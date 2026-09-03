@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/desktop/src-tauri",
+  "crates/collector",
+  "crates/core",
+  "crates/credentials",
+  "crates/database",
+  "crates/filesystem",
+  "crates/ssh",
+  "crates/terminal",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Yukinal contributors"]
+repository = "https://github.com/Bad0RANG3/yukinal"
+
+# Central dependency pinning (every dependency is audited once, here).
+# Entries are declared on day 0 so intent is explicit; they are only *used* by the
+# step that needs them, and unused workspace deps cost nothing.
+[workspace.dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "process"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+
+# SSH backend. ADR 0002: russh (pure Rust, tokio-native, PTY + SFTP).
+russh = "0.63"
+russh-sftp = "2.0"
+
+# OS credential store: keyring over Keychain / Credential Manager / Secret Service.
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# Local database.
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# Desktop shell.
+tauri = "2.11"
+tauri-build = "2.5"
+
+# Internal crates are referenced through the workspace so paths exist in one place.
+yukinal-core = { path = "crates/core" }
+yukinal-collector = { path = "crates/collector" }
+yukinal-credentials = { path = "crates/credentials" }
+yukinal-database = { path = "crates/database" }
+yukinal-filesystem = { path = "crates/filesystem" }
+yukinal-ssh = { path = "crates/ssh" }
+yukinal-terminal = { path = "crates/terminal" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

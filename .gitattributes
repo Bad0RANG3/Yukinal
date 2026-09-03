@@ -1,0 +1,8 @@
+# Normalize line endings: the repo is edited on Windows but built on three OSes.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.dll binary
+*.exe binary
+*.pdf binary

@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+out/
+target/
+*.tsbuildinfo
+.vite/
+coverage/
+
+# tauri
+apps/desktop/src-tauri/gen/
+
+# env / secrets  (secrets live in the OS credential store, never here)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*

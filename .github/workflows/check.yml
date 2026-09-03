@@ -1,0 +1,48 @@
+name: check
+
+# One job per OS that runs exactly the local gate (`pnpm check`): contract libs ->
+# typecheck -> agent bundle -> TS tests -> vite build -> sidecar smoke -> cargo
+# fmt/clippy/check -> Rust<->Node integration. Keeping CI and local identical is the
+# point; a separate "rust" job would drift (and `cargo check` needs apps/desktop/dist).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    name: pnpm check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `version:` here: package.json already pins `packageManager: pnpm@11.8.0`,
+      # and action-setup v4 fails when both are present.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux system deps (Tauri / webkit2gtk)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      # check.mjs passes its own node executable + the built agent entry to
+      # `cargo test`, so the cross-language test opts itself in here.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check

@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# pnpm gates lifecycle/postinstall scripts (every dependency is audited).
+# Approved here after checking each package: esbuild (native binary), tailwind oxide (native binary).
+allowBuilds:
+  esbuild: true
+  "@tailwindcss/oxide": true
+
+minimumReleaseAgeExclude:
+  - '@types/node@26.4.1'

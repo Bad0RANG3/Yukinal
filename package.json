@@ -1,0 +1,24 @@
+{
+  "name": "yukinal",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-native Remote Development & Infrastructure Workspace",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "build:libs": "pnpm --filter \"./packages/**\" --if-present build",
+    "test": "pnpm -r --if-present test",
+    "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
+    "desktop:dev": "pnpm --filter @yukinal/desktop dev",
+    "agent:dev": "pnpm --filter @yukinal/agent dev",
+    "clean": "node scripts/clean.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
