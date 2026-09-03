@@ -1,0 +1,84 @@
+/**
+ * Runtime probes for the desktop shell.
+ *
+ * These are the *only* places React learns what native processes are alive — and the
+ * answer always comes from Rust. React cannot spawn, list or signal a process.
+ */
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { IPC_COMMANDS } from "@yukinal/shared";
+import type { AgentSpawnResponse, AgentStatus } from "@yukinal/shared";
+
+import { callDesktop, isDesktopShell } from "./ipc.js";
+
+export const RUNTIME_QUERY_KEYS = {
+  ping: ["runtime", "core"] as const,
+  status: ["runtime", "agent"] as const,
+  logs: ["runtime", "agent-logs"] as const,
+};
+
+export function useCorePing() {
+  return useQuery({
+    queryKey: RUNTIME_QUERY_KEYS.ping,
+    enabled: isDesktopShell(),
+    // Version + OS never change while the window is alive; refetching is noise.
+    staleTime: Infinity,
+    queryFn: () => callDesktop(IPC_COMMANDS.corePing, {}),
+  });
+}
+
+/**
+ * Sidecar status. Polled rather than pushed until the agent loop wires `agent.*` events:
+ * a 1.5s poll of a local state read is invisible cost, and it survives a sidecar
+ * that dies while nobody is looking.
+ */
+export function useAgentStatus() {
+  return useQuery({
+    queryKey: RUNTIME_QUERY_KEYS.status,
+    enabled: isDesktopShell(),
+    refetchInterval: (query) => (query.state.data?.running ? 1_500 : 5_000),
+    queryFn: () => callDesktop(IPC_COMMANDS.agentStatus, {}),
+  });
+}
+
+export function useAgentLogs(enabled: boolean) {
+  return useQuery({
+    queryKey: RUNTIME_QUERY_KEYS.logs,
+    enabled: enabled && isDesktopShell(),
+    queryFn: () => callDesktop(IPC_COMMANDS.agentLogs, {}),
+  });
+}
+
+export function useSpawnAgent() {
+  const queryClient = useQueryClient();
+  return useMutation<AgentSpawnResponse, Error>({
+    mutationFn: () => callDesktop(IPC_COMMANDS.agentSpawn, {}),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: RUNTIME_QUERY_KEYS.status });
+      void queryClient.invalidateQueries({ queryKey: RUNTIME_QUERY_KEYS.logs });
+    },
+  });
+}
+
+export function useKillAgent() {
+  const queryClient = useQueryClient();
+  return useMutation<{ killed: boolean }, Error>({
+    mutationFn: () => callDesktop(IPC_COMMANDS.agentKill, {}),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: RUNTIME_QUERY_KEYS.status });
+      void queryClient.invalidateQueries({ queryKey: RUNTIME_QUERY_KEYS.logs });
+    },
+  });
+}
+
+export function statusLabel(status: AgentStatus | undefined, shellAvailable: boolean): string {
+  if (!shellAvailable) return "browser preview — native core unavailable";
+  if (!status) return "querying core…";
+  if (status.running && status.pid !== null) {
+    return `agent · pid ${status.pid} · protocol ${status.protocolVersion ?? "?"} · ${status.toolCount ?? 0} tools`;
+  }
+  if (status.lastExit) {
+    return `agent exited (${status.lastExit.code ?? status.lastExit.signal ?? "unknown"})`;
+  }
+  return "agent not started";
+}

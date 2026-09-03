@@ -1,0 +1,161 @@
+//! The complete native surface available to React (-R9-R10).
+//!
+//! Every command mirrors a key of `IpcCommandMap` in `@yukinal/shared`; field naming is
+//! camelCase on both sides. If a command is not in that map, it does not exist for the
+//! UI and must not be added here.
+
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
+
+use crate::state::AppState;
+use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
+use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PingResponse {
+    pub version: &'static str,
+    pub os: &'static str,
+}
+
+/// Smoke test: proves the IPC round trip without pretending to do real work.
+#[tauri::command]
+pub fn core_ping() -> PingResponse {
+    PingResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        os: std::env::consts::OS,
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpawnResponse {
+    pub pid: u32,
+    pub protocol_version: String,
+    pub agent_version: String,
+    pub entry: String,
+    pub tool_count: usize,
+    pub already_running: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentKillResponse {
+    pub killed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLogsResponse {
+    pub lines: Vec<String>,
+    pub capacity: usize,
+}
+
+/// Launch the agent sidecar and handshake with it. React never spawns processes:
+/// ownership of the child stays on this side of the boundary (ADR 0001).
+#[tauri::command]
+pub async fn agent_spawn(app: AppHandle) -> Result<AgentSpawnResponse, String> {
+    start_sidecar(&app).await
+}
+
+/// The only code path that starts a sidecar. The dev autostart hook calls this same
+/// function, so an automated run exercises exactly what a user click does (config
+/// resolution, app-data dir, handshake, event forwarding).
+pub(crate) async fn start_sidecar(app: &AppHandle) -> Result<AgentSpawnResponse, String> {
+    let config = resolve_config(app)?;
+    let outcome = app
+        .state::<AppState>()
+        .supervisor
+        .start(&config)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !outcome.already_running {
+        forward_sidecar_events(app.clone());
+    }
+
+    Ok(AgentSpawnResponse {
+        pid: outcome.runtime.pid,
+        protocol_version: outcome.runtime.protocol_version,
+        agent_version: outcome.runtime.agent_version,
+        entry: outcome.runtime.entry,
+        tool_count: outcome.runtime.tool_count,
+        already_running: outcome.already_running,
+    })
+}
+
+#[tauri::command]
+pub async fn agent_status(state: State<'_, AppState>) -> Result<SupervisorStatus, String> {
+    Ok(state.supervisor.status().await)
+}
+
+#[tauri::command]
+pub async fn agent_kill(state: State<'_, AppState>) -> Result<AgentKillResponse, String> {
+    Ok(AgentKillResponse {
+        killed: state.supervisor.stop().await,
+    })
+}
+
+/// Recent sidecar stderr, for the "why did it die" affordance.
+#[tauri::command]
+pub async fn agent_logs(state: State<'_, AppState>) -> Result<AgentLogsResponse, String> {
+    Ok(AgentLogsResponse {
+        lines: state.supervisor.logs().await,
+        capacity: LOG_HISTORY,
+    })
+}
+
+/// Decide what to launch. Resolution order lives in `SidecarConfig::from_env_with_cwd`
+/// (ADR 0009); this only supplies the app data dir when the caller did not set one.
+fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let mut config = SidecarConfig::from_env_with_cwd(&cwd).map_err(|error| error.to_string())?;
+
+    if config.data_dir.trim().is_empty() {
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+        config.data_dir = data_dir.display().to_string();
+    }
+    let data_dir = config.data_dir.clone();
+    Ok(config.with_env("YUKINAL_DATA_DIR", &data_dir))
+}
+
+/// One task per launched sidecar: keeps the child's stderr visible in the desktop log
+/// until the event → Tauri event mapping is not implemented yet.
+fn forward_sidecar_events(app: AppHandle) {
+    let supervisor = app.state::<AppState>().supervisor.clone();
+    let mut receiver = supervisor.subscribe();
+    tauri::async_runtime::spawn(async move {
+        // The sidecar's startup lines are written before this task exists, and a
+        // broadcast channel does not replay them. Print the retained tail first so
+        // "what the agent said when it booted" is never invisible.
+        for line in supervisor.logs().await {
+            eprintln!("[agent] {line}");
+        }
+        loop {
+            match receiver.recv().await {
+                Ok(event) => match event {
+                    SidecarEvent::Log(line) => eprintln!("[agent] {line}"),
+                    SidecarEvent::Frame(frame) => eprintln!(
+                        "[agent:stream] {}",
+                        frame
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("notification")
+                    ),
+                    SidecarEvent::Exited { code, signal } => {
+                        eprintln!("[agent] exited code={code:?} signal={signal:?}");
+                        break;
+                    }
+                },
+                Err(error) => {
+                    eprintln!("[agent] event stream closed: {error}");
+                    break;
+                }
+            }
+        }
+    });
+}

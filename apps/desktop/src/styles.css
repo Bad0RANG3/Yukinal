@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+/* the UI speaks in servers, deploys, logs and health — not in channels and
+   transports. Keep the palette small; production identity must be unmistakable. */
+:root {
+  --yukinal-bg: var(--color-zinc-950);
+  --yukinal-fg: var(--color-zinc-100);
+  --yukinal-muted: var(--color-zinc-400);
+  --yukinal-border: var(--color-zinc-800);
+  --yukinal-accent: var(--color-sky-400);
+  --yukinal-production: var(--color-red-400);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--yukinal-bg);
+  color: var(--yukinal-fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}

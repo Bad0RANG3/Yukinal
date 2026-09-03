@@ -1,0 +1,36 @@
+{
+  "name": "@yukinal/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tauri 2 shell: server list, overview, terminal, agent panel ()",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json",
+    "tauri": "tauri",
+    "icon": "tauri icon design/app-icon.png"
+  },
+  "dependencies": {
+    "@yukinal/agent-sdk": "workspace:*",
+    "@yukinal/shared": "workspace:*",
+    "@tanstack/react-query": "^5.102.8",
+    "@tauri-apps/api": "^2.11.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.5.4",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}
