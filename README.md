@@ -1,5 +1,11 @@
 # Yukinal
 
+[![license: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue)](LICENSE)
+![status: early](https://img.shields.io/badge/status-very_early-yellow)
+
+> **非商业许可**:本仓库使用 [PolyForm Noncommercial 1.0.0](LICENSE) —— 可自由学习、修改、
+> 非商业地分发与引用(注明来源即可),**商业用途需要先取得单独授权**。详见 [NOTICE](NOTICE)。
+
 **AI-native remote development & infrastructure workspace.**
 不是"更好看的 SSH 客户端",而是一个由 agent 驱动的远程开发 / 部署 / 排障工作台。
 
