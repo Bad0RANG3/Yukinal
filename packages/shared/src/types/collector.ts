@@ -7,7 +7,8 @@
 
 import type { ServerCapabilities } from "./server.js";
 
-export type HealthState = "healthy" | "warning" | "critical" | "unknown";
+export const HEALTH_STATES = ["healthy", "warning", "critical", "unknown"] as const;
+export type HealthState = (typeof HEALTH_STATES)[number];
 
 export interface DiskUsage {
   device: string;

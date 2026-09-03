@@ -1,0 +1,12 @@
+{
+  "server": {
+    "id": "srv_01abc",
+    "name": "Production API",
+    "connection": { "host": "api.example.com", "port": 22, "username": "deploy" },
+    "capabilities": { "linux": true, "docker": true },
+    "status": "connected",
+    "metadata": { "environment": "production", "region": "Singapore" },
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  }
+}

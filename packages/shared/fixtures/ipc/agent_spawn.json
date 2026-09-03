@@ -1,0 +1,8 @@
+{
+  "pid": 25980,
+  "protocolVersion": "1.0",
+  "agentVersion": "0.0.0",
+  "entry": "apps/agent/dist/index.js",
+  "toolCount": 1,
+  "alreadyRunning": false
+}

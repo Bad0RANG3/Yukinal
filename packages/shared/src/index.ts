@@ -18,6 +18,8 @@ export * from "./types/chat.js";
 
 export * from "./schemas/server.js";
 export * from "./schemas/permission.js";
+export * from "./schemas/collector.js";
+export * from "./schemas/ipc.js";
 
 export * from "./events/index.js";
 export * from "./ipc/index.js";

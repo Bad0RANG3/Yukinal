@@ -1,0 +1,60 @@
+{
+  "snapshot": {
+    "id": "snap_01",
+    "serverId": "srv_01abc",
+    "collectedAt": "2026-01-01T00:00:05.000Z",
+    "health": "healthy",
+    "os": {
+      "distribution": "Ubuntu",
+      "version": "24.04",
+      "hostname": "api-01",
+      "kernel": "6.8.0",
+      "arch": "x86_64"
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) Platinum 8375C",
+      "cores": 8,
+      "usagePercent": 23.5,
+      "loadAverage": [1.2, 0.9, 0.7]
+    },
+    "memory": {
+      "totalBytes": 17179869184,
+      "usedBytes": 6012954214,
+      "availableBytes": 11166914970,
+      "usagePercent": 35
+    },
+    "disks": [
+      {
+        "device": "/dev/sda1",
+        "mountPoint": "/",
+        "totalBytes": 107374182400,
+        "usedBytes": 42949672960,
+        "usagePercent": 40
+      }
+    ],
+    "uptimeSeconds": 172800,
+    "network": [
+      { "name": "eth0", "rxBytes": 1099511627776, "txBytes": 2199023255552 }
+    ],
+    "docker": {
+      "available": true,
+      "containers": [
+        {
+          "name": "api",
+          "image": "ghcr.io/example/api:1.4.2",
+          "state": "running",
+          "status": "Up 12 hours",
+          "restartCount": 0
+        }
+      ]
+    },
+    "capabilities": { "linux": true, "docker": true },
+    "collectors": [
+      {
+        "collectorId": "collector.cpu",
+        "collectedAt": "2026-01-01T00:00:04.000Z",
+        "ok": true
+      }
+    ]
+  }
+}

@@ -12,6 +12,7 @@
 //!
 //! 实现随 SSH 层逐步落地；当前为契约占位。
 
+pub mod ipc;
 pub mod sidecar;
 
 pub mod supervisor;

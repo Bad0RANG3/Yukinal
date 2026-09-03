@@ -1,0 +1,14 @@
+{
+  "running": false,
+  "pid": null,
+  "protocolVersion": null,
+  "agentVersion": null,
+  "toolCount": null,
+  "entry": null,
+  "startedAt": null,
+  "lastExit": {
+    "code": 1,
+    "signal": null,
+    "at": "2026-01-01T00:05:00Z"
+  }
+}

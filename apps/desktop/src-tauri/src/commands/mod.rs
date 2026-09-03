@@ -4,7 +4,6 @@
 //! camelCase on both sides. If a command is not in that map, it does not exist for the
 //! UI and must not be added here.
 
-use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
@@ -19,19 +18,6 @@ pub fn core_ping() -> PingResponse {
         version: env!("CARGO_PKG_VERSION"),
         os: std::env::consts::OS,
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentKillResponse {
-    pub killed: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentLogsResponse {
-    pub lines: Vec<String>,
-    pub capacity: usize,
 }
 
 /// Launch the agent sidecar and handshake with it. React never spawns processes:
