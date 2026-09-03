@@ -1,0 +1,25 @@
+{
+  "name": "@yukinal/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent runtime sidecar: agent loop, tool registry, permission engine, trace (ADR 0001)",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@yukinal/provider-sdk": "workspace:*",
+    "@yukinal/shared": "workspace:*",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
