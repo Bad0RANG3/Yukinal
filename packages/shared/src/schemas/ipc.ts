@@ -16,7 +16,7 @@ import type { IpcCommandName } from "../ipc/index.js";
 import { AddServerInputSchema, ServerSchema } from "./server.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ApprovalResponseSchema } from "./permission.js";
-import { ProviderConfigSchema, ProviderSaveInputSchema } from "./provider.js";
+import { CcSwitchProviderCandidateSchema, ProviderConfigSchema, ProviderSaveInputSchema } from "./provider.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -143,6 +143,14 @@ export const IPC_SCHEMAS = {
   provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
   provider_save_openai: {
     params: ProviderSaveInputSchema,
+    response: z.strictObject({ provider: ProviderConfigSchema }),
+  },
+  provider_import_ccswitch: {
+    params: EMPTY_PAYLOAD,
+    response: z.strictObject({ providers: z.array(CcSwitchProviderCandidateSchema) }),
+  },
+  provider_import_ccswitch_apply: {
+    params: z.strictObject({ ccSwitchProviderId: z.string().min(1) }),
     response: z.strictObject({ provider: ProviderConfigSchema }),
   },
 } satisfies Record<IpcCommandName, IpcCommandSchema>;

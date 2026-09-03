@@ -165,6 +165,8 @@ const MIGRATIONS: &[&str] = &[
         trust_level  TEXT NOT NULL CHECK (trust_level IN ('reviewed','unreviewed'))
     );
     "#,
+    // 2 — provider wire dialect (codex `responses` vs `chat` completions).
+    r#"ALTER TABLE provider_configs ADD COLUMN wire_api TEXT NOT NULL DEFAULT 'chat';"#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

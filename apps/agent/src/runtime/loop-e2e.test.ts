@@ -128,3 +128,37 @@ test("E2E: Stop aborts the in-flight call and lands on cancelled", async (t) => 
   );
 });
 
+
+/** codex `responses` 方言：CC Switch 导入的中转常走 /responses（如 My Codex）。 */
+test("E2E (responses dialee): tool chain via /responses", async (t) => {
+  const { port, close } = await mockLlm([
+    [
+      { type: "response.output_item.added", item: { type: "function_call", id: "fc_1", name: "system__echo", arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"message":"hi from responses"}' },
+    ],
+    [
+      { type: "response.output_text.delta", delta: "responses answered" },
+    ],
+  ]);
+  t.after(() => close());
+
+  const runtime = createRuntime({ log: silent });
+  const events: AgentStreamEvent[] = [];
+
+  const result = await runtime.loop.start(
+    runRequest(),
+    { emit: (event) => events.push(event) },
+    new OpenAiCompatibleProvider({
+      baseUrl: `http://127.0.0.1:${port}`,
+      model: "gpt-5.6-terra",
+      wireApi: "responses",
+    }),
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(result.toolCalls, 1);
+  const toolResult = events.find((event) => event.type === "agent.tool_result");
+  assert(toolResult && toolResult.type === "agent.tool_result");
+  assert.equal(toolResult.status, "success");
+  assert.match(result.text, /responses answered/);
+});

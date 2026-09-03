@@ -25,11 +25,11 @@ impl<'a> ProviderConfigsRepository<'a> {
             connection.execute(
                 "INSERT INTO provider_configs (
                     id, family, kind, label, base_url, model, api_key_credential_ref,
-                    enabled, custom_headers, max_input_tokens, created_at, updated_at
-                 ) VALUES (?1, 'ai', 'openai-compatible', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    enabled, custom_headers, max_input_tokens, wire_api, created_at, updated_at
+                 ) VALUES (?1, 'ai', 'openai-compatible', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(id) DO UPDATE SET
                     label = ?2, base_url = ?3, model = ?4, api_key_credential_ref = ?5,
-                    enabled = ?6, custom_headers = ?7, max_input_tokens = ?8, updated_at = ?10",
+                    enabled = ?6, custom_headers = ?7, max_input_tokens = ?8, wire_api = ?9, updated_at = ?11",
                 params![
                     config.id,
                     config.label,
@@ -39,6 +39,7 @@ impl<'a> ProviderConfigsRepository<'a> {
                     config.enabled,
                     optional_json_string(&config.custom_headers)?,
                     config.max_input_tokens,
+                    config.wire_api,
                     config.created_at,
                     config.updated_at,
                 ],
@@ -91,7 +92,7 @@ impl<'a> ProviderConfigsRepository<'a> {
             connection
                 .query_row(
                     "SELECT id, kind, label, base_url, model, api_key_credential_ref, enabled,
-                            custom_headers, max_input_tokens, credential_ref, settings, created_at, updated_at, family
+                            custom_headers, max_input_tokens, credential_ref, settings, created_at, updated_at, family, wire_api
                      FROM provider_configs WHERE id = ?1 AND family = 'ai'",
                     params![id],
                     row_to_ai,
@@ -121,7 +122,7 @@ impl<'a> ProviderConfigsRepository<'a> {
         self.db.with(|connection| {
             let sql = format!(
                 "SELECT id, kind, label, base_url, model, api_key_credential_ref, enabled,
-                        custom_headers, max_input_tokens, credential_ref, settings, created_at, updated_at, family
+                        custom_headers, max_input_tokens, credential_ref, settings, created_at, updated_at, family, wire_api
                  FROM provider_configs WHERE {filter} ORDER BY label"
             );
             let mut statement = connection.prepare(&sql)?;
@@ -155,6 +156,9 @@ fn row_to_ai(row: &Row<'_>) -> rusqlite::Result<AiProviderConfig> {
         max_input_tokens: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        wire_api: row
+            .get::<_, Option<String>>(14)?
+            .unwrap_or_else(|| "chat".to_string()),
     })
 }
 

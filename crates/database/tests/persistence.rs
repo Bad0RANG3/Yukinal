@@ -205,6 +205,7 @@ fn sample_ai_provider(id: &str) -> AiProviderConfig {
         enabled: true,
         custom_headers: None,
         max_input_tokens: Some(200_000),
+        wire_api: "chat".into(),
         created_at: "2026-01-01T00:00:00.000Z".into(),
         updated_at: "2026-01-01T00:00:00.000Z".into(),
     }

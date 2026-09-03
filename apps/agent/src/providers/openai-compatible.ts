@@ -1,11 +1,11 @@
 /**
  * OpenAI-compatible provider (ADR 0003): one implementation covers OpenAI,
- * OpenRouter, Ollama, and internal gateways via `baseUrl`.
+ * OpenRouter, Ollama, codex-style gateways, and internal proxies via `baseUrl`.
  *
  * Real HTTP + SSE only. `signal` is wired to `AbortController` so Stop truly
- * kills the in-flight request; `timeoutMs` bounds a stalled stream. Tool-name
- * rewriting happens in the loop via `createProviderNameIndex` (ADR 0004); this
- * module only moves bytes.
+ * kills the in-flight request; `timeoutMs` bounds a stalled stream. Two dialects:
+ * chat completions (default) and the codex `responses` API (CC Switch imports).
+ * Tool-name rewriting happens in the loop via `createProviderNameIndex` (ADR 0004).
  */
 
 import type { ChatRequest, FinishReason, LLMProvider, ModelInfo, StreamEvent } from "@yukinal/provider-sdk";
@@ -18,6 +18,8 @@ export interface OpenAiCompatibleConfig {
   apiKey?: string;
   customHeaders?: Record<string, string>;
   timeoutMs?: number;
+  /** Endpoint dialect: chat completions (default) or the codex `responses` API. */
+  wireApi?: "chat" | "responses";
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -56,30 +58,43 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     const timer = setTimeout(() => controller.abort(new Error("provider stream timed out")), timeoutMs);
 
     try {
-      const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const responsesDialect = this.config.wireApi === "responses";
+      const endpoint = `${this.config.baseUrl.replace(/\/$/, "")}/${responsesDialect ? "responses" : "chat/completions"}`;
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...this.#headers() },
-        body: JSON.stringify({
-          model: request.model,
-          messages: request.messages,
-          tools: request.tools,
-          stream: true,
-          temperature: request.temperature ?? 0,
-          max_tokens: request.maxOutputTokens,
-        }),
+        body: JSON.stringify(
+          responsesDialect
+            ? {
+                model: request.model,
+                input: request.messages,
+                tools: request.tools,
+                stream: true,
+                temperature: request.temperature ?? 0,
+                max_output_tokens: request.maxOutputTokens,
+              }
+            : {
+                model: request.model,
+                messages: request.messages,
+                tools: request.tools,
+                stream: true,
+                temperature: request.temperature ?? 0,
+                max_tokens: request.maxOutputTokens,
+              },
+        ),
         signal: controller.signal,
       });
 
       if (!response.ok || !response.body) {
         const detail = await response.text().catch(() => "");
         throw new ProviderError(
-          `chat/completions failed (${response.status}): ${detail.slice(0, 300)}`,
+          `${endpoint} failed (${response.status}): ${detail.slice(0, 300)}`,
           response.status >= 500,
           response.status,
         );
       }
 
-      yield* this.#consumeSse(response.body);
+      yield* responsesDialect ? this.#consumeResponsesSse(response.body) : this.#consumeSse(response.body);
     } catch (error) {
       if (request.signal?.aborted) {
         yield { type: "done", finishReason: "cancelled" };
@@ -102,13 +117,12 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     return headers;
   }
 
-  /** SSE `data:` 行解析；tool_calls deltas 累积，流结束时一次性 yield 完整 ToolCall。 */
+  /** chat/completions 的 SSE：`data:` 行可能是 JSON chunk，`[DONE]` 结尾。工具调用按 index 累积。 */
   async *#consumeSse(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let lastFinishReason: string | null = null;
-
     const slots = new Map<string, { id: string; name: string; args: string }>();
 
     const toolCallEvents = (): StreamEvent[] =>
@@ -119,7 +133,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           try {
             args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
           } catch {
-            args = { raw: slot.args }; // 中断导致的未闭合 JSON：不丢原文
+            args = { raw: slot.args };
           }
           return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
         });
@@ -128,11 +142,9 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-
-      let events = buffer.split("\n");
-      buffer = events.pop() ?? "";
-
-      for (const line of events) {
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed.startsWith("data:")) continue;
         const payload = trimmed.slice(5).trim();
@@ -146,7 +158,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         try {
           chunk = JSON.parse(payload) as SseChunk;
         } catch {
-          continue; // 半行/噪音：跳过而不是炸掉流
+          continue;
         }
         const choice = chunk.choices?.[0];
         if (choice?.finish_reason) lastFinishReason = choice.finish_reason;
@@ -170,6 +182,72 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     // EOF 而没收到 [DONE]（异常结束）：把手里的工具调用放出来，避免吞掉。
     for (const event of toolCallEvents()) yield event;
   }
+
+  /** codex `responses` API 的 SSE。事件：output_text.delta / output_item.added / function_call_arguments.delta。 */
+  async *#consumeResponsesSse(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const slots = new Map<string, { name: string; args: string }>();
+
+    const flush = (): StreamEvent[] =>
+      [...slots.entries()]
+        .filter(([, slot]) => slot.name)
+        .map(([id, slot]) => {
+          let args: Record<string, unknown> = {};
+          try {
+            args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
+          } catch {
+            args = { raw: slot.args };
+          }
+          return { type: "tool_call" as const, call: { id, name: slot.name, arguments: args } };
+        });
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === "[DONE]") {
+          for (const event of flush()) yield event;
+          yield { type: "done", finishReason: "stop" };
+          return;
+        }
+        let event: ResponsesEvent;
+        try {
+          event = JSON.parse(payload) as ResponsesEvent;
+        } catch {
+          continue;
+        }
+        switch (event.type) {
+          case "response.output_text.delta":
+            if (event.delta) yield { type: "text_delta", text: event.delta };
+            break;
+          case "response.output_item.added": {
+            const item = event.item;
+            if (item?.type === "function_call" && item.id) {
+              slots.set(item.id, { name: item.name ?? "", args: item.arguments ?? "" });
+            }
+            break;
+          }
+          case "response.function_call_arguments.delta": {
+            const slot = event.item_id ? slots.get(event.item_id) : undefined;
+            if (slot && event.delta) slot.args += event.delta;
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+    for (const event of flush()) yield event;
+    yield { type: "done", finishReason: "stop" };
+  }
 }
 
 interface SseChunk {
@@ -184,6 +262,13 @@ interface SseChunk {
     };
     finish_reason?: string | null;
   }>;
+}
+
+interface ResponsesEvent {
+  type: string;
+  delta?: string;
+  item_id?: string;
+  item?: { type?: string; id?: string; name?: string; arguments?: string };
 }
 
 function finishReasonFor(reason: string | null): FinishReason {

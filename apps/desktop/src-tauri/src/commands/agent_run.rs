@@ -3,7 +3,7 @@
 //! sidecar, and streams every observable step back as Tauri events.
 //!
 //! The sidecar never sees a key until this call: material rides only on the
-//! transient JSON-RPC params (ADR 0001/0006 + S10 rule).
+//! transient JSON-RPC params (ADR 0001/0006; 使用点注入规则).
 
 use serde::Serialize;
 use serde_json::json;
@@ -86,6 +86,7 @@ pub async fn agent_run_start(
             "apiKey": api_key,
             "customHeaders": provider.custom_headers,
             "timeoutMs": 120_000,
+            "wireApi": provider.wire_api,
         },
     });
     let response = state

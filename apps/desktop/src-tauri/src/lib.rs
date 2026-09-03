@@ -51,6 +51,8 @@ pub fn run() {
             commands::server::server_add,
             commands::provider::provider_list,
             commands::provider::provider_save_openai,
+            commands::provider::provider_import_ccswitch,
+            commands::provider::provider_import_ccswitch_apply,
             commands::server::server_snapshot,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,

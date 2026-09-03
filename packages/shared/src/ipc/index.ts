@@ -9,7 +9,7 @@
 import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
 import type { ServerSnapshot } from "../types/collector.js";
 import type { AddServerInput, Server } from "../types/server.js";
-import type { AiProviderConfig, ProviderSaveInput } from "../types/provider.js";
+import type { AiProviderConfig, CcSwitchProviderCandidate, ProviderSaveInput } from "../types/provider.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -39,6 +39,9 @@ export const IPC_COMMANDS = {
   /** AI provider config: settings panel only; the key never leaves the keychain. */
   providerList: "provider_list",
   providerSaveOpenai: "provider_save_openai",
+  /** Import candidates from CC Switch (Rust reads the os store key at apply time). */
+  providerImportCcSwitch: "provider_import_ccswitch",
+  providerImportCcSwitchApply: "provider_import_ccswitch_apply",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
@@ -73,6 +76,14 @@ export interface IpcCommandMap {
   provider_list: { params: Record<string, never>; response: { providers: AiProviderConfig[] } };
   provider_save_openai: {
     params: ProviderSaveInput;
+    response: { provider: AiProviderConfig };
+  };
+  provider_import_ccswitch: {
+    params: Record<string, never>;
+    response: { providers: CcSwitchProviderCandidate[] };
+  };
+  provider_import_ccswitch_apply: {
+    params: { ccSwitchProviderId: string };
     response: { provider: AiProviderConfig };
   };
 }

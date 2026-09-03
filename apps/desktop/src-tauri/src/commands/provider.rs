@@ -1,5 +1,5 @@
 //! AI provider 配置命令：设置页写入 provider_configs 行；apiKey 只进 OS keychain，
-//! SQLite 存 credentialRef（S10 规则：不落盘、不进日志）。
+//! SQLite 只存 credentialRef（不落盘、不进日志）。
 
 use serde::Serialize;
 use tauri::State;
@@ -78,6 +78,7 @@ pub async fn provider_save_openai(
         enabled: true,
         custom_headers: None,
         max_input_tokens: None,
+        wire_api: "chat".into(),
         created_at: existing
             .as_ref()
             .map(|provider| provider.created_at.clone())
@@ -90,5 +91,95 @@ pub async fn provider_save_openai(
         .upsert_ai(&provider)
         .map_err(|error| error.to_string())?;
 
+    Ok(ProviderSaveResponse { provider })
+}
+
+// ---------------------------------------------------------------------------
+// CC Switch 导入（第三方供应商切换工具，如 codex 的 My Codex）
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcSwitchImportListResponse {
+    pub providers: Vec<serde_json::Value>,
+}
+
+/// 列出 cc-switch 里可导入的候选。**绝不返回 apiKey**：key 在 apply 时才
+/// 由 Rust 进程内取出并进 keychain。
+#[tauri::command]
+pub async fn provider_import_ccswitch(
+    _state: State<'_, AppState>,
+) -> Result<CcSwitchImportListResponse, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "无法确定用户目录（USERPROFILE/HOME 均缺失）".to_string())?;
+    let providers = yukinal_core::ccswitch::read_ccswitch(std::path::Path::new(&home))
+        .map_err(|error| error.to_string())?;
+
+    let items: Vec<serde_json::Value> = providers
+        .into_iter()
+        .map(|provider| {
+            serde_json::json!({
+                "id": provider.id,
+                "name": provider.name,
+                "baseUrl": provider.base_url,
+                "model": provider.model,
+                "wireApi": provider.wire_api.as_str(),
+                "hasApiKey": provider.has_api_key,
+            })
+        })
+        .collect();
+    Ok(CcSwitchImportListResponse { providers: items })
+}
+
+/// 应用一个候选：Rust 读 key → keychain；SQLite 只存 provider 行（含 wireApi）。
+#[tauri::command]
+pub async fn provider_import_ccswitch_apply(
+    state: State<'_, AppState>,
+    cc_switch_provider_id: String,
+) -> Result<ProviderSaveResponse, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "无法确定用户目录（USERPROFILE/HOME 均缺失）".to_string())?;
+    let providers = yukinal_core::ccswitch::read_ccswitch(std::path::Path::new(&home))
+        .map_err(|error| error.to_string())?;
+    let found = providers
+        .into_iter()
+        .find(|provider| provider.id == cc_switch_provider_id)
+        .ok_or_else(|| format!("cc-switch 中没有 `{cc_switch_provider_id}`（可能已被删除）"))?;
+
+    let api_key_credential_ref = match found.api_key() {
+        Some(key) => {
+            let reference = state
+                .credentials
+                .set("openai", "default", &Secret::from_utf8(key.to_string()))
+                .map_err(|error| error.to_string())?;
+            Some(reference.to_string_ref())
+        }
+        None => None,
+    };
+
+    let now = yukinal_core::sidecar::iso8601_now();
+    let provider = AiProviderConfig {
+        id: crate::commands::server::next_id("prv"),
+        kind: AiProviderKind::OpenaiCompatible,
+        label: found.name.clone(),
+        base_url: found.base_url.trim_end_matches('/').to_string(),
+        model: found.model.clone(),
+        api_key_credential_ref,
+        enabled: true,
+        custom_headers: None,
+        max_input_tokens: None,
+        wire_api: match found.wire_api {
+            yukinal_core::ccswitch::WireApi::Responses => "responses".into(),
+            yukinal_core::ccswitch::WireApi::Chat => "chat".into(),
+        },
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    state
+        .database
+        .providers()
+        .upsert_ai(&provider)
+        .map_err(|error| error.to_string())?;
     Ok(ProviderSaveResponse { provider })
 }

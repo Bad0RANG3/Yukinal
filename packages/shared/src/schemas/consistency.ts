@@ -62,6 +62,8 @@ export type _IpcParamsContracts = {
   agent_approval_respond: Expect<Assignable<ParamsOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["params"]>>;
   provider_list: Expect<Assignable<ParamsOf<"provider_list">, IpcCommandMap["provider_list"]["params"]>>;
   provider_save_openai: Expect<Assignable<ParamsOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["params"]>>;
+  provider_import_ccswitch: Expect<Assignable<ParamsOf<"provider_import_ccswitch">, IpcCommandMap["provider_import_ccswitch"]["params"]>>;
+  provider_import_ccswitch_apply: Expect<Assignable<ParamsOf<"provider_import_ccswitch_apply">, IpcCommandMap["provider_import_ccswitch_apply"]["params"]>>;
 };
 
 export type _IpcResponseContracts = {
@@ -84,4 +86,6 @@ export type _IpcResponseContracts = {
   agent_approval_respond: Expect<Assignable<ResponseOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["response"]>>;
   provider_list: Expect<Assignable<ResponseOf<"provider_list">, IpcCommandMap["provider_list"]["response"]>>;
   provider_save_openai: Expect<Assignable<ResponseOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["response"]>>;
+  provider_import_ccswitch: Expect<Assignable<ResponseOf<"provider_import_ccswitch">, IpcCommandMap["provider_import_ccswitch"]["response"]>>;
+  provider_import_ccswitch_apply: Expect<Assignable<ResponseOf<"provider_import_ccswitch_apply">, IpcCommandMap["provider_import_ccswitch_apply"]["response"]>>;
 };

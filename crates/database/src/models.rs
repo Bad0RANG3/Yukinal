@@ -255,6 +255,10 @@ pub enum ActivityOutcome {
 // ---------------------------------------------------------------------------
 // servers
 
+fn default_wire_api() -> String {
+    "chat".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConnection {
@@ -403,6 +407,9 @@ pub struct AiProviderConfig {
     pub label: String,
     pub base_url: String,
     pub model: String,
+    /// "chat" | "responses" — codex 中转的 responses API 由 CC Switch 导入决定。
+    #[serde(default = "default_wire_api")]
+    pub wire_api: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_credential_ref: Option<String>,
     pub enabled: bool,

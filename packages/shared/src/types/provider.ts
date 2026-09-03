@@ -25,6 +25,8 @@ export interface AiProviderConfig {
   /** Extra headers for corporate gateways. */
   customHeaders?: Record<string, string>;
   maxInputTokens?: number;
+  /** Endpoint dialect (codex `responses` vs chat completions). */
+  wireApi?: "chat" | "responses";
   createdAt: string;
   updatedAt: string;
 }
@@ -43,6 +45,20 @@ export interface RuntimeProviderConfig {
   apiKey?: string;
   customHeaders?: Record<string, string>;
   timeoutMs?: number;
+  /** Endpoint dialect: chat completions (default) or the codex `responses` API. */
+  wireApi?: "chat" | "responses";
+}
+
+/** 从 CC Switch（第三方供应商切换工具）导入的候选：key 只由 Rust 在 apply 时读。 */
+export interface CcSwitchProviderCandidate {
+  /** 稳定引用（cc-switch providers.id + app_type）。 */
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  wireApi: "chat" | "responses";
+  /** key 是否可用（不返回 key 本体）。 */
+  hasApiKey: boolean;
 }
 
 /** Settings form: label optional (defaults to baseUrl), apiKey goes to the keychain here. */

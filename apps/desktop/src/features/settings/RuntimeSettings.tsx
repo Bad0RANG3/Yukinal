@@ -81,6 +81,19 @@ function ProviderSettings() {
     queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
   });
 
+  const ccswitch = useQuery({
+    queryKey: ["providers", "ccswitch"],
+    enabled: isDesktopShell(),
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerImportCcSwitch, {})).providers,
+    retry: 0,
+  });
+
+  const importOne = useMutation({
+    mutationFn: (ccSwitchProviderId: string) =>
+      callDesktop(IPC_COMMANDS.providerImportCcSwitchApply, { ccSwitchProviderId }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["providers"] }),
+  });
+
   const save = useMutation({
     mutationFn: () =>
       callDesktop(IPC_COMMANDS.providerSaveOpenai, {
@@ -164,6 +177,40 @@ function ProviderSettings() {
       >
         {save.isPending ? "保存中…" : "保存 Provider"}
       </button>
+
+      <div className="mt-5 border-t border-zinc-800 pt-3">
+        <h3 className="mb-1 text-xs font-medium text-zinc-300">从 CC Switch 导入（第三方供应商）</h3>
+        <p className="mb-2 text-[11px] text-zinc-500">
+          读取本机 CC Switch 里配置的 codex / claude 供应商（如 My Codex）；API key 只在导入时进系统钥匙串，不会回显。
+        </p>
+        {ccswitch.isLoading ? <p className="text-xs text-zinc-500">读取中…</p> : null}
+        {ccswitch.isError ? (
+          <p className="text-xs text-amber-300">未发现 CC Switch（{String(ccswitch.error)}）</p>
+        ) : null}
+        {ccswitch.data && ccswitch.data.length === 0 ? (
+          <p className="text-xs text-zinc-600">没有可导入的供应商。</p>
+        ) : null}
+        <ul className="space-y-1">
+          {(ccswitch.data ?? []).map((candidate) => (
+            <li key={candidate.id} className="flex items-center gap-2 text-xs">
+              <span className="flex-1 truncate">
+                {candidate.name} · {candidate.model}
+                <span className="text-zinc-600"> · {candidate.wireApi === "responses" ? "responses" : "chat"}</span>
+                {candidate.hasApiKey ? " · ✓ key" : " · 无 key"}
+              </span>
+              <button
+                type="button"
+                disabled={importOne.isPending}
+                onClick={() => importOne.mutate(candidate.id)}
+                className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-300 hover:border-zinc-500"
+              >
+                导入
+              </button>
+            </li>
+          ))}
+        </ul>
+        {importOne.isError ? <p className="mt-1 text-xs text-red-400">{String(importOne.error)}</p> : null}
+      </div>
     </div>
   );
 }

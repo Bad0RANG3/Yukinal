@@ -12,6 +12,7 @@
 //!
 //! 实现随 SSH 层逐步落地；当前为契约占位。
 
+pub mod ccswitch;
 pub mod collector;
 pub mod health;
 pub mod ipc;
