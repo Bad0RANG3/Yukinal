@@ -16,7 +16,8 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["Yukinal contributors"]
-repository = "https://github.com/Bad0RANG3/yukinal"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Bad0RANG3/Yukinal"
 
 # Central dependency pinning (every dependency is audited once, here).
 # Entries are declared on day 0 so intent is explicit; they are only *used* by the

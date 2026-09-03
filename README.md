@@ -110,4 +110,13 @@ sidecar stdio 往返 smoke → `cargo fmt` / `clippy -D warnings` / `check` →
 
 ## License
 
-尚未选择。在此之前,本仓库默认保留所有权利(all rights reserved)。
+**PolyForm Noncommercial License 1.0.0** —— 见 [LICENSE](LICENSE)。要点:
+
+- ✅ 允许:学习、使用、修改、为非商业目的分发(个人研究/实验/爱好、教育与公益机构等)。
+- ❌ 不允许:任何商业用途。需要商用的话,请单独联系版权人拿许可。
+- 📌 再分发时必须带上本许可证全文与 `NOTICE` 里的署名行;改了也要说清楚。
+- 🚫 不提供任何担保,也不额外授予商标权;专利权按许可证原文。
+
+第三方依赖仍受各自许可证约束(`MIT` / `Apache-2.0` / `BSD` 等)——本许可证只覆盖本仓库原创的部分。
+
+Copyright (c) 2026 Bad0RANG3
