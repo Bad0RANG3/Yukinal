@@ -9,8 +9,6 @@
 **AI-native remote development & infrastructure workspace.**
 不是"更好看的 SSH 客户端",而是一个由 agent 驱动的远程开发 / 部署 / 排障工作台。
 
-名字取自 **yugal / 拉丁 iugum**「轭」:把人的意图和机器的执行力套进同一副轭,同向用力。
-你说要什么,agent 去环境里查、去改、去验证,然后把过程讲清楚。
 
 > ⚠️ 非常早期。目前只有桌面外壳、连接与 agent 运行时骨架,还没有可发布的版本。
 
