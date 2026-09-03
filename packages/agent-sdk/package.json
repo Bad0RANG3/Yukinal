@@ -1,0 +1,28 @@
+{
+  "name": "@yukinal/agent-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed client for the agent sidecar (, ADR 0001 ADR 0006)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@yukinal/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

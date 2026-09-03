@@ -1,0 +1,102 @@
+/**
+ * Tauri IPC contract (Rule 10 of).
+ *
+ * React may only call these commands and listen to these events. Rust mirrors the
+ * names 1:1; the agent sidecar is reached through `@yukinal/agent-sdk`, never here.
+ * Anything not in this map does not exist for the UI.
+ */
+
+import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
+import type { ServerSnapshot } from "../types/collector.js";
+import type { AddServerInput, Server } from "../types/server.js";
+
+export const IPC_COMMANDS = {
+  /** Proves the IPC round trip works. */
+  corePing: "core_ping",
+  /** Server CRUD, backed by the local database. */
+  serverList: "server_list",
+  serverAdd: "server_add",
+  /** SSH connect / disconnect. */
+  serverConnect: "server_connect",
+  serverDisconnect: "server_disconnect",
+  /** Latest collected snapshot. */
+  serverSnapshot: "server_snapshot",
+  /** Terminal byte streams leave as events, not command returns. */
+  terminalOpen: "terminal_open",
+  terminalWrite: "terminal_write",
+  terminalResize: "terminal_resize",
+  terminalClose: "terminal_close",
+  /** Sidecar lifecycle is owned by Rust; the UI never spawns processes. */
+  agentSpawn: "agent_spawn",
+  agentKill: "agent_kill",
+  agentStatus: "agent_status",
+  agentLogs: "agent_logs",
+} as const;
+
+export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
+
+export interface IpcCommandMap {
+  core_ping: { params: Record<string, never>; response: { version: string; os: string } };
+  server_list: { params: Record<string, never>; response: { servers: Server[] } };
+  server_add: { params: AddServerInput; response: { server: Server } };
+  server_connect: { params: { serverId: string }; response: { status: "connected" } };
+  server_disconnect: { params: { serverId: string }; response: Record<string, never> };
+  server_snapshot: { params: { serverId: string }; response: { snapshot: ServerSnapshot } };
+  terminal_open: {
+    params: { serverId: string; cols: number; rows: number };
+    response: { terminalSessionId: string };
+  };
+  terminal_write: { params: { terminalSessionId: string; data: string }; response: Record<string, never> };
+  terminal_resize: {
+    params: { terminalSessionId: string; cols: number; rows: number };
+    response: Record<string, never>;
+  };
+  terminal_close: { params: { terminalSessionId: string }; response: Record<string, never> };
+  agent_spawn: { params: Record<string, never>; response: AgentSpawnResponse };
+  agent_kill: { params: Record<string, never>; response: { killed: boolean } };
+  agent_status: { params: Record<string, never>; response: AgentStatus };
+  agent_logs: { params: Record<string, never>; response: AgentLogs };
+}
+
+/**
+ * Sidecar runtime identity. `entry` is the JS bundle Rust launches — recorded so the
+ * UI can show *what actually started* instead of what the build assumed.
+ */
+export interface AgentSpawnResponse {
+  pid: number;
+  protocolVersion: string;
+  agentVersion: string;
+  entry: string;
+  toolCount: number;
+  alreadyRunning: boolean;
+}
+
+export interface AgentStatus {
+  running: boolean;
+  pid: number | null;
+  protocolVersion: string | null;
+  agentVersion: string | null;
+  /** Registered tools reported by the sidecar at handshake time. */
+  toolCount: number | null;
+  /** Which bundle Rust actually launched (ADR 0009) — "what started" must be visible. */
+  entry: string | null;
+  startedAt: string | null;
+  /** Last abnormal exit, kept until the next successful spawn so a crash stays visible. */
+  lastExit: SidecarExit | null;
+}
+
+export interface SidecarExit {
+  /** null when killed by signal / on platforms without exit codes. */
+  code: number | null;
+  signal: string | null;
+  at: string;
+}
+
+/** Bounded tail of sidecar stderr: the "why did it die" affordance. */
+export interface AgentLogs {
+  lines: string[];
+  capacity: number;
+}
+
+/** Re-exported so the UI can validate payloads it sends into the sidecar. */
+export type { AgentRunRequest, ApprovalResponse };
