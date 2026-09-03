@@ -1,4 +1,4 @@
-# 0009 — sidecar 的启动方式：Rust 拉起 `node <bundle>`，按固定顺序解析入口
+# 0008 — sidecar 的启动方式：Rust 拉起 `node <bundle>`，按固定顺序解析入口
 
 Status: accepted (2026-09)
 
