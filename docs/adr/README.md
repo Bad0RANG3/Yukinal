@@ -11,7 +11,6 @@
 | [0005](0005-permission-engine-sole-decision-maker.md) | 三层风险事实，Permission Engine 唯一决策 | Accepted |
 | [0006](0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 传输 = stdio 上的 NDJSON JSON-RPC | Accepted |
 | [0007](0007-monorepo-and-day-one-abstractions.md) | 第一天建 monorepo + 钉死 7 个抽象 | Accepted |
-| [0008](0008-project-name-yukinal.md) | 项目名 **Yukinal**（轭：意图与执行力同向） | Accepted |
-| [0009](0009-sidecar-launch-and-lifecycle.md) | 只有 Rust 启动 sidecar；入口解析顺序与生命周期规则 | Accepted |
+| [0008](0008-sidecar-launch-and-lifecycle.md) | 只有 Rust 启动 sidecar；入口解析顺序与生命周期规则 | Accepted |
 
 新增 ADR 的门槛：该决定会影响 ≥2 个模块，或者将来有人很可能想重新讨论。

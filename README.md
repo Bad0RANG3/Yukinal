@@ -9,7 +9,6 @@
 **AI-native remote development & infrastructure workspace.**
 不是"更好看的 SSH 客户端",而是一个由 agent 驱动的远程开发 / 部署 / 排障工作台。
 
-
 > ⚠️ 非常早期。目前只有桌面外壳、连接与 agent 运行时骨架,还没有可发布的版本。
 
 ## 它做什么
@@ -109,8 +108,7 @@ sidecar stdio 往返 smoke → `cargo fmt` / `clippy -D warnings` / `check` →
 - [ADR 0005](docs/adr/0005-permission-engine-sole-decision-maker.md) — 三层风险事实,Permission Engine 唯一决策
 - [ADR 0006](docs/adr/0006-sidecar-transport-ndjson-jsonrpc.md) — sidecar 传输:stdio 上的 NDJSON JSON-RPC
 - [ADR 0007](docs/adr/0007-monorepo-and-day-one-abstractions.md) — 第一天钉死的核心抽象
-- [ADR 0008](docs/adr/0008-project-name-yukinal.md) — 为什么叫 Yukinal
-- [ADR 0009](docs/adr/0009-sidecar-launch-and-lifecycle.md) — sidecar 的启动方式与生命周期规则
+- [ADR 0008](docs/adr/0008-sidecar-launch-and-lifecycle.md) — sidecar 的启动方式与生命周期规则
 
 ## License
 

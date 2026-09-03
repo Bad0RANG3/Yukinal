@@ -8,15 +8,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
+use yukinal_core::ipc::{AgentKillResponse, AgentLogsResponse, AgentSpawnResponse, PingResponse};
 use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
 use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PingResponse {
-    pub version: &'static str,
-    pub os: &'static str,
-}
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -25,17 +19,6 @@ pub fn core_ping() -> PingResponse {
         version: env!("CARGO_PKG_VERSION"),
         os: std::env::consts::OS,
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSpawnResponse {
-    pub pid: u32,
-    pub protocol_version: String,
-    pub agent_version: String,
-    pub entry: String,
-    pub tool_count: usize,
-    pub already_running: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,7 +89,7 @@ pub async fn agent_logs(state: State<'_, AppState>) -> Result<AgentLogsResponse,
 }
 
 /// Decide what to launch. Resolution order lives in `SidecarConfig::from_env_with_cwd`
-/// (ADR 0009); this only supplies the app data dir when the caller did not set one.
+/// (ADR 0008); this only supplies the app data dir when the caller did not set one.
 fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let mut config = SidecarConfig::from_env_with_cwd(&cwd).map_err(|error| error.to_string())?;

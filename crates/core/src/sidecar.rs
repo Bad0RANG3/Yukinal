@@ -1,4 +1,4 @@
-//! Sidecar supervision: Rust owns the agent process (ADR 0001/0006/0009).
+//! Sidecar supervision: Rust owns the agent process (ADR 0001/0006/0008).
 //!
 //! The desktop never spawns processes itself. This module resolves *what* to launch,
 //! launches it with piped stdio, speaks NDJSON JSON-RPC, correlates responses, forwards
@@ -69,7 +69,7 @@ pub struct SidecarConfig {
 }
 
 impl SidecarConfig {
-    /// Resolution order (ADR 0009):
+    /// Resolution order (ADR 0008):
     /// 1. `YUKINAL_AGENT_COMMAND` (+ optional `YUKINAL_AGENT_ARGS`, `;`-separated)
     /// 2. `YUKINAL_AGENT_ENTRY` (+ optional `YUKINAL_NODE`)
     /// 3. dev fallback: nearest `apps/agent/dist/index.js` walking up from `cwd`

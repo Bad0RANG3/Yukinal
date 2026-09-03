@@ -78,7 +78,7 @@ export interface AgentStatus {
   agentVersion: string | null;
   /** Registered tools reported by the sidecar at handshake time. */
   toolCount: number | null;
-  /** Which bundle Rust actually launched (ADR 0009) — "what started" must be visible. */
+  /** Which bundle Rust actually launched (ADR 0008) — "what started" must be visible. */
   entry: string | null;
   startedAt: string | null;
   /** Last abnormal exit, kept until the next successful spawn so a crash stays visible. */
