@@ -7,8 +7,20 @@ license.workspace = true
 publish = false
 
 [dependencies]
+russh = { workspace = true }
+russh-sftp = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+# New deps rationale (repo rule): russh/russh-sftp — MIT, maintained, pure Rust,
+# cross-platform, replaces hand-rolled SSH. tokio-util — MIT, part of the tokio
+# team, cancels in-flight tool calls without killing the runtime. tracing — MIT.
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"

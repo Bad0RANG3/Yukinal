@@ -30,8 +30,14 @@ thiserror = "2.0"
 tracing = "0.1"
 
 # SSH backend. ADR 0002: russh (pure Rust, tokio-native, PTY + SFTP).
-russh = "0.63"
+# Crypto backend: `ring` instead of the default aws-lc-rs — aws-lc-sys needs a C
+# toolchain/cmake everywhere, ring ships prebuilt asm for the platforms we target.
+# (audited per the ADR's crypto note; revisit if a server needs aws-lc-only ciphers)
+russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.0"
+
+# Cancellation primitive for tool execution (shareable stop signal).
+tokio-util = "0.7"
 
 # OS credential store: keyring over Keychain / Credential Manager / Secret Service.
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
