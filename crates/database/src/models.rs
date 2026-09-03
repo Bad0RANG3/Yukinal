@@ -483,11 +483,11 @@ pub struct ServerSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub disks: Option<Vec<serde_json::Value>>,
+    pub disks: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<Vec<serde_json::Value>>,
+    pub network: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker: Option<serde_json::Value>,
     pub capabilities: ServerCapabilities,

@@ -11,6 +11,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+yukinal-collector = { workspace = true }
+yukinal-database = { workspace = true }
 yukinal-ssh = { workspace = true }
 yukinal-terminal = { workspace = true }
 

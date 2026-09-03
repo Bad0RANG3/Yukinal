@@ -19,7 +19,7 @@ pub struct TerminalOpenResponse {
 }
 
 /// 确保 `server_id` 有一条已认证的 ssh 连接（缓存命中 → 直接复用）。
-async fn ensure_session(state: &AppState, server_id: &str) -> Result<(), String> {
+pub(crate) async fn ensure_session(state: &AppState, server_id: &str) -> Result<(), String> {
     if state.terminals.cached_session(server_id).is_ok() {
         return Ok(());
     }

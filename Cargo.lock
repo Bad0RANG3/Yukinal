@@ -5982,6 +5982,15 @@ dependencies = [
 [[package]]
 name = "yukinal-collector"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "yukinal-ssh",
+]
 
 [[package]]
 name = "yukinal-core"
@@ -5993,6 +6002,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "yukinal-collector",
+ "yukinal-database",
  "yukinal-ssh",
  "yukinal-terminal",
 ]

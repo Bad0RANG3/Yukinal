@@ -1,0 +1,5 @@
+{
+  "cpu": { "warning": 70, "critical": 90 },
+  "memory": { "warning": 70, "critical": 90 },
+  "disk": { "warning": 75, "critical": 90 }
+}

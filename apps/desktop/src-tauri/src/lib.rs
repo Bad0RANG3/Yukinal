@@ -44,6 +44,7 @@ pub fn run() {
             commands::agent_status,
             commands::agent_kill,
             commands::agent_logs,
+            commands::server::server_snapshot,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
