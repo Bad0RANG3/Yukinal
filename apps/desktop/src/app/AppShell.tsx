@@ -4,15 +4,27 @@ import { RuntimeStrip } from "../features/settings/RuntimeStrip.js";
 import { ServerList } from "../features/servers/ServerList.js";
 import { TerminalPane } from "../features/terminal/TerminalPane.js";
 import { ServerOverview } from "../features/overview/ServerOverview.js";
-import { PRIMARY_NAV, useWorkspaceStore, type ServerPage } from "../stores/workspace-store.js";
+import {
+  PRIMARY_NAV,
+  useWorkspaceStore,
+  type PrimaryNav,
+  type ServerPage,
+} from "../stores/workspace-store.js";
+
+const PRIMARY_NAV_LABELS: Record<PrimaryNav, string> = {
+  servers: "服务器",
+  projects: "项目",
+  activity: "动态",
+  settings: "设置",
+};
 
 const SERVER_PAGE_LABELS: Record<ServerPage, string> = {
-  overview: "Overview",
-  terminal: "Terminal",
-  files: "Files",
-  logs: "Logs",
-  services: "Services",
-  activity: "Activity",
+  overview: "概览",
+  terminal: "终端",
+  files: "文件",
+  logs: "日志",
+  services: "服务",
+  activity: "活动",
 };
 
 export function AppShell() {
@@ -30,11 +42,11 @@ export function AppShell() {
             key={item}
             type="button"
             onClick={() => setPrimary(item)}
-            className={`rounded-md px-2 py-1.5 text-left capitalize ${
+            className={`rounded-md px-2 py-1.5 text-left ${
               primary === item ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900"
             }`}
           >
-            {item}
+            {PRIMARY_NAV_LABELS[item]}
           </button>
         ))}
         <RuntimeStrip />
@@ -44,8 +56,8 @@ export function AppShell() {
 
       <main className="flex min-w-0 flex-1 flex-col border-r border-zinc-800">
         {primary !== "servers" ? (
-          <header className="border-b border-zinc-800 px-4 py-2 text-xs uppercase tracking-wide text-zinc-500 capitalize">
-            {primary}
+          <header className="border-b border-zinc-800 px-4 py-2 text-xs uppercase tracking-wide text-zinc-500">
+            {PRIMARY_NAV_LABELS[primary]}
           </header>
         ) : null}
         <header className="flex items-center gap-3 border-b border-zinc-800 px-4 py-2">
@@ -65,8 +77,8 @@ export function AppShell() {
 
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {primary === "settings" ? <RuntimeSettings /> : null}
-          {primary === "projects" ? <ComingSoon what="Projects" /> : null}
-          {primary === "activity" ? <ComingSoon what="Activity" /> : null}
+          {primary === "projects" ? <ComingSoon what="项目" /> : null}
+          {primary === "activity" ? <ComingSoon what="动态" /> : null}
           {primary === "servers" ? (
             <>
               {serverPage === "overview" ? <ServerOverview /> : null}
@@ -88,7 +100,5 @@ export function AppShell() {
 }
 
 function ComingSoon({ what }: { what: string }) {
-  return (
-    <p className="text-zinc-400">{what} — not implemented yet.</p>
-  );
+  return <p className="text-zinc-400">{what} — 尚未实现（保持诚实空态）。</p>;
 }

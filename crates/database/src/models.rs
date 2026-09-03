@@ -447,6 +447,45 @@ pub struct McpServerConfig {
 }
 
 // ---------------------------------------------------------------------------
+// add-server input（带 secret 的瞬时输入；secret 只进 keychain，不落 SQLite）
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "method", rename_all = "camelCase")]
+pub enum AuthenticationInput {
+    Password {
+        password: String,
+    },
+    PrivateKey {
+        private_key_pem: String,
+        passphrase: Option<String>,
+    },
+    /// 引用已存在的身份（不改凭据）。
+    Identity {
+        identity_id: String,
+    },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddServerInput {
+    pub name: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub username: String,
+    pub environment: Environment,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    pub authentication: AuthenticationInput,
+}
+
+impl AddServerInput {
+    /// 从跨层 JSON 反序列化（与 `@yukinal/shared` 的 AddServerInput 同形）。
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // snapshots / activities / tool executions
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

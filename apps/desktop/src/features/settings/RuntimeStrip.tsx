@@ -1,13 +1,11 @@
+/**
+ * Runtime strip：原生进程是否活着，由 Rust 上报。刻意小而轻 —— 让用户想服务器和
+ * 健康，而不是 pid；但它必须常驻可见：“agent 到底跑没跑”不能靠猜。
+ */
+
 import { isDesktopShell } from "../../lib/ipc.js";
 import { useAgentStatus, useCorePing, useKillAgent, useSpawnAgent, statusLabel } from "../../lib/runtime.js";
 
-/**
- * Runtime strip: what native processes are alive, reported by Rust.
- *
- * Deliberately small and out of the way — wants users thinking about servers
- * and health, not about pids. It stays visible because "is the agent even running"
- * must never be a guess.
- */
 export function RuntimeStrip() {
   const core = useCorePing();
   const status = useAgentStatus();
@@ -35,7 +33,7 @@ export function RuntimeStrip() {
           onClick={() => spawn.mutate()}
           className="rounded border border-zinc-700 px-1.5 py-0.5 text-zinc-300 disabled:opacity-40"
         >
-          {spawn.isPending ? "starting…" : "Start agent"}
+          {spawn.isPending ? "启动中…" : "启动 agent"}
         </button>
         <button
           type="button"
@@ -43,7 +41,7 @@ export function RuntimeStrip() {
           onClick={() => kill.mutate()}
           className="rounded border border-zinc-700 px-1.5 py-0.5 text-zinc-300 disabled:opacity-40"
         >
-          {kill.isPending ? "stopping…" : "Stop"}
+          {kill.isPending ? "停止中…" : "停止"}
         </button>
       </div>
 
@@ -51,7 +49,7 @@ export function RuntimeStrip() {
       {status.isError ? <p className="mt-1 break-words text-red-400">{status.error.message}</p> : null}
 
       <p className="mt-1 truncate">
-        {shell && core.data ? `core ${core.data.version} · ${core.data.os}` : "core: unavailable"}
+        {shell && core.data ? `core ${core.data.version} · ${core.data.os}` : "core：不可用（浏览器环境）"}
       </p>
     </div>
   );

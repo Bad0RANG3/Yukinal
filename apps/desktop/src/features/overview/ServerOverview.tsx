@@ -44,9 +44,15 @@ function gaugeClass(
   return "healthy";
 }
 
-function Gauge({ label, usage }: { label: string; usage: number | undefined }) {
-  const thresholds =
-    label === "CPU" ? HEALTH_THRESHOLDS.cpu : label === "Memory" ? HEALTH_THRESHOLDS.memory : HEALTH_THRESHOLDS.disk;
+function Gauge({
+  label,
+  usage,
+  thresholds,
+}: {
+  label: string;
+  usage: number | undefined;
+  thresholds: { warning: number; critical: number };
+}) {
   const klass = gaugeClass(usage, thresholds);
   const color =
     klass === "critical" ? "bg-rose-500" : klass === "warning" ? "bg-amber-400" : "bg-emerald-500";
@@ -157,9 +163,9 @@ export function ServerOverview() {
 
       {/* gauges */}
       <div className="flex flex-wrap gap-4 rounded-lg border border-zinc-800 p-4">
-        <Gauge label="CPU" usage={cpu?.usagePercent} />
-        <Gauge label="Memory" usage={memory?.usagePercent} />
-        <Gauge label="Disk" usage={disks.length > 0 ? Math.max(...disks.map((d) => d.usagePercent)) : undefined} />
+        <Gauge label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} />
+        <Gauge label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} />
+        <Gauge label="磁盘" usage={disks.length > 0 ? Math.max(...disks.map((d) => d.usagePercent)) : undefined} thresholds={HEALTH_THRESHOLDS.disk} />
       </div>
 
       {/* docker */}
@@ -167,7 +173,7 @@ export function ServerOverview() {
         <div className="rounded-lg border border-zinc-800 p-4">
           <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Docker</div>
           {docker.containers.length === 0 ? (
-            <p className="text-sm text-zinc-500">no containers</p>
+            <p className="text-sm text-zinc-500">无容器</p>
           ) : (
             <ul className="space-y-1 text-sm">
               {docker.containers.slice(0, 12).map((container, index) => (
@@ -191,7 +197,7 @@ export function ServerOverview() {
       {/* attention：由当前健康级驱动（趋势版在快照历史接入后补） */}
       {health !== "healthy" ? (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-400">Attention</div>
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-400">关注</div>
           {health === "critical" ? (
             <p className="text-sm">CPU / 内存 / 磁盘至少一项处于 critical（{HEALTH_LABEL[health]}）</p>
           ) : (
@@ -202,7 +208,7 @@ export function ServerOverview() {
 
       {/* recent activity：活动流在后续步骤接入，先给诚实的空态 */}
       <div className="rounded-lg border border-zinc-800 p-4">
-        <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Recent Activity</div>
+        <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">最近动态</div>
         <p className="text-sm text-zinc-600">活动流接入前暂无数据。</p>
       </div>
     </div>

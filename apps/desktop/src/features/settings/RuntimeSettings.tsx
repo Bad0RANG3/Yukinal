@@ -17,29 +17,28 @@ export function RuntimeSettings() {
 
   return (
     <section className="max-w-2xl space-y-4">
-      <h1 className="text-lg font-semibold">Runtime</h1>
+      <h1 className="text-lg font-semibold">运行环境</h1>
 
       {!shell ? (
         <p className="rounded border border-amber-500/40 bg-amber-500/5 p-2 text-amber-200">
-          Running in a plain browser: the Rust core is not reachable, so every value below stays
-          unknown instead of being faked. Launch with <code>pnpm tauri dev</code>.
+          纯浏览器预览：Rust 核心不可达，下面的值保持未知而不是造假。请用 <code>pnpm tauri dev</code> 启动。
         </p>
       ) : null}
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <Row label="Native core" value={core.data ? `${core.data.version} (${core.data.os})` : unknown(shell)} />
-        <Row label="Agent status" value={status.data ? (status.data.running ? "running" : "stopped") : unknown(shell)} />
+        <Row label="原生核心" value={core.data ? `${core.data.version} (${core.data.os})` : unknown(shell)} />
+        <Row label="Agent 状态" value={status.data ? (status.data.running ? "运行中" : "已停止") : unknown(shell)} />
         <Row label="Agent pid" value={text(status.data?.pid, shell)} />
-        <Row label="Protocol" value={text(status.data?.protocolVersion, shell)} />
-        <Row label="Agent version" value={text(status.data?.agentVersion, shell)} />
-        <Row label="Registered tools" value={text(status.data?.toolCount, shell)} />
-        <Row label="Sidecar entry" value={text(status.data?.entry, shell)} wide />
+        <Row label="协议" value={text(status.data?.protocolVersion, shell)} />
+        <Row label="Agent 版本" value={text(status.data?.agentVersion, shell)} />
+        <Row label="已注册工具" value={text(status.data?.toolCount, shell)} />
+        <Row label="Sidecar 入口" value={text(status.data?.entry, shell)} wide />
         <Row
           label="Last exit"
           value={
             status.data?.lastExit
-              ? `${status.data.lastExit.code ?? status.data.lastExit.signal ?? "unknown"} @ ${status.data.lastExit.at}`
-              : "none"
+              ? `${status.data.lastExit.code ?? status.data.lastExit.signal ?? "未知"} @ ${status.data.lastExit.at}`
+              : "无"
           }
           wide
         />
@@ -51,11 +50,11 @@ export function RuntimeSettings() {
           onClick={() => setShowLogs((current) => !current)}
           className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300"
         >
-          {showLogs ? "Hide agent log" : "Show agent log"}
+          {showLogs ? "隐藏 agent 日志" : "查看 agent 日志"}
         </button>
         {showLogs ? (
           <pre className="mt-2 max-h-64 overflow-auto rounded border border-zinc-800 bg-black/40 p-2 text-[11px] text-zinc-400">
-            {logs.data?.lines.length ? logs.data.lines.join("\n") : "(no output captured yet)"}
+            {logs.data?.lines.length ? logs.data.lines.join("\n") : "（暂未捕获输出）"}
           </pre>
         ) : null}
       </div>
@@ -73,7 +72,7 @@ function Row({ label, value, wide = false }: { label: string; value: string; wid
 }
 
 function unknown(shell: boolean): string {
-  return shell ? "…" : "unavailable";
+  return shell ? "…" : "不可用";
 }
 
 function text(value: string | number | null | undefined, shell: boolean): string {
