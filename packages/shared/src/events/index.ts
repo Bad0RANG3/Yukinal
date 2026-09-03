@@ -22,6 +22,7 @@ export const EVENT_NAMES = [
   "agent.completed",
   "agent.failed",
   "terminal.opened",
+  "terminal.data",
   "terminal.closed",
   "activity.created",
 ] as const;
@@ -54,6 +55,12 @@ export interface TerminalOpenedEvent {
   rows: number;
 }
 
+/** Stream bytes: the only per-keystroke channel. Payload `data` is UTF-8 (MVP). */
+export interface TerminalDataEvent {
+  terminalSessionId: string;
+  data: string;
+}
+
 export interface TerminalClosedEvent {
   terminalSessionId: string;
   exitCode: number | null;
@@ -65,6 +72,7 @@ export type YukinalEvent =
   | { name: "server.disconnected"; payload: ServerDisconnectedEvent }
   | { name: "server.updated"; payload: ServerUpdatedEvent }
   | { name: "terminal.opened"; payload: TerminalOpenedEvent }
+  | { name: "terminal.data"; payload: TerminalDataEvent }
   | { name: "terminal.closed"; payload: TerminalClosedEvent }
   | { name: "activity.created"; payload: Activity }
   | { name: "agent.started" | "agent.thinking" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

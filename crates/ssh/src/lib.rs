@@ -9,7 +9,7 @@
 //! - 超时 / 取消映射到 [`Error::Timeout`] / [`Error::Cancelled`]；host key 不匹配
 //!   必须报 [`Error::HostKeyVerification`]，绝不静默接受。
 
-#![allow(dead_code)] // 契约先行；S06/S09 之前部分方法尚未被上层调用
+#![allow(dead_code)] // 契约先行；终端/服务器工具落地前部分方法尚未被上层调用
 
 pub mod backend;
 mod conn;

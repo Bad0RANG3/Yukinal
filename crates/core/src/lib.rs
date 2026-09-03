@@ -16,3 +16,4 @@ pub mod ipc;
 pub mod sidecar;
 
 pub mod supervisor;
+pub mod terminal;

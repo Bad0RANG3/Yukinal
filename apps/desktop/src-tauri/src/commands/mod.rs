@@ -11,6 +11,8 @@ use yukinal_core::ipc::{AgentKillResponse, AgentLogsResponse, AgentSpawnResponse
 use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
 use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
 
+pub mod terminal;
+
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
 pub fn core_ping() -> PingResponse {

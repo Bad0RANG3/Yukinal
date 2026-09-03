@@ -65,7 +65,7 @@ impl RusshBackend {
         store.register(host, port, fingerprint)
     }
 
-    /// SFTP 冒烟操作（S13 之前证明子系统真实可用）：远端目录清单。
+    /// SFTP 冒烟操作（文件工具落地前证明子系统真实可用）：远端目录清单。
     pub async fn sftp_list_dir(&self, client: &SftpClient, path: &str) -> Result<Vec<String>> {
         let sftp = lock_sftp(client).await?;
         let dir = sftp
@@ -75,7 +75,7 @@ impl RusshBackend {
         Ok(dir.map(|entry| entry.file_name()).collect())
     }
 
-    /// SFTP 读整文件（S13 filesystem.read 的基础操作）。
+    /// SFTP 读整文件（filesystem read 工具的基础操作）。
     pub async fn sftp_read_file(&self, client: &SftpClient, path: &str) -> Result<Vec<u8>> {
         use russh_sftp::protocol::OpenFlags;
         use tokio::io::AsyncReadExt;

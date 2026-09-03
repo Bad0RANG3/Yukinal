@@ -1,4 +1,4 @@
-//! S03 DoD: restart-persistence for servers/workspaces/provider_configs, write+read
+//! Acceptance: restart-persistence for servers/workspaces/provider_configs, write+read
 //! for tool_executions, and the camelCase wire shape of the row structs.
 
 use std::path::PathBuf;
