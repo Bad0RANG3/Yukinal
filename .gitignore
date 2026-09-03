@@ -33,3 +33,6 @@ Thumbs.db
 *.log
 npm-debug.log*
 pnpm-debug.log*
+
+# local working notes: design drafts and step plans, never committed
+.private/
