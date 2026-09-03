@@ -90,14 +90,17 @@ test("describe advertises what is and is not implemented yet", async () => {
 
   assert.deepEqual(described.toolNameCollisions, []);
   assert.equal(described.implemented[AGENT_METHODS.initialize], true);
-  assert.equal(described.implemented[AGENT_METHODS.runStart], false);
+  assert.equal(described.implemented[AGENT_METHODS.runStart], true);
+  assert.equal(described.implemented[AGENT_METHODS.runStop], true);
+  assert.equal(described.implemented[AGENT_METHODS.approvalRespond], true);
   assert.ok(described.permissionPolicyIds.includes("policy.production"));
 });
 
-test("agent.run.start validates the request then refuses honestly", async () => {
+test("agent.run.start requires providerConfig and validates it", async () => {
   const { runtime, initialize } = await withRuntime();
   await initialize();
 
+  // 没有 providerConfig：契约错误（INVALID_PARAMS），不是"未实现"。
   await assert.rejects(
     runtime.router.handle(
       request(AGENT_METHODS.runStart, {
@@ -107,13 +110,32 @@ test("agent.run.start validates the request then refuses honestly", async () => 
         target: { host: "remote", serverId: "srv_1", environment: "staging" },
       }),
     ),
-    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.NOT_IMPLEMENTED,
+    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,
   );
 
-  // A malformed run request is a contract error, not a "not implemented" one.
+  // 带 providerConfig 但没有可用端点时，run.start 返回 started 而 run 失败会走事件。
+  const ok = (await runtime.router.handle(
+    request(AGENT_METHODS.runStart, {
+      runId: "run_2",
+      sessionId: "ses_2",
+      prompt: "hi",
+      providerConfig: { kind: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "m" },
+    }),
+  )) as { runId: string; started: boolean };
+  assert.equal(ok.started, true);
+  assert.equal(ok.runId, "run_2");
+
+  // 畸形 provider kind：契约错误。
   await assert.rejects(
-    runtime.router.handle(request(AGENT_METHODS.runStart, { runId: "run_2" })),
-    (error: unknown) => error instanceof RpcFailure && error.code !== RPC_ERROR.NOT_IMPLEMENTED,
+    runtime.router.handle(
+      request(AGENT_METHODS.runStart, {
+        runId: "run_3",
+        sessionId: "ses_3",
+        prompt: "hi",
+        providerConfig: { kind: "anthropic", baseUrl: "http://x", model: "m" } as never,
+      }),
+    ),
+    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,
   );
 });
 

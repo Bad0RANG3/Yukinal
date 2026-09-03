@@ -1,5 +1,5 @@
 /**
- * 添加服务器表单（spec §77 的 MVP 形态）。
+ * 添加服务器表单（MVP 形态，高级配置刻意隐藏）。
  *
  * 提交后 secret（密码 / 私钥）走 `server_add` → OS keychain；SQLite 只存引用。
  * 高级配置（ProxyJump/AgentForwarding/Keepalive/KnownHosts）刻意隐藏。

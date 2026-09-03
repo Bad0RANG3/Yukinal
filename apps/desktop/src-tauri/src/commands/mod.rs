@@ -4,13 +4,15 @@
 //! camelCase on both sides. If a command is not in that map, it does not exist for the
 //! UI and must not be added here.
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::AppState;
 use yukinal_core::ipc::{AgentKillResponse, AgentLogsResponse, AgentSpawnResponse, PingResponse};
 use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
 use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
 
+pub mod agent_run;
+pub mod provider;
 pub mod server;
 pub mod terminal;
 
@@ -111,13 +113,9 @@ fn forward_sidecar_events(app: AppHandle) {
             match receiver.recv().await {
                 Ok(event) => match event {
                     SidecarEvent::Log(line) => eprintln!("[agent] {line}"),
-                    SidecarEvent::Frame(frame) => eprintln!(
-                        "[agent:stream] {}",
-                        frame
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("notification")
-                    ),
+                    // 上行通知：`agent.stream` 的 payload 是 AgentStreamEvent，按
+                    // 其 type 原样转成 Tauri 事件（agent.thinking / tool_call / …）。
+                    SidecarEvent::Frame(frame) => forward_agent_frame(&app, &frame),
                     SidecarEvent::Exited { code, signal } => {
                         eprintln!("[agent] exited code={code:?} signal={signal:?}");
                         break;
@@ -130,4 +128,21 @@ fn forward_sidecar_events(app: AppHandle) {
             }
         }
     });
+}
+
+/// `agent.stream` 通知 → Tauri event（事件名 = AgentStreamEvent.type）。
+fn forward_agent_frame(app: &AppHandle, frame: &serde_json::Value) {
+    let Some(method) = frame.get("method").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    if method != "agent.stream" {
+        return;
+    }
+    let Some(params) = frame.get("params") else {
+        return;
+    };
+    let Some(event_type) = params.get("type").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let _ = app.emit(event_type, params.clone());
 }

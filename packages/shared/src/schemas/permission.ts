@@ -8,6 +8,16 @@ import { PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, ToolTargetSchema } from "./server.js";
 
+/** Per-run provider material (mirrors `RuntimeProviderConfig`). */
+export const RuntimeProviderConfigSchema = z.object({
+  kind: z.literal("openai-compatible"),
+  baseUrl: z.string().min(1),
+  model: z.string().min(1),
+  apiKey: z.string().optional(),
+  customHeaders: z.record(z.string(), z.string()).optional(),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
 export const PermissionTierSchema = z.enum(PERMISSION_TIERS);
 export const PermissionModeSchema = z.enum(PERMISSION_MODES);
 
@@ -99,5 +109,6 @@ export const AgentRunRequestSchema = z.object({
   focusServerId: z.string().optional(),
   target: ToolTargetSchema.optional(),
   policyId: z.string().optional(),
+  providerConfig: RuntimeProviderConfigSchema.optional(),
 });
 

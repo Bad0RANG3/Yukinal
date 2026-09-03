@@ -57,6 +57,11 @@ export type _IpcParamsContracts = {
   agent_kill: Expect<Assignable<ParamsOf<"agent_kill">, IpcCommandMap["agent_kill"]["params"]>>;
   agent_status: Expect<Assignable<ParamsOf<"agent_status">, IpcCommandMap["agent_status"]["params"]>>;
   agent_logs: Expect<Assignable<ParamsOf<"agent_logs">, IpcCommandMap["agent_logs"]["params"]>>;
+  agent_run_start: Expect<Assignable<ParamsOf<"agent_run_start">, IpcCommandMap["agent_run_start"]["params"]>>;
+  agent_run_stop: Expect<Assignable<ParamsOf<"agent_run_stop">, IpcCommandMap["agent_run_stop"]["params"]>>;
+  agent_approval_respond: Expect<Assignable<ParamsOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["params"]>>;
+  provider_list: Expect<Assignable<ParamsOf<"provider_list">, IpcCommandMap["provider_list"]["params"]>>;
+  provider_save_openai: Expect<Assignable<ParamsOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["params"]>>;
 };
 
 export type _IpcResponseContracts = {
@@ -74,4 +79,9 @@ export type _IpcResponseContracts = {
   agent_kill: Expect<Assignable<ResponseOf<"agent_kill">, IpcCommandMap["agent_kill"]["response"]>>;
   agent_status: Expect<Assignable<ResponseOf<"agent_status">, IpcCommandMap["agent_status"]["response"]>>;
   agent_logs: Expect<Assignable<ResponseOf<"agent_logs">, IpcCommandMap["agent_logs"]["response"]>>;
+  agent_run_start: Expect<Assignable<ResponseOf<"agent_run_start">, IpcCommandMap["agent_run_start"]["response"]>>;
+  agent_run_stop: Expect<Assignable<ResponseOf<"agent_run_stop">, IpcCommandMap["agent_run_stop"]["response"]>>;
+  agent_approval_respond: Expect<Assignable<ResponseOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["response"]>>;
+  provider_list: Expect<Assignable<ResponseOf<"provider_list">, IpcCommandMap["provider_list"]["response"]>>;
+  provider_save_openai: Expect<Assignable<ResponseOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["response"]>>;
 };

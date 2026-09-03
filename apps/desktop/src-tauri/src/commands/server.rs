@@ -178,7 +178,7 @@ async fn store_identity(
 }
 
 /// `srv_`/`idn_` 前缀 + 时间戳/millis + 进程内计数器：稳定、非 host 派生。
-fn next_id(prefix: &str) -> String {
+pub(crate) fn next_id(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let millis = std::time::SystemTime::now()

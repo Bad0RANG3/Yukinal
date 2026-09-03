@@ -9,6 +9,7 @@
 import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
 import type { ServerSnapshot } from "../types/collector.js";
 import type { AddServerInput, Server } from "../types/server.js";
+import type { AiProviderConfig, ProviderSaveInput } from "../types/provider.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -31,6 +32,13 @@ export const IPC_COMMANDS = {
   agentKill: "agent_kill",
   agentStatus: "agent_status",
   agentLogs: "agent_logs",
+  /** Agent runs: Rust resolves the provider + credential and hands the call to the sidecar. */
+  agentRunStart: "agent_run_start",
+  agentRunStop: "agent_run_stop",
+  agentApprovalRespond: "agent_approval_respond",
+  /** AI provider config: settings panel only; the key never leaves the keychain. */
+  providerList: "provider_list",
+  providerSaveOpenai: "provider_save_openai",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
@@ -56,6 +64,17 @@ export interface IpcCommandMap {
   agent_kill: { params: Record<string, never>; response: { killed: boolean } };
   agent_status: { params: Record<string, never>; response: AgentStatus };
   agent_logs: { params: Record<string, never>; response: AgentLogs };
+  agent_run_start: {
+    params: { sessionId: string; prompt: string };
+    response: { runId: string };
+  };
+  agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
+  agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };
+  provider_list: { params: Record<string, never>; response: { providers: AiProviderConfig[] } };
+  provider_save_openai: {
+    params: ProviderSaveInput;
+    response: { provider: AiProviderConfig };
+  };
 }
 
 /**

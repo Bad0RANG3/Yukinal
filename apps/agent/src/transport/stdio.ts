@@ -21,8 +21,14 @@ export function startStdioRpc(deps: {
   /** Called when the desktop closes our stdin, i.e. it is going away. */
   onParentGone?: () => void;
 }): StdioServer {
+  // 通知（agent.stream / agent.log）走 stdout 协议帧（ADR 0006）。
   const decoder = new NdjsonDecoder((line, error) => {
     deps.log.warn("dropped malformed frame", { head: line.slice(0, 120), error: String(error) });
+  });
+
+  // 上行通知（agent.stream）也是协议帧；desktop 从 stdout 读。
+  deps.router.attachNotifications((method, params) => {
+    process.stdout.write(encodeFrame({ jsonrpc: "2.0", method, params }));
   });
 
   const write = (frame: JsonRpcFailure | { jsonrpc: "2.0"; id: number; result: unknown }): void => {

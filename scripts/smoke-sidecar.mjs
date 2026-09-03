@@ -36,9 +36,13 @@ child.stdout.on("data", (chunk) => {
     buffer = buffer.slice(index + 1);
     if (line.trim() !== "") {
       const frame = JSON.parse(line);
-      const waiter = waiters.shift();
-      if (waiter) waiter(frame);
-      else queue.push(frame);
+      // 只把「响应帧」（带 id）交给 ask；agent.* 通知不进匹配队列，
+      // 否则后台 run 的事件会把后来的断言喂错帧。
+      if (typeof frame.id === "number") {
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame);
+        else queue.push(frame);
+      }
     }
     index = buffer.indexOf("\n");
   }
@@ -80,7 +84,10 @@ await ask({ jsonrpc: "2.0", id: 3, method: "tools.list", params: {} }, (frame) =
 
 await ask({ jsonrpc: "2.0", id: 4, method: "system.describe", params: {} }, (frame) =>
   assert(
-    frame.result?.implemented?.["agent.run.start"] === false && frame.result.toolNameCollisions?.length === 0,
+    frame.result?.implemented?.["agent.run.start"] === true &&
+      frame.result?.implemented?.["agent.run.stop"] === true &&
+      frame.result?.implemented?.["agent.approval.respond"] === true &&
+      frame.result.toolNameCollisions?.length === 0,
     `describe: ${JSON.stringify(frame)}`,
   ),
 );
@@ -94,9 +101,18 @@ await ask(
     jsonrpc: "2.0",
     id: 6,
     method: "agent.run.start",
-    params: { runId: "r", sessionId: "s", prompt: "hi", target: { host: "remote", serverId: "srv_1", environment: "staging" } },
+    params: {
+      runId: "smoke_run",
+      sessionId: "ses",
+      prompt: "hi",
+      providerConfig: { kind: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "m" },
+    },
   },
-  (frame) => assert(frame.error?.code === -32604, `run.start should be NOT_IMPLEMENTED: ${JSON.stringify(frame)}`),
+  // 真实 run（无可达端点）会在后台失败并走事件；这里只断言分发不炸 + 返回 runId。
+  (frame) => {
+    assert(!frame.error, `run.start should not error: ${JSON.stringify(frame)}`);
+    assert(frame.result?.runId === "smoke_run", `run.start should echo runId: ${JSON.stringify(frame)}`);
+  },
 );
 
 // A malformed frame must be dropped, not fatal.

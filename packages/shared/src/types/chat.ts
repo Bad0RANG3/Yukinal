@@ -5,6 +5,7 @@
  */
 
 import type { AGENT_RUN_STATES } from "./enums.js";
+import type { RuntimeProviderConfig } from "./provider.js";
 import type { ToolTarget } from "./tool.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
@@ -39,6 +40,13 @@ export interface AgentRunRequest {
   target?: ToolTarget;
   /** Overrides the policy that would otherwise be derived from the environment. */
   policyId?: string;
+  /** Durable sidecar needs a per-run provider: Rust resolves and injects this. */
+  providerConfig?: RuntimeProviderConfig;
+}
+
+/** `agent.run.stop` params: stop decouples from the run only by its id. */
+export interface AgentRunStopParams {
+  runId: string;
 }
 
 export interface AgentRunResult {

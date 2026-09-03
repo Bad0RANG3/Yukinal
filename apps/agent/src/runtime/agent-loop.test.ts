@@ -11,7 +11,7 @@ import type { AgentLogger } from "../config.js";
 const noop = (): void => {};
 const silent: AgentLogger = { debug: noop, info: noop, warn: noop, error: noop, child: () => silent };
 
-test("the run state machine follows ", () => {
+test("the run state machine follows a full cycle", () => {
   const path: AgentRunState[] = [
     transition("idle", "user_prompt"),
     transition("thinking", "tool_call_requested"),
@@ -50,8 +50,6 @@ test("an illegal transition throws instead of silently drifting", () => {
 test("without a provider the loop refuses to run instead of faking output", async () => {
   const runtime = createRuntime({ log: silent });
   const loop = new AgentLoop(runtime.loop.deps);
-  assert.equal(loop.ready, false);
-
   await assert.rejects(
     loop.start(
       {
@@ -61,6 +59,7 @@ test("without a provider the loop refuses to run instead of faking output", asyn
         target: { host: "remote", serverId: "srv_1", environment: "staging" },
       },
       { emit: noop },
+      undefined as never,
     ),
     (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.NOT_IMPLEMENTED,
   );

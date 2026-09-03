@@ -15,6 +15,8 @@ import { z } from "zod";
 import type { IpcCommandName } from "../ipc/index.js";
 import { AddServerInputSchema, ServerSchema } from "./server.js";
 import { ServerSnapshotSchema } from "./collector.js";
+import { ApprovalResponseSchema } from "./permission.js";
+import { ProviderConfigSchema, ProviderSaveInputSchema } from "./provider.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -123,4 +125,24 @@ export const IPC_SCHEMAS = {
   agent_kill: { params: EMPTY_PAYLOAD, response: z.strictObject({ killed: z.boolean() }) },
   agent_status: { params: EMPTY_PAYLOAD, response: AgentStatusSchema },
   agent_logs: { params: EMPTY_PAYLOAD, response: AgentLogsResponseSchema },
+  agent_run_start: {
+    params: z.strictObject({
+      sessionId: z.string().min(1),
+      prompt: z.string().min(1),
+    }),
+    response: z.strictObject({ runId: z.string().min(1) }),
+  },
+  agent_run_stop: {
+    params: z.strictObject({ runId: z.string().min(1) }),
+    response: z.strictObject({ stopped: z.boolean() }),
+  },
+  agent_approval_respond: {
+    params: ApprovalResponseSchema,
+    response: z.strictObject({ accepted: z.boolean() }),
+  },
+  provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
+  provider_save_openai: {
+    params: ProviderSaveInputSchema,
+    response: z.strictObject({ provider: ProviderConfigSchema }),
+  },
 } satisfies Record<IpcCommandName, IpcCommandSchema>;

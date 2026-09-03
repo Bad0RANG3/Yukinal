@@ -63,6 +63,8 @@ export type StreamEvent =
 
 export interface LLMProvider {
   readonly id: string;
+  /** The model this instance talks to (surfaced so the run can log what it used). */
+  readonly model?: string;
   listModels(): Promise<ModelInfo[]>;
   stream(request: ChatRequest): AsyncIterable<StreamEvent>;
 }
