@@ -3,14 +3,22 @@ Copyright (c) 2026 Bad0RANG3 <badorangeovo@Outlook.com>
 
 Required Notice: Copyright (c) 2026 Bad0RANG3 <badorangeovo@Outlook.com> · Yukinal
 
-This software is licensed under the PolyForm Noncommercial License 1.0.0.
-See LICENSE for the full terms. In short:
+This software is licensed under the PolyForm Noncommercial License 1.0.0
+(see LICENSE). In short:
 
-  - You may use, study, modify and share it for noncommercial purposes.
-  - Keep this notice and the license text with every copy you pass on.
-  - Commercial use requires a separate agreement from the copyright holder.
-  - No warranty, no liability, and no trademark or patent grant beyond what
-    the license states.
+  - You may use, copy, modify and share it for noncommercial purposes.
+    Personal research, study, hobby projects, and use by educational,
+    charitable, research, public-safety, health or government institutions
+    are permitted, regardless of where their funding comes from.
+  - Commercial use is not licensed. If you want to use Yukinal commercially,
+    or to offer it as part of a commercial service, get a separate license
+    from the copyright holder.
+  - Anyone who receives a copy of any part of this software must also receive
+    a copy of the license terms (or its URL) and the `Required Notice:` line
+    above. If you modify it, say so.
+  - No warranty, no liability, no trademark license, and no patent license
+    beyond what the license text grants.
 
-Third-party components remain under their own licenses; see each package's
-manifest for what you are also accepting.
+Third-party components remain under their own licenses. This project is built
+on Tauri, React, russh, tokio, sqlite, xterm.js and others; whatever you
+receive from this repository also carries their terms.
