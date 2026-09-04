@@ -64,6 +64,7 @@ pub fn run() {
             commands::provider::provider_activate,
             commands::provider::provider_models,
             commands::server::server_snapshot,
+            commands::activity::activity_list,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,

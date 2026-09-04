@@ -7,6 +7,7 @@
  */
 
 import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
+import type { ActivityListInput, ActivityListResponse } from "../types/activity.js";
 import type { ServerSnapshot } from "../types/collector.js";
 import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
 import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
@@ -27,6 +28,7 @@ export const IPC_COMMANDS = {
   serverSnapshot: "server_snapshot",
   remoteFileList: "remote_file_list",
   remoteFileRead: "remote_file_read",
+  activityList: "activity_list",
   /** Terminal byte streams leave as events, not command returns. */
   terminalOpen: "terminal_open",
   terminalWrite: "terminal_write",
@@ -66,6 +68,7 @@ export interface IpcCommandMap {
   server_snapshot: { params: { serverId: string }; response: { snapshot: ServerSnapshot } };
   remote_file_list: { params: { serverId: string; path: string }; response: RemoteFileListResponse };
   remote_file_read: { params: { serverId: string; path: string }; response: RemoteFileReadResponse };
+  activity_list: { params: ActivityListInput; response: ActivityListResponse };
   terminal_open: {
     params: { serverId: string; cols: number; rows: number };
     response: { terminalSessionId: string };

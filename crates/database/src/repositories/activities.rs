@@ -53,6 +53,21 @@ impl<'a> ActivitiesRepository<'a> {
                 .map_err(crate::DatabaseError::from)
         })
     }
+
+    /// Newest-first activity feed for one server.
+    pub fn list_recent_for_server(&self, server_id: &str, limit: usize) -> Result<Vec<Activity>> {
+        self.db.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, server_id, workspace_id, type, title, description, source, actor,
+                        reason, outcome, trace_id, created_at
+                 FROM activities WHERE server_id = ?1
+                 ORDER BY created_at DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![server_id, limit as i64], row_to_activity)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(crate::DatabaseError::from)
+        })
+    }
 }
 
 fn row_to_activity(row: &Row<'_>) -> rusqlite::Result<Activity> {

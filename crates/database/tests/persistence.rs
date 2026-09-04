@@ -434,6 +434,39 @@ fn activities_round_trip() {
     assert_eq!(feed[0].source, ActivitySource::System);
 }
 
+#[test]
+fn activities_can_be_filtered_by_server_and_limited() {
+    let (_path, db) = temp_db("act-filter");
+    let repo = db.activities();
+    for (id, server_id, created_at) in [
+        ("act_a", Some("srv_a"), "2026-01-01T00:00:00.000Z"),
+        ("act_b", Some("srv_b"), "2026-01-01T00:01:00.000Z"),
+        ("act_c", Some("srv_a"), "2026-01-01T00:02:00.000Z"),
+    ] {
+        repo.insert(&Activity {
+            id: id.into(),
+            server_id: server_id.map(str::to_string),
+            workspace_id: None,
+            r#type: ActivityType::Configuration,
+            title: id.into(),
+            description: None,
+            source: ActivitySource::System,
+            actor: "core".into(),
+            reason: None,
+            outcome: None,
+            trace_id: None,
+            created_at: created_at.into(),
+        })
+        .expect("insert activity");
+    }
+
+    let feed = repo
+        .list_recent_for_server("srv_a", 1)
+        .expect("filtered feed");
+    assert_eq!(feed.len(), 1);
+    assert_eq!(feed[0].id, "act_c");
+}
+
 // MCP server configs round-trip too (they share the provider lifecycle).
 #[test]
 fn mcp_server_round_trip() {

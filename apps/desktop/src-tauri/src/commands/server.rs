@@ -8,7 +8,8 @@ use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use yukinal_credentials::{CredentialStore, Secret};
 use yukinal_database::models::{
-    Identity, Server, ServerCapabilities, ServerConnection, ServerMetadata, ServerStatus,
+    Activity, ActivityOutcome, ActivitySource, ActivityType, Identity, Server, ServerCapabilities,
+    ServerConnection, ServerMetadata, ServerStatus,
 };
 use yukinal_database::UpdateServerInput;
 use yukinal_database::{AddServerInput, AuthenticationInput};
@@ -102,6 +103,14 @@ pub async fn server_connect(
                     &yukinal_core::sidecar::iso8601_now(),
                 )
                 .map_err(|error| error.to_string())?;
+            record_activity(
+                &state,
+                &server_id,
+                ActivityType::Connection,
+                "已连接服务器",
+                None,
+                ActivityOutcome::Success,
+            )?;
             Ok(ServerConnectResponse {
                 status: "connected",
             })
@@ -111,6 +120,14 @@ pub async fn server_connect(
                 &server_id,
                 ServerStatus::Error,
                 &yukinal_core::sidecar::iso8601_now(),
+            );
+            let _ = record_activity(
+                &state,
+                &server_id,
+                ActivityType::Connection,
+                "连接服务器失败",
+                Some(error.clone()),
+                ActivityOutcome::Failure,
             );
             Err(error)
         }
@@ -137,7 +154,15 @@ pub async fn server_disconnect(
             ServerStatus::Disconnected,
             &yukinal_core::sidecar::iso8601_now(),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    record_activity(
+        &state,
+        &server_id,
+        ActivityType::Connection,
+        "已断开服务器",
+        None,
+        ActivityOutcome::Success,
+    )
 }
 
 #[tauri::command]
@@ -195,6 +220,14 @@ pub async fn server_update(
     {
         reclaim_identity(&state, &old_id, &server.id)?;
     }
+    record_activity(
+        &state,
+        &server.id,
+        ActivityType::Configuration,
+        "已更新服务器配置",
+        None,
+        ActivityOutcome::Success,
+    )?;
     Ok(ServerAddResponse { server })
 }
 
@@ -221,6 +254,14 @@ pub async fn server_delete(
     if let Some(identity_id) = server.connection.identity_id {
         reclaim_identity(&state, &identity_id, &server_id)?;
     }
+    record_activity(
+        &state,
+        &server_id,
+        ActivityType::Configuration,
+        "已删除服务器",
+        None,
+        ActivityOutcome::Success,
+    )?;
     Ok(ServerDeleteResponse { deleted: true })
 }
 
@@ -269,7 +310,44 @@ pub async fn server_add(
         .insert(&server)
         .map_err(|error| error.to_string())?;
 
+    record_activity(
+        &state,
+        &id,
+        ActivityType::Configuration,
+        "已添加服务器",
+        None,
+        ActivityOutcome::Success,
+    )?;
+
     Ok(ServerAddResponse { server })
+}
+
+fn record_activity(
+    state: &State<'_, AppState>,
+    server_id: &str,
+    activity_type: ActivityType,
+    title: &str,
+    description: Option<String>,
+    outcome: ActivityOutcome,
+) -> Result<(), String> {
+    state
+        .database
+        .activities()
+        .insert(&Activity {
+            id: next_id("act"),
+            server_id: Some(server_id.to_string()),
+            workspace_id: None,
+            r#type: activity_type,
+            title: title.to_string(),
+            description,
+            source: ActivitySource::User,
+            actor: "user".to_string(),
+            reason: Some("用户在工作区执行操作".to_string()),
+            outcome: Some(outcome),
+            trace_id: None,
+            created_at: yukinal_core::sidecar::iso8601_now(),
+        })
+        .map_err(|error| error.to_string())
 }
 
 async fn store_identity(

@@ -1360,3 +1360,23 @@ button:disabled {
 .remote-file-size { color: #71717a; font-size: 11px; }
 .file-preview-content { overflow: auto; max-height: 470px; margin-top: 12px; padding: 12px; border-radius: 6px; background: #050505; color: #d4d4d8; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 @media (max-width: 900px) { .files-layout { grid-template-columns: 1fr; } }
+.activity-page { min-height: 0; display: flex; flex-direction: column; gap: 18px; }
+.activity-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.activity-page-header h2 { margin: 3px 0 0; font-size: 24px; letter-spacing: -.03em; }
+.activity-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 9px; background: rgba(9, 14, 18, .46); overflow: hidden; }
+.activity-row { display: flex; gap: 13px; padding: 16px 18px; border-bottom: 1px solid rgba(39, 50, 54, .72); }
+.activity-row:last-child { border-bottom: 0; }
+.activity-type-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #34524d; border-radius: 7px; color: #92c8bc; background: rgba(55, 112, 99, .16); font-size: 14px; }
+.activity-type-configuration { color: #b5b4df; border-color: #4a4a72; background: rgba(89, 85, 146, .16); }
+.activity-type-agent_action { color: #e1c58a; border-color: #6b5732; background: rgba(130, 95, 32, .16); }
+.activity-type-health { color: #8fc6dc; border-color: #31596a; background: rgba(43, 111, 140, .16); }
+.activity-row-body { min-width: 0; flex: 1; }
+.activity-row-title { display: flex; align-items: center; gap: 9px; min-height: 21px; }
+.activity-row-title strong { color: var(--text); font-size: 13px; font-weight: 620; }
+.activity-outcome { padding: 2px 6px; border-radius: 4px; font-size: 10px; line-height: 1.2; }
+.activity-outcome-success { color: #8dd0af; background: rgba(55, 140, 91, .15); }
+.activity-outcome-failure, .activity-outcome-denied { color: #eaa0a0; background: rgba(161, 58, 58, .15); }
+.activity-outcome-cancelled { color: #d8b985; background: rgba(155, 112, 48, .15); }
+.activity-row-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.activity-row-meta time { margin-left: auto; color: var(--faint); }
+.activity-row-body p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

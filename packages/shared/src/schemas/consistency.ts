@@ -8,10 +8,12 @@ import type { z } from "zod";
 
 import type { AgentRunRequest, ApprovalResponse } from "../types/chat.js";
 import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
+import type { Activity } from "../types/activity.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
 import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
+import type { ActivitySchema } from "./activity.js";
 import type {
   AgentRunRequestSchema,
   ApprovalResponseSchema,
@@ -27,6 +29,7 @@ type Assignable<S extends z.ZodType, Target> = z.output<S> extends Target ? true
 export type _ServerContract = Expect<Assignable<typeof ServerSchema, Server>>;
 export type _AddServerContract = Expect<Assignable<typeof AddServerInputSchema, AddServerInput>>;
 export type _UpdateServerContract = Expect<Assignable<typeof UpdateServerInputSchema, UpdateServerInput>>;
+export type _ActivityContract = Expect<Assignable<typeof ActivitySchema, Activity>>;
 export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDecisionSchema, PermissionDecision>>;
 export type _ToolDeclarationContract = Expect<Assignable<typeof ToolDeclarationSchema, ToolDeclaration>>;
 export type _ApprovalResponseContract = Expect<Assignable<typeof ApprovalResponseSchema, ApprovalResponse>>;
@@ -54,6 +57,7 @@ export type _IpcParamsContracts = {
   server_snapshot: Expect<Assignable<ParamsOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["params"]>>;
   remote_file_list: Expect<Assignable<ParamsOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["params"]>>;
   remote_file_read: Expect<Assignable<ParamsOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["params"]>>;
+  activity_list: Expect<Assignable<ParamsOf<"activity_list">, IpcCommandMap["activity_list"]["params"]>>;
   terminal_open: Expect<Assignable<ParamsOf<"terminal_open">, IpcCommandMap["terminal_open"]["params"]>>;
   terminal_write: Expect<Assignable<ParamsOf<"terminal_write">, IpcCommandMap["terminal_write"]["params"]>>;
   terminal_resize: Expect<Assignable<ParamsOf<"terminal_resize">, IpcCommandMap["terminal_resize"]["params"]>>;
@@ -86,6 +90,7 @@ export type _IpcResponseContracts = {
   server_snapshot: Expect<Assignable<ResponseOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["response"]>>;
   remote_file_list: Expect<Assignable<ResponseOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["response"]>>;
   remote_file_read: Expect<Assignable<ResponseOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["response"]>>;
+  activity_list: Expect<Assignable<ResponseOf<"activity_list">, IpcCommandMap["activity_list"]["response"]>>;
   terminal_open: Expect<Assignable<ResponseOf<"terminal_open">, IpcCommandMap["terminal_open"]["response"]>>;
   terminal_write: Expect<Assignable<ResponseOf<"terminal_write">, IpcCommandMap["terminal_write"]["response"]>>;
   terminal_resize: Expect<Assignable<ResponseOf<"terminal_resize">, IpcCommandMap["terminal_resize"]["response"]>>;

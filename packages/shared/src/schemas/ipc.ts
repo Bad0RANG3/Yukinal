@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import type { IpcCommandName } from "../ipc/index.js";
 import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
+import { ActivitySchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ApprovalResponseSchema } from "./permission.js";
 import {
@@ -114,6 +115,13 @@ export const IPC_SCHEMAS = {
   remote_file_read: {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
     response: z.strictObject({ path: z.string().min(1), content: z.string(), truncated: z.boolean() }),
+  },
+  activity_list: {
+    params: z.strictObject({
+      serverId: IpcServerIdSchema.optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    }),
+    response: z.strictObject({ activities: z.array(ActivitySchema) }),
   },
   terminal_open: {
     params: z.strictObject({

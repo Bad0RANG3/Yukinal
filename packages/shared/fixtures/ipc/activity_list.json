@@ -1,0 +1,25 @@
+{
+  "activities": [
+    {
+      "id": "act_01",
+      "serverId": "srv_01abc",
+      "type": "connection",
+      "title": "已连接服务器",
+      "source": "user",
+      "actor": "user",
+      "reason": "用户请求连接",
+      "outcome": "success",
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "act_02",
+      "type": "configuration",
+      "title": "Provider 已更新",
+      "description": "更新默认模型",
+      "source": "system",
+      "actor": "core",
+      "outcome": "success",
+      "createdAt": "2026-01-01T00:01:00.000Z"
+    }
+  ]
+}

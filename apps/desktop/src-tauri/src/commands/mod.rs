@@ -11,6 +11,7 @@ use yukinal_core::ipc::{AgentKillResponse, AgentLogsResponse, AgentSpawnResponse
 use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
 use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
 
+pub mod activity;
 pub mod agent_run;
 pub mod files;
 pub mod provider;

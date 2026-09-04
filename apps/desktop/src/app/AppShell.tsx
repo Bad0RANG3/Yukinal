@@ -5,6 +5,7 @@ import { ServerList } from "../features/servers/ServerList.js";
 import { TerminalPane } from "../features/terminal/TerminalPane.js";
 import { ServerOverview } from "../features/overview/ServerOverview.js";
 import { RemoteFilesPane } from "../features/files/RemoteFilesPane.js";
+import { ActivityFeed } from "../features/activity/ActivityFeed.js";
 import {
   PRIMARY_NAV,
   SERVER_PAGES,
@@ -99,13 +100,14 @@ export function AppShell() {
         <div className="workspace-content">
           {primary === "settings" ? <RuntimeSettings /> : null}
           {primary === "projects" ? <ComingSoon icon="⌁" title="项目视图" detail="项目与服务器的关联会在工作区能力完成后显示。" /> : null}
-          {primary === "activity" ? <ComingSoon icon="◷" title="全局动态" detail="跨服务器的审计流尚未接入，当前不会伪造数据。" /> : null}
+          {primary === "activity" ? <ActivityFeed /> : null}
           {primary === "servers" ? (
             <>
               {serverPage === "overview" ? <ServerOverview /> : null}
               {serverPage === "terminal" ? <TerminalPane /> : null}
               {serverPage === "files" ? <RemoteFilesPane /> : null}
-              {serverPage === "logs" || serverPage === "services" || serverPage === "activity" ? (
+              {serverPage === "activity" ? <ActivityFeed serverId={selectedServerId} /> : null}
+              {serverPage === "logs" || serverPage === "services" ? (
                 <ComingSoon icon="···" title={SERVER_PAGE_LABELS[serverPage]} detail="这个能力还没有接入真实 IPC，保持空态以避免误导。" />
               ) : null}
             </>

@@ -9,8 +9,6 @@ import type { ToolExecutionStatus } from "./tool.js";
  * Trace = the Agent's step-by-step working, rendered as cards in the AI panel.
  */
 
-export type ActivitySource = "agent" | "user" | "system" | "docker" | "git" | "cloud";
-
 export const ACTIVITY_TYPES = [
   "connection",
   "authentication",
@@ -25,6 +23,12 @@ export const ACTIVITY_TYPES = [
 ] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
+export const ACTIVITY_SOURCES = ["agent", "user", "system", "docker", "git", "cloud"] as const;
+export type ActivitySource = (typeof ACTIVITY_SOURCES)[number];
+
+export const ACTIVITY_OUTCOMES = ["success", "failure", "cancelled", "denied"] as const;
+export type ActivityOutcome = (typeof ACTIVITY_OUTCOMES)[number];
+
 export interface Activity {
   id: string;
   serverId?: string;
@@ -37,10 +41,19 @@ export interface Activity {
   actor: string;
   /** Why it happened — the agent's stated intent, or the triggering event. */
   reason?: string;
-  outcome?: "success" | "failure" | "cancelled" | "denied";
+  outcome?: ActivityOutcome;
   /** Link to the trace record for drill-down. */
   traceId?: string;
   createdAt: string;
+}
+
+export interface ActivityListInput {
+  serverId?: string;
+  limit?: number;
+}
+
+export interface ActivityListResponse {
+  activities: Activity[];
 }
 
 export type TraceStepStatus = (typeof TRACE_STEP_STATUSES)[number];

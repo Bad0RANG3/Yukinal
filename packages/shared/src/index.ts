@@ -19,6 +19,7 @@ export * from "./types/health.js";
 export * from "./types/file.js";
 
 export * from "./schemas/server.js";
+export * from "./schemas/activity.js";
 export * from "./schemas/permission.js";
 export * from "./schemas/collector.js";
 export * from "./schemas/ipc.js";

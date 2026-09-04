@@ -97,3 +97,11 @@ test("add-server params are validated by the shared input schema", () => {
   });
   assert.equal(parsed.success, true);
 });
+
+test("activity_list accepts an optional server filter and bounded limit", () => {
+  const parsed = IPC_SCHEMAS.activity_list.params.safeParse({ serverId: "srv_01abc", limit: 25 });
+  assert.equal(parsed.success, true);
+  assert.equal(IPC_SCHEMAS.activity_list.params.safeParse({ serverId: "api.example.com:22" }).success, false);
+  assert.equal(IPC_SCHEMAS.activity_list.params.safeParse({ limit: 0 }).success, false);
+  assert.equal(IPC_SCHEMAS.activity_list.params.safeParse({ limit: 101 }).success, false);
+});
