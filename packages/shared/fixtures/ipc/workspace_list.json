@@ -1,0 +1,22 @@
+{
+  "workspaces": [
+    {
+      "id": "ws_01",
+      "name": "Checkout Staging",
+      "serverIds": ["srv_01abc"],
+      "repositories": [
+        {
+          "id": "repo_01",
+          "name": "api",
+          "host": "remote",
+          "path": "/srv/api",
+          "serverId": "srv_01abc",
+          "gitUrl": "https://example.com/api.git",
+          "defaultBranch": "main"
+        }
+      ],
+      "providerIds": ["prv_01"],
+      "defaultEnvironment": "staging"
+    }
+  ]
+}

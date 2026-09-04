@@ -7,14 +7,14 @@
 import type { z } from "zod";
 
 import type { AgentRunRequest, ApprovalResponse } from "../types/chat.js";
-import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
+import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
 import type { Activity } from "../types/activity.js";
 import type { ServerService, ServerServicesResponse } from "../types/service.js";
 import type { ServerLogLine, ServerLogsResponse } from "../types/log.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
-import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
+import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
 import type { ActivitySchema } from "./activity.js";
 import type { ServerServiceSchema, ServerServicesResponseSchema } from "./service.js";
 import type { ServerLogLineSchema, ServerLogsResponseSchema } from "./log.js";
@@ -31,6 +31,7 @@ type Expect<T extends true> = T;
 type Assignable<S extends z.ZodType, Target> = z.output<S> extends Target ? true : false;
 
 export type _ServerContract = Expect<Assignable<typeof ServerSchema, Server>>;
+export type _WorkspaceListContract = Expect<Assignable<typeof WorkspaceListResponseSchema, WorkspaceListResponse>>;
 export type _AddServerContract = Expect<Assignable<typeof AddServerInputSchema, AddServerInput>>;
 export type _UpdateServerContract = Expect<Assignable<typeof UpdateServerInputSchema, UpdateServerInput>>;
 export type _ActivityContract = Expect<Assignable<typeof ActivitySchema, Activity>>;
@@ -57,6 +58,7 @@ type ResponseOf<C extends IpcCommandName> = (typeof IPC_SCHEMAS)[C]["response"];
 export type _IpcParamsContracts = {
   core_ping: Expect<Assignable<ParamsOf<"core_ping">, IpcCommandMap["core_ping"]["params"]>>;
   server_list: Expect<Assignable<ParamsOf<"server_list">, IpcCommandMap["server_list"]["params"]>>;
+  workspace_list: Expect<Assignable<ParamsOf<"workspace_list">, IpcCommandMap["workspace_list"]["params"]>>;
   server_add: Expect<Assignable<ParamsOf<"server_add">, IpcCommandMap["server_add"]["params"]>>;
   server_update: Expect<Assignable<ParamsOf<"server_update">, IpcCommandMap["server_update"]["params"]>>;
   server_delete: Expect<Assignable<ParamsOf<"server_delete">, IpcCommandMap["server_delete"]["params"]>>;
@@ -92,6 +94,7 @@ export type _IpcParamsContracts = {
 export type _IpcResponseContracts = {
   core_ping: Expect<Assignable<ResponseOf<"core_ping">, IpcCommandMap["core_ping"]["response"]>>;
   server_list: Expect<Assignable<ResponseOf<"server_list">, IpcCommandMap["server_list"]["response"]>>;
+  workspace_list: Expect<Assignable<ResponseOf<"workspace_list">, IpcCommandMap["workspace_list"]["response"]>>;
   server_add: Expect<Assignable<ResponseOf<"server_add">, IpcCommandMap["server_add"]["response"]>>;
   server_update: Expect<Assignable<ResponseOf<"server_update">, IpcCommandMap["server_update"]["response"]>>;
   server_delete: Expect<Assignable<ResponseOf<"server_delete">, IpcCommandMap["server_delete"]["response"]>>;

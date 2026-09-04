@@ -8,6 +8,7 @@ import { RemoteFilesPane } from "../features/files/RemoteFilesPane.js";
 import { ActivityFeed } from "../features/activity/ActivityFeed.js";
 import { ServicesPane } from "../features/services/ServicesPane.js";
 import { LogsPane } from "../features/logs/LogsPane.js";
+import { ProjectsPane } from "../features/projects/ProjectsPane.js";
 import {
   PRIMARY_NAV,
   SERVER_PAGES,
@@ -101,7 +102,7 @@ export function AppShell() {
 
         <div className="workspace-content">
           {primary === "settings" ? <RuntimeSettings /> : null}
-          {primary === "projects" ? <ComingSoon icon="⌁" title="项目视图" detail="项目与服务器的关联会在工作区能力完成后显示。" /> : null}
+          {primary === "projects" ? <ProjectsPane /> : null}
           {primary === "activity" ? <ActivityFeed /> : null}
           {primary === "servers" ? (
             <>
@@ -117,16 +118,6 @@ export function AppShell() {
       </main>
 
       <AgentPanel />
-    </div>
-  );
-}
-
-function ComingSoon({ icon, title, detail }: { icon: string; title: string; detail: string }) {
-  return (
-    <div className="empty-state page-empty">
-      <span className="empty-state-mark">{icon}</span>
-      <h2>{title}</h2>
-      <p>{detail}</p>
     </div>
   );
 }

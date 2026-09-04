@@ -114,6 +114,10 @@ export interface Workspace {
   defaultEnvironment: Environment;
 }
 
+export interface WorkspaceListResponse {
+  workspaces: Workspace[];
+}
+
 export interface WorkspaceRepository {
   id: string;
   name: string;

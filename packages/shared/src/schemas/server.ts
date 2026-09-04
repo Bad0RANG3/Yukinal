@@ -54,6 +54,29 @@ export const ServerSchema = z.object({
   updatedAt: z.string(),
 });
 
+export const WorkspaceRepositorySchema = z.strictObject({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  host: z.enum(["local", "remote"]),
+  path: z.string().min(1).optional(),
+  serverId: z.string().min(1).optional(),
+  gitUrl: z.string().min(1).optional(),
+  defaultBranch: z.string().min(1).optional(),
+});
+
+export const WorkspaceSchema = z.strictObject({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  serverIds: z.array(z.string().min(1)),
+  repositories: z.array(WorkspaceRepositorySchema),
+  providerIds: z.array(z.string().min(1)),
+  defaultEnvironment: EnvironmentSchema,
+});
+
+export const WorkspaceListResponseSchema = z.strictObject({
+  workspaces: z.array(WorkspaceSchema),
+});
+
 /** Payload of the "Add Server" form. Secrets are dropped into the keychain here. */
 export const AddServerInputSchema = z.object({
   name: z.string().min(1),

@@ -12,7 +12,7 @@ import type { ServerSnapshot } from "../types/collector.js";
 import type { ServerServicesResponse } from "../types/service.js";
 import type { ServerLogsResponse } from "../types/log.js";
 import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
-import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
+import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
 import type { AiProviderConfig, CcSwitchProviderCandidate, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
 
 export const IPC_COMMANDS = {
@@ -20,6 +20,7 @@ export const IPC_COMMANDS = {
   corePing: "core_ping",
   /** Server CRUD, backed by the local database. */
   serverList: "server_list",
+  workspaceList: "workspace_list",
   serverAdd: "server_add",
   serverUpdate: "server_update",
   serverDelete: "server_delete",
@@ -65,6 +66,7 @@ export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
 export interface IpcCommandMap {
   core_ping: { params: Record<string, never>; response: { version: string; os: string } };
   server_list: { params: Record<string, never>; response: { servers: Server[] } };
+  workspace_list: { params: Record<string, never>; response: WorkspaceListResponse };
   server_add: { params: AddServerInput; response: { server: Server } };
   server_update: { params: UpdateServerInput; response: { server: Server } };
   server_delete: { params: { serverId: string }; response: { deleted: boolean } };

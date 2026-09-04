@@ -48,6 +48,7 @@ pub fn run() {
             commands::agent_run::agent_run_stop,
             commands::agent_run::agent_approval_respond,
             commands::server::server_list,
+            commands::workspace::workspace_list,
             commands::server::server_add,
             commands::server::server_update,
             commands::server::server_delete,

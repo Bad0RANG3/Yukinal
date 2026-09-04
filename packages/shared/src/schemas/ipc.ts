@@ -13,7 +13,7 @@
 import { z } from "zod";
 
 import type { IpcCommandName } from "../ipc/index.js";
-import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
+import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
 import { ActivitySchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
@@ -92,6 +92,7 @@ interface IpcCommandSchema {
 export const IPC_SCHEMAS = {
   core_ping: { params: EMPTY_PAYLOAD, response: CorePingResponseSchema },
   server_list: { params: EMPTY_PAYLOAD, response: ServerListResponseSchema },
+  workspace_list: { params: EMPTY_PAYLOAD, response: WorkspaceListResponseSchema },
   server_add: { params: AddServerInputSchema, response: ServerAddResponseSchema },
   server_update: { params: UpdateServerInputSchema, response: ServerAddResponseSchema },
   server_delete: {
