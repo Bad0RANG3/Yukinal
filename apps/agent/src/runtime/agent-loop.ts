@@ -27,6 +27,7 @@ import {
   type AgentStreamEvent,
   type ApprovalRequest,
   type ApprovalResponse,
+  type PermissionDecision,
   type ToolCallRequest,
   type ToolCallResult,
 } from "@yukinal/shared";
@@ -183,8 +184,68 @@ export class AgentLoop {
     let toolCalls = 0;
     let finalText = "";
 
-    const emitToolCall = (call: { traceId: string; stepId: string; toolName: string; input: unknown }): void => {
-      emit({ type: "agent.tool_call", runId, traceId: call.traceId, stepId: call.stepId, toolName: call.toolName, input: call.input, at: now() });
+    const emitToolCall = (call: {
+      traceId: string;
+      stepId: string;
+      callId: string;
+      toolName: string;
+      input: unknown;
+      target: ToolCallRequest["target"];
+      riskLevel: PermissionDecision["finalRisk"];
+      decision: PermissionDecision["outcome"];
+    }): void => {
+      emit({
+        type: "agent.tool_call",
+        runId,
+        traceId: call.traceId,
+        stepId: call.stepId,
+        callId: call.callId,
+        toolName: call.toolName,
+        input: call.input,
+        target: call.target,
+        riskLevel: call.riskLevel,
+        decision: call.decision,
+        at: now(),
+      });
+    };
+
+    const emitToolResult = (result: {
+      traceId: string;
+      stepId: string;
+      callId: string;
+      toolName: string;
+      input: unknown;
+      target: ToolCallRequest["target"];
+      riskLevel: PermissionDecision["finalRisk"];
+      decision: PermissionDecision["outcome"];
+      approvedBy?: "user" | "policy";
+      status: "success" | "failed" | "cancelled";
+      outputSummary: string;
+      error?: string;
+      startedAt: string;
+      endedAt: string;
+      durationMs: number;
+    }): void => {
+      emit({
+        type: "agent.tool_result",
+        runId,
+        traceId: result.traceId,
+        stepId: result.stepId,
+        callId: result.callId,
+        toolName: result.toolName,
+        input: result.input,
+        target: result.target,
+        riskLevel: result.riskLevel,
+        decision: result.decision,
+        approvedBy: result.approvedBy,
+        status: result.status,
+        outputSummary: result.outputSummary,
+        error: result.error,
+        startedAt: result.startedAt,
+        endedAt: result.endedAt,
+        durationMs: result.durationMs,
+        at: result.endedAt,
+      });
     };
 
     try {
@@ -262,15 +323,23 @@ export class AgentLoop {
             continue;
           }
 
-          assistantToolCalls.push({ id: call.call.id, name: call.call.name, arguments: call.call.arguments });
-          emitToolCall({ traceId, stepId, toolName: internalName, input: call.call.arguments });
-
           // Permission decides (ADR 0005) — never the model.
           const target = request.target ?? { host: "local" as const, environment: "unknown" as const };
           const decision = this.deps.permission.evaluate({
             declaration,
             target,
             input: call.call.arguments,
+          });
+          assistantToolCalls.push({ id: call.call.id, name: call.call.name, arguments: call.call.arguments });
+          emitToolCall({
+            traceId,
+            stepId,
+            callId: call.call.id,
+            toolName: internalName,
+            input: call.call.arguments,
+            target,
+            riskLevel: decision.finalRisk,
+            decision: decision.outcome,
           });
 
           let ticket: ExecutionTicket;
@@ -291,40 +360,55 @@ export class AgentLoop {
             const granted = await this.#awaitApproval(runId, approval, token);
             if (token.signal.aborted) return this.#finishCancelled({ runId, steps, toolCalls, text: finalText }, emit, now);
             if (!granted) {
+              const rejectedAt = now();
               toolMessages.push({
                 role: "tool",
                 toolCallId: call.call.id,
                 content: `权限拒绝：${decision.reason}`,
               });
-              emit({
-                type: "agent.tool_result",
-                runId,
+              emitToolResult({
                 traceId,
                 stepId,
+                callId: call.call.id,
                 toolName: internalName,
+                input: call.call.arguments,
+                target,
+                riskLevel: decision.finalRisk,
+                decision: decision.outcome,
                 status: "failed",
                 outputSummary: "权限拒绝",
-                at: now(),
+                error: decision.reason,
+                startedAt: rejectedAt,
+                endedAt: rejectedAt,
+                durationMs: 0,
               });
               continue;
             }
             ticket = { kind: "user_approved", decision, approvalId: decision.approvalId ?? "approved", respondedAt: now() };
           } else {
+            const deniedAt = now();
             toolMessages.push({ role: "tool", toolCallId: call.call.id, content: `策略禁止：${decision.reason}` });
-            emit({
-              type: "agent.tool_result",
-              runId,
+            emitToolResult({
               traceId,
               stepId,
+              callId: call.call.id,
               toolName: internalName,
+              input: call.call.arguments,
+              target,
+              riskLevel: decision.finalRisk,
+              decision: decision.outcome,
               status: "failed",
               outputSummary: "策略禁止",
-              at: now(),
+              error: decision.reason,
+              startedAt: deniedAt,
+              endedAt: deniedAt,
+              durationMs: 0,
             });
             continue;
           }
 
           toolCalls += 1;
+          const startedAt = now();
           const result = await this.deps.registry.execute(
             {
               callId: call.call.id,
@@ -340,15 +424,22 @@ export class AgentLoop {
           this.#consumeResult(result, (output) =>
             toolMessages.push({ role: "tool", toolCallId: call.call.id, content: output }),
           );
-          emit({
-            type: "agent.tool_result",
-            runId,
+          emitToolResult({
             traceId,
             stepId,
+            callId: call.call.id,
             toolName: internalName,
+            input: call.call.arguments,
+            target,
+            riskLevel: decision.finalRisk,
+            decision: decision.outcome,
+            approvedBy: ticket.kind === "policy_auto" ? "policy" : "user",
             status: result.status === "success" ? "success" : result.status === "cancelled" ? "cancelled" : "failed",
             outputSummary: result.outputSummary ?? summarize(result.output),
-            at: now(),
+            error: result.error?.message,
+            startedAt: result.startedAt || startedAt,
+            endedAt: result.endedAt,
+            durationMs: result.durationMs,
           });
         }
 

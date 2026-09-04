@@ -94,8 +94,16 @@ test("E2E: prompt -> tool call -> permission -> execute -> report", async (t) =>
   const toolCall = events.find((event) => event.type === "agent.tool_call");
   assert(toolCall && toolCall.type === "agent.tool_call", "a tool call must be visible");
   assert.equal(toolCall.toolName, "system.echo"); // 内部 dot 名回填（ADR 0004）
+  assert.equal(toolCall.callId, "call_1");
+  assert.deepEqual(toolCall.target, runRequest().target);
+  assert.equal(toolCall.riskLevel, "read");
+  assert.equal(toolCall.decision, "auto");
   const toolResult = events.find((event) => event.type === "agent.tool_result");
   assert(toolResult && toolResult.type === "agent.tool_result");
+  assert.equal(toolResult.callId, "call_1");
+  assert.equal(toolResult.approvedBy, "policy");
+  assert.equal(toolResult.durationMs >= 0, true);
+  assert.equal(toolResult.startedAt <= toolResult.endedAt, true);
   assert.equal(toolResult.status, "success");
   assert.match(toolResult.outputSummary, /hello from mock/);
   assert(types.includes("agent.completed"), JSON.stringify(types));

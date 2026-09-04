@@ -6,6 +6,7 @@
 
 import type { AGENT_RUN_STATES } from "./enums.js";
 import type { RuntimeProviderConfig } from "./provider.js";
+import type { PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolTarget } from "./tool.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
@@ -85,8 +86,39 @@ export type AgentStreamEvent =
   | { type: "agent.started"; runId: string; at: string }
   | { type: "agent.thinking"; runId: string; textDelta?: string; at: string }
   | { type: "agent.text"; runId: string; textDelta: string; at: string }
-  | { type: "agent.tool_call"; runId: string; traceId: string; stepId: string; toolName: string; input: unknown; at: string }
-  | { type: "agent.tool_result"; runId: string; traceId: string; stepId: string; toolName: string; status: "success" | "failed" | "cancelled"; outputSummary: string; at: string }
+  | {
+      type: "agent.tool_call";
+      runId: string;
+      traceId: string;
+      stepId: string;
+      callId: string;
+      toolName: string;
+      input: unknown;
+      target: ToolTarget;
+      riskLevel: RiskLevel;
+      decision: PermissionMode;
+      at: string;
+    }
+  | {
+      type: "agent.tool_result";
+      runId: string;
+      traceId: string;
+      stepId: string;
+      callId: string;
+      toolName: string;
+      input: unknown;
+      target: ToolTarget;
+      riskLevel: RiskLevel;
+      decision: PermissionMode;
+      approvedBy?: "user" | "policy";
+      status: "success" | "failed" | "cancelled";
+      outputSummary: string;
+      error?: string;
+      startedAt: string;
+      endedAt: string;
+      durationMs: number;
+      at: string;
+    }
   | { type: "agent.waiting_approval"; runId: string; approval: ApprovalRequest; at: string }
   | { type: "agent.completed"; runId: string; result: AgentRunResult; at: string }
   | { type: "agent.failed"; runId: string; error: string; at: string };
