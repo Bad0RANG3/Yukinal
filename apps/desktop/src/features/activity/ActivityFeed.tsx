@@ -1,5 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
-import { IPC_COMMANDS, type Activity, type ActivityType, type Server } from "@yukinal/shared";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ActivitySchema, IPC_COMMANDS, type Activity, type ActivityType, type Server } from "@yukinal/shared";
+import { listen } from "@tauri-apps/api/event";
+import { useEffect } from "react";
 
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 
@@ -26,14 +28,37 @@ const OUTCOME_LABEL = {
 export function ActivityFeed({ serverId }: { serverId?: string | null }) {
   const shell = isDesktopShell();
   const scoped = serverId !== undefined;
+  const queryClient = useQueryClient();
+  const activityQueryKey = ["activities", scoped ? serverId : "all"] as const;
   const activities = useQuery({
-    queryKey: ["activities", scoped ? serverId : "all"],
+    queryKey: activityQueryKey,
     enabled: shell && (!scoped || Boolean(serverId)),
     queryFn: async () =>
       (
         await callDesktop(IPC_COMMANDS.activityList, scoped ? { serverId: serverId as string, limit: 50 } : { limit: 100 })
       ).activities,
   });
+
+  useEffect(() => {
+    if (!shell) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("activity.created", (event) => {
+      const parsed = ActivitySchema.safeParse(event.payload);
+      if (!parsed.success || (scoped && parsed.data.serverId !== serverId)) return;
+      queryClient.setQueryData<Activity[]>(activityQueryKey, (current) => {
+        if (!current) return current;
+        return [parsed.data, ...current.filter((item) => item.id !== parsed.data.id)].slice(0, scoped ? 50 : 100);
+      });
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [queryClient, scoped, serverId, shell]);
   const servers = useQuery({
     queryKey: ["servers"],
     enabled: shell && !scoped,

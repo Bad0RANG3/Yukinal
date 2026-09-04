@@ -294,6 +294,8 @@ fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
     };
     if let Err(error) = state.database.activities().insert(&activity) {
         eprintln!("[agent] failed to persist tool activity: {error}");
+    } else if let Ok(payload) = serde_json::to_value(&activity) {
+        let _ = app.emit("activity.created", payload);
     }
 }
 

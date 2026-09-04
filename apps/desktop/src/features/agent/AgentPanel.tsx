@@ -102,9 +102,12 @@ export function AgentPanel() {
       const event = payload as Extract<AgentStreamEvent, { type: "agent.tool_call" }>;
       if (!isActive(event)) return;
       setRunState("running_tool");
+      const target = event.target.serverId
+        ? `${event.target.serverId} · ${event.target.environment}`
+        : event.target.environment;
       setEntries((current) => [
         ...current,
-        { kind: "tool_call", text: `➤ ${event.toolName}` },
+        { kind: "tool_call", text: `➤ ${event.toolName} · ${target} · 风险 ${event.riskLevel} · ${decisionLabel(event.decision)}` },
       ]);
     });
     on("agent.tool_result", (payload) => {
@@ -114,7 +117,7 @@ export function AgentPanel() {
       const marker = event.status === "success" ? "✓" : event.status === "cancelled" ? "✗(已取消)" : "✗";
       setEntries((current) => [
         ...current,
-        { kind: "tool_result", text: `${marker} ${event.toolName}: ${event.outputSummary.slice(0, 240)}` },
+        { kind: "tool_result", text: `${marker} ${event.toolName} · ${event.durationMs}ms: ${event.outputSummary.slice(0, 240)}` },
       ]);
     });
     on("agent.waiting_approval", (payload) => {
@@ -318,4 +321,10 @@ function EntryView({
         </div>
       );
   }
+}
+
+function decisionLabel(decision: "auto" | "ask" | "deny"): string {
+  if (decision === "auto") return "自动批准";
+  if (decision === "ask") return "需审批";
+  return "策略禁止";
 }
