@@ -19,8 +19,11 @@ import { createEmptyContextSource } from "../context/empty-source.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { RpcRouter } from "../rpc/router.js";
 import { AgentLoop } from "./agent-loop.js";
+import { dockerPsTool } from "../tools/builtin/docker-ps.js";
+import { serverInfoTool } from "../tools/builtin/server-info.js";
 import { systemEchoTool } from "../tools/builtin/system-echo.js";
 import { ToolRegistry } from "../tools/registry.js";
+import type { HostRpcClient } from "../transport/host-client.js";
 
 export const BUILTIN_POLICY_IDS = [
   LOCAL_POLICY.id,
@@ -39,11 +42,15 @@ export interface Runtime {
   declarations: ToolDeclaration[];
 }
 
-export function createRuntime(options: { log?: AgentLogger } = {}): Runtime {
+export function createRuntime(options: { log?: AgentLogger; hostToolClient?: HostRpcClient } = {}): Runtime {
   const log = options.log ?? createLogger({ level: "info", scope: "agent" });
 
   const registry = new ToolRegistry();
   const declarations = [registry.register(systemEchoTool)];
+  if (options.hostToolClient) {
+    declarations.push(registry.register(serverInfoTool(options.hostToolClient)));
+    declarations.push(registry.register(dockerPsTool(options.hostToolClient)));
+  }
 
   const permission = new PermissionEngine();
   // Empty until Rust feeds real rows through the IPC-backed source.

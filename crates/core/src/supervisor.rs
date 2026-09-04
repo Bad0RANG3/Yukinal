@@ -199,6 +199,7 @@ impl Supervisor {
                             break;
                         }
                         frame @ SidecarEvent::Frame(_) => watcher.publish(frame).await,
+                        request @ SidecarEvent::Request { .. } => watcher.publish(request).await,
                     },
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         watcher

@@ -40,6 +40,7 @@ export function AgentPanel() {
   });
   const selectedProviderId = useWorkspaceStore((state) => state.selectedProviderId);
   const selectedModel = useWorkspaceStore((state) => state.selectedModel);
+  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectProvider = useWorkspaceStore((state) => state.selectProvider);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
@@ -161,6 +162,7 @@ export function AgentPanel() {
         prompt: text,
         providerId: selectedProviderId ?? undefined,
         model: selectedModel ?? undefined,
+        focusServerId: selectedServerId ?? undefined,
       });
       activeRunRef.current = started;
       setRunId(started);

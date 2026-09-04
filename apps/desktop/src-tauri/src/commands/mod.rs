@@ -14,6 +14,7 @@ use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
 pub mod activity;
 pub mod agent_run;
 pub mod files;
+pub mod host;
 pub mod logs;
 pub mod provider;
 pub mod server;
@@ -121,6 +122,15 @@ fn forward_sidecar_events(app: AppHandle) {
                     // 上行通知：`agent.stream` 的 payload 是 AgentStreamEvent，按
                     // 其 type 原样转成 Tauri 事件（agent.thinking / tool_call / …）。
                     SidecarEvent::Frame(frame) => forward_agent_frame(&app, &frame),
+                    SidecarEvent::Request { id, method, params } => {
+                        let state = app.state::<AppState>();
+                        let outcome = host::handle_sidecar_request(&state, &method, params).await;
+                        if let Some(handle) = state.supervisor.handle().await {
+                            if let Err(error) = handle.respond(id, outcome).await {
+                                eprintln!("[agent] host response failed: {error}");
+                            }
+                        }
+                    }
                     SidecarEvent::Exited { code, signal } => {
                         eprintln!("[agent] exited code={code:?} signal={signal:?}");
                         break;

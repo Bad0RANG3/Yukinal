@@ -185,6 +185,12 @@ fn ancestors(start: &Path) -> impl Iterator<Item = PathBuf> {
 pub enum SidecarEvent {
     /// JSON-RPC notification from the agent (`agent.stream`, ).
     Frame(Value),
+    /// JSON-RPC request from the sidecar to the Rust host.
+    Request {
+        id: i64,
+        method: String,
+        params: Value,
+    },
     /// A stderr line from the sidecar process.
     Log(String),
     Exited {
@@ -281,6 +287,39 @@ impl SidecarHandle {
             Ok(Ok(Err(message))) => Err(SidecarError::Remote(message)),
             Ok(Ok(Ok(result))) => Ok(result),
         }
+    }
+
+    /// Answer a JSON-RPC request that originated in the sidecar.
+    pub async fn respond(
+        &self,
+        id: i64,
+        outcome: Result<Value, String>,
+    ) -> Result<(), SidecarError> {
+        if !self.is_running() {
+            return Err(SidecarError::NotRunning);
+        }
+
+        let frame = match outcome {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err(message) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32603, "message": message }
+            }),
+        };
+        let mut payload =
+            serde_json::to_vec(&frame).map_err(|error| SidecarError::Frame(error.to_string()))?;
+        payload.push(b'\n');
+
+        let mut stdin = self.inner.stdin.lock().await;
+        stdin
+            .write_all(&payload)
+            .await
+            .map_err(|error| SidecarError::Write(error.to_string()))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| SidecarError::Write(error.to_string()))
     }
 
     /// Ask the sidecar to exit politely; the process is killed if it does not.
@@ -431,10 +470,12 @@ impl SidecarHandle {
             self.broadcast(SidecarEvent::Frame(frame));
             return;
         };
-        if frame.get("method").is_some() {
-            // A request from the sidecar to us is not part of ADR 0006; treat it as
-            // data so it stays visible instead of being dropped.
-            self.broadcast(SidecarEvent::Frame(frame));
+        if let Some(method) = frame.get("method").and_then(Value::as_str) {
+            self.broadcast(SidecarEvent::Request {
+                id,
+                method: method.to_string(),
+                params: frame.get("params").cloned().unwrap_or(Value::Null),
+            });
             return;
         }
         let outcome = match frame.get("error") {

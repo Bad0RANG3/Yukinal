@@ -5,6 +5,7 @@
 
 import { AGENT_VERSION, createLogger, readConfig } from "./config.js";
 import { BUILTIN_POLICY_IDS, createRuntime } from "./runtime/create-runtime.js";
+import { HostRpcClient } from "./transport/host-client.js";
 import { startStdioRpc, type StdioServer } from "./transport/stdio.js";
 
 let server: StdioServer | undefined;
@@ -12,11 +13,13 @@ let server: StdioServer | undefined;
 export function main(): void {
   const config = readConfig();
   const log = createLogger({ level: config.logLevel, scope: "agent" });
-  const runtime = createRuntime({ log });
+  const hostToolClient = new HostRpcClient((frame) => process.stdout.write(frame));
+  const runtime = createRuntime({ log, hostToolClient });
 
   server = startStdioRpc({
     router: runtime.router,
     log: log.child("stdio"),
+    hostToolClient,
     // No parent stdin means the desktop is gone: exit instead of orphaning.
     onParentGone: () => shutdown("stdin-closed"),
   });

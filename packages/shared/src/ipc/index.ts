@@ -93,7 +93,14 @@ export interface IpcCommandMap {
   agent_status: { params: Record<string, never>; response: AgentStatus };
   agent_logs: { params: Record<string, never>; response: AgentLogs };
   agent_run_start: {
-    params: { sessionId: string; prompt: string; providerId?: string; model?: string };
+    params: {
+      sessionId: string;
+      prompt: string;
+      providerId?: string;
+      model?: string;
+      workspaceId?: string;
+      focusServerId?: string;
+    };
     response: { runId: string };
   };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };

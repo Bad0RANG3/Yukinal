@@ -10,6 +10,7 @@ import { NdjsonDecoder, RPC_ERROR, encodeFrame, type JsonRpcFailure, type JsonRp
 import type { AgentLogger } from "../config.js";
 import { RpcFailure } from "../errors.js";
 import type { RpcRouter } from "../rpc/router.js";
+import type { HostRpcClient } from "./host-client.js";
 
 export interface StdioServer {
   close(): void;
@@ -18,6 +19,8 @@ export interface StdioServer {
 export function startStdioRpc(deps: {
   router: RpcRouter;
   log: AgentLogger;
+  /** Bidirectional calls to the Rust host use the same stdout protocol stream. */
+  hostToolClient?: HostRpcClient;
   /** Called when the desktop closes our stdin, i.e. it is going away. */
   onParentGone?: () => void;
 }): StdioServer {
@@ -46,6 +49,7 @@ export function startStdioRpc(deps: {
 
   const onData = (chunk: string): void => {
     for (const message of decoder.push(chunk)) {
+      if (deps.hostToolClient?.handleIncoming(message)) continue;
       if (!isRequest(message)) {
         deps.log.warn("ignored non-request frame");
         continue;
@@ -56,6 +60,7 @@ export function startStdioRpc(deps: {
 
   const onEnd = (): void => {
     for (const message of decoder.end()) {
+      if (deps.hostToolClient?.handleIncoming(message)) continue;
       if (isRequest(message)) void respond(message);
     }
     deps.onParentGone?.();
@@ -69,6 +74,7 @@ export function startStdioRpc(deps: {
     close() {
       process.stdin.off("data", onData);
       process.stdin.off("end", onEnd);
+      deps.hostToolClient?.close();
     },
   };
 }

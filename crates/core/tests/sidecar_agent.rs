@@ -107,6 +107,14 @@ async fn handshakes_pings_and_reports_the_real_sidecar() {
         .unwrap_or_default();
     assert!(names.contains(&"system.echo"), "{names:?}");
     assert!(
+        names.contains(&"server.info"),
+        "host-backed server.info missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"docker.ps"),
+        "host-backed docker.ps missing: {names:?}"
+    );
+    assert!(
         names.iter().all(|name| !name.contains("__")),
         "the registry must speak internal names only (ADR 0004): {names:?}"
     );

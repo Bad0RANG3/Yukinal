@@ -168,6 +168,8 @@ export const IPC_SCHEMAS = {
       prompt: z.string().min(1),
       providerId: z.string().min(1).optional(),
       model: z.string().min(1).optional(),
+      workspaceId: z.string().min(1).optional(),
+      focusServerId: IpcServerIdSchema.optional(),
     }),
     response: z.strictObject({ runId: z.string().min(1) }),
   },

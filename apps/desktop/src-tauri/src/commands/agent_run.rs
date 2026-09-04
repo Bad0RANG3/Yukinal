@@ -80,6 +80,8 @@ pub async fn agent_run_start(
     prompt: String,
     provider_id: Option<String>,
     model: Option<String>,
+    workspace_id: Option<String>,
+    focus_server_id: Option<String>,
 ) -> Result<RunStartResponse, String> {
     let provider = resolve_provider(&state, provider_id.as_deref())?;
     let api_key = resolve_api_key(&state, &provider)?;
@@ -88,7 +90,7 @@ pub async fn agent_run_start(
         .unwrap_or_else(|| provider.model.clone());
 
     let run_id = format!("run_{}", yukinal_core::sidecar::iso8601_now());
-    let params = json!({
+    let mut params = json!({
         "runId": run_id,
         "sessionId": session_id,
         "prompt": prompt,
@@ -102,6 +104,26 @@ pub async fn agent_run_start(
             "wireApi": provider.wire_api,
         },
     });
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        params["workspaceId"] = json!(workspace_id);
+    }
+    if let Some(server_id) = focus_server_id.as_deref() {
+        let server = state
+            .database
+            .servers()
+            .get(server_id)
+            .map_err(|error| error.to_string())?;
+        let mut target = json!({
+            "host": "remote",
+            "serverId": server.id,
+            "environment": server.metadata.environment,
+        });
+        if let Some(workspace_id) = workspace_id.as_deref() {
+            target["workspaceId"] = json!(workspace_id);
+        }
+        params["focusServerId"] = json!(server_id);
+        params["target"] = target;
+    }
     let response = state
         .supervisor
         .request(
