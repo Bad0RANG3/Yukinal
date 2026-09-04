@@ -11,6 +11,7 @@ import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse }
 import type { Activity } from "../types/activity.js";
 import type { ServerService, ServerServicesResponse } from "../types/service.js";
 import type { ServerLogLine, ServerLogsResponse } from "../types/log.js";
+import type { DockerInspectResult, DockerLogsResult } from "../types/docker.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
@@ -18,6 +19,7 @@ import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, Works
 import type { ActivitySchema } from "./activity.js";
 import type { ServerServiceSchema, ServerServicesResponseSchema } from "./service.js";
 import type { ServerLogLineSchema, ServerLogsResponseSchema } from "./log.js";
+import type { DockerInspectResultSchema, DockerLogsResultSchema } from "./docker.js";
 import type {
   AgentRunRequestSchema,
   ApprovalResponseSchema,
@@ -39,6 +41,8 @@ export type _ServerServiceContract = Expect<Assignable<typeof ServerServiceSchem
 export type _ServerServicesContract = Expect<Assignable<typeof ServerServicesResponseSchema, ServerServicesResponse>>;
 export type _ServerLogLineContract = Expect<Assignable<typeof ServerLogLineSchema, ServerLogLine>>;
 export type _ServerLogsContract = Expect<Assignable<typeof ServerLogsResponseSchema, ServerLogsResponse>>;
+export type _DockerLogsContract = Expect<Assignable<typeof DockerLogsResultSchema, DockerLogsResult>>;
+export type _DockerInspectContract = Expect<Assignable<typeof DockerInspectResultSchema, DockerInspectResult>>;
 export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDecisionSchema, PermissionDecision>>;
 export type _ToolDeclarationContract = Expect<Assignable<typeof ToolDeclarationSchema, ToolDeclaration>>;
 export type _ApprovalResponseContract = Expect<Assignable<typeof ApprovalResponseSchema, ApprovalResponse>>;

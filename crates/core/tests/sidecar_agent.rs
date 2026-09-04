@@ -115,6 +115,14 @@ async fn handshakes_pings_and_reports_the_real_sidecar() {
         "host-backed docker.ps missing: {names:?}"
     );
     assert!(
+        names.contains(&"docker.logs"),
+        "host-backed docker.logs missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"docker.inspect"),
+        "host-backed docker.inspect missing: {names:?}"
+    );
+    assert!(
         names.iter().all(|name| !name.contains("__")),
         "the registry must speak internal names only (ADR 0004): {names:?}"
     );

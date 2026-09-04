@@ -4,7 +4,7 @@
 //! resolve credentials. This module is the narrow, deny-by-default bridge from the
 //! sidecar request to Rust-owned state.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use yukinal_database::models::{ContainerInfo, Environment};
@@ -16,7 +16,12 @@ use crate::state::AppState;
 const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
 const SERVER_INFO: &str = "server.info";
 const DOCKER_PS: &str = "docker.ps";
+const DOCKER_LOGS: &str = "docker.logs";
+const DOCKER_INSPECT: &str = "docker.inspect";
 const MAX_CONTAINERS: usize = 200;
+const DEFAULT_LOG_TAIL: usize = 120;
+const MAX_LOG_TAIL: usize = 500;
+const MAX_LOG_LINE_CHARS: usize = 4_000;
 const DOCKER_PS_COMMAND: &str = "docker ps --format '{{json .}}' 2>/dev/null";
 const DOCKER_PS_ALL_COMMAND: &str = "docker ps -a --format '{{json .}}' 2>/dev/null";
 
@@ -54,6 +59,72 @@ struct DockerRow {
 #[serde(deny_unknown_fields)]
 struct DockerPsInput {
     all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DockerLogsInput {
+    container: String,
+    tail: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DockerInspectInput {
+    container: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerInspectRow {
+    id: Option<String>,
+    name: Option<String>,
+    config: Option<DockerConfig>,
+    state: Option<DockerState>,
+    restart_count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerConfig {
+    image: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerState {
+    status: Option<String>,
+    started_at: Option<String>,
+    health: Option<DockerHealth>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerHealth {
+    status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DockerLogsResult {
+    container: String,
+    lines: Vec<String>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DockerInspectResult {
+    id: String,
+    name: String,
+    image: String,
+    state: String,
+    status: String,
+    restart_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health: Option<String>,
 }
 
 /// Handle one sidecar-originated request. Expected tool failures are returned as a
@@ -128,6 +199,8 @@ pub(crate) async fn handle_sidecar_request(
     match request.tool_name.as_str() {
         SERVER_INFO => server_info(state, server_id, &request.input).await,
         DOCKER_PS => docker_ps(state, server_id, &request.input).await,
+        DOCKER_LOGS => docker_logs(state, server_id, &request.input).await,
+        DOCKER_INSPECT => docker_inspect(state, server_id, &request.input).await,
         other => Ok(failed(
             "not_found",
             format!("host tool `{other}` is not enabled"),
@@ -222,6 +295,231 @@ async fn docker_ps(state: &AppState, server_id: &str, input: &Value) -> Result<V
     })))
 }
 
+async fn docker_logs(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+    let input = match serde_json::from_value::<DockerLogsInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("docker.logs input is invalid: {error}"),
+                true,
+                None,
+            ))
+        }
+    };
+    if !is_safe_container_ref(&input.container) {
+        return Ok(failed(
+            "invalid_input",
+            "container must be a Docker name or id without shell metacharacters",
+            true,
+            None,
+        ));
+    }
+    let tail = input.tail.unwrap_or(DEFAULT_LOG_TAIL);
+    if !(1..=MAX_LOG_TAIL).contains(&tail) {
+        return Ok(failed(
+            "invalid_input",
+            format!("tail must be between 1 and {MAX_LOG_TAIL}"),
+            true,
+            None,
+        ));
+    }
+    if let Err(error) = ensure_session(state, server_id).await {
+        return Ok(failed("transport", error, true, None));
+    }
+    let session = match state.terminals.cached_session(server_id) {
+        Ok(session) => session,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    let command = format!(
+        "docker logs --tail {tail} --timestamps -- {} 2>&1",
+        shell_quote(&input.container)
+    );
+    let result = match state
+        .ssh
+        .execute(
+            &session,
+            &command,
+            Some(std::time::Duration::from_secs(10)),
+            &CancellationToken::new(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    if result.exit_code != 0 {
+        return Ok(failed(
+            "execution_failed",
+            format!("could not read logs for container `{}`", input.container),
+            false,
+            Some(json!({
+                "exitCode": result.exit_code,
+                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+            })),
+        ));
+    }
+
+    let (lines, truncated) = bounded_log_lines(&result.stdout_lossy(), tail);
+    Ok(success(
+        serde_json::to_value(DockerLogsResult {
+            container: input.container,
+            lines,
+            truncated,
+        })
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+async fn docker_inspect(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+    let input = match serde_json::from_value::<DockerInspectInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("docker.inspect input is invalid: {error}"),
+                true,
+                None,
+            ))
+        }
+    };
+    if !is_safe_container_ref(&input.container) {
+        return Ok(failed(
+            "invalid_input",
+            "container must be a Docker name or id without shell metacharacters",
+            true,
+            None,
+        ));
+    }
+    if let Err(error) = ensure_session(state, server_id).await {
+        return Ok(failed("transport", error, true, None));
+    }
+    let session = match state.terminals.cached_session(server_id) {
+        Ok(session) => session,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    let command = format!(
+        "docker inspect --format '{{{{json .}}}}' -- {} 2>/dev/null",
+        shell_quote(&input.container)
+    );
+    let result = match state
+        .ssh
+        .execute(
+            &session,
+            &command,
+            Some(std::time::Duration::from_secs(10)),
+            &CancellationToken::new(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    if result.exit_code != 0 {
+        return Ok(failed(
+            "not_found",
+            format!("container `{}` was not found", input.container),
+            false,
+            Some(json!({
+                "exitCode": result.exit_code,
+                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+            })),
+        ));
+    }
+    let inspected = match parse_docker_inspect(&result.stdout_lossy()) {
+        Ok(inspected) => inspected,
+        Err(error) => return Ok(failed("execution_failed", error, false, None)),
+    };
+    Ok(success(
+        serde_json::to_value(inspected).map_err(|error| error.to_string())?,
+    ))
+}
+
+fn parse_docker_inspect(raw: &str) -> Result<DockerInspectResult, String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| "docker inspect returned no JSON object".to_string())?;
+    let row = serde_json::from_str::<DockerInspectRow>(line)
+        .map_err(|error| format!("docker inspect returned invalid JSON: {error}"))?;
+    let id = nonempty(row.id, "Id")?;
+    let name = row
+        .name
+        .map(|value| value.trim_start_matches('/').to_string())
+        .filter(|value| is_safe_container_ref(value))
+        .ok_or_else(|| "docker inspect returned an invalid Name".to_string())?;
+    let image = nonempty(row.config.and_then(|config| config.image), "Config.Image")?;
+    let state = row
+        .state
+        .ok_or_else(|| "docker inspect omitted State".to_string())?;
+    let status = nonempty(state.status, "State.Status")?;
+    let started_at = state.started_at.filter(|value| !value.trim().is_empty());
+    let health = state
+        .health
+        .and_then(|health| health.status)
+        .filter(|value| !value.trim().is_empty());
+    Ok(DockerInspectResult {
+        id,
+        name,
+        image,
+        state: status.clone(),
+        status,
+        restart_count: row.restart_count.unwrap_or(0),
+        started_at,
+        health,
+    })
+}
+
+fn nonempty(value: Option<String>, field: &str) -> Result<String, String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .ok_or_else(|| format!("docker inspect omitted {field}"))
+}
+
+fn is_safe_container_ref(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    value.len() <= 128
+        && first.is_ascii_alphanumeric()
+        && chars.all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn bounded_log_lines(raw: &str, limit: usize) -> (Vec<String>, bool) {
+    let mut truncated = false;
+    let lines = raw
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            if index >= limit {
+                truncated = true;
+                return None;
+            }
+            let bounded = truncate_text(line, MAX_LOG_LINE_CHARS);
+            if bounded.chars().count() < line.chars().count() {
+                truncated = true;
+            }
+            Some(bounded)
+        })
+        .collect();
+    (lines, truncated)
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut output: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
+}
+
 fn parse_docker_ps(raw: &str) -> Vec<ContainerInfo> {
     raw.lines()
         .filter_map(|line| serde_json::from_str::<DockerRow>(line.trim()).ok())
@@ -265,7 +563,10 @@ fn failed(code: &str, message: impl Into<String>, retryable: bool, detail: Optio
 
 #[cfg(test)]
 mod tests {
-    use super::parse_docker_ps;
+    use super::{
+        bounded_log_lines, is_safe_container_ref, parse_docker_inspect, parse_docker_ps,
+        shell_quote,
+    };
 
     #[test]
     fn parses_docker_json_lines_into_bounded_structured_rows() {
@@ -290,5 +591,38 @@ not-json
 "#,
         );
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn bounds_log_lines_and_marks_long_output() {
+        let long_line = "x".repeat(4_010);
+        let raw = format!("first\n{long_line}\nthird\n");
+        let (lines, truncated) = bounded_log_lines(&raw, 2);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "first");
+        assert!(lines[1].ends_with('…'));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn parses_normalized_inspect_fields_without_forwarding_raw_docker_shape() {
+        let result = parse_docker_inspect(
+            r#"{"Id":"sha256:abc","Name":"/web","Config":{"Image":"nginx:1.27"},"State":{"Status":"running","StartedAt":"2026-09-04T06:00:00Z","Health":{"Status":"healthy"}},"RestartCount":2}"#,
+        )
+        .expect("inspect output");
+
+        assert_eq!(result.id, "sha256:abc");
+        assert_eq!(result.name, "web");
+        assert_eq!(result.state, "running");
+        assert_eq!(result.restart_count, 2);
+        assert_eq!(result.health.as_deref(), Some("healthy"));
+    }
+
+    #[test]
+    fn container_reference_validation_and_shell_quote_are_defensive() {
+        assert!(is_safe_container_ref("api_1.2-3"));
+        assert!(!is_safe_container_ref("api;rm -rf /"));
+        assert_eq!(shell_quote("api_1"), "'api_1'");
     }
 }

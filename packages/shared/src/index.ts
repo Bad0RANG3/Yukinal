@@ -19,6 +19,7 @@ export * from "./types/health.js";
 export * from "./types/file.js";
 export * from "./types/service.js";
 export * from "./types/log.js";
+export * from "./types/docker.js";
 export * from "./types/host.js";
 
 export * from "./schemas/server.js";
@@ -29,6 +30,7 @@ export * from "./schemas/ipc.js";
 export * from "./schemas/provider.js";
 export * from "./schemas/service.js";
 export * from "./schemas/log.js";
+export * from "./schemas/docker.js";
 export * from "./schemas/host.js";
 
 export * from "./events/index.js";

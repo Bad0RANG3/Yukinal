@@ -19,6 +19,8 @@ import { createEmptyContextSource } from "../context/empty-source.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { RpcRouter } from "../rpc/router.js";
 import { AgentLoop } from "./agent-loop.js";
+import { dockerInspectTool } from "../tools/builtin/docker-inspect.js";
+import { dockerLogsTool } from "../tools/builtin/docker-logs.js";
 import { dockerPsTool } from "../tools/builtin/docker-ps.js";
 import { serverInfoTool } from "../tools/builtin/server-info.js";
 import { systemEchoTool } from "../tools/builtin/system-echo.js";
@@ -50,6 +52,8 @@ export function createRuntime(options: { log?: AgentLogger; hostToolClient?: Hos
   if (options.hostToolClient) {
     declarations.push(registry.register(serverInfoTool(options.hostToolClient)));
     declarations.push(registry.register(dockerPsTool(options.hostToolClient)));
+    declarations.push(registry.register(dockerLogsTool(options.hostToolClient)));
+    declarations.push(registry.register(dockerInspectTool(options.hostToolClient)));
   }
 
   const permission = new PermissionEngine();
