@@ -288,7 +288,7 @@ pub async fn server_add(
             host: input.host.clone(),
             port: input.port.unwrap_or(22),
             username: input.username.clone(),
-            identity_id: Some(identity_id),
+            identity_id: Some(identity_id.clone()),
         },
         group_id: input.group_id.clone(),
         capabilities: ServerCapabilities::default(),
@@ -304,11 +304,7 @@ pub async fn server_add(
         created_at: now.clone(),
         updated_at: now,
     };
-    state
-        .database
-        .servers()
-        .insert(&server)
-        .map_err(|error| error.to_string())?;
+    insert_server_and_attach_identity(&state.database, &server, &identity_id)?;
 
     record_activity(
         &state,
@@ -347,6 +343,21 @@ fn record_activity(
             trace_id: None,
             created_at: yukinal_core::sidecar::iso8601_now(),
         })
+        .map_err(|error| error.to_string())
+}
+
+fn insert_server_and_attach_identity(
+    database: &yukinal_database::Database,
+    server: &Server,
+    identity_id: &str,
+) -> Result<(), String> {
+    database
+        .servers()
+        .insert(server)
+        .map_err(|error| error.to_string())?;
+    database
+        .identities()
+        .attach_to_server(&server.id, identity_id)
         .map_err(|error| error.to_string())
 }
 
@@ -398,11 +409,6 @@ async fn store_identity(
         .database
         .identities()
         .insert(&identity)
-        .map_err(|error| error.to_string())?;
-    state
-        .database
-        .identities()
-        .attach_to_server(server_id, &identity.id)
         .map_err(|error| error.to_string())?;
     Ok(identity.id)
 }
@@ -523,4 +529,71 @@ pub(crate) fn next_id(prefix: &str) -> String {
         .unwrap_or(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{millis:x}{n:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insert_server_and_attach_identity;
+    use yukinal_database::models::{
+        Environment, Identity, Server, ServerCapabilities, ServerConnection, ServerMetadata,
+        ServerStatus,
+    };
+
+    #[test]
+    fn server_is_inserted_before_identity_attachment() {
+        let path = std::env::temp_dir().join(format!(
+            "yukinal-server-add-order-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let database = yukinal_database::Database::open(&path).expect("open database");
+        database
+            .identities()
+            .insert(&Identity {
+                id: "idn_order".into(),
+                label: "test identity".into(),
+                method: "password".into(),
+                credential_ref: "keychain://ssh/test".into(),
+                created_at: "2026-01-01T00:00:00.000Z".into(),
+            })
+            .expect("insert identity");
+        let server = Server {
+            id: "srv_order".into(),
+            name: "Order test".into(),
+            connection: ServerConnection {
+                host: "127.0.0.1".into(),
+                port: 22,
+                username: "test".into(),
+                identity_id: Some("idn_order".into()),
+            },
+            group_id: None,
+            capabilities: ServerCapabilities::default(),
+            status: ServerStatus::Disconnected,
+            metadata: ServerMetadata {
+                environment: Environment::Development,
+                region: None,
+                hostname: None,
+                os: None,
+                tags: None,
+                workspace_ids: None,
+            },
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        };
+
+        insert_server_and_attach_identity(&database, &server, "idn_order")
+            .expect("server and identity association");
+        assert_eq!(
+            database
+                .identities()
+                .ids_for_server("srv_order")
+                .expect("ids"),
+            vec!["idn_order".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
 }
