@@ -4,6 +4,7 @@ import test from "node:test";
 import type { HostToolExecuteRequest, HostToolExecuteResponse, ToolTarget } from "@yukinal/shared";
 
 import { dockerPsTool } from "./docker-ps.js";
+import { dockerRestartTool } from "./docker-restart.js";
 import { filesystemReadTool } from "./filesystem-read.js";
 import { filesystemWriteTool } from "./filesystem-write.js";
 import { serverInfoTool } from "./server-info.js";
@@ -75,4 +76,13 @@ test("filesystem tools validate bounded output and declare writes as medium risk
   const writeOutput = await write.execute({ path: "/etc/app.env", content: "PORT=8080" }, context);
   assert.equal(write.risk, "medium");
   assert.equal(writeOutput.bytesWritten, 9);
+});
+
+test("docker restart is exposed as a high-risk host action", async () => {
+  const tool = dockerRestartTool(
+    fakeHost({ status: "success", output: { container: "api_1", restarted: true } }),
+  );
+  const output = await tool.execute({ container: "api_1", timeoutSeconds: 15 }, context);
+  assert.equal(tool.risk, "high");
+  assert.equal(output.restarted, true);
 });

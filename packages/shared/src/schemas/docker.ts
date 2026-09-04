@@ -27,3 +27,13 @@ export const DockerInspectResultSchema = z.strictObject({
   startedAt: z.string().min(1).optional(),
   health: z.string().min(1).optional(),
 });
+
+export const DockerRestartInputSchema = z.strictObject({
+  container: DockerContainerRefSchema,
+  timeoutSeconds: z.number().int().min(1).max(120).optional(),
+});
+
+export const DockerRestartResultSchema = z.strictObject({
+  container: DockerContainerRefSchema,
+  restarted: z.boolean(),
+});

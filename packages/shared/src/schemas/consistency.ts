@@ -12,7 +12,7 @@ import type { Activity, ToolExecutionListResponse } from "../types/activity.js";
 import type { ServerService, ServerServicesResponse } from "../types/service.js";
 import type { ServerLogLine, ServerLogsResponse } from "../types/log.js";
 import type { FilesystemReadInput, FilesystemReadOutput, FilesystemWriteInput, FilesystemWriteOutput } from "../types/file.js";
-import type { DockerInspectResult, DockerLogsResult } from "../types/docker.js";
+import type { DockerInspectResult, DockerLogsResult, DockerRestartInput, DockerRestartResult } from "../types/docker.js";
 import type { HostContextRequest, HostContextResponse } from "../types/host.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
@@ -22,7 +22,7 @@ import type { ActivitySchema, ToolExecutionListResponseSchema } from "./activity
 import type { ServerServiceSchema, ServerServicesResponseSchema } from "./service.js";
 import type { ServerLogLineSchema, ServerLogsResponseSchema } from "./log.js";
 import type { FilesystemReadInputSchema, FilesystemReadOutputSchema, FilesystemWriteInputSchema, FilesystemWriteOutputSchema } from "./file.js";
-import type { DockerInspectResultSchema, DockerLogsResultSchema } from "./docker.js";
+import type { DockerInspectResultSchema, DockerLogsResultSchema, DockerRestartInputSchema, DockerRestartResultSchema } from "./docker.js";
 import type { HostContextRequestSchema, HostContextResponseSchema } from "./host.js";
 import type {
   AgentRunRequestSchema,
@@ -52,6 +52,8 @@ export type _FilesystemWriteInputContract = Expect<Assignable<typeof FilesystemW
 export type _FilesystemWriteOutputContract = Expect<Assignable<typeof FilesystemWriteOutputSchema, FilesystemWriteOutput>>;
 export type _DockerLogsContract = Expect<Assignable<typeof DockerLogsResultSchema, DockerLogsResult>>;
 export type _DockerInspectContract = Expect<Assignable<typeof DockerInspectResultSchema, DockerInspectResult>>;
+export type _DockerRestartInputContract = Expect<Assignable<typeof DockerRestartInputSchema, DockerRestartInput>>;
+export type _DockerRestartResultContract = Expect<Assignable<typeof DockerRestartResultSchema, DockerRestartResult>>;
 export type _HostContextRequestContract = Expect<Assignable<typeof HostContextRequestSchema, HostContextRequest>>;
 export type _HostContextResponseContract = Expect<Assignable<typeof HostContextResponseSchema, HostContextResponse>>;
 export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDecisionSchema, PermissionDecision>>;

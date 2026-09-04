@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type { IpcCommandName } from "../ipc/index.js";
+import { DockerRestartInputSchema, DockerRestartResultSchema } from "./docker.js";
 import { FilesystemReadInputSchema, FilesystemWriteInputSchema } from "./file.js";
 import {
   AgentStatusSchema,
@@ -130,4 +131,11 @@ test("filesystem tool schemas bound paths, reads and writes", () => {
   assert.equal(FilesystemReadInputSchema.safeParse({ path: "/tmp/file", maxBytes: 0 }).success, false);
   assert.equal(FilesystemWriteInputSchema.safeParse({ path: "/etc/app.env", content: "PORT=8080" }).success, true);
   assert.equal(FilesystemWriteInputSchema.safeParse({ path: "/etc/app.env", content: "x", extra: true }).success, false);
+});
+
+test("docker restart schema keeps the mutating input bounded", () => {
+  assert.equal(DockerRestartInputSchema.safeParse({ container: "api_1", timeoutSeconds: 30 }).success, true);
+  assert.equal(DockerRestartInputSchema.safeParse({ container: "api;rm -rf /" }).success, false);
+  assert.equal(DockerRestartInputSchema.safeParse({ container: "api_1", timeoutSeconds: 0 }).success, false);
+  assert.equal(DockerRestartResultSchema.safeParse({ container: "api_1", restarted: true }).success, true);
 });

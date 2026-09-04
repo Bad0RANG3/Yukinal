@@ -16,3 +16,13 @@ export interface DockerInspectResult {
   startedAt?: string;
   health?: string;
 }
+
+export interface DockerRestartInput {
+  container: string;
+  timeoutSeconds?: number;
+}
+
+export interface DockerRestartResult {
+  container: string;
+  restarted: boolean;
+}

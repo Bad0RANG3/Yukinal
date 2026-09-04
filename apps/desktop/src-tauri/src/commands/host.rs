@@ -20,12 +20,15 @@ const SERVER_INFO: &str = "server.info";
 const DOCKER_PS: &str = "docker.ps";
 const DOCKER_LOGS: &str = "docker.logs";
 const DOCKER_INSPECT: &str = "docker.inspect";
+const DOCKER_RESTART: &str = "docker.restart";
 const FILESYSTEM_READ: &str = "filesystem.read";
 const FILESYSTEM_WRITE: &str = "filesystem.write";
 const MAX_CONTAINERS: usize = 200;
 const DEFAULT_LOG_TAIL: usize = 120;
 const MAX_LOG_TAIL: usize = 500;
 const MAX_LOG_LINE_CHARS: usize = 4_000;
+const DEFAULT_RESTART_TIMEOUT: usize = 10;
+const MAX_RESTART_TIMEOUT: usize = 120;
 const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
 const MAX_FILE_READ_BYTES: usize = 1024 * 1024;
 const MAX_FILE_WRITE_BYTES: usize = 512 * 1024;
@@ -99,6 +102,13 @@ struct DockerInspectInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DockerRestartInput {
+    container: String,
+    timeout_seconds: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FilesystemReadInput {
     path: String,
     max_bytes: Option<usize>,
@@ -162,6 +172,13 @@ struct DockerInspectResult {
     started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DockerRestartResult {
+    container: String,
+    restarted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -256,6 +273,7 @@ pub(crate) async fn handle_sidecar_request(
         DOCKER_PS => docker_ps(state, server_id, &request.input).await,
         DOCKER_LOGS => docker_logs(state, server_id, &request.input).await,
         DOCKER_INSPECT => docker_inspect(state, server_id, &request.input).await,
+        DOCKER_RESTART => docker_restart(state, server_id, &request.input).await,
         FILESYSTEM_READ => filesystem_read(state, server_id, &request.input).await,
         FILESYSTEM_WRITE => filesystem_write(state, server_id, &request.input).await,
         other => Ok(failed(
@@ -645,6 +663,83 @@ async fn docker_inspect(state: &AppState, server_id: &str, input: &Value) -> Res
     ))
 }
 
+async fn docker_restart(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+    let input = match serde_json::from_value::<DockerRestartInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("docker.restart input is invalid: {error}"),
+                true,
+                None,
+            ))
+        }
+    };
+    if !is_safe_container_ref(&input.container) {
+        return Ok(failed(
+            "invalid_input",
+            "container must be a Docker name or id without shell metacharacters",
+            true,
+            None,
+        ));
+    }
+    let timeout = input.timeout_seconds.unwrap_or(DEFAULT_RESTART_TIMEOUT);
+    if !(1..=MAX_RESTART_TIMEOUT).contains(&timeout) {
+        return Ok(failed(
+            "invalid_input",
+            format!("timeoutSeconds must be between 1 and {MAX_RESTART_TIMEOUT}"),
+            true,
+            None,
+        ));
+    }
+    if let Err(error) = ensure_session(state, server_id).await {
+        return Ok(failed("transport", error, true, None));
+    }
+    let session = match state.terminals.cached_session(server_id) {
+        Ok(session) => session,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    let command = docker_restart_command(&input.container, timeout);
+    let result = match state
+        .ssh
+        .execute(
+            &session,
+            &command,
+            Some(std::time::Duration::from_secs(30)),
+            &CancellationToken::new(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    if result.exit_code != 0 {
+        return Ok(failed(
+            "execution_failed",
+            format!("could not restart container `{}`", input.container),
+            false,
+            Some(json!({
+                "exitCode": result.exit_code,
+                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+            })),
+        ));
+    }
+    Ok(success(
+        serde_json::to_value(DockerRestartResult {
+            container: input.container,
+            restarted: true,
+        })
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+fn docker_restart_command(container: &str, timeout: usize) -> String {
+    format!(
+        "docker restart --time {timeout} -- {}",
+        shell_quote(container)
+    )
+}
+
 fn parse_docker_inspect(raw: &str) -> Result<DockerInspectResult, String> {
     let line = raw
         .lines()
@@ -792,8 +887,8 @@ fn failed(code: &str, message: impl Into<String>, retryable: bool, detail: Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_log_lines, is_safe_container_ref, parse_docker_inspect, parse_docker_ps,
-        shell_quote, validate_remote_path,
+        bounded_log_lines, docker_restart_command, is_safe_container_ref, parse_docker_inspect,
+        parse_docker_ps, shell_quote, validate_remote_path,
     };
 
     #[test]
@@ -860,5 +955,13 @@ not-json
         assert!(validate_remote_path("relative/app.env").is_err());
         assert!(validate_remote_path("/etc/app\n.env").is_err());
         assert!(validate_remote_path(&format!("/{}", "x".repeat(4_096))).is_err());
+    }
+
+    #[test]
+    fn restart_command_is_bounded_and_shell_safe() {
+        assert_eq!(
+            docker_restart_command("api_1", 15),
+            "docker restart --time 15 -- 'api_1'"
+        );
     }
 }

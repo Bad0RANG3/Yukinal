@@ -23,6 +23,7 @@ import { AgentLoop } from "./agent-loop.js";
 import { dockerInspectTool } from "../tools/builtin/docker-inspect.js";
 import { dockerLogsTool } from "../tools/builtin/docker-logs.js";
 import { dockerPsTool } from "../tools/builtin/docker-ps.js";
+import { dockerRestartTool } from "../tools/builtin/docker-restart.js";
 import { filesystemReadTool } from "../tools/builtin/filesystem-read.js";
 import { filesystemWriteTool } from "../tools/builtin/filesystem-write.js";
 import { serverInfoTool } from "../tools/builtin/server-info.js";
@@ -57,6 +58,7 @@ export function createRuntime(options: { log?: AgentLogger; hostToolClient?: Hos
     declarations.push(registry.register(dockerPsTool(options.hostToolClient)));
     declarations.push(registry.register(dockerLogsTool(options.hostToolClient)));
     declarations.push(registry.register(dockerInspectTool(options.hostToolClient)));
+    declarations.push(registry.register(dockerRestartTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemReadTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemWriteTool(options.hostToolClient)));
   }
