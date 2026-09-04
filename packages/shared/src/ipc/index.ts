@@ -10,6 +10,7 @@ import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
 import type { ActivityListInput, ActivityListResponse } from "../types/activity.js";
 import type { ServerSnapshot } from "../types/collector.js";
 import type { ServerServicesResponse } from "../types/service.js";
+import type { ServerLogsResponse } from "../types/log.js";
 import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
 import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
 import type { AiProviderConfig, CcSwitchProviderCandidate, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
@@ -29,6 +30,7 @@ export const IPC_COMMANDS = {
   serverSnapshot: "server_snapshot",
   /** Read-only systemd/Docker service discovery. */
   serverServices: "server_services",
+  serverLogs: "server_logs",
   remoteFileList: "remote_file_list",
   remoteFileRead: "remote_file_read",
   activityList: "activity_list",
@@ -70,6 +72,7 @@ export interface IpcCommandMap {
   server_disconnect: { params: { serverId: string }; response: Record<string, never> };
   server_snapshot: { params: { serverId: string }; response: { snapshot: ServerSnapshot } };
   server_services: { params: { serverId: string }; response: ServerServicesResponse };
+  server_logs: { params: { serverId: string }; response: ServerLogsResponse };
   remote_file_list: { params: { serverId: string; path: string }; response: RemoteFileListResponse };
   remote_file_read: { params: { serverId: string; path: string }; response: RemoteFileReadResponse };
   activity_list: { params: ActivityListInput; response: ActivityListResponse };

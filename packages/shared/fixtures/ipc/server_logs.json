@@ -1,0 +1,13 @@
+{
+  "source": "journalctl",
+  "lines": [
+    {
+      "text": "2026-09-04T06:00:00+0800 host sshd[10]: Accepted publickey",
+      "level": "info"
+    },
+    {
+      "text": "2026-09-04T06:02:00+0800 host app[13]: Failed to connect to database",
+      "level": "error"
+    }
+  ]
+}

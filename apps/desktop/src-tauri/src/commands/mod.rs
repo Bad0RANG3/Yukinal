@@ -14,6 +14,7 @@ use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
 pub mod activity;
 pub mod agent_run;
 pub mod files;
+pub mod logs;
 pub mod provider;
 pub mod server;
 pub mod services;

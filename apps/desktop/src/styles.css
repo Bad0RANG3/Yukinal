@@ -1405,3 +1405,23 @@ button:disabled {
 .service-state-running { color: var(--success); }
 .service-state-failed { color: var(--danger); }
 .service-empty { min-height: 260px; }
+.logs-page { min-height: 0; display: flex; flex-direction: column; gap: 18px; }
+.logs-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.logs-page-header h2 { margin: 3px 0 0; font-size: 24px; letter-spacing: -.03em; }
+.logs-page-header p:last-child { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.log-summary { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
+.log-source { border: 1px solid var(--line-strong); border-radius: 5px; padding: 4px 7px; color: var(--text); background: var(--panel-raised); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.log-source-journalctl { border-color: #31596a; color: #9bd1e3; background: rgba(43, 111, 140, .13); }
+.log-source-syslog, .log-source-messages { border-color: #34524d; color: #92c8bc; background: rgba(55, 112, 99, .13); }
+.log-source-unavailable { border-color: #6b5732; color: var(--warning); background: rgba(130, 95, 32, .13); }
+.log-notice { border: 1px solid #6b5732; border-radius: 7px; background: rgba(130, 95, 32, .13); color: var(--warning); padding: 11px 13px; font-size: 12px; }
+.log-list { display: flex; flex-direction: column; margin: 0; padding: 0; overflow: auto; list-style: none; border: 1px solid var(--line); border-radius: 9px; background: rgba(5, 10, 13, .7); }
+.log-row { display: grid; grid-template-columns: 34px 38px minmax(0, 1fr); align-items: baseline; gap: 10px; padding: 10px 13px; border-bottom: 1px solid rgba(39, 50, 54, .6); }
+.log-row:last-child { border-bottom: 0; }
+.log-line-number { color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
+.log-level { font-size: 9px; font-weight: 650; letter-spacing: .04em; }
+.log-level-info { color: #8fc6dc; }
+.log-level-warning { color: var(--warning); }
+.log-level-error { color: var(--danger); }
+.log-row code { min-width: 0; overflow: hidden; color: var(--text); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-empty { min-height: 260px; }
