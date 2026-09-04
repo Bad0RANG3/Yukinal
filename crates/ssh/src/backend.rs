@@ -75,6 +75,33 @@ impl RusshBackend {
         Ok(dir.map(|entry| entry.file_name()).collect())
     }
 
+    pub async fn sftp_list_dir_detailed(
+        &self,
+        client: &SftpClient,
+        path: &str,
+    ) -> Result<Vec<(String, String, u64)>> {
+        let sftp = lock_sftp(client).await?;
+        let dir = sftp
+            .read_dir(path)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        Ok(dir
+            .map(|entry| {
+                let file_type = match entry.file_type() {
+                    russh_sftp::protocol::FileType::Dir => "directory",
+                    russh_sftp::protocol::FileType::File => "file",
+                    russh_sftp::protocol::FileType::Symlink => "symlink",
+                    russh_sftp::protocol::FileType::Other => "other",
+                };
+                (
+                    entry.file_name(),
+                    file_type.to_string(),
+                    entry.metadata().len(),
+                )
+            })
+            .collect())
+    }
+
     /// SFTP 读整文件（filesystem read 工具的基础操作）。
     pub async fn sftp_read_file(&self, client: &SftpClient, path: &str) -> Result<Vec<u8>> {
         use russh_sftp::protocol::OpenFlags;

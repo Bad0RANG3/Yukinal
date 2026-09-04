@@ -90,6 +90,37 @@ impl TerminalService {
             .ok_or_else(|| TerminalServiceError::NoSession(server_id.to_string()))
     }
 
+    /// Close all PTYs and remove the cached SSH session for a server.
+    pub async fn disconnect(&self, server_id: &str) -> Result<bool> {
+        let session = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .remove(server_id);
+        let _closed_terminals = self.manager.close_for_server(server_id).await?;
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        self.ssh.close(&session).await?;
+        Ok(true)
+    }
+
+    pub async fn sftp_list(
+        &self,
+        server_id: &str,
+        path: &str,
+    ) -> Result<Vec<(String, String, u64)>> {
+        let session = self.cached_session(server_id)?;
+        let client = self.ssh.sftp(&session).await?;
+        Ok(self.ssh.sftp_list_dir_detailed(&client, path).await?)
+    }
+
+    pub async fn sftp_read(&self, server_id: &str, path: &str) -> Result<Vec<u8>> {
+        let session = self.cached_session(server_id)?;
+        let client = self.ssh.sftp(&session).await?;
+        Ok(self.ssh.sftp_read_file(&client, path).await?)
+    }
+
     #[must_use]
     pub fn manager(&self) -> &TerminalManager<SshPty> {
         &self.manager

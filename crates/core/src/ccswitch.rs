@@ -43,8 +43,20 @@ pub struct CcSwitchProvider {
     pub model: String,
     pub wire_api: WireApi,
     pub has_api_key: bool,
+    pub models: Vec<CcSwitchModel>,
     /// 只在 apply 路径内存在；绝不跨出本模块分界线。
     api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcSwitchModel {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    pub supports_tool_calling: bool,
+    pub supports_streaming: bool,
 }
 
 impl CcSwitchProvider {
@@ -104,6 +116,90 @@ pub fn read_ccswitch(home: &Path) -> Result<Vec<CcSwitchProvider>, CcSwitchError
     Ok(providers)
 }
 
+/// Read the active Codex configuration without modifying it. This is separate
+/// from CC Switch because many users install Codex directly and have no
+/// `cc-switch.db` at all.
+pub fn read_codex(home: &Path) -> Result<Vec<CcSwitchProvider>, CcSwitchError> {
+    let codex_dir = home.join(".codex");
+    let config_path = codex_dir.join("config.toml");
+    if !config_path.is_file() {
+        return Err(CcSwitchError::NotFound(config_path.display().to_string()));
+    }
+    let config = std::fs::read_to_string(&config_path)
+        .map_err(|error| CcSwitchError::Db(format!("{}: {error}", config_path.display())))?;
+    let parsed = parse_codex_toml(&config);
+
+    // Codex's official provider does not need a model_providers block. Use its
+    // documented OpenAI endpoint when the local config omits a base URL.
+    let effective_config = if parsed.base_url.is_none()
+        && parsed
+            .provider
+            .as_ref()
+            .and_then(|block| block.get("base_url"))
+            .is_none()
+    {
+        format!("base_url = \"https://api.openai.com/v1\"\n{config}")
+    } else {
+        config
+    };
+
+    let auth = read_json_object(&codex_dir.join("auth.json"))?;
+    let mut settings = serde_json::Map::new();
+    settings.insert("auth".to_string(), Value::Object(auth));
+    settings.insert(
+        "config".to_string(),
+        Value::String(effective_config.clone()),
+    );
+
+    if let Some(catalog_name) = parsed.model_catalog_json.as_deref() {
+        if let Some(catalog) = read_catalog_file(&codex_dir, catalog_name) {
+            settings.insert("modelCatalog".to_string(), catalog);
+        }
+    }
+
+    parse_provider("local", "Codex", &Value::Object(settings).to_string())
+        .map(|provider| vec![provider])
+}
+
+fn read_json_object(path: &Path) -> Result<serde_json::Map<String, Value>, CcSwitchError> {
+    if !path.is_file() {
+        return Ok(serde_json::Map::new());
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| CcSwitchError::Db(format!("{}: {error}", path.display())))?;
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(object)) => Ok(object),
+        Ok(_) => Err(CcSwitchError::Malformed(format!(
+            "{}: expected JSON object",
+            path.display()
+        ))),
+        Err(error) => Err(CcSwitchError::Malformed(format!(
+            "{}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn read_catalog_file(codex_dir: &Path, configured_path: &str) -> Option<Value> {
+    let configured = Path::new(configured_path);
+    let path = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        codex_dir.join(configured)
+    };
+    let root = codex_dir.canonicalize().ok()?;
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(&root) || !canonical.is_file() {
+        tracing::warn!(
+            "ignoring Codex model catalog outside .codex: {}",
+            path.display()
+        );
+        return None;
+    }
+    let text = std::fs::read_to_string(canonical).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 fn parse_provider(
     provider_id: &str,
     name: &str,
@@ -120,8 +216,13 @@ fn parse_provider(
         .as_ref()
         .and_then(|block| block.get("base_url"))
         .cloned()
+        .or_else(|| parsed.base_url.clone())
         .filter(|value: &String| !value.is_empty());
-    let model = parsed.model.filter(|value: &String| !value.is_empty());
+    let models = parse_model_catalog(value.get("modelCatalog"));
+    let model = parsed
+        .model
+        .filter(|value: &String| !value.is_empty())
+        .or_else(|| models.first().map(|model| model.id.clone()));
 
     let api_key = parsed
         .provider
@@ -138,8 +239,8 @@ fn parse_provider(
     let wire_api = match parsed
         .provider
         .as_ref()
-        .and_then(|block| block.get("wire_api"))
-        .map(String::as_str)
+        .and_then(|block| block.get("wire_api").map(String::as_str))
+        .or(parsed.wire_api.as_deref())
     {
         Some("responses") => WireApi::Responses,
         _ => WireApi::Chat,
@@ -159,13 +260,16 @@ fn parse_provider(
     Ok(CcSwitchProvider {
         id: format!("codex:{provider_id}"),
         name: parsed
-            .provider_name
-            .map(|display| display.to_string())
+            .provider
+            .as_ref()
+            .and_then(|block| block.get("name"))
+            .map(ToString::to_string)
             .unwrap_or_else(|| name.to_string()),
         base_url,
         model,
         wire_api,
         has_api_key: api_key.is_some(),
+        models,
         api_key,
     })
 }
@@ -175,6 +279,9 @@ pub struct CodexToml {
     pub model: Option<String>,
     pub provider_name: Option<String>,
     pub provider: Option<std::collections::HashMap<String, String>>,
+    pub wire_api: Option<String>,
+    pub base_url: Option<String>,
+    pub model_catalog_json: Option<String>,
 }
 
 /// 迷你 TOML：只解析我们需要的键（顶层 model/model_provider，块内的
@@ -220,7 +327,65 @@ pub fn parse_codex_toml(text: &str) -> CodexToml {
         model: top.get("model").cloned(),
         provider_name,
         provider,
+        wire_api: top.get("wire_api").cloned(),
+        base_url: top.get("base_url").cloned(),
+        model_catalog_json: top.get("model_catalog_json").cloned(),
     }
+}
+
+fn parse_model_catalog(value: Option<&Value>) -> Vec<CcSwitchModel> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let Some(entries) = value
+        .get("models")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut models = Vec::new();
+    for entry in entries {
+        let (id, label, context_window) = match entry {
+            Value::String(id) if !id.trim().is_empty() => (id.clone(), id.clone(), None),
+            Value::Object(object) => {
+                let Some(id) = object
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                else {
+                    continue;
+                };
+                let label = object
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or(id)
+                    .to_string();
+                let context_window = object.get("contextWindow").and_then(parse_context_window);
+                (id.to_string(), label, context_window)
+            }
+            _ => continue,
+        };
+        if models.iter().any(|model: &CcSwitchModel| model.id == id) {
+            continue;
+        }
+        models.push(CcSwitchModel {
+            id,
+            label,
+            context_window,
+            supports_tool_calling: true,
+            supports_streaming: true,
+        });
+    }
+    models
+}
+
+fn parse_context_window(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
 }
 
 fn unquote(value: &str) -> String {
@@ -333,5 +498,31 @@ base_url = \"https://x/v1\"
         let provider = parse_provider("id_2", "X", &settings).expect("parse");
         assert_eq!(provider.wire_api, WireApi::Chat);
         assert_eq!(provider.api_key.as_deref(), Some("auth-key"));
+    }
+
+    #[test]
+    fn reads_model_catalog_and_prefers_configured_model() {
+        let config = "model = \"preferred\"\nmodel_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"https://x/v1\"\n";
+        let settings = serde_json::json!({
+            "config": config,
+            "modelCatalog": { "models": [
+                { "model": "preferred", "displayName": "Preferred", "contextWindow": "128000" },
+                "fallback"
+            ] }
+        })
+        .to_string();
+        let provider = parse_provider("id_3", "Catalog", &settings).expect("parse");
+        assert_eq!(provider.model, "preferred");
+        assert_eq!(provider.models.len(), 2);
+        assert_eq!(provider.models[0].label, "Preferred");
+        assert_eq!(provider.models[0].context_window, Some(128_000));
+    }
+
+    #[test]
+    fn top_level_wire_api_is_used_when_provider_block_omits_it() {
+        let config = "model = \"m\"\nmodel_provider = \"custom\"\nwire_api = \"responses\"\n[model_providers.custom]\nbase_url = \"https://x/v1\"\n";
+        let settings = serde_json::json!({ "config": config }).to_string();
+        let provider = parse_provider("id_4", "Top wire", &settings).expect("parse");
+        assert_eq!(provider.wire_api, WireApi::Responses);
     }
 }

@@ -259,6 +259,20 @@ fn default_wire_api() -> String {
     "chat".to_string()
 }
 
+/// Non-sensitive model metadata cached from a provider catalog. The API key is
+/// deliberately absent so this value is safe to persist in SQLite and return
+/// to the desktop UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelOption {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    pub supports_tool_calling: bool,
+    pub supports_streaming: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConnection {
@@ -417,6 +431,10 @@ pub struct AiProviderConfig {
     pub custom_headers: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<u32>,
+    /// Cached model catalog. Stored under the existing `settings` column to
+    /// keep the migration backwards compatible with existing databases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<ProviderModelOption>>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -483,6 +501,26 @@ pub struct AddServerInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     pub authentication: AuthenticationInput,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateServerInput {
+    pub server_id: String,
+    pub name: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub username: String,
+    pub environment: Environment,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    pub authentication: Option<AuthenticationInput>,
+}
+
+impl UpdateServerInput {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
 }
 
 impl AddServerInput {

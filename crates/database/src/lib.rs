@@ -26,7 +26,9 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-pub use models::{AddServerInput, AuthenticationInput, Server, ServerStatus, Workspace};
+pub use models::{
+    AddServerInput, AuthenticationInput, Server, ServerStatus, UpdateServerInput, Workspace,
+};
 
 pub type Result<T> = std::result::Result<T, DatabaseError>;
 

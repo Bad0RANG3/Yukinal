@@ -202,6 +202,24 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
         Ok(())
     }
 
+    /// Close every terminal belonging to one server. Disconnecting a server
+    /// must not leave PTYs alive against a session that the user believes is
+    /// closed.
+    pub async fn close_for_server(&self, server_id: &str) -> Result<usize> {
+        let ids: Vec<String> = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|info| info.server_id == server_id)
+            .map(|info| info.terminal_session_id)
+            .collect();
+        let count = ids.len();
+        for id in ids {
+            self.close(&id).await?;
+        }
+        Ok(count)
+    }
+
     pub async fn list(&self) -> Vec<TerminalSessionInfo> {
         let sessions = self.sessions.lock().await;
         let mut infos: Vec<_> = sessions
@@ -473,6 +491,25 @@ mod tests {
                 manager.close("t_missing").await,
                 Err(TerminalError::NotFound(_))
             ));
+        });
+    }
+
+    #[test]
+    fn close_for_server_only_closes_matching_sessions() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let manager = TerminalManager::<MemoryPty>::new();
+        rt.block_on(async {
+            let matching = manager
+                .open("srv_a", 80, 24, MemoryPty::new())
+                .await
+                .expect("open");
+            let other = manager
+                .open("srv_b", 80, 24, MemoryPty::new())
+                .await
+                .expect("open");
+            assert_eq!(manager.close_for_server("srv_a").await.expect("close"), 1);
+            assert!(manager.get(&matching).await.is_none());
+            assert!(manager.get(&other).await.is_some());
         });
     }
 

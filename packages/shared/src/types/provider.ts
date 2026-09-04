@@ -27,8 +27,18 @@ export interface AiProviderConfig {
   maxInputTokens?: number;
   /** Endpoint dialect (codex `responses` vs chat completions). */
   wireApi?: "chat" | "responses";
+  /** Cached non-sensitive catalog entries used by the model selector. */
+  models?: ProviderModelOption[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProviderModelOption {
+  id: string;
+  label: string;
+  contextWindow?: number;
+  supportsToolCalling: boolean;
+  supportsStreaming: boolean;
 }
 
 /**
@@ -59,15 +69,19 @@ export interface CcSwitchProviderCandidate {
   wireApi: "chat" | "responses";
   /** key 是否可用（不返回 key 本体）。 */
   hasApiKey: boolean;
+  models?: ProviderModelOption[];
 }
 
 /** Settings form: label optional (defaults to baseUrl), apiKey goes to the keychain here. */
 export interface ProviderSaveInput {
+  providerId?: string;
   label?: string;
   baseUrl: string;
   model: string;
   /** Present only when the user enters a new key; absent keeps the existing ref. */
   apiKey?: string;
+  wireApi?: "chat" | "responses";
+  models?: ProviderModelOption[];
 }
 
 export interface ModelInfo {

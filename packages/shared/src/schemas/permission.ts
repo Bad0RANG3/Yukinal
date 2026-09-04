@@ -16,6 +16,7 @@ export const RuntimeProviderConfigSchema = z.object({
   apiKey: z.string().optional(),
   customHeaders: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().positive().optional(),
+  wireApi: z.enum(["chat", "responses"]).optional(),
 });
 
 export const PermissionTierSchema = z.enum(PERMISSION_TIERS);
@@ -111,4 +112,3 @@ export const AgentRunRequestSchema = z.object({
   policyId: z.string().optional(),
   providerConfig: RuntimeProviderConfigSchema.optional(),
 });
-

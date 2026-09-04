@@ -30,12 +30,23 @@ pub(crate) async fn ensure_session(state: &AppState, server_id: &str) -> Result<
         .get(server_id)
         .map_err(|error| error.to_string())?;
     let (config, secrets) = resolve_capabilities(state, &server)?;
-    let session = state
-        .ssh
-        .connect(config, secrets)
-        .await
-        .map_err(|error| error.to_string())?;
+    let session = match state.ssh.connect(config, secrets).await {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = state.database.servers().set_status(
+                server_id,
+                yukinal_database::models::ServerStatus::Error,
+                &yukinal_core::sidecar::iso8601_now(),
+            );
+            return Err(error.to_string());
+        }
+    };
     state.terminals.cache_session(server_id, session);
+    let _ = state.database.servers().set_status(
+        server_id,
+        yukinal_database::models::ServerStatus::Connected,
+        &yukinal_core::sidecar::iso8601_now(),
+    );
     Ok(())
 }
 

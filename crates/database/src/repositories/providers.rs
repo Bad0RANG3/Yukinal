@@ -8,6 +8,7 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use crate::models::{
     AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpServerConfig,
+    ProviderModelOption,
 };
 use crate::{optional_json, Database, DatabaseError, Result};
 
@@ -25,11 +26,11 @@ impl<'a> ProviderConfigsRepository<'a> {
             connection.execute(
                 "INSERT INTO provider_configs (
                     id, family, kind, label, base_url, model, api_key_credential_ref,
-                    enabled, custom_headers, max_input_tokens, wire_api, created_at, updated_at
-                 ) VALUES (?1, 'ai', 'openai-compatible', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    enabled, custom_headers, max_input_tokens, settings, wire_api, created_at, updated_at
+                 ) VALUES (?1, 'ai', 'openai-compatible', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                     label = ?2, base_url = ?3, model = ?4, api_key_credential_ref = ?5,
-                    enabled = ?6, custom_headers = ?7, max_input_tokens = ?8, wire_api = ?9, updated_at = ?11",
+                    enabled = ?6, custom_headers = ?7, max_input_tokens = ?8, settings = ?9, wire_api = ?10, updated_at = ?12",
                 params![
                     config.id,
                     config.label,
@@ -39,6 +40,12 @@ impl<'a> ProviderConfigsRepository<'a> {
                     config.enabled,
                     optional_json_string(&config.custom_headers)?,
                     config.max_input_tokens,
+                    config
+                        .models
+                        .as_ref()
+                        .map(|models| serde_json::to_string(&serde_json::json!({ "models": models })))
+                        .transpose()
+                        .map_err(DatabaseError::from)?,
                     config.wire_api,
                     config.created_at,
                     config.updated_at,
@@ -154,12 +161,30 @@ fn row_to_ai(row: &Row<'_>) -> rusqlite::Result<AiProviderConfig> {
         custom_headers: optional_json(row.get::<_, Option<String>>(7)?)
             .map_err(|error| err(7, error))?,
         max_input_tokens: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+        models: parse_models(row.get::<_, Option<String>>(10)?).map_err(|error| err(10, error))?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         wire_api: row
             .get::<_, Option<String>>(14)?
             .unwrap_or_else(|| "chat".to_string()),
     })
+}
+
+fn parse_models(
+    raw: Option<String>,
+) -> std::result::Result<Option<Vec<ProviderModelOption>>, String> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    let Some(models) = value
+        .get("models")
+        .cloned()
+        .or_else(|| value.is_array().then_some(value))
+    else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_value(models).ok())
 }
 
 fn row_to_infra(row: &Row<'_>) -> rusqlite::Result<InfrastructureProviderConfig> {

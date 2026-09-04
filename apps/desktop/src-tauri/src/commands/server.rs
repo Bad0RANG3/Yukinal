@@ -10,6 +10,7 @@ use yukinal_credentials::{CredentialStore, Secret};
 use yukinal_database::models::{
     Identity, Server, ServerCapabilities, ServerConnection, ServerMetadata, ServerStatus,
 };
+use yukinal_database::UpdateServerInput;
 use yukinal_database::{AddServerInput, AuthenticationInput};
 
 #[derive(Debug, Serialize)]
@@ -22,6 +23,18 @@ pub struct ServerListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ServerAddResponse {
     pub server: Server,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerConnectResponse {
+    pub status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerDeleteResponse {
+    pub deleted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +83,145 @@ pub async fn server_list(state: State<'_, AppState>) -> Result<ServerListRespons
         .list()
         .map_err(|error| error.to_string())?;
     Ok(ServerListResponse { servers })
+}
+
+/// Establish and cache the SSH session used by terminal, snapshots and SFTP.
+#[tauri::command]
+pub async fn server_connect(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<ServerConnectResponse, String> {
+    match ensure_session(&state, &server_id).await {
+        Ok(()) => {
+            state
+                .database
+                .servers()
+                .set_status(
+                    &server_id,
+                    ServerStatus::Connected,
+                    &yukinal_core::sidecar::iso8601_now(),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(ServerConnectResponse {
+                status: "connected",
+            })
+        }
+        Err(error) => {
+            let _ = state.database.servers().set_status(
+                &server_id,
+                ServerStatus::Error,
+                &yukinal_core::sidecar::iso8601_now(),
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Close the cached session and every PTY attached to it. This operation is
+/// idempotent so a stale UI can safely request disconnect twice.
+#[tauri::command]
+pub async fn server_disconnect(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<(), String> {
+    state
+        .terminals
+        .disconnect(&server_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .database
+        .servers()
+        .set_status(
+            &server_id,
+            ServerStatus::Disconnected,
+            &yukinal_core::sidecar::iso8601_now(),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn server_update(
+    state: State<'_, AppState>,
+    input: serde_json::Value,
+) -> Result<ServerAddResponse, String> {
+    let input = UpdateServerInput::from_value(&input)
+        .map_err(|error| format!("invalid server-update input: {error}"))?;
+    let mut server = state
+        .database
+        .servers()
+        .get(&input.server_id)
+        .map_err(|error| error.to_string())?;
+    let old_identity_id = server.connection.identity_id.clone();
+
+    // A changed endpoint or credential must not leave the old authenticated
+    // connection cached under the same stable server id.
+    state
+        .terminals
+        .disconnect(&input.server_id)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let new_identity_id = match input.authentication {
+        Some(authentication) => Some(
+            store_identity_input(
+                &state,
+                &authentication,
+                &input.name,
+                &input.server_id,
+                &yukinal_core::sidecar::iso8601_now(),
+            )
+            .await?,
+        ),
+        None => old_identity_id.clone(),
+    };
+    server.name = input.name;
+    server.connection.host = input.host;
+    server.connection.port = input.port.unwrap_or(22);
+    server.connection.username = input.username;
+    server.connection.identity_id = new_identity_id;
+    server.group_id = input.group_id;
+    server.metadata.environment = input.environment;
+    server.status = ServerStatus::Disconnected;
+    server.updated_at = yukinal_core::sidecar::iso8601_now();
+    state
+        .database
+        .servers()
+        .update(&server)
+        .map_err(|error| error.to_string())?;
+
+    if let Some(old_id) =
+        old_identity_id.filter(|id| Some(id) != server.connection.identity_id.as_ref())
+    {
+        reclaim_identity(&state, &old_id, &server.id)?;
+    }
+    Ok(ServerAddResponse { server })
+}
+
+#[tauri::command]
+pub async fn server_delete(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<ServerDeleteResponse, String> {
+    let server = state
+        .database
+        .servers()
+        .get(&server_id)
+        .map_err(|error| error.to_string())?;
+    state
+        .terminals
+        .disconnect(&server_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .database
+        .servers()
+        .delete(&server_id)
+        .map_err(|error| error.to_string())?;
+    if let Some(identity_id) = server.connection.identity_id {
+        reclaim_identity(&state, &identity_id, &server_id)?;
+    }
+    Ok(ServerDeleteResponse { deleted: true })
 }
 
 /// `server_add`：表单输入 →（secret 进 keychain，SQLite 只存引用）→ 服务器行。
@@ -175,6 +327,112 @@ async fn store_identity(
         .attach_to_server(server_id, &identity.id)
         .map_err(|error| error.to_string())?;
     Ok(identity.id)
+}
+
+async fn store_identity_input(
+    state: &State<'_, AppState>,
+    authentication: &AuthenticationInput,
+    label: &str,
+    server_id: &str,
+    now: &str,
+) -> Result<String, String> {
+    match authentication {
+        AuthenticationInput::Identity { identity_id } => {
+            state
+                .database
+                .identities()
+                .get(identity_id)
+                .map_err(|error| error.to_string())?;
+            Ok(identity_id.clone())
+        }
+        AuthenticationInput::Password { password } => {
+            let reference = state
+                .credentials
+                .set(
+                    "ssh",
+                    &format!("{server_id}-{}", next_id("cred")),
+                    &Secret::from_utf8(password.clone()),
+                )
+                .map_err(|error| error.to_string())?;
+            let identity = Identity {
+                id: next_id("idn"),
+                label: format!("{} ({server_id})", label),
+                method: "password".into(),
+                credential_ref: reference.to_string_ref(),
+                created_at: now.to_string(),
+            };
+            state
+                .database
+                .identities()
+                .insert(&identity)
+                .map_err(|error| error.to_string())?;
+            state
+                .database
+                .identities()
+                .attach_to_server(server_id, &identity.id)
+                .map_err(|error| error.to_string())?;
+            Ok(identity.id)
+        }
+        AuthenticationInput::PrivateKey {
+            private_key_pem,
+            passphrase,
+        } => {
+            if passphrase.as_ref().is_some_and(|value| !value.is_empty()) {
+                return Err("鍔犲瘑绉侀挜鏆傛湭鏀寔".into());
+            }
+            let reference = state
+                .credentials
+                .set(
+                    "ssh",
+                    &format!("{server_id}-{}", next_id("cred")),
+                    &Secret::from_utf8(private_key_pem.clone()),
+                )
+                .map_err(|error| error.to_string())?;
+            let identity = Identity {
+                id: next_id("idn"),
+                label: format!("{} ({server_id})", label),
+                method: "privateKey".into(),
+                credential_ref: reference.to_string_ref(),
+                created_at: now.to_string(),
+            };
+            state
+                .database
+                .identities()
+                .insert(&identity)
+                .map_err(|error| error.to_string())?;
+            state
+                .database
+                .identities()
+                .attach_to_server(server_id, &identity.id)
+                .map_err(|error| error.to_string())?;
+            Ok(identity.id)
+        }
+    }
+}
+
+fn reclaim_identity(
+    state: &State<'_, AppState>,
+    identity_id: &str,
+    server_id: &str,
+) -> Result<(), String> {
+    if state
+        .database
+        .identities()
+        .attached_to_other_server(identity_id, server_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    if let Ok(identity) = state.database.identities().get(identity_id) {
+        if let Ok(reference) = yukinal_credentials::CredentialRef::parse(&identity.credential_ref) {
+            state
+                .credentials
+                .delete(&reference)
+                .map_err(|error| error.to_string())?;
+        }
+        let _ = state.database.identities().delete(identity_id);
+    }
+    Ok(())
 }
 
 /// `srv_`/`idn_` 前缀 + 时间戳/millis + 进程内计数器：稳定、非 host 派生。

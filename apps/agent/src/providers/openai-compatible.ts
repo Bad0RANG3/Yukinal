@@ -8,7 +8,7 @@
  * Tool-name rewriting happens in the loop via `createProviderNameIndex` (ADR 0004).
  */
 
-import type { ChatRequest, FinishReason, LLMProvider, ModelInfo, StreamEvent } from "@yukinal/provider-sdk";
+import type { ChatRequest, FinishReason, LLMProvider, LlmMessage, ModelInfo, StreamEvent } from "@yukinal/provider-sdk";
 import { ProviderError } from "@yukinal/provider-sdk";
 
 export interface OpenAiCompatibleConfig {
@@ -67,8 +67,13 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           responsesDialect
             ? {
                 model: request.model,
-                input: request.messages,
-                tools: request.tools,
+                input: toResponsesInput(request.messages),
+                tools: request.tools?.map((tool) => ({
+                  type: "function",
+                  name: tool.function.name,
+                  description: tool.function.description,
+                  parameters: tool.function.parameters,
+                })),
                 stream: true,
                 temperature: request.temperature ?? 0,
                 max_output_tokens: request.maxOutputTokens,
@@ -188,19 +193,19 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    const slots = new Map<string, { name: string; args: string }>();
+    const slots = new Map<string, { id: string; name: string; args: string }>();
 
     const flush = (): StreamEvent[] =>
       [...slots.entries()]
         .filter(([, slot]) => slot.name)
-        .map(([id, slot]) => {
+        .map(([, slot]) => {
           let args: Record<string, unknown> = {};
           try {
             args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
           } catch {
             args = { raw: slot.args };
           }
-          return { type: "tool_call" as const, call: { id, name: slot.name, arguments: args } };
+          return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
         });
 
     for (;;) {
@@ -231,7 +236,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           case "response.output_item.added": {
             const item = event.item;
             if (item?.type === "function_call" && item.id) {
-              slots.set(item.id, { name: item.name ?? "", args: item.arguments ?? "" });
+              slots.set(item.id, { id: item.call_id ?? item.id, name: item.name ?? "", args: item.arguments ?? "" });
             }
             break;
           }
@@ -268,7 +273,27 @@ interface ResponsesEvent {
   type: string;
   delta?: string;
   item_id?: string;
-  item?: { type?: string; id?: string; name?: string; arguments?: string };
+  item?: { type?: string; id?: string; call_id?: string; name?: string; arguments?: string };
+}
+
+function toResponsesInput(messages: LlmMessage[]): Array<Record<string, unknown>> {
+  const input: Array<Record<string, unknown>> = [];
+  for (const message of messages) {
+    if (message.role === "tool") {
+      input.push({ type: "function_call_output", call_id: message.toolCallId, output: message.content });
+      continue;
+    }
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      if (message.content) input.push({ role: "assistant", content: [{ type: "output_text", text: message.content }] });
+      for (const call of message.toolCalls) {
+        input.push({ type: "function_call", call_id: call.id, name: call.name, arguments: JSON.stringify(call.arguments) });
+      }
+      continue;
+    }
+    const contentType = message.role === "assistant" ? "output_text" : "input_text";
+    input.push({ role: message.role, content: [{ type: contentType, text: message.content }] });
+  }
+  return input;
 }
 
 function finishReasonFor(reason: string | null): FinishReason {

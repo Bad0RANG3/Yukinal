@@ -32,7 +32,10 @@ pub struct ApprovalRespondResponse {
 }
 
 /// 第一个启用的 AI provider；没有就明确报错（UI 引导去配置，不做假 provider）。
-fn first_enabled_provider(state: &AppState) -> Result<AiProviderConfig, String> {
+fn resolve_provider(
+    state: &AppState,
+    provider_id: Option<&str>,
+) -> Result<AiProviderConfig, String> {
     let providers = state
         .database
         .providers()
@@ -40,7 +43,12 @@ fn first_enabled_provider(state: &AppState) -> Result<AiProviderConfig, String> 
         .map_err(|error| error.to_string())?;
     providers
         .into_iter()
-        .find(|provider| provider.enabled)
+        .find(|provider| {
+            provider_id
+                .map(|id| provider.id == id)
+                .unwrap_or(provider.enabled)
+                && provider.enabled
+        })
         .ok_or_else(|| {
             "没有启用的 AI provider：请先到「设置 ▸ Provider」配置（baseUrl/model/API key）".into()
         })
@@ -70,9 +78,14 @@ pub async fn agent_run_start(
     state: State<'_, AppState>,
     session_id: String,
     prompt: String,
+    provider_id: Option<String>,
+    model: Option<String>,
 ) -> Result<RunStartResponse, String> {
-    let provider = first_enabled_provider(&state)?;
+    let provider = resolve_provider(&state, provider_id.as_deref())?;
     let api_key = resolve_api_key(&state, &provider)?;
+    let selected_model = model
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| provider.model.clone());
 
     let run_id = format!("run_{}", yukinal_core::sidecar::iso8601_now());
     let params = json!({
@@ -82,7 +95,7 @@ pub async fn agent_run_start(
         "providerConfig": {
             "kind": "openai-compatible",
             "baseUrl": provider.base_url,
-            "model": provider.model,
+            "model": selected_model,
             "apiKey": api_key,
             "customHeaders": provider.custom_headers,
             "timeoutMs": 120_000,

@@ -7,11 +7,11 @@
 import type { z } from "zod";
 
 import type { AgentRunRequest, ApprovalResponse } from "../types/chat.js";
-import type { AddServerInput, Server } from "../types/server.js";
+import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
-import type { AddServerInputSchema, ServerSchema } from "./server.js";
+import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
 import type {
   AgentRunRequestSchema,
   ApprovalResponseSchema,
@@ -26,6 +26,7 @@ type Assignable<S extends z.ZodType, Target> = z.output<S> extends Target ? true
 
 export type _ServerContract = Expect<Assignable<typeof ServerSchema, Server>>;
 export type _AddServerContract = Expect<Assignable<typeof AddServerInputSchema, AddServerInput>>;
+export type _UpdateServerContract = Expect<Assignable<typeof UpdateServerInputSchema, UpdateServerInput>>;
 export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDecisionSchema, PermissionDecision>>;
 export type _ToolDeclarationContract = Expect<Assignable<typeof ToolDeclarationSchema, ToolDeclaration>>;
 export type _ApprovalResponseContract = Expect<Assignable<typeof ApprovalResponseSchema, ApprovalResponse>>;
@@ -46,9 +47,13 @@ export type _IpcParamsContracts = {
   core_ping: Expect<Assignable<ParamsOf<"core_ping">, IpcCommandMap["core_ping"]["params"]>>;
   server_list: Expect<Assignable<ParamsOf<"server_list">, IpcCommandMap["server_list"]["params"]>>;
   server_add: Expect<Assignable<ParamsOf<"server_add">, IpcCommandMap["server_add"]["params"]>>;
+  server_update: Expect<Assignable<ParamsOf<"server_update">, IpcCommandMap["server_update"]["params"]>>;
+  server_delete: Expect<Assignable<ParamsOf<"server_delete">, IpcCommandMap["server_delete"]["params"]>>;
   server_connect: Expect<Assignable<ParamsOf<"server_connect">, IpcCommandMap["server_connect"]["params"]>>;
   server_disconnect: Expect<Assignable<ParamsOf<"server_disconnect">, IpcCommandMap["server_disconnect"]["params"]>>;
   server_snapshot: Expect<Assignable<ParamsOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["params"]>>;
+  remote_file_list: Expect<Assignable<ParamsOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["params"]>>;
+  remote_file_read: Expect<Assignable<ParamsOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["params"]>>;
   terminal_open: Expect<Assignable<ParamsOf<"terminal_open">, IpcCommandMap["terminal_open"]["params"]>>;
   terminal_write: Expect<Assignable<ParamsOf<"terminal_write">, IpcCommandMap["terminal_write"]["params"]>>;
   terminal_resize: Expect<Assignable<ParamsOf<"terminal_resize">, IpcCommandMap["terminal_resize"]["params"]>>;
@@ -64,15 +69,23 @@ export type _IpcParamsContracts = {
   provider_save_openai: Expect<Assignable<ParamsOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["params"]>>;
   provider_import_ccswitch: Expect<Assignable<ParamsOf<"provider_import_ccswitch">, IpcCommandMap["provider_import_ccswitch"]["params"]>>;
   provider_import_ccswitch_apply: Expect<Assignable<ParamsOf<"provider_import_ccswitch_apply">, IpcCommandMap["provider_import_ccswitch_apply"]["params"]>>;
+  provider_import_codex: Expect<Assignable<ParamsOf<"provider_import_codex">, IpcCommandMap["provider_import_codex"]["params"]>>;
+  provider_import_codex_apply: Expect<Assignable<ParamsOf<"provider_import_codex_apply">, IpcCommandMap["provider_import_codex_apply"]["params"]>>;
+  provider_activate: Expect<Assignable<ParamsOf<"provider_activate">, IpcCommandMap["provider_activate"]["params"]>>;
+  provider_models: Expect<Assignable<ParamsOf<"provider_models">, IpcCommandMap["provider_models"]["params"]>>;
 };
 
 export type _IpcResponseContracts = {
   core_ping: Expect<Assignable<ResponseOf<"core_ping">, IpcCommandMap["core_ping"]["response"]>>;
   server_list: Expect<Assignable<ResponseOf<"server_list">, IpcCommandMap["server_list"]["response"]>>;
   server_add: Expect<Assignable<ResponseOf<"server_add">, IpcCommandMap["server_add"]["response"]>>;
+  server_update: Expect<Assignable<ResponseOf<"server_update">, IpcCommandMap["server_update"]["response"]>>;
+  server_delete: Expect<Assignable<ResponseOf<"server_delete">, IpcCommandMap["server_delete"]["response"]>>;
   server_connect: Expect<Assignable<ResponseOf<"server_connect">, IpcCommandMap["server_connect"]["response"]>>;
   server_disconnect: Expect<Assignable<ResponseOf<"server_disconnect">, IpcCommandMap["server_disconnect"]["response"]>>;
   server_snapshot: Expect<Assignable<ResponseOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["response"]>>;
+  remote_file_list: Expect<Assignable<ResponseOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["response"]>>;
+  remote_file_read: Expect<Assignable<ResponseOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["response"]>>;
   terminal_open: Expect<Assignable<ResponseOf<"terminal_open">, IpcCommandMap["terminal_open"]["response"]>>;
   terminal_write: Expect<Assignable<ResponseOf<"terminal_write">, IpcCommandMap["terminal_write"]["response"]>>;
   terminal_resize: Expect<Assignable<ResponseOf<"terminal_resize">, IpcCommandMap["terminal_resize"]["response"]>>;
@@ -88,4 +101,8 @@ export type _IpcResponseContracts = {
   provider_save_openai: Expect<Assignable<ResponseOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["response"]>>;
   provider_import_ccswitch: Expect<Assignable<ResponseOf<"provider_import_ccswitch">, IpcCommandMap["provider_import_ccswitch"]["response"]>>;
   provider_import_ccswitch_apply: Expect<Assignable<ResponseOf<"provider_import_ccswitch_apply">, IpcCommandMap["provider_import_ccswitch_apply"]["response"]>>;
+  provider_import_codex: Expect<Assignable<ResponseOf<"provider_import_codex">, IpcCommandMap["provider_import_codex"]["response"]>>;
+  provider_import_codex_apply: Expect<Assignable<ResponseOf<"provider_import_codex_apply">, IpcCommandMap["provider_import_codex_apply"]["response"]>>;
+  provider_activate: Expect<Assignable<ResponseOf<"provider_activate">, IpcCommandMap["provider_activate"]["response"]>>;
+  provider_models: Expect<Assignable<ResponseOf<"provider_models">, IpcCommandMap["provider_models"]["response"]>>;
 };

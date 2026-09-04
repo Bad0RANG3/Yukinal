@@ -7,10 +7,12 @@
 
 import { IPC_COMMANDS, type AgentStreamEvent, type ApprovalRequest } from "@yukinal/shared";
 import { listen } from "@tauri-apps/api/event";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useAgentStatus } from "../../lib/runtime.js";
+import { useWorkspaceStore } from "../../stores/workspace-store.js";
 
 type Entry =
   | { kind: "user"; text: string }
@@ -31,11 +33,27 @@ const RUN_STATE_LABEL: Record<string, string> = {
 
 export function AgentPanel() {
   const agentStatus = useAgentStatus();
+  const providers = useQuery({
+    queryKey: ["providers"],
+    enabled: isDesktopShell(),
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
+  });
+  const selectedProviderId = useWorkspaceStore((state) => state.selectedProviderId);
+  const selectedModel = useWorkspaceStore((state) => state.selectedModel);
+  const selectProvider = useWorkspaceStore((state) => state.selectProvider);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
   const [runState, setRunState] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
+  const [pendingApprovals, setPendingApprovals] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!providers.data?.length) return;
+    const current = providers.data.find((provider) => provider.id === selectedProviderId);
+    const fallback = providers.data.find((provider) => provider.enabled) ?? providers.data[0];
+    if (!current && fallback) selectProvider(fallback.id, fallback.model);
+  }, [providers.data, selectedProviderId, selectProvider]);
 
   // 流式文本按 run 累积（事件乱序也没关系，同 run 追加）。
   const activeRunRef = useRef<string | null>(null);
@@ -43,8 +61,15 @@ export function AgentPanel() {
   useEffect(() => {
     if (!isDesktopShell()) return;
     const unlisteners: Array<() => void> = [];
+    let disposed = false;
     const on = (name: string, handler: (payload: unknown) => void): void => {
-      listen(name, (event) => handler(event.payload)).then((unlisten) => unlisteners.push(unlisten));
+      void listen(name, (event) => handler(event.payload)).then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlisteners.push(unlisten);
+        }
+      });
     };
 
     const isActive = (payload: { runId?: string }): boolean => activeRunRef.current !== null && payload.runId === activeRunRef.current;
@@ -55,7 +80,9 @@ export function AgentPanel() {
       setRunId(event.runId);
       setRunning(true);
       setRunState("thinking");
-      setEntries([]);
+      // Keep the user's prompt visible. Clearing it here made the transcript
+      // jump as soon as the Rust event arrived after `agent_run_start`.
+      setEntries((current) => current);
     });
     on("agent.thinking", (payload) => {
       const event = payload as AgentStreamEvent;
@@ -117,7 +144,10 @@ export function AgentPanel() {
       setEntries((current) => [...current, { kind: "error", text: event.error }]);
     });
 
-    return () => unlisteners.forEach((unlisten) => unlisten());
+    return () => {
+      disposed = true;
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
+    };
   }, []);
 
   const send = async (): Promise<void> => {
@@ -129,6 +159,8 @@ export function AgentPanel() {
       const { runId: started } = await callDesktop(IPC_COMMANDS.agentRunStart, {
         sessionId: "ses_ui",
         prompt: text,
+        providerId: selectedProviderId ?? undefined,
+        model: selectedModel ?? undefined,
       });
       activeRunRef.current = started;
       setRunId(started);
@@ -145,46 +177,72 @@ export function AgentPanel() {
   };
 
   const respondApproval = async (approval: ApprovalRequest, decision: "approve_once" | "approve_session" | "reject"): Promise<void> => {
-    await callDesktop(IPC_COMMANDS.agentApprovalRespond, {
-      approvalId: approval.approvalId,
-      decision,
-      respondedAt: new Date().toISOString(),
-    }).catch((error) => {
+    if (pendingApprovals.includes(approval.approvalId)) return;
+    setPendingApprovals((current) => [...current, approval.approvalId]);
+    try {
+      await callDesktop(IPC_COMMANDS.agentApprovalRespond, {
+        approvalId: approval.approvalId,
+        decision,
+        respondedAt: new Date().toISOString(),
+      });
+    } catch (error) {
       setEntries((current) => [...current, { kind: "error", text: String(error) }]);
-    });
+    } finally {
+      setPendingApprovals((current) => current.filter((id) => id !== approval.approvalId));
+    }
   };
 
   const shell = isDesktopShell();
   const agentRunning = agentStatus.data?.running === true;
 
   return (
-    <aside className="flex w-96 shrink-0 flex-col bg-zinc-950/60">
-      <header className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-        <span className="text-sm font-medium">Agent</span>
+    <aside className="agent-panel">
+      <header className="agent-header">
+        <div className="agent-title"><span className="agent-orb">✦</span><div><p className="eyebrow">自动化工作区</p><h2>Agent</h2></div></div>
         {running && runState ? (
-          <span className="text-xs text-zinc-400">{RUN_STATE_LABEL[runState] ?? runState}</span>
+          <span className="agent-status agent-status-active"><span className="status-pulse" />{RUN_STATE_LABEL[runState] ?? runState}</span>
         ) : (
-          <span className="text-xs text-zinc-500">
+          <span className={`agent-status ${agentRunning ? "agent-status-ready" : "agent-status-idle"}`}>
             {agentRunning ? "agent 运行中" : "agent 未启动"}
           </span>
         )}
       </header>
 
-      <div className="flex-1 space-y-2 overflow-auto p-3 text-sm">
+      <div className="agent-feed">
         {entries.length === 0 ? (
-          <p className="text-zinc-500">用目标提问，而不是命令：“为什么 staging API 在重启？”</p>
+          <div className="agent-empty"><span className="agent-empty-mark">✦</span><strong>从目标开始</strong><p>例如：为什么 staging API 一直在重启？</p></div>
         ) : (
-          entries.map((entry, index) => <EntryView key={index} entry={entry} onApproval={respondApproval} />)
+          entries.map((entry, index) => <EntryView key={index} entry={entry} onApproval={respondApproval} approvalBusy={entry.kind === "approval" && pendingApprovals.includes(entry.approval.approvalId)} />)
         )}
         {!shell || !agentRunning ? (
-          <p className="rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-200">
+          <p className="agent-notice">
             {!shell ? "浏览器预览：无法触达 Rust 核心。" : "先启动 agent（左下角），再配置 provider（设置 ▸ Provider）。"}
           </p>
         ) : null}
       </div>
 
-      <footer className="space-y-2 border-t border-zinc-800 p-3">
-        <div className="flex gap-2">
+      <footer className="agent-composer">
+        {providers.data?.length ? (
+          <div className="composer-meta">
+            <select
+              aria-label="AI Provider"
+              value={selectedProviderId ?? ""}
+              onChange={(event) => {
+                const provider = providers.data?.find((item) => item.id === event.target.value);
+                if (provider) selectProvider(provider.id, provider.model);
+              }}
+              className="composer-select"
+            >
+              {providers.data.map((provider) => (
+                <option key={provider.id} value={provider.id} disabled={!provider.enabled}>
+                  {provider.label}{provider.enabled ? "" : " (disabled)"}
+                </option>
+              ))}
+            </select>
+            {selectedModel ? <span className="composer-model">{selectedModel}</span> : null}
+          </div>
+        ) : null}
+        <div className="composer-row">
           <input
             value={prompt}
             disabled={!shell || !agentRunning || running}
@@ -193,13 +251,13 @@ export function AgentPanel() {
               if (event.key === "Enter" && !event.shiftKey) void send();
             }}
             placeholder={running ? "运行中…" : "输入你想让 agent 做的事"}
-            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600 disabled:opacity-50"
+            className="composer-input"
           />
           {running ? (
             <button
               type="button"
               onClick={() => void stop()}
-              className="rounded-md border border-rose-700 px-3 py-1.5 text-sm text-rose-300"
+              className="composer-button composer-button-stop"
             >
               停止
             </button>
@@ -208,7 +266,7 @@ export function AgentPanel() {
               type="button"
               disabled={!prompt.trim()}
               onClick={() => void send()}
-              className="rounded-md bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 disabled:opacity-40"
+              className="composer-button composer-button-send"
             >
               发送
             </button>
@@ -222,34 +280,36 @@ export function AgentPanel() {
 function EntryView({
   entry,
   onApproval,
+  approvalBusy,
 }: {
   entry: Entry;
   onApproval: (approval: ApprovalRequest, decision: "approve_once" | "approve_session" | "reject") => Promise<void>;
+  approvalBusy: boolean;
 }) {
   switch (entry.kind) {
     case "user":
-      return <div className="rounded-md bg-zinc-900 px-2 py-1.5">{entry.text}</div>;
+      return <div className="agent-entry agent-entry-user"><span className="entry-label">你</span><div>{entry.text}</div></div>;
     case "assistant":
-      return <div className="whitespace-pre-wrap text-zinc-200">{entry.text || "…"}</div>;
+      return <div className="agent-entry agent-entry-assistant"><span className="entry-label">Agent</span><div className="whitespace-pre-wrap">{entry.text || "…"}</div></div>;
     case "tool_call":
-      return <div className="rounded-md border border-zinc-800 px-2 py-1.5 font-mono text-xs text-zinc-300">{entry.text}</div>;
+      return <div className="tool-card tool-card-call"><span className="tool-card-label">工具调用</span><code>{entry.text}</code></div>;
     case "tool_result":
-      return <div className="rounded-md border border-zinc-800 px-2 py-1.5 font-mono text-xs text-zinc-500">{entry.text}</div>;
+      return <div className="tool-card tool-card-result"><span className="tool-card-label">结果</span><code>{entry.text}</code></div>;
     case "error":
-      return <div className="rounded-md border border-rose-500/40 px-2 py-1.5 text-xs text-rose-300">{entry.text}</div>;
+      return <div className="agent-error">{entry.text}</div>;
     case "approval":
       return (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
-          <div className="mb-1 font-medium text-amber-200">需要审批：{entry.approval.toolName}</div>
-          <p className="mb-2 text-amber-200/70">{entry.approval.reason}</p>
-          <div className="flex gap-1.5">
-            <button type="button" className="rounded border border-zinc-600 px-2 py-0.5 text-zinc-200" onClick={() => void onApproval(entry.approval, "reject")}>
+        <div className="approval-card">
+          <div className="approval-heading"><span className="approval-icon">!</span><div><strong>需要审批</strong><code>{entry.approval.toolName}</code></div></div>
+          <p>{entry.approval.reason}</p>
+          <div className="approval-actions">
+            <button type="button" className="approval-button approval-button-reject" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "reject")}>
               拒绝
             </button>
-            <button type="button" className="rounded bg-amber-400 px-2 py-0.5 text-zinc-900" onClick={() => void onApproval(entry.approval, "approve_once")}>
+            <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_once")}>
               批准一次
             </button>
-            <button type="button" className="rounded bg-amber-400 px-2 py-0.5 text-zinc-900" onClick={() => void onApproval(entry.approval, "approve_session")}>
+            <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_session")}>
               本次会话批准
             </button>
           </div>

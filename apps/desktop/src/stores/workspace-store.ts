@@ -20,19 +20,27 @@ export interface WorkspaceState {
   primary: PrimaryNav;
   serverPage: ServerPage;
   selectedServerId: string | null;
+  selectedProviderId: string | null;
+  selectedModel: string | null;
   /** Right panel is never dismissible in the MVP. */
   agentOpen: boolean;
   setPrimary(primary: PrimaryNav): void;
   setServerPage(page: ServerPage): void;
   selectServer(serverId: string | null): void;
+  selectProvider(providerId: string | null, model?: string | null): void;
+  selectModel(model: string | null): void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   primary: "servers",
   serverPage: "overview",
   selectedServerId: null,
+  selectedProviderId: null,
+  selectedModel: null,
   agentOpen: true,
   setPrimary: (primary) => set({ primary }),
-  setServerPage: (serverPage) => set({ serverPage }),
+  setServerPage: (serverPage) => set({ serverPage, primary: "servers" }),
   selectServer: (selectedServerId) => set({ selectedServerId, serverPage: "overview" }),
+  selectProvider: (selectedProviderId, selectedModel = null) => set({ selectedProviderId, selectedModel }),
+  selectModel: (selectedModel) => set({ selectedModel }),
 }));

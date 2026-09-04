@@ -8,8 +8,9 @@
 
 import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
 import type { ServerSnapshot } from "../types/collector.js";
-import type { AddServerInput, Server } from "../types/server.js";
-import type { AiProviderConfig, CcSwitchProviderCandidate, ProviderSaveInput } from "../types/provider.js";
+import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
+import type { AddServerInput, Server, UpdateServerInput } from "../types/server.js";
+import type { AiProviderConfig, CcSwitchProviderCandidate, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -17,11 +18,15 @@ export const IPC_COMMANDS = {
   /** Server CRUD, backed by the local database. */
   serverList: "server_list",
   serverAdd: "server_add",
+  serverUpdate: "server_update",
+  serverDelete: "server_delete",
   /** SSH connect / disconnect. */
   serverConnect: "server_connect",
   serverDisconnect: "server_disconnect",
   /** Latest collected snapshot. */
   serverSnapshot: "server_snapshot",
+  remoteFileList: "remote_file_list",
+  remoteFileRead: "remote_file_read",
   /** Terminal byte streams leave as events, not command returns. */
   terminalOpen: "terminal_open",
   terminalWrite: "terminal_write",
@@ -42,6 +47,10 @@ export const IPC_COMMANDS = {
   /** Import candidates from CC Switch (Rust reads the os store key at apply time). */
   providerImportCcSwitch: "provider_import_ccswitch",
   providerImportCcSwitchApply: "provider_import_ccswitch_apply",
+  providerImportCodex: "provider_import_codex",
+  providerImportCodexApply: "provider_import_codex_apply",
+  providerActivate: "provider_activate",
+  providerModels: "provider_models",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
@@ -50,9 +59,13 @@ export interface IpcCommandMap {
   core_ping: { params: Record<string, never>; response: { version: string; os: string } };
   server_list: { params: Record<string, never>; response: { servers: Server[] } };
   server_add: { params: AddServerInput; response: { server: Server } };
+  server_update: { params: UpdateServerInput; response: { server: Server } };
+  server_delete: { params: { serverId: string }; response: { deleted: boolean } };
   server_connect: { params: { serverId: string }; response: { status: "connected" } };
   server_disconnect: { params: { serverId: string }; response: Record<string, never> };
   server_snapshot: { params: { serverId: string }; response: { snapshot: ServerSnapshot } };
+  remote_file_list: { params: { serverId: string; path: string }; response: RemoteFileListResponse };
+  remote_file_read: { params: { serverId: string; path: string }; response: RemoteFileReadResponse };
   terminal_open: {
     params: { serverId: string; cols: number; rows: number };
     response: { terminalSessionId: string };
@@ -68,7 +81,7 @@ export interface IpcCommandMap {
   agent_status: { params: Record<string, never>; response: AgentStatus };
   agent_logs: { params: Record<string, never>; response: AgentLogs };
   agent_run_start: {
-    params: { sessionId: string; prompt: string };
+    params: { sessionId: string; prompt: string; providerId?: string; model?: string };
     response: { runId: string };
   };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
@@ -85,6 +98,22 @@ export interface IpcCommandMap {
   provider_import_ccswitch_apply: {
     params: { ccSwitchProviderId: string };
     response: { provider: AiProviderConfig };
+  };
+  provider_import_codex: {
+    params: Record<string, never>;
+    response: { providers: CcSwitchProviderCandidate[] };
+  };
+  provider_import_codex_apply: {
+    params: { codexProviderId: string; model?: string };
+    response: { provider: AiProviderConfig };
+  };
+  provider_activate: {
+    params: { providerId: string };
+    response: { provider: AiProviderConfig };
+  };
+  provider_models: {
+    params: { providerId: string };
+    response: { models: ProviderModelOption[] };
   };
 }
 

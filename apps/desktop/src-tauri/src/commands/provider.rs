@@ -5,8 +5,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::state::AppState;
-use yukinal_credentials::{CredentialStore, Secret};
-use yukinal_database::models::{AiProviderConfig, AiProviderKind};
+use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
+use yukinal_database::models::{AiProviderConfig, AiProviderKind, ProviderModelOption};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,12 +33,16 @@ pub async fn provider_list(state: State<'_, AppState>) -> Result<ProviderListRes
 /// 保存 OpenAI-compatible provider。apiKey 给了就换一份（进 keychain）；不给就保留
 /// 旧引用（不然每次保存都要重新粘贴 key）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn provider_save_openai(
     state: State<'_, AppState>,
     base_url: String,
     model: String,
     label: Option<String>,
     api_key: Option<String>,
+    provider_id: Option<String>,
+    wire_api: Option<String>,
+    models: Option<Vec<ProviderModelOption>>,
 ) -> Result<ProviderSaveResponse, String> {
     let existing = state
         .database
@@ -46,7 +50,12 @@ pub async fn provider_save_openai(
         .list_ai()
         .map_err(|error| error.to_string())?
         .into_iter()
-        .find(|provider| provider.enabled);
+        .find(|provider| {
+            provider_id
+                .as_deref()
+                .map(|id| provider.id == id)
+                .unwrap_or(provider.enabled)
+        });
 
     let id = existing
         .as_ref()
@@ -78,7 +87,17 @@ pub async fn provider_save_openai(
         enabled: true,
         custom_headers: None,
         max_input_tokens: None,
-        wire_api: "chat".into(),
+        wire_api: wire_api.unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .map(|provider| provider.wire_api.clone())
+                .unwrap_or_else(|| "chat".into())
+        }),
+        models: models.or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|provider| provider.models.clone())
+        }),
         created_at: existing
             .as_ref()
             .map(|provider| provider.created_at.clone())
@@ -90,6 +109,7 @@ pub async fn provider_save_openai(
         .providers()
         .upsert_ai(&provider)
         .map_err(|error| error.to_string())?;
+    activate_only(&state, &provider.id)?;
 
     Ok(ProviderSaveResponse { provider })
 }
@@ -109,22 +129,22 @@ pub struct CcSwitchImportListResponse {
 pub async fn provider_import_ccswitch(
     _state: State<'_, AppState>,
 ) -> Result<CcSwitchImportListResponse, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "无法确定用户目录（USERPROFILE/HOME 均缺失）".to_string())?;
-    let providers = yukinal_core::ccswitch::read_ccswitch(std::path::Path::new(&home))
-        .map_err(|error| error.to_string())?;
+    let home = user_home()?;
+    let providers =
+        yukinal_core::ccswitch::read_ccswitch(&home).map_err(|error| error.to_string())?;
 
     let items: Vec<serde_json::Value> = providers
         .into_iter()
         .map(|provider| {
+            let models = provider.models;
             serde_json::json!({
                 "id": provider.id,
                 "name": provider.name,
-                "baseUrl": provider.base_url,
-                "model": provider.model,
+                "baseUrl": provider.base_url.clone(),
+                "model": provider.model.clone(),
                 "wireApi": provider.wire_api.as_str(),
                 "hasApiKey": provider.has_api_key,
+                "models": models,
             })
         })
         .collect();
@@ -137,11 +157,9 @@ pub async fn provider_import_ccswitch_apply(
     state: State<'_, AppState>,
     cc_switch_provider_id: String,
 ) -> Result<ProviderSaveResponse, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "无法确定用户目录（USERPROFILE/HOME 均缺失）".to_string())?;
-    let providers = yukinal_core::ccswitch::read_ccswitch(std::path::Path::new(&home))
-        .map_err(|error| error.to_string())?;
+    let home = user_home()?;
+    let providers =
+        yukinal_core::ccswitch::read_ccswitch(&home).map_err(|error| error.to_string())?;
     let found = providers
         .into_iter()
         .find(|provider| provider.id == cc_switch_provider_id)
@@ -149,9 +167,16 @@ pub async fn provider_import_ccswitch_apply(
 
     let api_key_credential_ref = match found.api_key() {
         Some(key) => {
+            // Each imported provider gets its own keychain account. Reusing a
+            // fixed account would make importing provider B silently replace
+            // provider A's credential reference.
+            let account = format!(
+                "ccswitch_{}",
+                cc_switch_provider_id.replace([':', '/'], "_")
+            );
             let reference = state
                 .credentials
-                .set("openai", "default", &Secret::from_utf8(key.to_string()))
+                .set("openai", &account, &Secret::from_utf8(key.to_string()))
                 .map_err(|error| error.to_string())?;
             Some(reference.to_string_ref())
         }
@@ -173,6 +198,19 @@ pub async fn provider_import_ccswitch_apply(
             yukinal_core::ccswitch::WireApi::Responses => "responses".into(),
             yukinal_core::ccswitch::WireApi::Chat => "chat".into(),
         },
+        models: Some(
+            found
+                .models
+                .iter()
+                .map(|model| ProviderModelOption {
+                    id: model.id.clone(),
+                    label: model.label.clone(),
+                    context_window: model.context_window,
+                    supports_tool_calling: model.supports_tool_calling,
+                    supports_streaming: model.supports_streaming,
+                })
+                .collect(),
+        ),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -181,5 +219,241 @@ pub async fn provider_import_ccswitch_apply(
         .providers()
         .upsert_ai(&provider)
         .map_err(|error| error.to_string())?;
+    activate_only(&state, &provider.id)?;
     Ok(ProviderSaveResponse { provider })
+}
+
+fn user_home() -> Result<std::path::PathBuf, String> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "无法确定用户目录（USERPROFILE/HOME 均缺失）".to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelsResponse {
+    pub models: Vec<ProviderModelOption>,
+}
+
+#[tauri::command]
+pub async fn provider_models(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<ProviderModelsResponse, String> {
+    let provider = state
+        .database
+        .providers()
+        .get_ai(&provider_id)
+        .map_err(|error| error.to_string())?;
+    let cached = provider.models.clone().unwrap_or_else(|| {
+        vec![ProviderModelOption {
+            id: provider.model.clone(),
+            label: provider.model.clone(),
+            context_window: None,
+            supports_tool_calling: true,
+            supports_streaming: true,
+        }]
+    });
+    let api_key = resolve_api_key(&state, &provider)?;
+    let response = state
+        .supervisor
+        .request(
+            "provider.models",
+            serde_json::json!({
+                "kind": "openai-compatible",
+                "baseUrl": provider.base_url,
+                "model": provider.model,
+                "apiKey": api_key,
+                "customHeaders": provider.custom_headers.clone(),
+                "timeoutMs": 30_000,
+                "wireApi": provider.wire_api.clone(),
+            }),
+            std::time::Duration::from_secs(35),
+        )
+        .await
+        .map_err(|error| format!("model endpoint unavailable: {error}"))?;
+    let models = response
+        .get("models")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<ProviderModelOption>>(value).ok())
+        .filter(|models| !models.is_empty())
+        .unwrap_or(cached);
+    let mut updated = provider;
+    updated.models = Some(models.clone());
+    updated.updated_at = yukinal_core::sidecar::iso8601_now();
+    state
+        .database
+        .providers()
+        .upsert_ai(&updated)
+        .map_err(|error| error.to_string())?;
+    Ok(ProviderModelsResponse { models })
+}
+
+fn resolve_api_key(
+    state: &AppState,
+    provider: &AiProviderConfig,
+) -> Result<Option<String>, String> {
+    let Some(reference) = provider.api_key_credential_ref.as_deref() else {
+        return Ok(None);
+    };
+    let reference = CredentialRef::parse(reference).map_err(|error| error.to_string())?;
+    let secret = state
+        .credentials
+        .get(&reference)
+        .map_err(|error| error.to_string())?;
+    secret
+        .as_utf8()
+        .map(|value| Some(value.into_owned()))
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderActivateResponse {
+    pub provider: AiProviderConfig,
+}
+
+#[tauri::command]
+pub async fn provider_activate(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<ProviderActivateResponse, String> {
+    let providers = state
+        .database
+        .providers()
+        .list_ai()
+        .map_err(|error| error.to_string())?;
+    let selected = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .cloned()
+        .ok_or_else(|| format!("未找到 Provider `{provider_id}`"))?;
+    for mut provider in providers {
+        let should_enable = provider.id == provider_id;
+        if provider.enabled != should_enable {
+            provider.enabled = should_enable;
+            state
+                .database
+                .providers()
+                .upsert_ai(&provider)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(ProviderActivateResponse {
+        provider: AiProviderConfig {
+            enabled: true,
+            ..selected
+        },
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCodexImportListResponse {
+    pub providers: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+pub async fn provider_import_codex(
+    _state: State<'_, AppState>,
+) -> Result<LocalCodexImportListResponse, String> {
+    let providers =
+        yukinal_core::ccswitch::read_codex(&user_home()?).map_err(|error| error.to_string())?;
+    Ok(LocalCodexImportListResponse {
+        providers: providers
+            .into_iter()
+            .map(|provider| {
+                serde_json::json!({
+                    "id": provider.id,
+                    "name": provider.name,
+                    "baseUrl": provider.base_url,
+                    "model": provider.model,
+                    "wireApi": provider.wire_api.as_str(),
+                    "hasApiKey": provider.has_api_key,
+                    "models": provider.models,
+                })
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn provider_import_codex_apply(
+    state: State<'_, AppState>,
+    codex_provider_id: String,
+    model: Option<String>,
+) -> Result<ProviderSaveResponse, String> {
+    let providers =
+        yukinal_core::ccswitch::read_codex(&user_home()?).map_err(|error| error.to_string())?;
+    let found = providers
+        .into_iter()
+        .find(|provider| provider.id == codex_provider_id)
+        .ok_or_else(|| format!("本地 Codex 配置中没有 `{codex_provider_id}`"))?;
+    let api_key_credential_ref = found
+        .api_key()
+        .map(|key| {
+            state
+                .credentials
+                .set("openai", "codex_local", &Secret::from_utf8(key.to_string()))
+                .map(|reference| reference.to_string_ref())
+                .map_err(|error| error.to_string())
+        })
+        .transpose()?;
+    let now = yukinal_core::sidecar::iso8601_now();
+    let provider = AiProviderConfig {
+        id: crate::commands::server::next_id("prv"),
+        kind: AiProviderKind::OpenaiCompatible,
+        label: found.name,
+        base_url: found.base_url,
+        model: model.unwrap_or(found.model),
+        api_key_credential_ref,
+        enabled: true,
+        custom_headers: None,
+        max_input_tokens: None,
+        wire_api: found.wire_api.as_str().to_string(),
+        models: Some(
+            found
+                .models
+                .into_iter()
+                .map(|model| ProviderModelOption {
+                    id: model.id,
+                    label: model.label,
+                    context_window: model.context_window,
+                    supports_tool_calling: model.supports_tool_calling,
+                    supports_streaming: model.supports_streaming,
+                })
+                .collect(),
+        ),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    state
+        .database
+        .providers()
+        .upsert_ai(&provider)
+        .map_err(|error| error.to_string())?;
+    activate_only(&state, &provider.id)?;
+    Ok(ProviderSaveResponse { provider })
+}
+
+fn activate_only(state: &AppState, provider_id: &str) -> Result<(), String> {
+    let providers = state
+        .database
+        .providers()
+        .list_ai()
+        .map_err(|error| error.to_string())?;
+    for mut provider in providers {
+        let enabled = provider.id == provider_id;
+        if provider.enabled != enabled {
+            provider.enabled = enabled;
+            provider.updated_at = yukinal_core::sidecar::iso8601_now();
+            state
+                .database
+                .providers()
+                .upsert_ai(&provider)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }

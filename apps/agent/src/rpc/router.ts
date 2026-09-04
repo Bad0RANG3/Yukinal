@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   AGENT_METHODS,
   AgentRunRequestSchema,
+  RuntimeProviderConfigSchema,
   ApprovalResponseSchema,
   YUKINAL_RPC_VERSION,
   RPC_ERROR,
@@ -42,6 +43,7 @@ export const IMPLEMENTATION_STATUS: Record<string, boolean> = {
   [AGENT_METHODS.runStart]: true,
   [AGENT_METHODS.runStop]: true,
   [AGENT_METHODS.approvalRespond]: true,
+  [AGENT_METHODS.providerModels]: true,
 };
 
 export class RpcRouter {
@@ -94,6 +96,11 @@ export class RpcRouter {
       case AGENT_METHODS.approvalRespond: {
         const response = parseOrThrow(ApprovalResponseSchema, request.params) as ApprovalResponse;
         return { accepted: this.deps.loop.respondApproval(response) };
+      }
+      case AGENT_METHODS.providerModels: {
+        const config = parseOrThrow(RuntimeProviderConfigSchema, request.params);
+        const provider = buildProvider(config);
+        return { models: await provider.listModels() };
       }
       default:
         throw new RpcFailure(RPC_ERROR.METHOD_NOT_FOUND, `Unknown method "${request.method}"`);
@@ -202,5 +209,6 @@ function buildProvider(config: RuntimeProviderConfig | undefined): OpenAiCompati
     apiKey: config.apiKey,
     customHeaders: config.customHeaders,
     timeoutMs: config.timeoutMs,
+    wireApi: config.wireApi,
   });
 }

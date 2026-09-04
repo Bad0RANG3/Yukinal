@@ -32,6 +32,24 @@ impl<'a> IdentitiesRepository<'a> {
         })
     }
 
+    pub fn update(&self, identity: &Identity) -> Result<()> {
+        self.db.with(|connection| {
+            let changed = connection.execute(
+                "UPDATE identities SET label = ?2, method = ?3, credential_ref = ?4 WHERE id = ?1",
+                params![
+                    identity.id,
+                    identity.label,
+                    identity.method,
+                    identity.credential_ref
+                ],
+            )?;
+            if changed == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
     pub fn get(&self, id: &str) -> Result<Identity> {
         self.db.with(|connection| {
             connection
@@ -101,6 +119,21 @@ impl<'a> IdentitiesRepository<'a> {
             let rows = statement.query_map(params![server_id], |row| row.get::<_, String>(0))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(DatabaseError::from)
+        })
+    }
+
+    pub fn attached_to_other_server(
+        &self,
+        identity_id: &str,
+        excluding_server_id: &str,
+    ) -> Result<bool> {
+        self.db.with(|connection| {
+            let attached: i64 = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM server_identities WHERE identity_id = ?1 AND server_id <> ?2)",
+                params![identity_id, excluding_server_id],
+                |row| row.get(0),
+            )?;
+            Ok(attached != 0)
         })
     }
 }

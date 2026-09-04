@@ -73,6 +73,17 @@ export const AddServerInputSchema = z.object({
   ]),
 });
 
+export const UpdateServerInputSchema = z.object({
+  serverId: z.string().regex(/^srv_[a-z0-9]+$/),
+  name: z.string().min(1),
+  host: z.string().min(1),
+  port: z.number().int().min(1).max(65535).optional(),
+  username: z.string().min(1),
+  environment: EnvironmentSchema,
+  groupId: z.string().optional(),
+  authentication: AddServerInputSchema.shape.authentication.optional(),
+});
+
 export const ToolTargetSchema = z.object({
   host: z.enum(["local", "remote"]),
   serverId: z.string().optional(),

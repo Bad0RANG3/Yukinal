@@ -13,10 +13,15 @@
 import { z } from "zod";
 
 import type { IpcCommandName } from "../ipc/index.js";
-import { AddServerInputSchema, ServerSchema } from "./server.js";
+import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ApprovalResponseSchema } from "./permission.js";
-import { CcSwitchProviderCandidateSchema, ProviderConfigSchema, ProviderSaveInputSchema } from "./provider.js";
+import {
+  CcSwitchProviderCandidateSchema,
+  ProviderConfigSchema,
+  ProviderModelOptionSchema,
+  ProviderSaveInputSchema,
+} from "./provider.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -85,6 +90,11 @@ export const IPC_SCHEMAS = {
   core_ping: { params: EMPTY_PAYLOAD, response: CorePingResponseSchema },
   server_list: { params: EMPTY_PAYLOAD, response: ServerListResponseSchema },
   server_add: { params: AddServerInputSchema, response: ServerAddResponseSchema },
+  server_update: { params: UpdateServerInputSchema, response: ServerAddResponseSchema },
+  server_delete: {
+    params: z.strictObject({ serverId: IpcServerIdSchema }),
+    response: z.strictObject({ deleted: z.boolean() }),
+  },
   server_connect: {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
     response: ServerConnectResponseSchema,
@@ -96,6 +106,14 @@ export const IPC_SCHEMAS = {
   server_snapshot: {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
     response: ServerSnapshotResponseSchema,
+  },
+  remote_file_list: {
+    params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
+    response: z.strictObject({ path: z.string().min(1), entries: z.array(z.strictObject({ name: z.string(), path: z.string(), type: z.enum(["file", "directory", "symlink", "other"]), size: z.number().nonnegative() })) }),
+  },
+  remote_file_read: {
+    params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
+    response: z.strictObject({ path: z.string().min(1), content: z.string(), truncated: z.boolean() }),
   },
   terminal_open: {
     params: z.strictObject({
@@ -129,6 +147,8 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({
       sessionId: z.string().min(1),
       prompt: z.string().min(1),
+      providerId: z.string().min(1).optional(),
+      model: z.string().min(1).optional(),
     }),
     response: z.strictObject({ runId: z.string().min(1) }),
   },
@@ -152,5 +172,21 @@ export const IPC_SCHEMAS = {
   provider_import_ccswitch_apply: {
     params: z.strictObject({ ccSwitchProviderId: z.string().min(1) }),
     response: z.strictObject({ provider: ProviderConfigSchema }),
+  },
+  provider_import_codex: {
+    params: EMPTY_PAYLOAD,
+    response: z.strictObject({ providers: z.array(CcSwitchProviderCandidateSchema) }),
+  },
+  provider_import_codex_apply: {
+    params: z.strictObject({ codexProviderId: z.string().min(1), model: z.string().min(1).optional() }),
+    response: z.strictObject({ provider: ProviderConfigSchema }),
+  },
+  provider_activate: {
+    params: z.strictObject({ providerId: z.string().min(1) }),
+    response: z.strictObject({ provider: ProviderConfigSchema }),
+  },
+  provider_models: {
+    params: z.strictObject({ providerId: z.string().min(1) }),
+    response: z.strictObject({ models: z.array(ProviderModelOptionSchema) }),
   },
 } satisfies Record<IpcCommandName, IpcCommandSchema>;

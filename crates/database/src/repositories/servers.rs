@@ -92,6 +92,20 @@ impl<'a> ServersRepository<'a> {
         })
     }
 
+    /// Update only the connection lifecycle marker without replacing the row.
+    pub fn set_status(&self, id: &str, status: ServerStatus, updated_at: &str) -> Result<()> {
+        self.db.with(|connection| {
+            let changed = connection.execute(
+                "UPDATE servers SET status = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, status.as_str(), updated_at],
+            )?;
+            if changed == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
     /// Delete the server row and everything that cascades from it (snapshots,
     /// services, `server_identities` via foreign keys).
     pub fn delete(&self, id: &str) -> Result<()> {

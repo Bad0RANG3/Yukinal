@@ -5,6 +5,14 @@
 
 import { z } from "zod";
 
+export const ProviderModelOptionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  contextWindow: z.number().int().positive().optional(),
+  supportsToolCalling: z.boolean(),
+  supportsStreaming: z.boolean(),
+});
+
 export const ProviderConfigSchema = z.object({
   id: z.string().min(1),
   kind: z.literal("openai-compatible"),
@@ -16,15 +24,19 @@ export const ProviderConfigSchema = z.object({
   customHeaders: z.record(z.string(), z.string()).optional(),
   maxInputTokens: z.number().int().positive().optional(),
   wireApi: z.enum(["chat", "responses"]).optional(),
+  models: z.array(ProviderModelOptionSchema).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 
 export const ProviderSaveInputSchema = z.object({
+  providerId: z.string().min(1).optional(),
   label: z.string().optional(),
   baseUrl: z.string().min(1),
   model: z.string().min(1),
   apiKey: z.string().min(1).optional(),
+  wireApi: z.enum(["chat", "responses"]).optional(),
+  models: z.array(ProviderModelOptionSchema).optional(),
 });
 export const CcSwitchProviderCandidateSchema = z.object({
   id: z.string().min(1),
@@ -33,4 +45,5 @@ export const CcSwitchProviderCandidateSchema = z.object({
   model: z.string().min(1),
   wireApi: z.enum(["chat", "responses"]),
   hasApiKey: z.boolean(),
+  models: z.array(ProviderModelOptionSchema).optional(),
 });

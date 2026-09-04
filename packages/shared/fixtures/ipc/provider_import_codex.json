@@ -1,0 +1,1 @@
+{"providers":[{"id":"codex:local","name":"Codex","baseUrl":"https://api.openai.com/v1","model":"gpt-5.2","wireApi":"responses","hasApiKey":true,"models":[{"id":"gpt-5.2","label":"GPT-5.2","contextWindow":128000,"supportsToolCalling":true,"supportsStreaming":true}]}]}

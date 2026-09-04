@@ -16,6 +16,7 @@ export * from "./types/activity.js";
 export * from "./types/provider.js";
 export * from "./types/chat.js";
 export * from "./types/health.js";
+export * from "./types/file.js";
 
 export * from "./schemas/server.js";
 export * from "./schemas/permission.js";

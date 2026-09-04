@@ -16,22 +16,20 @@ export function RuntimeStrip() {
   const running = status.data?.running === true;
 
   return (
-    <div className="mt-auto border-t border-zinc-800 px-2 py-2 text-[11px] leading-relaxed text-zinc-500">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate">
-          <span className={running ? "text-emerald-400" : "text-zinc-500"}>
-            {shell ? (running ? "●" : "○") : "○"}
-          </span>{" "}
-          {statusLabel(status.data, shell)}
-        </span>
+    <div className="runtime-strip">
+      <div className="runtime-strip-title">
+        <span className={`runtime-dot ${running ? "runtime-dot-running" : ""}`} />
+        <span className="runtime-strip-label">运行时</span>
+        <span className="runtime-strip-state">{running ? "在线" : shell ? "已停止" : "预览"}</span>
       </div>
+      <p className="runtime-strip-detail">{statusLabel(status.data, shell)}</p>
 
-      <div className="mt-1 flex items-center gap-2">
+      <div className="runtime-actions">
         <button
           type="button"
           disabled={!shell || running || spawn.isPending}
           onClick={() => spawn.mutate()}
-          className="rounded border border-zinc-700 px-1.5 py-0.5 text-zinc-300 disabled:opacity-40"
+          className="runtime-action"
         >
           {spawn.isPending ? "启动中…" : "启动 agent"}
         </button>
@@ -39,16 +37,16 @@ export function RuntimeStrip() {
           type="button"
           disabled={!shell || !running || kill.isPending}
           onClick={() => kill.mutate()}
-          className="rounded border border-zinc-700 px-1.5 py-0.5 text-zinc-300 disabled:opacity-40"
+          className="runtime-action"
         >
           {kill.isPending ? "停止中…" : "停止"}
         </button>
       </div>
 
-      {spawn.isError ? <p className="mt-1 break-words text-red-400">{spawn.error.message}</p> : null}
-      {status.isError ? <p className="mt-1 break-words text-red-400">{status.error.message}</p> : null}
+      {spawn.isError ? <p className="runtime-error">{spawn.error.message}</p> : null}
+      {status.isError ? <p className="runtime-error">{status.error.message}</p> : null}
 
-      <p className="mt-1 truncate">
+      <p className="runtime-core">
         {shell && core.data ? `core ${core.data.version} · ${core.data.os}` : "core：不可用（浏览器环境）"}
       </p>
     </div>

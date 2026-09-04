@@ -1,10 +1,7 @@
 /**
- * Server Overview: raw collector data → health classes (thresholds live in
- * `@yukinal/shared`, the same file the Rust core compiles in).
- *
- * Everything rendered here comes from a real `server_snapshot` run: if the host is
- * unreachable / auth failed / collectors failed, the user gets the error instead of
- * a made-up dashboard.
+ * Server Overview turns collector samples into a small set of decisions. The
+ * page never invents values: unavailable data stays visibly unavailable and
+ * collection failures remain actionable errors.
  */
 
 import { useQuery } from "@tanstack/react-query";
@@ -16,56 +13,55 @@ import {
   type ServerSnapshot,
 } from "@yukinal/shared";
 
+import { EnvBadge } from "../../components/EnvBadge.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { EnvBadge } from "../../components/EnvBadge.js";
 
 const HEALTH_DOT: Record<HealthClass | "unknown", string> = {
-  healthy: "bg-emerald-500",
-  warning: "bg-amber-400",
-  critical: "bg-rose-500",
-  unknown: "bg-zinc-600",
+  healthy: "health-dot-healthy",
+  warning: "health-dot-warning",
+  critical: "health-dot-critical",
+  unknown: "health-dot-unknown",
 };
 
 const HEALTH_LABEL: Record<HealthClass | "unknown", string> = {
-  healthy: "Healthy",
-  warning: "Warning",
-  critical: "Critical",
-  unknown: "Unknown",
+  healthy: "健康",
+  warning: "需要关注",
+  critical: "严重",
+  unknown: "未知",
 };
 
-function gaugeClass(
-  usage: number | undefined,
-  thresholds: { warning: number; critical: number },
-): HealthClass | "unknown" {
+function gaugeClass(usage: number | undefined, thresholds: { warning: number; critical: number }): HealthClass | "unknown" {
   if (usage === undefined) return "unknown";
   if (usage >= thresholds.critical) return "critical";
   if (usage >= thresholds.warning) return "warning";
   return "healthy";
 }
 
-function Gauge({
+function MetricCard({
   label,
   usage,
   thresholds,
+  hint,
 }: {
   label: string;
   usage: number | undefined;
   thresholds: { warning: number; critical: number };
+  hint: string;
 }) {
-  const klass = gaugeClass(usage, thresholds);
-  const color =
-    klass === "critical" ? "bg-rose-500" : klass === "warning" ? "bg-amber-400" : "bg-emerald-500";
+  const status = gaugeClass(usage, thresholds);
   const width = usage === undefined ? 0 : Math.min(100, Math.max(0, Math.round(usage)));
   return (
-    <div className="min-w-32 flex-1">
-      <div className="mb-1 flex items-baseline justify-between text-xs">
-        <span className="text-zinc-400">{label}</span>
-        <span className="font-mono">{usage === undefined ? "—" : `${Math.round(usage)}%`}</span>
+    <div className="metric-card">
+      <div className="metric-card-topline">
+        <span>{label}</span>
+        <span className={`metric-status metric-status-${status}`}>{HEALTH_LABEL[status]}</span>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded bg-zinc-800">
-        <div className={`h-full ${color}`} style={{ width: `${width}%` }} />
+      <strong>{usage === undefined ? "—" : `${Math.round(usage)}%`}</strong>
+      <div className="metric-track" aria-hidden="true">
+        <div className={`metric-fill metric-fill-${status}`} style={{ width: `${width}%` }} />
       </div>
+      <span className="metric-hint">{hint}</span>
     </div>
   );
 }
@@ -73,10 +69,10 @@ function Gauge({
 function formatUptime(seconds?: number): string {
   if (seconds === undefined) return "—";
   const days = Math.floor(seconds / 86_400);
-  if (days >= 1) return `${days}d`;
+  if (days >= 1) return `${days} 天`;
   const hours = Math.floor((seconds % 86_400) / 3_600);
-  if (hours >= 1) return `${hours}h`;
-  return `${Math.floor(seconds / 60)}m`;
+  if (hours >= 1) return `${hours} 小时`;
+  return `${Math.max(1, Math.floor(seconds / 60))} 分钟`;
 }
 
 function formatBytes(bytes?: number): string {
@@ -93,10 +89,12 @@ function formatBytes(bytes?: number): string {
 
 export function ServerOverview() {
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const shell = isDesktopShell();
   const serversQuery = useQuery({
     queryKey: ["servers"],
-    queryFn: async () =>
-      isDesktopShell() ? (await callDesktop(IPC_COMMANDS.serverList, {})).servers : [],
+    enabled: shell,
+    staleTime: 10_000,
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.serverList, {})).servers,
   });
   const server = serversQuery.data?.find((candidate: Server) => candidate.id === selectedServerId);
 
@@ -107,110 +105,134 @@ export function ServerOverview() {
       return (await callDesktop(IPC_COMMANDS.serverSnapshot, { serverId: selectedServerId })).snapshot;
     },
     refetchInterval: 15_000,
-    enabled: Boolean(selectedServerId) && isDesktopShell(),
+    enabled: Boolean(selectedServerId) && shell,
   });
 
+  if (!shell) return <PreviewEmpty />;
+
   if (!selectedServerId || !server) {
-    return <p className="text-zinc-400">从左侧选择一台服务器查看概览。</p>;
+    return (
+      <div className="empty-state page-empty">
+        <span className="empty-state-mark">▦</span>
+        <h2>选择一台服务器</h2>
+        <p>从左侧列表选择目标环境，查看实时健康状态与运行中的容器。</p>
+      </div>
+    );
   }
 
   if (snapshotQuery.isLoading) {
     return (
-      <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-zinc-500">
-        正在连接并采集（SSH + 7 个采集器）…
+      <div className="loading-panel">
+        <div className="loading-spinner" />
+        <strong>正在连接并采集</strong>
+        <span>SSH · 7 个采集器 · 预计几秒完成</span>
       </div>
     );
   }
 
   if (snapshotQuery.isError || !snapshotQuery.data) {
     return (
-      <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-rose-400">
-        采集失败：{snapshotQuery.error instanceof Error ? snapshotQuery.error.message : String(snapshotQuery.error)}
+      <div className="error-panel">
+        <div className="error-panel-icon">!</div>
+        <div>
+          <strong>无法读取服务器状态</strong>
+          <p>{snapshotQuery.error instanceof Error ? snapshotQuery.error.message : String(snapshotQuery.error)}</p>
+          <button type="button" className="secondary-button" onClick={() => void snapshotQuery.refetch()}>
+            重试采集
+          </button>
+        </div>
       </div>
     );
   }
 
-  const snapshot: ServerSnapshot = snapshotQuery.data;
+  return <OverviewContent server={server} snapshot={snapshotQuery.data} refreshing={snapshotQuery.isFetching} onRefresh={() => void snapshotQuery.refetch()} />;
+}
+
+function OverviewContent({
+  server,
+  snapshot,
+  refreshing,
+  onRefresh,
+}: {
+  server: Server;
+  snapshot: ServerSnapshot;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
   const health = snapshot.health;
   const cpu = snapshot.cpu;
   const memory = snapshot.memory;
   const disks = snapshot.disks ?? [];
   const docker = snapshot.docker;
+  const diskUsage = disks.length > 0 ? Math.max(...disks.map((disk) => disk.usagePercent)) : undefined;
 
   return (
-    <div className="space-y-5">
-      {/* 标题行：名称 + 环境徽标 + 状态点 + 区域（production/api/singapore 常显） */}
-      <div className="flex items-center gap-3">
-        <h2 className="text-lg font-semibold">{server.name}</h2>
-        <EnvBadge environment={server.metadata.environment} serverName={server.name} region={server.metadata.region} />
-        <span className="flex items-center gap-1.5 text-sm">
-          <span className={`size-2 rounded-full ${HEALTH_DOT[health]}`} />
-          <span className={health === "critical" ? "text-rose-400" : health === "warning" ? "text-amber-400" : "text-zinc-300"}>
-            {HEALTH_LABEL[health]}
-          </span>
-        </span>
-        {server.metadata.region ? (
-          <span className="text-xs text-zinc-500">{server.metadata.region}</span>
-        ) : null}
-      </div>
+    <div className="overview-page">
+      <section className="overview-hero">
+        <div>
+          <div className="identity-line">
+            <EnvBadge environment={server.metadata.environment} serverName={server.name} region={server.metadata.region} />
+            <span className={`health-label health-label-${health}`}>
+              <span className={`health-dot ${HEALTH_DOT[health]}`} />
+              {HEALTH_LABEL[health]}
+            </span>
+          </div>
+          <h2>{server.name}</h2>
+          <p className="overview-subtitle">
+            {snapshot.os ? `${snapshot.os.distribution} ${snapshot.os.version}` : "操作系统未知"} · {server.connection.username}@{server.connection.host}
+          </p>
+        </div>
+        <button type="button" className="secondary-button refresh-button" onClick={onRefresh} disabled={refreshing}>
+          <span aria-hidden="true">↻</span> {refreshing ? "采集中" : "刷新状态"}
+        </button>
+      </section>
 
-      {/* meta 行 */}
-      <p className="text-xs text-zinc-400">
-        {snapshot.os ? `${snapshot.os.distribution} ${snapshot.os.version}` : "—"} ·{" "}
-        {server.metadata.region ?? "unknown region"} · {cpu?.cores ?? "—"} CPU ·{" "}
-        {memory ? formatBytes(memory.totalBytes) : "—"} RAM · Uptime {formatUptime(snapshot.uptimeSeconds)}
-      </p>
+      <dl className="server-facts">
+        <div><dt>区域</dt><dd>{server.metadata.region ?? "未设置"}</dd></div>
+        <div><dt>计算</dt><dd>{cpu?.cores === undefined ? "—" : `${cpu.cores} 核 CPU`}</dd></div>
+        <div><dt>内存</dt><dd>{formatBytes(memory?.totalBytes)}</dd></div>
+        <div><dt>运行时间</dt><dd>{formatUptime(snapshot.uptimeSeconds)}</dd></div>
+      </dl>
 
-      {/* gauges */}
-      <div className="flex flex-wrap gap-4 rounded-lg border border-zinc-800 p-4">
-        <Gauge label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} />
-        <Gauge label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} />
-        <Gauge label="磁盘" usage={disks.length > 0 ? Math.max(...disks.map((d) => d.usagePercent)) : undefined} thresholds={HEALTH_THRESHOLDS.disk} />
-      </div>
+      <section className="section-block">
+        <div className="section-heading">
+          <div><p className="eyebrow">资源概况</p><h3>系统健康</h3></div>
+          <span className="section-note">每 15 秒更新</span>
+        </div>
+        <div className="metric-grid">
+          <MetricCard label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} hint={`${cpu?.cores ?? "—"} 核处理器`} />
+          <MetricCard label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} hint={memory ? `${formatBytes(memory.usedBytes)} 已使用` : "采集器未返回数据"} />
+          <MetricCard label="磁盘" usage={diskUsage} thresholds={HEALTH_THRESHOLDS.disk} hint={disks.length ? `${disks.length} 个挂载点` : "未发现磁盘数据"} />
+        </div>
+      </section>
 
-      {/* docker */}
-      {docker && docker.available ? (
-        <div className="rounded-lg border border-zinc-800 p-4">
-          <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Docker</div>
-          {docker.containers.length === 0 ? (
-            <p className="text-sm text-zinc-500">无容器</p>
-          ) : (
-            <ul className="space-y-1 text-sm">
-              {docker.containers.slice(0, 12).map((container, index) => (
-                <li key={`${container.name}-${index}`} className="flex items-center gap-2">
-                  <span
-                    className={`size-1.5 rounded-full ${container.state === "running" ? "bg-emerald-500" : "bg-zinc-600"}`}
-                  />
-                  <span className="font-mono">{container.name}</span>
-                  <span className="text-xs text-zinc-500">
-                    {container.image} · {container.status}
-                  </span>
-                </li>
+      {health !== "healthy" ? (
+        <section className={`attention-panel attention-${health}`}>
+          <span className="attention-icon">!</span>
+          <div><strong>{health === "critical" ? "需要立即关注" : "有资源接近阈值"}</strong><p>CPU、内存或磁盘至少一项已达到 {health === "critical" ? "严重" : "警告"} 阈值。可以让 Agent 进一步检查原因。</p></div>
+        </section>
+      ) : null}
+
+      <section className="split-sections">
+        <div className="section-block section-block-flex">
+          <div className="section-heading"><div><p className="eyebrow">容器运行时</p><h3>Docker</h3></div><span className="section-note">{docker?.available ? `${docker.containers.length} 个容器` : "不可用"}</span></div>
+          {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有运行中的容器。</p> : (
+            <ul className="container-list">
+              {docker.containers.slice(0, 8).map((container, index) => (
+                <li key={`${container.name}-${index}`}><span className={`container-dot ${container.state === "running" ? "container-dot-running" : ""}`} /><span className="container-name">{container.name}</span><span className="container-meta">{container.image} · {container.status}</span></li>
               ))}
             </ul>
           )}
         </div>
-      ) : docker ? (
-        <div className="rounded-lg border border-zinc-800 p-4 text-sm text-zinc-500">Docker 不可用</div>
-      ) : null}
-
-      {/* attention：由当前健康级驱动（趋势版在快照历史接入后补） */}
-      {health !== "healthy" ? (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-400">关注</div>
-          {health === "critical" ? (
-            <p className="text-sm">CPU / 内存 / 磁盘至少一项处于 critical（{HEALTH_LABEL[health]}）</p>
-          ) : (
-            <p className="text-sm">CPU / 内存 / 磁盘至少一项达到 warning 阈值</p>
-          )}
+        <div className="section-block section-block-flex">
+          <div className="section-heading"><div><p className="eyebrow">审计流</p><h3>最近动态</h3></div><span className="section-note">暂无数据</span></div>
+          <div className="activity-empty"><span aria-hidden="true">◷</span><p>活动历史接入后，这里会显示部署、登录与服务变更。</p></div>
         </div>
-      ) : null}
-
-      {/* recent activity：活动流在后续步骤接入，先给诚实的空态 */}
-      <div className="rounded-lg border border-zinc-800 p-4">
-        <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">最近动态</div>
-        <p className="text-sm text-zinc-600">活动流接入前暂无数据。</p>
-      </div>
+      </section>
     </div>
   );
+}
+
+function PreviewEmpty() {
+  return <div className="empty-state page-empty"><span className="empty-state-mark">◌</span><h2>浏览器预览</h2><p>原生连接能力只在 Tauri 桌面壳中可用，预览不会伪造服务器数据。</p></div>;
 }

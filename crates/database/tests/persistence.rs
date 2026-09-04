@@ -128,6 +128,16 @@ fn server_round_trip_update_delete() {
     repo.update(&renamed).expect("update");
     assert_eq!(repo.get("srv_a").expect("get").name, "Renamed");
 
+    repo.set_status(
+        "srv_a",
+        ServerStatus::Disconnected,
+        "2026-01-03T00:00:00.000Z",
+    )
+    .expect("set status");
+    let disconnected = repo.get("srv_a").expect("get status");
+    assert_eq!(disconnected.status, ServerStatus::Disconnected);
+    assert_eq!(disconnected.updated_at, "2026-01-03T00:00:00.000Z");
+
     repo.delete("srv_a").expect("delete");
     assert!(matches!(repo.get("srv_a"), Err(DatabaseError::NotFound)));
 }
@@ -206,6 +216,7 @@ fn sample_ai_provider(id: &str) -> AiProviderConfig {
         custom_headers: None,
         max_input_tokens: Some(200_000),
         wire_api: "chat".into(),
+        models: None,
         created_at: "2026-01-01T00:00:00.000Z".into(),
         updated_at: "2026-01-01T00:00:00.000Z".into(),
     }

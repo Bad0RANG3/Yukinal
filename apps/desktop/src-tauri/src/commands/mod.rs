@@ -12,6 +12,7 @@ use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
 use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
 
 pub mod agent_run;
+pub mod files;
 pub mod provider;
 pub mod server;
 pub mod terminal;

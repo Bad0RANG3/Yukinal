@@ -70,6 +70,22 @@ export interface AddServerInput {
     | { method: "identity"; identityId: string };
 }
 
+/** Editable server fields. Authentication is optional so an edit can retain
+ * the current keychain credential without exposing it to the UI. */
+export interface UpdateServerInput {
+  serverId: string;
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+  environment: Environment;
+  groupId?: string;
+  authentication?:
+    | { method: "password"; password: string }
+    | { method: "privateKey"; privateKeyPem: string; passphrase?: string }
+    | { method: "identity"; identityId: string };
+}
+
 /** Identity row without secrets: it references the OS credential store. */
 export interface Identity {
   id: string;
