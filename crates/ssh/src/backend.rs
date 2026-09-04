@@ -104,18 +104,51 @@ impl RusshBackend {
 
     /// SFTP 读整文件（filesystem read 工具的基础操作）。
     pub async fn sftp_read_file(&self, client: &SftpClient, path: &str) -> Result<Vec<u8>> {
+        self.sftp_read_file_bounded(client, path, usize::MAX).await
+    }
+
+    /// SFTP 读取至多 `max_bytes + 1` 字节，以便调用方可靠判断是否截断。
+    pub async fn sftp_read_file_bounded(
+        &self,
+        client: &SftpClient,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
         use russh_sftp::protocol::OpenFlags;
         use tokio::io::AsyncReadExt;
         let sftp = lock_sftp(client).await?;
-        let mut file = sftp
+        let file = sftp
             .open_with_flags(path, OpenFlags::READ)
             .await
             .map_err(|error| Error::Channel(error.to_string()))?;
         let mut out = Vec::new();
-        file.read_to_end(&mut out)
+        file.take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut out)
             .await
             .map_err(|error| Error::Channel(error.to_string()))?;
         Ok(out)
+    }
+
+    /// SFTP 覆盖写入一个文件；close 会等待远端确认所有 pending writes。
+    pub async fn sftp_write_file(
+        &self,
+        client: &SftpClient,
+        path: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let sftp = lock_sftp(client).await?;
+        let mut file = sftp
+            .create(path)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        file.write_all(data)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        file.close()
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        Ok(())
     }
 
     fn next_session_id(&self) -> String {

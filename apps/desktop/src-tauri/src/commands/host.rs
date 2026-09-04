@@ -1,4 +1,4 @@
-//! Host-side execution for the small set of read-only Agent tools.
+//! Host-side execution for bounded Agent tools (read-only plus permission-gated writes).
 //!
 //! The sidecar can describe and request a tool, but it cannot open SSH sessions or
 //! resolve credentials. This module is the narrow, deny-by-default bridge from the
@@ -20,10 +20,16 @@ const SERVER_INFO: &str = "server.info";
 const DOCKER_PS: &str = "docker.ps";
 const DOCKER_LOGS: &str = "docker.logs";
 const DOCKER_INSPECT: &str = "docker.inspect";
+const FILESYSTEM_READ: &str = "filesystem.read";
+const FILESYSTEM_WRITE: &str = "filesystem.write";
 const MAX_CONTAINERS: usize = 200;
 const DEFAULT_LOG_TAIL: usize = 120;
 const MAX_LOG_TAIL: usize = 500;
 const MAX_LOG_LINE_CHARS: usize = 4_000;
+const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
+const MAX_FILE_READ_BYTES: usize = 1024 * 1024;
+const MAX_FILE_WRITE_BYTES: usize = 512 * 1024;
+const MAX_REMOTE_PATH_CHARS: usize = 4_096;
 const DOCKER_PS_COMMAND: &str = "docker ps --format '{{json .}}' 2>/dev/null";
 const DOCKER_PS_ALL_COMMAND: &str = "docker ps -a --format '{{json .}}' 2>/dev/null";
 
@@ -92,6 +98,20 @@ struct DockerInspectInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesystemReadInput {
+    path: String,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesystemWriteInput {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct DockerInspectRow {
     id: Option<String>,
@@ -142,6 +162,21 @@ struct DockerInspectResult {
     started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemReadResult {
+    path: String,
+    content: String,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemWriteResult {
+    path: String,
+    bytes_written: usize,
 }
 
 /// Handle one sidecar-originated request. Expected tool failures are returned as a
@@ -221,6 +256,8 @@ pub(crate) async fn handle_sidecar_request(
         DOCKER_PS => docker_ps(state, server_id, &request.input).await,
         DOCKER_LOGS => docker_logs(state, server_id, &request.input).await,
         DOCKER_INSPECT => docker_inspect(state, server_id, &request.input).await,
+        FILESYSTEM_READ => filesystem_read(state, server_id, &request.input).await,
+        FILESYSTEM_WRITE => filesystem_write(state, server_id, &request.input).await,
         other => Ok(failed(
             "not_found",
             format!("host tool `{other}` is not enabled"),
@@ -321,6 +358,103 @@ async fn server_info(state: &AppState, server_id: &str, input: &Value) -> Result
     }
     let output = serde_json::to_value(snapshot).map_err(|error| error.to_string())?;
     Ok(success(output))
+}
+
+async fn filesystem_read(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+) -> Result<Value, String> {
+    let input = match serde_json::from_value::<FilesystemReadInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("filesystem.read input is invalid: {error}"),
+                true,
+                None,
+            ))
+        }
+    };
+    if let Err(error) = validate_remote_path(&input.path) {
+        return Ok(failed("invalid_input", error, true, None));
+    }
+    let max_bytes = input.max_bytes.unwrap_or(DEFAULT_FILE_READ_BYTES);
+    if !(1..=MAX_FILE_READ_BYTES).contains(&max_bytes) {
+        return Ok(failed(
+            "invalid_input",
+            format!("maxBytes must be between 1 and {MAX_FILE_READ_BYTES}"),
+            true,
+            None,
+        ));
+    }
+    if let Err(error) = ensure_session(state, server_id).await {
+        return Ok(failed("transport", error, true, None));
+    }
+    let bytes = match state
+        .terminals
+        .sftp_read_bounded(server_id, &input.path, max_bytes)
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    };
+    let truncated = bytes.len() > max_bytes;
+    let content = String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned();
+    Ok(success(
+        serde_json::to_value(FilesystemReadResult {
+            path: input.path,
+            content,
+            truncated,
+        })
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+async fn filesystem_write(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+) -> Result<Value, String> {
+    let input = match serde_json::from_value::<FilesystemWriteInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("filesystem.write input is invalid: {error}"),
+                true,
+                None,
+            ))
+        }
+    };
+    if let Err(error) = validate_remote_path(&input.path) {
+        return Ok(failed("invalid_input", error, true, None));
+    }
+    if input.content.len() > MAX_FILE_WRITE_BYTES {
+        return Ok(failed(
+            "invalid_input",
+            format!("content must be at most {MAX_FILE_WRITE_BYTES} bytes"),
+            true,
+            None,
+        ));
+    }
+    if let Err(error) = ensure_session(state, server_id).await {
+        return Ok(failed("transport", error, true, None));
+    }
+    if let Err(error) = state
+        .terminals
+        .sftp_write(server_id, &input.path, input.content.as_bytes())
+        .await
+    {
+        return Ok(failed("transport", error.to_string(), true, None));
+    }
+    Ok(success(
+        serde_json::to_value(FilesystemWriteResult {
+            path: input.path,
+            bytes_written: input.content.len(),
+        })
+        .map_err(|error| error.to_string())?,
+    ))
 }
 
 async fn docker_ps(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
@@ -554,6 +688,24 @@ fn nonempty(value: Option<String>, field: &str) -> Result<String, String> {
         .ok_or_else(|| format!("docker inspect omitted {field}"))
 }
 
+fn validate_remote_path(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().count() > MAX_REMOTE_PATH_CHARS {
+        return Err(format!(
+            "remote path must be 1-{MAX_REMOTE_PATH_CHARS} characters"
+        ));
+    }
+    if !value.starts_with('/') {
+        return Err("remote path must be absolute".to_string());
+    }
+    if value
+        .bytes()
+        .any(|byte| byte == 0 || byte == b'\r' || byte == b'\n')
+    {
+        return Err("remote path contains a forbidden control character".to_string());
+    }
+    Ok(())
+}
+
 fn is_safe_container_ref(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -641,7 +793,7 @@ fn failed(code: &str, message: impl Into<String>, retryable: bool, detail: Optio
 mod tests {
     use super::{
         bounded_log_lines, is_safe_container_ref, parse_docker_inspect, parse_docker_ps,
-        shell_quote,
+        shell_quote, validate_remote_path,
     };
 
     #[test]
@@ -700,5 +852,13 @@ not-json
         assert!(is_safe_container_ref("api_1.2-3"));
         assert!(!is_safe_container_ref("api;rm -rf /"));
         assert_eq!(shell_quote("api_1"), "'api_1'");
+    }
+
+    #[test]
+    fn remote_file_paths_are_absolute_and_bounded() {
+        assert!(validate_remote_path("/etc/app.env").is_ok());
+        assert!(validate_remote_path("relative/app.env").is_err());
+        assert!(validate_remote_path("/etc/app\n.env").is_err());
+        assert!(validate_remote_path(&format!("/{}", "x".repeat(4_096))).is_err());
     }
 }

@@ -116,9 +116,27 @@ impl TerminalService {
     }
 
     pub async fn sftp_read(&self, server_id: &str, path: &str) -> Result<Vec<u8>> {
+        self.sftp_read_bounded(server_id, path, usize::MAX).await
+    }
+
+    pub async fn sftp_read_bounded(
+        &self,
+        server_id: &str,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
         let session = self.cached_session(server_id)?;
         let client = self.ssh.sftp(&session).await?;
-        Ok(self.ssh.sftp_read_file(&client, path).await?)
+        Ok(self
+            .ssh
+            .sftp_read_file_bounded(&client, path, max_bytes)
+            .await?)
+    }
+
+    pub async fn sftp_write(&self, server_id: &str, path: &str, data: &[u8]) -> Result<()> {
+        let session = self.cached_session(server_id)?;
+        let client = self.ssh.sftp(&session).await?;
+        Ok(self.ssh.sftp_write_file(&client, path, data).await?)
     }
 
     #[must_use]

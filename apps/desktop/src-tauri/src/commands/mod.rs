@@ -197,6 +197,7 @@ enum AgentApprovalSource {
 
 const MAX_AUDIT_TEXT_CHARS: usize = 4_000;
 const MAX_AUDIT_INPUT_TEXT_CHARS: usize = 2_000;
+const FILE_CONTENT_AUDIT_OMITTED: &str = "[file content omitted from audit]";
 
 fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
     let event = match serde_json::from_value::<AgentToolResultEvent>(params.clone()) {
@@ -224,7 +225,12 @@ fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
         return;
     }
 
-    let summary = safe_audit_summary(&event.output_summary, MAX_AUDIT_TEXT_CHARS);
+    let summary =
+        if event.tool_name == "filesystem.read" && event.status == ToolExecutionStatus::Success {
+            FILE_CONTENT_AUDIT_OMITTED.to_string()
+        } else {
+            safe_audit_summary(&event.output_summary, MAX_AUDIT_TEXT_CHARS)
+        };
     let error = event
         .error
         .as_deref()
@@ -389,6 +395,7 @@ fn is_sensitive_key(value: &str) -> bool {
             | "privatekey"
             | "secret"
             | "token"
+            | "content"
     )
 }
 
@@ -429,9 +436,11 @@ mod tests {
         let input = sanitize_audit_input(json!({
             "command": "echo hello",
             "apiKey": "do-not-persist",
+            "content": "file body must not be persisted",
             "nested": { "password": "also-do-not-persist" },
         }));
         assert_eq!(input["apiKey"], "[redacted]");
+        assert_eq!(input["content"], "[redacted]");
         assert_eq!(input["nested"]["password"], "[redacted]");
         assert_eq!(input["command"], "echo hello");
     }

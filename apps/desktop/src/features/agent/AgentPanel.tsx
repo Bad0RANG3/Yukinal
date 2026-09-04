@@ -115,9 +115,10 @@ export function AgentPanel() {
       if (!isActive(event)) return;
       setRunState("thinking");
       const marker = event.status === "success" ? "✓" : event.status === "cancelled" ? "✗(已取消)" : "✗";
+      const summary = event.toolName === "filesystem.read" ? "文件内容已返回给 Agent（正文不在动态中保存）" : event.outputSummary.slice(0, 240);
       setEntries((current) => [
         ...current,
-        { kind: "tool_result", text: `${marker} ${event.toolName} · ${event.durationMs}ms: ${event.outputSummary.slice(0, 240)}` },
+        { kind: "tool_result", text: `${marker} ${event.toolName} · ${event.durationMs}ms: ${summary}` },
       ]);
     });
     on("agent.waiting_approval", (payload) => {

@@ -30,6 +30,7 @@ export * from "./schemas/ipc.js";
 export * from "./schemas/provider.js";
 export * from "./schemas/service.js";
 export * from "./schemas/log.js";
+export * from "./schemas/file.js";
 export * from "./schemas/docker.js";
 export * from "./schemas/host.js";
 

@@ -1,6 +1,6 @@
 /** Shared adapter for tools whose execution belongs to the Rust host. */
 
-import type { HostToolExecuteRequest, HostToolExecuteResponse, ToolError } from "@yukinal/shared";
+import type { HostToolExecuteRequest, HostToolExecuteResponse, RiskLevel, ToolError } from "@yukinal/shared";
 import { ToolFailure, type Tool, type ToolContext } from "../tool.js";
 import type { z } from "zod";
 
@@ -11,6 +11,7 @@ export interface HostToolExecutor {
 interface HostBackedToolSpec<TInput extends Record<string, unknown>, TOutput> {
   name: string;
   description: string;
+  risk?: RiskLevel;
   timeoutMs: number;
   input: z.ZodType<TInput>;
   output: z.ZodType<TOutput>;
@@ -23,7 +24,7 @@ export function hostBackedTool<TInput extends Record<string, unknown>, TOutput>(
   return {
     name: spec.name,
     description: spec.description,
-    risk: "read",
+    risk: spec.risk ?? "read",
     timeoutMs: spec.timeoutMs,
     cancellable: true,
     retry: { maxAttempts: 1, backoffMs: 0 },

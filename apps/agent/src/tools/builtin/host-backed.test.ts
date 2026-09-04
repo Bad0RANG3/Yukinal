@@ -4,6 +4,8 @@ import test from "node:test";
 import type { HostToolExecuteRequest, HostToolExecuteResponse, ToolTarget } from "@yukinal/shared";
 
 import { dockerPsTool } from "./docker-ps.js";
+import { filesystemReadTool } from "./filesystem-read.js";
+import { filesystemWriteTool } from "./filesystem-write.js";
 import { serverInfoTool } from "./server-info.js";
 import { ToolFailure, type ToolContext } from "../tool.js";
 import type { HostToolExecutor } from "./host-backed.js";
@@ -58,4 +60,19 @@ test("host-backed failures retain the shared error code", async () => {
     tool.execute({}, context),
     (error: unknown) => error instanceof ToolFailure && error.code === "transport" && error.retryable,
   );
+});
+
+test("filesystem tools validate bounded output and declare writes as medium risk", async () => {
+  const read = filesystemReadTool(
+    fakeHost({ status: "success", output: { path: "/etc/app.env", content: "PORT=8080", truncated: false } }),
+  );
+  const readOutput = await read.execute({ path: "/etc/app.env", maxBytes: 4096 }, context);
+  assert.equal(readOutput.content, "PORT=8080");
+
+  const write = filesystemWriteTool(
+    fakeHost({ status: "success", output: { path: "/etc/app.env", bytesWritten: 9 } }),
+  );
+  const writeOutput = await write.execute({ path: "/etc/app.env", content: "PORT=8080" }, context);
+  assert.equal(write.risk, "medium");
+  assert.equal(writeOutput.bytesWritten, 9);
 });

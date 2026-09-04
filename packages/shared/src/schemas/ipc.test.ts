@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type { IpcCommandName } from "../ipc/index.js";
+import { FilesystemReadInputSchema, FilesystemWriteInputSchema } from "./file.js";
 import {
   AgentStatusSchema,
   EMPTY_PAYLOAD,
@@ -121,4 +122,12 @@ test("tool_execution_list accepts trace/server filters and bounded limit", () =>
   );
   assert.equal(IPC_SCHEMAS.tool_execution_list.params.safeParse({ limit: 0 }).success, false);
   assert.equal(IPC_SCHEMAS.tool_execution_list.params.safeParse({ limit: 101 }).success, false);
+});
+
+test("filesystem tool schemas bound paths, reads and writes", () => {
+  assert.equal(FilesystemReadInputSchema.safeParse({ path: "/etc/app.env", maxBytes: 4096 }).success, true);
+  assert.equal(FilesystemReadInputSchema.safeParse({ path: "relative/path" }).success, false);
+  assert.equal(FilesystemReadInputSchema.safeParse({ path: "/tmp/file", maxBytes: 0 }).success, false);
+  assert.equal(FilesystemWriteInputSchema.safeParse({ path: "/etc/app.env", content: "PORT=8080" }).success, true);
+  assert.equal(FilesystemWriteInputSchema.safeParse({ path: "/etc/app.env", content: "x", extra: true }).success, false);
 });

@@ -62,7 +62,7 @@ pub async fn remote_file_read(
     ensure_session(&state, &server_id).await?;
     let bytes = state
         .terminals
-        .sftp_read(&server_id, &path)
+        .sftp_read_bounded(&server_id, &path, MAX_READ_BYTES)
         .await
         .map_err(|error| error.to_string())?;
     let truncated = bytes.len() > MAX_READ_BYTES;
