@@ -4,12 +4,13 @@
 use serde::Serialize;
 use tauri::State;
 
+use crate::commands::activity::record_user_activity;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use yukinal_credentials::{CredentialStore, Secret};
 use yukinal_database::models::{
-    Activity, ActivityOutcome, ActivitySource, ActivityType, Identity, Server, ServerCapabilities,
-    ServerConnection, ServerMetadata, ServerStatus,
+    ActivityOutcome, ActivityType, Identity, Server, ServerCapabilities, ServerConnection,
+    ServerMetadata, ServerStatus,
 };
 use yukinal_database::UpdateServerInput;
 use yukinal_database::{AddServerInput, AuthenticationInput};
@@ -103,9 +104,9 @@ pub async fn server_connect(
                     &yukinal_core::sidecar::iso8601_now(),
                 )
                 .map_err(|error| error.to_string())?;
-            record_activity(
+            record_user_activity(
                 &state,
-                &server_id,
+                Some(&server_id),
                 ActivityType::Connection,
                 "已连接服务器",
                 None,
@@ -121,9 +122,9 @@ pub async fn server_connect(
                 ServerStatus::Error,
                 &yukinal_core::sidecar::iso8601_now(),
             );
-            let _ = record_activity(
+            let _ = record_user_activity(
                 &state,
-                &server_id,
+                Some(&server_id),
                 ActivityType::Connection,
                 "连接服务器失败",
                 Some(error.clone()),
@@ -155,9 +156,9 @@ pub async fn server_disconnect(
             &yukinal_core::sidecar::iso8601_now(),
         )
         .map_err(|error| error.to_string())?;
-    record_activity(
+    record_user_activity(
         &state,
-        &server_id,
+        Some(&server_id),
         ActivityType::Connection,
         "已断开服务器",
         None,
@@ -220,9 +221,9 @@ pub async fn server_update(
     {
         reclaim_identity(&state, &old_id, &server.id)?;
     }
-    record_activity(
+    record_user_activity(
         &state,
-        &server.id,
+        Some(&server.id),
         ActivityType::Configuration,
         "已更新服务器配置",
         None,
@@ -254,9 +255,9 @@ pub async fn server_delete(
     if let Some(identity_id) = server.connection.identity_id {
         reclaim_identity(&state, &identity_id, &server_id)?;
     }
-    record_activity(
+    record_user_activity(
         &state,
-        &server_id,
+        Some(&server_id),
         ActivityType::Configuration,
         "已删除服务器",
         None,
@@ -306,9 +307,9 @@ pub async fn server_add(
     };
     insert_server_and_attach_identity(&state.database, &server, &identity_id)?;
 
-    record_activity(
+    record_user_activity(
         &state,
-        &id,
+        Some(&id),
         ActivityType::Configuration,
         "已添加服务器",
         None,
@@ -316,34 +317,6 @@ pub async fn server_add(
     )?;
 
     Ok(ServerAddResponse { server })
-}
-
-fn record_activity(
-    state: &State<'_, AppState>,
-    server_id: &str,
-    activity_type: ActivityType,
-    title: &str,
-    description: Option<String>,
-    outcome: ActivityOutcome,
-) -> Result<(), String> {
-    state
-        .database
-        .activities()
-        .insert(&Activity {
-            id: next_id("act"),
-            server_id: Some(server_id.to_string()),
-            workspace_id: None,
-            r#type: activity_type,
-            title: title.to_string(),
-            description,
-            source: ActivitySource::User,
-            actor: "user".to_string(),
-            reason: Some("用户在工作区执行操作".to_string()),
-            outcome: Some(outcome),
-            trace_id: None,
-            created_at: yukinal_core::sidecar::iso8601_now(),
-        })
-        .map_err(|error| error.to_string())
 }
 
 fn insert_server_and_attach_identity(

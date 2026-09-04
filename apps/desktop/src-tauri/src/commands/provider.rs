@@ -4,9 +4,12 @@
 use serde::Serialize;
 use tauri::State;
 
+use crate::commands::activity::record_user_activity;
 use crate::state::AppState;
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
-use yukinal_database::models::{AiProviderConfig, AiProviderKind, ProviderModelOption};
+use yukinal_database::models::{
+    ActivityOutcome, ActivityType, AiProviderConfig, AiProviderKind, ProviderModelOption,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +113,14 @@ pub async fn provider_save_openai(
         .upsert_ai(&provider)
         .map_err(|error| error.to_string())?;
     activate_only(&state, &provider.id)?;
+    record_user_activity(
+        &state,
+        None,
+        ActivityType::Configuration,
+        "已保存 AI Provider",
+        None,
+        ActivityOutcome::Success,
+    )?;
 
     Ok(ProviderSaveResponse { provider })
 }
@@ -220,6 +231,14 @@ pub async fn provider_import_ccswitch_apply(
         .upsert_ai(&provider)
         .map_err(|error| error.to_string())?;
     activate_only(&state, &provider.id)?;
+    record_user_activity(
+        &state,
+        None,
+        ActivityType::Configuration,
+        "已导入 CC Switch Provider",
+        None,
+        ActivityOutcome::Success,
+    )?;
     Ok(ProviderSaveResponse { provider })
 }
 
@@ -340,6 +359,14 @@ pub async fn provider_activate(
                 .map_err(|error| error.to_string())?;
         }
     }
+    record_user_activity(
+        &state,
+        None,
+        ActivityType::Configuration,
+        "已切换 AI Provider",
+        None,
+        ActivityOutcome::Success,
+    )?;
     Ok(ProviderActivateResponse {
         provider: AiProviderConfig {
             enabled: true,
@@ -434,6 +461,14 @@ pub async fn provider_import_codex_apply(
         .upsert_ai(&provider)
         .map_err(|error| error.to_string())?;
     activate_only(&state, &provider.id)?;
+    record_user_activity(
+        &state,
+        None,
+        ActivityType::Configuration,
+        "已导入本地 Codex Provider",
+        None,
+        ActivityOutcome::Success,
+    )?;
     Ok(ProviderSaveResponse { provider })
 }
 

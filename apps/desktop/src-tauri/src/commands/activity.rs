@@ -4,7 +4,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::state::AppState;
-use yukinal_database::models::Activity;
+use yukinal_database::models::{Activity, ActivityOutcome, ActivitySource, ActivityType};
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
@@ -13,6 +13,34 @@ const MAX_LIMIT: usize = 100;
 #[serde(rename_all = "camelCase")]
 pub struct ActivityListResponse {
     pub activities: Vec<Activity>,
+}
+
+pub(crate) fn record_user_activity(
+    state: &State<'_, AppState>,
+    server_id: Option<&str>,
+    activity_type: ActivityType,
+    title: &str,
+    description: Option<String>,
+    outcome: ActivityOutcome,
+) -> Result<(), String> {
+    state
+        .database
+        .activities()
+        .insert(&Activity {
+            id: crate::commands::server::next_id("act"),
+            server_id: server_id.map(str::to_string),
+            workspace_id: None,
+            r#type: activity_type,
+            title: title.to_string(),
+            description,
+            source: ActivitySource::User,
+            actor: "user".to_string(),
+            reason: Some("用户在工作区执行操作".to_string()),
+            outcome: Some(outcome),
+            trace_id: None,
+            created_at: yukinal_core::sidecar::iso8601_now(),
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
