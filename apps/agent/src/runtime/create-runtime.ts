@@ -16,6 +16,7 @@ import {
 import { createLogger, type AgentLogger } from "../config.js";
 import { ContextEngine } from "../context/context-engine.js";
 import { createEmptyContextSource } from "../context/empty-source.js";
+import { createHostContextSource } from "../context/host-context-source.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { RpcRouter } from "../rpc/router.js";
 import { AgentLoop } from "./agent-loop.js";
@@ -57,8 +58,9 @@ export function createRuntime(options: { log?: AgentLogger; hostToolClient?: Hos
   }
 
   const permission = new PermissionEngine();
-  // Empty until Rust feeds real rows through the IPC-backed source.
-  const context = new ContextEngine(createEmptyContextSource());
+  const context = new ContextEngine(
+    options.hostToolClient ? createHostContextSource(options.hostToolClient) : createEmptyContextSource(),
+  );
   // no provider yet, so loop.start() refuses instead of faking.
   const loop = new AgentLoop({ registry, permission, context });
 

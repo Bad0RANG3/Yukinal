@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use yukinal_database::models::{ContainerInfo, Environment};
+use yukinal_database::DatabaseError;
 use yukinal_ssh::SshBackend;
 
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
 const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
+const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const SERVER_INFO: &str = "server.info";
 const DOCKER_PS: &str = "docker.ps";
 const DOCKER_LOGS: &str = "docker.logs";
@@ -44,6 +46,21 @@ struct HostToolTarget {
     server_id: Option<String>,
     workspace_id: Option<String>,
     environment: Environment,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostContextRequest {
+    kind: HostContextKind,
+    id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HostContextKind {
+    Server,
+    Snapshot,
+    Workspace,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +152,9 @@ pub(crate) async fn handle_sidecar_request(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    if method == HOST_CONTEXT_FETCH {
+        return handle_context_request(state, params);
+    }
     if method != HOST_TOOL_EXECUTE {
         return Err(format!("unknown host method `{method}`"));
     }
@@ -208,6 +228,62 @@ pub(crate) async fn handle_sidecar_request(
             None,
         )),
     }
+}
+
+fn handle_context_request(state: &AppState, params: Value) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostContextRequest>(params)
+        .map_err(|error| format!("invalid host context request: {error}"))?;
+    if request.id.trim().is_empty() || request.id.len() > 160 {
+        return Ok(failed(
+            "invalid_input",
+            "context id must be between 1 and 160 characters",
+            true,
+            None,
+        ));
+    }
+    if matches!(
+        request.kind,
+        HostContextKind::Server | HostContextKind::Snapshot
+    ) && !request.id.starts_with("srv_")
+    {
+        return Ok(failed(
+            "invalid_input",
+            "server context requires an opaque srv_ id",
+            false,
+            None,
+        ));
+    }
+
+    match request.kind {
+        HostContextKind::Server => context_row(state.database.servers().get(&request.id)),
+        HostContextKind::Snapshot => match state.database.snapshots().latest(&request.id) {
+            Ok(Some(snapshot)) => context_success(snapshot),
+            Ok(None) => Ok(json!({ "status": "not_found" })),
+            Err(error) => context_error(error),
+        },
+        HostContextKind::Workspace => context_row(state.database.workspaces().get(&request.id)),
+    }
+}
+
+fn context_row<T: Serialize>(result: yukinal_database::Result<T>) -> Result<Value, String> {
+    match result {
+        Ok(value) => context_success(value),
+        Err(error) => context_error(error),
+    }
+}
+
+fn context_success<T: Serialize>(value: T) -> Result<Value, String> {
+    Ok(json!({
+        "status": "success",
+        "data": serde_json::to_value(value).map_err(|error| error.to_string())?,
+    }))
+}
+
+fn context_error(error: DatabaseError) -> Result<Value, String> {
+    if matches!(error, DatabaseError::NotFound) {
+        return Ok(json!({ "status": "not_found" }));
+    }
+    Ok(failed("internal", error.to_string(), false, None))
 }
 
 async fn server_info(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {

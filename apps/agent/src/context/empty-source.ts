@@ -1,11 +1,11 @@
 import type { ContextSource } from "./context-engine.js";
 
 /**
- * Day-0 context source: knows nothing, on purpose.
+ * Fallback context source for standalone sidecar tests and browser-like runs.
  *
- * Real data arrives through Rust/Tauri once `yukinal-database` （not built yet） and
- * `yukinal-collector` （not built yet） exist; the agent then gets an IPC-backed implementation
- * of `ContextSource`. Until then this keeps the wiring honest — no fake metrics.
+ * The desktop composition root uses the host-backed source when Rust is present;
+ * this implementation keeps the agent honest when there is no host to ask — no
+ * fake servers or metrics are invented.
  */
 export function createEmptyContextSource(): ContextSource {
   return {

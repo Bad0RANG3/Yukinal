@@ -2,9 +2,13 @@
 
 import {
   encodeFrame,
+  HostContextRequestSchema,
+  HostContextResponseSchema,
   HOST_METHODS,
   HostToolExecuteRequestSchema,
   HostToolExecuteResponseSchema,
+  type HostContextRequest,
+  type HostContextResponse,
   type HostToolExecuteRequest,
   type HostToolExecuteResponse,
 } from "@yukinal/shared";
@@ -24,14 +28,38 @@ export class HostRpcClient {
 
   execute(request: HostToolExecuteRequest, signal?: AbortSignal): Promise<HostToolExecuteResponse> {
     const params = HostToolExecuteRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.toolExecute,
+      params,
+      (value) => HostToolExecuteResponseSchema.parse(value),
+      signal,
+    );
+  }
+
+  fetchContext(request: HostContextRequest, signal?: AbortSignal): Promise<HostContextResponse> {
+    const params = HostContextRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.contextFetch,
+      params,
+      (value) => HostContextResponseSchema.parse(value),
+      signal,
+    );
+  }
+
+  #request<T>(
+    method: string,
+    params: unknown,
+    parse: (value: unknown) => T,
+    signal?: AbortSignal,
+  ): Promise<T> {
     if (signal?.aborted) return Promise.reject(new Error("host request cancelled"));
 
     const id = this.#nextId++;
-    return new Promise<HostToolExecuteResponse>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const pending: PendingRequest = {
         resolve: (value) => {
           try {
-            resolve(HostToolExecuteResponseSchema.parse(value));
+            resolve(parse(value));
           } catch (error) {
             reject(error instanceof Error ? error : new Error(String(error)));
           }
@@ -48,7 +76,7 @@ export class HostRpcClient {
       signal?.addEventListener("abort", onAbort, { once: true });
 
       try {
-        this.send(encodeFrame({ jsonrpc: "2.0", id, method: HOST_METHODS.toolExecute, params }));
+        this.send(encodeFrame({ jsonrpc: "2.0", id, method, params }));
       } catch (error) {
         this.#pending.delete(id);
         signal?.removeEventListener("abort", onAbort);
