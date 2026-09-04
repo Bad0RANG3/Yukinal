@@ -16,6 +16,7 @@ import type { IpcCommandName } from "../ipc/index.js";
 import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
 import { ActivitySchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
+import { ServerServicesResponseSchema } from "./service.js";
 import { ApprovalResponseSchema } from "./permission.js";
 import {
   CcSwitchProviderCandidateSchema,
@@ -107,6 +108,10 @@ export const IPC_SCHEMAS = {
   server_snapshot: {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
     response: ServerSnapshotResponseSchema,
+  },
+  server_services: {
+    params: z.strictObject({ serverId: IpcServerIdSchema }),
+    response: ServerServicesResponseSchema,
   },
   remote_file_list: {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),

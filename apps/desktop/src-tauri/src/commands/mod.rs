@@ -16,6 +16,7 @@ pub mod agent_run;
 pub mod files;
 pub mod provider;
 pub mod server;
+pub mod services;
 pub mod terminal;
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.

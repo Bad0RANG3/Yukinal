@@ -6,6 +6,7 @@ import { TerminalPane } from "../features/terminal/TerminalPane.js";
 import { ServerOverview } from "../features/overview/ServerOverview.js";
 import { RemoteFilesPane } from "../features/files/RemoteFilesPane.js";
 import { ActivityFeed } from "../features/activity/ActivityFeed.js";
+import { ServicesPane } from "../features/services/ServicesPane.js";
 import {
   PRIMARY_NAV,
   SERVER_PAGES,
@@ -106,8 +107,9 @@ export function AppShell() {
               {serverPage === "overview" ? <ServerOverview /> : null}
               {serverPage === "terminal" ? <TerminalPane /> : null}
               {serverPage === "files" ? <RemoteFilesPane /> : null}
+              {serverPage === "services" ? <ServicesPane /> : null}
               {serverPage === "activity" ? <ActivityFeed serverId={selectedServerId} /> : null}
-              {serverPage === "logs" || serverPage === "services" ? (
+              {serverPage === "logs" ? (
                 <ComingSoon icon="···" title={SERVER_PAGE_LABELS[serverPage]} detail="这个能力还没有接入真实 IPC，保持空态以避免误导。" />
               ) : null}
             </>

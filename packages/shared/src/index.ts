@@ -17,6 +17,7 @@ export * from "./types/provider.js";
 export * from "./types/chat.js";
 export * from "./types/health.js";
 export * from "./types/file.js";
+export * from "./types/service.js";
 
 export * from "./schemas/server.js";
 export * from "./schemas/activity.js";
@@ -24,6 +25,7 @@ export * from "./schemas/permission.js";
 export * from "./schemas/collector.js";
 export * from "./schemas/ipc.js";
 export * from "./schemas/provider.js";
+export * from "./schemas/service.js";
 
 export * from "./events/index.js";
 export * from "./ipc/index.js";

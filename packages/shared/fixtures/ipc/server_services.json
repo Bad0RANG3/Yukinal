@@ -1,0 +1,17 @@
+{
+  "source": "systemd",
+  "services": [
+    {
+      "name": "sshd.service",
+      "state": "running",
+      "status": "active/running",
+      "description": "OpenSSH server daemon"
+    },
+    {
+      "name": "nginx.service",
+      "state": "failed",
+      "status": "failed/failed",
+      "description": "A high performance web server"
+    }
+  ]
+}
