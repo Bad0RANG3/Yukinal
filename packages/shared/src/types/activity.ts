@@ -99,3 +99,13 @@ export interface ToolExecutionRecord {
   endedAt?: string;
   durationMs?: number;
 }
+
+export interface ToolExecutionListInput {
+  traceId?: string;
+  serverId?: string;
+  limit?: number;
+}
+
+export interface ToolExecutionListResponse {
+  executions: ToolExecutionRecord[];
+}

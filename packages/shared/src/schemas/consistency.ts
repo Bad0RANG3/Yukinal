@@ -8,7 +8,7 @@ import type { z } from "zod";
 
 import type { AgentRunRequest, ApprovalResponse } from "../types/chat.js";
 import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
-import type { Activity } from "../types/activity.js";
+import type { Activity, ToolExecutionListResponse } from "../types/activity.js";
 import type { ServerService, ServerServicesResponse } from "../types/service.js";
 import type { ServerLogLine, ServerLogsResponse } from "../types/log.js";
 import type { DockerInspectResult, DockerLogsResult } from "../types/docker.js";
@@ -17,7 +17,7 @@ import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
 import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
-import type { ActivitySchema } from "./activity.js";
+import type { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import type { ServerServiceSchema, ServerServicesResponseSchema } from "./service.js";
 import type { ServerLogLineSchema, ServerLogsResponseSchema } from "./log.js";
 import type { DockerInspectResultSchema, DockerLogsResultSchema } from "./docker.js";
@@ -39,6 +39,7 @@ export type _WorkspaceListContract = Expect<Assignable<typeof WorkspaceListRespo
 export type _AddServerContract = Expect<Assignable<typeof AddServerInputSchema, AddServerInput>>;
 export type _UpdateServerContract = Expect<Assignable<typeof UpdateServerInputSchema, UpdateServerInput>>;
 export type _ActivityContract = Expect<Assignable<typeof ActivitySchema, Activity>>;
+export type _ToolExecutionListContract = Expect<Assignable<typeof ToolExecutionListResponseSchema, ToolExecutionListResponse>>;
 export type _ServerServiceContract = Expect<Assignable<typeof ServerServiceSchema, ServerService>>;
 export type _ServerServicesContract = Expect<Assignable<typeof ServerServicesResponseSchema, ServerServicesResponse>>;
 export type _ServerLogLineContract = Expect<Assignable<typeof ServerLogLineSchema, ServerLogLine>>;
@@ -78,6 +79,7 @@ export type _IpcParamsContracts = {
   remote_file_list: Expect<Assignable<ParamsOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["params"]>>;
   remote_file_read: Expect<Assignable<ParamsOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["params"]>>;
   activity_list: Expect<Assignable<ParamsOf<"activity_list">, IpcCommandMap["activity_list"]["params"]>>;
+  tool_execution_list: Expect<Assignable<ParamsOf<"tool_execution_list">, IpcCommandMap["tool_execution_list"]["params"]>>;
   terminal_open: Expect<Assignable<ParamsOf<"terminal_open">, IpcCommandMap["terminal_open"]["params"]>>;
   terminal_write: Expect<Assignable<ParamsOf<"terminal_write">, IpcCommandMap["terminal_write"]["params"]>>;
   terminal_resize: Expect<Assignable<ParamsOf<"terminal_resize">, IpcCommandMap["terminal_resize"]["params"]>>;
@@ -114,6 +116,7 @@ export type _IpcResponseContracts = {
   remote_file_list: Expect<Assignable<ResponseOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["response"]>>;
   remote_file_read: Expect<Assignable<ResponseOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["response"]>>;
   activity_list: Expect<Assignable<ResponseOf<"activity_list">, IpcCommandMap["activity_list"]["response"]>>;
+  tool_execution_list: Expect<Assignable<ResponseOf<"tool_execution_list">, IpcCommandMap["tool_execution_list"]["response"]>>;
   terminal_open: Expect<Assignable<ResponseOf<"terminal_open">, IpcCommandMap["terminal_open"]["response"]>>;
   terminal_write: Expect<Assignable<ResponseOf<"terminal_write">, IpcCommandMap["terminal_write"]["response"]>>;
   terminal_resize: Expect<Assignable<ResponseOf<"terminal_resize">, IpcCommandMap["terminal_resize"]["response"]>>;

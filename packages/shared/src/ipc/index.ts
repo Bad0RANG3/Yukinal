@@ -7,7 +7,12 @@
  */
 
 import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
-import type { ActivityListInput, ActivityListResponse } from "../types/activity.js";
+import type {
+  ActivityListInput,
+  ActivityListResponse,
+  ToolExecutionListInput,
+  ToolExecutionListResponse,
+} from "../types/activity.js";
 import type { ServerSnapshot } from "../types/collector.js";
 import type { ServerServicesResponse } from "../types/service.js";
 import type { ServerLogsResponse } from "../types/log.js";
@@ -35,6 +40,7 @@ export const IPC_COMMANDS = {
   remoteFileList: "remote_file_list",
   remoteFileRead: "remote_file_read",
   activityList: "activity_list",
+  toolExecutionList: "tool_execution_list",
   /** Terminal byte streams leave as events, not command returns. */
   terminalOpen: "terminal_open",
   terminalWrite: "terminal_write",
@@ -78,6 +84,7 @@ export interface IpcCommandMap {
   remote_file_list: { params: { serverId: string; path: string }; response: RemoteFileListResponse };
   remote_file_read: { params: { serverId: string; path: string }; response: RemoteFileReadResponse };
   activity_list: { params: ActivityListInput; response: ActivityListResponse };
+  tool_execution_list: { params: ToolExecutionListInput; response: ToolExecutionListResponse };
   terminal_open: {
     params: { serverId: string; cols: number; rows: number };
     response: { terminalSessionId: string };

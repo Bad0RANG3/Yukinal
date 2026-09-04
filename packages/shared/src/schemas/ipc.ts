@@ -14,7 +14,7 @@ import { z } from "zod";
 
 import type { IpcCommandName } from "../ipc/index.js";
 import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
-import { ActivitySchema } from "./activity.js";
+import { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
 import { ServerLogsResponseSchema } from "./log.js";
@@ -133,6 +133,14 @@ export const IPC_SCHEMAS = {
       limit: z.number().int().min(1).max(100).optional(),
     }),
     response: z.strictObject({ activities: z.array(ActivitySchema) }),
+  },
+  tool_execution_list: {
+    params: z.strictObject({
+      traceId: z.string().min(1).optional(),
+      serverId: IpcServerIdSchema.optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    }),
+    response: ToolExecutionListResponseSchema,
   },
   terminal_open: {
     params: z.strictObject({

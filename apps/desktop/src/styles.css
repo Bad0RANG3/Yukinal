@@ -1380,6 +1380,20 @@ button:disabled {
 .activity-row-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--muted); font-size: 11px; }
 .activity-row-meta time { margin-left: auto; color: var(--faint); }
 .activity-row-body p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.activity-detail-toggle { margin-left: auto; border: 0; padding: 3px 6px; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.activity-detail-toggle:hover { color: var(--text); }
+.activity-trace-detail { display: flex; flex-direction: column; gap: 8px; margin-top: 11px; padding: 10px; border: 1px solid rgba(64, 88, 87, .72); border-radius: 7px; background: rgba(6, 12, 14, .56); }
+.activity-trace-step { display: flex; flex-direction: column; gap: 5px; padding-bottom: 8px; border-bottom: 1px solid rgba(39, 50, 54, .72); }
+.activity-trace-step:last-child { padding-bottom: 0; border-bottom: 0; }
+.activity-trace-step-top, .activity-trace-step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.activity-trace-step-top strong { color: var(--text); font-size: 12px; }
+.activity-trace-step-top code, .activity-trace-step-meta { color: var(--muted); font-size: 10px; }
+.activity-trace-step-top code { margin-left: auto; }
+.activity-execution-status { padding: 2px 5px; border-radius: 4px; color: #9bc6bc; background: rgba(55, 140, 91, .13); font-size: 10px; }
+.activity-execution-status-failed, .activity-execution-status-cancelled { color: #eaa0a0; background: rgba(161, 58, 58, .15); }
+.activity-execution-status-waiting_approval { color: #e7c88e; background: rgba(155, 112, 48, .15); }
+.activity-trace-step-input, .activity-trace-step-output { display: block; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--faint); font-size: 10px; line-height: 1.45; }
+.activity-trace-step-error { color: #eaa0a0; }
 .services-page { min-height: 0; display: flex; flex-direction: column; gap: 18px; }
 .services-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .services-page-header h2 { margin: 3px 0 0; font-size: 24px; letter-spacing: -.03em; }

@@ -318,6 +318,12 @@ fn tool_executions_write_and_read() {
     let recent = repo.list_recent(2).expect("recent");
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].trace_id, "trc_2");
+
+    let server = repo
+        .list_recent_for_server("srv_01abc", 2)
+        .expect("by server");
+    assert_eq!(server.len(), 2);
+    assert_eq!(server[0].trace_id, "trc_2");
 }
 
 // ---------------------------------------------------------------------------

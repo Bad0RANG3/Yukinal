@@ -68,6 +68,7 @@ pub fn run() {
             commands::services::server_services,
             commands::logs::server_logs,
             commands::activity::activity_list,
+            commands::execution::tool_execution_list,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,

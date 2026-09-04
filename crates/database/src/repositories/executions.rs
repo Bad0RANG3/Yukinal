@@ -73,6 +73,24 @@ impl<'a> ToolExecutionsRepository<'a> {
                 .map_err(DatabaseError::from)
         })
     }
+
+    /// Newest executions for one server (the server-scoped audit view).
+    pub fn list_recent_for_server(
+        &self,
+        server_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ToolExecutionRecord>> {
+        self.db.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT trace_id, step_id, call_id, tool_name, server_id, environment, risk_level,
+                        decision, approved_by, status, input, output, error, started_at, ended_at, duration_ms
+                 FROM tool_executions WHERE server_id = ?1 ORDER BY started_at DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![server_id, limit as i64], row_to_record)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(DatabaseError::from)
+        })
+    }
 }
 
 fn row_to_record(row: &Row<'_>) -> rusqlite::Result<ToolExecutionRecord> {

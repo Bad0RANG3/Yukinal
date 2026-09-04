@@ -105,3 +105,20 @@ test("activity_list accepts an optional server filter and bounded limit", () => 
   assert.equal(IPC_SCHEMAS.activity_list.params.safeParse({ limit: 0 }).success, false);
   assert.equal(IPC_SCHEMAS.activity_list.params.safeParse({ limit: 101 }).success, false);
 });
+
+test("tool_execution_list accepts trace/server filters and bounded limit", () => {
+  assert.equal(
+    IPC_SCHEMAS.tool_execution_list.params.safeParse({ traceId: "trc_1", limit: 25 }).success,
+    true,
+  );
+  assert.equal(
+    IPC_SCHEMAS.tool_execution_list.params.safeParse({ serverId: "srv_01abc", limit: 25 }).success,
+    true,
+  );
+  assert.equal(
+    IPC_SCHEMAS.tool_execution_list.params.safeParse({ serverId: "api.example.com:22" }).success,
+    false,
+  );
+  assert.equal(IPC_SCHEMAS.tool_execution_list.params.safeParse({ limit: 0 }).success, false);
+  assert.equal(IPC_SCHEMAS.tool_execution_list.params.safeParse({ limit: 101 }).success, false);
+});

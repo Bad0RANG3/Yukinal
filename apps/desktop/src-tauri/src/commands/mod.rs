@@ -19,6 +19,7 @@ use yukinal_database::models::{
 
 pub mod activity;
 pub mod agent_run;
+pub mod execution;
 pub mod files;
 pub mod host;
 pub mod logs;
