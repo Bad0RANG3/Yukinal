@@ -1,19 +1,21 @@
-# 0004 — Tool 内部用点号命名，LLM 边界用双下划线
+# ADR 0004：内部使用点号工具名，Provider 边界使用双下划线
 
-Status: accepted (2026-09)
+Status: Accepted
+Date: 2026-09-09
 
 ## Context
-的命名是 `docker.ps`。多数 OpenAI-compatible 网关的 function name 约束是
-`^[a-zA-Z0-9_-]{1,64}$`：点号会被拒绝或静默改写；改写后的名字回到我们手里就对不上注册表。
+
+Yukinal 的工具按命名空间组织，例如 `docker.ps` 和 `filesystem.read`。不少 function-calling 网关对名称允许的字符和长度有更严格的限制，点号可能被拒绝或被静默改写；改写后的名称如果进入内部日志或审计，会造成无法可靠追踪。
 
 ## Decision
-- **内部（唯一真相）**：`docker.ps` —— registry key、trace、audit、DB、IPC、Tool 实现全部用它。
-- **模型边界**：`docker__ps` —— 只允许在 `packages/provider-sdk` 的 `createProviderNameIndex` 内产生。
-- 反向映射：收到 `tool_call` 时先 `internalFor()`；解析不出即报错给模型，绝不猜测。
-- 长度/字符合法性、注册期冲突检测在 `@yukinal/shared/naming/tool-name.ts`。
+
+- 内部唯一名称使用点号：ToolRegistry、Permission Engine、trace、SQLite 审计、IPC 和 UI 都使用 `docker.ps`。
+- 发给 Provider 的名称使用双下划线：`docker__ps`。
+- `createProviderNameIndex` 负责生成映射，收到模型工具调用后先反向映射，再交给 ToolRegistry；无法映射时视为未知工具，不猜测。
+- 注册阶段检查字符、长度和映射冲突。内部名称的段不使用下划线，因此点号与双下划线映射保持可逆。
 
 ## Consequences
-- (+) 审计/日志/UI 永远看到规范里的名字，文档与代码一致。
-- (+) MCP 带来的外来名字（`server:tool`、含空格）在注册期被拒或强制命名空间化，而不是运行时炸。
-- (−) 一次映射成本；(−) 模型可能在输出里拼 `docker__ps`，需要在 prompt 里明确"名字由系统提供"。
-- 注：内部段禁止下划线，因此 `.`→`__` 映射在数学上是单射；冲突检测仍保留为对 MCP/未来扩展的防线。
+
+- 日志、审计和界面显示稳定的业务名称，Provider 的命名限制不会改变内部契约。
+- MCP 或其他外部工具未来加入时，必须先经过命名空间化和冲突检查。
+- 映射层增加了少量复杂度，但集中在 `packages/provider-sdk`，避免在 loop 或每个工具中复制规则。

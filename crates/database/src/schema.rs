@@ -167,6 +167,41 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // 2 — provider wire dialect (codex `responses` vs `chat` completions).
     r#"ALTER TABLE provider_configs ADD COLUMN wire_api TEXT NOT NULL DEFAULT 'chat';"#,
+    // 3 — record explicit Agent delegation in the execution audit.
+    r#"
+    DROP INDEX IF EXISTS idx_tool_executions_trace;
+    DROP INDEX IF EXISTS idx_tool_executions_server;
+    ALTER TABLE tool_executions RENAME TO tool_executions_legacy;
+    CREATE TABLE tool_executions (
+        trace_id    TEXT NOT NULL,
+        step_id     TEXT NOT NULL,
+        call_id     TEXT NOT NULL,
+        tool_name   TEXT NOT NULL,
+        server_id   TEXT,
+        environment TEXT NOT NULL CHECK (environment IN ('local','development','staging','production','unknown')),
+        risk_level  TEXT NOT NULL CHECK (risk_level IN ('read','low','medium','high','critical')),
+        decision    TEXT NOT NULL CHECK (decision IN ('auto','ask','deny')),
+        approved_by TEXT CHECK (approved_by IN ('user','policy','agent')),
+        status      TEXT NOT NULL CHECK (status IN ('pending','running','waiting_approval','success','failed','cancelled')),
+        input       TEXT NOT NULL,
+        output      TEXT,
+        error       TEXT,
+        started_at  TEXT NOT NULL,
+        ended_at    TEXT,
+        duration_ms INTEGER,
+        PRIMARY KEY (trace_id, step_id)
+    );
+    INSERT INTO tool_executions (
+        trace_id, step_id, call_id, tool_name, server_id, environment, risk_level,
+        decision, approved_by, status, input, output, error, started_at, ended_at, duration_ms
+    )
+    SELECT trace_id, step_id, call_id, tool_name, server_id, environment, risk_level,
+           decision, approved_by, status, input, output, error, started_at, ended_at, duration_ms
+      FROM tool_executions_legacy;
+    DROP TABLE tool_executions_legacy;
+    CREATE INDEX idx_tool_executions_trace ON tool_executions (trace_id);
+    CREATE INDEX idx_tool_executions_server ON tool_executions (server_id);
+    "#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

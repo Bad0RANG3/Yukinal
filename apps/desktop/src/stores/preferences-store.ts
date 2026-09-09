@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import type { AgentPermissionMode } from "@yukinal/shared";
 
 export const UI_PREFERENCES_STORAGE_KEY = "yukinal.ui-preferences.v1";
 
@@ -17,6 +18,8 @@ export interface UiPreferences {
   terminalLineHeight: TerminalLineHeight;
   terminalCursorBlink: boolean;
   reduceMotion: boolean;
+  /** How an Agent run delegates tool approvals; this is sent with every run. */
+  agentPermissionMode: AgentPermissionMode;
 }
 
 export interface PreferencesState extends UiPreferences {
@@ -32,6 +35,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   terminalLineHeight: 1.35,
   terminalCursorBlink: true,
   reduceMotion: false,
+  agentPermissionMode: "ask",
 };
 
 function isUiFontSize(value: unknown): value is UiFontSize {
@@ -60,6 +64,7 @@ function sanitizePreferences(value: unknown): UiPreferences {
     terminalLineHeight: isTerminalLineHeight(candidate.terminalLineHeight) ? candidate.terminalLineHeight : DEFAULT_UI_PREFERENCES.terminalLineHeight,
     terminalCursorBlink: typeof candidate.terminalCursorBlink === "boolean" ? candidate.terminalCursorBlink : DEFAULT_UI_PREFERENCES.terminalCursorBlink,
     reduceMotion: typeof candidate.reduceMotion === "boolean" ? candidate.reduceMotion : DEFAULT_UI_PREFERENCES.reduceMotion,
+    agentPermissionMode: candidate.agentPermissionMode === "auto" || candidate.agentPermissionMode === "ask" ? candidate.agentPermissionMode : DEFAULT_UI_PREFERENCES.agentPermissionMode,
   };
 }
 
@@ -81,6 +86,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         terminalLineHeight: state.terminalLineHeight,
         terminalCursorBlink: state.terminalCursorBlink,
         reduceMotion: state.reduceMotion,
+        agentPermissionMode: state.agentPermissionMode,
       }),
       merge: (persisted, current) => ({ ...current, ...sanitizePreferences(persisted) }),
     },

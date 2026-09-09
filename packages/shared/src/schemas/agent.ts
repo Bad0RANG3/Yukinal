@@ -3,7 +3,7 @@
 import { z } from "zod";
 
 import { RiskLevelSchema, ToolTargetSchema } from "./server.js";
-import { PermissionModeSchema } from "./permission.js";
+import { PermissionApprovalSourceSchema, PermissionModeSchema } from "./permission.js";
 
 const RunIdSchema = z.string().trim().min(1).max(256);
 const TimestampSchema = z.string().min(1).max(80);
@@ -45,6 +45,7 @@ export const AgentStreamEventSchema = z.discriminatedUnion("type", [
     target: ToolTargetSchema,
     riskLevel: RiskLevelSchema,
     decision: PermissionModeSchema,
+    approvedBy: PermissionApprovalSourceSchema.optional(),
     at: TimestampSchema,
   }),
   z.strictObject({
@@ -58,7 +59,7 @@ export const AgentStreamEventSchema = z.discriminatedUnion("type", [
     target: ToolTargetSchema,
     riskLevel: RiskLevelSchema,
     decision: PermissionModeSchema,
-    approvedBy: z.enum(["user", "policy"]).optional(),
+    approvedBy: PermissionApprovalSourceSchema.optional(),
     status: z.enum(["success", "failed", "cancelled"]),
     outputSummary: z.string().max(4_000),
     error: z.string().max(4_000).optional(),
@@ -68,6 +69,7 @@ export const AgentStreamEventSchema = z.discriminatedUnion("type", [
     at: TimestampSchema,
   }),
   z.strictObject({ type: z.literal("agent.waiting_approval"), runId: RunIdSchema, approval: ApprovalRequestSchema, at: TimestampSchema }),
+  z.strictObject({ type: z.literal("agent.approval_expired"), runId: RunIdSchema, approvalId: RunIdSchema, at: TimestampSchema }),
   z.strictObject({ type: z.literal("agent.completed"), runId: RunIdSchema, result: AgentRunResultSchema, at: TimestampSchema }),
   z.strictObject({ type: z.literal("agent.failed"), runId: RunIdSchema, error: z.string().max(4_000), at: TimestampSchema }),
 ]);

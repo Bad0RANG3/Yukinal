@@ -23,7 +23,7 @@ const RULES = [
 ];
 
 const SKIP_FILES = new Set(["scripts/check-publication.mjs", "Cargo.lock", "pnpm-lock.yaml"]);
-const SKIP_EXT = /\.(png|ico|icns|woff2?|jpg|jpeg)$/;
+const SKIP_EXT = /\.(png|ico|icns|woff2?|ttf|otf|jpg|jpeg)$/;
 
 const tracked = spawnSync("git", ["ls-files", "-z"], { encoding: "utf8" }).stdout.split("\0").filter(Boolean);
 

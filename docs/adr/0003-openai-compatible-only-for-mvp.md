@@ -1,20 +1,24 @@
-# 0003 — MVP 只实现一个 provider：OpenAI-compatible
+# ADR 0003：MVP 先实现 OpenAI-compatible Provider
 
-Status: accepted (2026-09)
+Status: Accepted
+Date: 2026-09-09
 
 ## Context
--P5 要求 provider 无关， 禁止在 core 里 `if (provider === "openai")`，
-但 MVP 只需一条能跑通 的链路。
+
+Agent loop 需要 Provider 无关的接口，但 MVP 只需要一条完整、可测试的流式工具调用链。把多个原生 Provider 同时塞进 loop 会扩大状态和测试面，并让协议差异渗透到权限与工具执行代码。
 
 ## Decision
-`apps/agent/src/providers/` MVP 只有一个实现：`openai-compatible`（chat completions + tools + streaming），
-`LLMProvider` 接口不变。
 
-覆盖范围：OpenAI、OpenRouter、Ollama、LM Studio、vLLM、公司内部网关 —— 通过 `baseUrl` 区分，不是通过代码分支。
-Anthropic / Gemini 原生协议适配是后续 **新增实现**，不是修改 loop。
+`apps/agent/src/providers/openai-compatible.ts` 是当前唯一的 AI Provider 实现。它通过配置的 `baseUrl` 对接兼容 OpenAI Chat Completions 的网关，并支持两种线协议：
+
+- `chat`：`/chat/completions`，默认方言。
+- `responses`：`/responses`，用于兼容 Responses API 的网关。
+
+实现覆盖模型列表、SSE 文本增量、工具调用增量、停止取消、超时和安全错误摘要。OpenAI、OpenRouter、Ollama、LM Studio、vLLM 及内部网关只通过 URL、模型、请求头和方言配置区分；loop 不按 Provider ID 分支。
 
 ## Consequences
-- (+) 一份传输代码，一套流式/tool-call 解析逻辑，测试面最小。
-- (+) 用户接私有模型是产品卖点，优先做对。
-- (−) 某些 provider 的高级参数（thinking budget、prompt caching）MVP 不支持 → 通过 `customHeaders`/`settings` 预留。
-- (−) 对"自称 OpenAI-compatible 但实际偏离"的网关，兼容问题会集中在这里；需要显式错误信息，不允许静默重试。
+
+- 一份 Provider 实现即可覆盖本地模型、公共网关和企业代理，测试路径集中。
+- Provider-specific 参数必须留在 Provider 边界；Agent loop 只消费 `LLMProvider` 和统一的 `StreamEvent`。
+- 不兼容的网关会在 Provider 边界暴露明确错误，不静默改变权限或工具语义。
+- Anthropic、Gemini 等原生协议若日后加入，应新增实现并保持 `LLMProvider` 不变，而不是修改 loop 中的 Provider 分支。

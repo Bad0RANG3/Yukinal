@@ -84,8 +84,9 @@ test("server form normalizes values and validates port and first-time credential
 
 test("run lifecycle accepts one start and ignores duplicate or stale terminal events", () => {
   const lifecycle = new RunLifecycle();
-  assert.equal(lifecycle.begin(), true);
+  assert.equal(lifecycle.begin("run_a"), true);
   assert.equal(lifecycle.begin(), false);
+  assert.equal(lifecycle.started("run_other"), false);
   assert.equal(lifecycle.started("run_a"), true);
   assert.equal(lifecycle.started("run_b"), false);
   assert.equal(lifecycle.isActive("run_b"), false);

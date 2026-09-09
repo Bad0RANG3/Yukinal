@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use rusqlite::Connection;
 use serde_json::json;
 use yukinal_database::models::{
     Activity, ActivitySource, ActivityType, AiProviderConfig, AiProviderKind, Environment,
@@ -326,6 +327,22 @@ fn tool_executions_write_and_read() {
     assert_eq!(server[0].trace_id, "trc_2");
 }
 
+#[test]
+fn tool_executions_record_agent_delegation_source() {
+    let (_path, db) = temp_db("exec-agent");
+    let mut record = sample_execution("trc_agent", 1, 1);
+    record.approved_by = Some("agent".into());
+    db.executions()
+        .insert(&record)
+        .expect("insert delegated execution");
+
+    let saved = db
+        .executions()
+        .list_for_trace("trc_agent")
+        .expect("read delegated execution");
+    assert_eq!(saved[0].approved_by.as_deref(), Some("agent"));
+}
+
 // ---------------------------------------------------------------------------
 // identities + server_identities + cascades
 
@@ -408,6 +425,62 @@ fn migrations_are_idempotent_and_future_schemas_are_refused() {
 
     let err = Database::open(&path).expect_err("newer schema must be refused");
     assert!(matches!(err, DatabaseError::NewerSchema { .. }));
+    cleanup(&path);
+}
+
+#[test]
+fn migration_v3_preserves_legacy_execution_rows_and_allows_agent_source() {
+    let path = std::env::temp_dir().join(format!(
+        "yukinal-db-mig-agent-{}.sqlite",
+        std::process::id()
+    ));
+    cleanup(&path);
+    let legacy = Connection::open(&path).expect("open legacy database");
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE tool_executions (
+                trace_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                server_id TEXT,
+                environment TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                approved_by TEXT CHECK (approved_by IN ('user','policy')),
+                status TEXT NOT NULL,
+                input TEXT NOT NULL,
+                output TEXT,
+                error TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                duration_ms INTEGER,
+                PRIMARY KEY (trace_id, step_id)
+            );
+            CREATE INDEX idx_tool_executions_trace ON tool_executions (trace_id);
+            CREATE INDEX idx_tool_executions_server ON tool_executions (server_id);
+            INSERT INTO tool_executions VALUES
+              ('trc_legacy', 'step_1', 'call_1', 'ssh.execute', 'srv_01abc', 'production', 'medium', 'auto', 'policy', 'success', '{}', NULL, NULL, '2026-01-01T00:00:00Z', NULL, 1);
+            PRAGMA user_version = 2;
+            "#,
+        )
+        .expect("create legacy schema");
+    drop(legacy);
+
+    let db = Database::open(&path).expect("upgrade legacy database");
+    let legacy_rows = db
+        .executions()
+        .list_for_trace("trc_legacy")
+        .expect("read legacy row");
+    assert_eq!(legacy_rows[0].approved_by.as_deref(), Some("policy"));
+
+    let mut delegated = sample_execution("trc_migrated_agent", 1, 2);
+    delegated.approved_by = Some("agent".into());
+    db.executions()
+        .insert(&delegated)
+        .expect("insert agent row after migration");
+    drop(db);
     cleanup(&path);
 }
 

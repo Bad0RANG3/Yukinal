@@ -64,8 +64,8 @@ export function RuntimeSettings() {
             {showLogs ? "隐藏 Agent 日志" : "查看 Agent 日志"}
           </button>
         </div>
-        {status.isError || core.isError ? <p className="form-error" role="alert">{status.error?.message ?? core.error?.message}</p> : null}
-        {showLogs ? <pre id="runtime-logs" className="agent-log-viewer">{logs.isLoading ? "正在读取日志…" : logs.isError ? logs.error.message : logs.data?.lines.length ? logs.data.lines.join("\n") : "（暂无捕获输出）"}</pre> : null}
+        {status.isError || core.isError ? <div className="settings-error-row" role="alert"><span>{status.error?.message ?? core.error?.message}</span><button type="button" className="text-button" onClick={() => { void core.refetch(); void status.refetch(); }}>重试</button></div> : null}
+        {showLogs ? logs.isLoading ? <pre id="runtime-logs" className="agent-log-viewer">正在读取日志…</pre> : logs.isError ? <div className="settings-error-row" role="alert"><span>{logs.error.message}</span><button type="button" className="text-button" onClick={() => void logs.refetch()}>重试</button></div> : <pre id="runtime-logs" className="agent-log-viewer">{logs.data?.lines.length ? logs.data.lines.join("\n") : "（暂无捕获输出）"}</pre> : null}
       </section>
 
       <AppearanceSettings />
@@ -121,6 +121,12 @@ function AppearanceSettings() {
             <option value={1.5}>宽松 · 1.5</option>
           </select>
         </Field>
+        <Field label="Agent 权限">
+          <select className="form-input" value={preferences.agentPermissionMode} onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}>
+            <option value="ask">操作前询问（推荐）</option>
+            <option value="auto">委托 Agent 自动批准</option>
+          </select>
+        </Field>
       </div>
       <div className="settings-check-grid">
         <label className="settings-check-row">
@@ -132,6 +138,7 @@ function AppearanceSettings() {
           <span><strong>减少动效</strong><small>降低过渡和状态动画</small></span>
         </label>
       </div>
+      <p className="form-hint">自动批准只代表你把本次运行的执行判断委托给 Agent；策略禁止的操作仍会拒绝，执行结果会以“Agent 自主批准”写入审计。</p>
       <div className="settings-actions">
         <button type="button" className="button-secondary" onClick={preferences.resetPreferences}>
           <Icon name="refresh" size={14} />恢复默认设置
@@ -208,7 +215,8 @@ function ProviderSettings() {
             ))}
           </div>
         ) : <p className="muted-copy">{shell ? "还没有配置 Provider。" : "在桌面应用中配置 AI Provider。"}</p>}
-        {activate.isError ? <p className="form-error" role="alert">启用失败：{activate.error.message}</p> : null}
+        {providers.isError ? <div className="settings-error-row" role="alert"><span>{providers.error.message}</span><button type="button" className="text-button" onClick={() => void providers.refetch()}>重试</button></div> : null}
+        {activate.isError ? <div className="settings-error-row" role="alert"><span>启用失败：{activate.error.message}</span>{activate.variables ? <button type="button" className="text-button" onClick={() => activate.mutate(activate.variables!)}>重试</button> : null}</div> : null}
       </section>
 
       {/* Each provider owns its draft. Query refreshes never overwrite typing. */}
@@ -226,9 +234,9 @@ function ProviderSettings() {
           </button>
           {autoImport.data ? <span className="settings-storage-note">本次同步 {autoImport.data.imported} 个 Provider</span> : null}
         </div> : null}
-        {importCcSwitch.isError ? <p className="form-error" role="alert">CC Switch 导入失败：{importCcSwitch.error.message}</p> : null}
-        {importCodex.isError ? <p className="form-error" role="alert">Codex 导入失败：{importCodex.error.message}</p> : null}
-        {autoImport.isError ? <p className="form-error" role="alert">自动同步失败：{autoImport.error.message}</p> : null}
+        {importCcSwitch.isError ? <div className="settings-error-row" role="alert"><span>CC Switch 导入失败：{importCcSwitch.error.message}</span>{importCcSwitch.variables ? <button type="button" className="text-button" onClick={() => importCcSwitch.mutate(importCcSwitch.variables!)}>重试</button> : null}</div> : null}
+        {importCodex.isError ? <div className="settings-error-row" role="alert"><span>Codex 导入失败：{importCodex.error.message}</span>{importCodex.variables ? <button type="button" className="text-button" onClick={() => importCodex.mutate(importCodex.variables!)}>重试</button> : null}</div> : null}
+        {autoImport.isError ? <div className="settings-error-row" role="alert"><span>自动同步失败：{autoImport.error.message}</span><button type="button" className="text-button" onClick={() => autoImport.mutate()}>重试</button></div> : null}
       </section>
     </div>
   );
@@ -282,7 +290,7 @@ function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; on
           </div>
         </fieldset>
         {catalog.isError ? <p className="form-hint form-hint-warning">实时模型列表暂不可用，可手动输入模型 ID。</p> : null}
-        {save.isError ? <p className="form-error" role="alert">{save.error.message}</p> : null}
+        {save.isError ? <div className="settings-error-row" role="alert"><span>{save.error.message}</span><button type="button" className="text-button" onClick={() => save.mutate()}>重试</button></div> : null}
         {saved ? <p className="form-success" role="status">Provider 配置已保存。</p> : null}
         <div className="settings-actions">
           <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size={14} />{save.isPending ? "保存中…" : "保存 Provider"}</button>
@@ -297,9 +305,9 @@ function Field({ label, className, children }: { label: string; className?: stri
   return <label className={className ? `settings-field ${className}` : "settings-field"}><span className="field-label">{label}</span>{children}</label>;
 }
 
-function SourceList({ title, state, busy, onImport }: { title: string; state: { data?: CcSwitchProviderCandidate[]; isLoading: boolean; isError: boolean }; busy: boolean; onImport: (id: string) => void }) {
+function SourceList({ title, state, busy, onImport }: { title: string; state: { data?: CcSwitchProviderCandidate[]; isLoading: boolean; isError: boolean; refetch: () => Promise<unknown> }; busy: boolean; onImport: (id: string) => void }) {
   if (state.isLoading) return <p className="muted-copy">{title}：正在扫描…</p>;
-  if (state.isError) return <p className="muted-copy">{title}：未找到或无法读取</p>;
+  if (state.isError) return <div className="settings-error-row"><span>{title}：未找到或无法读取</span><button type="button" className="text-button" onClick={() => void state.refetch()}>重试</button></div>;
   if (!state.data?.length) return <p className="muted-copy">{title}：暂无配置</p>;
   return (
     <div className="source-group">

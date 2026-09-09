@@ -6,7 +6,7 @@
 
 import type { AGENT_RUN_STATES } from "./enums.js";
 import type { RuntimeProviderConfig } from "./provider.js";
-import type { PermissionMode, RiskLevel } from "./risk.js";
+import type { AgentPermissionMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolTarget } from "./tool.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
@@ -59,6 +59,8 @@ export interface AgentRunRequest {
   target?: ToolTarget;
   /** Overrides the policy that would otherwise be derived from the environment. */
   policyId?: string;
+  /** User-selected execution delegation for this run. */
+  permissionMode?: AgentPermissionMode;
   /** Durable sidecar needs a per-run provider: Rust resolves and injects this. */
   providerConfig?: RuntimeProviderConfig;
 }
@@ -78,7 +80,7 @@ export interface AgentRunResult {
   error?: string;
 }
 
-/** Approval round-trip (). */
+/** Approval round-trip between the desktop and the sidecar. */
 export interface ApprovalRequest {
   approvalId: string;
   runId: string;
@@ -117,6 +119,7 @@ export type AgentStreamEvent =
       target: ToolTarget;
       riskLevel: RiskLevel;
       decision: PermissionMode;
+      approvedBy?: PermissionApprovalSource;
       at: string;
     }
   | {
@@ -130,7 +133,7 @@ export type AgentStreamEvent =
       target: ToolTarget;
       riskLevel: RiskLevel;
       decision: PermissionMode;
-      approvedBy?: "user" | "policy";
+      approvedBy?: PermissionApprovalSource;
       status: "success" | "failed" | "cancelled";
       outputSummary: string;
       error?: string;
@@ -140,5 +143,6 @@ export type AgentStreamEvent =
       at: string;
     }
   | { type: "agent.waiting_approval"; runId: string; approval: ApprovalRequest; at: string }
+  | { type: "agent.approval_expired"; runId: string; approvalId: string; at: string }
   | { type: "agent.completed"; runId: string; result: AgentRunResult; at: string }
   | { type: "agent.failed"; runId: string; error: string; at: string };

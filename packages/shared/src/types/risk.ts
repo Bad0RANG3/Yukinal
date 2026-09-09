@@ -2,7 +2,8 @@
  * Environment + Risk + Permission contracts.
  *
  * Per ADR 0005: the three risk layers produce *facts*, and a fact is never a decision.
- * The Permission Engine is the only place allowed to turn facts into a decision.
+ * The Permission Engine is the only place allowed to turn facts plus an explicit
+ * run delegation into an executable decision.
  */
 
 export const RISK_LEVELS = ["read", "low", "medium", "high", "critical"] as const;
@@ -41,6 +42,14 @@ export function tierOf(level: RiskLevel): PermissionTier {
 
 export const PERMISSION_MODES = ["auto", "ask", "deny"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+/** User-selected delegation for one Agent run. Policy denial always wins. */
+export const AGENT_PERMISSION_MODES = ["ask", "auto"] as const;
+export type AgentPermissionMode = (typeof AGENT_PERMISSION_MODES)[number];
+
+/** The authority that made an automatic execution possible. */
+export const PERMISSION_APPROVAL_SOURCES = ["user", "policy", "agent"] as const;
+export type PermissionApprovalSource = (typeof PERMISSION_APPROVAL_SOURCES)[number];
 
 export interface PermissionPolicy {
   id: string;
@@ -139,8 +148,9 @@ export type RiskFact = ToolRiskFact | CommandRiskFact | EnvironmentRiskFact;
 export const RISK_FACT_SOURCES = ["tool", "command", "environment"] as const;
 
 /**
- * Output of the Permission Engine. The only authority that may allow execution
- * (the LLM cannot decide this for itself).
+ * Output of the Permission Engine. The engine remains the only execution authority;
+ * an explicit run mode may delegate an allowed decision to the Agent, but model text
+ * can never forge a user approval or bypass a policy denial.
  */
 export interface PermissionDecision {
   outcome: PermissionMode;
@@ -156,6 +166,8 @@ export interface PermissionDecision {
   toolName: string;
   /** Human readable, rendered verbatim in the Approval UI. */
   reason: string;
+  /** Present for automatic decisions so the audit trail can explain who delegated it. */
+  approvedBy?: PermissionApprovalSource;
   /** Resolved stable target, never a free-text name. */
   target: {
     host: "local" | "remote";

@@ -1,5 +1,5 @@
 import type { TRACE_STEP_STATUSES } from "./enums.js";
-import type { Environment, PermissionMode, RiskLevel } from "./risk.js";
+import type { Environment, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolExecutionStatus } from "./tool.js";
 
 /**
@@ -88,9 +88,9 @@ export interface ToolExecutionRecord {
   serverId?: string;
   environment: Environment;
   riskLevel: RiskLevel;
-  /** Which layer decided: "policy" means it was auto-approved by rules, "user" means approved in UI. */
+  /** Which authority allowed it: policy, the delegated Agent, or the user in the UI. */
   decision: PermissionMode;
-  approvedBy?: "user" | "policy";
+  approvedBy?: PermissionApprovalSource;
   status: ToolExecutionStatus;
   input: unknown;
   output?: unknown;

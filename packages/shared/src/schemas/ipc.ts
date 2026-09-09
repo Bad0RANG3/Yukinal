@@ -18,7 +18,7 @@ import { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
 import { ServerLogsResponseSchema } from "./log.js";
-import { ApprovalResponseSchema } from "./permission.js";
+import { AgentPermissionModeSchema, ApprovalResponseSchema } from "./permission.js";
 import {
   CcSwitchProviderCandidateSchema,
   ProviderConfigSchema,
@@ -174,6 +174,7 @@ export const IPC_SCHEMAS = {
   agent_logs: { params: EMPTY_PAYLOAD, response: AgentLogsResponseSchema },
   agent_run_start: {
     params: z.strictObject({
+      runId: z.string().trim().min(1).max(256).optional(),
       sessionId: z.string().trim().min(1).max(256),
       prompt: z.string().trim().min(1).max(100_000),
       messageId: z.string().trim().min(1).max(256).optional(),
@@ -184,6 +185,7 @@ export const IPC_SCHEMAS = {
       model: z.string().trim().min(1).max(256).optional(),
       workspaceId: z.string().trim().min(1).max(256).optional(),
       focusServerId: IpcServerIdSchema.optional(),
+      permissionMode: AgentPermissionModeSchema.optional(),
     }),
     response: z.strictObject({ runId: z.string().min(1) }),
   },

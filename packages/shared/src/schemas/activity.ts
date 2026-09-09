@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ACTIVITY_OUTCOMES, ACTIVITY_SOURCES, ACTIVITY_TYPES } from "../types/activity.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
-import { ENVIRONMENTS, PERMISSION_MODES, RISK_LEVELS } from "../types/risk.js";
+import { ENVIRONMENTS, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, RISK_LEVELS } from "../types/risk.js";
 
 export const ActivitySchema = z.strictObject({
   id: z.string().min(1),
@@ -28,7 +28,7 @@ export const ToolExecutionRecordSchema = z.strictObject({
   environment: z.enum(ENVIRONMENTS),
   riskLevel: z.enum(RISK_LEVELS),
   decision: z.enum(PERMISSION_MODES),
-  approvedBy: z.enum(["user", "policy"]).optional(),
+  approvedBy: z.enum(PERMISSION_APPROVAL_SOURCES).optional(),
   status: z.enum(TOOL_EXECUTION_STATUSES),
   input: z.unknown(),
   output: z.unknown().optional(),

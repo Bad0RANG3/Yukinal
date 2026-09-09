@@ -3,7 +3,7 @@
 //! sidecar, and streams every observable step back as Tauri events.
 //!
 //! The sidecar never sees a key until this call: material rides only on the
-//! transient JSON-RPC params (ADR 0001/0006; 使用点注入规则).
+//! transient JSON-RPC params (ADR 0001/0006; resolve secrets at the point of use).
 
 use serde::Serialize;
 use serde_json::json;
@@ -86,6 +86,7 @@ fn resolve_api_key(
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_run_start(
     state: State<'_, AppState>,
+    run_id: Option<String>,
     session_id: String,
     prompt: String,
     message_id: Option<String>,
@@ -96,6 +97,7 @@ pub async fn agent_run_start(
     model: Option<String>,
     workspace_id: Option<String>,
     focus_server_id: Option<String>,
+    permission_mode: Option<String>,
 ) -> Result<RunStartResponse, String> {
     // Repair legacy databases before resolving the provider. The UI normally does
     // this through provider_list, but run.start must remain safe when invoked
@@ -109,7 +111,9 @@ pub async fn agent_run_start(
 
     // Millisecond timestamps can collide when two submissions arrive in the
     // same tick; use the process-wide opaque id generator instead.
-    let run_id = crate::commands::server::next_id("run");
+    let run_id = run_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| crate::commands::server::next_id("run"));
     let message_id = message_id.unwrap_or_else(|| format!("msg_{run_id}"));
     let parts = parts.filter(|items| !items.is_empty()).unwrap_or_else(|| {
         vec![PromptPart {
@@ -151,6 +155,9 @@ pub async fn agent_run_start(
         }
         params["focusServerId"] = json!(server_id);
         params["target"] = target;
+    }
+    if let Some(permission_mode) = permission_mode {
+        params["permissionMode"] = json!(permission_mode);
     }
     let response = state
         .supervisor

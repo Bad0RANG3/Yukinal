@@ -135,3 +135,120 @@ test("approval responses are bound to the run that displayed them", async () => 
   assert.equal(result.state, "completed", JSON.stringify(result));
   assert.equal(result.toolCalls, 1);
 });
+
+test("auto mode lets the Agent self-approve an allowed tool and labels the audit source", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "danger.test",
+    description: "Test action eligible for delegated approval",
+    risk: "high",
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({}),
+    execute: async () => ({ ok: true }),
+  });
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "tool_call", call: { id: "call_agent_auto", name: "danger__test", arguments: {} } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "已完成委托执行" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+
+  const events: AgentStreamEvent[] = [];
+  const result = await loop.start(
+    {
+      runId: "run_agent_auto",
+      sessionId: "ses_agent_auto",
+      prompt: "run the delegated test action",
+      permissionMode: "auto",
+      target: { host: "remote", serverId: "srv_agent_auto", environment: "production" },
+    },
+    { emit: (event) => events.push(event) },
+    provider,
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(result.toolCalls, 1);
+  assert.equal(events.some((event) => event.type === "agent.waiting_approval"), false);
+  const toolResult = events.find((event) => event.type === "agent.tool_result");
+  assert(toolResult && toolResult.type === "agent.tool_result");
+  assert.equal(toolResult.approvedBy, "agent");
+  assert.equal(toolResult.status, "success");
+});
+
+test("approval expiry is streamed and does not leave a live approval", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "danger.test",
+    description: "Test action requiring approval",
+    risk: "high",
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({}),
+    execute: async () => ({ ok: true }),
+  });
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+    approvalTtlMs: 10,
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "tool_call", call: { id: "call_expiry", name: "danger__test", arguments: {} } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "continued after expiry" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+
+  const events: AgentStreamEvent[] = [];
+  const result = await loop.start(
+    {
+      runId: "run_expiry",
+      sessionId: "ses_expiry",
+      prompt: "run the protected test action",
+      target: { host: "remote", serverId: "srv_expiry", environment: "production" },
+    },
+    { emit: (event) => events.push(event) },
+    provider,
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(events.some((event) => event.type === "agent.approval_expired" && event.approvalId.length > 0), true);
+  const rejected = events.find((event) => event.type === "agent.tool_result");
+  assert(rejected && rejected.type === "agent.tool_result");
+  assert.equal(rejected.outputSummary, "审批已过期");
+  assert.match(result.text, /continued after expiry/);
+});

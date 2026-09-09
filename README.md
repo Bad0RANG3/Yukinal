@@ -1,124 +1,155 @@
 # Yukinal
 
-[![license: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue)](LICENSE)
-![status: early](https://img.shields.io/badge/status-very_early-yellow)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Status: development](https://img.shields.io/badge/status-development-yellow.svg)](#当前状态)
 
-> **非商业许可**:本仓库使用 [PolyForm Noncommercial 1.0.0](LICENSE) —— 可自由学习、修改、
-> 非商业地分发与引用(注明来源即可),**商业用途需要先取得单独授权**。详见 [NOTICE](NOTICE)。
+Yukinal 是一个面向 AI 的远程开发与基础设施工作区。它把服务器连接、健康概览、终端、文件、日志、服务、活动记录和 Agent 操作放进同一个桌面工作区，让每一次远程动作都能被解释、审批和追踪。
 
-**AI-native remote development & infrastructure workspace.**
-不是"更好看的 SSH 客户端",而是一个由 agent 驱动的远程开发 / 部署 / 排障工作台。
+## 当前状态
 
-> ⚠️ 非常早期。目前只有桌面外壳、连接与 agent 运行时骨架,还没有可发布的版本。
+仓库当前处于可运行的开发版本（`0.0.0`），尚未发布安装包，也不承诺稳定的跨版本兼容性。核心桌面链路和 Agent 链路已经接通；发布构建、更多认证方式和 MCP 集成仍属于后续工作。
 
-## 它做什么
+## 已实现能力
+
+- Tauri 2 桌面壳：服务器列表、SSH 连接、健康概览、终端、远程文件、日志、服务和活动记录。
+- Node.js Agent sidecar：流式文本、工具调用、工具结果、运行状态、停止和审批超时。
+- 一个 OpenAI-compatible Provider 实现，支持 Chat Completions 和 Responses 两种流式协议方言，可通过 `baseUrl` 连接 OpenAI、OpenRouter、Ollama、LM Studio、vLLM 或兼容网关。
+- 内置工具：`system.echo`；在桌面宿主可用时还包括 `server.info`、`docker.ps`、`docker.logs`、`docker.inspect`、`docker.restart`、`filesystem.read` 和 `filesystem.write`。
+- Permission Engine：静态工具风险、命令风险和目标环境风险共同决定执行策略；Agent 可在用户明确委托的自动模式下自主批准并承担结果，策略禁止仍不可绕过。
+- Provider 配置、系统凭据库保存 API key，以及 OpenCode、Codex 和 CC Switch 配置导入。
+- 纯浏览器预览模式：无需服务器即可查看完整 UI，并明确标识需要 Tauri 原生能力的部分。
+
+## 核心交互模型
 
 ```text
-你的意图 → Agent → 上下文 → 工具 → 权限 → 执行 → 验证 → 结果
+用户意图 → Agent 上下文 → 工具调用 → Permission Engine
+                           ↓                  ↓
+                       Rust 宿主执行 ← 审批 / 策略
+                           ↓
+                      结果、活动与验证
 ```
 
-一个具体的例子(我们正在把它跑通):
+Yukinal 遵守三条产品约束：
 
-```text
-你:「检查 staging API 为什么一直重启」
-    agent: server.info → docker.ps → docker.logs → docker.inspect
-    agent: 根因是 .env 里缺 DATABASE_URL
-你:「帮我修」
-    agent: 读文件 → 写文件（请求批准）→ docker.restart → health check
-    agent: 报告改了什么、为什么、验证结果
-```
-
-设计上坚持三件事:
-
-- **信息优先**:打开服务器看到的是健康度和结论,不是 `df -h` 的输出。
-- **每一步可见**:agent 看了什么、调了什么工具、拿到什么结果,全部是 UI 里的卡片。
-- **危险操作必须显式批准**:权限由「用户策略 + 工具风险 + 目标环境」决定,不由模型自己决定。
+1. 先展示信息和目标，再执行改变状态的操作。
+2. Agent 的思考、工具调用、结果和审批都以可追踪事件呈现。
+3. Permission Engine 是唯一执行入口；用户可选择“操作前询问”或把本次运行的批准判断委托给 Agent，模型输出不能伪造用户批准或绕过策略禁止。
 
 ## 架构
 
 ```text
-┌──────────────────────────────────────────┐
-│ React (Tauri WebView)                     │
-│  Server 列表 / Overview / Terminal / Agent │
-└───────────────┬──────────────────────────┘
-                │ Tauri IPC（唯一白名单，见 packages/shared）
-┌───────────────▼──────────────────────────┐
-│ Rust core                                 │
-│  ssh · pty · sftp · collector · sqlite    │
-│  credentials(OS keychain) · sidecar 监管  │
-└──────┬───────────────────────┬───────────┘
-       │ SSH                   │ stdio (NDJSON JSON-RPC)
-   远端服务器            ┌──────▼───────────────────────┐
-                        │ Agent runtime (Node.js)      │
-                        │  loop · tool registry ·       │
-                        │  permission engine · trace    │
-                        └──────┬───────────┬───────────┘
-                               │           │
-                          Built-in      MCP / Providers
-                          tools         (规划中)
+┌────────────────────────────────────────────┐
+│ React + Tauri WebView                      │
+│ server list · overview · terminal · agent  │
+└──────────────────────┬─────────────────────┘
+                       │ 白名单 Tauri IPC
+┌──────────────────────▼─────────────────────┐
+│ Rust host / yukinal-core                   │
+│ SSH · PTY · SFTP · collectors · SQLite     │
+│ OS credentials · sidecar supervisor         │
+└───────────────┬──────────────────┬──────────┘
+                │ SSH / host tools │ stdio
+                │                  │ NDJSON JSON-RPC
+          远程服务器        ┌───────▼───────────────┐
+                            │ Node.js Agent         │
+                            │ loop · tools · policy │
+                            │ provider · trace      │
+                            └───────────────────────┘
 ```
 
-- 密钥只存在系统凭据库(Windows Credential Manager / macOS Keychain / Linux Secret Service),
-  数据库里只有 `credential_ref`。
-- Agent 不直接碰 SSH、不持有凭据:`Agent → Tool → Permission → Rust → SSH`。
-- 所有能力统一成带 schema 的 Tool,内部用点号命名(`docker.ps`),送给模型时才映射成
-  `docker__ps`。
+跨层类型、Zod schema、事件名、IPC 命令和 sidecar 协议集中在 `packages/shared`。Rust 负责启动、停止、监督 sidecar，并把 `agent.stream` 映射为桌面事件；React 不直接创建进程，也不直接接触 SSH 会话或凭据。
+
+## 安全与数据边界
+
+- 服务器和 Provider 的非敏感配置保存在本地 SQLite；密码、私钥和 API key 通过系统凭据库保存，数据库只保存引用。
+- Rust 在一次 Agent 运行开始时解析 Provider 凭据，并通过短生命周期协议参数注入 sidecar；凭据不写入日志或审计活动。
+- 远程 SSH 默认使用 Trust On First Use：首次认证成功后记录主机指纹，后续指纹不匹配会拒绝连接。生产环境请在首次连接前核验主机指纹。
+- Agent 不直接执行 SSH。需要远程能力时，Agent 通过受 schema 约束的 host tool 请求 Rust，Rust 再执行 SSH、SFTP 或 PTY 操作。
+- 工具输出、审计输入和文件正文都有大小边界；敏感字段会在审计层脱敏。
+- 浏览器预览没有 Tauri IPC、SQLite、SSH 或 sidecar，所有相关页面都会显示不可用原因，而不是伪造数据。
 
 ## 仓库结构
 
 ```text
 apps/
-  desktop/        Tauri 2 + React + Vite + Tailwind（UI 不含任何原生逻辑）
-    src-tauri/    Rust 命令层：原生能力的唯一出入口
-  agent/          Node.js sidecar：agent loop / tool registry / permission engine / trace
+  desktop/        Tauri 2 + React + Vite 前端与 Rust 命令层
+  agent/          Node.js sidecar：loop、tools、permissions、providers
 packages/
-  shared/         跨层契约：类型 + zod schema + 事件名 + IPC 映射 + 帧协议
-  provider-sdk/   LLMProvider 抽象 + provider 边界的工具名映射
-  agent-sdk/      桌面 ↔ sidecar 的 typed client
+  shared/         跨层类型、schema、事件、IPC 与协议
+  provider-sdk/   Provider 接口与模型侧工具名映射
+  agent-sdk/      sidecar JSON-RPC typed client
 crates/
-  core  ssh  terminal  collector  credentials  database  filesystem
-docs/adr/         架构决策记录（为什么这么选）
+  core/           sidecar、监督、宿主请求和共享核心
+  ssh/            russh 连接、host key、PTY、SFTP
+  terminal/       多会话 PTY 路由
+  collector/      服务器健康数据采集与解析
+  credentials/    系统凭据库抽象
+  database/       SQLite 模型与 repository
+  filesystem/     受约束的文件操作
+docs/
+  README.md       文档入口
+  adr/            架构决策记录
+scripts/          检查、构建和 sidecar smoke 工具
 ```
 
-## 开发
+## 快速开始
 
-前置:Node ≥ 24、pnpm 11、Rust stable(MSVC / Xcode CLT / Linux 上 `libwebkit2gtk-4.1-dev`)。
+前置环境：Node.js `>=24`、pnpm `11`、Rust stable（当前 workspace 的最低 Rust 版本为 `1.85`），以及 Tauri 在目标平台所需的系统依赖。
 
 ```bash
 pnpm install
-pnpm check                          # 完整门禁，见下
-pnpm --filter @yukinal/desktop dev  # 浏览器里看 UI 外壳（原生能力会明确提示不可用）
-pnpm --filter @yukinal/desktop tauri dev   # 桌面壳（含 Rust 编译）
-pnpm --filter @yukinal/agent start         # 单独跑 sidecar，stdin 说协议、stderr 说日志
+pnpm check
 ```
 
-`pnpm check` 一条命令跑完:契约库构建 → 全量 typecheck → agent bundle → TS 单测 →
-sidecar stdio 往返 smoke → `cargo fmt` / `clippy -D warnings` / `check` →
-**Rust 监管真 Node sidecar 的跨语言握手测试**。CI 在 ubuntu / windows / macOS 上跑同一条命令。
+在浏览器中查看 UI 预览：
 
-改图标:`powershell -File scripts/generate-app-icon.ps1` 生成源图,再
-`pnpm --filter @yukinal/desktop icon` 展开全平台图标。
+```bash
+pnpm --filter @yukinal/desktop dev
+```
 
-## 决策记录
+浏览器预览使用 `http://127.0.0.1:1420/`，原生能力会显示为不可用。启动完整桌面壳：
 
-- [ADR 0001](docs/adr/0001-agent-runtime-as-node-sidecar.md) — agent 运行时是独立 Node 进程
-- [ADR 0002](docs/adr/0002-ssh-backend-russh.md) — SSH backend 用 russh
-- [ADR 0003](docs/adr/0003-openai-compatible-only-for-mvp.md) — 先只支持 OpenAI-compatible
-- [ADR 0004](docs/adr/0004-tool-name-mapping.md) — 工具名内部点号、模型边界双下划线
-- [ADR 0005](docs/adr/0005-permission-engine-sole-decision-maker.md) — 三层风险事实,Permission Engine 唯一决策
-- [ADR 0006](docs/adr/0006-sidecar-transport-ndjson-jsonrpc.md) — sidecar 传输:stdio 上的 NDJSON JSON-RPC
-- [ADR 0007](docs/adr/0007-monorepo-and-day-one-abstractions.md) — 第一天钉死的核心抽象
-- [ADR 0008](docs/adr/0008-sidecar-launch-and-lifecycle.md) — sidecar 的启动方式与生命周期规则
+```bash
+pnpm --filter @yukinal/desktop tauri dev
+```
 
-## License
+单独开发 sidecar：
 
-**PolyForm Noncommercial License 1.0.0** —— 见 [LICENSE](LICENSE)。要点:
+```bash
+pnpm --filter @yukinal/agent dev
+```
 
-- ✅ 允许:学习、使用、修改、为非商业目的分发(个人研究/实验/爱好、教育与公益机构等)。
-- ❌ 不允许:任何商业用途。需要商用的话,请单独联系版权人拿许可。
-- 📌 再分发时必须带上本许可证全文与 `NOTICE` 里的署名行;改了也要说清楚。
-- 🚫 不提供任何担保,也不额外授予商标权;专利权按许可证原文。
+第一次使用桌面壳时，请在“设置 → Provider”配置兼容端点、模型和 API key；本地端点可以不填写 key。添加服务器时需要 SSH 用户名和密码或未加密私钥，并在首次连接时核验 host key。
 
-第三方依赖仍受各自许可证约束(`MIT` / `Apache-2.0` / `BSD` 等)——本许可证只覆盖本仓库原创的部分。
+## 检查与测试
 
-Copyright (c) 2026 Bad0RANG3
+根目录的 `pnpm check` 按顺序执行：发布文档卫生检查、共享库构建、TypeScript 类型检查、Agent bundle、全部单元测试、桌面 Vite 构建、sidecar stdio smoke，以及在 Rust 可用时执行 `fmt`、`clippy`、`cargo check` 和跨语言集成测试。
+
+常用的分层命令：
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm build:libs
+pnpm smoke:sidecar
+```
+
+## 已知限制
+
+- 尚未提供可发布的桌面安装包；`tauri.conf.json` 当前关闭 bundle 发布流程。
+- Agent 目前只有 OpenAI-compatible Provider，没有 Anthropic、Gemini 等原生协议适配器。
+- MCP 适配器尚未实现，sidecar capability 中的 `mcp` 当前为 `false`。
+- SSH Agent 登录和带密码保护的私钥尚未实现；当前支持密码和未加密私钥。
+- 终端、远程文件、日志、服务、服务器活动和本地数据库只能在 Tauri 桌面壳中使用。
+
+## 文档
+
+- [文档入口](docs/README.md)
+- [架构决策记录](docs/adr/README.md)
+- [Provider 实现说明](apps/agent/src/providers/README.md)
+- [MCP 适配器边界](apps/agent/src/mcp/README.md)
+- [第三方声明](NOTICE)
+
+## 许可证
+
+本项目原创代码和文档以 [MIT License](LICENSE) 发布。第三方依赖和随仓库分发的字体仍受各自许可证约束，详见 [NOTICE](NOTICE)。

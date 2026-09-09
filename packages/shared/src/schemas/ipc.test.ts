@@ -100,6 +100,20 @@ test("add-server params are validated by the shared input schema", () => {
   assert.equal(parsed.success, true);
 });
 
+test("Agent run params carry the explicit permission delegation", () => {
+  const parsed = IPC_SCHEMAS.agent_run_start.params.safeParse({
+    sessionId: "ses_1",
+    prompt: "restart the service",
+    permissionMode: "auto",
+  });
+  assert.equal(parsed.success, true);
+  assert.equal(IPC_SCHEMAS.agent_run_start.params.safeParse({
+    sessionId: "ses_1",
+    prompt: "restart the service",
+    permissionMode: "policy",
+  }).success, false);
+});
+
 test("activity_list accepts an optional server filter and bounded limit", () => {
   const parsed = IPC_SCHEMAS.activity_list.params.safeParse({ serverId: "srv_01abc", limit: 25 });
   assert.equal(parsed.success, true);

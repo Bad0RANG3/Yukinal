@@ -1,5 +1,5 @@
 /**
- * Tauri IPC contract (Rule 10 of).
+ * Tauri IPC contract shared by React and the Rust command layer.
  *
  * React may only call these commands and listen to these events. Rust mirrors the
  * names 1:1; the agent sidecar is reached through `@yukinal/agent-sdk`, never here.
@@ -7,6 +7,7 @@
  */
 
 import type { ApprovalResponse, AgentPromptPart, AgentRunRequest } from "../types/chat.js";
+import type { AgentPermissionMode } from "../types/risk.js";
 import type {
   ActivityListInput,
   ActivityListResponse,
@@ -102,6 +103,8 @@ export interface IpcCommandMap {
   agent_logs: { params: Record<string, never>; response: AgentLogs };
   agent_run_start: {
     params: {
+      /** UI-generated identity lets the event consumer reject a foreign started event. */
+      runId?: string;
       sessionId: string;
       prompt: string;
       messageId?: string;
@@ -112,6 +115,7 @@ export interface IpcCommandMap {
       model?: string;
       workspaceId?: string;
       focusServerId?: string;
+      permissionMode?: AgentPermissionMode;
     };
     response: { runId: string };
   };

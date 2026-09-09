@@ -25,5 +25,5 @@
     "typescript": "^7.0.2",
     "@types/node": "^26.4.1"
   },
-  "license": "PolyForm-Noncommercial-1.0.0"
+  "license": "MIT"
 }

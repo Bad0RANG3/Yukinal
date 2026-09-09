@@ -1,31 +1,31 @@
-# 0005 — 三层风险事实，Permission Engine 是唯一决策者
+# ADR 0005：Permission Engine 是唯一执行决策者
 
-Status: accepted (2026-09)
+Status: Accepted
+Date: 2026-09-09
 
 ## Context
-（工具静态风险）、（危险命令检测）、/（环境差异）各自都能提高风险，
-但 又规定"权限不能由 LLM 自己决定"。如果三处各自 `return allow`，就没有单一真相。
+
+工具声明、输入内容和目标环境都可能改变一次操作的风险。如果每个工具、Provider 或模型都能独立决定“允许执行”，授权结果就无法解释，也无法保证远程目标之间的隔离。
 
 ## Decision
-风险计算是 **事实（fact）生产者**，不是决策者：
 
-| 层 | 生产者 | 产物 |
-| --- | --- | --- |
-| 1 静态 | Tool 声明（`declaration.risk`） | `ToolRiskFact` |
-| 2 动态 | `analyzeCommand()` 规则集 | `CommandRiskFact` |
-| 3 环境 | `ENVIRONMENT_RISK_FLOOR[environment]` | `EnvironmentRiskFact` |
+风险事实由多个来源提供，但只有 `PermissionEngine.evaluate()` 合成最终决策：
 
-`PermissionEngine.evaluate()` 独占合成：
-`finalRisk = max(facts)` → `tier = tierOf(finalRisk)` → `mode = policy.tiers[tier]`，
-并施加两条不可配置的下限：
-1. `critical` 永远不能 `auto`（ 禁止隐藏危险操作）。
-2. 会话级授权只覆盖 read/write tier，且按 `tool + serverId + environment` 隔离。
+| 来源 | 事实 |
+| --- | --- |
+| Tool declaration | 工具静态风险 |
+| `analyzeCommand()` | 输入中的命令风险 |
+| `ENVIRONMENT_RISK_FLOOR` | 目标环境最低风险 |
 
-`ToolRegistry.execute()` 需要 **ExecutionTicket**：要么 `policy_auto`（决策为 auto），
-要么 `user_approved`（携带匹配 `approvalId`）；决策绑定的 tool 与 target 必须与调用完全一致，否则拒绝。
+Engine 取这些事实中的最高风险，并根据策略映射为 `auto`、`ask` 或 `deny`。以下约束不可被配置覆盖：
+
+- `critical` 风险不能由环境策略静默自动放行；只有用户明确选择本次运行的 `auto` 委托时，才允许以 `agent` 来源执行，否则必须有用户审批。
+- 会话授权只在当前运行内扩大范围，并按工具、服务器和环境绑定。
+- ToolRegistry 只接受 `policy_auto`、带有明确委托来源的 `agent_auto`、当前运行会话授权的 `session_auto`，或与待处理审批完全匹配的 `user_approved` ticket；工具名、目标、来源和审批 ID 任一不匹配都拒绝执行。
 
 ## Consequences
-- (+) 可以回答"为什么允许/为什么拒绝"：`decision.facts` 就是解释，直接渲染进 Approval UI。
-- (+) 规则升级不会改变授权语义；策略改动不会绕过命令检测。
-- (−) 多一层数据结构和一处必须始终同步的映射表。
-- (−) 未来 team policy / RBAC只能扩展 `PermissionPolicy` 的来源，不能新增决策点。
+
+- UI 可以展示构成决策的 facts，用户能够理解为什么需要审批或为什么被拒绝。
+- 模型输出不能伪造权限来源；用户选择的运行级 Agent 委托会显式标记为 `agent`，规则升级不会改变授权链的单一入口。
+- 增加了风险事实和 ticket 契约，但把安全审计集中在一个可测试的边界内。
+- 未来的团队策略或 RBAC 只能扩展策略来源，不能在其他模块增加第二个授权点。

@@ -8,7 +8,8 @@
  *   layer 2  command analysis   rules over the concrete command
  *   layer 3  target environment  production raises the floor
  *
- * Nothing else may decide: not the LLM, not the UI, not the tool itself.
+ * Nothing else may execute: the UI supplies an explicit run mode, while the
+ * engine remains the only place that turns that delegation into a ticket.
  */
 
 import { randomUUID } from "node:crypto";
@@ -17,7 +18,9 @@ import {
   defaultPolicyFor,
   maxRisk,
   tierOf,
+  type AgentPermissionMode,
   type Environment,
+  type PermissionApprovalSource,
   type PermissionDecision,
   type PermissionMode,
   type PermissionPolicy,
@@ -46,6 +49,8 @@ export interface PermissionRequest {
   input: unknown;
   /** Omitted -> the environment's built-in default policy. */
   policy?: PermissionPolicy;
+  /** Omitted -> preserve the policy-only behaviour for non-UI callers. */
+  permissionMode?: AgentPermissionMode;
 }
 
 /** Grants are scoped to `tool + target`, never to a name the model typed. */
@@ -114,13 +119,35 @@ export class PermissionEngine {
     const finalRisk = maxRisk(intrinsicRisk, environmentLevel);
     const tier = tierOf(finalRisk);
     let outcome: PermissionMode = policy.tiers[tier];
+    let approvedBy: PermissionApprovalSource | undefined = outcome === "auto" ? "policy" : undefined;
     let reason = `${declaration.name} is ${finalRisk} on ${describeTarget(target)}; policy "${policy.name}" says ${outcome} for tier "${tier}"`;
 
-    // A critical call can never be auto-approved by configuration alone
-    // (dangerous actions must never be hidden,: rules are not the boundary).
-    if (finalRisk === "critical" && outcome === "auto") {
+    // A critical call still needs an explicit delegation or a user approval.
+    // The old policy-only path cannot silently auto-approve it.
+    if (finalRisk === "critical" && outcome === "auto" && request.permissionMode !== "auto") {
       outcome = "ask";
+      approvedBy = undefined;
       reason = `${describeTarget(target)}: critical risk action cannot be auto-approved even if the policy allows it`;
+    }
+
+    // `auto` is a user-selected delegation: the Agent may choose and execute an
+    // allowed action itself, including a critical action. Policy denial remains
+    // absolute, and the source is persisted so the outcome is accountable.
+    if (request.permissionMode === "auto" && outcome === "ask") {
+      outcome = "auto";
+      approvedBy = "agent";
+      reason = `${declaration.name} on ${describeTarget(target)} was delegated to the Agent for automatic approval; ${reason}`;
+    } else if (request.permissionMode === "auto" && outcome === "auto") {
+      approvedBy = "agent";
+      reason = `${declaration.name} on ${describeTarget(target)} was delegated to the Agent; ${reason}`;
+    }
+
+    // Ask mode keeps safe reads frictionless but pauses before every state
+    // changing or dangerous operation, even when the environment policy says auto.
+    if (request.permissionMode === "ask" && outcome === "auto" && tier !== "read") {
+      outcome = "ask";
+      approvedBy = undefined;
+      reason = `${declaration.name} on ${describeTarget(target)} is waiting for user approval because Agent mode is "ask"`;
     }
 
     // Session grants widen non-dangerous actions only: an intrinsically dangerous
@@ -144,6 +171,7 @@ export class PermissionEngine {
       policyId: policy.id,
       toolName: declaration.name,
       reason,
+      approvedBy,
       target: { ...target },
       requestedAt: this.#now(),
     };

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Tauri 2 shell: server list, overview, terminal, agent panel ()",
+  "description": "Tauri 2 shell: server list, overview, terminal, settings and agent panel",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -36,5 +36,5 @@
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
   },
-  "license": "PolyForm-Noncommercial-1.0.0"
+  "license": "MIT"
 }

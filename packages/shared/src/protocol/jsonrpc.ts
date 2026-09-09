@@ -74,7 +74,7 @@ export const AGENT_METHODS = {
 
 export type AgentMethodName = (typeof AGENT_METHODS)[keyof typeof AGENT_METHODS];
 
-/** Notifications the agent emits upward (mapped 1:1 onto AgentStreamEvent, ). */
+/** Notifications the agent emits upward and maps 1:1 onto AgentStreamEvent. */
 export const AGENT_NOTIFICATIONS = {
   stream: "agent.stream",
   log: "agent.log",
@@ -84,7 +84,7 @@ export interface InitializeParams {
   protocolVersion: typeof YUKINAL_RPC_VERSION;
   /** Yukinal desktop version, for capability negotiation + audit. */
   clientVersion: string;
-  /** Absolute path of the per-user data dir handed over by Rust (). */
+  /** Absolute path of the per-user data directory supplied by Rust. */
   dataDir: string;
 }
 

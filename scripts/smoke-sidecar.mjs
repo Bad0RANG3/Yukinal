@@ -3,8 +3,8 @@
  * End-to-end smoke test of the sidecar over its real transport (ADR 0001 / ADR 0006).
  *
  * Spawns `apps/agent` the same way Rust does, speaking NDJSON on stdin/stdout,
- * and asserts the protocol behaves as contracted -- including the honest
- * NOT_IMPLEMENTED answer for the agent loop, and survival of a malformed frame.
+ * and asserts the protocol behaves as contracted -- including the real agent
+ * admission path and survival of a malformed frame.
  */
 
 import { spawn } from "node:child_process";

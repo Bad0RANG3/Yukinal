@@ -35,7 +35,7 @@ pub struct SupervisorStatus {
     pub pid: Option<u32>,
     pub protocol_version: Option<String>,
     pub agent_version: Option<String>,
-    /// Registered tools, captured at handshake. The live list is `tools.list` （not built yet）.
+    /// Registered tools, captured at handshake. The live list is available through `tools.list`.
     pub tool_count: Option<usize>,
     pub entry: Option<String>,
     pub started_at: Option<String>,
@@ -225,6 +225,9 @@ impl Supervisor {
 
     /// Stop the sidecar. Returns whether a process was actually running.
     pub async fn stop(&self) -> bool {
+        // Coordinate with start so a stop racing the spawn/handshake/publish sequence
+        // cannot observe an empty runtime slot and leave the newly launched child alive.
+        let _start_guard = self.inner.start_lock.lock().await;
         let runtime = self.inner.runtime.lock().await.take();
         match runtime {
             Some(state) => {

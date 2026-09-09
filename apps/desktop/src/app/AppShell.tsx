@@ -20,7 +20,7 @@ import { usePreferencesStore } from "../stores/preferences-store.js";
 import { useServers } from "../lib/servers.js";
 import { useStartupProviderImport } from "../lib/providers.js";
 import { isDesktopShell } from "../lib/ipc.js";
-import { useCallback, useEffect, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 
 const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = {
   servers: { label: "服务器", icon: "servers" },
@@ -52,13 +52,22 @@ export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [agentLayoutOpen, setAgentLayoutOpen] = useState(agentOpen);
   const [agentToggleVisible, setAgentToggleVisible] = useState(!agentOpen);
+  const agentToggleRef = useRef<HTMLButtonElement>(null);
+  const workspaceContentRef = useRef<HTMLDivElement>(null);
+  const focusAgentToggleOnRender = useRef(false);
   const terminalActive = primary === "servers" && serverPage === "terminal";
   const layoutAgentOpen = agentOpen || agentLayoutOpen;
   const onAgentCloseStart = useCallback(() => {
+    if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#agent-panel")) {
+      workspaceContentRef.current?.focus({ preventScroll: true });
+    }
     setAgentLayoutOpen(false);
     setAgentToggleVisible(false);
   }, []);
-  const onAgentCloseEnd = useCallback(() => setAgentToggleVisible(true), []);
+  const onAgentCloseEnd = useCallback(() => {
+    focusAgentToggleOnRender.current = true;
+    setAgentToggleVisible(true);
+  }, []);
 
   // Import local OpenCode/Codex/CC Switch provider material before the first
   // Agent request. The command is native, idempotent and silent when no source
@@ -72,6 +81,13 @@ export function AppShell() {
       setAgentToggleVisible(false);
     }
   }, [agentOpen]);
+
+  useEffect(() => {
+    if (agentOpen || !agentToggleVisible || !focusAgentToggleOnRender.current) return;
+    focusAgentToggleOnRender.current = false;
+    const frame = requestAnimationFrame(() => agentToggleRef.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [agentOpen, agentToggleVisible]);
 
   const navigateTab = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const next = event.key === "ArrowRight" ? (index + 1) % SERVER_PAGES.length
@@ -122,7 +138,7 @@ export function AppShell() {
         </div>
       </nav>
 
-      <ServerList onClose={() => setSidebarOpen(false)} />
+      {primary === "servers" ? <ServerList onClose={() => setSidebarOpen(false)} /> : null}
       {sidebarOpen ? <button type="button" className="sidebar-scrim" aria-label="关闭服务器列表" onClick={() => setSidebarOpen(false)} /> : null}
 
       <main className="workspace-main">
@@ -138,6 +154,8 @@ export function AppShell() {
               <button
                 type="button"
                 className="agent-toggle-inline"
+                ref={agentToggleRef}
+                id="agent-toggle-inline"
                 aria-controls="agent-panel"
                 aria-expanded={false}
                 onClick={() => setAgentOpen(true)}
@@ -171,7 +189,7 @@ export function AppShell() {
           </div>
         ) : null}
 
-        <div className="workspace-content" id={primary === "servers" ? "server-view" : undefined} role={primary === "servers" ? "tabpanel" : undefined} aria-labelledby={primary === "servers" ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
+        <div ref={workspaceContentRef} className="workspace-content" id={primary === "servers" ? "server-view" : undefined} role={primary === "servers" ? "tabpanel" : undefined} aria-labelledby={primary === "servers" ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
           {primary === "settings" ? <RuntimeSettings /> : null}
           {primary === "projects" ? <ProjectsPane /> : null}
           {primary === "activity" ? <ActivityFeed /> : null}
@@ -188,6 +206,7 @@ export function AppShell() {
         </div>
       </main>
 
+      {agentOpen ? <button type="button" className="agent-scrim" aria-label="关闭 Agent 面板" onClick={() => setAgentOpen(false)} /> : null}
       <AgentPanel onCloseStart={onAgentCloseStart} onCloseEnd={onAgentCloseEnd} />
     </div>
   );

@@ -75,3 +75,20 @@ test("permission decisions always state which layer spoke", () => {
   });
   assert.equal(parsed.success, true);
 });
+
+test("permission contracts distinguish Agent delegation from policy approval", () => {
+  const parsed = PermissionDecisionSchema.safeParse({
+    outcome: "auto",
+    intrinsicRisk: "high",
+    finalRisk: "high",
+    tier: "dangerous",
+    facts: [{ source: "tool", level: "high", toolName: "docker.restart" }],
+    policyId: "policy.production",
+    toolName: "docker.restart",
+    reason: "delegated for this run",
+    approvedBy: "agent",
+    target: { host: "remote", serverId: "srv_01abc", environment: "production" },
+    requestedAt: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(parsed.success, true);
+});

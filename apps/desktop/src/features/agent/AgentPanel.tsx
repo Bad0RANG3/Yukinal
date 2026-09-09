@@ -5,7 +5,7 @@
  * 规则：不造假 transcript。没有运行中的 run 就没有消息；Stop 立刻掐断在途请求。
  */
 
-import { AgentStreamEventSchema, IPC_COMMANDS, type AgentStreamEvent, type ApprovalRequest, type Environment, type PermissionMode, type RiskLevel } from "@yukinal/shared";
+import { AgentStreamEventSchema, IPC_COMMANDS, type AgentStreamEvent, type ApprovalRequest, type Environment, type PermissionApprovalSource, type PermissionMode, type RiskLevel } from "@yukinal/shared";
 import { listen } from "@tauri-apps/api/event";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { usePreferencesStore } from "../../stores/preferences-store.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { RunLifecycle } from "./run-lifecycle.js";
@@ -21,7 +22,7 @@ import { useServers } from "../../lib/servers.js";
 type Entry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
-  | { kind: "tool_call"; toolName: string; target: string; riskLevel: RiskLevel; decision: PermissionMode }
+  | { kind: "tool_call"; toolName: string; target: string; riskLevel: RiskLevel; decision: PermissionMode; approvedBy?: PermissionApprovalSource }
   | { kind: "tool_result"; toolName: string; status: "success" | "failed" | "cancelled"; durationMs: number; summary: string }
   | { kind: "approval"; approval: ApprovalRequest }
   | { kind: "error"; text: string };
@@ -57,6 +58,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
   const toggleAgent = useWorkspaceStore((state) => state.toggleAgent);
   const selectProvider = useWorkspaceStore((state) => state.selectProvider);
+  const permissionMode = usePreferencesStore((state) => state.agentPermissionMode);
+  const setPreferences = usePreferencesStore((state) => state.setPreferences);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
   const [runState, setRunState] = useState<string | null>(null);
@@ -70,6 +73,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const [runContext, setRunContext] = useState<string | null>(null);
   const [isClosing, setIsClosing] = useState(false);
   const hasBeenOpen = useRef(agentOpen);
+  const wasOpen = useRef(agentOpen);
+  const panelRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
   const followFeed = useRef(true);
   const servers = useServers();
@@ -89,6 +95,50 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       onCloseStart?.();
     }
   }, [agentOpen, isClosing, onCloseStart]);
+
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    panel.inert = !agentOpen;
+    const openedInOverlay = agentOpen && !wasOpen.current && window.matchMedia("(max-width: 1150px)").matches;
+    wasOpen.current = agentOpen;
+    const focusFrame = openedInOverlay
+      ? requestAnimationFrame(() => closeButtonRef.current?.focus({ preventScroll: true }))
+      : undefined;
+    if (!agentOpen) return () => { if (focusFrame !== undefined) cancelAnimationFrame(focusFrame); };
+
+    const onKeyDown = (event: globalThis.KeyboardEvent): void => {
+      if (event.target instanceof HTMLElement && event.target.closest("dialog[open]")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAgentOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !window.matchMedia("(max-width: 1150px)").matches) return;
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex=\"-1\"])",
+      )).filter((element) => element.getClientRects().length > 0);
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
+    };
+  }, [agentOpen, setAgentOpen]);
 
   useEffect(() => {
     if (!providers.data?.length) return;
@@ -151,7 +201,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       if (!isActive(event)) return;
       setRunState("running_tool");
       setEntries((current) => appendEntries(current, [
-        { kind: "tool_call", toolName: event.toolName, target: targetLabel(event.target), riskLevel: event.riskLevel, decision: event.decision },
+        { kind: "tool_call", toolName: event.toolName, target: targetLabel(event.target), riskLevel: event.riskLevel, decision: event.decision, approvedBy: event.approvedBy },
       ]));
     });
     on("agent.tool_result", (payload) => {
@@ -169,6 +219,11 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       setRunState("waiting_approval");
       setAgentOpen(true);
       setEntries((current) => appendEntries(current, [{ kind: "approval", approval: event.approval }]));
+    });
+    on("agent.approval_expired", (payload) => {
+      const event = payload as Extract<AgentStreamEvent, { type: "agent.approval_expired" }>;
+      if (!isActive(event)) return;
+      setApprovalDecisions((current) => ({ ...current, [event.approvalId]: "审批已过期" }));
     });
     on("agent.completed", (payload) => {
       const event = payload as Extract<AgentStreamEvent, { type: "agent.completed" }>;
@@ -204,9 +259,25 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     };
   }, []);
 
-  const send = async (): Promise<void> => {
-    const text = prompt.trim();
-    if (!text || !canSend || !lifecycle.current.begin()) return;
+  useEffect(() => {
+    if (!running || agentStatus.data?.running !== false) return;
+    lifecycle.current.fail();
+    setRunning(false);
+    setRunId(null);
+    setStopping(false);
+    setPendingApprovals([]);
+    setRunState("failed");
+    setEntries((current) => {
+      const last = current.at(-1);
+      if (last?.kind === "error" && last.text === "Agent sidecar 已退出，本次运行已中断。") return current;
+      return appendEntries(current, [{ kind: "error", text: "Agent sidecar 已退出，本次运行已中断。" }]);
+    });
+  }, [agentStatus.data?.running, running]);
+
+  const send = async (retryText?: string): Promise<void> => {
+    const text = (retryText ?? prompt).trim();
+    const expectedRunId = `run_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
+    if (!text || !canSend || !lifecycle.current.begin(expectedRunId)) return;
     setRunning(true);
     setRunState("starting");
     setRunId(null);
@@ -220,6 +291,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       setEntries([{ kind: "user", text }]);
       const messageId = `msg_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
       const { runId: started } = await callDesktop(IPC_COMMANDS.agentRunStart, {
+        runId: expectedRunId,
         sessionId: "ses_ui",
         prompt: text,
         messageId,
@@ -229,6 +301,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
         providerId: selectedProviderId ?? undefined,
         model: selectedModel ?? undefined,
         focusServerId: selectedServerId ?? undefined,
+        permissionMode,
       });
       if (lifecycle.current.acknowledge(started)) {
         setRunId(started);
@@ -295,10 +368,12 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
 
   const panelClosing = !agentOpen && (isClosing || hasBeenOpen.current);
   const panelClass = panelClosing ? "agent-panel-closing" : !agentOpen ? "agent-panel-hidden" : "";
+  const lastUserPrompt = [...entries].reverse().find((entry): entry is Extract<Entry, { kind: "user" }> => entry.kind === "user")?.text;
 
   return (
     <aside
       id="agent-panel"
+      ref={panelRef}
       className={`agent-panel ${panelClass}`}
       aria-hidden={!agentOpen}
       onAnimationEnd={(event) => {
@@ -318,7 +393,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
               {runState ? RUN_STATE_LABEL[runState] ?? runState : !shell ? "预览" : agentRunning ? "已就绪" : "未启动"}
             </span>
           )}
-          <button type="button" className="icon-button agent-toggle" aria-label="收起 Agent 面板" title="收起 Agent 面板" aria-controls="agent-panel" aria-expanded={agentOpen} onClick={handleAgentToggle}>
+          <button ref={closeButtonRef} type="button" className="icon-button agent-toggle" aria-label="收起 Agent 面板" title="收起 Agent 面板" aria-controls="agent-panel" aria-expanded={agentOpen} onClick={handleAgentToggle}>
             <Icon name="chevronRight" size={15} />
           </button>
         </div>
@@ -331,6 +406,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
         ) : (
           entries.map((entry, index) => <EntryView key={index} entry={entry} onApproval={respondApproval} approvalBusy={entry.kind === "approval" && pendingApprovals.includes(entry.approval.approvalId)} approvalStatus={entry.kind === "approval" ? approvalDecisions[entry.approval.approvalId] ?? (!running ? "本次运行已结束" : undefined) : undefined} />)
         )}
+        {!running && runState === "failed" && lastUserPrompt ? <div className="agent-retry"><span>这次运行未完成。</span><button type="button" className="text-button" disabled={!canSend} onClick={() => void send(lastUserPrompt)}>重试上一条</button></div> : null}
         {!shell || !agentRunning || !selectedProvider ? (
           <p className="agent-notice" role="status" aria-live="polite">
             {!shell ? "启动 Yukinal 桌面应用后即可直接提问，无需先添加服务器。" : !agentRunning ? (
@@ -364,8 +440,35 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
               ))}
             </select>
             {selectedModel ? <span className="composer-model">{selectedModel}</span> : null}
+            <label className="composer-permission">
+              <span>权限</span>
+              <select
+                aria-label="Agent 权限模式"
+                disabled={running}
+                value={permissionMode}
+                onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}
+                className="composer-select composer-permission-select"
+              >
+                <option value="ask">操作前询问</option>
+                <option value="auto">委托 Agent 自动批准</option>
+              </select>
+            </label>
           </div>
-        ) : null}
+        ) : (
+          <label className="composer-permission composer-permission-standalone">
+            <span>权限</span>
+            <select
+              aria-label="Agent 权限模式"
+              disabled={running}
+              value={permissionMode}
+              onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}
+              className="composer-select composer-permission-select"
+            >
+              <option value="ask">操作前询问</option>
+              <option value="auto">委托 Agent 自动批准</option>
+            </select>
+          </label>
+        )}
         <div className="composer-row">
           <textarea
             rows={2}
@@ -425,7 +528,7 @@ function EntryView({
       return (
         <div className="tool-card tool-card-call">
           <div className="tool-card-heading"><span className="tool-card-label">工具调用</span><span className="tool-name"><KeywordText text={entry.toolName} /></span></div>
-          <div className="tool-card-meta"><code><KeywordText text={entry.target} /></code><span className={`risk-badge risk-${entry.riskLevel}`}>风险：{riskLabel(entry.riskLevel)}</span><span className={`decision-badge decision-${entry.decision}`}>{decisionLabel(entry.decision)}</span></div>
+          <div className="tool-card-meta"><code><KeywordText text={entry.target} /></code><span className={`risk-badge risk-${entry.riskLevel}`}>风险：{riskLabel(entry.riskLevel)}</span><span className={`decision-badge decision-${entry.decision}`}>{decisionLabel(entry.decision)}</span>{entry.approvedBy ? <span className="decision-badge decision-source">{approvalSourceLabel(entry.approvedBy)}</span> : null}</div>
         </div>
       );
     case "tool_result":
@@ -463,6 +566,10 @@ function decisionLabel(decision: "auto" | "ask" | "deny"): string {
   if (decision === "auto") return "自动批准";
   if (decision === "ask") return "需审批";
   return "策略禁止";
+}
+
+function approvalSourceLabel(source: PermissionApprovalSource): string {
+  return source === "agent" ? "Agent 自主批准" : source === "policy" ? "策略批准" : "用户批准";
 }
 
 function targetLabel(target: { serverId?: string; environment: string; host: string }): string {

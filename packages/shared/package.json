@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Cross-layer API contracts: types, schemas, events, IPC + sidecar protocol ()",
+  "description": "Cross-layer API contracts: types, schemas, events, IPC and sidecar protocol",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -25,5 +25,5 @@
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   },
-  "license": "PolyForm-Noncommercial-1.0.0"
+  "license": "MIT"
 }

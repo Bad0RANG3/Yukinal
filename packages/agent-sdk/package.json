@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Typed client for the agent sidecar (, ADR 0001 ADR 0006)",
+  "description": "Typed client for the agent sidecar over JSON-RPC and NDJSON",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -25,5 +25,5 @@
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   },
-  "license": "PolyForm-Noncommercial-1.0.0"
+  "license": "MIT"
 }

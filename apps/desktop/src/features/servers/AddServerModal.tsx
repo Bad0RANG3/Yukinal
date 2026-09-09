@@ -20,6 +20,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
   const queryClient = useQueryClient();
   const selectServer = useWorkspaceStore((state) => state.selectServer);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(server?.name ?? "");
   const [host, setHost] = useState(server?.connection.host ?? "");
   const [port, setPort] = useState(String(server?.connection.port ?? 22));
@@ -41,7 +42,10 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
   useEffect(() => {
     const previousFocus = document.activeElement;
     dialogRef.current?.showModal();
+    const focusFrame = requestAnimationFrame(() => nameInputRef.current?.focus({ preventScroll: true }));
     return () => {
+      cancelAnimationFrame(focusFrame);
+      dialogRef.current?.close();
       if (previousFocus instanceof HTMLElement) previousFocus.focus();
     };
   }, []);
@@ -77,7 +81,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
           <fieldset className="server-form-fields" disabled={save.isPending}>
           <div className="form-field form-field-wide">
             <label className="field-label" htmlFor="server-name">名称</label>
-            <input autoFocus id="server-name" className="form-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：生产 API" required />
+            <input ref={nameInputRef} id="server-name" className="form-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：生产 API" required />
           </div>
 
           <div className="form-grid form-grid-host">

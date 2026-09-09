@@ -28,9 +28,9 @@ export function useCorePing() {
 }
 
 /**
- * Sidecar status. Polled rather than pushed until the agent loop wires `agent.*` events:
- * a 1.5s poll of a local state read is invisible cost, and it survives a sidecar
- * that dies while nobody is looking.
+ * Sidecar status is polled as a durable health signal. The agent also emits `agent.*`
+ * events for active runs, but a poll still catches a process that dies while nobody
+ * is looking at the event stream.
  */
 export function useAgentStatus() {
   return useQuery({

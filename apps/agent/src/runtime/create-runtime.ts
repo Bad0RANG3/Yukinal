@@ -67,7 +67,8 @@ export function createRuntime(options: { log?: AgentLogger; hostToolClient?: Hos
   const context = new ContextEngine(
     options.hostToolClient ? createHostContextSource(options.hostToolClient) : createEmptyContextSource(),
   );
-  // no provider yet, so loop.start() refuses instead of faking.
+  // The router supplies a configured provider for each run; the loop refuses
+  // direct calls without one instead of faking a response.
   const loop = new AgentLoop({ registry, permission, context, maxRunMs: options.maxRunMs });
 
   const router = new RpcRouter({

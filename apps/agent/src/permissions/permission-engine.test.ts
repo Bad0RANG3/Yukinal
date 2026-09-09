@@ -80,16 +80,72 @@ test("layer 3: production turns a medium write into an approval", () => {
   assert.ok(onProduction.reason.includes("Production") || onProduction.reason.length > 0);
 });
 
-test("critical actions can never be auto-approved, even by a permissive policy", () => {
+test("critical actions need explicit delegation instead of policy-only auto approval", () => {
   const engine = new PermissionEngine();
-  const decision = engine.evaluate({
+  const policyOnly = engine.evaluate({
     declaration: declaration({ name: "ssh.execute", risk: "read" }),
     target: target("development"),
     input: { command: "mkfs.ext4 /dev/sda1" },
     policy: { ...STAGING_POLICY, tiers: { read: "auto", write: "auto", dangerous: "auto" } },
   });
-  assert.equal(decision.finalRisk, "critical");
-  assert.equal(decision.outcome, "ask");
+  assert.equal(policyOnly.finalRisk, "critical");
+  assert.equal(policyOnly.outcome, "ask");
+
+  const delegated = engine.evaluate({
+    declaration: declaration({ name: "ssh.execute", risk: "read" }),
+    target: target("development"),
+    input: { command: "mkfs.ext4 /dev/sda1" },
+    permissionMode: "auto",
+    policy: { ...STAGING_POLICY, tiers: { read: "auto", write: "auto", dangerous: "auto" } },
+  });
+  assert.equal(delegated.outcome, "auto");
+  assert.equal(delegated.approvedBy, "agent");
+});
+
+test("ask mode pauses before writes while keeping reads automatic", () => {
+  const engine = new PermissionEngine();
+  const write = engine.evaluate({
+    declaration: declaration({ name: "filesystem.write", risk: "medium" }),
+    target: target("staging"),
+    input: {},
+    permissionMode: "ask",
+    policy: STAGING_POLICY,
+  });
+  assert.equal(write.outcome, "ask");
+  assert.equal(write.approvedBy, undefined);
+
+  const read = engine.evaluate({
+    declaration: declaration({ name: "docker.ps", risk: "read" }),
+    target: target("staging"),
+    input: {},
+    permissionMode: "ask",
+    policy: STAGING_POLICY,
+  });
+  assert.equal(read.outcome, "auto");
+  assert.equal(read.approvedBy, "policy");
+});
+
+test("auto mode delegates a policy approval and preserves policy denial", () => {
+  const engine = new PermissionEngine();
+  const delegated = engine.evaluate({
+    declaration: declaration({ name: "filesystem.write", risk: "medium" }),
+    target: target("production"),
+    input: {},
+    permissionMode: "auto",
+    policy: PRODUCTION_POLICY,
+  });
+  assert.equal(delegated.outcome, "auto");
+  assert.equal(delegated.approvedBy, "agent");
+
+  const denied = engine.evaluate({
+    declaration: declaration({ name: "filesystem.write", risk: "medium" }),
+    target: target("production"),
+    input: {},
+    permissionMode: "auto",
+    policy: { ...PRODUCTION_POLICY, tiers: { read: "auto", write: "deny", dangerous: "deny" } },
+  });
+  assert.equal(denied.outcome, "deny");
+  assert.equal(denied.approvedBy, undefined);
 });
 
 test("a session grant covers read/write but never the dangerous tier", () => {

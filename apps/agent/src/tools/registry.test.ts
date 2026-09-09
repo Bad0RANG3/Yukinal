@@ -143,6 +143,24 @@ test("an ask decision cannot be smuggled through as an auto ticket", async () =>
   assert.match(result.error?.message ?? "", /policy_auto|"ask"/);
 });
 
+test("a critical call needs the explicit Agent delegation ticket", async () => {
+  const registry = new ToolRegistry();
+  registry.register(echoTool({ name: "test.critical", risk: "critical" }));
+  const production: ToolTarget = { host: "remote", serverId: "srv_critical", environment: "production" };
+  const declaration = registry.declaration("test.critical");
+  assert.ok(declaration);
+  const engine = new PermissionEngine();
+  const delegated = engine.evaluate({ declaration, target: production, input: { text: "x" }, permissionMode: "auto" });
+  assert.equal(delegated.outcome, "auto");
+  assert.equal(delegated.approvedBy, "agent");
+
+  const result = await registry.execute(
+    { callId: "c", traceId: "t", toolName: "test.critical", input: { text: "x" }, target: production },
+    { kind: "agent_auto", decision: delegated },
+  );
+  assert.equal(result.status, "success");
+});
+
 test("a ticket for one server cannot be replayed on another", async () => {
   const registry = new ToolRegistry();
   registry.register(echoTool({ name: "test.write", risk: "medium" }));

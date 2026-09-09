@@ -1,11 +1,11 @@
 /**
- * Tool Registry — registration + the only execution path (-R5).
+ * Tool Registry — registration and the only execution path.
  *
  * Invariants enforced here:
  *  1. a tool must declare name/description/risk/timeout/retry/cancellable
  *  2. the model never sees dot-names; the mapping is derived, not hand-written (ADR 0004)
  *  3. execution requires a ticket from the Permission Engine
- *  4. every call is timed, cancellable and traced (-R8)
+ *  4. every call is timed, cancellable and traced
  */
 
 import { z } from "zod";
@@ -27,6 +27,8 @@ import type { AnyTool, Tool } from "./tool.js";
 
 export type ExecutionTicket =
   | { kind: "policy_auto"; decision: PermissionDecision }
+  | { kind: "agent_auto"; decision: PermissionDecision }
+  | { kind: "session_auto"; decision: PermissionDecision }
   | { kind: "user_approved"; decision: PermissionDecision; approvalId: string; respondedAt: string };
 
 export class DeniedByPolicyError extends NotImplementedError {}
@@ -246,22 +248,31 @@ export function checkTicket(
       retryable: false,
     };
   }
-  if (decision.finalRisk === "critical" && ticket.kind !== "user_approved") {
+  if (decision.finalRisk === "critical" && ticket.kind !== "agent_auto" && ticket.kind !== "user_approved") {
     return {
       code: "denied_by_policy",
-      message: "Critical actions require an explicit user approval",
+      message: "Critical actions require an explicit user approval or Agent auto-delegation",
       retryable: false,
     };
   }
   if (decision.outcome === "deny") {
     return { code: "denied_by_policy", message: decision.reason, retryable: false };
   }
-  if (ticket.kind === "policy_auto" && decision.outcome !== "auto") {
+  if ((ticket.kind === "policy_auto" || ticket.kind === "agent_auto" || ticket.kind === "session_auto") && decision.outcome !== "auto") {
     return {
       code: "denied_by_policy",
       message: `Policy said "${decision.outcome}", but the call arrived with an auto ticket`,
       retryable: false,
     };
+  }
+  if (ticket.kind === "policy_auto" && decision.approvedBy !== "policy") {
+    return { code: "denied_by_policy", message: "Policy auto ticket has no policy authorization", retryable: false };
+  }
+  if (ticket.kind === "agent_auto" && decision.approvedBy !== "agent") {
+    return { code: "denied_by_policy", message: "Agent auto ticket has no Agent delegation", retryable: false };
+  }
+  if (ticket.kind === "session_auto" && decision.approvedBy !== "user") {
+    return { code: "denied_by_policy", message: "Session auto ticket has no user session approval", retryable: false };
   }
   if (ticket.kind === "user_approved" && decision.approvalId !== ticket.approvalId) {
     return { code: "denied_by_policy", message: "Approval id does not match the pending decision", retryable: false };

@@ -19,7 +19,7 @@ export interface AiProviderConfig {
   label: string;
   baseUrl: string;
   model: string;
-  /** Reference into the OS credential store. Never the key itself (). */
+  /** Reference into the OS credential store. Never the key itself. */
   apiKeyCredentialRef?: string;
   enabled: boolean;
   /** Extra headers for corporate gateways. */

@@ -163,7 +163,7 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
 
 function ExecutionStep({ execution }: { execution: ToolExecutionRecord }) {
   const output = execution.error ?? executionOutput(execution);
-  const approval = execution.approvedBy === "user" ? "用户批准" : execution.approvedBy === "policy" ? "策略批准" : null;
+  const approval = execution.approvedBy === "user" ? "用户批准" : execution.approvedBy === "policy" ? "策略批准" : execution.approvedBy === "agent" ? "Agent 自主批准" : null;
   return (
     <div className="activity-trace-step">
       <div className="activity-trace-step-top">

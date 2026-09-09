@@ -1,4 +1,4 @@
-//! The complete native surface available to React (-R9-R10).
+//! The native surface available to React through the explicit IPC allow-list.
 //!
 //! Every command mirrors a key of `IpcCommandMap` in `@yukinal/shared`; field naming is
 //! camelCase on both sides. If a command is not in that map, it does not exist for the
@@ -119,8 +119,8 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
     Ok(config.with_env("YUKINAL_DATA_DIR", &data_dir))
 }
 
-/// One task per launched sidecar: keeps the child's stderr visible in the desktop log
-/// until the event → Tauri event mapping is not implemented yet.
+/// One task per launched sidecar: keeps stderr visible and maps sidecar notifications
+/// onto the desktop event channels.
 fn forward_sidecar_events(app: AppHandle) {
     let supervisor = app.state::<AppState>().supervisor.clone();
     let mut receiver = supervisor.subscribe();
@@ -244,6 +244,7 @@ enum AgentToolHost {
 enum AgentApprovalSource {
     User,
     Policy,
+    Agent,
 }
 
 const MAX_AUDIT_TEXT_CHARS: usize = 4_000;
@@ -317,6 +318,7 @@ fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
         approved_by: event.approved_by.map(|source| match source {
             AgentApprovalSource::User => "user".to_string(),
             AgentApprovalSource::Policy => "policy".to_string(),
+            AgentApprovalSource::Agent => "agent".to_string(),
         }),
         status: event.status,
         input: sanitize_audit_input(event.input),
@@ -472,6 +474,7 @@ fn forward_agent_frame(app: &AppHandle, frame: &Value) {
             | "agent.tool_call"
             | "agent.tool_result"
             | "agent.waiting_approval"
+            | "agent.approval_expired"
             | "agent.completed"
             | "agent.failed"
     ) {

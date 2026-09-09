@@ -95,6 +95,9 @@ export function TerminalPane({ active }: { active: boolean }) {
     const unlisteners: UnlistenFn[] = [];
     let sessionId: string | null = null;
     let disposed = false;
+    const pendingData: Array<{ terminalSessionId: string; data: string }> = [];
+    let pendingDataChars = 0;
+    const MAX_PENDING_DATA_CHARS = 256_000;
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(() => {
         if (!disposed && activeRef.current) fit.fit();
@@ -103,9 +106,24 @@ export function TerminalPane({ active }: { active: boolean }) {
     resizeObserver.observe(container);
 
     // Remote bytes → xterm. The event carries the session id so one pane can't
-    // write foreign output if a second terminal is open.
+    // write foreign output if a second terminal is open. The short pre-response
+    // window is buffered by id so the first prompt is not lost, then foreign
+    // sessions are discarded once this pane knows its own id.
     void listen<{ terminalSessionId: string; data: string }>("terminal.data", (event) => {
-      if (disposed || (sessionId !== null && event.payload.terminalSessionId !== sessionId)) return;
+      if (disposed) return;
+      if (sessionId === null) {
+        const data = event.payload.data;
+        while (pendingDataChars + data.length > MAX_PENDING_DATA_CHARS && pendingData.length > 0) {
+          const removed = pendingData.shift();
+          pendingDataChars -= removed?.data.length ?? 0;
+        }
+        if (data.length <= MAX_PENDING_DATA_CHARS) {
+          pendingData.push(event.payload);
+          pendingDataChars += data.length;
+        }
+        return;
+      }
+      if (event.payload.terminalSessionId !== sessionId) return;
       term.write(event.payload.data);
     }).then((unlisten) => {
       if (disposed) unlisten();
@@ -134,6 +152,11 @@ export function TerminalPane({ active }: { active: boolean }) {
           return;
         }
         sessionId = terminalSessionId;
+        for (const event of pendingData) {
+          if (event.terminalSessionId === sessionId) term.write(event.data);
+        }
+        pendingData.length = 0;
+        pendingDataChars = 0;
         void callDesktop(IPC_COMMANDS.terminalResize, { terminalSessionId, cols: term.cols, rows: term.rows }).catch(() => {});
         // Terminal emits its current size after open; bidirectional wiring starts
         // from here so a resize before this point is not lost.
