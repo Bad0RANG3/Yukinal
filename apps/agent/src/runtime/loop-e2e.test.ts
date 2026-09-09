@@ -48,6 +48,20 @@ function mockLlm(script: Array<Array<object> | "hang">): Promise<{ port: number;
   });
 }
 
+function mockProviderFailure(body: string, status = 401): Promise<{ port: number; close(): void }> {
+  return new Promise((resolve) => {
+    const server: Server = createServer((_req, res) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(body);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ port, close: () => server.close() });
+    });
+  });
+}
+
 function sseText(text: string): object {
   return { choices: [{ delta: { content: text }, finish_reason: null }] };
 }
@@ -109,6 +123,27 @@ test("E2E: prompt -> tool call -> permission -> execute -> report", async (t) =>
   assert(types.includes("agent.completed"), JSON.stringify(types));
 });
 
+test("E2E: a general question runs without a server target", async (t) => {
+  const { port, close } = await mockLlm([[sseText("可以直接回答一般问题")]]);
+  t.after(() => close());
+
+  const runtime = createRuntime({ log: silent });
+  const events: AgentStreamEvent[] = [];
+  const result = await runtime.loop.start(
+    runRequest({
+      prompt: "什么是蓝绿部署？",
+      target: undefined,
+      focusServerId: undefined,
+    }),
+    { emit: (event) => events.push(event) },
+    new OpenAiCompatibleProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "mock-model" }),
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.match(result.text, /可以直接回答一般问题/);
+  assert.equal(events.some((event) => event.type === "agent.tool_call"), false);
+});
+
 test("E2E: Stop aborts the in-flight call and lands on cancelled", async (t) => {
   const { port, close } = await mockLlm(["hang"]);
   t.after(() => close());
@@ -134,6 +169,21 @@ test("E2E: Stop aborts the in-flight call and lands on cancelled", async (t) => 
     finalEvent && finalEvent.type === "agent.completed" && finalEvent.result.state === "cancelled",
     "completion must carry state=cancelled",
   );
+});
+
+test("E2E: the whole run has a wall-clock deadline", async (t) => {
+  const { port, close } = await mockLlm(["hang"]);
+  t.after(() => close());
+
+  const runtime = createRuntime({ log: silent, maxRunMs: 40 });
+  const result = await runtime.loop.start(
+    runRequest({ runId: "run_deadline" }),
+    { emit: noop },
+    new OpenAiCompatibleProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "mock-model" }),
+  );
+
+  assert.equal(result.state, "failed", JSON.stringify(result));
+  assert.match(result.error ?? "", /maxRunMs=40/);
 });
 
 
@@ -169,4 +219,50 @@ test("E2E (responses dialee): tool chain via /responses", async (t) => {
   assert(toolResult && toolResult.type === "agent.tool_result");
   assert.equal(toolResult.status, "success");
   assert.match(result.text, /responses answered/);
+});
+
+test("E2E (responses dialect): provider failures are surfaced", async (t) => {
+  const { port, close } = await mockLlm([
+    [
+      {
+        type: "response.failed",
+        response: { error: { message: "模型暂时不可用（api key: ****g2z5）", code: "model_error" } },
+      },
+    ],
+  ]);
+  t.after(() => close());
+
+  const runtime = createRuntime({ log: silent });
+  const events: AgentStreamEvent[] = [];
+  const result = await runtime.loop.start(
+    runRequest({ runId: "run_responses_failed" }),
+    { emit: (event) => events.push(event) },
+    new OpenAiCompatibleProvider({
+      baseUrl: `http://127.0.0.1:${port}`,
+      model: "gpt-5.6-terra",
+      wireApi: "responses",
+    }),
+  );
+
+  assert.equal(result.state, "failed", JSON.stringify(result));
+  assert.match(result.error ?? "", /模型暂时不可用/);
+  assert.doesNotMatch(result.error ?? "", /g2z5/);
+  assert.equal(events.some((event) => event.type === "agent.completed"), false);
+  assert.equal(events.some((event) => event.type === "agent.failed"), true);
+});
+
+test("E2E: HTTP provider errors do not echo response bodies", async (t) => {
+  const { port, close } = await mockProviderFailure('{"error":{"message":"Your api key: ****g2z5 is invalid"}}');
+  t.after(() => close());
+
+  const runtime = createRuntime({ log: silent });
+  const result = await runtime.loop.start(
+    runRequest({ runId: "run_http_failure" }),
+    { emit: noop },
+    new OpenAiCompatibleProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "mock-model" }),
+  );
+
+  assert.equal(result.state, "failed", JSON.stringify(result));
+  assert.match(result.error ?? "", /failed \(401\)/);
+  assert.doesNotMatch(result.error ?? "", /g2z5/);
 });

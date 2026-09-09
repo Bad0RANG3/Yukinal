@@ -3,14 +3,13 @@
 //! russh types stay inside this module + `backend`; `Session`/`PtySession`/
 //! `SftpClient` in the crate root only hold `Arc`s to the handles defined here.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{watch, Mutex};
 
 use crate::backend::{establish, ConnHandler};
 use crate::known_hosts::KnownHostsStore;
-use crate::{ConnectionSecrets, Error, PtyEvent, Result, SshConfig};
+use crate::{ConnectionSecrets, PtyEvent, Result, SshConfig};
 
 /// One established connection, shared by every clone of a `Session`.
 pub(crate) struct SessionHandle {
@@ -18,7 +17,7 @@ pub(crate) struct SessionHandle {
     pub known_hosts: Arc<StdMutex<KnownHostsStore>>,
     pub config: SshConfig,
     secrets: ConnectionSecrets,
-    reconnecting: AtomicBool,
+    reconnect_lock: Mutex<()>,
     shutdown: watch::Sender<bool>,
     keepalive_task: tokio::task::JoinHandle<()>,
 }
@@ -65,28 +64,18 @@ impl SessionHandle {
             known_hosts,
             config,
             secrets,
-            reconnecting: AtomicBool::new(false),
+            reconnect_lock: Mutex::new(()),
             shutdown,
             keepalive_task,
         }
     }
 
     /// Re-establish the connection using the stored config + resolved secrets.
-    /// Single-flight: concurrent callers wait for the in-flight reconnect.
+    /// A mutex is used instead of a polling flag so a waiter cannot mistake a
+    /// failed reconnect for a successful one.
     pub(crate) async fn reconnect(&self) -> Result<()> {
-        if self.reconnecting.swap(true, Ordering::SeqCst) {
-            for _ in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if !self.reconnecting.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-            }
-            return Err(Error::Transport("reconnect already in progress".into()));
-        }
-
-        let result = establish(&self.config, &self.secrets, &self.known_hosts).await;
-        self.reconnecting.store(false, Ordering::SeqCst);
-        let new_conn = result?;
+        let _guard = self.reconnect_lock.lock().await;
+        let new_conn = establish(&self.config, &self.secrets, &self.known_hosts).await?;
         *self.conn.lock().await = new_conn;
         Ok(())
     }
@@ -112,6 +101,7 @@ impl Drop for SessionHandle {
 pub(crate) enum PtyCmd {
     Write(Vec<u8>),
     Resize(u16, u16),
+    Close,
 }
 
 /// One open PTY: commands in, output events out. The single task owning the
@@ -119,7 +109,10 @@ pub(crate) enum PtyCmd {
 pub(crate) struct PtyHandle {
     pub output_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
     pub commands: tokio::sync::mpsc::UnboundedSender<PtyCmd>,
-    receiver: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<PtyEvent>>>,
+    // `take_output` is intentionally synchronous because the public PTY trait is
+    // synchronous at the subscription seam. A short std mutex avoids calling
+    // Tokio's `blocking_lock` from inside an async forwarder (which can panic).
+    receiver: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<PtyEvent>>>,
 }
 
 impl PtyHandle {
@@ -131,7 +124,7 @@ impl PtyHandle {
             Self {
                 output_tx,
                 commands,
-                receiver: tokio::sync::Mutex::new(Some(receiver)),
+                receiver: StdMutex::new(Some(receiver)),
             },
             commands_rx,
         )
@@ -139,7 +132,10 @@ impl PtyHandle {
 
     /// The one output stream of this PTY (terminal owns exactly one subscriber).
     pub(crate) fn take_output(&self) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent> {
-        let mut slot = self.receiver.blocking_lock();
+        let mut slot = self
+            .receiver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         slot.take().unwrap_or_else(|| {
             // Not supposed to happen twice; a fresh silent receiver keeps
             // callers from panicking on misuse.

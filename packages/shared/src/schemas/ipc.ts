@@ -12,7 +12,7 @@
 
 import { z } from "zod";
 
-import type { IpcCommandName } from "../ipc/index.js";
+import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
 import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
 import { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
@@ -30,9 +30,9 @@ import {
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
 
 /** Opaque `srv_` ids are the only admissible server references on the wire. */
-export const IpcServerIdSchema = z.string().regex(/^srv_[a-z0-9]+$/, "server id must be an opaque srv_ id");
+export const IpcServerIdSchema = z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/, "server id must be an opaque srv_ id");
 
-const IpcTerminalSessionIdSchema = z.string().min(1);
+const IpcTerminalSessionIdSchema = z.string().trim().min(1).max(256);
 const IpcPortSchema = z.number().int().min(1).max(65535);
 
 export const CorePingResponseSchema = z.strictObject({
@@ -79,10 +79,12 @@ export const AgentLogsResponseSchema = z.strictObject({
   capacity: z.number().int().positive(),
 });
 
-interface IpcCommandSchema {
-  params: z.ZodType;
-  response: z.ZodType;
-}
+type IpcCommandSchemaMap = {
+  [C in IpcCommandName]: {
+    params: z.ZodType<IpcCommandMap[C]["params"]>;
+    response: z.ZodType<IpcCommandMap[C]["response"]>;
+  };
+};
 
 /**
  * Every command of `IpcCommandMap`, each with a params + response gate. The
@@ -151,7 +153,7 @@ export const IPC_SCHEMAS = {
     response: TerminalOpenResponseSchema,
   },
   terminal_write: {
-    params: z.strictObject({ terminalSessionId: IpcTerminalSessionIdSchema, data: z.string() }),
+    params: z.strictObject({ terminalSessionId: IpcTerminalSessionIdSchema, data: z.string().max(64 * 1024) }),
     response: EMPTY_PAYLOAD,
   },
   terminal_resize: {
@@ -172,17 +174,21 @@ export const IPC_SCHEMAS = {
   agent_logs: { params: EMPTY_PAYLOAD, response: AgentLogsResponseSchema },
   agent_run_start: {
     params: z.strictObject({
-      sessionId: z.string().min(1),
-      prompt: z.string().min(1),
-      providerId: z.string().min(1).optional(),
-      model: z.string().min(1).optional(),
-      workspaceId: z.string().min(1).optional(),
+      sessionId: z.string().trim().min(1).max(256),
+      prompt: z.string().trim().min(1).max(100_000),
+      messageId: z.string().trim().min(1).max(256).optional(),
+      parts: z.array(z.strictObject({ type: z.literal("text"), text: z.string().trim().min(1).max(100_000) })).min(1).max(128).optional(),
+      delivery: z.enum(["async", "sync"]).optional(),
+      resume: z.boolean().optional(),
+      providerId: z.string().trim().min(1).max(256).optional(),
+      model: z.string().trim().min(1).max(256).optional(),
+      workspaceId: z.string().trim().min(1).max(256).optional(),
       focusServerId: IpcServerIdSchema.optional(),
     }),
     response: z.strictObject({ runId: z.string().min(1) }),
   },
   agent_run_stop: {
-    params: z.strictObject({ runId: z.string().min(1) }),
+    params: z.strictObject({ runId: z.string().trim().min(1).max(256) }),
     response: z.strictObject({ stopped: z.boolean() }),
   },
   agent_approval_respond: {
@@ -190,6 +196,10 @@ export const IPC_SCHEMAS = {
     response: z.strictObject({ accepted: z.boolean() }),
   },
   provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
+  provider_import_auto: {
+    params: EMPTY_PAYLOAD,
+    response: z.strictObject({ imported: z.number().int().nonnegative(), providers: z.array(ProviderConfigSchema) }),
+  },
   provider_save_openai: {
     params: ProviderSaveInputSchema,
     response: z.strictObject({ provider: ProviderConfigSchema }),
@@ -218,4 +228,4 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ providerId: z.string().min(1) }),
     response: z.strictObject({ models: z.array(ProviderModelOptionSchema) }),
   },
-} satisfies Record<IpcCommandName, IpcCommandSchema>;
+} satisfies IpcCommandSchemaMap;

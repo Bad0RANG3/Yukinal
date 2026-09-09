@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx --test \"tests/**/*.test.ts\"",
     "tauri": "tauri",
     "icon": "tauri icon design/app-icon.png"
   },

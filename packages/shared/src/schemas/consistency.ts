@@ -6,7 +6,7 @@
 
 import type { z } from "zod";
 
-import type { AgentRunRequest, ApprovalResponse } from "../types/chat.js";
+import type { AgentRunRequest, AgentStreamEvent, ApprovalResponse } from "../types/chat.js";
 import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
 import type { Activity, ToolExecutionListResponse } from "../types/activity.js";
 import type { ServerService, ServerServicesResponse } from "../types/service.js";
@@ -30,6 +30,7 @@ import type {
   PermissionDecisionSchema,
   ToolDeclarationSchema,
 } from "./permission.js";
+import type { AgentStreamEventSchema } from "./agent.js";
 import type { IPC_SCHEMAS } from "./ipc.js";
 
 /** Succeeds only when the schema's output is assignable to the declared contract type. */
@@ -60,6 +61,7 @@ export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDec
 export type _ToolDeclarationContract = Expect<Assignable<typeof ToolDeclarationSchema, ToolDeclaration>>;
 export type _ApprovalResponseContract = Expect<Assignable<typeof ApprovalResponseSchema, ApprovalResponse>>;
 export type _AgentRunContract = Expect<Assignable<typeof AgentRunRequestSchema, AgentRunRequest>>;
+export type _AgentStreamEventContract = Expect<Assignable<typeof AgentStreamEventSchema, AgentStreamEvent>>;
 
 /**
  * Per-command IPC gates: every command's params and response schema must produce a
@@ -100,6 +102,7 @@ export type _IpcParamsContracts = {
   agent_run_stop: Expect<Assignable<ParamsOf<"agent_run_stop">, IpcCommandMap["agent_run_stop"]["params"]>>;
   agent_approval_respond: Expect<Assignable<ParamsOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["params"]>>;
   provider_list: Expect<Assignable<ParamsOf<"provider_list">, IpcCommandMap["provider_list"]["params"]>>;
+  provider_import_auto: Expect<Assignable<ParamsOf<"provider_import_auto">, IpcCommandMap["provider_import_auto"]["params"]>>;
   provider_save_openai: Expect<Assignable<ParamsOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["params"]>>;
   provider_import_ccswitch: Expect<Assignable<ParamsOf<"provider_import_ccswitch">, IpcCommandMap["provider_import_ccswitch"]["params"]>>;
   provider_import_ccswitch_apply: Expect<Assignable<ParamsOf<"provider_import_ccswitch_apply">, IpcCommandMap["provider_import_ccswitch_apply"]["params"]>>;
@@ -137,6 +140,7 @@ export type _IpcResponseContracts = {
   agent_run_stop: Expect<Assignable<ResponseOf<"agent_run_stop">, IpcCommandMap["agent_run_stop"]["response"]>>;
   agent_approval_respond: Expect<Assignable<ResponseOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["response"]>>;
   provider_list: Expect<Assignable<ResponseOf<"provider_list">, IpcCommandMap["provider_list"]["response"]>>;
+  provider_import_auto: Expect<Assignable<ResponseOf<"provider_import_auto">, IpcCommandMap["provider_import_auto"]["response"]>>;
   provider_save_openai: Expect<Assignable<ResponseOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["response"]>>;
   provider_import_ccswitch: Expect<Assignable<ResponseOf<"provider_import_ccswitch">, IpcCommandMap["provider_import_ccswitch"]["response"]>>;
   provider_import_ccswitch_apply: Expect<Assignable<ResponseOf<"provider_import_ccswitch_apply">, IpcCommandMap["provider_import_ccswitch_apply"]["response"]>>;

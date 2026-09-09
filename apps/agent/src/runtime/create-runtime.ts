@@ -48,7 +48,7 @@ export interface Runtime {
   declarations: ToolDeclaration[];
 }
 
-export function createRuntime(options: { log?: AgentLogger; hostToolClient?: HostRpcClient } = {}): Runtime {
+export function createRuntime(options: { log?: AgentLogger; hostToolClient?: HostRpcClient; maxRunMs?: number } = {}): Runtime {
   const log = options.log ?? createLogger({ level: "info", scope: "agent" });
 
   const registry = new ToolRegistry();
@@ -68,7 +68,7 @@ export function createRuntime(options: { log?: AgentLogger; hostToolClient?: Hos
     options.hostToolClient ? createHostContextSource(options.hostToolClient) : createEmptyContextSource(),
   );
   // no provider yet, so loop.start() refuses instead of faking.
-  const loop = new AgentLoop({ registry, permission, context });
+  const loop = new AgentLoop({ registry, permission, context, maxRunMs: options.maxRunMs });
 
   const router = new RpcRouter({
     registry,

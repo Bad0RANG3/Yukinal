@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { z } from "zod";
 
-import { RPC_ERROR, type AgentRunState } from "@yukinal/shared";
+import { RPC_ERROR, type AgentRunState, type AgentStreamEvent } from "@yukinal/shared";
+import type { LLMProvider } from "@yukinal/provider-sdk";
 
+import { createEmptyContextSource } from "../context/empty-source.js";
+import { ContextEngine } from "../context/context-engine.js";
 import { RpcFailure } from "../errors.js";
+import { PermissionEngine } from "../permissions/permission-engine.js";
+import { ToolRegistry } from "../tools/registry.js";
 import { AgentLoop, InvalidTransitionError, isTerminal, transition } from "./agent-loop.js";
 import { createRuntime } from "./create-runtime.js";
 import type { AgentLogger } from "../config.js";
@@ -63,4 +69,69 @@ test("without a provider the loop refuses to run instead of faking output", asyn
     ),
     (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.NOT_IMPLEMENTED,
   );
+});
+
+test("approval responses are bound to the run that displayed them", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "danger.test",
+    description: "Test action requiring approval",
+    risk: "high",
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({}),
+    execute: async () => ({ ok: true }),
+  });
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "tool_call", call: { id: "call_approval", name: "danger__test", arguments: {} } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "approved" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+
+  let resolveApproval: ((approval: Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>['approval']) => void) | undefined;
+  const approval = new Promise<Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>['approval']>((resolve) => {
+    resolveApproval = resolve;
+  });
+  const run = loop.start(
+    {
+      runId: "run_approval",
+      sessionId: "ses_approval",
+      prompt: "run the protected test action",
+      target: { host: "remote", serverId: "srv_approval", environment: "production" },
+    },
+    {
+      emit: (event) => {
+        if (event.type === "agent.waiting_approval") resolveApproval?.(event.approval);
+      },
+    },
+    provider,
+  );
+
+  const request = await approval;
+  const response = { approvalId: request.approvalId, decision: "approve_once" as const, respondedAt: new Date().toISOString() };
+  assert.equal(loop.respondApproval({ ...response, runId: "run_other" }), false);
+  assert.equal(loop.respondApproval({ ...response, runId: "run_approval" }), true);
+  const result = await run;
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(result.toolCalls, 1);
 });

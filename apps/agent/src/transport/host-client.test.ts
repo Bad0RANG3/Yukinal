@@ -42,11 +42,21 @@ test("host client sends a typed context request and resolves its response", asyn
 });
 
 test("aborting a host request removes it and rejects promptly", async () => {
-  const client = new HostRpcClient(() => {});
+  const frames: string[] = [];
+  const client = new HostRpcClient((frame) => frames.push(frame));
   const controller = new AbortController();
   const pending = client.execute(request, controller.signal);
+  const requestFrame = JSON.parse(frames[0] ?? "{}") as { id: number; method: string; params: unknown };
   controller.abort();
 
   await assert.rejects(pending, /host request cancelled/);
-  assert.equal(client.handleIncoming({ jsonrpc: "2.0", id: 1, result: { status: "success" } }), true);
+  const cancelFrame = JSON.parse(frames[1] ?? "{}") as {
+    id: number;
+    method: string;
+    params: unknown;
+  };
+  assert.equal(requestFrame.method, HOST_METHODS.toolExecute);
+  assert.equal(cancelFrame.method, HOST_METHODS.toolCancel);
+  assert.deepEqual(cancelFrame.params, { requestId: requestFrame.id });
+  assert.equal(client.handleIncoming({ jsonrpc: "2.0", id: requestFrame.id, result: { status: "success" } }), true);
 });

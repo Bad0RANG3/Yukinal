@@ -72,13 +72,13 @@ export function useKillAgent() {
 }
 
 export function statusLabel(status: AgentStatus | undefined, shellAvailable: boolean): string {
-  if (!shellAvailable) return "浏览器预览 —— 原生命中不可用";
-  if (!status) return "查询 core 中…";
+  if (!shellAvailable) return "浏览器预览 · 原生能力不可用";
+  if (!status) return "正在查询 Core…";
   if (status.running && status.pid !== null) {
-    return `agent · pid ${status.pid} · 协议 ${status.protocolVersion ?? "?"} · ${status.toolCount ?? 0} 个工具`;
+    return `Agent · PID ${status.pid} · 协议 ${status.protocolVersion ?? "?"} · ${status.toolCount ?? 0} 个工具`;
   }
   if (status.lastExit) {
-    return `agent 已退出（${status.lastExit.code ?? status.lastExit.signal ?? "未知"}）`;
+    return `Agent 已退出（${status.lastExit.code ?? status.lastExit.signal ?? "未知"}）`;
   }
-  return "agent 未启动";
+  return "Agent 未启动";
 }

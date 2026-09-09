@@ -148,6 +148,7 @@ export class ToolRegistry {
     const controller = new AbortController();
     const abortFromCaller = () => controller.abort(new Error("cancelled-by-user"));
     options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (options.signal?.aborted) abortFromCaller();
 
     const deadlineAt = startedAtMs + declaration.timeoutMs;
     const timer = setTimeout(() => controller.abort(new Error("timeout")), declaration.timeoutMs);
@@ -173,7 +174,12 @@ export class ToolRegistry {
           // reported as timed out / cancelled immediately. The abandoned
           // promise is still observed so a misbehaving tool surfaces in logs instead of
           // silently finishing work the user already stopped.
-          output = await Promise.race([running, interruption(controller.signal)]);
+          const interruptionState = interruption(controller.signal);
+          try {
+            output = await Promise.race([running, interruptionState.promise]);
+          } finally {
+            interruptionState.cleanup();
+          }
           void running.then(
             () => undefined,
             (error: unknown) => {
@@ -264,7 +270,7 @@ export function checkTicket(
 }
 
 function sameTarget(a: ToolCallRequest["target"], b: ToolCallRequest["target"]): boolean {
-  return a.host === b.host && a.serverId === b.serverId && a.environment === b.environment;
+  return a.host === b.host && a.serverId === b.serverId && a.workspaceId === b.workspaceId && a.environment === b.environment;
 }
 
 function describe(target: ToolCallRequest["target"]): string {
@@ -278,16 +284,23 @@ class InterruptedError extends Error {
   }
 }
 
-/** Rejects as soon as the call's own AbortSignal fires. */
-function interruption(signal: AbortSignal): Promise<never> {
-  return new Promise<never>((_, reject) => {
-    const fire = (): void => {
+/** Rejects as soon as the call's own AbortSignal fires and releases its listener. */
+function interruption(signal: AbortSignal): { promise: Promise<never>; cleanup: () => void } {
+  let fire: (() => void) | undefined;
+  const promise = new Promise<never>((_, reject) => {
+    fire = (): void => {
       const reason = String((signal.reason as Error | undefined)?.message ?? "abort");
       reject(new InterruptedError(reason === "timeout" ? "timeout" : "cancelled"));
     };
     if (signal.aborted) fire();
     else signal.addEventListener("abort", fire, { once: true });
   });
+  return {
+    promise,
+    cleanup: () => {
+      if (fire) signal.removeEventListener("abort", fire);
+    },
+  };
 }
 
 function toToolError(error: unknown): ToolError {
@@ -354,16 +367,33 @@ function humanTitle(declaration: ToolDeclaration): string {
 }
 
 export function summarize(output: unknown): string {
-  const text = typeof output === "string" ? output : JSON.stringify(output, null, 2) ?? String(output);
+  let text: string;
+  if (typeof output === "string") {
+    text = output;
+  } else {
+    try {
+      text = JSON.stringify(output, null, 2) ?? String(output);
+    } catch {
+      text = "[unserialisable output]";
+    }
+  }
   return text.length > MAX_SUMMARY_CHARS ? `${text.slice(0, MAX_SUMMARY_CHARS)}\n…[truncated]` : text;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
+  if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
     timer.unref?.();
-    signal.addEventListener("abort", () => resolve(), { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 

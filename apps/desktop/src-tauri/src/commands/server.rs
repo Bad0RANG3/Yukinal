@@ -6,8 +6,9 @@ use tauri::State;
 
 use crate::commands::activity::record_user_activity;
 use crate::commands::terminal::ensure_session;
+use crate::commands::EmptyResponse;
 use crate::state::AppState;
-use yukinal_credentials::{CredentialStore, Secret};
+use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{
     ActivityOutcome, ActivityType, Identity, Server, ServerCapabilities, ServerConnection,
     ServerMetadata, ServerStatus,
@@ -141,7 +142,7 @@ pub async fn server_connect(
 pub async fn server_disconnect(
     state: State<'_, AppState>,
     server_id: String,
-) -> Result<(), String> {
+) -> Result<EmptyResponse, String> {
     state
         .terminals
         .disconnect(&server_id)
@@ -163,7 +164,8 @@ pub async fn server_disconnect(
         "已断开服务器",
         None,
         ActivityOutcome::Success,
-    )
+    )?;
+    Ok(EmptyResponse {})
 }
 
 #[tauri::command]
@@ -180,27 +182,47 @@ pub async fn server_update(
         .map_err(|error| error.to_string())?;
     let old_identity_id = server.connection.identity_id.clone();
 
-    // A changed endpoint or credential must not leave the old authenticated
-    // connection cached under the same stable server id.
-    state
-        .terminals
-        .disconnect(&input.server_id)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let new_identity_id = match input.authentication {
+    // Validate and stage the replacement identity before disconnecting the old
+    // session. A bad identity reference or keychain failure must not destroy a
+    // connection that was still usable.
+    let staged_identity_id = match input.authentication.as_ref() {
+        Some(AuthenticationInput::Identity { .. }) | None => None,
         Some(authentication) => Some(
             store_identity_input(
                 &state,
-                &authentication,
+                authentication,
                 &input.name,
                 &input.server_id,
                 &yukinal_core::sidecar::iso8601_now(),
             )
             .await?,
         ),
+    };
+    let new_identity_id = match input.authentication.as_ref() {
+        Some(authentication) => Some(match authentication {
+            AuthenticationInput::Identity { identity_id } => {
+                state
+                    .database
+                    .identities()
+                    .get(identity_id)
+                    .map_err(|error| error.to_string())?;
+                identity_id.clone()
+            }
+            _ => staged_identity_id
+                .clone()
+                .ok_or_else(|| "replacement identity was not staged".to_string())?,
+        }),
         None => old_identity_id.clone(),
     };
+
+    // A changed endpoint or credential must not leave the old authenticated
+    // connection cached under the same stable server id.
+    if let Err(error) = state.terminals.disconnect(&input.server_id).await {
+        if let Some(identity_id) = staged_identity_id.as_deref() {
+            let _ = reclaim_identity(&state, identity_id, &server.id);
+        }
+        return Err(error.to_string());
+    }
     server.name = input.name;
     server.connection.host = input.host;
     server.connection.port = input.port.unwrap_or(22);
@@ -210,11 +232,12 @@ pub async fn server_update(
     server.metadata.environment = input.environment;
     server.status = ServerStatus::Disconnected;
     server.updated_at = yukinal_core::sidecar::iso8601_now();
-    state
-        .database
-        .servers()
-        .update(&server)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = state.database.servers().update(&server) {
+        if let Some(identity_id) = staged_identity_id.as_deref() {
+            let _ = reclaim_identity(&state, identity_id, &server.id);
+        }
+        return Err(error.to_string());
+    }
 
     if let Some(old_id) =
         old_identity_id.filter(|id| Some(id) != server.connection.identity_id.as_ref())
@@ -328,10 +351,16 @@ fn insert_server_and_attach_identity(
         .servers()
         .insert(server)
         .map_err(|error| error.to_string())?;
-    database
+    if let Err(error) = database
         .identities()
         .attach_to_server(&server.id, identity_id)
-        .map_err(|error| error.to_string())
+    {
+        // Do not leave a server row behind when the second half of the add
+        // operation fails (for example, a stale identity reference).
+        let _ = database.servers().delete(&server.id);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 async fn store_identity(
@@ -367,6 +396,11 @@ async fn store_identity(
         }
         AuthenticationInput::Identity { identity_id } => {
             // 引用已存在的身份：不改凭据，直接挂上。
+            state
+                .database
+                .identities()
+                .get(identity_id)
+                .map_err(|error| error.to_string())?;
             return Ok(identity_id.clone());
         }
     };
@@ -378,11 +412,12 @@ async fn store_identity(
         credential_ref,
         created_at: now.to_string(),
     };
-    state
-        .database
-        .identities()
-        .insert(&identity)
-        .map_err(|error| error.to_string())?;
+    let reference =
+        CredentialRef::parse(&identity.credential_ref).map_err(|error| error.to_string())?;
+    if let Err(error) = state.database.identities().insert(&identity) {
+        let _ = state.credentials.delete(&reference);
+        return Err(error.to_string());
+    }
     Ok(identity.id)
 }
 
@@ -418,16 +453,19 @@ async fn store_identity_input(
                 credential_ref: reference.to_string_ref(),
                 created_at: now.to_string(),
             };
-            state
-                .database
-                .identities()
-                .insert(&identity)
-                .map_err(|error| error.to_string())?;
-            state
+            if let Err(error) = state.database.identities().insert(&identity) {
+                let _ = state.credentials.delete(&reference);
+                return Err(error.to_string());
+            }
+            if let Err(error) = state
                 .database
                 .identities()
                 .attach_to_server(server_id, &identity.id)
-                .map_err(|error| error.to_string())?;
+            {
+                let _ = state.database.identities().delete(&identity.id);
+                let _ = state.credentials.delete(&reference);
+                return Err(error.to_string());
+            }
             Ok(identity.id)
         }
         AuthenticationInput::PrivateKey {
@@ -435,7 +473,7 @@ async fn store_identity_input(
             passphrase,
         } => {
             if passphrase.as_ref().is_some_and(|value| !value.is_empty()) {
-                return Err("鍔犲瘑绉侀挜鏆傛湭鏀寔".into());
+                return Err("加密私钥暂未支持（SSH 后端显式拒绝）".into());
             }
             let reference = state
                 .credentials
@@ -452,16 +490,19 @@ async fn store_identity_input(
                 credential_ref: reference.to_string_ref(),
                 created_at: now.to_string(),
             };
-            state
-                .database
-                .identities()
-                .insert(&identity)
-                .map_err(|error| error.to_string())?;
-            state
+            if let Err(error) = state.database.identities().insert(&identity) {
+                let _ = state.credentials.delete(&reference);
+                return Err(error.to_string());
+            }
+            if let Err(error) = state
                 .database
                 .identities()
                 .attach_to_server(server_id, &identity.id)
-                .map_err(|error| error.to_string())?;
+            {
+                let _ = state.database.identities().delete(&identity.id);
+                let _ = state.credentials.delete(&reference);
+                return Err(error.to_string());
+            }
             Ok(identity.id)
         }
     }

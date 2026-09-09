@@ -132,6 +132,23 @@ test("grants are scoped per server, so staging cannot unlock production", () => 
   assert.ok(grantKey("filesystem.write", target("production", "srv_db01")).includes("srv_db01"));
 });
 
+test("grants are also scoped per workspace on the same server", () => {
+  const engine = new PermissionEngine();
+  const firstTarget = { ...target("production", "srv_api01"), workspaceId: "ws_frontend" };
+  const request = {
+    declaration: declaration({ name: "filesystem.write" }),
+    target: firstTarget,
+    input: {},
+    policy: PRODUCTION_POLICY,
+  };
+  engine.grantSession(engine.evaluate(request));
+  assert.equal(engine.evaluate(request).outcome, "auto");
+
+  const otherWorkspace = { ...firstTarget, workspaceId: "ws_backend" };
+  assert.equal(engine.evaluate({ ...request, target: otherWorkspace }).outcome, "ask");
+  assert.notEqual(grantKey("filesystem.write", firstTarget), grantKey("filesystem.write", otherWorkspace));
+});
+
 test("an unknown environment is treated like production", () => {
   const engine = new PermissionEngine();
   const decision = engine.evaluate({

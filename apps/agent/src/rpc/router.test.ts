@@ -44,6 +44,15 @@ test("initialize negotiates the protocol version", async () => {
   assert.equal(result.capabilities.cancellation, true);
 });
 
+test("initialize cannot be negotiated twice on one sidecar session", async () => {
+  const { initialize } = await withRuntime();
+  await initialize();
+  await assert.rejects(
+    initialize(),
+    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_REQUEST,
+  );
+});
+
 test("a mismatched protocol version is refused, not guessed", async () => {
   const { runtime } = await withRuntime();
   await assert.rejects(
@@ -135,6 +144,50 @@ test("agent.run.start requires providerConfig and validates it", async () => {
         providerConfig: { kind: "anthropic", baseUrl: "http://x", model: "m" } as never,
       }),
     ),
+    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,
+  );
+});
+
+test("agent.run.start admits one OpenCode-style message exactly once", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const params = {
+    runId: "run_admitted",
+    sessionId: "ses_admitted",
+    messageId: "msg_admitted",
+    prompt: "fallback text",
+    parts: [{ type: "text" as const, text: "canonical text" }],
+    delivery: "async" as const,
+    resume: true,
+    providerConfig: { kind: "openai-compatible" as const, baseUrl: "http://127.0.0.1:1", model: "m" },
+  };
+  const first = (await runtime.router.handle(request(AGENT_METHODS.runStart, params, 1))) as { runId: string; started: boolean };
+  const retry = (await runtime.router.handle(request(AGENT_METHODS.runStart, { ...params, runId: "run_other" }, 2))) as {
+    runId: string;
+    started: boolean;
+    duplicate: boolean;
+  };
+  assert.equal(first.runId, "run_admitted");
+  assert.equal(retry.runId, first.runId);
+  assert.equal(retry.duplicate, true);
+  await assert.rejects(
+    runtime.router.handle(request(AGENT_METHODS.runStart, { ...params, parts: [{ type: "text", text: "different" }] }, 3)),
+    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,
+  );
+});
+
+test("agent.run.start rejects a duplicate run id while the first run is active", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const params = {
+    runId: "run_duplicate",
+    sessionId: "ses_duplicate",
+    prompt: "hello",
+    providerConfig: { kind: "openai-compatible" as const, baseUrl: "http://127.0.0.1:1", model: "m" },
+  };
+  await runtime.router.handle(request(AGENT_METHODS.runStart, params, 1));
+  await assert.rejects(
+    runtime.router.handle(request(AGENT_METHODS.runStart, params, 2)),
     (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,
   );
 });

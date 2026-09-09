@@ -68,6 +68,10 @@ struct RuntimeState {
 
 #[derive(Debug)]
 struct Inner {
+    /// Serializes the check → spawn → handshake → publish sequence. Without this
+    /// gate two simultaneous UI starts can both observe an empty slot and launch
+    /// two sidecars before either one records its runtime.
+    start_lock: AsyncMutex<()>,
     runtime: AsyncMutex<Option<RuntimeState>>,
     last_exit: AsyncMutex<Option<ExitRecord>>,
     logs: AsyncMutex<VecDeque<String>>,
@@ -92,6 +96,7 @@ impl Supervisor {
         let (events, _) = broadcast::channel(UI_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(Inner {
+                start_lock: AsyncMutex::new(()),
                 runtime: AsyncMutex::new(None),
                 last_exit: AsyncMutex::new(None),
                 logs: AsyncMutex::new(VecDeque::new()),
@@ -146,6 +151,7 @@ impl Supervisor {
     /// Launch (or reuse) the sidecar and handshake with it. Never leaves a half-alive
     /// child behind: `sidecar::launch` kills on handshake failure.
     pub async fn start(&self, config: &SidecarConfig) -> Result<StartOutcome, SidecarError> {
+        let _start_guard = self.inner.start_lock.lock().await;
         if let Some(state) = self.inner.runtime.lock().await.as_ref() {
             if state.handle.is_running() {
                 return Ok(StartOutcome {

@@ -9,6 +9,7 @@
 import {
   AGENT_METHODS,
   AGENT_NOTIFICATIONS,
+  AgentStreamEventSchema,
   RPC_ERROR,
   isJsonRpcResponse,
   type AgentRunRequest,
@@ -40,9 +41,9 @@ export type AgentMethodResults = {
   "system.describe": SystemDescribeResult;
   "system.ping": { pong: string; agentPid: number };
   "tools.list": { tools: ToolDeclaration[] };
-  "agent.run.start": { runId: string; traceId: string };
-  "agent.run.stop": { cancelled: boolean };
-  "agent.approval.respond": { acknowledged: boolean };
+  "agent.run.start": { runId: string; started: boolean; duplicate?: boolean };
+  "agent.run.stop": { stopped: boolean };
+  "agent.approval.respond": { accepted: boolean };
 };
 
 export type AgentMethodName = keyof AgentMethodParams & keyof AgentMethodResults;
@@ -146,15 +147,15 @@ export class AgentClient {
     return this.request(AGENT_METHODS.listTools, {}).then((result) => result.tools);
   }
 
-  startRun(run: AgentRunRequest): Promise<{ runId: string; traceId: string }> {
+  startRun(run: AgentRunRequest): Promise<{ runId: string; started: boolean; duplicate?: boolean }> {
     return this.request(AGENT_METHODS.runStart, run);
   }
 
-  stopRun(runId: string): Promise<{ cancelled: boolean }> {
+  stopRun(runId: string): Promise<{ stopped: boolean }> {
     return this.request(AGENT_METHODS.runStop, { runId });
   }
 
-  respondApproval(response: ApprovalResponse): Promise<{ acknowledged: boolean }> {
+  respondApproval(response: ApprovalResponse): Promise<{ accepted: boolean }> {
     return this.request(AGENT_METHODS.approvalRespond, response);
   }
 
@@ -194,7 +195,5 @@ export class AgentClient {
 }
 
 function isAgentStreamEvent(value: unknown): value is AgentStreamEvent {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Partial<AgentStreamEvent>;
-  return typeof candidate.type === "string" && typeof candidate.runId === "string";
+  return AgentStreamEventSchema.safeParse(value).success;
 }

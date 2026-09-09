@@ -66,9 +66,27 @@ export function createLogger(config: { level: LogLevel; scope?: string }): Agent
 }
 
 function safeJson(value: unknown): string {
+  const seen = new WeakSet<object>();
   try {
-    return JSON.stringify(value);
+    const encoded = JSON.stringify(value, (key, candidate: unknown) => {
+      if (key && /api.?key|authorization|bearer|token|password|secret|credential|private.?key|passphrase/i.test(key)) {
+        return "[redacted]";
+      }
+      if (typeof candidate === "string") return redactString(candidate);
+      if (typeof candidate === "object" && candidate !== null) {
+        if (seen.has(candidate)) return "[circular]";
+        seen.add(candidate);
+      }
+      return candidate;
+    });
+    return encoded.length > 8_000 ? `${encoded.slice(0, 8_000)}…[truncated]` : encoded;
   } catch {
     return "{\"unserialisable\":true}";
   }
+}
+
+function redactString(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "sk-[redacted]");
 }

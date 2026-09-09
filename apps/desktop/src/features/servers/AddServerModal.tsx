@@ -1,15 +1,25 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { IPC_COMMANDS, type AddServerInput, type Environment, type Server, type UpdateServerInput } from "@yukinal/shared";
-import { useEffect, useState } from "react";
+import { IPC_COMMANDS, type Environment, type Server } from "@yukinal/shared";
+import { useEffect, useRef, useState } from "react";
 
-import { callDesktop } from "../../lib/ipc.js";
+import { Icon } from "../../components/Icon.js";
+import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { buildServerInput } from "./server-form.js";
 
 const ENVIRONMENTS: Environment[] = ["local", "development", "staging", "production", "unknown"];
+const ENVIRONMENT_LABEL: Record<Environment, string> = {
+  local: "本地",
+  development: "开发",
+  staging: "预发布",
+  production: "生产",
+  unknown: "未知",
+};
 
 export function AddServerModal({ onClose, server }: { onClose: () => void; server?: Server }) {
   const queryClient = useQueryClient();
   const selectServer = useWorkspaceStore((state) => state.selectServer);
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(server?.name ?? "");
   const [host, setHost] = useState(server?.connection.host ?? "");
   const [port, setPort] = useState(String(server?.connection.port ?? 22));
@@ -28,37 +38,103 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
     setEnvironment(server.metadata.environment);
   }, [server]);
 
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    dialogRef.current?.showModal();
+    return () => {
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, []);
+
   const save = useMutation<{ server: { id: string } }, Error>({
     mutationFn: () => {
-      const base = { name: name.trim(), host: host.trim(), port: Number.parseInt(port, 10) || 22, username: username.trim(), environment };
-      const authentication = authMethod === "password" ? { method: "password" as const, password } : { method: "privateKey" as const, privateKeyPem: privateKeyPem.trim() };
-      if (server) {
-        const input: UpdateServerInput = { ...base, serverId: server.id };
-        if (password.trim() || privateKeyPem.trim()) input.authentication = authentication;
-        return callDesktop(IPC_COMMANDS.serverUpdate, input);
-      }
-      const input: AddServerInput = { ...base, authentication };
-      return callDesktop(IPC_COMMANDS.serverAdd, input);
+      const values = { name, host, port, username, environment, authMethod, password, privateKeyPem };
+      return server
+        ? callDesktop(IPC_COMMANDS.serverUpdate, buildServerInput(values, server.id))
+        : callDesktop(IPC_COMMANDS.serverAdd, buildServerInput(values));
     },
-    onSuccess: (response) => { void queryClient.invalidateQueries({ queryKey: ["servers"] }); selectServer(response.server.id); onClose(); },
+    onSuccess: (response) => {
+      void queryClient.invalidateQueries({ queryKey: ["servers"] });
+      selectServer(response.server.id);
+      onClose();
+    },
   });
 
-  const inputClass = "w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-sm outline-none focus:border-zinc-600 placeholder:text-zinc-600";
-  const labelClass = "mb-1 block text-xs text-zinc-400";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
-      <div className="w-full max-w-md rounded-lg border border-zinc-800 bg-zinc-950 p-5 shadow-xl" onClick={(event) => event.stopPropagation()}>
-        <h2 className="mb-4 text-base font-semibold">{server ? "Edit server" : "Add server"}</h2>
-        <div className="space-y-3">
-          <div><label className={labelClass}>Name</label><input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="Production API" /></div>
-          <div className="grid grid-cols-3 gap-3"><div className="col-span-2"><label className={labelClass}>Host</label><input className={inputClass} value={host} onChange={(event) => setHost(event.target.value)} placeholder="api.example.com" /></div><div><label className={labelClass}>Port</label><input className={inputClass} value={port} onChange={(event) => setPort(event.target.value)} /></div></div>
-          <div className="grid grid-cols-2 gap-3"><div><label className={labelClass}>Username</label><input className={inputClass} value={username} onChange={(event) => setUsername(event.target.value)} placeholder="deploy" /></div><div><label className={labelClass}>Environment</label><select className={inputClass} value={environment} onChange={(event) => setEnvironment(event.target.value as Environment)}>{ENVIRONMENTS.map((env) => <option key={env} value={env}>{env}</option>)}</select></div></div>
-          <div><label className={labelClass}>Authentication</label><div className="flex gap-4 text-sm"><label className="flex items-center gap-1.5"><input type="radio" checked={authMethod === "password"} onChange={() => setAuthMethod("password")} />Password</label><label className="flex items-center gap-1.5"><input type="radio" checked={authMethod === "privateKey"} onChange={() => setAuthMethod("privateKey")} />SSH private key</label></div></div>
-          {authMethod === "password" ? <div><label className={labelClass}>Password{server ? " (blank keeps current)" : ""}</label><input className={inputClass} type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></div> : <div><label className={labelClass}>Private key PEM{server ? " (blank keeps current)" : ""}</label><textarea className={`${inputClass} h-24 resize-none font-mono text-xs`} value={privateKeyPem} onChange={(event) => setPrivateKeyPem(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /><p className="mt-1 text-[11px] text-zinc-600">Stored only in the OS keychain. Encrypted keys are not supported yet.</p></div>}
-          {save.isError ? <p className="text-sm text-red-400">{save.error.message}</p> : null}
-        </div>
-        <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={onClose} className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300">Cancel</button><button type="button" disabled={save.isPending || !name.trim() || !host.trim() || !username.trim()} onClick={() => save.mutate()} className="rounded-md bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 disabled:opacity-40">{save.isPending ? "Saving..." : server ? "Save changes" : "Save and connect"}</button></div>
-      </div>
-    </div>
+      <dialog ref={dialogRef} className="server-modal" aria-labelledby="server-modal-title" onCancel={(event) => { event.preventDefault(); if (!save.isPending) onClose(); }}>
+        <header className="modal-header">
+          <div>
+            <p className="eyebrow">服务器连接</p>
+            <h2 id="server-modal-title">{server ? "编辑服务器" : "添加服务器"}</h2>
+          </div>
+          <button type="button" className="icon-button modal-close" aria-label="关闭弹窗" title="关闭" disabled={save.isPending} onClick={onClose}>
+            <Icon name="close" size={16} />
+          </button>
+        </header>
+
+        <form className="server-form" onSubmit={(event) => { event.preventDefault(); if (!save.isPending) save.mutate(); }}>
+          {!isDesktopShell() ? <p className="settings-notice">连接配置需要在桌面应用中保存。</p> : null}
+          <fieldset className="server-form-fields" disabled={save.isPending}>
+          <div className="form-field form-field-wide">
+            <label className="field-label" htmlFor="server-name">名称</label>
+            <input autoFocus id="server-name" className="form-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：生产 API" required />
+          </div>
+
+          <div className="form-grid form-grid-host">
+            <div className="form-field">
+              <label className="field-label" htmlFor="server-host">主机</label>
+              <input id="server-host" className="form-input" value={host} onChange={(event) => setHost(event.target.value)} placeholder="api.example.com" required />
+            </div>
+            <div className="form-field">
+              <label className="field-label" htmlFor="server-port">端口</label>
+              <input id="server-port" type="number" min={1} max={65535} step={1} className="form-input form-input-mono" value={port} onChange={(event) => setPort(event.target.value)} inputMode="numeric" required />
+            </div>
+          </div>
+
+          <div className="form-grid">
+            <div className="form-field">
+              <label className="field-label" htmlFor="server-username">用户名</label>
+              <input id="server-username" className="form-input" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="deploy" required />
+            </div>
+            <div className="form-field">
+              <label className="field-label" htmlFor="server-environment">环境</label>
+              <select id="server-environment" className="form-input" value={environment} onChange={(event) => setEnvironment(event.target.value as Environment)}>
+                {ENVIRONMENTS.map((env) => <option key={env} value={env}>{ENVIRONMENT_LABEL[env]}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <fieldset className="form-fieldset">
+            <legend className="field-label">认证方式</legend>
+            <div className="form-radio-group">
+              <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "password"} onChange={() => setAuthMethod("password")} />密码</label>
+              <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "privateKey"} onChange={() => setAuthMethod("privateKey")} />SSH 私钥</label>
+            </div>
+          </fieldset>
+
+          {authMethod === "password" ? (
+            <div className="form-field">
+              <label className="field-label" htmlFor="server-password">密码{server ? "（留空保留现有认证）" : ""}</label>
+              <input id="server-password" className="form-input" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required={!server} />
+            </div>
+          ) : (
+            <div className="form-field">
+              <label className="field-label" htmlFor="server-private-key">私钥 PEM{server ? "（留空保留现有认证）" : ""}</label>
+              <textarea id="server-private-key" className="form-input form-textarea" value={privateKeyPem} onChange={(event) => setPrivateKeyPem(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" required={!server} spellCheck={false} />
+              <p className="form-hint">仅保存到系统凭据库。暂不支持加密私钥。</p>
+            </div>
+          )}
+          </fieldset>
+
+          {save.isError ? <p className="form-error" role="alert">{save.error.message}</p> : null}
+
+          <div className="modal-actions">
+            <button type="button" disabled={save.isPending} onClick={onClose} className="button-secondary">取消</button>
+            <button type="submit" disabled={!isDesktopShell() || save.isPending || !name.trim() || !host.trim() || !username.trim()} className="button-primary">
+              {save.isPending ? "保存中…" : server ? "保存修改" : "保存服务器"}
+            </button>
+          </div>
+        </form>
+      </dialog>
   );
 }

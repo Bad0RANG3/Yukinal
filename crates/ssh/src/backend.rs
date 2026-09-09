@@ -21,6 +21,10 @@ use crate::{
 
 /// 建连 + 认证整体超时（硬性兜底，不让 UI 卡在握手）。
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Remote commands must not be able to grow an unbounded Rust `Vec` from a
+/// hostile or unexpectedly noisy process. The host layer applies tighter
+/// semantic limits when it parses a result; this is the transport-level cap.
+const MAX_COMMAND_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct RusshBackend {
     known_hosts: Arc<StdMutex<KnownHostsStore>>,
@@ -63,6 +67,26 @@ impl RusshBackend {
             )
         })?;
         store.register(host, port, fingerprint)
+    }
+
+    /// Execute a command exactly once. Read-only commands use the trait method,
+    /// which may reconnect and retry a transport failure; callers with side
+    /// effects must use this method so a lost response cannot repeat the action.
+    pub async fn execute_once(
+        &self,
+        session: &Session,
+        command: &str,
+        timeout: Option<std::time::Duration>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<CommandResult> {
+        run_command(
+            session.inner.conn.lock().await.clone(),
+            command,
+            timeout,
+            cancel,
+            MAX_COMMAND_OUTPUT_BYTES,
+        )
+        .await
     }
 
     /// SFTP 冒烟操作（文件工具落地前证明子系统真实可用）：远端目录清单。
@@ -195,13 +219,18 @@ impl SshBackend for RusshBackend {
         timeout: Option<std::time::Duration>,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<CommandResult> {
-        retry_transport_async(session, |conn| run_command(conn, command, timeout, cancel)).await
+        retry_transport_async(
+            session,
+            |conn| run_command(conn, command, timeout, cancel, MAX_COMMAND_OUTPUT_BYTES),
+            Some(cancel),
+        )
+        .await
     }
 
     async fn open_pty(&self, session: &Session, size: (u16, u16)) -> Result<PtySession> {
         let (cols, rows) = size;
         let channel =
-            retry_transport_async(session, |conn| open_pty_channel(conn, cols, rows)).await?;
+            retry_transport_async(session, |conn| open_pty_channel(conn, cols, rows), None).await?;
         let pty_id = self.next_pty_id();
 
         let (pty, mut commands_rx) = PtyHandle::new();
@@ -224,6 +253,11 @@ impl SshBackend for RusshBackend {
                                 let _ = channel
                                     .window_change(u32::from(cols), u32::from(rows), 0, 0)
                                     .await;
+                            }
+                            crate::conn::PtyCmd::Close => {
+                                let _ = channel.close().await;
+                                let _ = output_tx.send(PtyEvent::Closed { code: None });
+                                break;
                             }
                         }
                     }
@@ -265,17 +299,21 @@ impl SshBackend for RusshBackend {
     }
 
     async fn sftp(&self, session: &Session) -> Result<SftpClient> {
-        let sftp = retry_transport_async(session, |conn| async move {
-            let channel = conn.channel_open_session().await.map_err(map_send_err)?;
-            channel
-                .request_subsystem(true, "sftp")
-                .await
-                .map_err(map_send_err)?;
-            let stream = channel.into_stream();
-            russh_sftp::client::SftpSession::new(stream)
-                .await
-                .map_err(|error| Error::Channel(format!("sftp handshake failed: {error}")))
-        })
+        let sftp = retry_transport_async(
+            session,
+            |conn| async move {
+                let channel = conn.channel_open_session().await.map_err(map_send_err)?;
+                channel
+                    .request_subsystem(true, "sftp")
+                    .await
+                    .map_err(map_send_err)?;
+                let stream = channel.into_stream();
+                russh_sftp::client::SftpSession::new(stream)
+                    .await
+                    .map_err(|error| Error::Channel(format!("sftp handshake failed: {error}")))
+            },
+            None,
+        )
         .await?;
         Ok(SftpClient {
             session_id: session.session_id.clone(),
@@ -296,6 +334,14 @@ impl SshBackend for RusshBackend {
         pty.inner
             .commands
             .send(crate::conn::PtyCmd::Resize(cols, rows))
+            .map_err(|_| Error::Channel("pty is closed".into()))?;
+        Ok(())
+    }
+
+    async fn pty_close(&self, pty: &PtySession) -> Result<()> {
+        pty.inner
+            .commands
+            .send(crate::conn::PtyCmd::Close)
             .map_err(|_| Error::Channel("pty is closed".into()))?;
         Ok(())
     }
@@ -453,7 +499,11 @@ async fn authenticate(
 
 /// 包裹一次"transport 断开 → 重连 → 重试"：只对 transport 类错误重试，认证 /
 /// 校验 / 参数错误不重试。
-async fn retry_transport_async<T, F, Fut>(session: &Session, op: F) -> Result<T>
+async fn retry_transport_async<T, F, Fut>(
+    session: &Session,
+    op: F,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<T>
 where
     F: Fn(Arc<Handle<ConnHandler>>) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -461,10 +511,16 @@ where
 {
     let mut attempt = 0;
     loop {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(Error::Cancelled);
+        }
         let conn = session.inner.conn.lock().await.clone();
         let result = op(conn).await;
         match result {
             Err(Error::Transport(_)) if attempt == 0 => {
+                if cancel.is_some_and(|token| token.is_cancelled()) {
+                    return Err(Error::Cancelled);
+                }
                 session.inner.reconnect().await?;
                 attempt += 1;
             }
@@ -481,6 +537,7 @@ async fn run_command(
     command: &str,
     timeout: Option<std::time::Duration>,
     cancel: &tokio_util::sync::CancellationToken,
+    max_output_bytes: usize,
 ) -> Result<CommandResult> {
     let mut channel = conn.channel_open_session().await.map_err(map_send_err)?;
     channel.exec(true, command).await.map_err(map_send_err)?;
@@ -491,8 +548,10 @@ async fn run_command(
         let mut exit_code = None;
         while let Some(message) = channel.wait().await {
             match message {
-                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+                ChannelMsg::Data { data } => append_bounded(&mut stdout, &data, max_output_bytes),
+                ChannelMsg::ExtendedData { data, ext: 1 } => {
+                    append_bounded(&mut stderr, &data, max_output_bytes)
+                }
                 ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
                 ChannelMsg::Close | ChannelMsg::Eof => break,
                 _ => {}
@@ -515,6 +574,11 @@ async fn run_command(
             result = body => result,
         },
     }
+}
+
+fn append_bounded(output: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) {
+    let remaining = max_bytes.saturating_sub(output.len());
+    output.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
 }
 
 // ---------------------------------------------------------------------------

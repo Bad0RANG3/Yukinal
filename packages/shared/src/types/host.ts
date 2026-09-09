@@ -5,6 +5,7 @@ import type { ToolError, ToolTarget } from "./tool.js";
 export const HOST_METHODS = {
   toolExecute: "host.tool.execute",
   contextFetch: "host.context.fetch",
+  toolCancel: "host.tool.cancel",
 } as const;
 
 export interface HostToolExecuteRequest {
@@ -13,6 +14,15 @@ export interface HostToolExecuteRequest {
   toolName: string;
   input: unknown;
   target: ToolTarget;
+}
+
+/** Cancels a previously sent host.tool.execute request by its JSON-RPC id. */
+export interface HostToolCancelRequest {
+  requestId: number;
+}
+
+export interface HostToolCancelResponse {
+  cancelled: boolean;
 }
 
 export type HostToolExecuteResponse =

@@ -5,24 +5,26 @@
   "identifier": "dev.yukinal.workspace",
   "build": {
     "beforeDevCommand": "pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "pnpm --filter @yukinal/desktop build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": true,
         "title": "Yukinal",
         "width": 1440,
         "height": 900,
-        "minWidth": 1024,
+        "minWidth": 1160,
         "minHeight": 640,
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
     }
   },
   "bundle": {

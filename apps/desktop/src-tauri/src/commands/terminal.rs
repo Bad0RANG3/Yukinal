@@ -7,6 +7,7 @@
 use serde::Serialize;
 use tauri::State;
 
+use crate::commands::EmptyResponse;
 use crate::state::AppState;
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::Server;
@@ -143,12 +144,13 @@ pub async fn terminal_write(
     state: State<'_, AppState>,
     terminal_session_id: String,
     data: String,
-) -> Result<(), String> {
+) -> Result<EmptyResponse, String> {
     state
         .terminals
         .write(&terminal_session_id, data.as_bytes())
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(EmptyResponse {})
 }
 
 #[tauri::command]
@@ -157,22 +159,24 @@ pub async fn terminal_resize(
     terminal_session_id: String,
     cols: u16,
     rows: u16,
-) -> Result<(), String> {
+) -> Result<EmptyResponse, String> {
     state
         .terminals
         .resize(&terminal_session_id, cols, rows)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(EmptyResponse {})
 }
 
 #[tauri::command]
 pub async fn terminal_close(
     state: State<'_, AppState>,
     terminal_session_id: String,
-) -> Result<(), String> {
+) -> Result<EmptyResponse, String> {
     state
         .terminals
         .close(&terminal_session_id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(EmptyResponse {})
 }

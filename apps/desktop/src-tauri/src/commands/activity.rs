@@ -16,7 +16,7 @@ pub struct ActivityListResponse {
 }
 
 pub(crate) fn record_user_activity(
-    state: &State<'_, AppState>,
+    state: &AppState,
     server_id: Option<&str>,
     activity_type: ActivityType,
     title: &str,

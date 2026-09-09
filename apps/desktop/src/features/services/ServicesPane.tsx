@@ -8,6 +8,8 @@ import {
 
 import { callDesktopParsed, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { Icon } from "../../components/Icon.js";
+import { KeywordText } from "../../components/KeywordText.js";
 
 const STATE_LABEL: Record<ServiceState, string> = {
   running: "运行中",
@@ -45,7 +47,7 @@ export function ServicesPane() {
   if (!selectedServerId) {
     return (
       <div className="empty-state page-empty">
-        <span className="empty-state-mark">◇</span>
+        <Icon name="services" size={24} />
         <h2>选择一台服务器</h2>
         <p>从左侧列表选择目标环境，查看远端服务状态。</p>
       </div>
@@ -65,7 +67,7 @@ export function ServicesPane() {
   if (servicesQuery.isError || !servicesQuery.data) {
     return (
       <div className="error-panel">
-        <div className="error-panel-icon">!</div>
+        <div className="error-panel-icon"><Icon name="warning" size={16} /></div>
         <div>
           <strong>无法读取服务状态</strong>
           <p>{servicesQuery.error instanceof Error ? servicesQuery.error.message : String(servicesQuery.error)}</p>
@@ -89,8 +91,8 @@ export function ServicesPane() {
           <h2>服务</h2>
           <p>从目标服务器实时读取，不在本地猜测运行状态。</p>
         </div>
-        <button type="button" className="secondary-button" onClick={() => void servicesQuery.refetch()} disabled={servicesQuery.isFetching}>
-          <span aria-hidden="true">↻</span> {servicesQuery.isFetching ? "读取中" : "刷新"}
+        <button type="button" className="secondary-button" onClick={() => void servicesQuery.refetch()} disabled={servicesQuery.isFetching} title="刷新服务" aria-label="刷新服务">
+          <Icon name="refresh" size={14} /> {servicesQuery.isFetching ? "读取中" : "刷新"}
         </button>
       </section>
 
@@ -103,7 +105,7 @@ export function ServicesPane() {
 
       {response.services.length === 0 ? (
         <div className="empty-state page-empty service-empty">
-          <span className="empty-state-mark">◇</span>
+          <Icon name="services" size={24} />
           <h2>没有可展示的服务</h2>
           <p>{response.message ?? "服务管理器没有返回服务条目。"}</p>
         </div>
@@ -113,10 +115,10 @@ export function ServicesPane() {
             <li className="service-row" key={`${response.source}:${service.name}`}>
               <span className={`service-state-dot service-state-dot-${service.state}`} aria-hidden="true" />
               <div className="service-row-copy">
-                <strong>{service.name}</strong>
-                <span>{service.description ?? "无描述"}</span>
+                <strong><KeywordText text={service.name} /></strong>
+                <span><KeywordText text={service.description ?? "无描述"} /></span>
               </div>
-              <code>{service.status}</code>
+              <code><KeywordText text={service.status} /></code>
               <span className={`service-state service-state-${service.state}`}>{STATE_LABEL[service.state]}</span>
             </li>
           ))}
@@ -129,7 +131,7 @@ export function ServicesPane() {
 function PreviewEmpty() {
   return (
     <div className="empty-state page-empty">
-      <span className="empty-state-mark">◌</span>
+      <Icon name="services" size={24} />
       <h2>浏览器预览</h2>
       <p>原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端服务数据。</p>
     </div>

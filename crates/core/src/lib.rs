@@ -16,6 +16,7 @@ pub mod ccswitch;
 pub mod collector;
 pub mod health;
 pub mod ipc;
+pub mod opencode;
 pub mod sidecar;
 
 pub mod supervisor;

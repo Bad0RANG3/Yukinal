@@ -10,6 +10,7 @@
 
 import type { ChatRequest, FinishReason, LLMProvider, LlmMessage, ModelInfo, StreamEvent } from "@yukinal/provider-sdk";
 import { ProviderError } from "@yukinal/provider-sdk";
+import { z } from "zod";
 
 export interface OpenAiCompatibleConfig {
   /** Full base URL, e.g. `https://openrouter.ai/api/v1`. */
@@ -23,6 +24,9 @@ export interface OpenAiCompatibleConfig {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+const ProviderModelsResponseSchema = z.strictObject({
+  data: z.array(z.strictObject({ id: z.string().trim().min(1).max(256) })).max(1_000).optional(),
+});
 
 export class OpenAiCompatibleProvider implements LLMProvider {
   readonly id = "openai-compatible";
@@ -33,29 +37,40 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/models`, {
-      headers: this.#headers(),
-      signal: AbortSignal.timeout(this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      throw new ProviderError(`listModels failed (${response.status})`, true, response.status);
+    try {
+      const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/models`, {
+        headers: this.#headers(),
+        signal: AbortSignal.timeout(this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new ProviderError(`listModels failed (${response.status})`, response.status >= 500, response.status);
+      }
+      const parsed = ProviderModelsResponseSchema.safeParse(await response.json());
+      if (!parsed.success) throw new ProviderError("listModels returned an invalid model catalog", false, response.status);
+      return (parsed.data.data ?? []).map((entry) => ({
+        id: entry.id,
+        label: entry.id,
+        contextWindow: undefined,
+        supportsToolCalling: true,
+        supportsStreaming: true,
+      }));
+    } catch (error) {
+      if (error instanceof ProviderError) throw error;
+      throw new ProviderError(
+        `listModels request failed: ${safeProviderMessage(error instanceof Error ? error.message : String(error))}`,
+        true,
+      );
     }
-    const body = (await response.json()) as { data?: Array<{ id: string }> };
-    return (body.data ?? []).map((entry) => ({
-      id: entry.id,
-      label: entry.id,
-      contextWindow: undefined,
-      supportsToolCalling: true,
-      supportsStreaming: true,
-    }));
   }
 
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const controller = new AbortController();
     const onParentAbort = (): void => controller.abort(request.signal?.reason);
     request.signal?.addEventListener("abort", onParentAbort, { once: true });
+    if (request.signal?.aborted) onParentAbort();
     const timeoutMs = request.timeoutMs ?? this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const timer = setTimeout(() => controller.abort(new Error("provider stream timed out")), timeoutMs);
+    timer.unref?.();
 
     try {
       const responsesDialect = this.config.wireApi === "responses";
@@ -91,9 +106,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       });
 
       if (!response.ok || !response.body) {
-        const detail = await response.text().catch(() => "");
         throw new ProviderError(
-          `${endpoint} failed (${response.status}): ${detail.slice(0, 300)}`,
+          `${endpoint} failed (${response.status})`,
           response.status >= 500,
           response.status,
         );
@@ -115,18 +129,20 @@ export class OpenAiCompatibleProvider implements LLMProvider {
 
   #headers(): Record<string, string> {
     const headers: Record<string, string> = {};
+    Object.assign(headers, this.config.customHeaders ?? {});
     if (this.config.apiKey) {
+      // A configured key is authoritative. Remove case variants first so a
+      // custom `Authorization` header cannot silently replace the keychain key.
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === "authorization") delete headers[key];
+      }
       headers.authorization = `Bearer ${this.config.apiKey}`;
     }
-    Object.assign(headers, this.config.customHeaders ?? {});
     return headers;
   }
 
   /** chat/completions 的 SSE：`data:` 行可能是 JSON chunk，`[DONE]` 结尾。工具调用按 index 累积。 */
   async *#consumeSse(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
     let lastFinishReason: string | null = null;
     const slots = new Map<string, { id: string; name: string; args: string }>();
 
@@ -143,56 +159,44 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
         });
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
-        if (payload === "[DONE]") {
-          for (const event of toolCallEvents()) yield event;
-          slots.clear();
-          yield { type: "done", finishReason: finishReasonFor(lastFinishReason) };
-          return;
-        }
-        let chunk: SseChunk;
-        try {
-          chunk = JSON.parse(payload) as SseChunk;
-        } catch {
-          continue;
-        }
-        const choice = chunk.choices?.[0];
-        if (choice?.finish_reason) lastFinishReason = choice.finish_reason;
-        const delta = choice?.delta;
-        if (!delta) continue;
+    for await (const payload of sseData(body)) {
+      if (payload === "[DONE]") {
+        for (const event of toolCallEvents()) yield event;
+        slots.clear();
+        yield { type: "done", finishReason: finishReasonFor(lastFinishReason) };
+        return;
+      }
+      let chunk: SseChunk;
+      try {
+        chunk = JSON.parse(payload) as SseChunk;
+      } catch {
+        continue;
+      }
+      const choice = chunk.choices?.[0];
+      if (choice?.finish_reason) lastFinishReason = choice.finish_reason;
+      const delta = choice?.delta;
+      if (!delta) continue;
 
-        if (typeof delta.content === "string" && delta.content.length > 0) {
-          yield { type: "text_delta", text: delta.content };
-        }
-        for (const tool of delta.tool_calls ?? []) {
-          const index = tool.index ?? 0;
-          const key = String(index);
-          const slot = slots.get(key) ?? { id: tool.id ?? `tc_${index}`, name: "", args: "" };
-          if (tool.id) slot.id = tool.id;
-          if (tool.function?.name) slot.name += tool.function.name;
-          if (tool.function?.arguments) slot.args += tool.function.arguments;
-          slots.set(key, slot);
-        }
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        yield { type: "text_delta", text: delta.content };
+      }
+      for (const tool of delta.tool_calls ?? []) {
+        const index = tool.index ?? 0;
+        const key = String(index);
+        const slot = slots.get(key) ?? { id: tool.id ?? `tc_${index}`, name: "", args: "" };
+        if (tool.id) slot.id = tool.id;
+        if (tool.function?.name) slot.name += tool.function.name;
+        if (tool.function?.arguments) slot.args += tool.function.arguments;
+        slots.set(key, slot);
       }
     }
     // EOF 而没收到 [DONE]（异常结束）：把手里的工具调用放出来，避免吞掉。
     for (const event of toolCallEvents()) yield event;
+    yield { type: "done", finishReason: finishReasonFor(lastFinishReason) };
   }
 
   /** codex `responses` API 的 SSE。事件：output_text.delta / output_item.added / function_call_arguments.delta。 */
   async *#consumeResponsesSse(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
     const slots = new Map<string, { id: string; name: string; args: string }>();
 
     const flush = (): StreamEvent[] =>
@@ -208,51 +212,82 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
         });
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
-        if (payload === "[DONE]") {
-          for (const event of flush()) yield event;
+    for await (const payload of sseData(body)) {
+      if (payload === "[DONE]") {
+        for (const event of flush()) yield event;
+        yield { type: "done", finishReason: "stop" };
+        return;
+      }
+      let event: ResponsesEvent;
+      try {
+        event = JSON.parse(payload) as ResponsesEvent;
+      } catch {
+        continue;
+      }
+      switch (event.type) {
+        case "response.output_text.delta":
+          if (event.delta) yield { type: "text_delta", text: event.delta };
+          break;
+        case "response.output_item.added": {
+          const item = event.item;
+          if (item?.type === "function_call" && item.id) {
+            slots.set(item.id, { id: item.call_id ?? item.id, name: item.name ?? "", args: item.arguments ?? "" });
+          }
+          break;
+        }
+        case "response.function_call_arguments.delta": {
+          const slot = event.item_id ? slots.get(event.item_id) : undefined;
+          if (slot && event.delta) slot.args += event.delta;
+          break;
+        }
+        case "response.failed":
+          yield {
+            type: "error",
+            message: responseTerminalError(event, "Responses API request failed"),
+            retryable: false,
+          };
+          return;
+        case "response.incomplete":
+          yield {
+            type: "error",
+            message: responseTerminalError(event, "Responses API response was incomplete"),
+            retryable: false,
+          };
+          return;
+        case "response.completed":
+          for (const toolEvent of flush()) yield toolEvent;
           yield { type: "done", finishReason: "stop" };
           return;
-        }
-        let event: ResponsesEvent;
-        try {
-          event = JSON.parse(payload) as ResponsesEvent;
-        } catch {
-          continue;
-        }
-        switch (event.type) {
-          case "response.output_text.delta":
-            if (event.delta) yield { type: "text_delta", text: event.delta };
-            break;
-          case "response.output_item.added": {
-            const item = event.item;
-            if (item?.type === "function_call" && item.id) {
-              slots.set(item.id, { id: item.call_id ?? item.id, name: item.name ?? "", args: item.arguments ?? "" });
-            }
-            break;
-          }
-          case "response.function_call_arguments.delta": {
-            const slot = event.item_id ? slots.get(event.item_id) : undefined;
-            if (slot && event.delta) slot.args += event.delta;
-            break;
-          }
-          default:
-            break;
-        }
+        default:
+          break;
       }
     }
     for (const event of flush()) yield event;
     yield { type: "done", finishReason: "stop" };
   }
+}
+
+/** Yield each SSE data line, including a final line without a trailing newline. */
+async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      buffer += decoder.decode();
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) yield trimmed.slice(5).trim();
+    }
+  }
+  const finalLine = buffer.trim();
+  if (finalLine.startsWith("data:")) yield finalLine.slice(5).trim();
 }
 
 interface SseChunk {
@@ -274,6 +309,27 @@ interface ResponsesEvent {
   delta?: string;
   item_id?: string;
   item?: { type?: string; id?: string; call_id?: string; name?: string; arguments?: string };
+  error?: { message?: string; code?: string } | null;
+  response?: {
+    error?: { message?: string; code?: string } | null;
+    incomplete_details?: { reason?: string } | null;
+  } | null;
+}
+
+function responseTerminalError(event: ResponsesEvent, fallback: string): string {
+  return safeProviderMessage(
+    event.response?.error?.message ??
+    event.error?.message ??
+    event.response?.incomplete_details?.reason ??
+    fallback,
+  );
+}
+
+/** Upstream gateways sometimes echo a masked API-key suffix in error text. */
+function safeProviderMessage(message: string): string {
+  return message
+    .replace(/(["']?api[\s_-]*key["']?|["']?authorization["']?|["']?bearer["']?|["']?token["']?)\s*[:=]\s*["']?[^,\s)}"']+/gi, "$1=[redacted]")
+    .slice(0, 300);
 }
 
 function toResponsesInput(messages: LlmMessage[]): Array<Record<string, unknown>> {

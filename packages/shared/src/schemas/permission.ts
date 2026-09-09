@@ -9,13 +9,22 @@ import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, ToolTargetSchema } from "./server.js";
 
 /** Per-run provider material (mirrors `RuntimeProviderConfig`). */
-export const RuntimeProviderConfigSchema = z.object({
+const HttpBaseUrlSchema = z.string().trim().min(1).max(2048).refine((value) => {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}, "baseUrl must be an http(s) URL without embedded credentials");
+
+export const RuntimeProviderConfigSchema = z.strictObject({
   kind: z.literal("openai-compatible"),
-  baseUrl: z.string().min(1),
-  model: z.string().min(1),
-  apiKey: z.string().optional(),
-  customHeaders: z.record(z.string(), z.string()).optional(),
-  timeoutMs: z.number().int().positive().optional(),
+  baseUrl: HttpBaseUrlSchema,
+  model: z.string().trim().min(1).max(256),
+  apiKey: z.string().max(4096).optional(),
+  customHeaders: z.record(z.string().trim().min(1).max(128), z.string().max(4096)).refine((headers) => Object.keys(headers).length <= 32, "too many custom headers").optional(),
+  timeoutMs: z.number().int().min(100).max(10 * 60_000).optional(),
   wireApi: z.enum(["chat", "responses"]).optional(),
 });
 
@@ -96,18 +105,28 @@ export const ToolDeclarationSchema = z.object({
 
 export const ToolExecutionStatusSchema = z.enum(TOOL_EXECUTION_STATUSES);
 
-export const ApprovalResponseSchema = z.object({
+export const ApprovalResponseSchema = z.strictObject({
   approvalId: z.string().min(1),
+  runId: z.string().min(1),
   decision: z.enum(["approve_once", "approve_session", "reject"]),
   respondedAt: z.string(),
 });
 
-export const AgentRunRequestSchema = z.object({
-  runId: z.string().min(1),
-  sessionId: z.string().min(1),
-  prompt: z.string().min(1),
-  workspaceId: z.string().optional(),
-  focusServerId: z.string().optional(),
+export const AgentPromptPartSchema = z.strictObject({
+  type: z.literal("text"),
+  text: z.string().min(1),
+});
+
+export const AgentRunRequestSchema = z.strictObject({
+  runId: z.string().trim().min(1).max(256),
+  sessionId: z.string().trim().min(1).max(256),
+  prompt: z.string().trim().min(1).max(100_000),
+  messageId: z.string().trim().min(1).max(256).optional(),
+  parts: z.array(AgentPromptPartSchema).min(1).max(128).optional(),
+  delivery: z.enum(["async", "sync"]).optional(),
+  resume: z.boolean().optional(),
+  workspaceId: z.string().trim().min(1).max(256).optional(),
+  focusServerId: z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/).optional(),
   target: ToolTargetSchema.optional(),
   policyId: z.string().optional(),
   providerConfig: RuntimeProviderConfigSchema.optional(),

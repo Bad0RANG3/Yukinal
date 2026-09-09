@@ -278,6 +278,9 @@ pub trait SshBackend {
     /// 订阅该 PTY 的输出 / 关闭事件（每会话一个订阅者）。
     fn pty_output(&self, pty: &PtySession) -> mpsc::UnboundedReceiver<PtyEvent>;
 
+    /// Close one PTY channel without tearing down the shared SSH session.
+    fn pty_close(&self, pty: &PtySession) -> impl std::future::Future<Output = Result<()>> + Send;
+
     /// 关闭会话（终止 keepalive 与连接）。
     fn close(&self, session: &Session) -> impl std::future::Future<Output = Result<()>> + Send;
 }

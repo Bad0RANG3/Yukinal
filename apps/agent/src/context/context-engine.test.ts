@@ -96,7 +96,7 @@ test("no focused server is stated explicitly so the agent must resolve a target"
   const bundle = await engine.build(baseRequest);
 
   assert.deepEqual(bundle.layers, ["global", "task"]);
-  assert.match(bundle.rendered, /Focused server: none/);
+  assert.match(bundle.rendered, /Focused server: none.*answer general questions directly/);
 });
 
 test("an oversized context block is truncated, and says so", async () => {

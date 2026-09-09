@@ -14,7 +14,7 @@ export function main(): void {
   const config = readConfig();
   const log = createLogger({ level: config.logLevel, scope: "agent" });
   const hostToolClient = new HostRpcClient((frame) => process.stdout.write(frame));
-  const runtime = createRuntime({ log, hostToolClient });
+  const runtime = createRuntime({ log, hostToolClient, maxRunMs: config.maxRunMs });
 
   server = startStdioRpc({
     router: runtime.router,

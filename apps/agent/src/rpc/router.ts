@@ -48,6 +48,10 @@ export const IMPLEMENTATION_STATUS: Record<string, boolean> = {
 
 export class RpcRouter {
   #initialized = false;
+  #activeRuns = new Set<string>();
+
+  /** OpenCode-style admission receipts: retries of one message never fork a second run. */
+  #admissions = new Map<string, { sessionId: string; prompt: string; runId: string; completed: boolean }>();
 
   #notificationSink: ((method: string, params: unknown) => void) | undefined;
 
@@ -81,9 +85,32 @@ export class RpcRouter {
         return this.#describe();
       case AGENT_METHODS.runStart: {
         const parsed = parseOrThrow(AgentRunRequestSchema, request.params) as AgentRunRequest;
+        const prompt = requestPrompt(parsed);
+        if (parsed.messageId) {
+          const admitted = this.#admissions.get(parsed.messageId);
+          if (admitted) {
+            if (admitted.sessionId !== parsed.sessionId || admitted.prompt !== prompt) {
+              throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `messageId "${parsed.messageId}" was already admitted with different content`);
+            }
+            return { runId: admitted.runId, started: true, duplicate: true };
+          }
+        }
+        if (this.#activeRuns.has(parsed.runId)) {
+          throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `runId "${parsed.runId}" is already running`);
+        }
         const provider = buildProvider(parsed.providerConfig);
+        this.#activeRuns.add(parsed.runId);
         // run 是流式的：先回 runId（响应帧必须先于任何 agent.* 通知），
         // 过程全走 agent.stream 通知。timers 保证响应先写、事件后到。
+        if (parsed.messageId) {
+          this.#admissions.set(parsed.messageId, {
+            sessionId: parsed.sessionId,
+            prompt,
+            runId: parsed.runId,
+            completed: false,
+          });
+          this.#pruneAdmissions();
+        }
         setTimeout(() => {
           void this.#spinRun(parsed, provider);
         }, 0);
@@ -116,16 +143,43 @@ export class RpcRouter {
       const result = await this.deps.loop.start(parsed, { emit }, provider);
       this.deps.log.info("run finished", { runId: parsed.runId, state: result.state, steps: result.steps, toolCalls: result.toolCalls });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.log.error("run crashed", { runId: parsed.runId, error: message.slice(0, 300) });
       this.#notificationSink?.(AGENT_NOTIFICATIONS.stream, {
         type: "agent.failed",
         runId: parsed.runId,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
         at: new Date().toISOString(),
       });
+    } finally {
+      this.#activeRuns.delete(parsed.runId);
+      if (parsed.messageId) {
+        const admission = this.#admissions.get(parsed.messageId);
+        if (admission?.runId === parsed.runId) {
+          admission.completed = true;
+          this.#pruneAdmissions();
+        }
+      }
+    }
+  }
+
+  /**
+   * Keep retry receipts bounded without evicting an active receipt. Evicting an
+   * in-flight message would make a transport retry start a second run.
+   */
+  #pruneAdmissions(): void {
+    const limit = 256;
+    if (this.#admissions.size <= limit) return;
+    for (const [messageId, admission] of this.#admissions) {
+      if (this.#admissions.size <= limit) break;
+      if (admission.completed) this.#admissions.delete(messageId);
     }
   }
 
   #initialize(params: unknown): InitializeResult {
+    if (this.#initialized) {
+      throw new RpcFailure(RPC_ERROR.INVALID_REQUEST, "initialize has already completed");
+    }
     const parsed = parseInitializeParams(params);
     this.#initialized = true;
     this.deps.log.info("initialized", { clientVersion: parsed.clientVersion, dataDir: parsed.dataDir });
@@ -138,8 +192,8 @@ export class RpcRouter {
   }
 
   #ping(params: unknown): { pong: string; agentPid: number } {
-    const echo = (params as { echo?: unknown } | undefined)?.echo;
-    return { pong: typeof echo === "string" ? echo : "pong", agentPid: process.pid };
+    const parsed = parseOrThrow(PingParamsSchema, params);
+    return { pong: parsed.echo ?? "pong", agentPid: process.pid };
   }
 
   #describe(): SystemDescribeResult {
@@ -161,6 +215,10 @@ export class RpcRouter {
   }
 }
 
+function requestPrompt(request: AgentRunRequest): string {
+  return request.parts?.map((part) => part.text).join("\n").trim() || request.prompt.trim();
+}
+
 /**
  * Contract violations are INVALID_PARAMS, never INTERNAL_ERROR: the caller sent a
  * shape we agreed not to accept.
@@ -176,24 +234,17 @@ function parseOrThrow<T>(schema: z.ZodType<T>, params: unknown): T {
 }
 
 function parseInitializeParams(params: unknown): InitializeParams {
-  const candidate = params as Partial<InitializeParams> | undefined;
-  if (!candidate || typeof candidate !== "object") {
-    throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "initialize requires params");
-  }
-  if (candidate.protocolVersion !== YUKINAL_RPC_VERSION) {
-    throw new RpcFailure(
-      RPC_ERROR.INVALID_PARAMS,
-      `protocol version mismatch: desktop asked for "${String(candidate.protocolVersion)}", agent speaks "${YUKINAL_RPC_VERSION}"`,
-    );
-  }
-  return {
-    protocolVersion: YUKINAL_RPC_VERSION,
-    clientVersion: candidate.clientVersion ?? "unknown",
-    dataDir: candidate.dataDir ?? "",
-  };
+  return parseOrThrow(InitializeParamsSchema, params);
 }
 
-const AgentRunStopSchema = z.object({ runId: z.string().min(1) });
+const InitializeParamsSchema = z.strictObject({
+  protocolVersion: z.literal(YUKINAL_RPC_VERSION),
+  clientVersion: z.string().trim().min(1).max(128),
+  dataDir: z.string().max(4096),
+});
+
+const PingParamsSchema = z.strictObject({ echo: z.string().max(1_000).optional() });
+const AgentRunStopSchema = z.strictObject({ runId: z.string().trim().min(1).max(256) });
 
 /** 每次 run 由 Rust 注入 provider 材料；构造失败立即报错（不是 run 的失败）。 */
 function buildProvider(config: RuntimeProviderConfig | undefined): OpenAiCompatibleProvider {

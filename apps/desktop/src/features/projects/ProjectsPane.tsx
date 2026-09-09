@@ -8,6 +8,7 @@ import {
 } from "@yukinal/shared";
 
 import { callDesktop, callDesktopParsed, isDesktopShell } from "../../lib/ipc.js";
+import { Icon } from "../../components/Icon.js";
 
 const ENVIRONMENT_LABEL: Record<Environment, string> = {
   production: "生产",
@@ -52,7 +53,7 @@ export function ProjectsPane() {
   if (workspaces.isError || !workspaces.data) {
     return (
       <div className="error-panel">
-        <div className="error-panel-icon">!</div>
+        <div className="error-panel-icon"><Icon name="warning" size={16} /></div>
         <div>
           <strong>无法读取项目</strong>
           <p>{workspaces.error instanceof Error ? workspaces.error.message : String(workspaces.error)}</p>
@@ -75,14 +76,14 @@ export function ProjectsPane() {
           <h2>项目</h2>
           <p>按项目查看关联的服务器和代码仓库，目标环境始终明确可见。</p>
         </div>
-        <button type="button" className="secondary-button" onClick={() => void workspaces.refetch()} disabled={workspaces.isFetching}>
-          <span aria-hidden="true">↻</span> {workspaces.isFetching ? "读取中" : "刷新"}
+        <button type="button" className="secondary-button" onClick={() => void workspaces.refetch()} disabled={workspaces.isFetching} title="刷新项目" aria-label="刷新项目">
+          <Icon name="refresh" size={14} /> {workspaces.isFetching ? "读取中" : "刷新"}
         </button>
       </section>
 
       {rows.length === 0 ? (
         <div className="empty-state page-empty project-empty">
-          <span className="empty-state-mark">⌁</span>
+          <Icon name="projects" size={24} />
           <h2>暂无项目</h2>
           <p>本地数据库还没有 workspace 记录。服务器视图仍可独立使用。</p>
         </div>
@@ -100,7 +101,7 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
     <li className="project-card">
       <div className="project-card-header">
         <div>
-          <p className="eyebrow">Workspace</p>
+          <p className="eyebrow">项目工作区</p>
           <h3>{workspace.name}</h3>
         </div>
         <span className={`project-environment project-environment-${workspace.defaultEnvironment}`}>
@@ -142,7 +143,7 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
 function PreviewEmpty() {
   return (
     <div className="empty-state page-empty">
-      <span className="empty-state-mark">◌</span>
+      <Icon name="projects" size={24} />
       <h2>浏览器预览</h2>
       <p>本地 workspace 数据只在 Tauri 桌面壳中可用，预览不会伪造项目内容。</p>
     </div>

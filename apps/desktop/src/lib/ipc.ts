@@ -10,7 +10,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { IpcCommandMap, IpcCommandName } from "@yukinal/shared";
+import { IPC_COMMANDS, IPC_SCHEMAS, type IpcCommandMap, type IpcCommandName } from "@yukinal/shared";
 
 /** True when running inside Tauri; false in a plain browser during `vite dev`. */
 export function isDesktopShell(): boolean {
@@ -19,7 +19,7 @@ export function isDesktopShell(): boolean {
 
 export class IpcUnavailableError extends Error {
   constructor(command: string) {
-    super(`${command} is only available inside the Tauri shell (Rust core, )`);
+    super(`请在 Yukinal 桌面应用中执行此操作（${command}）。`);
     this.name = "IpcUnavailableError";
   }
 }
@@ -28,7 +28,7 @@ export async function callDesktop<C extends IpcCommandName>(
   command: C,
   params: IpcCommandMap[C]["params"],
 ): Promise<IpcCommandMap[C]["response"]> {
-  return callDesktopParsed(command, params, (raw) => raw as IpcCommandMap[C]["response"]);
+  return callDesktopParsed(command, params, (raw) => IPC_SCHEMAS[command].response.parse(raw));
 }
 
 /** Same as `callDesktop`, but validates/normalises the raw payload first. */
@@ -38,6 +38,15 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
   parse: (raw: unknown) => T,
 ): Promise<T> {
   if (!isDesktopShell()) throw new IpcUnavailableError(command);
-  const raw = await invoke<unknown>(command, { ...(params as Record<string, unknown>) });
-  return parse(raw);
+  const validatedParams = IPC_SCHEMAS[command].params.parse(params);
+  // These Rust commands accept one structured `input`; the typed UI contract
+  // deliberately stays flat. Keep this transport detail at the IPC boundary.
+  const args = command === IPC_COMMANDS.serverAdd || command === IPC_COMMANDS.serverUpdate
+    ? { input: validatedParams }
+    : { ...(validatedParams as Record<string, unknown>) };
+  try {
+    return parse(await invoke<unknown>(command, args));
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error));
+  }
 }

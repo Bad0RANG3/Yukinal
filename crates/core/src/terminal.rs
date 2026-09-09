@@ -26,7 +26,6 @@ pub enum TerminalServiceError {
 /// `yukinal_ssh::PtySession` 到 manager seam 的适配器。
 pub struct SshPty {
     backend: Arc<RusshBackend>,
-    session: Session,
     pty: yukinal_ssh::PtySession,
 }
 
@@ -51,7 +50,7 @@ impl TerminalPty for SshPty {
 
     async fn close(&self) -> yukinal_terminal::Result<()> {
         self.backend
-            .close(&self.session)
+            .pty_close(&self.pty)
             .await
             .map_err(|error| yukinal_terminal::TerminalError::Channel(error.to_string()))
     }
@@ -150,7 +149,6 @@ impl TerminalService {
         let pty = self.ssh.open_pty(&session, (cols, rows)).await?;
         let adopted = SshPty {
             backend: Arc::clone(&self.ssh),
-            session: session.clone(),
             pty,
         };
         Ok(self.manager.open(server_id, cols, rows, adopted).await?)

@@ -30,11 +30,29 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+/**
+ * OpenCode-style prompt parts. Keeping the text in a part gives the transport a
+ * stable place to add file/image/context parts later without changing the run
+ * envelope or making the UI concatenate provider-specific payloads.
+ */
+export interface AgentPromptPart {
+  type: "text";
+  text: string;
+}
+
 /** What UI sends to start a run.: targets are ids, not prose. */
 export interface AgentRunRequest {
   runId: string;
   sessionId: string;
   prompt: string;
+  /** Stable message identity for admission/retry semantics. */
+  messageId?: string;
+  /** OpenCode-compatible message parts; `prompt` remains the compatibility fallback. */
+  parts?: AgentPromptPart[];
+  /** A UI submission is admitted and executed asynchronously. */
+  delivery?: "async" | "sync";
+  /** Whether the runner should resume execution after admitting the message. */
+  resume?: boolean;
   workspaceId?: string;
   /** Currently focused server; the agent may still need to disambiguate. */
   focusServerId?: string;
@@ -78,6 +96,8 @@ export type ApprovalDecision = "approve_once" | "approve_session" | "reject";
 
 export interface ApprovalResponse {
   approvalId: string;
+  /** Bind the response to the run that displayed the approval. */
+  runId: string;
   decision: ApprovalDecision;
   respondedAt: string;
 }

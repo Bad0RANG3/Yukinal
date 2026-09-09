@@ -4,6 +4,9 @@
 //! resolve credentials. This module is the narrow, deny-by-default bridge from the
 //! sidecar request to Rust-owned state.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -16,6 +19,7 @@ use crate::state::AppState;
 
 const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
+pub(crate) const HOST_TOOL_CANCEL: &str = "host.tool.cancel";
 const SERVER_INFO: &str = "server.info";
 const DOCKER_PS: &str = "docker.ps";
 const DOCKER_LOGS: &str = "docker.logs";
@@ -46,6 +50,37 @@ struct HostToolExecuteRequest {
     tool_name: String,
     input: Value,
     target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostToolCancelRequest {
+    request_id: i64,
+}
+
+pub(crate) type HostCancellationRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
+
+/// Cancel a host request that is already executing. The response is deliberately
+/// best-effort: a request may have completed between the Agent's abort and this
+/// frame arriving at the host.
+pub(crate) fn cancel_sidecar_request(
+    registry: &HostCancellationRegistry,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostToolCancelRequest>(params)
+        .map_err(|error| format!("invalid host cancellation request: {error}"))?;
+    if request.request_id <= 0 {
+        return Err("host cancellation request id must be positive".to_string());
+    }
+    let token = registry
+        .lock()
+        .map_err(|_| "host cancellation registry is poisoned".to_string())?
+        .remove(&request.request_id);
+    let cancelled = token.is_some();
+    if let Some(token) = token {
+        token.cancel();
+    }
+    Ok(json!({ "cancelled": cancelled }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,13 +231,14 @@ struct FilesystemWriteResult {
     bytes_written: usize,
 }
 
-/// Handle one sidecar-originated request. Expected tool failures are returned as a
-/// successful JSON-RPC result containing the shared `{status,error}` envelope; only
-/// malformed/unknown bridge requests use a JSON-RPC error.
-pub(crate) async fn handle_sidecar_request(
+/// Host request entry point with a cancellation token owned by the sidecar
+/// dispatcher. Keeping the token explicit prevents a user Stop from ending only
+/// the Node promise while an SSH operation continues in Rust.
+pub(crate) async fn handle_sidecar_request_with_cancel(
     state: &AppState,
     method: &str,
     params: Value,
+    cancel: CancellationToken,
 ) -> Result<Value, String> {
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
@@ -269,13 +305,13 @@ pub(crate) async fn handle_sidecar_request(
     }
 
     match request.tool_name.as_str() {
-        SERVER_INFO => server_info(state, server_id, &request.input).await,
-        DOCKER_PS => docker_ps(state, server_id, &request.input).await,
-        DOCKER_LOGS => docker_logs(state, server_id, &request.input).await,
-        DOCKER_INSPECT => docker_inspect(state, server_id, &request.input).await,
-        DOCKER_RESTART => docker_restart(state, server_id, &request.input).await,
-        FILESYSTEM_READ => filesystem_read(state, server_id, &request.input).await,
-        FILESYSTEM_WRITE => filesystem_write(state, server_id, &request.input).await,
+        SERVER_INFO => server_info(state, server_id, &request.input, &cancel).await,
+        DOCKER_PS => docker_ps(state, server_id, &request.input, &cancel).await,
+        DOCKER_LOGS => docker_logs(state, server_id, &request.input, &cancel).await,
+        DOCKER_INSPECT => docker_inspect(state, server_id, &request.input, &cancel).await,
+        DOCKER_RESTART => docker_restart(state, server_id, &request.input, &cancel).await,
+        FILESYSTEM_READ => filesystem_read(state, server_id, &request.input, &cancel).await,
+        FILESYSTEM_WRITE => filesystem_write(state, server_id, &request.input, &cancel).await,
         other => Ok(failed(
             "not_found",
             format!("host tool `{other}` is not enabled"),
@@ -341,7 +377,38 @@ fn context_error(error: DatabaseError) -> Result<Value, String> {
     Ok(failed("internal", error.to_string(), false, None))
 }
 
-async fn server_info(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+async fn ensure_session_with_cancel(
+    state: &AppState,
+    server_id: &str,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err("host operation cancelled".to_string());
+    }
+    tokio::select! {
+        result = ensure_session(state, server_id) => result,
+        _ = cancel.cancelled() => Err("host operation cancelled".to_string()),
+    }
+}
+
+fn transport_or_cancel(error: impl std::fmt::Display, cancel: &CancellationToken) -> Value {
+    if cancel.is_cancelled() {
+        cancelled_failure()
+    } else {
+        failed("transport", error.to_string(), true, None)
+    }
+}
+
+fn cancelled_failure() -> Value {
+    failed("cancelled", "Host operation cancelled", false, None)
+}
+
+async fn server_info(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
     if !is_empty_object(input) {
         return Ok(failed(
             "invalid_input",
@@ -351,24 +418,25 @@ async fn server_info(state: &AppState, server_id: &str, input: &Value) -> Result
         ));
     }
 
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
     let session = match state.terminals.cached_session(server_id) {
         Ok(session) => session,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     let collected_at = yukinal_core::sidecar::iso8601_now();
-    let (snapshot, _) = match yukinal_core::collector::collect_snapshot(
-        &state.ssh,
-        &session,
-        server_id,
-        &collected_at,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(failed("execution_failed", error.to_string(), true, None)),
+    let (snapshot, _) = tokio::select! {
+        result = yukinal_core::collector::collect_snapshot(
+            &state.ssh,
+            &session,
+            server_id,
+            &collected_at,
+        ) => match result {
+            Ok(result) => result,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
     };
 
     if let Err(error) = state.database.snapshots().insert(&snapshot) {
@@ -382,6 +450,7 @@ async fn filesystem_read(
     state: &AppState,
     server_id: &str,
     input: &Value,
+    cancel: &CancellationToken,
 ) -> Result<Value, String> {
     let input = match serde_json::from_value::<FilesystemReadInput>(input.clone()) {
         Ok(input) => input,
@@ -406,16 +475,15 @@ async fn filesystem_read(
             None,
         ));
     }
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
-    let bytes = match state
-        .terminals
-        .sftp_read_bounded(server_id, &input.path, max_bytes)
-        .await
-    {
-        Ok(bytes) => bytes,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+    let bytes = tokio::select! {
+        result = state.terminals.sftp_read_bounded(server_id, &input.path, max_bytes) => match result {
+            Ok(bytes) => bytes,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
     };
     let truncated = bytes.len() > max_bytes;
     let content = String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned();
@@ -433,6 +501,7 @@ async fn filesystem_write(
     state: &AppState,
     server_id: &str,
     input: &Value,
+    cancel: &CancellationToken,
 ) -> Result<Value, String> {
     let input = match serde_json::from_value::<FilesystemWriteInput>(input.clone()) {
         Ok(input) => input,
@@ -456,15 +525,14 @@ async fn filesystem_write(
             None,
         ));
     }
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
-    if let Err(error) = state
-        .terminals
-        .sftp_write(server_id, &input.path, input.content.as_bytes())
-        .await
-    {
-        return Ok(failed("transport", error.to_string(), true, None));
+    tokio::select! {
+        result = state.terminals.sftp_write(server_id, &input.path, input.content.as_bytes()) => if let Err(error) = result {
+            return Ok(transport_or_cancel(error, cancel));
+        },
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
     }
     Ok(success(
         serde_json::to_value(FilesystemWriteResult {
@@ -475,7 +543,12 @@ async fn filesystem_write(
     ))
 }
 
-async fn docker_ps(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+async fn docker_ps(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
     let input = match serde_json::from_value::<DockerPsInput>(input.clone()) {
         Ok(input) => input,
         Err(error) => {
@@ -487,12 +560,12 @@ async fn docker_ps(state: &AppState, server_id: &str, input: &Value) -> Result<V
             ))
         }
     };
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
     let session = match state.terminals.cached_session(server_id) {
         Ok(session) => session,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     let command = if input.all.unwrap_or(false) {
         DOCKER_PS_ALL_COMMAND
@@ -505,12 +578,12 @@ async fn docker_ps(state: &AppState, server_id: &str, input: &Value) -> Result<V
             &session,
             command,
             Some(std::time::Duration::from_secs(10)),
-            &CancellationToken::new(),
+            cancel,
         )
         .await
     {
         Ok(result) => result,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
 
     // A missing Docker binary or a non-Docker host is a valid, structured answer.
@@ -523,7 +596,12 @@ async fn docker_ps(state: &AppState, server_id: &str, input: &Value) -> Result<V
     })))
 }
 
-async fn docker_logs(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+async fn docker_logs(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
     let input = match serde_json::from_value::<DockerLogsInput>(input.clone()) {
         Ok(input) => input,
         Err(error) => {
@@ -552,12 +630,12 @@ async fn docker_logs(state: &AppState, server_id: &str, input: &Value) -> Result
             None,
         ));
     }
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
     let session = match state.terminals.cached_session(server_id) {
         Ok(session) => session,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     let command = format!(
         "docker logs --tail {tail} --timestamps -- {} 2>&1",
@@ -569,12 +647,12 @@ async fn docker_logs(state: &AppState, server_id: &str, input: &Value) -> Result
             &session,
             &command,
             Some(std::time::Duration::from_secs(10)),
-            &CancellationToken::new(),
+            cancel,
         )
         .await
     {
         Ok(result) => result,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     if result.exit_code != 0 {
         return Ok(failed(
@@ -599,7 +677,12 @@ async fn docker_logs(state: &AppState, server_id: &str, input: &Value) -> Result
     ))
 }
 
-async fn docker_inspect(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+async fn docker_inspect(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
     let input = match serde_json::from_value::<DockerInspectInput>(input.clone()) {
         Ok(input) => input,
         Err(error) => {
@@ -619,12 +702,12 @@ async fn docker_inspect(state: &AppState, server_id: &str, input: &Value) -> Res
             None,
         ));
     }
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
     let session = match state.terminals.cached_session(server_id) {
         Ok(session) => session,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     let command = format!(
         "docker inspect --format '{{{{json .}}}}' -- {} 2>/dev/null",
@@ -636,12 +719,12 @@ async fn docker_inspect(state: &AppState, server_id: &str, input: &Value) -> Res
             &session,
             &command,
             Some(std::time::Duration::from_secs(10)),
-            &CancellationToken::new(),
+            cancel,
         )
         .await
     {
         Ok(result) => result,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     if result.exit_code != 0 {
         return Ok(failed(
@@ -663,7 +746,12 @@ async fn docker_inspect(state: &AppState, server_id: &str, input: &Value) -> Res
     ))
 }
 
-async fn docker_restart(state: &AppState, server_id: &str, input: &Value) -> Result<Value, String> {
+async fn docker_restart(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
     let input = match serde_json::from_value::<DockerRestartInput>(input.clone()) {
         Ok(input) => input,
         Err(error) => {
@@ -692,26 +780,26 @@ async fn docker_restart(state: &AppState, server_id: &str, input: &Value) -> Res
             None,
         ));
     }
-    if let Err(error) = ensure_session(state, server_id).await {
-        return Ok(failed("transport", error, true, None));
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
     }
     let session = match state.terminals.cached_session(server_id) {
         Ok(session) => session,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     let command = docker_restart_command(&input.container, timeout);
     let result = match state
         .ssh
-        .execute(
+        .execute_once(
             &session,
             &command,
             Some(std::time::Duration::from_secs(30)),
-            &CancellationToken::new(),
+            cancel,
         )
         .await
     {
         Ok(result) => result,
-        Err(error) => return Ok(failed("transport", error.to_string(), true, None)),
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     };
     if result.exit_code != 0 {
         return Ok(failed(
@@ -886,10 +974,36 @@ fn failed(code: &str, message: impl Into<String>, retryable: bool, detail: Optio
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
     use super::{
-        bounded_log_lines, docker_restart_command, is_safe_container_ref, parse_docker_inspect,
-        parse_docker_ps, shell_quote, validate_remote_path,
+        bounded_log_lines, cancel_sidecar_request, docker_restart_command, is_safe_container_ref,
+        parse_docker_inspect, parse_docker_ps, shell_quote, validate_remote_path,
+        HostCancellationRegistry,
     };
+
+    #[test]
+    fn cancellation_registry_cancels_and_removes_a_running_request() {
+        let registry: HostCancellationRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let token = CancellationToken::new();
+        registry
+            .lock()
+            .expect("registry lock")
+            .insert(7, token.clone());
+
+        let result = cancel_sidecar_request(&registry, json!({ "requestId": 7 }))
+            .expect("cancellation response");
+        assert_eq!(result["cancelled"], json!(true));
+        assert!(token.is_cancelled());
+
+        let result = cancel_sidecar_request(&registry, json!({ "requestId": 7 }))
+            .expect("second cancellation response");
+        assert_eq!(result["cancelled"], json!(false));
+    }
 
     #[test]
     fn parses_docker_json_lines_into_bounded_structured_rows() {

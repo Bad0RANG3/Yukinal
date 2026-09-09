@@ -2,6 +2,7 @@
 
 import {
   encodeFrame,
+  HostToolCancelRequestSchema,
   HostContextRequestSchema,
   HostContextResponseSchema,
   HOST_METHODS,
@@ -14,10 +15,12 @@ import {
 } from "@yukinal/shared";
 
 interface PendingRequest {
+  id: number;
   resolve(value: unknown): void;
   reject(error: Error): void;
   signal?: AbortSignal;
   onAbort?: () => void;
+  cancelOnAbort: boolean;
 }
 
 export class HostRpcClient {
@@ -33,6 +36,7 @@ export class HostRpcClient {
       params,
       (value) => HostToolExecuteResponseSchema.parse(value),
       signal,
+      true,
     );
   }
 
@@ -43,6 +47,7 @@ export class HostRpcClient {
       params,
       (value) => HostContextResponseSchema.parse(value),
       signal,
+      false,
     );
   }
 
@@ -51,12 +56,14 @@ export class HostRpcClient {
     params: unknown,
     parse: (value: unknown) => T,
     signal?: AbortSignal,
+    cancelOnAbort = false,
   ): Promise<T> {
     if (signal?.aborted) return Promise.reject(new Error("host request cancelled"));
 
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       const pending: PendingRequest = {
+        id,
         resolve: (value) => {
           try {
             resolve(parse(value));
@@ -66,9 +73,11 @@ export class HostRpcClient {
         },
         reject,
         signal,
+        cancelOnAbort,
       };
       const onAbort = (): void => {
-        this.#pending.delete(id);
+        if (!this.#pending.delete(id)) return;
+        if (cancelOnAbort) this.#sendCancel(id);
         reject(new Error("host request cancelled"));
       };
       pending.onAbort = onAbort;
@@ -109,8 +118,27 @@ export class HostRpcClient {
     const pending = [...this.#pending.values()];
     this.#pending.clear();
     for (const request of pending) {
+      if (request.cancelOnAbort) this.#sendCancel(request.id);
       if (request.signal && request.onAbort) request.signal.removeEventListener("abort", request.onAbort);
       request.reject(new Error("host connection closed"));
+    }
+  }
+
+  /** Best-effort cancellation is a separate host request because JSON-RPC
+   * responses cannot interrupt an already-running request. */
+  #sendCancel(requestId: number): void {
+    try {
+      const params = HostToolCancelRequestSchema.parse({ requestId });
+      this.send(encodeFrame({
+        jsonrpc: "2.0",
+        id: this.#nextId++,
+        method: HOST_METHODS.toolCancel,
+        params,
+      }));
+    } catch {
+      // The original request is already cancelled from the Agent's point of
+      // view. A dead host cannot be made more cancelled by surfacing another
+      // transport error here.
     }
   }
 }

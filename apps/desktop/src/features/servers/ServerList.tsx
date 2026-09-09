@@ -1,40 +1,98 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IPC_COMMANDS, type Environment, type Server } from "@yukinal/shared";
+import { type Environment, type Server } from "@yukinal/shared";
 import { useEffect, useMemo, useState } from "react";
 
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { isDesktopShell } from "../../lib/ipc.js";
+import { useServerAction, useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { Icon } from "../../components/Icon.js";
 import { AddServerModal } from "./AddServerModal.js";
 
 const ENV_LABEL: Record<Environment, string> = { production: "生产", staging: "预发", development: "开发", local: "本地", unknown: "未知" };
-const ENV_DOT: Record<Environment, string> = { production: "server-dot-production", staging: "server-dot-staging", development: "server-dot-development", local: "server-dot-development", unknown: "server-dot-unknown" };
+const ENV_DOT: Record<Environment, string> = { production: "server-dot-production", staging: "server-dot-staging", development: "server-dot-development", local: "server-dot-local", unknown: "server-dot-unknown" };
+const STATUS_LABEL: Record<Server["status"], string> = {
+  connecting: "连接中",
+  connected: "已连接",
+  disconnected: "未连接",
+  error: "错误",
+};
 
-export function ServerList() {
+export function ServerList({ onClose }: { onClose?: () => void }) {
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectServer = useWorkspaceStore((state) => state.selectServer);
+  const syncServerSelection = useWorkspaceStore((state) => state.syncServerSelection);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Server | undefined>();
   const [filter, setFilter] = useState("");
   const shell = isDesktopShell();
-  const queryClient = useQueryClient();
-  const servers = useQuery({ queryKey: ["servers"], enabled: shell, staleTime: 10_000, refetchInterval: 60_000, queryFn: async () => (await callDesktop(IPC_COMMANDS.serverList, {})).servers });
-  const refresh = () => { void queryClient.invalidateQueries({ queryKey: ["servers"] }); };
-  const connect = useMutation({ mutationFn: (serverId: string) => callDesktop(IPC_COMMANDS.serverConnect, { serverId }), onSuccess: refresh });
-  const disconnect = useMutation({ mutationFn: (serverId: string) => callDesktop(IPC_COMMANDS.serverDisconnect, { serverId }), onSuccess: refresh });
-  const remove = useMutation({ mutationFn: (serverId: string) => callDesktop(IPC_COMMANDS.serverDelete, { serverId }), onSuccess: (_, serverId) => { if (selectedServerId === serverId) selectServer(null); refresh(); } });
+  const servers = useServers();
+  const { action, busy } = useServerAction();
   const serverRows = servers.data ?? [];
   const filteredServers = useMemo(() => { const needle = filter.trim().toLowerCase(); return needle ? serverRows.filter((server) => [server.name, server.connection.host, server.metadata.environment, server.metadata.region].filter((value): value is string => Boolean(value)).some((value) => value.toLowerCase().includes(needle))) : serverRows; }, [filter, serverRows]);
-  useEffect(() => { if (!servers.isSuccess) return; const first = serverRows[0]; if (!first) { if (selectedServerId) selectServer(null); return; } if (!selectedServerId || !serverRows.some((server) => server.id === selectedServerId)) selectServer(first.id); }, [selectServer, selectedServerId, serverRows, servers.isSuccess]);
+  useEffect(() => {
+    if (servers.data) syncServerSelection(servers.data.map((server) => server.id));
+  }, [syncServerSelection, servers.data]);
 
-  return <aside className="server-sidebar">
-    <div className="server-sidebar-header"><div><p className="eyebrow">工作区</p><h2>服务器</h2></div><button type="button" className="icon-button icon-button-accent" aria-label="添加服务器" title="添加服务器" onClick={() => setAdding(true)}>+</button></div>
-    <label className="server-search"><span aria-hidden="true">⌕</span><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索名称或主机" aria-label="搜索服务器" />{filter ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => setFilter("")}>×</button> : null}</label>
-    <div className="server-list-meta"><span>{serverRows.length} 台服务器</span><button type="button" className="text-button" onClick={() => void servers.refetch()} disabled={servers.isFetching}>↻</button></div>
-    {servers.isError ? <div className="inline-error"><strong>读取失败</strong><span>{servers.error instanceof Error ? servers.error.message : String(servers.error)}</span><button type="button" className="text-button text-button-danger" onClick={() => void servers.refetch()}>重试</button></div> : null}
-    {!shell ? <div className="empty-state compact-empty"><p>浏览器预览模式</p><small>启动 Tauri 后加载本地服务器。</small></div> : null}
-    {shell && !serverRows.length && !servers.isLoading ? <div className="empty-state compact-empty"><p>还没有服务器</p><button type="button" className="secondary-button" onClick={() => setAdding(true)}>添加服务器</button></div> : null}
-    {servers.isLoading ? <div className="skeleton-list" aria-label="正在加载服务器" /> : null}
-    {filteredServers.length ? <ul className="server-list">{filteredServers.map((server) => <li key={server.id} className="server-list-item"><div className={`server-row ${selectedServerId === server.id ? "server-row-selected" : ""}`}><button type="button" onClick={() => selectServer(server.id)} className="server-row-main"><span className={`server-dot ${ENV_DOT[server.metadata.environment]}`} /><span className="server-row-copy"><span className="server-row-name">{server.name}</span><span className="server-row-detail">{server.connection.host}:{server.connection.port}</span></span><span className="server-row-env">{ENV_LABEL[server.metadata.environment]}</span></button><div className="server-row-actions"><span className={`server-status-pill server-status-${server.status}`}>{server.status}</span>{server.status === "connected" ? <button type="button" title="断开" aria-label={`断开 ${server.name}`} onClick={() => disconnect.mutate(server.id)}>⏏</button> : <button type="button" title="连接" aria-label={`连接 ${server.name}`} onClick={() => connect.mutate(server.id)} disabled={server.status === "connecting"}>↗</button>}<button type="button" title="编辑" aria-label={`编辑 ${server.name}`} onClick={() => setEditing(server)}>✎</button><button type="button" title="删除" aria-label={`删除 ${server.name}`} onClick={() => { if (window.confirm(`删除服务器 ${server.name}？`)) remove.mutate(server.id); }}>×</button></div></div></li>)}</ul> : shell && serverRows.length ? <p className="no-results">没有匹配的服务器</p> : null}
-    {adding ? <AddServerModal onClose={() => setAdding(false)} /> : null}{editing ? <AddServerModal server={editing} onClose={() => setEditing(undefined)} /> : null}
-  </aside>;
+  return (
+    <aside id="server-sidebar" className="server-sidebar" aria-label="服务器列表">
+      <div className="server-sidebar-header">
+        <div><p className="eyebrow">工作区</p><h2>服务器</h2></div>
+        <div className="server-sidebar-header-actions">
+          {onClose ? <button type="button" className="icon-button server-sidebar-close" aria-label="关闭服务器列表" title="关闭服务器列表" onClick={onClose}><Icon name="close" size={15} /></button> : null}
+          <button type="button" className="icon-button icon-button-accent" aria-label="添加服务器" title="添加服务器" onClick={() => setAdding(true)}>
+            <Icon name="plus" size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="server-search">
+        <Icon name="search" size={14} />
+        <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索名称或主机" aria-label="搜索服务器" />
+        {filter ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => setFilter("")}><Icon name="close" size={13} /></button> : null}
+      </div>
+
+      <div className="server-list-meta">
+        <span>{filter.trim() ? `${filteredServers.length} / ${serverRows.length}` : serverRows.length} 台服务器</span>
+        <button type="button" className="text-button icon-text-button" onClick={() => void servers.refetch()} disabled={!shell || servers.isFetching} aria-label="刷新服务器列表" title="刷新服务器列表">
+          <Icon name="refresh" size={13} />
+        </button>
+      </div>
+
+      {servers.isError ? <div className="inline-error"><strong>读取失败</strong><span>{servers.error instanceof Error ? servers.error.message : String(servers.error)}</span><button type="button" className="text-button text-button-danger" onClick={() => void servers.refetch()}>重试</button></div> : null}
+      {action.isError ? <div className="inline-error" role="alert"><strong>操作未完成</strong><span>{action.error.message}</span><button type="button" className="text-button" onClick={() => action.reset()}>关闭提示</button></div> : null}
+      {!shell ? <div className="empty-state compact-empty"><p>浏览器预览模式</p><small>启动 Tauri 后加载本地服务器。</small></div> : null}
+      {shell && !serverRows.length && servers.isSuccess ? <div className="empty-state compact-empty"><Icon name="servers" size={26} /><p>连接你的第一台服务器</p><small>添加 SSH 连接，开始管理远程环境。</small><button type="button" className="secondary-button" onClick={() => setAdding(true)}>添加服务器</button></div> : null}
+      {servers.isLoading ? <div className="skeleton-list" aria-label="正在加载服务器" /> : null}
+      {filteredServers.length ? (
+        <ul className="server-list">
+          {filteredServers.map((server) => (
+            <li key={server.id} className="server-list-item">
+              <div className={`server-row ${selectedServerId === server.id ? "server-row-selected" : ""}`}>
+                <button type="button" onClick={() => selectServer(server.id)} className="server-row-main" aria-current={selectedServerId === server.id ? "true" : undefined}>
+                  <span className={`server-dot ${ENV_DOT[server.metadata.environment]}`} aria-hidden="true" />
+                  <span className="server-row-copy">
+                    <span className="server-row-name">{server.name}</span>
+                    <span className="server-row-detail">{server.connection.host}:{server.connection.port}</span>
+                  </span>
+                  <span className="server-row-env">{ENV_LABEL[server.metadata.environment]}</span>
+                </button>
+                <div className="server-row-actions">
+                  <span className={`server-status-pill server-status-${server.status}`}>{action.isPending && action.variables.serverId === server.id ? "处理中…" : STATUS_LABEL[server.status]}</span>
+                  {server.status === "connected" ? (
+                    <button type="button" title="断开连接" aria-label={`断开 ${server.name}`} disabled={busy} onClick={() => action.mutate({ type: "disconnect", serverId: server.id })}><Icon name="disconnect" size={13} /></button>
+                  ) : (
+                    <button type="button" title="连接服务器" aria-label={`连接 ${server.name}`} onClick={() => action.mutate({ type: "connect", serverId: server.id })} disabled={busy || server.status === "connecting"}><Icon name="connect" size={13} /></button>
+                  )}
+                  <button type="button" title="编辑服务器" aria-label={`编辑 ${server.name}`} disabled={busy} onClick={() => setEditing(server)}><Icon name="edit" size={13} /></button>
+                  <button type="button" title="删除服务器" aria-label={`删除 ${server.name}`} disabled={busy} onClick={() => { if (window.confirm(`确定删除服务器“${server.name}”？`)) action.mutate({ type: "delete", serverId: server.id }); }}><Icon name="trash" size={13} /></button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : shell && serverRows.length ? <p className="no-results">没有匹配的服务器</p> : null}
+
+      {adding ? <AddServerModal onClose={() => setAdding(false)} /> : null}
+      {editing ? <AddServerModal server={editing} onClose={() => setEditing(undefined)} /> : null}
+    </aside>
+  );
 }

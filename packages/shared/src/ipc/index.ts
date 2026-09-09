@@ -6,7 +6,7 @@
  * Anything not in this map does not exist for the UI.
  */
 
-import type { ApprovalResponse, AgentRunRequest } from "../types/chat.js";
+import type { ApprovalResponse, AgentPromptPart, AgentRunRequest } from "../types/chat.js";
 import type {
   ActivityListInput,
   ActivityListResponse,
@@ -57,6 +57,7 @@ export const IPC_COMMANDS = {
   agentApprovalRespond: "agent_approval_respond",
   /** AI provider config: settings panel only; the key never leaves the keychain. */
   providerList: "provider_list",
+  providerImportAuto: "provider_import_auto",
   providerSaveOpenai: "provider_save_openai",
   /** Import candidates from CC Switch (Rust reads the os store key at apply time). */
   providerImportCcSwitch: "provider_import_ccswitch",
@@ -103,6 +104,10 @@ export interface IpcCommandMap {
     params: {
       sessionId: string;
       prompt: string;
+      messageId?: string;
+      parts?: AgentPromptPart[];
+      delivery?: "async" | "sync";
+      resume?: boolean;
       providerId?: string;
       model?: string;
       workspaceId?: string;
@@ -113,6 +118,7 @@ export interface IpcCommandMap {
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
   agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };
   provider_list: { params: Record<string, never>; response: { providers: AiProviderConfig[] } };
+  provider_import_auto: { params: Record<string, never>; response: { imported: number; providers: AiProviderConfig[] } };
   provider_save_openai: {
     params: ProviderSaveInput;
     response: { provider: AiProviderConfig };

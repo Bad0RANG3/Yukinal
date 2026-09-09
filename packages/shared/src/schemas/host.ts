@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   HOST_METHODS,
+  type HostToolCancelResponse,
   type HostContextResponse,
   type HostToolExecuteResponse,
 } from "../types/host.js";
@@ -38,6 +39,14 @@ export const HostToolExecuteResponseSchema = z.discriminatedUnion("status", [
   z.strictObject({ status: z.literal("failed"), error: ToolErrorSchema }),
   z.strictObject({ status: z.literal("cancelled"), error: ToolErrorSchema.optional() }),
 ]) satisfies z.ZodType<HostToolExecuteResponse>;
+
+export const HostToolCancelRequestSchema = z.strictObject({
+  requestId: z.number().int().positive(),
+});
+
+export const HostToolCancelResponseSchema = z.strictObject({
+  cancelled: z.boolean(),
+}) satisfies z.ZodType<HostToolCancelResponse>;
 
 export const HostContextRequestSchema = z.strictObject({
   kind: z.enum(["server", "snapshot", "workspace"]),

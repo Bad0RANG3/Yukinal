@@ -14,7 +14,7 @@ export const EnvironmentSchema = z.enum(ENVIRONMENTS);
 export const RiskLevelSchema = z.enum(RISK_LEVELS);
 export const ServerStatusSchema = z.enum(SERVER_STATUSES);
 
-export const ServerCapabilitiesSchema = z.object({
+export const ServerCapabilitiesSchema = z.strictObject({
   linux: z.boolean().optional(),
   docker: z.boolean().optional(),
   systemd: z.boolean().optional(),
@@ -24,39 +24,39 @@ export const ServerCapabilitiesSchema = z.object({
   kubernetes: z.boolean().optional(),
 });
 
-export const ServerConnectionSchema = z.object({
-  host: z.string().min(1),
+export const ServerConnectionSchema = z.strictObject({
+  host: z.string().trim().min(1).max(256),
   /** 0 is not a port. Empty port defaults are a classic config bug. */
   port: z.number().int().min(1).max(65535),
-  username: z.string().min(1),
-  identityId: z.string().min(1).optional(),
+  username: z.string().trim().min(1).max(256),
+  identityId: z.string().trim().min(1).max(256).optional(),
 });
 
-export const ServerMetadataSchema = z.object({
+export const ServerMetadataSchema = z.strictObject({
   environment: EnvironmentSchema,
-  region: z.string().optional(),
-  hostname: z.string().optional(),
-  os: z.string().optional(),
-  tags: z.array(z.string()).optional(),
-  workspaceIds: z.array(z.string()).optional(),
+  region: z.string().trim().max(256).optional(),
+  hostname: z.string().trim().max(256).optional(),
+  os: z.string().trim().max(256).optional(),
+  tags: z.array(z.string().trim().max(128)).max(64).optional(),
+  workspaceIds: z.array(z.string().trim().max(256)).max(128).optional(),
 });
 
-export const ServerSchema = z.object({
+export const ServerSchema = z.strictObject({
   /** `srv_` prefixed opaque id; never derived from host/port. */
-  id: z.string().regex(/^srv_[a-z0-9]+$/, "server id must be an opaque srv_ id"),
-  name: z.string().min(1),
+  id: z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/, "server id must be an opaque srv_ id"),
+  name: z.string().trim().min(1).max(256),
   connection: ServerConnectionSchema,
-  groupId: z.string().optional(),
+  groupId: z.string().trim().max(256).optional(),
   capabilities: ServerCapabilitiesSchema,
   status: ServerStatusSchema,
   metadata: ServerMetadataSchema,
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  createdAt: z.string().min(1).max(80),
+  updatedAt: z.string().min(1).max(80),
 });
 
 export const WorkspaceRepositorySchema = z.strictObject({
-  id: z.string().min(1),
-  name: z.string().min(1),
+  id: z.string().trim().min(1).max(256),
+  name: z.string().trim().min(1).max(256),
   host: z.enum(["local", "remote"]),
   path: z.string().min(1).optional(),
   serverId: z.string().min(1).optional(),
@@ -67,9 +67,9 @@ export const WorkspaceRepositorySchema = z.strictObject({
 export const WorkspaceSchema = z.strictObject({
   id: z.string().min(1),
   name: z.string().min(1),
-  serverIds: z.array(z.string().min(1)),
+  serverIds: z.array(z.string().trim().min(1).max(256)).max(128),
   repositories: z.array(WorkspaceRepositorySchema),
-  providerIds: z.array(z.string().min(1)),
+  providerIds: z.array(z.string().trim().min(1).max(256)).max(128),
   defaultEnvironment: EnvironmentSchema,
 });
 
@@ -78,38 +78,45 @@ export const WorkspaceListResponseSchema = z.strictObject({
 });
 
 /** Payload of the "Add Server" form. Secrets are dropped into the keychain here. */
-export const AddServerInputSchema = z.object({
-  name: z.string().min(1),
-  host: z.string().min(1),
+export const AddServerInputSchema = z.strictObject({
+  name: z.string().trim().min(1).max(256),
+  host: z.string().trim().min(1).max(256),
   port: z.number().int().min(1).max(65535).optional(),
-  username: z.string().min(1),
+  username: z.string().trim().min(1).max(256),
   environment: EnvironmentSchema,
-  groupId: z.string().optional(),
+  groupId: z.string().trim().max(256).optional(),
   authentication: z.discriminatedUnion("method", [
-    z.object({ method: z.literal("password"), password: z.string().min(1) }),
-    z.object({
+    z.strictObject({ method: z.literal("password"), password: z.string().min(1).max(4_096) }),
+    z.strictObject({
       method: z.literal("privateKey"),
-      privateKeyPem: z.string().min(1),
-      passphrase: z.string().min(1).optional(),
+      privateKeyPem: z.string().min(1).max(1_000_000),
+      passphrase: z.string().min(1).max(4_096).optional(),
     }),
-    z.object({ method: z.literal("identity"), identityId: z.string().min(1) }),
+    z.strictObject({ method: z.literal("identity"), identityId: z.string().trim().min(1).max(256) }),
   ]),
 });
 
-export const UpdateServerInputSchema = z.object({
-  serverId: z.string().regex(/^srv_[a-z0-9]+$/),
-  name: z.string().min(1),
-  host: z.string().min(1),
+export const UpdateServerInputSchema = z.strictObject({
+  serverId: z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/),
+  name: z.string().trim().min(1).max(256),
+  host: z.string().trim().min(1).max(256),
   port: z.number().int().min(1).max(65535).optional(),
-  username: z.string().min(1),
+  username: z.string().trim().min(1).max(256),
   environment: EnvironmentSchema,
-  groupId: z.string().optional(),
+  groupId: z.string().trim().max(256).optional(),
   authentication: AddServerInputSchema.shape.authentication.optional(),
 });
 
-export const ToolTargetSchema = z.object({
+export const ToolTargetSchema = z.strictObject({
   host: z.enum(["local", "remote"]),
-  serverId: z.string().optional(),
-  workspaceId: z.string().optional(),
+  serverId: z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/).optional(),
+  workspaceId: z.string().trim().min(1).max(256).optional(),
   environment: EnvironmentSchema,
+}).superRefine((target, context) => {
+  if (target.host === "remote" && !target.serverId) {
+    context.addIssue({ code: "custom", path: ["serverId"], message: "remote targets require serverId" });
+  }
+  if (target.host === "local" && target.serverId) {
+    context.addIssue({ code: "custom", path: ["serverId"], message: "local targets cannot include serverId" });
+  }
 });

@@ -9,9 +9,18 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::State;
 
+use crate::commands::provider::runtime_provider_config;
 use crate::state::AppState;
 use yukinal_credentials::{CredentialRef, CredentialStore};
 use yukinal_database::models::AiProviderConfig;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPart {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: String,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,35 +83,54 @@ fn resolve_api_key(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn agent_run_start(
     state: State<'_, AppState>,
     session_id: String,
     prompt: String,
+    message_id: Option<String>,
+    parts: Option<Vec<PromptPart>>,
+    delivery: Option<String>,
+    resume: Option<bool>,
     provider_id: Option<String>,
     model: Option<String>,
     workspace_id: Option<String>,
     focus_server_id: Option<String>,
 ) -> Result<RunStartResponse, String> {
+    // Repair legacy databases before resolving the provider. The UI normally does
+    // this through provider_list, but run.start must remain safe when invoked
+    // directly or while the startup query is still refreshing.
+    crate::commands::provider::normalize_active_provider(&state)?;
     let provider = resolve_provider(&state, provider_id.as_deref())?;
     let api_key = resolve_api_key(&state, &provider)?;
     let selected_model = model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| provider.model.clone());
 
-    let run_id = format!("run_{}", yukinal_core::sidecar::iso8601_now());
+    // Millisecond timestamps can collide when two submissions arrive in the
+    // same tick; use the process-wide opaque id generator instead.
+    let run_id = crate::commands::server::next_id("run");
+    let message_id = message_id.unwrap_or_else(|| format!("msg_{run_id}"));
+    let parts = parts.filter(|items| !items.is_empty()).unwrap_or_else(|| {
+        vec![PromptPart {
+            kind: "text".into(),
+            text: prompt.clone(),
+        }]
+    });
+    let provider_config = runtime_provider_config(&provider, &selected_model, api_key, 120_000);
+
     let mut params = json!({
         "runId": run_id,
         "sessionId": session_id,
         "prompt": prompt,
-        "providerConfig": {
-            "kind": "openai-compatible",
-            "baseUrl": provider.base_url,
-            "model": selected_model,
-            "apiKey": api_key,
-            "customHeaders": provider.custom_headers,
-            "timeoutMs": 120_000,
-            "wireApi": provider.wire_api,
-        },
+        "messageId": message_id,
+        "parts": parts
+            .into_iter()
+            .map(|part| json!({ "type": part.kind, "text": part.text }))
+            .collect::<Vec<_>>(),
+        "delivery": delivery.unwrap_or_else(|| "async".into()),
+        "resume": resume.unwrap_or(true),
+        "providerConfig": provider_config,
     });
     if let Some(workspace_id) = workspace_id.as_deref() {
         params["workspaceId"] = json!(workspace_id);
@@ -133,7 +161,13 @@ pub async fn agent_run_start(
         )
         .await
         .map_err(|error| error.to_string())?;
-    let _ = response;
+    let returned_run_id = response
+        .get("runId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "agent sidecar returned an invalid run.start response".to_string())?;
+    if returned_run_id != run_id {
+        return Err("agent sidecar returned a different run id".into());
+    }
     Ok(RunStartResponse { run_id })
 }
 
@@ -155,7 +189,7 @@ pub async fn agent_run_stop(
         stopped: response
             .get("stopped")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+            .ok_or_else(|| "agent sidecar returned an invalid run.stop response".to_string())?,
     })
 }
 
@@ -163,6 +197,7 @@ pub async fn agent_run_stop(
 pub async fn agent_approval_respond(
     state: State<'_, AppState>,
     approval_id: String,
+    run_id: String,
     decision: String,
 ) -> Result<ApprovalRespondResponse, String> {
     let response = state
@@ -171,6 +206,7 @@ pub async fn agent_approval_respond(
             "agent.approval.respond",
             json!({
                 "approvalId": approval_id,
+                "runId": run_id,
                 "decision": decision,
                 "respondedAt": yukinal_core::sidecar::iso8601_now(),
             }),
@@ -182,6 +218,6 @@ pub async fn agent_approval_respond(
         accepted: response
             .get("accepted")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+            .ok_or_else(|| "agent sidecar returned an invalid approval response".to_string())?,
     })
 }

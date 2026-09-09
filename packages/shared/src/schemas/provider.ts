@@ -5,45 +5,54 @@
 
 import { z } from "zod";
 
-export const ProviderModelOptionSchema = z.object({
-  id: z.string().min(1),
-  label: z.string().min(1),
-  contextWindow: z.number().int().positive().optional(),
+const ProviderBaseUrlSchema = z.string().trim().min(1).max(2_048).refine((value) => {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}, "baseUrl must be an http(s) URL without embedded credentials");
+
+export const ProviderModelOptionSchema = z.strictObject({
+  id: z.string().trim().min(1).max(256),
+  label: z.string().trim().min(1).max(256),
+  contextWindow: z.number().int().positive().max(10_000_000).optional(),
   supportsToolCalling: z.boolean(),
   supportsStreaming: z.boolean(),
 });
 
-export const ProviderConfigSchema = z.object({
-  id: z.string().min(1),
+export const ProviderConfigSchema = z.strictObject({
+  id: z.string().trim().min(1).max(256),
   kind: z.literal("openai-compatible"),
-  label: z.string().min(1),
-  baseUrl: z.string().min(1),
-  model: z.string().min(1),
-  apiKeyCredentialRef: z.string().optional(),
+  label: z.string().trim().min(1).max(256),
+  baseUrl: ProviderBaseUrlSchema,
+  model: z.string().trim().min(1).max(256),
+  apiKeyCredentialRef: z.string().trim().min(1).max(512).optional(),
   enabled: z.boolean(),
-  customHeaders: z.record(z.string(), z.string()).optional(),
-  maxInputTokens: z.number().int().positive().optional(),
+  customHeaders: z.record(z.string().trim().min(1).max(128), z.string().max(4_096)).refine((headers) => Object.keys(headers).length <= 32).optional(),
+  maxInputTokens: z.number().int().positive().max(10_000_000).optional(),
   wireApi: z.enum(["chat", "responses"]).optional(),
-  models: z.array(ProviderModelOptionSchema).optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
+  createdAt: z.string().min(1).max(80),
+  updatedAt: z.string().min(1).max(80),
 });
 
-export const ProviderSaveInputSchema = z.object({
-  providerId: z.string().min(1).optional(),
-  label: z.string().optional(),
-  baseUrl: z.string().min(1),
-  model: z.string().min(1),
-  apiKey: z.string().min(1).optional(),
+export const ProviderSaveInputSchema = z.strictObject({
+  providerId: z.string().trim().min(1).max(256).optional(),
+  label: z.string().trim().max(256).optional(),
+  baseUrl: ProviderBaseUrlSchema,
+  model: z.string().trim().min(1).max(256),
+  apiKey: z.string().min(1).max(4_096).optional(),
   wireApi: z.enum(["chat", "responses"]).optional(),
-  models: z.array(ProviderModelOptionSchema).optional(),
+  models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
 });
-export const CcSwitchProviderCandidateSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  baseUrl: z.string().min(1),
-  model: z.string().min(1),
+export const CcSwitchProviderCandidateSchema = z.strictObject({
+  id: z.string().trim().min(1).max(512),
+  name: z.string().trim().min(1).max(256),
+  baseUrl: ProviderBaseUrlSchema,
+  model: z.string().trim().min(1).max(256),
   wireApi: z.enum(["chat", "responses"]),
   hasApiKey: z.boolean(),
-  models: z.array(ProviderModelOptionSchema).optional(),
+  models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
 });

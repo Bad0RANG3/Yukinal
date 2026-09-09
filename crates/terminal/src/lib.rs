@@ -66,18 +66,21 @@ pub enum TerminalAppEvent {
     },
     Closed {
         terminal_session_id: String,
+        exit_code: Option<u32>,
     },
 }
 
 struct Session<P: TerminalPty> {
     info: TerminalSessionInfo,
     pty: Arc<P>,
+    generation: u64,
 }
 
 /// 多会话 terminal 管理器。`subscribe` 的 broadcast 是 UI 唯一事件入口。
 pub struct TerminalManager<P: TerminalPty> {
     sessions: Arc<Mutex<HashMap<String, Session<P>>>>,
     next_id: AtomicU64,
+    next_generation: AtomicU64,
     events: broadcast::Sender<TerminalAppEvent>,
 }
 
@@ -94,6 +97,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
+            next_generation: AtomicU64::new(1),
             events,
         }
     }
@@ -123,6 +127,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
             Session {
                 info,
                 pty: Arc::new(pty),
+                generation: self.next_generation.fetch_add(1, Ordering::Relaxed),
             },
         );
 
@@ -133,7 +138,8 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                 .info
                 .clone(),
         });
-        self.spawn_forwarder(session_id.clone());
+        let generation = sessions.get(&session_id).expect("just inserted").generation;
+        self.spawn_forwarder(session_id.clone(), generation);
         Ok(session_id)
     }
 
@@ -152,15 +158,17 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
         session.pty = Arc::new(pty);
         session.info.cols = cols;
         session.info.rows = rows;
+        session.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
 
         let session_id = terminal_session_id.to_string();
         let info = session.info.clone();
+        let generation = session.generation;
         drop(sessions);
         let _ = self.events.send(TerminalAppEvent::Opened {
             payload: info.clone(),
         });
         let _ = info;
-        self.spawn_forwarder(session_id);
+        self.spawn_forwarder(session_id, generation);
 
         // 传输上的 re-opened 与 opened 事件同形；UI 用同一逻辑重挂数据流。
         Ok(())
@@ -198,6 +206,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
         pty.close().await?;
         let _ = self.events.send(TerminalAppEvent::Closed {
             terminal_session_id: terminal_session_id.to_string(),
+            exit_code: None,
         });
         Ok(())
     }
@@ -213,9 +222,16 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
             .filter(|info| info.server_id == server_id)
             .map(|info| info.terminal_session_id)
             .collect();
-        let count = ids.len();
+        let mut count = 0;
         for id in ids {
-            self.close(&id).await?;
+            match self.close(&id).await {
+                Ok(()) => count += 1,
+                Err(TerminalError::NotFound(_)) => {
+                    // A concurrent UI close already removed it; disconnect is
+                    // intentionally idempotent.
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(count)
     }
@@ -248,7 +264,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
 
     /// 每会话一个转发任务：pty 输出 → Data；Closed → 上抛（不做删除，
     /// 删除权归 `close()`，避免 reopen 与任务移除互踩）。
-    fn spawn_forwarder(&self, terminal_session_id: String) {
+    fn spawn_forwarder(&self, terminal_session_id: String, generation: u64) {
         let sessions = Arc::clone(&self.sessions);
         let events = self.events.clone();
         tokio::spawn(async move {
@@ -263,6 +279,14 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
             loop {
                 match receiver.recv().await {
                     Some(PtyEvent::Output(bytes)) => {
+                        let current = sessions
+                            .lock()
+                            .await
+                            .get(&terminal_session_id)
+                            .is_some_and(|session| session.generation == generation);
+                        if !current {
+                            break;
+                        }
                         let data = String::from_utf8_lossy(&bytes).into_owned();
                         if events
                             .send(TerminalAppEvent::Data {
@@ -274,10 +298,32 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                             break; // 无订阅者（UI 已关），任务结束
                         }
                     }
-                    Some(PtyEvent::Closed { .. }) | None => {
-                        let _ = events.send(TerminalAppEvent::Closed {
-                            terminal_session_id: terminal_session_id.clone(),
-                        });
+                    Some(PtyEvent::Closed { code }) => {
+                        let current = sessions
+                            .lock()
+                            .await
+                            .get(&terminal_session_id)
+                            .is_some_and(|session| session.generation == generation);
+                        if current {
+                            let _ = events.send(TerminalAppEvent::Closed {
+                                terminal_session_id: terminal_session_id.clone(),
+                                exit_code: code,
+                            });
+                        }
+                        break;
+                    }
+                    None => {
+                        let current = sessions
+                            .lock()
+                            .await
+                            .get(&terminal_session_id)
+                            .is_some_and(|session| session.generation == generation);
+                        if current {
+                            let _ = events.send(TerminalAppEvent::Closed {
+                                terminal_session_id: terminal_session_id.clone(),
+                                exit_code: None,
+                            });
+                        }
                         break;
                     }
                 }
@@ -534,7 +580,7 @@ mod tests {
             matches!(&events[0], TerminalAppEvent::Opened { payload } if payload.server_id == "srv_1")
         );
         assert!(
-            matches!(&events[1], TerminalAppEvent::Closed { terminal_session_id } if terminal_session_id == &id)
+            matches!(&events[1], TerminalAppEvent::Closed { terminal_session_id, exit_code: None } if terminal_session_id == &id)
         );
     }
 
@@ -570,7 +616,11 @@ mod tests {
             match rx.recv().await.expect("event 3") {
                 TerminalAppEvent::Closed {
                     terminal_session_id,
-                } => assert_eq!(id, terminal_session_id),
+                    exit_code,
+                } => {
+                    assert_eq!(id, terminal_session_id);
+                    assert_eq!(exit_code, Some(0));
+                }
                 other => panic!("expected Closed, got {other:?}"),
             }
         });

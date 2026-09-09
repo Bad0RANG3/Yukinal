@@ -66,25 +66,26 @@ export class ContextEngine {
     let serverContext: ServerContext | undefined;
     let workspaceContext: ContextBundle["workspace"];
 
-    if (request.workspaceId) {
-      const workspace = await this.source.workspace(request.workspaceId);
-      if (workspace) {
-        layers.push("workspace");
-        workspaceContext = {
-          id: workspace.id,
-          name: workspace.name,
-          defaultEnvironment: workspace.defaultEnvironment,
-        };
-      }
+    // Workspace and server identity are independent lookups. Fetch them in
+    // parallel; the snapshot still waits for the validated server id below.
+    const [workspace, server] = await Promise.all([
+      request.workspaceId ? this.source.workspace(request.workspaceId) : Promise.resolve(undefined),
+      serverId ? this.source.server(serverId) : Promise.resolve(undefined),
+    ]);
+
+    if (workspace) {
+      layers.push("workspace");
+      workspaceContext = {
+        id: workspace.id,
+        name: workspace.name,
+        defaultEnvironment: workspace.defaultEnvironment,
+      };
     }
 
-    if (serverId) {
-      const server = await this.source.server(serverId);
-      if (server) {
-        layers.push("server");
-        const snapshot = await this.source.snapshot(serverId);
-        serverContext = toServerContext(server, snapshot);
-      }
+    if (server && serverId) {
+      layers.push("server");
+      const snapshot = await this.source.snapshot(serverId);
+      serverContext = toServerContext(server, snapshot);
     }
 
     const rendered = render({ workspace: workspaceContext, server: serverContext, request });
@@ -145,7 +146,7 @@ function render(parts: {
     lines.push(`Focused server: ${parts.server.server.name} [${parts.server.server.id}] (${parts.server.server.environment})`);
     lines.push(`Runtime: ${JSON.stringify({ os: parts.server.server.os, health: parts.server.health, metrics: parts.server.metrics, containers: parts.server.containers })}`);
   } else {
-    lines.push("Focused server: none — resolve the target before any write action.");
+    lines.push("Focused server: none — answer general questions directly; ask for a server before remote actions.");
   }
   lines.push(`Task: ${parts.request.prompt}`);
   return lines.join("\n");

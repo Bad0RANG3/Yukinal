@@ -51,7 +51,8 @@ export interface PermissionRequest {
 /** Grants are scoped to `tool + target`, never to a name the model typed. */
 export function grantKey(toolName: string, target: ToolTarget): string {
   const where = target.host === "local" ? "local" : (target.serverId ?? "unknown-server");
-  return `${toolName}@${where}@${target.environment}`;
+  const workspace = target.workspaceId ?? "global";
+  return `${toolName}@${where}@${workspace}@${target.environment}`;
 }
 
 export class PermissionEngine {

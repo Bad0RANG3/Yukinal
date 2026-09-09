@@ -22,13 +22,16 @@ export interface WorkspaceState {
   selectedServerId: string | null;
   selectedProviderId: string | null;
   selectedModel: string | null;
-  /** Right panel is never dismissible in the MVP. */
+  /** Right panel is session-scoped and opens automatically for approvals. */
   agentOpen: boolean;
   setPrimary(primary: PrimaryNav): void;
   setServerPage(page: ServerPage): void;
   selectServer(serverId: string | null): void;
+  syncServerSelection(serverIds: readonly string[]): void;
   selectProvider(providerId: string | null, model?: string | null): void;
   selectModel(model: string | null): void;
+  setAgentOpen(open: boolean): void;
+  toggleAgent(): void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
@@ -40,7 +43,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   agentOpen: true,
   setPrimary: (primary) => set({ primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers" }),
-  selectServer: (selectedServerId) => set({ selectedServerId, serverPage: "overview" }),
+  selectServer: (selectedServerId) => set((state) => ({
+    selectedServerId,
+    primary: selectedServerId ? "servers" : state.primary,
+    serverPage: selectedServerId === state.selectedServerId ? state.serverPage : "overview",
+  })),
+  // Background refreshes can reconcile a deleted selection without taking the
+  // user away from Settings or resetting a still-valid server tab.
+  syncServerSelection: (serverIds) => set((state) => {
+    if (state.selectedServerId && serverIds.includes(state.selectedServerId)) return state;
+    const selectedServerId = serverIds[0] ?? null;
+    return selectedServerId === state.selectedServerId ? state : { selectedServerId, serverPage: "overview" };
+  }),
   selectProvider: (selectedProviderId, selectedModel = null) => set({ selectedProviderId, selectedModel }),
   selectModel: (selectedModel) => set({ selectedModel }),
+  setAgentOpen: (agentOpen) => set({ agentOpen }),
+  toggleAgent: () => set((state) => ({ agentOpen: !state.agentOpen })),
 }));

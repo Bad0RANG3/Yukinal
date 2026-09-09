@@ -6,6 +6,8 @@
 mod commands;
 mod state;
 
+use std::path::PathBuf;
+
 use tauri::{Emitter, Manager};
 
 use state::AppState;
@@ -16,26 +18,39 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             // 数据目录：SQLite、known_hosts、终端服务都挂在这里（全部由 Rust 侧装配）。
-            let data_dir = app.path().app_data_dir()?;
+            // Keep native state and the sidecar's YUKINAL_DATA_DIR aligned for
+            // portable/dev runs; otherwise the host can silently use another DB.
+            let data_dir = configured_data_dir(app)?;
             let app_state = AppState::bootstrap(&data_dir)?;
             app.manage(app_state);
 
+            // Synchronize credentials before the first Agent submission. This is
+            // also invoked by the UI for manual refresh, but startup must not
+            // depend on React's shell probe or query timing.
+            let state = app.state::<AppState>();
+            match commands::provider::provider_import_auto_inner(&state) {
+                Ok(result) if result.imported > 0 => {
+                    eprintln!("[yukinal] provider import ok count={}", result.imported);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("[yukinal] provider import failed: {error}"),
+            }
+
             forward_terminal_events(app.handle().clone());
 
-            // Dev/test affordance only (never set by a shipped app): starts the sidecar
-            // through `agent_spawn`'s own code path so CI can assert the real chain.
-            if std::env::var("YUKINAL_AUTOSTART_AGENT").is_ok() {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    match commands::start_sidecar(&handle).await {
-                        Ok(spawned) => eprintln!(
-                            "[yukinal] autostart ok pid={} protocol={} tools={}",
-                            spawned.pid, spawned.protocol_version, spawned.tool_count
-                        ),
-                        Err(error) => eprintln!("[yukinal] autostart failed: {error}"),
-                    }
-                });
-            }
+            // The Agent is a core interaction service, so it starts with the window
+            // instead of being hidden behind a status control in the rail. The same
+            // `start_sidecar` path remains used by tests and future recovery actions.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match commands::start_sidecar(&handle).await {
+                    Ok(spawned) => eprintln!(
+                        "[yukinal] autostart ok pid={} protocol={} tools={}",
+                        spawned.pid, spawned.protocol_version, spawned.tool_count
+                    ),
+                    Err(error) => eprintln!("[yukinal] autostart failed: {error}"),
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,6 +72,7 @@ pub fn run() {
             commands::files::remote_file_list,
             commands::files::remote_file_read,
             commands::provider::provider_list,
+            commands::provider::provider_import_auto,
             commands::provider::provider_save_openai,
             commands::provider::provider_import_ccswitch,
             commands::provider::provider_import_ccswitch_apply,
@@ -88,6 +104,13 @@ pub fn run() {
         });
 }
 
+fn configured_data_dir(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = std::env::var_os("YUKINAL_DATA_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(app.path().app_data_dir()?)
+}
+
 /// PTY Manager 事件 → Tauri events，UI 只认这几个名字（`@yukinal/shared` 里有契）。
 fn forward_terminal_events(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -114,10 +137,14 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                 }
                 Ok(TerminalAppEvent::Closed {
                     terminal_session_id,
+                    exit_code,
                 }) => {
                     let _ = app.emit(
                         "terminal.closed",
-                        serde_json::json!({ "terminalSessionId": terminal_session_id }),
+                        serde_json::json!({
+                            "terminalSessionId": terminal_session_id,
+                            "exitCode": exit_code,
+                        }),
                     );
                 }
                 Err(_) => break,

@@ -10,31 +10,84 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useEffect, useRef } from "react";
-
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
-import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { IPC_COMMANDS } from "@yukinal/shared";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useEffect, useRef, useState } from "react";
 
-export function TerminalPane() {
+import { Icon } from "../../components/Icon.js";
+import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
+import { useWorkspaceStore } from "../../stores/workspace-store.js";
+
+const TERMINAL_THEME = {
+  background: "#080808",
+  foreground: "#d9d9d9",
+  cursor: "#d0d0d0",
+  cursorAccent: "#080808",
+  selectionBackground: "#454545",
+  selectionForeground: "#f3f3f3",
+  black: "#161616",
+  brightBlack: "#686868",
+  red: "#bdbdbd",
+  brightRed: "#eeeeee",
+  green: "#c4c4c4",
+  brightGreen: "#f0f0f0",
+  yellow: "#b5b5b5",
+  brightYellow: "#e2e2e2",
+  blue: "#a7a7a7",
+  brightBlue: "#d3d3d3",
+  magenta: "#b0b0b0",
+  brightMagenta: "#e0e0e0",
+  cyan: "#aaaaaa",
+  brightCyan: "#d5d5d5",
+  white: "#c5c5c5",
+  brightWhite: "#f1f1f1",
+};
+
+export function TerminalPane({ active }: { active: boolean }) {
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const containerRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const preferences = usePreferencesStore();
+  const [opened, setOpened] = useState(active);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+
+  useEffect(() => { if (active) setOpened(true); }, [active]);
 
   useEffect(() => {
-    if (!selectedServerId || !isDesktopShell()) return;
+    const term = terminalRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    term.options.fontFamily = terminalFontFamily(preferences.terminalFont);
+    term.options.fontSize = preferences.terminalFontSize;
+    term.options.lineHeight = preferences.terminalLineHeight;
+    term.options.cursorBlink = preferences.terminalCursorBlink;
+    const frame = requestAnimationFrame(() => { if (activeRef.current && terminalRef.current === term) fit.fit(); });
+    return () => cancelAnimationFrame(frame);
+  }, [preferences.terminalCursorBlink, preferences.terminalFont, preferences.terminalFontSize, preferences.terminalLineHeight]);
+
+  useEffect(() => {
+    if (!opened || !selectedServerId || !isDesktopShell()) return;
 
     const container = containerRef.current;
     if (!container) return;
 
+    const initialPreferences = usePreferencesStore.getState();
     const term = new Terminal({
-      cursorBlink: true,
-      fontSize: 13,
-      fontFamily: "Menlo, Consolas, 'Courier New', monospace",
+      cursorBlink: initialPreferences.terminalCursorBlink,
+      cursorStyle: "bar",
+      fontSize: initialPreferences.terminalFontSize,
+      fontFamily: terminalFontFamily(initialPreferences.terminalFont),
+      lineHeight: initialPreferences.terminalLineHeight,
       scrollback: 10_000,
-      theme: { background: "#09090b" },
+      convertEol: false,
+      theme: TERMINAL_THEME,
     });
     const fit = new FitAddon();
+    terminalRef.current = term;
+    fitRef.current = fit;
     term.loadAddon(fit);
     term.open(container);
     fit.fit();
@@ -42,74 +95,119 @@ export function TerminalPane() {
     const unlisteners: UnlistenFn[] = [];
     let sessionId: string | null = null;
     let disposed = false;
+    const resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        if (!disposed && activeRef.current) fit.fit();
+      });
+    });
+    resizeObserver.observe(container);
 
     // Remote bytes → xterm. The event carries the session id so one pane can't
     // write foreign output if a second terminal is open.
-    listen<{ terminalSessionId: string; data: string }>("terminal.data", (event) => {
+    void listen<{ terminalSessionId: string; data: string }>("terminal.data", (event) => {
       if (disposed || (sessionId !== null && event.payload.terminalSessionId !== sessionId)) return;
       term.write(event.payload.data);
-    }).then((unlisten) => unlisteners.push(unlisten));
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    });
 
-    listen<{ terminalSessionId: string }>("terminal.closed", (event) => {
+    void listen<{ terminalSessionId: string; exitCode: number | null }>("terminal.closed", (event) => {
       if (disposed || event.payload.terminalSessionId !== sessionId) return;
-      term.write("\r\n\x1b[1;31m[session closed]\x1b[0m\r\n");
-    }).then((unlisten) => unlisteners.push(unlisten));
+      const suffix = event.payload.exitCode === null ? "" : ` (exit ${event.payload.exitCode})`;
+      term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    });
 
     // Open the PTY through the trusted chain.
     const rows = term.rows;
-    callDesktop(IPC_COMMANDS.terminalOpen, {
+    void callDesktop(IPC_COMMANDS.terminalOpen, {
       serverId: selectedServerId,
       cols: term.cols,
       rows: rows > 0 ? rows : 24,
     })
       .then(({ terminalSessionId }) => {
+        if (disposed) {
+          void callDesktop(IPC_COMMANDS.terminalClose, { terminalSessionId }).catch(() => {});
+          return;
+        }
         sessionId = terminalSessionId;
+        void callDesktop(IPC_COMMANDS.terminalResize, { terminalSessionId, cols: term.cols, rows: term.rows }).catch(() => {});
         // Terminal emits its current size after open; bidirectional wiring starts
         // from here so a resize before this point is not lost.
         const io = term.onData((data) => {
           if (sessionId !== null && isDesktopShell()) {
-            callDesktop(IPC_COMMANDS.terminalWrite, {
+            void callDesktop(IPC_COMMANDS.terminalWrite, {
               terminalSessionId: sessionId,
               data,
             }).catch(() => {});
           }
         });
-        const resize = term.onResize(({ cols, rows }) => {
+        const resize = term.onResize(({ cols, rows: nextRows }) => {
           if (sessionId !== null && isDesktopShell()) {
-            callDesktop(IPC_COMMANDS.terminalResize, {
+            void callDesktop(IPC_COMMANDS.terminalResize, {
               terminalSessionId: sessionId,
               cols,
-              rows,
+              rows: nextRows,
             }).catch(() => {});
           }
         });
-        unlisteners.push(async () => {
+        unlisteners.push(() => {
           io.dispose();
           resize.dispose();
         });
       })
       .catch((error) => {
-        term.write(`\r\n\x1b[1;31mterminal_open failed:\x1b[0m ${String(error)}\r\n`);
+        if (!disposed) term.write(`\r\n\x1b[1;31m终端打开失败：\x1b[0m${String(error)}\r\n`);
       });
-    term.focus();
+    if (activeRef.current) term.focus();
 
     return () => {
       disposed = true;
-      unlisteners.forEach((unlisten) => unlisten());
+      resizeObserver.disconnect();
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
       if (sessionId !== null) {
-        callDesktop(IPC_COMMANDS.terminalClose, { terminalSessionId: sessionId }).catch(() => {});
+        void callDesktop(IPC_COMMANDS.terminalClose, { terminalSessionId: sessionId }).catch(() => {});
       }
+      terminalRef.current = null;
+      fitRef.current = null;
       term.dispose();
     };
-  }, [selectedServerId]);
+  }, [selectedServerId, opened]);
+
+  useEffect(() => {
+    if (!active) return;
+    fitRef.current?.fit();
+    terminalRef.current?.focus();
+  }, [active, opened]);
+
+  if (!opened) return null;
 
   if (!selectedServerId) {
     return (
-      <div className="flex h-full min-h-[240px] items-center justify-center rounded-lg border border-dashed border-zinc-800 text-sm text-zinc-500">
-        需要一个服务器才能打开终端（Server ▸ add）。
+      <div className="terminal-empty">
+        <Icon name="terminal" size={22} />
+        <strong>选择服务器后打开终端</strong>
+        <span>先在左侧添加或选择一台服务器。</span>
       </div>
     );
   }
 
-  return <div ref={containerRef} className="h-full min-h-[240px] w-full overflow-hidden" />;
+  return (
+    <section className="terminal-page">
+      <div className="terminal-toolbar">
+        <div className="section-heading-inline"><Icon name="terminal" size={16} /><div><p className="eyebrow">SSH</p><h2>终端</h2></div></div>
+        <span className="terminal-toolbar-note">{preferences.terminalFont === "jetbrains-mono" ? "JetBrains Mono" : preferences.terminalFont === "jetbrains-nerd-mono" ? "JetBrains Mono Nerd" : "JetBrains Mono NL"} · {preferences.terminalFontSize}px</span>
+      </div>
+      <div ref={containerRef} className="terminal-shell" aria-label="SSH 终端" />
+    </section>
+  );
+}
+
+function terminalFontFamily(font: TerminalFont): string {
+  if (font === "jetbrains-nerd-mono") return '"JetBrains Mono Nerd", "JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
+  if (font === "jetbrains-mono") return '"JetBrains Mono", "JetBrains Mono NL", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
+  return '"JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
 }

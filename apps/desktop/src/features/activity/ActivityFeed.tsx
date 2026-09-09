@@ -5,6 +5,8 @@ import {
   ToolExecutionListResponseSchema,
   type Activity,
   type ActivityType,
+  type Environment,
+  type RiskLevel,
   type Server,
   type ToolExecutionRecord,
 } from "@yukinal/shared";
@@ -12,18 +14,20 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
 import { callDesktop, callDesktopParsed, isDesktopShell } from "../../lib/ipc.js";
+import { Icon, type IconName } from "../../components/Icon.js";
+import { KeywordText } from "../../components/KeywordText.js";
 
-const ACTIVITY_TYPE_META: Record<ActivityType, { label: string; icon: string }> = {
-  connection: { label: "连接", icon: "↔" },
-  authentication: { label: "认证", icon: "⌁" },
-  configuration: { label: "配置", icon: "⚙" },
-  deployment: { label: "部署", icon: "↑" },
-  service: { label: "服务", icon: "◇" },
-  container: { label: "容器", icon: "▰" },
-  file_change: { label: "文件", icon: "·" },
-  agent_action: { label: "Agent", icon: "✦" },
-  approval: { label: "审批", icon: "!" },
-  health: { label: "健康", icon: "♥" },
+const ACTIVITY_TYPE_META: Record<ActivityType, { label: string; icon: IconName }> = {
+  connection: { label: "连接", icon: "connect" },
+  authentication: { label: "认证", icon: "settings" },
+  configuration: { label: "配置", icon: "settings" },
+  deployment: { label: "部署", icon: "arrowUp" },
+  service: { label: "服务", icon: "services" },
+  container: { label: "容器", icon: "servers" },
+  file_change: { label: "文件", icon: "file" },
+  agent_action: { label: "Agent", icon: "agent" },
+  approval: { label: "审批", icon: "warning" },
+  health: { label: "健康", icon: "activity" },
 };
 
 const OUTCOME_LABEL = {
@@ -97,13 +101,13 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
     <section className="activity-page">
       <div className="activity-page-header">
         <div><p className="eyebrow">审计流</p><h2>{scoped ? "服务器动态" : "全局动态"}</h2></div>
-        <button type="button" className="secondary-button" onClick={() => void activities.refetch()} disabled={activities.isFetching}>↻ 刷新</button>
+        <button type="button" className="secondary-button" onClick={() => void activities.refetch()} disabled={activities.isFetching} title="刷新动态" aria-label="刷新动态"><Icon name="refresh" size={14} />刷新</button>
       </div>
       {activities.isError ? (
         <div className="error-panel"><div><strong>无法读取动态</strong><p>{activities.error instanceof Error ? activities.error.message : String(activities.error)}</p></div><button type="button" className="secondary-button" onClick={() => void activities.refetch()}>重试</button></div>
       ) : null}
       {activities.isLoading ? <div className="loading-panel"><div className="loading-spinner" /><strong>正在读取动态</strong><span>从本地审计记录加载</span></div> : null}
-      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="empty-state page-empty"><span className="empty-state-mark">◷</span><h2>暂无动态</h2><p>服务器连接、配置变更和 Agent 操作会记录在这里。</p></div> : null}
+      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="empty-state page-empty"><Icon name="activity" size={24} /><h2>暂无动态</h2><p>服务器连接、配置变更和 Agent 操作会记录在这里。</p></div> : null}
       {rows.length ? <div className="activity-list">{rows.map((activity) => <ActivityRow key={activity.id} activity={activity} serverName={activity.serverId ? serverNames.get(activity.serverId) : undefined} />)}</div> : null}
     </section>
   );
@@ -126,7 +130,7 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
   const outcome = activity.outcome ? OUTCOME_LABEL[activity.outcome] : null;
   return (
     <article className="activity-row">
-      <div className={`activity-type-icon activity-type-${activity.type}`} aria-hidden="true">{meta.icon}</div>
+      <div className={`activity-type-icon activity-type-${activity.type}`} aria-hidden="true"><Icon name={meta.icon} size={15} /></div>
       <div className="activity-row-body">
         <div className="activity-row-title">
           <strong>{activity.title}</strong>
@@ -142,7 +146,7 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
             </button>
           ) : null}
         </div>
-        <div className="activity-row-meta"><span>{meta.label}</span><span>·</span><span>{activity.actor}</span>{serverName ? <><span>·</span><span>{serverName}</span></> : null}<time dateTime={activity.createdAt}>{formatTimestamp(activity.createdAt)}</time></div>
+        <div className="activity-row-meta"><span>{meta.label}</span><span>·</span><span>{actorLabel(activity.actor)}</span>{serverName ? <><span>·</span><span>{serverName}</span></> : null}<time dateTime={activity.createdAt}>{formatTimestamp(activity.createdAt)}</time></div>
         {activity.description || activity.reason ? <p>{activity.description ?? activity.reason}</p> : null}
         {expanded && traceId ? (
           <div className="activity-trace-detail" aria-label="工具执行步骤">
@@ -163,21 +167,21 @@ function ExecutionStep({ execution }: { execution: ToolExecutionRecord }) {
   return (
     <div className="activity-trace-step">
       <div className="activity-trace-step-top">
-        <strong>{execution.toolName}</strong>
+        <strong><KeywordText text={execution.toolName} /></strong>
         <span className={`activity-execution-status activity-execution-status-${execution.status}`}>{EXECUTION_STATUS_LABEL[execution.status]}</span>
         <code>{execution.stepId}</code>
       </div>
       <div className="activity-trace-step-meta">
-        <span>{execution.environment}</span>
+        <span>{environmentLabel(execution.environment)}</span>
         <span>·</span>
-        <span>风险 {execution.riskLevel}</span>
+        <span>风险 {riskLabel(execution.riskLevel)}</span>
         <span>·</span>
         <span>{DECISION_LABEL[execution.decision]}</span>
         {approval ? <><span>·</span><span>{approval}</span></> : null}
         {execution.durationMs !== undefined ? <><span>·</span><span>{execution.durationMs}ms</span></> : null}
       </div>
-      <code className="activity-trace-step-input">输入：{formatAuditValue(execution.input, 240)}</code>
-      <code className={`activity-trace-step-output${execution.error ? " activity-trace-step-error" : ""}`}>{execution.error ? "错误" : "结果"}：{formatAuditValue(output, 400)}</code>
+      <code className="activity-trace-step-input">输入：<KeywordText text={formatAuditValue(execution.input, 240)} /></code>
+      <code className={`activity-trace-step-output${execution.error ? " activity-trace-step-error" : ""}`}>{execution.error ? "错误" : "结果"}：<KeywordText text={formatAuditValue(output, 400)} /></code>
     </div>
   );
 }
@@ -200,4 +204,26 @@ function formatTimestamp(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function actorLabel(actor: string): string {
+  if (actor === "user") return "用户";
+  if (actor === "core") return "Core";
+  return actor;
+}
+
+function environmentLabel(environment: Environment): string {
+  const labels: Record<Environment, string> = {
+    production: "生产环境",
+    staging: "预发布环境",
+    development: "开发环境",
+    local: "本地环境",
+    unknown: "未知环境",
+  };
+  return labels[environment] ?? environment;
+}
+
+function riskLabel(level: RiskLevel): string {
+  const labels: Record<RiskLevel, string> = { read: "只读", low: "低", medium: "中", high: "高", critical: "严重" };
+  return labels[level] ?? level;
 }

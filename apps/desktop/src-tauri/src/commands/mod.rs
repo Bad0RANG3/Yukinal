@@ -4,9 +4,12 @@
 //! camelCase on both sides. If a command is not in that map, it does not exist for the
 //! UI and must not be added here.
 
-use serde::Deserialize;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio_util::sync::CancellationToken;
 
 use crate::state::AppState;
 use yukinal_core::ipc::{AgentKillResponse, AgentLogsResponse, AgentSpawnResponse, PingResponse};
@@ -28,6 +31,12 @@ pub mod server;
 pub mod services;
 pub mod terminal;
 pub mod workspace;
+
+/// Explicit empty JSON object returned by commands whose shared IPC contract
+/// is `{}`. Returning Rust's unit type would serialize as `null` and make the
+/// frontend contract depend on Tauri's unit representation.
+#[derive(Debug, Serialize)]
+pub struct EmptyResponse {}
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -115,6 +124,8 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
 fn forward_sidecar_events(app: AppHandle) {
     let supervisor = app.state::<AppState>().supervisor.clone();
     let mut receiver = supervisor.subscribe();
+    let cancellations: host::HostCancellationRegistry =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     tauri::async_runtime::spawn(async move {
         // The sidecar's startup lines are written before this task exists, and a
         // broadcast channel does not replay them. Print the retained tail first so
@@ -130,13 +141,53 @@ fn forward_sidecar_events(app: AppHandle) {
                     // 其 type 原样转成 Tauri 事件（agent.thinking / tool_call / …）。
                     SidecarEvent::Frame(frame) => forward_agent_frame(&app, &frame),
                     SidecarEvent::Request { id, method, params } => {
-                        let state = app.state::<AppState>();
-                        let outcome = host::handle_sidecar_request(&state, &method, params).await;
-                        if let Some(handle) = state.supervisor.handle().await {
-                            if let Err(error) = handle.respond(id, outcome).await {
-                                eprintln!("[agent] host response failed: {error}");
+                        // Register the token before spawning the request task. This closes the
+                        // race where a cancellation frame arrives immediately after execute.
+                        let registration = if method == host::HOST_TOOL_CANCEL {
+                            Ok(None)
+                        } else {
+                            let token = CancellationToken::new();
+                            match cancellations.lock() {
+                                Ok(mut pending) => {
+                                    pending.insert(id, token.clone());
+                                    Ok(Some(token))
+                                }
+                                Err(_) => Err("host cancellation registry is poisoned".to_string()),
                             }
-                        }
+                        };
+                        let app = app.clone();
+                        let supervisor = supervisor.clone();
+                        let cancellations = Arc::clone(&cancellations);
+                        tauri::async_runtime::spawn(async move {
+                            let is_cancel = method == host::HOST_TOOL_CANCEL;
+                            let outcome = if is_cancel {
+                                host::cancel_sidecar_request(&cancellations, params)
+                            } else {
+                                let outcome = match registration {
+                                    Ok(Some(token)) => {
+                                        let state = app.state::<AppState>();
+                                        host::handle_sidecar_request_with_cancel(
+                                            &state, &method, params, token,
+                                        )
+                                        .await
+                                    }
+                                    Ok(None) => {
+                                        Err("host request was not registered for cancellation"
+                                            .to_string())
+                                    }
+                                    Err(error) => Err(error),
+                                };
+                                if let Ok(mut pending) = cancellations.lock() {
+                                    pending.remove(&id);
+                                }
+                                outcome
+                            };
+                            if let Some(handle) = supervisor.handle().await {
+                                if let Err(error) = handle.respond(id, outcome).await {
+                                    eprintln!("[agent] host response failed: {error}");
+                                }
+                            }
+                        });
                     }
                     SidecarEvent::Exited { code, signal } => {
                         eprintln!("[agent] exited code={code:?} signal={signal:?}");
@@ -413,6 +464,33 @@ fn forward_agent_frame(app: &AppHandle, frame: &Value) {
     let Some(event_type) = params.get("type").and_then(Value::as_str) else {
         return;
     };
+    if !matches!(
+        event_type,
+        "agent.started"
+            | "agent.thinking"
+            | "agent.text"
+            | "agent.tool_call"
+            | "agent.tool_result"
+            | "agent.waiting_approval"
+            | "agent.completed"
+            | "agent.failed"
+    ) {
+        return;
+    }
+    let Some(run_id) = params.get("runId").and_then(Value::as_str) else {
+        return;
+    };
+    if run_id.trim().is_empty() || run_id.len() > 256 {
+        return;
+    }
+    // The sidecar transport already caps a frame at 8 MiB. Keep a malformed
+    // event from becoming a similarly large Tauri/UI allocation.
+    if serde_json::to_vec(params)
+        .map(|payload| payload.len() > 1_000_000)
+        .unwrap_or(true)
+    {
+        return;
+    }
     if event_type == "agent.tool_result" {
         persist_agent_tool_result(app, params);
     }
