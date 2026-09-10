@@ -1,19 +1,16 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ActivitySchema,
   IPC_COMMANDS,
-  ToolExecutionListResponseSchema,
   type Activity,
   type ActivityType,
-  type Environment,
   type RiskLevel,
   type Server,
   type ToolExecutionRecord,
 } from "@yukinal/shared";
-import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
-import { callDesktop, callDesktopParsed, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
+import { environmentLabel } from "../../lib/labels.js";
 import { Icon, type IconName } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 
@@ -70,12 +67,11 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
     if (!shell) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen("activity.created", (event) => {
-      const parsed = ActivitySchema.safeParse(event.payload);
-      if (!parsed.success || (scoped && parsed.data.serverId !== serverId)) return;
+    void listenDesktop("activity.created", (activity) => {
+      if (scoped && activity.serverId !== serverId) return;
       queryClient.setQueryData<Activity[]>(activityQueryKey, (current) => {
         if (!current) return current;
-        return [parsed.data, ...current.filter((item) => item.id !== parsed.data.id)].slice(0, scoped ? 50 : 100);
+        return [activity, ...current.filter((item) => item.id !== activity.id)].slice(0, scoped ? 50 : 100);
       });
     }).then((stop) => {
       if (disposed) stop();
@@ -101,13 +97,13 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
     <section className="activity-page">
       <div className="activity-page-header">
         <div><p className="eyebrow">审计流</p><h2>{scoped ? "服务器动态" : "全局动态"}</h2></div>
-        <button type="button" className="secondary-button" onClick={() => void activities.refetch()} disabled={activities.isFetching} title="刷新动态" aria-label="刷新动态"><Icon name="refresh" size={14} />刷新</button>
+        <button type="button" className="secondary-button" onClick={() => void activities.refetch()} disabled={activities.isFetching} title="刷新动态" aria-label="刷新动态"><Icon name="refresh" size="sm" />刷新</button>
       </div>
       {activities.isError ? (
         <div className="error-panel"><div><strong>无法读取动态</strong><p>{activities.error instanceof Error ? activities.error.message : String(activities.error)}</p></div><button type="button" className="secondary-button" onClick={() => void activities.refetch()}>重试</button></div>
       ) : null}
       {activities.isLoading ? <div className="loading-panel"><div className="loading-spinner" /><strong>正在读取动态</strong><span>从本地审计记录加载</span></div> : null}
-      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="empty-state page-empty"><Icon name="activity" size={24} /><h2>暂无动态</h2><p>服务器连接、配置变更和 Agent 操作会记录在这里。</p></div> : null}
+      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="empty-state page-empty"><Icon name="activity" size="xl" /><h2>暂无动态</h2><p>服务器连接、配置变更和 Agent 操作会记录在这里。</p></div> : null}
       {rows.length ? <div className="activity-list">{rows.map((activity) => <ActivityRow key={activity.id} activity={activity} serverName={activity.serverId ? serverNames.get(activity.serverId) : undefined} />)}</div> : null}
     </section>
   );
@@ -120,17 +116,15 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
     queryKey: ["tool-executions", traceId],
     enabled: expanded && Boolean(traceId),
     queryFn: async () =>
-      callDesktopParsed(
-        IPC_COMMANDS.toolExecutionList,
-        { traceId: traceId as string, limit: 50 },
-        (raw) => ToolExecutionListResponseSchema.parse(raw),
-      ),
+      // `callDesktop` binds this command to the response schema registered in
+      // `IPC_SCHEMAS`, so the command→schema pair has exactly one home.
+      callDesktop(IPC_COMMANDS.toolExecutionList, { traceId: traceId as string, limit: 50 }),
   });
   const meta = ACTIVITY_TYPE_META[activity.type];
   const outcome = activity.outcome ? OUTCOME_LABEL[activity.outcome] : null;
   return (
     <article className="activity-row">
-      <div className={`activity-type-icon activity-type-${activity.type}`} aria-hidden="true"><Icon name={meta.icon} size={15} /></div>
+      <div className={`activity-type-icon activity-type-${activity.type}`} aria-hidden="true"><Icon name={meta.icon} size="md" /></div>
       <div className="activity-row-body">
         <div className="activity-row-title">
           <strong>{activity.title}</strong>
@@ -210,17 +204,6 @@ function actorLabel(actor: string): string {
   if (actor === "user") return "用户";
   if (actor === "core") return "Core";
   return actor;
-}
-
-function environmentLabel(environment: Environment): string {
-  const labels: Record<Environment, string> = {
-    production: "生产环境",
-    staging: "预发布环境",
-    development: "开发环境",
-    local: "本地环境",
-    unknown: "未知环境",
-  };
-  return labels[environment] ?? environment;
 }
 
 function riskLabel(level: RiskLevel): string {

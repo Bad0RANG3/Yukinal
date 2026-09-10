@@ -4,17 +4,9 @@ import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { ENVIRONMENTS, ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { buildServerInput } from "./server-form.js";
-
-const ENVIRONMENTS: Environment[] = ["local", "development", "staging", "production", "unknown"];
-const ENVIRONMENT_LABEL: Record<Environment, string> = {
-  local: "本地",
-  development: "开发",
-  staging: "预发布",
-  production: "生产",
-  unknown: "未知",
-};
 
 export function AddServerModal({ onClose, server }: { onClose: () => void; server?: Server }) {
   const queryClient = useQueryClient();
@@ -25,7 +17,11 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
   const [host, setHost] = useState(server?.connection.host ?? "");
   const [port, setPort] = useState(String(server?.connection.port ?? 22));
   const [username, setUsername] = useState(server?.connection.username ?? "");
-  const [environment, setEnvironment] = useState<Environment>(server?.metadata.environment ?? "staging");
+  // Defaults to "unknown", never "staging": staging is the one non-obvious class
+  // that lets the Agent auto-approve ordinary writes, so preselecting it means a
+  // user who misses this field gets a mislabelled host *and* auto-approved writes
+  // to it. "unknown" is honest and maps to the high risk floor.
+  const [environment, setEnvironment] = useState<Environment>(server?.metadata.environment ?? "unknown");
   const [authMethod, setAuthMethod] = useState<"password" | "privateKey">("password");
   const [password, setPassword] = useState("");
   const [privateKeyPem, setPrivateKeyPem] = useState("");
@@ -72,14 +68,14 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
             <h2 id="server-modal-title">{server ? "编辑服务器" : "添加服务器"}</h2>
           </div>
           <button type="button" className="icon-button modal-close" aria-label="关闭弹窗" title="关闭" disabled={save.isPending} onClick={onClose}>
-            <Icon name="close" size={16} />
+            <Icon name="close" size="md" />
           </button>
         </header>
 
         <form className="server-form" onSubmit={(event) => { event.preventDefault(); if (!save.isPending) save.mutate(); }}>
           {!isDesktopShell() ? <p className="settings-notice">连接配置需要在桌面应用中保存。</p> : null}
           <fieldset className="server-form-fields" disabled={save.isPending}>
-          <div className="form-field form-field-wide">
+          <div className="form-field field-wide">
             <label className="field-label" htmlFor="server-name">名称</label>
             <input ref={nameInputRef} id="server-name" className="form-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：生产 API" required />
           </div>
@@ -103,7 +99,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
             <div className="form-field">
               <label className="field-label" htmlFor="server-environment">环境</label>
               <select id="server-environment" className="form-input" value={environment} onChange={(event) => setEnvironment(event.target.value as Environment)}>
-                {ENVIRONMENTS.map((env) => <option key={env} value={env}>{ENVIRONMENT_LABEL[env]}</option>)}
+                {ENVIRONMENTS.map((env) => <option key={env} value={env}>{ENVIRONMENT_LABEL_SHORT[env]}</option>)}
               </select>
             </div>
           </div>

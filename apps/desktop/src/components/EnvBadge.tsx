@@ -1,12 +1,6 @@
 import type { Environment } from "@yukinal/shared";
 
-const ENV_LABEL: Record<Environment, string> = {
-  production: "生产环境",
-  staging: "预发布环境",
-  development: "开发环境",
-  local: "本地环境",
-  unknown: "未知环境",
-};
+import { environmentLabel } from "../lib/labels.js";
 
 /**
  * Environment identity: always visible, always explicit.
@@ -24,10 +18,10 @@ export function EnvBadge({
   return (
     <span
       className={`env-badge env-badge-${environment}`}
-      title={`${ENV_LABEL[environment]} · ${serverName}${region ? ` · ${region}` : ""}`}
+      title={`${environmentLabel(environment)} · ${serverName}${region ? ` · ${region}` : ""}`}
     >
       <span className="env-badge-dot" aria-hidden="true" />
-      <span>{ENV_LABEL[environment]}</span>
+      <span>{environmentLabel(environment)}</span>
       <span className="env-badge-divider" aria-hidden="true">·</span>
       <span className="env-badge-server">{serverName}</span>
       {region ? <><span className="env-badge-divider" aria-hidden="true">·</span><span className="env-badge-region">{region}</span></> : null}

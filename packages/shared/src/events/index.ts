@@ -1,5 +1,5 @@
 /**
- * System event names. These are the *only* event channels the UI may
+ * System logical event names. These are the *only* event types the UI may
  * subscribe to and the only names Rust may emit; adding one means updating this map.
  *
  * Rust -> UI events travel over Tauri's event system; agent -> UI events are
@@ -30,6 +30,17 @@ export const EVENT_NAMES = [
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
+
+/**
+ * Convert a logical event name to the channel accepted by Tauri.
+ *
+ * Payload discriminators intentionally keep their dotted names (for example,
+ * `agent.started`), while Tauri event channels only allow `:`, `/`, `_`, `-`
+ * and alphanumeric characters.
+ */
+export function tauriEventName(name: string): string {
+  return name.replace(/\./g, ":");
+}
 
 export interface ServerConnectedEvent {
   serverId: string;

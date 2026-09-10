@@ -7,10 +7,20 @@
  *   compile against. Rust mirrors the same names and shapes.
  * - When a command starts returning data that the UI branches on, a zod schema from
  *   `@yukinal/shared` is passed to `parse` — parse, never cast.
+ * - Events go through `listenDesktop`, gated by `EVENT_SCHEMAS`, so a native
+ *   payload is parsed before a component sees it for the same reason.
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { IPC_COMMANDS, IPC_SCHEMAS, type IpcCommandMap, type IpcCommandName } from "@yukinal/shared";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  EVENT_SCHEMAS,
+  IPC_COMMANDS,
+  IPC_SCHEMAS,
+  tauriEventName,
+  type IpcCommandMap,
+  type IpcCommandName,
+} from "@yukinal/shared";
 
 /** True when running inside Tauri; false in a plain browser during `vite dev`. */
 export function isDesktopShell(): boolean {
@@ -49,4 +59,46 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error));
   }
+}
+
+/** Event channels the UI may subscribe to, and the payload each one carries. */
+export type DesktopEventName = keyof typeof EVENT_SCHEMAS;
+
+export type DesktopEventPayload<E extends DesktopEventName> = ReturnType<
+  (typeof EVENT_SCHEMAS)[E]["parse"]
+>;
+
+/** The subset of channels that carry an `AgentStreamEvent`. */
+export type AgentEventName = Extract<DesktopEventName, `agent.${string}`>;
+
+/**
+ * Subscribe to a native event through the same gate as commands.
+ *
+ * Event names are keyed by `EVENT_SCHEMAS`, so the UI cannot subscribe to a
+ * channel that is not in the shared contract, and the handler only ever receives
+ * a payload that parsed. A payload that fails validation is dropped and reported
+ * once per channel name, because an event cannot be re-asked and a hot channel
+ * like `terminal.data` must not spam the console.
+ */
+export async function listenDesktop<E extends DesktopEventName>(
+  name: E,
+  handler: (payload: DesktopEventPayload<E>) => void,
+): Promise<UnlistenFn> {
+  const schema = EVENT_SCHEMAS[name];
+  return listen<unknown>(tauriEventName(name), (event) => {
+    const parsed = schema.safeParse(event.payload);
+    if (!parsed.success) {
+      warnDroppedEvent(name, parsed.error);
+      return;
+    }
+    handler(parsed.data as DesktopEventPayload<E>);
+  });
+}
+
+const reportedDroppedEvents = new Set<string>();
+
+function warnDroppedEvent(name: string, error: unknown): void {
+  if (reportedDroppedEvents.has(name)) return;
+  reportedDroppedEvents.add(name);
+  console.warn(`[ipc] dropped a malformed "${name}" event payload`, error);
 }

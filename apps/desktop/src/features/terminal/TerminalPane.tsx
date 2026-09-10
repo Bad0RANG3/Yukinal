@@ -11,11 +11,11 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { IPC_COMMANDS } from "@yukinal/shared";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
 import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 
@@ -51,11 +51,20 @@ export function TerminalPane({ active }: { active: boolean }) {
   const fitRef = useRef<FitAddon | null>(null);
   const preferences = usePreferencesStore();
   const [opened, setOpened] = useState(active);
+  /**
+   * First write/resize failure for the current session, or null.
+   *
+   * `terminal_write` used to be the one IPC call whose failure was discarded, so
+   * a dead session kept the pane looking interactive while keystrokes went
+   * nowhere. Only the first failure is kept, so a dead session cannot queue one
+   * banner per keystroke.
+   */
+  const [ioError, setIoError] = useState<string | null>(null);
+  const [reconnectNonce, setReconnectNonce] = useState(0);
   const activeRef = useRef(active);
   activeRef.current = active;
 
   useEffect(() => { if (active) setOpened(true); }, [active]);
-
   useEffect(() => {
     const term = terminalRef.current;
     const fit = fitRef.current;
@@ -73,6 +82,13 @@ export function TerminalPane({ active }: { active: boolean }) {
 
     const container = containerRef.current;
     if (!container) return;
+
+    setIoError(null);
+    /** Keep the first failure only; a functional update is a no-op once set. */
+    const reportIoError = (error: unknown): void => {
+      if (disposed) return;
+      setIoError((current) => current ?? (error instanceof Error ? error.message : String(error)));
+    };
 
     const initialPreferences = usePreferencesStore.getState();
     const term = new Terminal({
@@ -109,30 +125,34 @@ export function TerminalPane({ active }: { active: boolean }) {
     // write foreign output if a second terminal is open. The short pre-response
     // window is buffered by id so the first prompt is not lost, then foreign
     // sessions are discarded once this pane knows its own id.
-    void listen<{ terminalSessionId: string; data: string }>("terminal.data", (event) => {
+    //
+    // Subscribed through `listenDesktop`, so the payload is parsed against the
+    // shared contract before it reaches xterm: this data is read off a remote
+    // host, and the previous `listen<T>` cast validated nothing.
+    void listenDesktop("terminal.data", (payload) => {
       if (disposed) return;
       if (sessionId === null) {
-        const data = event.payload.data;
+        const data = payload.data;
         while (pendingDataChars + data.length > MAX_PENDING_DATA_CHARS && pendingData.length > 0) {
           const removed = pendingData.shift();
           pendingDataChars -= removed?.data.length ?? 0;
         }
         if (data.length <= MAX_PENDING_DATA_CHARS) {
-          pendingData.push(event.payload);
+          pendingData.push(payload);
           pendingDataChars += data.length;
         }
         return;
       }
-      if (event.payload.terminalSessionId !== sessionId) return;
-      term.write(event.payload.data);
+      if (payload.terminalSessionId !== sessionId) return;
+      term.write(payload.data);
     }).then((unlisten) => {
       if (disposed) unlisten();
       else unlisteners.push(unlisten);
     });
 
-    void listen<{ terminalSessionId: string; exitCode: number | null }>("terminal.closed", (event) => {
-      if (disposed || event.payload.terminalSessionId !== sessionId) return;
-      const suffix = event.payload.exitCode === null ? "" : ` (exit ${event.payload.exitCode})`;
+    void listenDesktop("terminal.closed", (payload) => {
+      if (disposed || payload.terminalSessionId !== sessionId) return;
+      const suffix = payload.exitCode === null ? "" : ` (exit ${payload.exitCode})`;
       term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);
     }).then((unlisten) => {
       if (disposed) unlisten();
@@ -157,7 +177,7 @@ export function TerminalPane({ active }: { active: boolean }) {
         }
         pendingData.length = 0;
         pendingDataChars = 0;
-        void callDesktop(IPC_COMMANDS.terminalResize, { terminalSessionId, cols: term.cols, rows: term.rows }).catch(() => {});
+        void callDesktop(IPC_COMMANDS.terminalResize, { terminalSessionId, cols: term.cols, rows: term.rows }).catch(reportIoError);
         // Terminal emits its current size after open; bidirectional wiring starts
         // from here so a resize before this point is not lost.
         const io = term.onData((data) => {
@@ -165,7 +185,7 @@ export function TerminalPane({ active }: { active: boolean }) {
             void callDesktop(IPC_COMMANDS.terminalWrite, {
               terminalSessionId: sessionId,
               data,
-            }).catch(() => {});
+            }).catch(reportIoError);
           }
         });
         const resize = term.onResize(({ cols, rows: nextRows }) => {
@@ -174,7 +194,7 @@ export function TerminalPane({ active }: { active: boolean }) {
               terminalSessionId: sessionId,
               cols,
               rows: nextRows,
-            }).catch(() => {});
+            }).catch(reportIoError);
           }
         });
         unlisteners.push(() => {
@@ -198,7 +218,7 @@ export function TerminalPane({ active }: { active: boolean }) {
       fitRef.current = null;
       term.dispose();
     };
-  }, [selectedServerId, opened]);
+  }, [selectedServerId, opened, reconnectNonce]);
 
   useEffect(() => {
     if (!active) return;
@@ -211,7 +231,7 @@ export function TerminalPane({ active }: { active: boolean }) {
   if (!selectedServerId) {
     return (
       <div className="terminal-empty">
-        <Icon name="terminal" size={22} />
+        <Icon name="terminal" size="xl" />
         <strong>选择服务器后打开终端</strong>
         <span>先在左侧添加或选择一台服务器。</span>
       </div>
@@ -221,9 +241,22 @@ export function TerminalPane({ active }: { active: boolean }) {
   return (
     <section className="terminal-page">
       <div className="terminal-toolbar">
-        <div className="section-heading-inline"><Icon name="terminal" size={16} /><div><p className="eyebrow">SSH</p><h2>终端</h2></div></div>
+        <div className="section-heading-inline"><Icon name="terminal" size="md" /><div><p className="eyebrow">SSH</p><h2>终端</h2></div></div>
         <span className="terminal-toolbar-note">{preferences.terminalFont === "jetbrains-mono" ? "JetBrains Mono" : preferences.terminalFont === "jetbrains-nerd-mono" ? "JetBrains Mono Nerd" : "JetBrains Mono NL"} · {preferences.terminalFontSize}px</span>
       </div>
+      {ioError !== null && (
+        <div className="terminal-io-error" role="alert">
+          <Icon name="warning" size="sm" />
+          <span>终端输入发送失败：{ioError}</span>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => { setIoError(null); setReconnectNonce((nonce) => nonce + 1); }}
+          >
+            重新连接
+          </button>
+        </div>
+      )}
       <div ref={containerRef} className="terminal-shell" aria-label="SSH 终端" />
     </section>
   );

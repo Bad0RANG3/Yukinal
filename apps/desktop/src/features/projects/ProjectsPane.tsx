@@ -1,22 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   IPC_COMMANDS,
-  WorkspaceListResponseSchema,
-  type Environment,
   type Server,
   type Workspace,
 } from "@yukinal/shared";
 
-import { callDesktop, callDesktopParsed, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
 import { Icon } from "../../components/Icon.js";
-
-const ENVIRONMENT_LABEL: Record<Environment, string> = {
-  production: "生产",
-  staging: "预发",
-  development: "开发",
-  local: "本地",
-  unknown: "未知",
-};
 
 export function ProjectsPane() {
   const shell = isDesktopShell();
@@ -25,11 +16,9 @@ export function ProjectsPane() {
     enabled: shell,
     staleTime: 10_000,
     queryFn: async () =>
-      callDesktopParsed(
-        IPC_COMMANDS.workspaceList,
-        {},
-        (raw) => WorkspaceListResponseSchema.parse(raw),
-      ),
+      // `callDesktop` binds this command to the response schema registered in
+      // `IPC_SCHEMAS`, so the command→schema pair has exactly one home.
+      callDesktop(IPC_COMMANDS.workspaceList, {}),
   });
   const servers = useQuery({
     queryKey: ["servers"],
@@ -53,7 +42,7 @@ export function ProjectsPane() {
   if (workspaces.isError || !workspaces.data) {
     return (
       <div className="error-panel">
-        <div className="error-panel-icon"><Icon name="warning" size={16} /></div>
+        <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取项目</strong>
           <p>{workspaces.error instanceof Error ? workspaces.error.message : String(workspaces.error)}</p>
@@ -77,13 +66,13 @@ export function ProjectsPane() {
           <p>按项目查看关联的服务器和代码仓库，目标环境始终明确可见。</p>
         </div>
         <button type="button" className="secondary-button" onClick={() => void workspaces.refetch()} disabled={workspaces.isFetching} title="刷新项目" aria-label="刷新项目">
-          <Icon name="refresh" size={14} /> {workspaces.isFetching ? "读取中" : "刷新"}
+          <Icon name="refresh" size="sm" /> {workspaces.isFetching ? "读取中" : "刷新"}
         </button>
       </section>
 
       {rows.length === 0 ? (
         <div className="empty-state page-empty project-empty">
-          <Icon name="projects" size={24} />
+          <Icon name="projects" size="xl" />
           <h2>暂无项目</h2>
           <p>本地数据库还没有 workspace 记录。服务器视图仍可独立使用。</p>
         </div>
@@ -105,7 +94,7 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
           <h3>{workspace.name}</h3>
         </div>
         <span className={`project-environment project-environment-${workspace.defaultEnvironment}`}>
-          {ENVIRONMENT_LABEL[workspace.defaultEnvironment]}
+          {ENVIRONMENT_LABEL_SHORT[workspace.defaultEnvironment]}
         </span>
       </div>
       <div className="project-card-meta">
@@ -143,7 +132,7 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
 function PreviewEmpty() {
   return (
     <div className="empty-state page-empty">
-      <Icon name="projects" size={24} />
+      <Icon name="projects" size="xl" />
       <h2>浏览器预览</h2>
       <p>本地 workspace 数据只在 Tauri 桌面壳中可用，预览不会伪造项目内容。</p>
     </div>

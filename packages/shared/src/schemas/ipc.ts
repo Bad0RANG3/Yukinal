@@ -18,9 +18,16 @@ import { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
 import { ServerLogsResponseSchema } from "./log.js";
-import { AgentPermissionModeSchema, ApprovalResponseSchema } from "./permission.js";
+import { AgentPermissionModeSchema, AgentRunModeSchema, ApprovalResponseSchema } from "./permission.js";
+import { AgentStreamEventSchema } from "./agent.js";
 import {
-  CcSwitchProviderCandidateSchema,
+  ChatMessageAppendResponseSchema,
+  ChatMessageRoleSchema,
+  ChatSessionCreateResponseSchema,
+  ChatSessionDetailResponseSchema,
+  ChatSessionListResponseSchema,
+} from "./chat.js";
+import {
   ProviderConfigSchema,
   ProviderModelOptionSchema,
   ProviderSaveInputSchema,
@@ -186,6 +193,8 @@ export const IPC_SCHEMAS = {
       workspaceId: z.string().trim().min(1).max(256).optional(),
       focusServerId: IpcServerIdSchema.optional(),
       permissionMode: AgentPermissionModeSchema.optional(),
+      /** Bounds what the run may accomplish; enforced by the permission engine. */
+      mode: AgentRunModeSchema.optional(),
     }),
     response: z.strictObject({ runId: z.string().min(1) }),
   },
@@ -197,29 +206,49 @@ export const IPC_SCHEMAS = {
     params: ApprovalResponseSchema,
     response: z.strictObject({ accepted: z.boolean() }),
   },
-  provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
-  provider_import_auto: {
-    params: EMPTY_PAYLOAD,
-    response: z.strictObject({ imported: z.number().int().nonnegative(), providers: z.array(ProviderConfigSchema) }),
+  chat_session_list: {
+    params: z.strictObject({
+      query: z.string().trim().max(200).optional(),
+      archived: z.boolean().optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    }),
+    response: ChatSessionListResponseSchema,
   },
+  chat_session_get: {
+    params: z.strictObject({ sessionId: z.string().trim().min(1).max(256) }),
+    response: ChatSessionDetailResponseSchema,
+  },
+  chat_session_create: {
+    params: z.strictObject({
+      sessionId: z.string().trim().min(1).max(256).optional(),
+      workspaceId: z.string().trim().min(1).max(256).optional(),
+      serverId: IpcServerIdSchema.optional(),
+      title: z.string().trim().min(1).max(200),
+    }),
+    response: ChatSessionCreateResponseSchema,
+  },
+  chat_message_append: {
+    params: z.strictObject({
+      sessionId: z.string().trim().min(1).max(256),
+      messageId: z.string().trim().min(1).max(256).optional(),
+      role: ChatMessageRoleSchema,
+      content: z.string().trim().min(1).max(100_000),
+      traceId: z.string().trim().min(1).max(256).optional(),
+      createdAt: z.string().min(1).max(80).optional(),
+    }),
+    response: ChatMessageAppendResponseSchema,
+  },
+  chat_session_archive: {
+    params: z.strictObject({ sessionId: z.string().trim().min(1).max(256), archived: z.boolean() }),
+    response: ChatSessionCreateResponseSchema,
+  },
+  chat_session_delete: {
+    params: z.strictObject({ sessionId: z.string().trim().min(1).max(256) }),
+    response: z.strictObject({ deleted: z.boolean() }),
+  },
+  provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
   provider_save_openai: {
     params: ProviderSaveInputSchema,
-    response: z.strictObject({ provider: ProviderConfigSchema }),
-  },
-  provider_import_ccswitch: {
-    params: EMPTY_PAYLOAD,
-    response: z.strictObject({ providers: z.array(CcSwitchProviderCandidateSchema) }),
-  },
-  provider_import_ccswitch_apply: {
-    params: z.strictObject({ ccSwitchProviderId: z.string().min(1) }),
-    response: z.strictObject({ provider: ProviderConfigSchema }),
-  },
-  provider_import_codex: {
-    params: EMPTY_PAYLOAD,
-    response: z.strictObject({ providers: z.array(CcSwitchProviderCandidateSchema) }),
-  },
-  provider_import_codex_apply: {
-    params: z.strictObject({ codexProviderId: z.string().min(1), model: z.string().min(1).optional() }),
     response: z.strictObject({ provider: ProviderConfigSchema }),
   },
   provider_activate: {
@@ -231,3 +260,45 @@ export const IPC_SCHEMAS = {
     response: z.strictObject({ models: z.array(ProviderModelOptionSchema) }),
   },
 } satisfies IpcCommandSchemaMap;
+
+/**
+ * Runtime gate for the *event* half of the IPC contract.
+ *
+ * `IPC_SCHEMAS` above gates commands; events had no equivalent, so their payloads
+ * crossed into the UI by cast. That is the same untrusted-boundary problem the
+ * command gate exists to solve — a `terminal.data` payload carries raw bytes read
+ * off a remote host — and one call site wrote them straight into xterm without
+ * checking the shape at all.
+ *
+ * Events are notifications, not requests: a payload that fails its schema can only
+ * be dropped, never re-asked. So the schema is here to make a drifted Rust payload
+ * a *visible* dropped event rather than a silent runtime failure deep in a writer.
+ */
+export const EVENT_SCHEMAS = {
+  // Agent stream events all share one discriminated union, so the UI can hand a
+  // payload to the same reducer regardless of which event it arrived on.
+  "agent.started": AgentStreamEventSchema,
+  "agent.thinking": AgentStreamEventSchema,
+  "agent.tool_call": AgentStreamEventSchema,
+  "agent.tool_result": AgentStreamEventSchema,
+  "agent.waiting_approval": AgentStreamEventSchema,
+  "agent.approval_expired": AgentStreamEventSchema,
+  "agent.completed": AgentStreamEventSchema,
+  "agent.failed": AgentStreamEventSchema,
+  "terminal.data": z.strictObject({
+    terminalSessionId: IpcTerminalSessionIdSchema,
+    // The bound is deliberately loose. This gate exists to catch *shape* drift —
+    // a renamed field, a wrong type — not to police size: terminal output is a
+    // high-volume stream read off a remote host, and a tight cap here would
+    // silently drop legitimate chunks, which is worse than a large payload. The
+    // host already rejects any streamed payload over 1,000,000 bytes, so this
+    // matches an enforced bound rather than inventing a new one.
+    data: z.string().max(1_000_000),
+  }),
+  "terminal.closed": z.strictObject({
+    terminalSessionId: IpcTerminalSessionIdSchema,
+    // Rust sends `Option<u32>`, so a negative or fractional code is drift.
+    exitCode: z.number().int().nonnegative().nullable(),
+  }),
+  "activity.created": ActivitySchema,
+} as const;

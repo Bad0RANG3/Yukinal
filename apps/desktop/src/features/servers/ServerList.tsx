@@ -1,20 +1,14 @@
-import { type Environment, type Server } from "@yukinal/shared";
+import { type Server } from "@yukinal/shared";
 import { useEffect, useMemo, useState } from "react";
 
 import { isDesktopShell } from "../../lib/ipc.js";
+import { ENVIRONMENT_LABEL_SHORT, SERVER_STATUS_LABEL } from "../../lib/labels.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { Icon } from "../../components/Icon.js";
 import { AddServerModal } from "./AddServerModal.js";
 
-const ENV_LABEL: Record<Environment, string> = { production: "生产", staging: "预发", development: "开发", local: "本地", unknown: "未知" };
-const ENV_DOT: Record<Environment, string> = { production: "server-dot-production", staging: "server-dot-staging", development: "server-dot-development", local: "server-dot-local", unknown: "server-dot-unknown" };
-const STATUS_LABEL: Record<Server["status"], string> = {
-  connecting: "连接中",
-  connected: "已连接",
-  disconnected: "未连接",
-  error: "错误",
-};
+const ENV_DOT: Record<Server["metadata"]["environment"], string> = { production: "server-dot-production", staging: "server-dot-staging", development: "server-dot-development", local: "server-dot-local", unknown: "server-dot-unknown" };
 
 export function ServerList({ onClose }: { onClose?: () => void }) {
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
@@ -37,30 +31,30 @@ export function ServerList({ onClose }: { onClose?: () => void }) {
       <div className="server-sidebar-header">
         <div><p className="eyebrow">工作区</p><h2>服务器</h2></div>
         <div className="server-sidebar-header-actions">
-          {onClose ? <button type="button" className="icon-button server-sidebar-close" aria-label="关闭服务器列表" title="关闭服务器列表" onClick={onClose}><Icon name="close" size={15} /></button> : null}
+          {onClose ? <button type="button" className="icon-button server-sidebar-close" aria-label="关闭服务器列表" title="关闭服务器列表" onClick={onClose}><Icon name="close" size="md" /></button> : null}
           <button type="button" className="icon-button icon-button-accent" aria-label="添加服务器" title="添加服务器" onClick={() => setAdding(true)}>
-            <Icon name="plus" size={16} />
+            <Icon name="plus" size="md" />
           </button>
         </div>
       </div>
 
       <div className="server-search">
-        <Icon name="search" size={14} />
+        <Icon name="search" size="sm" />
         <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索名称或主机" aria-label="搜索服务器" />
-        {filter ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => setFilter("")}><Icon name="close" size={13} /></button> : null}
+        {filter ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => setFilter("")}><Icon name="close" size="sm" /></button> : null}
       </div>
 
       <div className="server-list-meta">
         <span>{filter.trim() ? `${filteredServers.length} / ${serverRows.length}` : serverRows.length} 台服务器</span>
         <button type="button" className="text-button icon-text-button" onClick={() => void servers.refetch()} disabled={!shell || servers.isFetching} aria-label="刷新服务器列表" title="刷新服务器列表">
-          <Icon name="refresh" size={13} />
+          <Icon name="refresh" size="sm" />
         </button>
       </div>
 
       {servers.isError ? <div className="inline-error"><strong>读取失败</strong><span>{servers.error instanceof Error ? servers.error.message : String(servers.error)}</span><button type="button" className="text-button text-button-danger" onClick={() => void servers.refetch()}>重试</button></div> : null}
       {action.isError ? <div className="inline-error" role="alert"><strong>操作未完成</strong><span>{action.error.message}</span><button type="button" className="text-button" onClick={() => action.reset()}>关闭提示</button></div> : null}
       {!shell ? <div className="empty-state compact-empty"><p>浏览器预览模式</p><small>启动 Tauri 后加载本地服务器。</small></div> : null}
-      {shell && !serverRows.length && servers.isSuccess ? <div className="empty-state compact-empty"><Icon name="servers" size={26} /><p>连接你的第一台服务器</p><small>添加 SSH 连接，开始管理远程环境。</small><button type="button" className="secondary-button" onClick={() => setAdding(true)}>添加服务器</button></div> : null}
+      {shell && !serverRows.length && servers.isSuccess ? <div className="empty-state compact-empty"><Icon name="servers" size="xxl" /><p>连接你的第一台服务器</p><small>添加 SSH 连接，开始管理远程环境。</small><button type="button" className="secondary-button" onClick={() => setAdding(true)}>添加服务器</button></div> : null}
       {servers.isLoading ? <div className="skeleton-list" aria-label="正在加载服务器" /> : null}
       {filteredServers.length ? (
         <ul className="server-list">
@@ -73,17 +67,17 @@ export function ServerList({ onClose }: { onClose?: () => void }) {
                     <span className="server-row-name">{server.name}</span>
                     <span className="server-row-detail">{server.connection.host}:{server.connection.port}</span>
                   </span>
-                  <span className="server-row-env">{ENV_LABEL[server.metadata.environment]}</span>
+                  <span className="server-row-env">{ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}</span>
                 </button>
                 <div className="server-row-actions">
-                  <span className={`server-status-pill server-status-${server.status}`}>{action.isPending && action.variables.serverId === server.id ? "处理中…" : STATUS_LABEL[server.status]}</span>
+                  <span className={`server-status-pill server-status-${server.status}`}>{action.isPending && action.variables.serverId === server.id ? "处理中…" : SERVER_STATUS_LABEL[server.status]}</span>
                   {server.status === "connected" ? (
-                    <button type="button" title="断开连接" aria-label={`断开 ${server.name}`} disabled={busy} onClick={() => action.mutate({ type: "disconnect", serverId: server.id })}><Icon name="disconnect" size={13} /></button>
+                    <button type="button" title="断开连接" aria-label={`断开 ${server.name}`} disabled={busy} onClick={() => action.mutate({ type: "disconnect", serverId: server.id })}><Icon name="disconnect" size="sm" /></button>
                   ) : (
-                    <button type="button" title="连接服务器" aria-label={`连接 ${server.name}`} onClick={() => action.mutate({ type: "connect", serverId: server.id })} disabled={busy || server.status === "connecting"}><Icon name="connect" size={13} /></button>
+                    <button type="button" title="连接服务器" aria-label={`连接 ${server.name}`} onClick={() => action.mutate({ type: "connect", serverId: server.id })} disabled={busy || server.status === "connecting"}><Icon name="connect" size="sm" /></button>
                   )}
-                  <button type="button" title="编辑服务器" aria-label={`编辑 ${server.name}`} disabled={busy} onClick={() => setEditing(server)}><Icon name="edit" size={13} /></button>
-                  <button type="button" title="删除服务器" aria-label={`删除 ${server.name}`} disabled={busy} onClick={() => { if (window.confirm(`确定删除服务器“${server.name}”？`)) action.mutate({ type: "delete", serverId: server.id }); }}><Icon name="trash" size={13} /></button>
+                  <button type="button" title="编辑服务器" aria-label={`编辑 ${server.name}`} disabled={busy} onClick={() => setEditing(server)}><Icon name="edit" size="sm" /></button>
+                  <button type="button" title="删除服务器" aria-label={`删除 ${server.name}`} disabled={busy} onClick={() => { if (window.confirm(`确定删除服务器“${server.name}”？`)) action.mutate({ type: "delete", serverId: server.id }); }}><Icon name="trash" size="sm" /></button>
                 </div>
               </div>
             </li>

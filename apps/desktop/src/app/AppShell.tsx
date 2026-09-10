@@ -18,8 +18,8 @@ import {
 } from "../stores/workspace-store.js";
 import { usePreferencesStore } from "../stores/preferences-store.js";
 import { useServers } from "../lib/servers.js";
-import { useStartupProviderImport } from "../lib/providers.js";
 import { isDesktopShell } from "../lib/ipc.js";
+import { SERVER_STATUS_LABEL } from "../lib/labels.js";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 
 const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = {
@@ -68,11 +68,6 @@ export function AppShell() {
     focusAgentToggleOnRender.current = true;
     setAgentToggleVisible(true);
   }, []);
-
-  // Import local OpenCode/Codex/CC Switch provider material before the first
-  // Agent request. The command is native, idempotent and silent when no source
-  // exists, so the shell can render immediately.
-  useStartupProviderImport();
 
   useEffect(() => setSidebarOpen(false), [primary, selectedServerId]);
   useEffect(() => {
@@ -129,7 +124,7 @@ export function AppShell() {
                 className={`rail-button ${primary === item ? "rail-button-active" : ""}`}
               >
                 <span className="rail-icon" aria-hidden="true">
-                  <Icon name={meta.icon} size={17} />
+                  <Icon name={meta.icon} size="lg" />
                 </span>
                 <span>{meta.label}</span>
               </button>
@@ -148,8 +143,8 @@ export function AppShell() {
             <h1 title={selectedServer?.name}>{primary === "servers" ? selectedServer?.name ?? "基础设施" : PRIMARY_NAV_META[primary].label}</h1>
           </div>
           <div className="workspace-header-meta">
-            {primary === "servers" ? <button type="button" className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "关闭服务器列表" : "打开服务器列表"} aria-controls="server-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><Icon name="servers" size={16} /></button> : null}
-            {!isDesktopShell() ? <span className="preview-chip">预览模式</span> : selectedServer && primary === "servers" ? <span className={`context-chip server-status-${selectedServer.status}`}>{selectedServer.status === "connected" ? "已连接" : selectedServer.status === "connecting" ? "连接中" : selectedServer.status === "error" ? "连接异常" : "未连接"}</span> : null}
+            {primary === "servers" ? <button type="button" className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "关闭服务器列表" : "打开服务器列表"} aria-controls="server-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><Icon name="servers" size="md" /></button> : null}
+            {!isDesktopShell() ? <span className="preview-chip">预览模式</span> : selectedServer && primary === "servers" ? <span className={`context-chip server-status-${selectedServer.status}`}>{SERVER_STATUS_LABEL[selectedServer.status]}</span> : null}
             {!agentOpen && agentToggleVisible ? (
               <button
                 type="button"
@@ -160,7 +155,7 @@ export function AppShell() {
                 aria-expanded={false}
                 onClick={() => setAgentOpen(true)}
               >
-                <Icon name="agent" size={14} />
+                <Icon name="agent" size="sm" />
                 Agent
               </button>
             ) : null}
@@ -182,7 +177,7 @@ export function AppShell() {
                 onClick={() => setServerPage(page)}
                 className={`server-tab ${serverPage === page ? "server-tab-active" : ""}`}
               >
-                <Icon name={SERVER_PAGE_META[page].icon} size={14} />
+                <Icon name={SERVER_PAGE_META[page].icon} size="sm" />
                 <span>{SERVER_PAGE_META[page].label}</span>
               </button>
             ))}

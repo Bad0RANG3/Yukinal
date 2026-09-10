@@ -1,12 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   IPC_COMMANDS,
-  ServerServicesResponseSchema,
   type ServiceSource,
   type ServiceState,
 } from "@yukinal/shared";
 
-import { callDesktopParsed, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
@@ -34,11 +33,9 @@ export function ServicesPane() {
     refetchInterval: 30_000,
     queryFn: async () => {
       if (!selectedServerId) return null;
-      return callDesktopParsed(
-        IPC_COMMANDS.serverServices,
-        { serverId: selectedServerId },
-        (raw) => ServerServicesResponseSchema.parse(raw),
-      );
+      // `callDesktop` binds this command to the response schema registered in
+      // `IPC_SCHEMAS`, so the command→schema pair has exactly one home.
+      return callDesktop(IPC_COMMANDS.serverServices, { serverId: selectedServerId });
     },
   });
 
@@ -47,7 +44,7 @@ export function ServicesPane() {
   if (!selectedServerId) {
     return (
       <div className="empty-state page-empty">
-        <Icon name="services" size={24} />
+        <Icon name="services" size="xl" />
         <h2>选择一台服务器</h2>
         <p>从左侧列表选择目标环境，查看远端服务状态。</p>
       </div>
@@ -67,7 +64,7 @@ export function ServicesPane() {
   if (servicesQuery.isError || !servicesQuery.data) {
     return (
       <div className="error-panel">
-        <div className="error-panel-icon"><Icon name="warning" size={16} /></div>
+        <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取服务状态</strong>
           <p>{servicesQuery.error instanceof Error ? servicesQuery.error.message : String(servicesQuery.error)}</p>
@@ -92,7 +89,7 @@ export function ServicesPane() {
           <p>从目标服务器实时读取，不在本地猜测运行状态。</p>
         </div>
         <button type="button" className="secondary-button" onClick={() => void servicesQuery.refetch()} disabled={servicesQuery.isFetching} title="刷新服务" aria-label="刷新服务">
-          <Icon name="refresh" size={14} /> {servicesQuery.isFetching ? "读取中" : "刷新"}
+          <Icon name="refresh" size="sm" /> {servicesQuery.isFetching ? "读取中" : "刷新"}
         </button>
       </section>
 
@@ -105,7 +102,7 @@ export function ServicesPane() {
 
       {response.services.length === 0 ? (
         <div className="empty-state page-empty service-empty">
-          <Icon name="services" size={24} />
+          <Icon name="services" size="xl" />
           <h2>没有可展示的服务</h2>
           <p>{response.message ?? "服务管理器没有返回服务条目。"}</p>
         </div>
@@ -131,7 +128,7 @@ export function ServicesPane() {
 function PreviewEmpty() {
   return (
     <div className="empty-state page-empty">
-      <Icon name="services" size={24} />
+      <Icon name="services" size="xl" />
       <h2>浏览器预览</h2>
       <p>原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端服务数据。</p>
     </div>
