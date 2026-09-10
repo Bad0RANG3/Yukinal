@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use serde_json::json;
 use yukinal_database::models::{
-    Activity, ActivitySource, ActivityType, AiProviderConfig, AiProviderKind, Environment,
-    Identity, InfrastructureProviderConfig, McpServerConfig, PermissionMode, RiskLevel, Server,
-    ServerCapabilities, ServerConnection, ServerMetadata, ServerSnapshot, ServerStatus,
-    ToolExecutionRecord, ToolExecutionStatus, Workspace, WorkspaceRepository,
+    Activity, ActivitySource, ActivityType, AiProviderConfig, AiProviderKind, ChatMessage,
+    ChatMessageRole, ChatSession, Environment, Identity, InfrastructureProviderConfig,
+    McpServerConfig, PermissionMode, RiskLevel, Server, ServerCapabilities, ServerConnection,
+    ServerMetadata, ServerSnapshot, ServerStatus, ToolExecutionRecord, ToolExecutionStatus,
+    Workspace, WorkspaceRepository,
 };
 use yukinal_database::{Database, DatabaseError};
 
@@ -200,6 +201,79 @@ fn workspace_round_trip_and_persistence() {
     assert_eq!(got.default_environment, Environment::Production);
     assert_eq!(reopened.workspaces().list().expect("list").len(), 1);
     cleanup(&path);
+}
+
+// ---------------------------------------------------------------------------
+// Agent conversation history
+
+#[test]
+fn chat_history_can_search_archive_restore_and_delete() {
+    let (_path, db) = temp_db("chat");
+    let repo = db.chat();
+    repo.create(&ChatSession {
+        id: "ses_chat".into(),
+        workspace_id: Some("ws_1".into()),
+        server_id: Some("srv_01abc".into()),
+        title: "排查 API 错误".into(),
+        created_at: "2026-01-01T00:00:00.000Z".into(),
+        updated_at: "2026-01-01T00:00:00.000Z".into(),
+        archived_at: None,
+        message_count: 0,
+        last_message_preview: None,
+    })
+    .expect("create session");
+    repo.append_message(&ChatMessage {
+        id: "msg_chat".into(),
+        session_id: "ses_chat".into(),
+        role: ChatMessageRole::User,
+        content: "请检查 api-server 的 5xx 日志".into(),
+        trace_id: None,
+        created_at: "2026-01-01T00:01:00.000Z".into(),
+    })
+    .expect("append message");
+
+    let active = repo
+        .list(Some("api-server"), Some(false), 50)
+        .expect("search active sessions");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].message_count, 1);
+    assert_eq!(
+        active[0].last_message_preview.as_deref(),
+        Some("请检查 api-server 的 5xx 日志")
+    );
+    assert_eq!(repo.messages("ses_chat").expect("load messages").len(), 1);
+
+    let archived = repo
+        .set_archived("ses_chat", Some("2026-01-01T00:02:00.000Z"))
+        .expect("archive session");
+    assert_eq!(
+        archived.archived_at.as_deref(),
+        Some("2026-01-01T00:02:00.000Z")
+    );
+    assert!(repo
+        .list(None, Some(false), 50)
+        .expect("active sessions")
+        .is_empty());
+    assert_eq!(
+        repo.list(None, Some(true), 50)
+            .expect("archived sessions")
+            .len(),
+        1
+    );
+
+    repo.set_archived("ses_chat", None)
+        .expect("restore session");
+    assert_eq!(
+        repo.list(None, Some(false), 50)
+            .expect("restored sessions")
+            .len(),
+        1
+    );
+    repo.delete("ses_chat").expect("delete session");
+    assert!(repo
+        .messages("ses_chat")
+        .expect("cascade messages")
+        .is_empty());
 }
 
 // ---------------------------------------------------------------------------

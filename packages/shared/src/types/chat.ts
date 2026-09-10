@@ -6,7 +6,7 @@
 
 import type { AGENT_RUN_STATES } from "./enums.js";
 import type { RuntimeProviderConfig } from "./provider.js";
-import type { AgentPermissionMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
+import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolTarget } from "./tool.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
@@ -18,6 +18,9 @@ export interface ChatSession {
   title: string;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
+  messageCount: number;
+  lastMessagePreview?: string;
 }
 
 export interface ChatMessage {
@@ -28,6 +31,34 @@ export interface ChatMessage {
   /** Set for role === "tool": links the bubble to its trace card. */
   traceId?: string;
   createdAt: string;
+}
+
+export interface ChatSessionListInput {
+  query?: string;
+  /** Omitted returns both states; false returns active sessions, true archived sessions. */
+  archived?: boolean;
+  limit?: number;
+}
+
+export interface ChatSessionDetail {
+  session: ChatSession;
+  messages: ChatMessage[];
+}
+
+export interface ChatSessionCreateInput {
+  sessionId?: string;
+  workspaceId?: string;
+  serverId?: string;
+  title: string;
+}
+
+export interface ChatMessageAppendInput {
+  sessionId: string;
+  messageId?: string;
+  role: ChatMessage["role"];
+  content: string;
+  traceId?: string;
+  createdAt?: string;
 }
 
 /**
@@ -61,6 +92,12 @@ export interface AgentRunRequest {
   policyId?: string;
   /** User-selected execution delegation for this run. */
   permissionMode?: AgentPermissionMode;
+  /**
+   * Bounds what this run may accomplish at all. `plan` and `readonly` are
+   * enforced as a hard deny on every non-read tool call by the permission
+   * engine; `goal` leaves the run unconstrained. Omitted -> `goal`.
+   */
+  mode?: AgentRunMode;
   /** Durable sidecar needs a per-run provider: Rust resolves and injects this. */
   providerConfig?: RuntimeProviderConfig;
 }

@@ -6,8 +6,18 @@
  * Anything not in this map does not exist for the UI.
  */
 
-import type { ApprovalResponse, AgentPromptPart, AgentRunRequest } from "../types/chat.js";
-import type { AgentPermissionMode } from "../types/risk.js";
+import type {
+  ApprovalResponse,
+  AgentPromptPart,
+  AgentRunRequest,
+  ChatMessage,
+  ChatMessageAppendInput,
+  ChatSession,
+  ChatSessionCreateInput,
+  ChatSessionDetail,
+  ChatSessionListInput,
+} from "../types/chat.js";
+import type { AgentPermissionMode, AgentRunMode } from "../types/risk.js";
 import type {
   ActivityListInput,
   ActivityListResponse,
@@ -19,7 +29,7 @@ import type { ServerServicesResponse } from "../types/service.js";
 import type { ServerLogsResponse } from "../types/log.js";
 import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
 import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
-import type { AiProviderConfig, CcSwitchProviderCandidate, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
+import type { AiProviderConfig, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -56,15 +66,16 @@ export const IPC_COMMANDS = {
   agentRunStart: "agent_run_start",
   agentRunStop: "agent_run_stop",
   agentApprovalRespond: "agent_approval_respond",
+  /** Persistent Agent conversation history. */
+  chatSessionList: "chat_session_list",
+  chatSessionGet: "chat_session_get",
+  chatSessionCreate: "chat_session_create",
+  chatMessageAppend: "chat_message_append",
+  chatSessionArchive: "chat_session_archive",
+  chatSessionDelete: "chat_session_delete",
   /** AI provider config: settings panel only; the key never leaves the keychain. */
   providerList: "provider_list",
-  providerImportAuto: "provider_import_auto",
   providerSaveOpenai: "provider_save_openai",
-  /** Import candidates from CC Switch (Rust reads the os store key at apply time). */
-  providerImportCcSwitch: "provider_import_ccswitch",
-  providerImportCcSwitchApply: "provider_import_ccswitch_apply",
-  providerImportCodex: "provider_import_codex",
-  providerImportCodexApply: "provider_import_codex_apply",
   providerActivate: "provider_activate",
   providerModels: "provider_models",
 } as const;
@@ -116,31 +127,22 @@ export interface IpcCommandMap {
       workspaceId?: string;
       focusServerId?: string;
       permissionMode?: AgentPermissionMode;
+      /** Bounds what the run may accomplish; enforced by the permission engine. */
+      mode?: AgentRunMode;
     };
     response: { runId: string };
   };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
   agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };
+  chat_session_list: { params: ChatSessionListInput; response: { sessions: ChatSession[] } };
+  chat_session_get: { params: { sessionId: string }; response: ChatSessionDetail };
+  chat_session_create: { params: ChatSessionCreateInput; response: { session: ChatSession } };
+  chat_message_append: { params: ChatMessageAppendInput; response: { message: ChatMessage } };
+  chat_session_archive: { params: { sessionId: string; archived: boolean }; response: { session: ChatSession } };
+  chat_session_delete: { params: { sessionId: string }; response: { deleted: boolean } };
   provider_list: { params: Record<string, never>; response: { providers: AiProviderConfig[] } };
-  provider_import_auto: { params: Record<string, never>; response: { imported: number; providers: AiProviderConfig[] } };
   provider_save_openai: {
     params: ProviderSaveInput;
-    response: { provider: AiProviderConfig };
-  };
-  provider_import_ccswitch: {
-    params: Record<string, never>;
-    response: { providers: CcSwitchProviderCandidate[] };
-  };
-  provider_import_ccswitch_apply: {
-    params: { ccSwitchProviderId: string };
-    response: { provider: AiProviderConfig };
-  };
-  provider_import_codex: {
-    params: Record<string, never>;
-    response: { providers: CcSwitchProviderCandidate[] };
-  };
-  provider_import_codex_apply: {
-    params: { codexProviderId: string; model?: string };
     response: { provider: AiProviderConfig };
   };
   provider_activate: {

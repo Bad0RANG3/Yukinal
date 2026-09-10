@@ -1,597 +1,277 @@
 /**
- * Agent 面板 —— 真实接线：输入一句话，Rust 解析 provider + 凭据 → sidecar
- * `agent.run.start` → 事件流回 UI（thinking / 工具卡片 / 审批 / completed）。
+ * Agent 面板 —— 组合根。
+ *
+ * 这个文件只回答「这些东西怎么接在一起」：把侧车存活信号、provider 列表、
+ * 本地对话记录和事件流连成一条链路，再把结果交给各个展示组件。
+ *
+ * 真正的机制都已经搬到各自最深的地方：
+ *   - 事件流、run 生命周期、审批簿记 → useAgentRun
+ *   - 什么被写进本地记录             → useChatSessions
+ *   - 有哪些模型可选、选中了哪个     → useAgentModels
+ *   - 动态的顺序与文案               → transcript
+ *   - 焦点、Escape、收起动画         → useAgentPanelShell
  *
  * 规则：不造假 transcript。没有运行中的 run 就没有消息；Stop 立刻掐断在途请求。
  */
 
-import { AgentStreamEventSchema, IPC_COMMANDS, type AgentStreamEvent, type ApprovalRequest, type Environment, type PermissionApprovalSource, type PermissionMode, type RiskLevel } from "@yukinal/shared";
-import { listen } from "@tauri-apps/api/event";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import type { ChatMessage, ChatSession } from "@yukinal/shared";
+import { useCallback, useMemo, useState } from "react";
 
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
-import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
-import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { usePreferencesStore } from "../../stores/preferences-store.js";
 import { Icon } from "../../components/Icon.js";
-import { KeywordText } from "../../components/KeywordText.js";
-import { RunLifecycle } from "./run-lifecycle.js";
+import { isDesktopShell } from "../../lib/ipc.js";
+import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useServers } from "../../lib/servers.js";
-
-type Entry =
-  | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string }
-  | { kind: "tool_call"; toolName: string; target: string; riskLevel: RiskLevel; decision: PermissionMode; approvedBy?: PermissionApprovalSource }
-  | { kind: "tool_result"; toolName: string; status: "success" | "failed" | "cancelled"; durationMs: number; summary: string }
-  | { kind: "approval"; approval: ApprovalRequest }
-  | { kind: "error"; text: string };
-
-const MAX_TRANSCRIPT_ENTRIES = 500;
-
-function appendEntries(current: Entry[], additions: Entry[]): Entry[] {
-  return [...current, ...additions].slice(-MAX_TRANSCRIPT_ENTRIES);
-}
-
-const RUN_STATE_LABEL: Record<string, string> = {
-  starting: "正在提交…",
-  thinking: "思考中…",
-  running_tool: "执行工具…",
-  waiting_approval: "等待审批…",
-  completed: "完成",
-  failed: "失败",
-  cancelled: "已停止",
-};
+import { usePreferencesStore } from "../../stores/preferences-store.js";
+import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { AgentComposer } from "./AgentComposer.js";
+import { AgentFeed } from "./AgentFeed.js";
+import { AgentHeader } from "./AgentHeader.js";
+import { AgentHistoryPane } from "./AgentHistoryPane.js";
+import { AgentNotices } from "./AgentNotices.js";
+import {
+  commandHelpText,
+  resolveMentionedServer,
+  unavailableReason,
+  type CommandContext,
+  type MentionCandidate,
+  type Submission,
+} from "./composer-triggers.js";
+import { entriesFromMessages, lastUserPrompt } from "./transcript.js";
+import { useAgentModels } from "./useAgentModels.js";
+import { useAgentPanelShell } from "./useAgentPanelShell.js";
+import { useAgentRun } from "./useAgentRun.js";
+import { useChatSessions } from "./useChatSessions.js";
+import { useFeedFollow } from "./useFeedFollow.js";
 
 export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => void; onCloseEnd?: () => void }) {
   const agentStatus = useAgentStatus();
   const spawnAgent = useSpawnAgent();
-  const providers = useQuery({
-    queryKey: ["providers"],
-    enabled: isDesktopShell(),
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
-  });
-  const selectedProviderId = useWorkspaceStore((state) => state.selectedProviderId);
-  const selectedModel = useWorkspaceStore((state) => state.selectedModel);
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const agentOpen = useWorkspaceStore((state) => state.agentOpen);
   const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
   const toggleAgent = useWorkspaceStore((state) => state.toggleAgent);
-  const selectProvider = useWorkspaceStore((state) => state.selectProvider);
-  const permissionMode = usePreferencesStore((state) => state.agentPermissionMode);
-  const setPreferences = usePreferencesStore((state) => state.setPreferences);
-  const [entries, setEntries] = useState<Entry[]>([]);
-  const [running, setRunning] = useState(false);
-  const [runState, setRunState] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState("");
-  const [runId, setRunId] = useState<string | null>(null);
-  const [pendingApprovals, setPendingApprovals] = useState<string[]>([]);
-  const [approvalDecisions, setApprovalDecisions] = useState<Record<string, string>>({});
-  const approvalLocks = useRef(new Set<string>());
-  const [listening, setListening] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [runContext, setRunContext] = useState<string | null>(null);
-  const [isClosing, setIsClosing] = useState(false);
-  const hasBeenOpen = useRef(agentOpen);
-  const wasOpen = useRef(agentOpen);
-  const panelRef = useRef<HTMLElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const feedRef = useRef<HTMLDivElement>(null);
-  const followFeed = useRef(true);
-  const servers = useServers();
-  const focusServer = servers.data?.find((server) => server.id === selectedServerId);
-  const selectedProvider = providers.data?.find((provider) => provider.id === selectedProviderId && provider.enabled);
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
+  const permissionMode = usePreferencesStore((state) => state.agentPermissionMode);
+  const runMode = usePreferencesStore((state) => state.agentRunMode);
+  const setPreferences = usePreferencesStore((state) => state.setPreferences);
+
   const shell = isDesktopShell();
   const agentRunning = agentStatus.data?.running === true;
-  const canSend = shell && agentRunning && listening && Boolean(selectedProvider);
+  const servers = useServers();
+  const focusServer = servers.data?.find((server) => server.id === selectedServerId);
 
-  useEffect(() => {
-    if (agentOpen) {
-      hasBeenOpen.current = true;
-      setIsClosing(false);
-    } else if (hasBeenOpen.current && !isClosing) {
-      setIsClosing(true);
-      onCloseStart?.();
-    }
-  }, [agentOpen, isClosing, onCloseStart]);
+  const models = useAgentModels();
+  const sessions = useChatSessions();
+  // 「收到审批时把面板带到前景」是导航决策，所以由面板注入，而不是让运行模块去读 store。
+  const run = useAgentRun({
+    sidecarRunning: agentStatus.data?.running,
+    onAssistantMessage: (text) => void sessions.recordAssistantMessage(text),
+    onApprovalRequested: () => setAgentOpen(true),
+  });
 
-  useEffect(() => {
-    const panel = panelRef.current;
-    if (!panel) return;
-    panel.inert = !agentOpen;
-    const openedInOverlay = agentOpen && !wasOpen.current && window.matchMedia("(max-width: 1150px)").matches;
-    wasOpen.current = agentOpen;
-    const focusFrame = openedInOverlay
-      ? requestAnimationFrame(() => closeButtonRef.current?.focus({ preventScroll: true }))
-      : undefined;
-    if (!agentOpen) return () => { if (focusFrame !== undefined) cancelAnimationFrame(focusFrame); };
+  const [prompt, setPrompt] = useState("");
+  const [runContext, setRunContext] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const follow = useFeedFollow(agentOpen, run.entries);
+  // 必须稳定：焦点陷阱那个 effect 以它为依赖，每次渲染都换新函数会让键盘监听反复重装。
+  const closePanel = useCallback(() => setAgentOpen(false), [setAgentOpen]);
+  const panel = useAgentPanelShell({
+    agentOpen,
+    close: closePanel,
+    togglePanel: toggleAgent,
+    onCloseStart,
+    onCloseEnd,
+  });
 
-    const onKeyDown = (event: globalThis.KeyboardEvent): void => {
-      if (event.target instanceof HTMLElement && event.target.closest("dialog[open]")) return;
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setAgentOpen(false);
-        return;
-      }
-      if (event.key !== "Tab" || !window.matchMedia("(max-width: 1150px)").matches) return;
-      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
-        "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex=\"-1\"])",
-      )).filter((element) => element.getClientRects().length > 0);
-      if (!focusable.length) {
-        event.preventDefault();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
-    };
-  }, [agentOpen, setAgentOpen]);
+  const canSend = shell && agentRunning && run.listening && models.providerReady && !sessions.archived;
 
-  useEffect(() => {
-    if (!providers.data?.length) return;
-    const current = providers.data.find((provider) => provider.id === selectedProviderId && provider.enabled);
-    const fallback = providers.data.find((provider) => provider.enabled);
-    if (!current && fallback) selectProvider(fallback.id, fallback.model);
-  }, [providers.data, selectedProviderId, selectProvider]);
+  const commandContext: CommandContext = { running: run.running, archived: sessions.archived, desktop: shell };
 
-  // 流式文本按 run 累积（事件乱序也没关系，同 run 追加）。
-  const lifecycle = useRef(new RunLifecycle());
+  /** 可被 @ 提及的服务器 —— 直接来自 Rust 的服务器列表，不是凭空的候选。 */
+  const mentionCandidates: MentionCandidate[] = useMemo(
+    () => (servers.data ?? []).map((server) => ({
+      id: server.id,
+      label: server.name,
+      detail: `${server.connection.username}@${server.connection.host}`,
+    })),
+    [servers.data],
+  );
 
-  useEffect(() => {
-    const feed = feedRef.current;
-    if (agentOpen && followFeed.current && feed) feed.scrollTop = feed.scrollHeight;
-  }, [entries, agentOpen]);
-
-  useEffect(() => {
-    if (!isDesktopShell()) return;
-    const unlisteners: Array<() => void> = [];
-    const registrations: Promise<void>[] = [];
-    let disposed = false;
-    const on = (name: string, handler: (payload: unknown) => void): void => {
-      registrations.push(listen(name, (event) => {
-        if (disposed) return;
-        const parsed = AgentStreamEventSchema.safeParse(event.payload);
-        if (parsed.success) handler(parsed.data);
-      }).then((unlisten) => {
-        if (disposed) {
-          unlisten();
-        } else {
-          unlisteners.push(unlisten);
-        }
-      }));
-    };
-
-    const isActive = (payload: { runId: string }): boolean => lifecycle.current.isActive(payload.runId);
-
-    on("agent.started", (payload) => {
-      const event = payload as AgentStreamEvent;
-      if (!lifecycle.current.started(event.runId)) return;
-      setRunId(event.runId);
-      setRunning(true);
-      setRunState("thinking");
+  const send = async (raw: string): Promise<void> => {
+    const text = raw.trim();
+    if (!text || !canSend || run.running) return;
+    // 提示词里的 @服务器 决定这次运行的目标；没提及时才回落到当前选中的服务器。
+    const mentioned = resolveMentionedServer(text, mentionCandidates);
+    const focusServerId = mentioned?.id ?? selectedServerId;
+    setRunContext(mentioned?.label ?? focusServer?.name ?? "全局工作区");
+    follow.pinToBottom();
+    setPrompt("");
+    const outcome = await run.start({
+      prompt: text,
+      persistUserMessage: (messageId) => sessions.recordUserMessage(text, messageId, focusServerId),
+      providerId: models.selectedProviderId,
+      model: models.selectedModel,
+      focusServerId,
+      permissionMode,
+      mode: runMode,
     });
-    on("agent.thinking", (payload) => {
-      const event = payload as AgentStreamEvent;
-      if (!isActive(event)) return;
-      const delta = "textDelta" in event && event.textDelta ? event.textDelta : "";
-      setEntries((current) => {
-        if (delta.length === 0) return current;
-        const last = current.at(-1);
-        if (last && last.kind === "assistant") {
-          return appendEntries(current.slice(0, -1), [{ kind: "assistant", text: last.text + delta }]);
-        }
-        return appendEntries(current, [{ kind: "assistant", text: delta }]);
-      });
-    });
-    on("agent.tool_call", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.tool_call" }>;
-      if (!isActive(event)) return;
-      setRunState("running_tool");
-      setEntries((current) => appendEntries(current, [
-        { kind: "tool_call", toolName: event.toolName, target: targetLabel(event.target), riskLevel: event.riskLevel, decision: event.decision, approvedBy: event.approvedBy },
-      ]));
-    });
-    on("agent.tool_result", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.tool_result" }>;
-      if (!isActive(event)) return;
-      setRunState("thinking");
-      const summary = event.toolName === "filesystem.read" ? "文件内容已返回给 Agent（正文不在动态中保存）" : event.outputSummary.slice(0, 240);
-      setEntries((current) => appendEntries(current, [
-        { kind: "tool_result", toolName: event.toolName, status: event.status, durationMs: event.durationMs, summary },
-      ]));
-    });
-    on("agent.waiting_approval", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>;
-      if (!isActive(event)) return;
-      setRunState("waiting_approval");
-      setAgentOpen(true);
-      setEntries((current) => appendEntries(current, [{ kind: "approval", approval: event.approval }]));
-    });
-    on("agent.approval_expired", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.approval_expired" }>;
-      if (!isActive(event)) return;
-      setApprovalDecisions((current) => ({ ...current, [event.approvalId]: "审批已过期" }));
-    });
-    on("agent.completed", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.completed" }>;
-      if (!lifecycle.current.finish(event.runId)) return;
-      setRunning(false);
-      setRunState(event.result.state);
-      if (event.result.text) {
-        setEntries((current) => {
-          const last = current.at(-1);
-          return last && last.kind === "assistant"
-            ? [...current.slice(0, -1), { kind: "assistant", text: event.result.text }]
-            : appendEntries(current, [{ kind: "assistant", text: event.result.text }]);
-        });
-      }
-    });
-    on("agent.failed", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.failed" }>;
-      if (!lifecycle.current.finish(event.runId)) return;
-      setRunning(false);
-      setRunState("failed");
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: event.error }]));
-    });
-
-    void Promise.all(registrations).then(() => {
-      if (!disposed) setListening(true);
-    }).catch((error) => {
-      if (!disposed) setEntries([{ kind: "error", text: `无法接收 Agent 事件：${String(error)}` }]);
-    });
-
-    return () => {
-      disposed = true;
-      unlisteners.splice(0).forEach((unlisten) => unlisten());
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!running || agentStatus.data?.running !== false) return;
-    lifecycle.current.fail();
-    setRunning(false);
-    setRunId(null);
-    setStopping(false);
-    setPendingApprovals([]);
-    setRunState("failed");
-    setEntries((current) => {
-      const last = current.at(-1);
-      if (last?.kind === "error" && last.text === "Agent sidecar 已退出，本次运行已中断。") return current;
-      return appendEntries(current, [{ kind: "error", text: "Agent sidecar 已退出，本次运行已中断。" }]);
-    });
-  }, [agentStatus.data?.running, running]);
-
-  const send = async (retryText?: string): Promise<void> => {
-    const text = (retryText ?? prompt).trim();
-    const expectedRunId = `run_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
-    if (!text || !canSend || !lifecycle.current.begin(expectedRunId)) return;
-    setRunning(true);
-    setRunState("starting");
-    setRunId(null);
-    setRunContext(focusServer?.name ?? "全局工作区");
-    setApprovalDecisions({});
-    setPendingApprovals([]);
-    approvalLocks.current.clear();
-    followFeed.current = true;
-    try {
-      setPrompt("");
-      setEntries([{ kind: "user", text }]);
-      const messageId = `msg_${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
-      const { runId: started } = await callDesktop(IPC_COMMANDS.agentRunStart, {
-        runId: expectedRunId,
-        sessionId: "ses_ui",
-        prompt: text,
-        messageId,
-        parts: [{ type: "text", text }],
-        delivery: "async",
-        resume: true,
-        providerId: selectedProviderId ?? undefined,
-        model: selectedModel ?? undefined,
-        focusServerId: selectedServerId ?? undefined,
-        permissionMode,
-      });
-      if (lifecycle.current.acknowledge(started)) {
-        setRunId(started);
-        setRunState("thinking");
-      }
-    } catch (error) {
-      lifecycle.current.fail();
-      setRunning(false);
-      setRunState("failed");
-      setPrompt(text);
-      setEntries([{ kind: "user", text }, { kind: "error", text: String(error) }]);
-    }
+    // 没跑起来就把输入还给用户，别让他重新打一遍。
+    if (outcome !== "started") setPrompt(text);
   };
 
-  const stop = async (): Promise<void> => {
-    if (!runId || stopping) return;
-    setStopping(true);
-    try {
-      const { stopped } = await callDesktop(IPC_COMMANDS.agentRunStop, { runId });
-      if (stopped && lifecycle.current.finish(runId)) {
-        setRunning(false);
-        setRunState("cancelled");
-      } else if (!stopped && lifecycle.current.isActive(runId)) {
-        throw new Error("停止请求未被接受，请重试。");
-      }
-    } catch (error) {
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
-    } finally {
-      setStopping(false);
-    }
-  };
-
-  const respondApproval = async (approval: ApprovalRequest, decision: "approve_once" | "approve_session" | "reject"): Promise<void> => {
-    if (approvalLocks.current.has(approval.approvalId) || !lifecycle.current.isActive(approval.runId)) return;
-    if (Date.parse(approval.expiresAt) <= Date.now()) {
-      setApprovalDecisions((current) => ({ ...current, [approval.approvalId]: "审批已过期" }));
+  /**
+   * 提交的唯一去处。命令与提问在这里分流，而且未知/不可用的命令一律给出
+   * 明确反馈 —— 绝不退化成普通提问发出去，否则一个笔误就可能变成一次真实的
+   * 远端操作。
+   */
+  const handleSubmit = (submission: Submission): void => {
+    if (submission.kind === "prompt") {
+      void send(submission.text);
       return;
     }
-    approvalLocks.current.add(approval.approvalId);
-    setPendingApprovals((current) => [...current, approval.approvalId]);
-    try {
-      const { accepted } = await callDesktop(IPC_COMMANDS.agentApprovalRespond, {
-        approvalId: approval.approvalId,
-        runId: approval.runId,
-        decision,
-        respondedAt: new Date().toISOString(),
-      });
-      setApprovalDecisions((current) => ({ ...current, [approval.approvalId]: !accepted ? "审批已失效" : decision === "reject" ? "已拒绝" : decision === "approve_once" ? "已批准一次" : "已批准本次运行" }));
-    } catch (error) {
-      approvalLocks.current.delete(approval.approvalId);
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
-    } finally {
-      setPendingApprovals((current) => current.filter((id) => id !== approval.approvalId));
+    if (submission.kind === "unknown") {
+      setPrompt("");
+      run.appendSystemEntry(`没有名为 /${submission.name} 的命令。输入 /help 查看可用命令。`);
+      return;
+    }
+    const reason = unavailableReason(submission.spec, commandContext);
+    if (reason) {
+      setPrompt("");
+      run.appendSystemEntry(`/${submission.spec.name} 现在不可用：${reason}`);
+      return;
+    }
+    setPrompt("");
+    switch (submission.spec.name) {
+      case "new":
+        startNewSession();
+        return;
+      case "clear":
+        run.clearTranscript();
+        return;
+      case "history":
+        setHistoryOpen(true);
+        return;
+      case "stop":
+        void run.stop();
+        return;
+      case "help":
+        run.appendSystemEntry(commandHelpText(commandContext));
+        return;
+      default:
+        // 有可用性声明却没有对应实现 —— 必须报出来，而不是假装成功。
+        run.appendSystemEntry(`命令 /${submission.spec.name} 尚未接入。`);
     }
   };
 
-  const handleAgentToggle = (): void => {
-    if (agentOpen) {
-      setIsClosing(true);
-      onCloseStart?.();
-    }
-    toggleAgent();
+  const startNewSession = (): void => {
+    if (run.running) return;
+    sessions.startNewSession();
+    setHistoryOpen(false);
+    setRunContext(null);
+    setPrompt("");
+    run.clearTranscript();
   };
 
-  const panelClosing = !agentOpen && (isClosing || hasBeenOpen.current);
-  const panelClass = panelClosing ? "agent-panel-closing" : !agentOpen ? "agent-panel-hidden" : "";
-  const lastUserPrompt = [...entries].reverse().find((entry): entry is Extract<Entry, { kind: "user" }> => entry.kind === "user")?.text;
+  const openStoredSession = (session: ChatSession, messages: ChatMessage[]): void => {
+    if (run.running) return;
+    sessions.openStoredSession(session);
+    run.loadTranscript(entriesFromMessages(messages));
+    setRunContext(session.serverId ?? "全局工作区");
+    setPrompt("");
+    setHistoryOpen(false);
+  };
 
   return (
     <aside
       id="agent-panel"
-      ref={panelRef}
-      className={`agent-panel ${panelClass}`}
+      ref={panel.panelRef}
+      className={`agent-panel ${panel.panelClass}`}
       aria-hidden={!agentOpen}
-      onAnimationEnd={(event) => {
-        if (event.animationName !== "panel-exit" || agentOpen || !isClosing) return;
-        hasBeenOpen.current = false;
-        setIsClosing(false);
-        onCloseEnd?.();
-      }}
+      onAnimationEnd={panel.onAnimationEnd}
     >
-      <header className="agent-header">
-        <div className="agent-title"><span className="agent-orb"><Icon name="agent" size={15} /></span><div><p className="eyebrow">自动化工作区</p><h2>Agent</h2></div></div>
-        <div className="agent-header-actions">
-          {running && runState ? (
-            <span className="agent-status agent-status-active"><span className="status-pulse" />{RUN_STATE_LABEL[runState] ?? runState}</span>
-          ) : (
-            <span className={`agent-status ${agentRunning ? "agent-status-ready" : "agent-status-idle"}`}>
-              {runState ? RUN_STATE_LABEL[runState] ?? runState : !shell ? "预览" : agentRunning ? "已就绪" : "未启动"}
+      <AgentHeader
+        running={run.running}
+        runState={run.runState}
+        agentReady={agentRunning}
+        agentOpen={agentOpen}
+        shell={shell}
+        historyOpen={historyOpen}
+        onToggleHistory={() => setHistoryOpen((current) => !current)}
+        onToggle={panel.toggle}
+        closeButtonRef={panel.closeButtonRef}
+      />
+
+      {historyOpen ? (
+        <AgentHistoryPane
+          activeSessionId={sessions.activeSessionId}
+          onClose={() => setHistoryOpen(false)}
+          onNewSession={startNewSession}
+          onOpenSession={openStoredSession}
+          onSessionUpdated={sessions.noteSessionUpdated}
+          onSessionDeleted={(sessionId) => {
+            if (sessions.noteSessionDeleted(sessionId)) startNewSession();
+          }}
+        />
+      ) : (
+        <>
+          <div className="agent-context">
+            <Icon name="servers" size="sm" />
+            <span title={runContext ?? focusServer?.name ?? "全局工作区"}>
+              {run.running ? runContext : focusServer?.name ?? "全局工作区"}
             </span>
-          )}
-          <button ref={closeButtonRef} type="button" className="icon-button agent-toggle" aria-label="收起 Agent 面板" title="收起 Agent 面板" aria-controls="agent-panel" aria-expanded={agentOpen} onClick={handleAgentToggle}>
-            <Icon name="chevronRight" size={15} />
-          </button>
-        </div>
-      </header>
-
-      <div className="agent-context"><Icon name="servers" size={13} /><span title={runContext ?? focusServer?.name ?? "全局工作区"}>{running ? runContext : focusServer?.name ?? "全局工作区"}</span><small>{running ? "本次运行目标" : "当前上下文"}</small></div>
-      <div ref={feedRef} className="agent-feed" onScroll={(event) => { const feed = event.currentTarget; followFeed.current = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 64; }}>
-        {entries.length === 0 ? (
-          <div className="agent-empty"><span className="agent-empty-mark"><Icon name="sparkle" size={22} /></span><strong>直接问 Agent</strong><p>不添加服务器也能先问问题；需要远程操作时再选择目标。</p><div className="agent-suggestions">{["解释 Agent 能做什么", "帮我拆解一个排查计划"].map((suggestion) => <button type="button" key={suggestion} disabled={!canSend} onClick={() => setPrompt(suggestion)}>{suggestion}<Icon name="chevronRight" size={13} /></button>)}</div></div>
-        ) : (
-          entries.map((entry, index) => <EntryView key={index} entry={entry} onApproval={respondApproval} approvalBusy={entry.kind === "approval" && pendingApprovals.includes(entry.approval.approvalId)} approvalStatus={entry.kind === "approval" ? approvalDecisions[entry.approval.approvalId] ?? (!running ? "本次运行已结束" : undefined) : undefined} />)
-        )}
-        {!running && runState === "failed" && lastUserPrompt ? <div className="agent-retry"><span>这次运行未完成。</span><button type="button" className="text-button" disabled={!canSend} onClick={() => void send(lastUserPrompt)}>重试上一条</button></div> : null}
-        {!shell || !agentRunning || !selectedProvider ? (
-          <p className="agent-notice" role="status" aria-live="polite">
-            {!shell ? "启动 Yukinal 桌面应用后即可直接提问，无需先添加服务器。" : !agentRunning ? (
-              <>
-                <span>{agentStatus.data?.lastExit ? "Agent 已退出，可以重新启动。" : agentStatus.isError ? "无法读取 Agent 状态，可以尝试重新启动。" : "Agent 正在启动或尚未启动。"}</span>
-                <button type="button" className="text-button" disabled={spawnAgent.isPending} onClick={() => spawnAgent.mutate()}>{spawnAgent.isPending ? "启动中…" : "启动 / 重试"}</button>
-                {spawnAgent.isError ? <span className="agent-notice-error">{spawnAgent.error.message}</span> : null}
-              </>
-            ) : <>配置 AI Provider 后即可直接提问；不需要先添加服务器。<button type="button" className="text-button" onClick={() => setPrimary("settings")}>前往设置</button></>}
-          </p>
-        ) : null}
-      </div>
-
-      <footer className="agent-composer">
-        {providers.data?.length ? (
-          <div className="composer-meta">
-            <select
-              aria-label="选择 AI Provider"
-              disabled={running}
-              value={selectedProviderId ?? ""}
-              onChange={(event) => {
-                const provider = providers.data?.find((item) => item.id === event.target.value);
-                if (provider) selectProvider(provider.id, provider.model);
-              }}
-              className="composer-select"
-            >
-              {providers.data.map((provider) => (
-                <option key={provider.id} value={provider.id} disabled={!provider.enabled}>
-                  {provider.label}{provider.enabled ? "" : "（已禁用）"}
-                </option>
-              ))}
-            </select>
-            {selectedModel ? <span className="composer-model">{selectedModel}</span> : null}
-            <label className="composer-permission">
-              <span>权限</span>
-              <select
-                aria-label="Agent 权限模式"
-                disabled={running}
-                value={permissionMode}
-                onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}
-                className="composer-select composer-permission-select"
-              >
-                <option value="ask">操作前询问</option>
-                <option value="auto">委托 Agent 自动批准 开发与预发布写入</option>
-              </select>
-            </label>
+            <small>{run.running ? "本次运行目标" : "当前上下文"}</small>
           </div>
-        ) : (
-          <label className="composer-permission composer-permission-standalone">
-            <span>权限</span>
-            <select
-              aria-label="Agent 权限模式"
-              disabled={running}
-              value={permissionMode}
-              onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}
-              className="composer-select composer-permission-select"
-            >
-              <option value="ask">操作前询问</option>
-              <option value="auto">委托 Agent 自动批准 开发与预发布写入</option>
-            </select>
-          </label>
-        )}
-        <div className="composer-row">
-          <textarea
-            rows={2}
-            aria-label="Agent 任务"
-            value={prompt}
-            disabled={!canSend || running}
-            onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
-            }}
-            placeholder={running ? "运行中…" : "输入问题或任务（无需服务器也可以）"}
-            className="composer-input"
+          {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
+
+          <AgentFeed
+            entries={run.entries}
+            running={run.running}
+            runState={run.runState}
+            lastUserPrompt={lastUserPrompt(run.entries)}
+            canSend={canSend}
+            onRetry={(text) => void send(text)}            onApproval={run.respondApproval}
+            pendingApprovalIds={run.pendingApprovalIds}
+            approvalStatuses={run.approvalStatuses}
+            feedRef={follow.feedRef}
+            onScroll={follow.onScroll}
+          >
+            <AgentNotices
+              shell={shell}
+              agentRunning={agentRunning}
+              providerReady={models.providerReady}
+              agentExited={Boolean(agentStatus.data?.lastExit)}
+              statusUnreadable={agentStatus.isError}
+              spawning={spawnAgent.isPending}
+              spawnError={spawnAgent.error?.message}
+              onSpawn={() => spawnAgent.mutate()}
+              onOpenSettings={() => setPrimary("settings")}
+            />
+          </AgentFeed>
+
+          {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
+
+          <AgentComposer
+            prompt={prompt}
+            onPromptChange={setPrompt}
+            onSubmit={handleSubmit}
+            onStop={() => void run.stop()}
+            running={run.running}
+            stopping={run.stopping}
+            canSend={canSend}
+            canStop={Boolean(run.runId) && !run.stopping}
+            permissionMode={permissionMode}
+            onPermissionModeChange={(mode) => setPreferences({ agentPermissionMode: mode })}
+            runMode={runMode}
+            onRunModeChange={(mode) => setPreferences({ agentRunMode: mode })}
+            models={models.modelChoices}
+            selectedModelKey={models.selectedModelKey}
+            selectedModelLabel={models.selectedModelLabel}
+            onSelectModel={models.selectModelKey}
+            mentions={mentionCandidates}
+            commandContext={commandContext}
           />
-          {running ? (
-            <button
-              type="button"
-              onClick={() => void stop()}
-              disabled={!runId || stopping}
-              className="composer-button composer-button-stop"
-            >
-              {stopping ? "停止中" : "停止"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              disabled={!canSend || !prompt.trim()}
-              onClick={() => void send()}
-              className="composer-button composer-button-send"
-            >
-              发送
-            </button>
-          )}
-        </div>
-        <p className="composer-hint">Enter 发送 <span>Shift + Enter 换行</span></p>
-      </footer>
+        </>
+      )}
     </aside>
   );
-}
-
-function EntryView({
-  entry,
-  onApproval,
-  approvalBusy,
-  approvalStatus,
-}: {
-  entry: Entry;
-  onApproval: (approval: ApprovalRequest, decision: "approve_once" | "approve_session" | "reject") => Promise<void>;
-  approvalBusy: boolean;
-  approvalStatus?: string;
-}) {
-  switch (entry.kind) {
-    case "user":
-      return <div className="agent-entry agent-entry-user"><span className="entry-label">你</span><div>{entry.text}</div></div>;
-    case "assistant":
-      return <div className="agent-entry agent-entry-assistant"><span className="entry-label">Agent</span><KeywordText text={entry.text || "…"} className="agent-entry-text" /></div>;
-    case "tool_call":
-      return (
-        <div className="tool-card tool-card-call">
-          <div className="tool-card-heading"><span className="tool-card-label">工具调用</span><span className="tool-name"><KeywordText text={entry.toolName} /></span></div>
-          <div className="tool-card-meta"><code><KeywordText text={entry.target} /></code><span className={`risk-badge risk-${entry.riskLevel}`}>风险：{riskLabel(entry.riskLevel)}</span><span className={`decision-badge decision-${entry.decision}`}>{decisionLabel(entry.decision)}</span>{entry.approvedBy ? <span className="decision-badge decision-source">{approvalSourceLabel(entry.approvedBy)}</span> : null}</div>
-        </div>
-      );
-    case "tool_result":
-      return (
-        <div className={`tool-card tool-card-result tool-result-${entry.status}`}>
-          <div className="tool-card-heading"><span className="tool-card-label">工具结果</span><span className="tool-name"><KeywordText text={entry.toolName} /></span><span className="tool-result-status">{resultLabel(entry.status)}</span></div>
-          <code className="tool-result-copy"><KeywordText text={`${entry.durationMs}ms · ${entry.summary}`} /></code>
-        </div>
-      );
-    case "error":
-      return <div className="agent-error">{entry.text}</div>;
-    case "approval":
-      return (
-        <div className="approval-card">
-          <div className="approval-heading"><span className="approval-icon"><Icon name="warning" size={13} /></span><div><strong>需要审批</strong><code><KeywordText text={entry.approval.toolName} /></code></div></div>
-          <p>{entry.approval.reason}</p>
-          <p className="approval-target">{targetLabel(entry.approval.target)}</p>
-          {approvalStatus ? <p className="approval-resolved" role="status">{approvalStatus}</p> : <div className="approval-actions">
-            <button type="button" className="approval-button approval-button-reject" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "reject")}>
-              拒绝
-            </button>
-            <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_once")}>
-              批准一次
-            </button>
-            <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_session")}>
-              本次运行批准
-            </button>
-          </div>}
-        </div>
-      );
-  }
-}
-
-function decisionLabel(decision: "auto" | "ask" | "deny"): string {
-  if (decision === "auto") return "自动批准";
-  if (decision === "ask") return "需审批";
-  return "策略禁止";
-}
-
-function approvalSourceLabel(source: PermissionApprovalSource): string {
-  return source === "agent" ? "Agent 自主批准" : source === "policy" ? "策略批准" : "用户批准";
-}
-
-function targetLabel(target: { serverId?: string; environment: string; host: string }): string {
-  return target.serverId ? `${target.serverId} · ${environmentLabel(target.environment as Environment)}` : `${target.host} · ${environmentLabel(target.environment as Environment)}`;
-}
-
-function environmentLabel(environment: Environment): string {
-  const labels: Record<Environment, string> = {
-    local: "本地环境",
-    development: "开发环境",
-    staging: "预发布环境",
-    production: "生产环境",
-    unknown: "未知环境",
-  };
-  return labels[environment] ?? environment;
-}
-
-function riskLabel(level: RiskLevel): string {
-  const labels: Record<RiskLevel, string> = { read: "只读", low: "低", medium: "中", high: "高", critical: "严重" };
-  return labels[level];
-}
-
-function resultLabel(status: "success" | "failed" | "cancelled"): string {
-  return status === "success" ? "成功" : status === "cancelled" ? "已取消" : "失败";
 }

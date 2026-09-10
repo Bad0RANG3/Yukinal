@@ -202,6 +202,29 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_tool_executions_trace ON tool_executions (trace_id);
     CREATE INDEX idx_tool_executions_server ON tool_executions (server_id);
     "#,
+    // 4 — archive state for durable Agent conversation history.
+    r#"
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+        id           TEXT PRIMARY KEY,
+        workspace_id TEXT,
+        server_id    TEXT,
+        title        TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id         TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL CHECK (role IN ('user','assistant','tool','system')),
+        content    TEXT NOT NULL,
+        trace_id   TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages (session_id, created_at);
+    ALTER TABLE chat_sessions ADD COLUMN archived_at TEXT;
+    CREATE INDEX idx_chat_sessions_updated ON chat_sessions (updated_at DESC);
+    CREATE INDEX idx_chat_sessions_archived ON chat_sessions (archived_at, updated_at DESC);
+    "#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

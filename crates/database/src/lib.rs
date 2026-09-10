@@ -135,6 +135,10 @@ impl Database {
     pub fn activities(&self) -> repositories::ActivitiesRepository<'_> {
         repositories::ActivitiesRepository::new(self)
     }
+
+    pub fn chat(&self) -> repositories::ChatRepository<'_> {
+        repositories::ChatRepository::new(self)
+    }
 }
 
 /// Helper: parse a `NOT NULL` JSON column into a serde model.

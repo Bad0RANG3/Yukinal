@@ -9,9 +9,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire-string for enum columns without allocating JSON just to unquote it.
+///
+/// Also emits `ALL`, the complete variant list, so tests can assert the wire
+/// contract over every variant without keeping a second copy of the list. That
+/// second copy is what let `ActivityType` ship a serde rule that disagreed with
+/// `as_str` for `FileChange` and `AgentAction`: the variant list lived in three
+/// places and only two of them were checked.
 macro_rules! enum_as_str {
     ($ty:ident, $($variant:ident => $str:literal),+ $(,)?) => {
         impl $ty {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
             #[must_use]
             pub fn as_str(&self) -> &'static str {
                 match self {
@@ -96,9 +105,19 @@ enum_as_str!(HealthState, Healthy => "healthy", Warning => "warning", Critical =
 enum_as_str!(ActivityType, Connection => "connection", Authentication => "authentication", Configuration => "configuration", Deployment => "deployment", Service => "service", Container => "container", FileChange => "file_change", AgentAction => "agent_action", Approval => "approval", Health => "health");
 enum_as_str!(ActivitySource, Agent => "agent", User => "user", System => "system", Docker => "docker", Git => "git", Cloud => "cloud");
 enum_as_str!(ActivityOutcome, Success => "success", Failure => "failure", Cancelled => "cancelled", Denied => "denied");
+enum_as_str!(ChatMessageRole, User => "user", Assistant => "assistant", Tool => "tool", System => "system");
 enum_as_str!(ToolExecutionStatus, Pending => "pending", Running => "running", WaitingApproval => "waiting_approval", Success => "success", Failed => "failed", Cancelled => "cancelled");
 enum_as_str!(PermissionMode, Auto => "auto", Ask => "ask", Deny => "deny");
 enum_as_str!(RiskLevel, Read => "read", Low => "low", Medium => "medium", High => "high", Critical => "critical");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatMessageRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+}
 
 impl ActivityType {
     #[must_use]
@@ -142,6 +161,19 @@ impl ActivityOutcome {
             "failure" => Some(Self::Failure),
             "cancelled" => Some(Self::Cancelled),
             "denied" => Some(Self::Denied),
+            _ => None,
+        }
+    }
+}
+
+impl ChatMessageRole {
+    #[must_use]
+    pub fn from_db(raw: &str) -> Option<Self> {
+        match raw {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "tool" => Some(Self::Tool),
+            "system" => Some(Self::System),
             _ => None,
         }
     }
@@ -217,8 +249,17 @@ pub enum ToolExecutionStatus {
     Cancelled,
 }
 
+/// Activity type, as sent over IPC.
+///
+/// `snake_case`, not `lowercase`: `FileChange` and `AgentAction` are multi-word,
+/// and `lowercase` is a plain `to_ascii_lowercase()` that turned them into
+/// `"filechange"`/`"agentaction"`. The shared contract
+/// (`packages/shared/src/types/activity.ts`) and this file's own `as_str` /
+/// `from_db` both use `"file_change"`/`"agent_action"`, so the IPC payload was
+/// the only place with the wrong spelling — and nothing consumed it, which is
+/// why the mismatch survived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ActivityType {
     Connection,
     Authentication,
@@ -408,8 +449,8 @@ pub struct Identity {
 // provider configs (AI + infrastructure) and MCP servers
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum AiProviderKind {
+    #[serde(rename = "openai-compatible")]
     OpenaiCompatible,
 }
 
@@ -421,7 +462,7 @@ pub struct AiProviderConfig {
     pub label: String,
     pub base_url: String,
     pub model: String,
-    /// "chat" | "responses" — codex 中转的 responses API 由 CC Switch 导入决定。
+    /// "chat" | "responses" — 由用户按服务商端点选择。
     #[serde(default = "default_wire_api")]
     pub wire_api: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -604,6 +645,36 @@ pub struct Activity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatSession {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    pub message_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub session_id: String,
+    pub role: ChatMessageRole,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolExecutionRecord {
     pub trace_id: String,
     pub step_id: String,
@@ -627,4 +698,89 @@ pub struct ToolExecutionRecord {
     pub ended_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serde, `as_str` and `from_db` are three encodings of one contract, and
+    /// the IPC payload is produced by whichever one the call site happens to use.
+    /// This asserts all three agree for *every* variant of every enum, which is
+    /// the check that was missing when `ActivityType` serialised `FileChange` as
+    /// `"filechange"` while the database and the shared TypeScript contract both
+    /// said `"file_change"`.
+    ///
+    /// Driven by the same macro invocation that defines `as_str`, so a new
+    /// variant cannot be added without being covered here.
+    macro_rules! assert_wire_contract {
+        ($ty:ident) => {
+            for variant in $ty::ALL {
+                let expected = variant.as_str();
+
+                let serialised = serde_json::to_value(variant).unwrap_or_else(|error| {
+                    panic!(
+                        "{}::{} failed to serialise: {error}",
+                        stringify!($ty),
+                        expected
+                    )
+                });
+                assert_eq!(
+                    serialised,
+                    serde_json::Value::String(expected.to_string()),
+                    "{} serialises as {serialised} but as_str() says {expected:?}",
+                    stringify!($ty),
+                );
+
+                assert_eq!(
+                    $ty::from_db(expected),
+                    Some(*variant),
+                    "{}::from_db({expected:?}) does not round-trip",
+                    stringify!($ty),
+                );
+            }
+        };
+    }
+
+    #[test]
+    fn every_enum_agrees_across_serde_as_str_and_from_db() {
+        assert_wire_contract!(ServerStatus);
+        assert_wire_contract!(Environment);
+        assert_wire_contract!(HealthState);
+        assert_wire_contract!(RiskLevel);
+        assert_wire_contract!(PermissionMode);
+        assert_wire_contract!(ActivityType);
+        assert_wire_contract!(ActivitySource);
+        assert_wire_contract!(ActivityOutcome);
+        assert_wire_contract!(ChatMessageRole);
+        assert_wire_contract!(ToolExecutionStatus);
+    }
+
+    /// The multi-word variants specifically: these are the ones a `lowercase`
+    /// serde rule silently mangles, and the regression this guards against.
+    #[test]
+    fn multi_word_activity_types_use_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ActivityType::FileChange).unwrap(),
+            serde_json::json!("file_change"),
+        );
+        assert_eq!(
+            serde_json::to_value(ActivityType::AgentAction).unwrap(),
+            serde_json::json!("agent_action"),
+        );
+    }
+
+    /// Single-word variants must not gain underscores from the `snake_case` rule.
+    #[test]
+    fn single_word_activity_types_stay_flat() {
+        for variant in ActivityType::ALL {
+            let wire = variant.as_str();
+            if !wire.contains('_') {
+                assert_eq!(
+                    serde_json::to_value(variant).unwrap(),
+                    serde_json::Value::String(wire.to_string()),
+                );
+            }
+        }
+    }
 }

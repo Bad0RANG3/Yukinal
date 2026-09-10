@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { AgentPermissionMode } from "@yukinal/shared";
+import { AGENT_RUN_MODES } from "@yukinal/shared";
+import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
 
 export const UI_PREFERENCES_STORAGE_KEY = "yukinal.ui-preferences.v1";
 
@@ -20,6 +21,11 @@ export interface UiPreferences {
   reduceMotion: boolean;
   /** How an Agent run delegates tool approvals; this is sent with every run. */
   agentPermissionMode: AgentPermissionMode;
+  /**
+   * How far a run may go (readonly / plan / goal). Sent with every run and
+   * enforced by the sidecar's permission engine, not by the prompt.
+   */
+  agentRunMode: AgentRunMode;
 }
 
 export interface PreferencesState extends UiPreferences {
@@ -36,6 +42,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   terminalCursorBlink: true,
   reduceMotion: false,
   agentPermissionMode: "ask",
+  agentRunMode: "goal",
 };
 
 function isUiFontSize(value: unknown): value is UiFontSize {
@@ -48,6 +55,11 @@ function isTerminalFontSize(value: unknown): value is TerminalFontSize {
 
 function isTerminalLineHeight(value: unknown): value is TerminalLineHeight {
   return value === 1.2 || value === 1.35 || value === 1.5;
+}
+
+/** Narrowing against the shared list keeps the guard in step with the contract. */
+function isAgentRunMode(value: unknown): value is AgentRunMode {
+  return typeof value === "string" && (AGENT_RUN_MODES as readonly string[]).includes(value);
 }
 
 function sanitizePreferences(value: unknown): UiPreferences {
@@ -65,6 +77,7 @@ function sanitizePreferences(value: unknown): UiPreferences {
     terminalCursorBlink: typeof candidate.terminalCursorBlink === "boolean" ? candidate.terminalCursorBlink : DEFAULT_UI_PREFERENCES.terminalCursorBlink,
     reduceMotion: typeof candidate.reduceMotion === "boolean" ? candidate.reduceMotion : DEFAULT_UI_PREFERENCES.reduceMotion,
     agentPermissionMode: candidate.agentPermissionMode === "auto" || candidate.agentPermissionMode === "ask" ? candidate.agentPermissionMode : DEFAULT_UI_PREFERENCES.agentPermissionMode,
+    agentRunMode: isAgentRunMode(candidate.agentRunMode) ? candidate.agentRunMode : DEFAULT_UI_PREFERENCES.agentRunMode,
   };
 }
 
@@ -87,6 +100,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         terminalCursorBlink: state.terminalCursorBlink,
         reduceMotion: state.reduceMotion,
         agentPermissionMode: state.agentPermissionMode,
+        agentRunMode: state.agentRunMode,
       }),
       merge: (persisted, current) => ({ ...current, ...sanitizePreferences(persisted) }),
     },

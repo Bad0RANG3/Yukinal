@@ -4,7 +4,7 @@
 
 import { z } from "zod";
 
-import { AGENT_PERMISSION_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
+import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, ToolTargetSchema } from "./server.js";
 import { SafeCustomHeadersSchema } from "./provider.js";
@@ -32,6 +32,7 @@ export const RuntimeProviderConfigSchema = z.strictObject({
 export const PermissionTierSchema = z.enum(PERMISSION_TIERS);
 export const PermissionModeSchema = z.enum(PERMISSION_MODES);
 export const AgentPermissionModeSchema = z.enum(AGENT_PERMISSION_MODES);
+export const AgentRunModeSchema = z.enum(AGENT_RUN_MODES);
 export const PermissionApprovalSourceSchema = z.enum(PERMISSION_APPROVAL_SOURCES);
 
 export const PermissionPolicySchema = z.object({
@@ -134,5 +135,7 @@ export const AgentRunRequestSchema = z.strictObject({
   target: ToolTargetSchema.optional(),
   policyId: z.string().optional(),
   permissionMode: AgentPermissionModeSchema.optional(),
+  /** Omitted -> `goal`, the unconstrained mode. */
+  mode: AgentRunModeSchema.optional(),
   providerConfig: RuntimeProviderConfigSchema.optional(),
 });

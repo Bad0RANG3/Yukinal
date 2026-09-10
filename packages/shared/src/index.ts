@@ -26,6 +26,7 @@ export * from "./schemas/server.js";
 export * from "./schemas/activity.js";
 export * from "./schemas/permission.js";
 export * from "./schemas/agent.js";
+export * from "./schemas/chat.js";
 export * from "./schemas/collector.js";
 export * from "./schemas/ipc.js";
 export * from "./schemas/provider.js";

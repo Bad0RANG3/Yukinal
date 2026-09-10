@@ -4,6 +4,7 @@
 //! audit-relevant writes (tool executions, activities) sit on exactly one path.
 
 mod activities;
+mod chat;
 mod executions;
 mod identities;
 mod providers;
@@ -12,6 +13,7 @@ mod snapshots;
 mod workspaces;
 
 pub use activities::ActivitiesRepository;
+pub use chat::ChatRepository;
 pub use executions::ToolExecutionsRepository;
 pub use identities::IdentitiesRepository;
 pub use providers::{McpServersRepository, ProviderConfigsRepository};

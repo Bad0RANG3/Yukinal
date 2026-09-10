@@ -22,6 +22,7 @@ use yukinal_database::models::{
 
 pub mod activity;
 pub mod agent_run;
+pub mod chat;
 pub mod execution;
 pub mod files;
 pub mod host;
@@ -31,6 +32,13 @@ pub mod server;
 pub mod services;
 pub mod terminal;
 pub mod workspace;
+
+/// Map the logical event names shared with the UI to Tauri's event-channel
+/// grammar. Tauri channels do not allow `.` even though the payload type names
+/// intentionally use dots (for example, `agent.started`).
+pub(crate) fn tauri_event_name(name: &str) -> String {
+    name.replace('.', ":")
+}
 
 /// Explicit empty JSON object returned by commands whose shared IPC contract
 /// is `{}`. Returning Rust's unit type would serialize as `null` and make the
@@ -355,7 +363,7 @@ fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
     if let Err(error) = state.database.activities().insert(&activity) {
         eprintln!("[agent] failed to persist tool activity: {error}");
     } else if let Ok(payload) = serde_json::to_value(&activity) {
-        let _ = app.emit("activity.created", payload);
+        let _ = app.emit(&tauri_event_name("activity.created"), payload);
     }
 }
 
@@ -497,12 +505,12 @@ fn forward_agent_frame(app: &AppHandle, frame: &Value) {
     if event_type == "agent.tool_result" {
         persist_agent_tool_result(app, params);
     }
-    let _ = app.emit(event_type, params.clone());
+    let _ = app.emit(&tauri_event_name(event_type), params.clone());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_stable_server_id, safe_audit_summary, sanitize_audit_input};
+    use super::{is_stable_server_id, safe_audit_summary, sanitize_audit_input, tauri_event_name};
     use serde_json::json;
 
     #[test]
@@ -533,5 +541,15 @@ mod tests {
             "[sensitive output omitted]"
         );
         assert_eq!(safe_audit_summary("abcdef", 3), "abc\n…[truncated]");
+    }
+
+    #[test]
+    fn tauri_event_channels_use_only_supported_characters() {
+        let channel = tauri_event_name("agent.started");
+        assert_eq!(channel, "agent:started");
+        assert!(channel
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '/' | ':' | '_')));
     }
 }

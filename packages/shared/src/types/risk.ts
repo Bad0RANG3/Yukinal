@@ -47,6 +47,31 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 export const AGENT_PERMISSION_MODES = ["ask", "auto"] as const;
 export type AgentPermissionMode = (typeof AGENT_PERMISSION_MODES)[number];
 
+/**
+ * What a run is allowed to accomplish at all. Deliberately a separate axis from
+ * `AgentPermissionMode`: the run mode bounds *scope* (may this run change
+ * anything?), while the permission mode decides *who approves* the subset that
+ * is still permitted. A user can therefore ask for "plan mode, auto-approve"
+ * without one setting silently reinterpreting the other.
+ */
+export const AGENT_RUN_MODES = ["goal", "plan", "readonly"] as const;
+export type AgentRunMode = (typeof AGENT_RUN_MODES)[number];
+
+/**
+ * Modes that may not change anything on a target. The permission engine turns
+ * every non-read tier into a hard `deny` in these modes, so the restriction is
+ * enforced rather than merely requested in the prompt — a model that ignores
+ * its instructions still cannot write.
+ */
+export const READ_ONLY_RUN_MODES: readonly AgentRunMode[] = ["plan", "readonly"];
+
+export function isReadOnlyRunMode(mode: AgentRunMode): boolean {
+  return READ_ONLY_RUN_MODES.includes(mode);
+}
+
+/** The unconstrained mode: the run may do anything the policy and approvals allow. */
+export const DEFAULT_AGENT_RUN_MODE: AgentRunMode = "goal";
+
 /** The authority that made an automatic execution possible. */
 export const PERMISSION_APPROVAL_SOURCES = ["user", "policy", "agent"] as const;
 export type PermissionApprovalSource = (typeof PERMISSION_APPROVAL_SOURCES)[number];

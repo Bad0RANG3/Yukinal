@@ -24,18 +24,6 @@ pub fn run() {
             let app_state = AppState::bootstrap(&data_dir)?;
             app.manage(app_state);
 
-            // Synchronize credentials before the first Agent submission. This is
-            // also invoked by the UI for manual refresh, but startup must not
-            // depend on React's shell probe or query timing.
-            let state = app.state::<AppState>();
-            match commands::provider::provider_import_auto_inner(&state) {
-                Ok(result) if result.imported > 0 => {
-                    eprintln!("[yukinal] provider import ok count={}", result.imported);
-                }
-                Ok(_) => {}
-                Err(error) => eprintln!("[yukinal] provider import failed: {error}"),
-            }
-
             forward_terminal_events(app.handle().clone());
 
             // The Agent is a core interaction service, so it starts with the window
@@ -62,6 +50,12 @@ pub fn run() {
             commands::agent_run::agent_run_start,
             commands::agent_run::agent_run_stop,
             commands::agent_run::agent_approval_respond,
+            commands::chat::chat_session_list,
+            commands::chat::chat_session_get,
+            commands::chat::chat_session_create,
+            commands::chat::chat_message_append,
+            commands::chat::chat_session_archive,
+            commands::chat::chat_session_delete,
             commands::server::server_list,
             commands::workspace::workspace_list,
             commands::server::server_add,
@@ -72,12 +66,7 @@ pub fn run() {
             commands::files::remote_file_list,
             commands::files::remote_file_read,
             commands::provider::provider_list,
-            commands::provider::provider_import_auto,
             commands::provider::provider_save_openai,
-            commands::provider::provider_import_ccswitch,
-            commands::provider::provider_import_ccswitch_apply,
-            commands::provider::provider_import_codex,
-            commands::provider::provider_import_codex_apply,
             commands::provider::provider_activate,
             commands::provider::provider_models,
             commands::server::server_snapshot,
@@ -122,7 +111,7 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                     data,
                 }) => {
                     let _ = app.emit(
-                        "terminal.data",
+                        &commands::tauri_event_name("terminal.data"),
                         serde_json::json!({
                             "terminalSessionId": terminal_session_id,
                             "data": data,
@@ -131,7 +120,7 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                 }
                 Ok(TerminalAppEvent::Opened { payload }) => {
                     let _ = app.emit(
-                        "terminal.opened",
+                        &commands::tauri_event_name("terminal.opened"),
                         serde_json::to_value(payload).unwrap_or_default(),
                     );
                 }
@@ -140,7 +129,7 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                     exit_code,
                 }) => {
                     let _ = app.emit(
-                        "terminal.closed",
+                        &commands::tauri_event_name("terminal.closed"),
                         serde_json::json!({
                             "terminalSessionId": terminal_session_id,
                             "exitCode": exit_code,
