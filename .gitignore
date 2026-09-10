@@ -1,6 +1,9 @@
 # dependencies
 node_modules/
 .pnpm-store/
+# pnpm is the pinned package manager (package.json "packageManager"); an npm
+# lockfile here would be stale and could be picked up by Tooling that prefers it.
+package-lock.json
 
 # build output
 dist/
