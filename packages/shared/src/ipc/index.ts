@@ -67,11 +67,13 @@ export const IPC_COMMANDS = {
   providerImportCodexApply: "provider_import_codex_apply",
   providerActivate: "provider_activate",
   providerModels: "provider_models",
+  providerTest: "provider_test",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
 
 export interface IpcCommandMap {
+  provider_test: { params: { providerId: string }; response: { ok: true } };
   core_ping: { params: Record<string, never>; response: { version: string; os: string } };
   server_list: { params: Record<string, never>; response: { servers: Server[] } };
   workspace_list: { params: Record<string, never>; response: WorkspaceListResponse };

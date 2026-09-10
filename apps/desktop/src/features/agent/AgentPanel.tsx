@@ -63,7 +63,12 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
   const [runState, setRunState] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState("");
+  const prompt = useWorkspaceStore((state) => state.agentDraft);
+  const setPrompt = useWorkspaceStore((state) => state.setAgentDraft);
+  useEffect(() => {
+    useWorkspaceStore.getState().setAgentBusy(running);
+    return () => useWorkspaceStore.getState().setAgentBusy(false);
+  }, [running]);
   const [runId, setRunId] = useState<string | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<string[]>([]);
   const [approvalDecisions, setApprovalDecisions] = useState<Record<string, string>>({});
@@ -161,7 +166,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     const registrations: Promise<void>[] = [];
     let disposed = false;
     const on = (name: string, handler: (payload: unknown) => void): void => {
-      registrations.push(listen(name, (event) => {
+      registrations.push(listen(name.replaceAll(".", ":"), (event) => {
         if (disposed) return;
         const parsed = AgentStreamEventSchema.safeParse(event.payload);
         if (parsed.success) handler(parsed.data);

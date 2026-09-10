@@ -355,7 +355,7 @@ fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
     if let Err(error) = state.database.activities().insert(&activity) {
         eprintln!("[agent] failed to persist tool activity: {error}");
     } else if let Ok(payload) = serde_json::to_value(&activity) {
-        let _ = app.emit("activity.created", payload);
+        let _ = app.emit("activity:created", payload);
     }
 }
 
@@ -497,7 +497,8 @@ fn forward_agent_frame(app: &AppHandle, frame: &Value) {
     if event_type == "agent.tool_result" {
         persist_agent_tool_result(app, params);
     }
-    let _ = app.emit(event_type, params.clone());
+    // Tauri forbids dots in channel names; keep the sidecar payload unchanged.
+    let _ = app.emit(&event_type.replace('.', ":"), params.clone());
 }
 
 #[cfg(test)]

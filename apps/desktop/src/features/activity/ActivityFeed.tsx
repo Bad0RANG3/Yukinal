@@ -70,7 +70,7 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
     if (!shell) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void listen("activity.created", (event) => {
+    void listen("activity:created", (event) => {
       const parsed = ActivitySchema.safeParse(event.payload);
       if (!parsed.success || (scoped && parsed.data.serverId !== serverId)) return;
       queryClient.setQueryData<Activity[]>(activityQueryKey, (current) => {

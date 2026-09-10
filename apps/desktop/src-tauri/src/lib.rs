@@ -80,6 +80,7 @@ pub fn run() {
             commands::provider::provider_import_codex_apply,
             commands::provider::provider_activate,
             commands::provider::provider_models,
+            commands::provider::provider_test,
             commands::server::server_snapshot,
             commands::services::server_services,
             commands::logs::server_logs,
@@ -122,7 +123,7 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                     data,
                 }) => {
                     let _ = app.emit(
-                        "terminal.data",
+                        "terminal:data",
                         serde_json::json!({
                             "terminalSessionId": terminal_session_id,
                             "data": data,
@@ -131,7 +132,7 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                 }
                 Ok(TerminalAppEvent::Opened { payload }) => {
                     let _ = app.emit(
-                        "terminal.opened",
+                        "terminal:opened",
                         serde_json::to_value(payload).unwrap_or_default(),
                     );
                 }
@@ -140,7 +141,7 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                     exit_code,
                 }) => {
                     let _ = app.emit(
-                        "terminal.closed",
+                        "terminal:closed",
                         serde_json::json!({
                             "terminalSessionId": terminal_session_id,
                             "exitCode": exit_code,

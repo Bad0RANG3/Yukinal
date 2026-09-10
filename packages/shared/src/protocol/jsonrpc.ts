@@ -70,6 +70,7 @@ export const AGENT_METHODS = {
   runStop: "agent.run.stop",
   approvalRespond: "agent.approval.respond",
   providerModels: "provider.models",
+  providerTest: "provider.test",
 } as const;
 
 export type AgentMethodName = (typeof AGENT_METHODS)[keyof typeof AGENT_METHODS];

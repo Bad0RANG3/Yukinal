@@ -109,7 +109,7 @@ export function TerminalPane({ active }: { active: boolean }) {
     // write foreign output if a second terminal is open. The short pre-response
     // window is buffered by id so the first prompt is not lost, then foreign
     // sessions are discarded once this pane knows its own id.
-    void listen<{ terminalSessionId: string; data: string }>("terminal.data", (event) => {
+    void listen<{ terminalSessionId: string; data: string }>("terminal:data", (event) => {
       if (disposed) return;
       if (sessionId === null) {
         const data = event.payload.data;
@@ -130,7 +130,7 @@ export function TerminalPane({ active }: { active: boolean }) {
       else unlisteners.push(unlisten);
     });
 
-    void listen<{ terminalSessionId: string; exitCode: number | null }>("terminal.closed", (event) => {
+    void listen<{ terminalSessionId: string; exitCode: number | null }>("terminal:closed", (event) => {
       if (disposed || event.payload.terminalSessionId !== sessionId) return;
       const suffix = event.payload.exitCode === null ? "" : ` (exit ${event.payload.exitCode})`;
       term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);

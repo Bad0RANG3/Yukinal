@@ -242,7 +242,7 @@ function ProviderSettings() {
   );
 }
 
-function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; onSaved: (response: { provider: AiProviderConfig }) => void }) {
+export function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; onSaved: (response: { provider: AiProviderConfig }) => void }) {
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
   const [label, setLabel] = useState(provider?.label ?? "");

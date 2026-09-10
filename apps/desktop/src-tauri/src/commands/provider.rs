@@ -625,6 +625,28 @@ pub async fn provider_models(
     Ok(ProviderModelsResponse { models })
 }
 
+#[tauri::command]
+pub async fn provider_test(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Value, String> {
+    let provider = state
+        .database
+        .providers()
+        .get_ai(&provider_id)
+        .map_err(|error| error.to_string())?;
+    let api_key = resolve_api_key(&state, &provider)?;
+    let config = runtime_provider_config(&provider, &provider.model, api_key, 30_000);
+    state
+        .supervisor
+        .request("provider.test", config, std::time::Duration::from_secs(35))
+        .await
+        .map_err(|_| {
+            "模型测试失败：请确认 Agent 已启动，检查端点、API Key、模型和接口类型后重试。"
+                .to_string()
+        })
+}
+
 fn resolve_api_key(
     state: &AppState,
     provider: &AiProviderConfig,

@@ -410,6 +410,7 @@ pub struct Identity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AiProviderKind {
+    #[serde(rename = "openai-compatible", alias = "openaicompatible")]
     OpenaiCompatible,
 }
 

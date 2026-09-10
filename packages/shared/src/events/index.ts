@@ -3,7 +3,9 @@
  * subscribe to and the only names Rust may emit; adding one means updating this map.
  *
  * Rust -> UI events travel over Tauri's event system; agent -> UI events are
- * mapped from `AgentStreamEvent` onto the same names so the UI has one code path.
+ * mapped from `AgentStreamEvent`. These are logical names; the Tauri transport
+ * replaces dots with colons (e.g. agent.thinking -> agent:thinking), because
+ * Tauri does not allow dots in event channels. Payload types stay unchanged.
  */
 
 import type { Activity } from "../types/activity.js";

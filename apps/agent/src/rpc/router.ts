@@ -129,6 +129,24 @@ export class RpcRouter {
         const provider = buildProvider(config);
         return { models: await provider.listModels() };
       }
+      case AGENT_METHODS.providerTest: {
+        const config = parseOrThrow(RuntimeProviderConfigSchema, request.params);
+        const provider = buildProvider(config);
+        let hasText = false;
+        let completed = false;
+        for await (const event of provider.stream({
+          model: config.model,
+          messages: [{ role: "user", content: "Reply with OK only." }],
+          maxOutputTokens: 256,
+          timeoutMs: 30_000,
+        })) {
+          if (event.type === "text_delta" && event.text.trim()) hasText = true;
+          if (event.type === "error") throw new Error("模型测试失败，请检查端点、认证和模型配置。");
+          if (event.type === "done") completed = event.finishReason === "stop" || event.finishReason === "length";
+        }
+        if (!hasText || !completed) throw new Error("模型未返回完整文本回复，请检查模型和接口类型后重试。");
+        return { ok: true };
+      }
       default:
         throw new RpcFailure(RPC_ERROR.METHOD_NOT_FOUND, `Unknown method "${request.method}"`);
     }

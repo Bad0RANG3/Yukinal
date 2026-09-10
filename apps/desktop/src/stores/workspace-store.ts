@@ -24,6 +24,10 @@ export interface WorkspaceState {
   selectedModel: string | null;
   /** Right panel is session-scoped and opens automatically for approvals. */
   agentOpen: boolean;
+  agentDraft: string;
+  agentBusy: boolean;
+  setAgentDraft(draft: string): void;
+  setAgentBusy(busy: boolean): void;
   setPrimary(primary: PrimaryNav): void;
   setServerPage(page: ServerPage): void;
   selectServer(serverId: string | null): void;
@@ -41,6 +45,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedProviderId: null,
   selectedModel: null,
   agentOpen: true,
+  agentDraft: "",
+  agentBusy: false,
+  setAgentDraft: (agentDraft) => set({ agentDraft }),
+  setAgentBusy: (agentBusy) => set({ agentBusy }),
   setPrimary: (primary) => set({ primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers" }),
   selectServer: (selectedServerId) => set((state) => ({

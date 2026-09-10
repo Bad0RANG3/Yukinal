@@ -572,3 +572,15 @@ fn mcp_server_round_trip() {
     assert_eq!(list[0].args.as_ref().expect("args").len(), 2);
     assert!(!list[0].enabled);
 }
+#[test]
+fn provider_kind_matches_frontend_contract() {
+    use yukinal_database::models::AiProviderKind;
+    assert_eq!(
+        serde_json::to_value(AiProviderKind::OpenaiCompatible).unwrap(),
+        "openai-compatible"
+    );
+    assert_eq!(
+        serde_json::from_str::<AiProviderKind>("\"openaicompatible\"").unwrap(),
+        AiProviderKind::OpenaiCompatible
+    );
+}
