@@ -5,30 +5,55 @@ Date: 2026-09-09
 
 ## Context
 
-React 不应持有进程句柄，也不能在 WebView 中依赖 Node.js。sidecar 需要在 handshake 失败、父进程退出或用户停止运行时被可靠回收；启动路径还必须覆盖开发 bundle、测试入口和未来安装包资源。
+Agent 是一个独立进程（[ADR 0001](0001-agent-runtime-as-node-sidecar.md)），因此「谁把它启动起来、谁在它死掉时知道、谁负责不留下孤儿进程」必须在架构上被明确回答。
+
+把这件事交给 React 是错的：WebView 不应该持有进程句柄，也不应该在它的生命周期里做这种决定；界面刷新、面板关闭或路由切换都不该影响一个正在等待用户批准的任务。同时，启动路径必须同时覆盖三种真实场景——开发机的构建产物、测试里指定的入口、以及未来安装包中的资源路径——并且必须能在握手失败时可靠回滚，否则会留下一个半初始化的进程。
 
 ## Decision
 
-`yukinal-core` 的 `sidecar` 负责进程与 JSON-RPC transport，`supervisor` 负责状态、日志、单实例和退出记录。Tauri 命令只做参数编组：`agent_spawn`、`agent_status`、`agent_kill` 和 `agent_logs`。
+进程与传输归 `yukinal-core` 的 `sidecar` 模块，状态、日志、单实例和退出记录归同 crate 的 `supervisor` 模块。Tauri 命令只做参数编组：`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`。
 
-入口按下列顺序解析，第一个有效配置获胜：
+**启动目标按以下顺序解析，第一个有效配置获胜**（`SidecarConfig::from_env_with_cwd`）：
 
-1. `YUKINAL_AGENT_COMMAND` 与 `YUKINAL_AGENT_ARGS`，用于测试或明确的定制启动。
-2. `YUKINAL_AGENT_ENTRY`，可配合 `YUKINAL_NODE` 指向指定 Node 与 bundle。
-3. 从当前目录向上查找 `apps/agent/dist/index.js`，用于开发与本地构建。
+1. `YUKINAL_AGENT_COMMAND`，配合可选的 `YUKINAL_AGENT_ARGS`（以 `;` 分隔）。用于测试或明确指定的自定义启动方式。
+2. `YUKINAL_AGENT_ENTRY`，配合可选的 `YUKINAL_NODE` 指定 Node 可执行文件；入口文件必须存在，否则直接报错。
+3. 开发回退：从当前工作目录逐级向上查找 `apps/agent/dist/index.js`。
 
-启动顺序固定为 `spawn → subscribe → initialize/handshake → publish runtime`。handshake 失败时必须关闭 child，不能发布半初始化状态。Supervisor 的 start 和 stop 共用同一把锁，以避免竞争留下孤儿进程。
+请求超时由 `YUKINAL_AGENT_TIMEOUT_SECS` 决定（缺省 10 秒）。如果三者都没有解析出结果，不会退回到某个「大概能用」的默认值，而是返回一条点名构建步骤的错误：`no agent bundle to launch (searched …); run pnpm --filter @yukinal/agent build`。
 
-生命周期规则如下：
+**启动顺序固定为 `spawn → subscribe → initialize 握手 → 发布运行状态`。** 必须先订阅事件再握手，否则握手期间产生的输出会丢失；握手失败（包括协议版本不匹配、`system.describe` 报告工具名冲突）必须关闭子进程，不能发布一个半初始化的运行状态。
 
-- 每个 Supervisor 只保留一个运行中的 sidecar；重复启动返回 `alreadyRunning`。
-- sidecar stderr 保存最近 200 行，状态保留上一次退出记录，供 UI 显示故障原因。
-- sidecar 监听父 stdin，父进程消失时主动结束。Rust 正常关闭时请求 sidecar shutdown，进程句柄仍以 kill-on-drop 作为兜底。
-- sidecar 崩溃不能伪造“运行完成”事件；Supervisor 清理运行时，桌面 UI 通过状态轮询显示退出并提供重启入口。
+**生命周期规则：**
+
+- 一个 supervisor 只保留一个运行中的 sidecar。重复启动返回 `already_running`，而不是起第二个进程。
+- 启动与停止共用同一把锁，避免两个并发的启动请求各自看到空槽位、最后留下一个没人管理的进程。
+- sidecar 的 stderr 由 supervisor 保留最近 200 行；上一次异常退出的退出码、信号和时间会保留到下一次成功启动，供界面显示故障原因。
+- sidecar 监听父进程的 stdin，父进程消失时主动结束。Rust 正常关闭时先请求 sidecar 退出，`kill_on_drop` 作为兜底。
+- 桌面窗口启动时会自动拉起 sidecar，走的正是 `agent_spawn` 使用的那条函数；测试与将来的恢复操作也复用同一条路径。
+- Windows 上以 `CREATE_NO_WINDOW` 启动，避免控制台窗口闪现。
+- **崩溃不会被伪装成「运行完成」。** 进程消失后 supervisor 清空运行状态、记录退出信息；界面通过状态轮询发现它（运行时 1.5 秒一次，未运行时 5 秒一次），并显示重新启动入口。当前不自动重启。
+
+**界面看到的是事实，不是推断。** `agent_status` 返回的是否在运行、PID、协议版本、Agent 版本、握手时登记的工具数量、**实际启动的入口路径**以及上次退出记录。报告入口路径是有意的：当开发机上有多个构建产物时，「到底启动了哪一个」必须能从界面上直接读出来。
 
 ## Consequences
 
-- 开发、测试和桌面端共用实际的启动链路，跨语言 handshake 可在 CI 中验证。
-- React 不需要知道 Node 路径、PID 或重启细节，只消费状态和事件。
-- 发布安装包必须提供受信任的 Node 可执行文件与 bundle 绝对路径；生产环境不应依赖可被替换的 PATH 中的 `node`。
-- 当前仓库尚未启用 Tauri installer bundle，发布资源分发与 Node runtime 打包仍需后续决定。
+**收益**
+
+- 开发、测试和桌面端共用同一条启动链路，因此跨语言握手可以在 CI 里被真实执行（`cargo test` 会带上入口路径与 Node 可执行文件，让集成测试启动真实产物）。
+- React 不需要知道 Node 路径、PID、重启策略或进程回收；它只消费状态与事件。
+- 失败是可见的：握手失败、构建产物缺失和运行时崩溃都表现为明确的错误或状态，而不是「Agent 面板一直没有反应」。
+- 不会有孤儿进程：单一实例、共用锁、stdin 监听与 `kill_on_drop` 是四层互相独立的保证。
+
+**成本**
+
+- 发布安装包时必须提供一个受信任的 Node 可执行文件和一个绝对的 bundle 路径。当前实现默认使用 PATH 上的 `node`（Windows 上是 `node.exe`），这在开发机上可用，在成品里不成立——生产环境不应依赖一个可以被替换的 PATH。
+- 当前仓库还没有启用 Tauri 的安装包构建（`bundle.active` 为 `false`），因此资源分发与 Node 运行时打包仍是一个未决问题。
+- 不自动重启是有意的选择，但代价明确：一次崩溃会中断用户的会话，需要手动恢复；如果将来要做自动重启，必须同时解决「正在等待的审批怎么办」。
+- 保留边界意味着信息可能不足：200 行 stderr 和一条退出记录能解释大多数崩溃，但排查更复杂的问题仍需用户手动运行 sidecar。
+
+## Alternatives considered
+
+- **由 React 启动子进程。** 会把进程状态与窗口状态绑定，并给界面增加一项它不需要的系统能力。否决。
+- **把 sidecar 作为操作系统服务或开机自启进程常驻。** 会引入安装、升级、权限与生命周期管理成本，而且与「桌面应用按需工作」的使用方式不符。否决。
+- **崩溃后立刻自动重启。** 会造成重启风暴（坏 bundle 会无限重启），也会让在途审批与运行状态的含义变得模糊。先做可见性，再考虑自动恢复。
+- **把 Node 运行时静态链接进桌面二进制。** 在三个平台上都需要独立的构建与签名工作，收益目前只是省掉一次打包决策。推迟到真正做安装包时决定。
