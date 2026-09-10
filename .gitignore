@@ -44,6 +44,9 @@ Thumbs.db
 npm-debug.log*
 pnpm-debug.log*
 
+# local dev artifacts: dev-server logs and headless-browser screenshots
+.devlogs/
+
 # local working notes: design drafts and step plans, never committed
 .private/
 .yukinal-dev-data/
