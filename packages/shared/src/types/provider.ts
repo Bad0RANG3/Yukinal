@@ -59,19 +59,6 @@ export interface RuntimeProviderConfig {
   wireApi?: "chat" | "responses";
 }
 
-/** 从 CC Switch（第三方供应商切换工具）导入的候选：key 只由 Rust 在 apply 时读。 */
-export interface CcSwitchProviderCandidate {
-  /** 稳定引用（cc-switch providers.id + app_type）。 */
-  id: string;
-  name: string;
-  baseUrl: string;
-  model: string;
-  wireApi: "chat" | "responses";
-  /** key 是否可用（不返回 key 本体）。 */
-  hasApiKey: boolean;
-  models?: ProviderModelOption[];
-}
-
 /** Settings form: label optional (defaults to baseUrl), apiKey goes to the keychain here. */
 export interface ProviderSaveInput {
   providerId?: string;

@@ -1,5 +1,5 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IPC_COMMANDS, type AiProviderConfig, type CcSwitchProviderCandidate } from "@yukinal/shared";
+import { IPC_COMMANDS, type AiProviderConfig } from "@yukinal/shared";
 import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
@@ -33,7 +33,7 @@ export function RuntimeSettings() {
 
       {!shell ? (
         <div className="settings-notice" role="status">
-          <Icon name="warning" size={16} />
+          <Icon name="warning" size="md" />
           <span>浏览器预览：原生 Runtime 调用不可用，请启动 Tauri 桌面壳以连接 Agent。</span>
         </div>
       ) : null}
@@ -60,7 +60,7 @@ export function RuntimeSettings() {
         </dl>
         <div className="settings-card-actions">
           <button type="button" className="button-secondary" disabled={!shell} aria-expanded={showLogs} aria-controls="runtime-logs" onClick={() => setShowLogs((current) => !current)}>
-            <Icon name={showLogs ? "chevronUp" : "logs"} size={14} />
+            <Icon name={showLogs ? "chevronUp" : "logs"} size="sm" />
             {showLogs ? "隐藏 Agent 日志" : "查看 Agent 日志"}
           </button>
         </div>
@@ -86,7 +86,7 @@ function AppearanceSettings() {
           <h2>外观与交互</h2>
           <p>修改会立即应用，并保存在当前设备的本地存储中。</p>
         </div>
-        <Icon name="settings" size={18} />
+        <Icon name="settings" size="lg" />
       </div>
       <div className="settings-form-grid">
         <Field label="UI 字号">
@@ -141,7 +141,7 @@ function AppearanceSettings() {
       <p className="form-hint">自动批准只适用于开发或预发布目标上的普通写入。本机、未知、生产、高危和 critical 操作仍需逐项确认；策略禁止的操作始终拒绝，允许的自动执行会以“Agent 自主批准”写入审计。</p>
       <div className="settings-actions">
         <button type="button" className="button-secondary" onClick={preferences.resetPreferences}>
-          <Icon name="refresh" size={14} />恢复默认设置
+          <Icon name="refresh" size="sm" />恢复默认设置
         </button>
         <span className="settings-storage-note">仅保存界面偏好，不保存 API Key 或密码</span>
       </div>
@@ -155,52 +155,35 @@ function ProviderSettings() {
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
   const selectedProviderId = useWorkspaceStore((state) => state.selectedProviderId);
   const selectProvider = useWorkspaceStore((state) => state.selectProvider);
+  // `undefined` follows the active provider, `null` starts a new configuration,
+  // and an id keeps a specific saved provider open for editing.
+  const [editorProviderId, setEditorProviderId] = useState<string | null | undefined>(undefined);
   const providers = useQuery({
     queryKey: ["providers"], enabled: shell,
     queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
   });
-  const ccswitch = useQuery({
-    queryKey: ["providers", "ccswitch"], enabled: shell,
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerImportCcSwitch, {})).providers, retry: 0,
-  });
-  const codex = useQuery({
-    queryKey: ["providers", "codex"], enabled: shell,
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerImportCodex, {})).providers, retry: 0,
-  });
   const selectedProvider = providers.data?.find((provider) => provider.id === selectedProviderId)
     ?? providers.data?.find((provider) => provider.enabled);
+  const editorProvider = editorProviderId === undefined
+    ? selectedProvider
+    : editorProviderId === null
+      ? undefined
+      : providers.data?.find((provider) => provider.id === editorProviderId);
   const onSaved = ({ provider }: { provider: AiProviderConfig }) => {
     selectProvider(provider.id, provider.model);
+    setEditorProviderId(provider.id);
     void queryClient.invalidateQueries({ queryKey: ["providers"] });
   };
   const activate = useMutation({
     mutationKey: ["provider-write"],
     mutationFn: (providerId: string) => callDesktop(IPC_COMMANDS.providerActivate, { providerId }), onSuccess: onSaved,
   });
-  const importCcSwitch = useMutation({
-    mutationKey: ["provider-write"],
-    mutationFn: (providerId: string) => callDesktop(IPC_COMMANDS.providerImportCcSwitchApply, { ccSwitchProviderId: providerId }), onSuccess: onSaved,
-  });
-  const importCodex = useMutation({
-    mutationKey: ["provider-write"],
-    mutationFn: (providerId: string) => callDesktop(IPC_COMMANDS.providerImportCodexApply, { codexProviderId: providerId }), onSuccess: onSaved,
-  });
-  const autoImport = useMutation({
-    mutationKey: ["provider-write"],
-    mutationFn: () => callDesktop(IPC_COMMANDS.providerImportAuto, {}),
-    onSuccess: (response) => {
-      const selected = response.providers.find((provider) => provider.enabled) ?? response.providers[0];
-      if (selected) selectProvider(selected.id, selected.model);
-      void queryClient.invalidateQueries({ queryKey: ["providers"] });
-    },
-  });
-
   return (
     <div className="settings-stack">
       <section className="settings-card">
         <div className="settings-card-header">
           <div><p className="eyebrow">AI</p><h2>Provider</h2><p>新建 Agent 运行会使用当前启用的 Provider。</p></div>
-          <span className="settings-count">{providers.data?.length ?? 0} 个已配置</span>
+          <div className="settings-card-header-actions"><span className="settings-count">{providers.data?.length ?? 0} 个已配置</span><button type="button" disabled={busy} onClick={() => setEditorProviderId(null)} className="button-secondary button-small">添加 Provider</button></div>
         </div>
         {providers.isLoading ? <p className="muted-copy" role="status">正在加载 Provider…</p> : providers.isError ? <p className="form-error" role="alert">{providers.error.message}</p> : providers.data?.length ? (
           <div className="provider-list">
@@ -210,7 +193,10 @@ function ProviderSettings() {
                   <div className="provider-name"><span className={`provider-status-dot ${provider.enabled ? "provider-status-on" : "provider-status-off"}`} /><span>{provider.label}</span>{provider.enabled ? <span className="status-badge status-badge-success">当前使用</span> : null}</div>
                   <div className="provider-meta"><span><KeywordText text={provider.model} /></span><span>·</span><span><KeywordText text={provider.wireApi ?? "chat"} /></span><span>·</span><span>{provider.apiKeyCredentialRef ? "系统密钥链" : "未配置密钥"}</span></div>
                 </div>
-                <button type="button" disabled={busy} onClick={() => activate.mutate(provider.id)} className="button-secondary button-small">{provider.enabled ? "设为唯一当前" : "启用"}</button>
+                <div className="provider-row-actions">
+                  <button type="button" disabled={busy} onClick={() => setEditorProviderId(provider.id)} className="button-secondary button-small">编辑</button>
+                  <button type="button" disabled={busy} onClick={() => activate.mutate(provider.id)} className="button-secondary button-small">{provider.enabled ? "设为唯一当前" : "启用"}</button>
+                </div>
               </div>
             ))}
           </div>
@@ -220,31 +206,15 @@ function ProviderSettings() {
       </section>
 
       {/* Each provider owns its draft. Query refreshes never overwrite typing. */}
-      {!providers.isLoading && !providers.isError ? <ProviderEditor key={selectedProvider?.id ?? "new"} provider={selectedProvider} onSaved={onSaved} /> : null}
-
-      <section className="settings-card">
-        <div className="settings-card-header"><div><p className="eyebrow">导入</p><h2>本地配置来源</h2><p>启动时会自动同步 OpenCode、Codex 和 CC Switch 配置；也可以在这里手动重新导入。</p></div></div>
-        {!shell ? <p className="muted-copy">配置导入需要在桌面应用中使用。</p> : <div className="source-list-stack">
-          <SourceList title="CC Switch" state={ccswitch} busy={busy} onImport={(id) => importCcSwitch.mutate(id)} />
-          <SourceList title="Codex 配置" state={codex} busy={busy} onImport={(id) => importCodex.mutate(id)} />
-        </div>}
-        {shell ? <div className="settings-actions">
-          <button type="button" className="button-secondary" disabled={busy} onClick={() => autoImport.mutate()}>
-            <Icon name="refresh" size={14} />{autoImport.isPending ? "同步中…" : "立即同步本地配置"}
-          </button>
-          {autoImport.data ? <span className="settings-storage-note">本次同步 {autoImport.data.imported} 个 Provider</span> : null}
-        </div> : null}
-        {importCcSwitch.isError ? <div className="settings-error-row" role="alert"><span>CC Switch 导入失败：{importCcSwitch.error.message}</span>{importCcSwitch.variables ? <button type="button" className="text-button" onClick={() => importCcSwitch.mutate(importCcSwitch.variables!)}>重试</button> : null}</div> : null}
-        {importCodex.isError ? <div className="settings-error-row" role="alert"><span>Codex 导入失败：{importCodex.error.message}</span>{importCodex.variables ? <button type="button" className="text-button" onClick={() => importCodex.mutate(importCodex.variables!)}>重试</button> : null}</div> : null}
-        {autoImport.isError ? <div className="settings-error-row" role="alert"><span>自动同步失败：{autoImport.error.message}</span><button type="button" className="text-button" onClick={() => autoImport.mutate()}>重试</button></div> : null}
-      </section>
+      {!providers.isLoading && !providers.isError ? <ProviderEditor key={editorProvider?.id ?? "new"} provider={editorProvider} existingProviderIds={new Set(providers.data?.map((item) => item.id))} onSaved={onSaved} /> : null}
     </div>
   );
 }
 
-function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; onSaved: (response: { provider: AiProviderConfig }) => void }) {
+function ProviderEditor({ provider, existingProviderIds, onSaved }: { provider?: AiProviderConfig; existingProviderIds: Set<string>; onSaved: (response: { provider: AiProviderConfig }) => void }) {
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
+  const [providerId, setProviderId] = useState(provider?.id ?? "");
   const [label, setLabel] = useState(provider?.label ?? "");
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? "");
   const [model, setModel] = useState(provider?.model ?? "");
@@ -260,14 +230,18 @@ function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; on
   const save = useMutation({
     mutationKey: ["provider-write"],
     mutationFn: () => {
+      const nextProviderId = providerId.trim();
+      if (!provider && !nextProviderId) throw new Error("请填写 Provider ID。");
+      if (!provider && existingProviderIds.has(nextProviderId)) throw new Error("Provider ID 已存在，请换一个唯一 ID。");
       const url = new URL(baseUrl.trim());
       if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Base URL 必须使用 HTTP 或 HTTPS。");
       return callDesktop(IPC_COMMANDS.providerSaveOpenai, {
-        providerId: provider?.id, label: label.trim() || undefined, baseUrl: baseUrl.trim(),
+        providerId: nextProviderId || undefined, label: label.trim() || undefined, baseUrl: baseUrl.trim(),
         model: model.trim(), apiKey: apiKey.trim() || undefined, wireApi, models: models.length ? models : undefined,
       });
     },
     onSuccess: (response) => {
+      setProviderId(response.provider.id);
       setLabel(response.provider.label);
       setBaseUrl(response.provider.baseUrl);
       setModel(response.provider.model);
@@ -278,22 +252,23 @@ function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; on
   });
   return (
     <section className="settings-card">
-      <div className="settings-card-header"><div><p className="eyebrow">连接配置</p><h2>Provider 配置</h2><p>修改在保存后生效，API Key 仅保存在系统密钥链。</p></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
+      <div className="settings-card-header"><div><p className="eyebrow">自定义 Provider</p><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>按 OpenCode 的 custom provider 方式填写唯一 ID、名称、Base URL、API Key 和模型。API Key 仅保存在系统密钥链。</p></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
       <form onSubmit={(event) => { event.preventDefault(); if (shell && !busy) save.mutate(); }} onChange={() => { setSaved(false); save.reset(); }}>
         <fieldset className="settings-form-fields" disabled={busy}>
           <div className="settings-form-grid settings-form-grid-provider">
-            <Field label="名称" className="field-wide"><input className="form-input" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="公司网关、Ollama…" /></Field>
+            <Field label="Provider ID" className="field-wide"><input className="form-input" value={providerId} onChange={(event) => setProviderId(event.target.value.toLowerCase())} placeholder="myprovider" required={!provider} disabled={Boolean(provider)} spellCheck={false} pattern="[a-z0-9][a-z0-9-_]*" title="只能使用小写字母、数字、连字符和下划线，且首字符不能是符号" /></Field>
+            <Field label="名称" className="field-wide"><input className="form-input" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="My AI Provider" required /></Field>
             <Field label="Base URL" className="field-wide"><input type="url" className="form-input" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required spellCheck={false} /></Field>
             <Field label="Model"><input className="form-input" list={modelsId} value={model} onChange={(event) => setModel(event.target.value)} placeholder="选择或输入模型 ID" required spellCheck={false} /><datalist id={modelsId}>{models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</datalist></Field>
             <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field>
-            <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "本地端点可留空"} /></Field>
+            <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
           </div>
         </fieldset>
         {catalog.isError ? <p className="form-hint form-hint-warning">实时模型列表暂不可用，可手动输入模型 ID。</p> : null}
         {save.isError ? <div className="settings-error-row" role="alert"><span>{save.error.message}</span><button type="button" className="text-button" onClick={() => save.mutate()}>重试</button></div> : null}
         {saved ? <p className="form-success" role="status">Provider 配置已保存。</p> : null}
         <div className="settings-actions">
-          <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size={14} />{save.isPending ? "保存中…" : "保存 Provider"}</button>
+          <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size="sm" />{save.isPending ? "保存中…" : provider ? "保存并启用" : "添加并启用"}</button>
           {provider ? <button type="button" disabled={!shell || busy || catalog.isFetching} onClick={() => void catalog.refetch()} className="button-secondary">{catalog.isFetching ? "检查中…" : "刷新模型"}</button> : null}
           {models.length ? <span className="settings-storage-note">{models.length} 个可选模型</span> : null}
         </div>
@@ -303,25 +278,6 @@ function ProviderEditor({ provider, onSaved }: { provider?: AiProviderConfig; on
 }
 function Field({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
   return <label className={className ? `settings-field ${className}` : "settings-field"}><span className="field-label">{label}</span>{children}</label>;
-}
-
-function SourceList({ title, state, busy, onImport }: { title: string; state: { data?: CcSwitchProviderCandidate[]; isLoading: boolean; isError: boolean; refetch: () => Promise<unknown> }; busy: boolean; onImport: (id: string) => void }) {
-  if (state.isLoading) return <p className="muted-copy">{title}：正在扫描…</p>;
-  if (state.isError) return <div className="settings-error-row"><span>{title}：未找到或无法读取</span><button type="button" className="text-button" onClick={() => void state.refetch()}>重试</button></div>;
-  if (!state.data?.length) return <p className="muted-copy">{title}：暂无配置</p>;
-  return (
-    <div className="source-group">
-      <div className="source-title">{title}</div>
-      <div className="source-items">
-        {state.data.map((candidate) => (
-          <div key={candidate.id} className="source-item">
-            <span className="source-item-copy">{candidate.name} · {candidate.model}<small>· {candidate.models?.length ?? 0} 个模型 · {candidate.wireApi} · {candidate.hasApiKey ? "有密钥" : "无密钥"}</small></span>
-            <button type="button" disabled={busy} onClick={() => onImport(candidate.id)} className="button-secondary button-small">{busy ? "导入中…" : "导入"}</button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
 }
 
 function Row({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {

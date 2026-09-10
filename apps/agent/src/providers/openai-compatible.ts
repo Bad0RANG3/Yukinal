@@ -4,7 +4,7 @@
  *
  * Real HTTP + SSE only. `signal` is wired to `AbortController` so Stop truly
  * kills the in-flight request; `timeoutMs` bounds a stalled stream. Two dialects:
- * chat completions (default) and the codex `responses` API (CC Switch imports).
+ * chat completions (default) and the codex `responses` API selected by the user.
  * Tool-name rewriting happens in the loop via `createProviderNameIndex` (ADR 0004).
  */
 

@@ -24,8 +24,8 @@ export const ProviderModelOptionSchema = z.strictObject({
 
 /**
  * Provider credentials must use apiKey + the OS credential store. Custom headers
- * are limited to non-secret gateway metadata so imports cannot persist another
- * credential channel in SQLite.
+ * are limited to non-secret gateway metadata so a custom provider cannot persist
+ * another credential channel in SQLite.
  */
 const SafeCustomHeaderNameSchema = z.string().trim().min(1).max(128).refine(
   (name) => [
@@ -68,20 +68,11 @@ export const ProviderConfigSchema = z.strictObject({
 });
 
 export const ProviderSaveInputSchema = z.strictObject({
-  providerId: z.string().trim().min(1).max(256).optional(),
+  providerId: z.string().trim().min(1).max(256).regex(/^[a-z0-9][a-z0-9-_]*$/, "providerId must use lowercase letters, numbers, hyphens or underscores").optional(),
   label: z.string().trim().max(256).optional(),
   baseUrl: ProviderBaseUrlSchema,
   model: z.string().trim().min(1).max(256),
   apiKey: z.string().min(1).max(4_096).optional(),
   wireApi: z.enum(["chat", "responses"]).optional(),
-  models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
-});
-export const CcSwitchProviderCandidateSchema = z.strictObject({
-  id: z.string().trim().min(1).max(512),
-  name: z.string().trim().min(1).max(256),
-  baseUrl: ProviderBaseUrlSchema,
-  model: z.string().trim().min(1).max(256),
-  wireApi: z.enum(["chat", "responses"]),
-  hasApiKey: z.boolean(),
   models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
 });
