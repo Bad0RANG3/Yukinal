@@ -208,7 +208,7 @@ test("E2E: the whole run has a wall-clock deadline", async (t) => {
 });
 
 
-/** codex `responses` 方言：CC Switch 导入的中转常走 /responses（如 My Codex）。 */
+/** 用户配置的 `responses` 方言会经 /responses 端点执行。 */
 test("E2E (responses dialee): tool chain via /responses", async (t) => {
   const { port, close } = await mockLlm([
     [

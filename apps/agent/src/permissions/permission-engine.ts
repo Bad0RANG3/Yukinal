@@ -15,10 +15,13 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  DEFAULT_AGENT_RUN_MODE,
   defaultPolicyFor,
+  isReadOnlyRunMode,
   maxRisk,
   tierOf,
   type AgentPermissionMode,
+  type AgentRunMode,
   type Environment,
   type PermissionApprovalSource,
   type PermissionDecision,
@@ -51,6 +54,12 @@ export interface PermissionRequest {
   policy?: PermissionPolicy;
   /** Omitted -> preserve the policy-only behaviour for non-UI callers. */
   permissionMode?: AgentPermissionMode;
+  /**
+   * Omitted -> `goal` (unconstrained). In `plan` / `readonly` the run may not
+   * change anything, so every non-read tier is denied before policy or
+   * delegation is consulted.
+   */
+  mode?: AgentRunMode;
 }
 
 /** Grants are scoped to `tool + target`, never to a name the model typed. */
@@ -130,6 +139,17 @@ export class PermissionEngine {
       reason = `${describeTarget(target)}: dangerous or critical action cannot be auto-approved`;
     }
 
+    // A read-only run may not change anything. This is enforced here rather than
+    // requested in the prompt, so a model that ignores its instructions still
+    // cannot write. The denial is placed before policy delegation, the `auto`
+    // convenience path and session grants, so none of them can widen it back.
+    const runMode = request.mode ?? DEFAULT_AGENT_RUN_MODE;
+    if (isReadOnlyRunMode(runMode) && tier !== "read") {
+      outcome = "deny";
+      approvedBy = undefined;
+      reason = `${declaration.name} on ${describeTarget(target)} is a ${tier}-tier action and this run is in ${runMode} mode, which may not change anything`;
+    }
+
     // `auto` is intentionally narrow. It may cover ordinary write-tier work on a
     // resolved development or staging target, but it must never waive a human
     // confirmation for local, unknown, production, high-risk, or critical work.
@@ -154,15 +174,33 @@ export class PermissionEngine {
       reason = `${declaration.name} on ${describeTarget(target)} is waiting for user approval because Agent mode is "ask"`;
     }
 
-    // Session grants widen non-dangerous actions only: an intrinsically dangerous
-    // tool (docker.stop, rm -rf) re-asks every time, wherever it runs.
+    // Session grants widen non-dangerous actions only: anything that reaches the
+    // dangerous tier — an intrinsically dangerous tool (docker.stop, rm -rf), or a
+    // routine write the environment escalated (production or unlabelled) — re-asks
+    // every time. A session grant is still a single click of consent, so it must
+    // not stand in for the direct approval the dangerous tier requires.
+    //
+    // The test is `tier` (final risk), not `tierOf(intrinsicRisk)`, because `tier`
+    // is what the execution chokepoint enforces and what the escalation block above
+    // already acts on. Reading only the intrinsic risk let this branch re-open the
+    // invariant at "dangerous or critical action cannot be auto-approved", so the
+    // engine reported `auto`/`user` for a call `ToolRegistry.checkTicket()` then
+    // always denied. The engine must never advertise an approval that execution
+    // will refuse: a wrong `auto` here is invisible, whereas the safe failure — one
+    // extra prompt — is not.
     if (
       outcome === "ask" &&
-      tierOf(intrinsicRisk) !== "dangerous" &&
+      tier !== "dangerous" &&
       finalRisk !== "critical" &&
       this.#grants.has(grantKey(declaration.name, target))
     ) {
       outcome = "auto";
+      // `approvedBy` is the provenance the rest of the pipeline dispatches on,
+      // so it has to be stamped here. Leaving it undefined sent the call down
+      // the `policy_auto` branch in the runtime, which the ToolRegistry then
+      // rejected with "Policy auto ticket has no policy authorization" — so a
+      // session approval auto-denied the very next identical call.
+      approvedBy = "user";
       reason = `${declaration.name} on ${describeTarget(target)} was approved for this session`;
     }
 
@@ -187,17 +225,27 @@ export class PermissionEngine {
   }
 
   /**
-   * Called when the user chooses "approve for this session". `approve_once` must not
+   * Called when the user chooses "approve for this run". `approve_once` must not
    * call this. Dangerous tier is never granted for a session.
+   *
+   * "Dangerous tier" is judged on `decision.tier`, the final risk after
+   * environment escalation, because that is the field the execution chokepoint
+   * enforces. Recording a grant the registry will always refuse would leave a dead
+   * entry in the grant set and make the engine's own decisions misleading.
    */
   grantSession(decision: PermissionDecision): void {
-    // The *action* decides, not the environment: production escalation must not
-    // permanently lock a routine write once the user has approved it for this session.
-    if (tierOf(decision.intrinsicRisk) === "dangerous") return;
+    if (decision.tier === "dangerous") return;
     if (decision.finalRisk === "critical") return;
     this.#grants.add(grantKey(decision.toolName, decision.target));
   }
 
+  /**
+   * Drop every session grant.
+   *
+   * The AgentLoop calls this once no run is in flight. Without it the grant set
+   * lives as long as the sidecar process does, so an approval the user gave for
+   * one run would silently keep authorising later, unrelated runs.
+   */
   clearGrants(): void {
     this.#grants.clear();
   }

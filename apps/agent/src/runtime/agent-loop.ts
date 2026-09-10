@@ -285,12 +285,15 @@ export class AgentLoop {
       const prompt = request.parts?.map((part) => part.text).join("\n").trim() || request.prompt.trim();
       if (!prompt) throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "prompt must not be blank");
       const permissionGuidance = renderPermissionGuidance(request.permissionMode);
+      const modeGuidance = renderRunModeGuidance(request.mode);
       const safeContext = redactSensitiveText(bundle.rendered);
       const safePrompt = redactSensitiveText(prompt);
       const messages: LlmMessage[] = [
         {
           role: "system",
-          content: safeContext ? `${SYSTEM_PROMPT}\n\n${permissionGuidance}\n\n# 上下文\n${safeContext}` : `${SYSTEM_PROMPT}\n\n${permissionGuidance}`,
+          content: safeContext
+            ? `${SYSTEM_PROMPT}\n\n${modeGuidance}\n\n${permissionGuidance}\n\n# 上下文\n${safeContext}`
+            : `${SYSTEM_PROMPT}\n\n${modeGuidance}\n\n${permissionGuidance}`,
         },
         { role: "user", content: safePrompt },
       ];
@@ -375,6 +378,7 @@ export class AgentLoop {
             target,
             input: call.call.arguments,
             permissionMode: request.permissionMode,
+            mode: request.mode,
           });
           assistantToolCalls.push({
             id: call.call.id,
@@ -535,6 +539,12 @@ export class AgentLoop {
           waiter.resolve("reject");
         }
       }
+      // "Approve for this run" has to end with the run. The PermissionEngine
+      // outlives individual runs, so without this the grant set would keep
+      // authorising later, unrelated runs for the life of the sidecar process.
+      // Clearing only once nothing else is in flight keeps a concurrent run's
+      // own grants intact.
+      if (this.#tokensByRun.size === 0) this.deps.permission.clearGrants();
     }
   }
 
@@ -610,6 +620,21 @@ function summarize(output: unknown): string {
   if (output === undefined || output === null) return "(no output)";
   const text = redactSensitiveText(typeof output === "string" ? output : JSON.stringify(output));
   return text.length > 400 ? `${text.slice(0, 400)}…` : text;
+}
+
+/**
+ * The run mode's contract with the model. Only the *intent* lives here: the
+ * read-only restriction is enforced by the permission engine, so this text can
+ * never be the reason a write is blocked (or allowed).
+ */
+function renderRunModeGuidance(mode: AgentRunRequest["mode"]): string {
+  if (mode === "readonly") {
+    return "运行模式：只读。本次运行只做查看与诊断。写入、部署、重启等会改变目标的操作已被权限引擎直接拒绝，不要尝试绕过或改用别的工具达到同样目的。把结论讲清楚，并把需要用户自行执行的操作明确列出来。";
+  }
+  if (mode === "plan") {
+    return "运行模式：计划。本次运行只做调查，然后给出一份可执行的计划，不要执行任何变更 —— 改变目标的操作已被权限引擎直接拒绝。计划要具体到命令与顺序，说明每步的预期结果和风险，并指出哪些步骤不可逆。";
+  }
+  return "运行模式：目标。本次运行以完成用户的目标为准，可以持续推进多步直到达成。需要批准的操作照常等待用户批准，不要因为等待而放弃目标。";
 }
 
 function renderPermissionGuidance(mode: AgentRunRequest["permissionMode"]): string {
