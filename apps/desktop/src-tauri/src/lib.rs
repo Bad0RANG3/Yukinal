@@ -69,6 +69,7 @@ pub fn run() {
             commands::provider::provider_save_openai,
             commands::provider::provider_activate,
             commands::provider::provider_models,
+            commands::provider::provider_test,
             commands::server::server_snapshot,
             commands::services::server_services,
             commands::logs::server_logs,

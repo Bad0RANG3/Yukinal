@@ -1,4 +1,6 @@
 import { AgentPanel } from "../features/agent/AgentPanel.js";
+import { GettingStarted } from "../features/onboarding/GettingStarted.js";
+import { useOnboardingStore } from "../features/onboarding/onboarding-store.js";
 import { RuntimeSettings } from "../features/settings/RuntimeSettings.js";
 import { ServerList } from "../features/servers/ServerList.js";
 import { TerminalPane } from "../features/terminal/TerminalPane.js";
@@ -50,6 +52,8 @@ export function AppShell() {
   const servers = useServers();
   const selectedServer = servers.data?.find((server) => server.id === selectedServerId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(() => !useOnboardingStore.getState().dismissed);
+  const closeGuide = () => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); };
   const [agentLayoutOpen, setAgentLayoutOpen] = useState(agentOpen);
   const [agentToggleVisible, setAgentToggleVisible] = useState(!agentOpen);
   const agentToggleRef = useRef<HTMLButtonElement>(null);
@@ -120,7 +124,7 @@ export function AppShell() {
                 title={meta.label}
                 aria-label={meta.label}
                 aria-current={primary === item ? "page" : undefined}
-                onClick={() => setPrimary(item)}
+                onClick={() => { setPrimary(item); if (guideOpen) closeGuide(); }}
                 className={`rail-button ${primary === item ? "rail-button-active" : ""}`}
               >
                 <span className="rail-icon" aria-hidden="true">
@@ -143,6 +147,7 @@ export function AppShell() {
             <h1 title={selectedServer?.name}>{primary === "servers" ? selectedServer?.name ?? "基础设施" : PRIMARY_NAV_META[primary].label}</h1>
           </div>
           <div className="workspace-header-meta">
+            <button type="button" className="button-secondary" aria-expanded={guideOpen} onClick={() => guideOpen ? closeGuide() : setGuideOpen(true)}>使用引导</button>
             {primary === "servers" ? <button type="button" className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "关闭服务器列表" : "打开服务器列表"} aria-controls="server-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><Icon name="servers" size="md" /></button> : null}
             {!isDesktopShell() ? <span className="preview-chip">预览模式</span> : selectedServer && primary === "servers" ? <span className={`context-chip server-status-${selectedServer.status}`}>{SERVER_STATUS_LABEL[selectedServer.status]}</span> : null}
             {!agentOpen && agentToggleVisible ? (
@@ -162,7 +167,7 @@ export function AppShell() {
           </div>
         </header>
 
-        {primary === "servers" ? (
+        {primary === "servers" && !guideOpen ? (
           <div className="server-tabs" role="tablist" aria-label="服务器视图">
             {SERVER_PAGES.map((page, index) => (
               <button
@@ -184,11 +189,13 @@ export function AppShell() {
           </div>
         ) : null}
 
-        <div ref={workspaceContentRef} className="workspace-content" id={primary === "servers" ? "server-view" : undefined} role={primary === "servers" ? "tabpanel" : undefined} aria-labelledby={primary === "servers" ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
-          {primary === "settings" ? <RuntimeSettings /> : null}
-          {primary === "projects" ? <ProjectsPane /> : null}
-          {primary === "activity" ? <ActivityFeed /> : null}
-          {primary === "servers" ? (
+        <div ref={workspaceContentRef} className="workspace-content" id={primary === "servers" ? "server-view" : undefined} role={primary === "servers" && !guideOpen ? "tabpanel" : undefined} aria-labelledby={primary === "servers" && !guideOpen ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
+          {guideOpen ? <GettingStarted onClose={closeGuide} /> : null}
+          <div hidden={guideOpen} className="workspace-pages">
+          {primary === "settings" && !guideOpen ? <RuntimeSettings /> : null}
+          {primary === "projects" && !guideOpen ? <ProjectsPane /> : null}
+          {primary === "activity" && !guideOpen ? <ActivityFeed /> : null}
+          {primary === "servers" && !guideOpen ? (
             <>
               {serverPage === "overview" ? <ServerOverview key={selectedServerId} /> : null}
               {serverPage === "files" ? <RemoteFilesPane key={selectedServerId} /> : null}
@@ -198,6 +205,7 @@ export function AppShell() {
             </>
           ) : null}
           <div hidden={!terminalActive} className="terminal-container"><TerminalPane key={selectedServerId} active={terminalActive} /></div>
+          </div>
         </div>
       </main>
 

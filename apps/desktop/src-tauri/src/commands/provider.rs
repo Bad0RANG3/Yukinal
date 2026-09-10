@@ -239,6 +239,33 @@ pub async fn provider_models(
     Ok(ProviderModelsResponse { models })
 }
 
+/// 用一次真实的最小生成请求验证 provider 能通：端点、凭据、模型、接口类型。
+///
+/// 参数只带 `providerId`，配置和密钥都在 Rust 侧取出（密钥绝不经过 IPC 往返），
+/// 期望的回复内容由 sidecar 判定，这里只负责把结论和原因带回 UI。
+#[tauri::command]
+pub async fn provider_test(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Value, String> {
+    let provider = state
+        .database
+        .providers()
+        .get_ai(&provider_id)
+        .map_err(|error| error.to_string())?;
+    let api_key = resolve_api_key(&state, &provider)?;
+    let provider_config = runtime_provider_config(&provider, &provider.model, api_key, 30_000);
+    state
+        .supervisor
+        .request(
+            "provider.test",
+            provider_config,
+            std::time::Duration::from_secs(35),
+        )
+        .await
+        .map_err(|error| format!("模型测试失败：{error}"))
+}
+
 /// 解析 provider 的 apiKey：SQLite 里只有 credentialRef，材料在 OS keychain。
 ///
 /// 密钥在使用点解析，绝不写进 provider 行、日志或 IPC 参数之外的任何地方。

@@ -259,6 +259,10 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ providerId: z.string().min(1) }),
     response: z.strictObject({ models: z.array(ProviderModelOptionSchema) }),
   },
+  provider_test: {
+    params: z.strictObject({ providerId: z.string().min(1) }),
+    response: z.strictObject({ ok: z.literal(true) }),
+  },
 } satisfies IpcCommandSchemaMap;
 
 /**

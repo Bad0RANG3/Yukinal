@@ -211,7 +211,8 @@ function ProviderSettings() {
   );
 }
 
-function ProviderEditor({ provider, existingProviderIds, onSaved }: { provider?: AiProviderConfig; existingProviderIds: Set<string>; onSaved: (response: { provider: AiProviderConfig }) => void }) {
+/** Shared with the first-use guide, which hosts its own draft and provider list. */
+export function ProviderEditor({ provider, existingProviderIds, onSaved }: { provider?: AiProviderConfig; existingProviderIds: Set<string>; onSaved: (response: { provider: AiProviderConfig }) => void }) {
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
   const [providerId, setProviderId] = useState(provider?.id ?? "");

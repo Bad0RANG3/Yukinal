@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createServer } from "node:http";
 
 import {
   AGENT_METHODS,
@@ -35,6 +36,65 @@ async function withRuntime(): Promise<{ runtime: Runtime; initialize: () => Prom
 function silentLogger(): AgentLogger {
   const noop = (): void => {};
   return { debug: noop, info: noop, warn: noop, error: noop, child: () => silentLogger() };
+}
+
+for (const dialect of ["chat", "responses"] as const) {
+  test(`provider test makes a real ${dialect} request without tools or workspace content`, async () => {
+    let seenPath: string | undefined;
+    let seenBody: Record<string, unknown> = {};
+    const server = createServer(async (req, res) => {
+      seenPath = req.url;
+      let raw = "";
+      for await (const chunk of req) raw += chunk.toString();
+      seenBody = JSON.parse(raw);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const event = dialect === "chat"
+        ? { choices: [{ delta: { content: "OK" }, finish_reason: "stop" }] }
+        : { type: "response.output_text.delta", delta: "OK" };
+      res.end(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      const { runtime, initialize } = await withRuntime();
+      await initialize();
+      const result = await runtime.router.handle(request(AGENT_METHODS.providerTest, {
+        kind: "openai-compatible",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, model: "test-model", wireApi: dialect,
+      }));
+      assert.deepEqual(result, { ok: true });
+      assert.equal(seenPath, dialect === "chat" ? "/v1/chat/completions" : "/v1/responses");
+      assert.equal(seenBody.model, "test-model");
+      assert.equal(seenBody.tools, undefined);
+      assert.ok(JSON.stringify(seenBody).includes("Reply with OK only."));
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+}
+
+for (const outcome of ["unauthorized", "empty", "failed"] as const) {
+  test(`provider test rejects ${outcome} responses without exposing response bodies`, async () => {
+    let requests = 0;
+    const server = createServer((_req, res) => {
+      requests++;
+      res.writeHead(outcome === "unauthorized" ? 401 : 200, { "content-type": "text/event-stream" });
+      res.end(outcome === "unauthorized" ? "private-upstream-details" : outcome === "empty"
+        ? "data: [DONE]\n\n"
+        : 'data: {"type":"response.failed","error":{"message":"private-upstream-details"}}\n\n');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      const { runtime, initialize } = await withRuntime();
+      await initialize();
+      await assert.rejects(runtime.router.handle(request(AGENT_METHODS.providerTest, {
+        kind: "openai-compatible",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, model: "test-model", wireApi: "responses",
+      })), (error: Error) => !error.message.includes("private-upstream-details"));
+      assert.equal(requests, 1);
+    } finally { server.closeAllConnections(); server.close(); }
+  });
 }
 
 test("initialize negotiates the protocol version", async () => {

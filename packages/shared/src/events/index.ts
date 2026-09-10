@@ -4,6 +4,9 @@
  *
  * Rust -> UI events travel over Tauri's event system; agent -> UI events are
  * mapped from `AgentStreamEvent` onto the same names so the UI has one code path.
+ *
+ * These are logical names: `tauriEventName` below is the single place that turns
+ * them into the channel Tauri actually accepts.
  */
 
 import type { Activity } from "../types/activity.js";

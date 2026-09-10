@@ -646,3 +646,15 @@ fn mcp_server_round_trip() {
     assert_eq!(list[0].args.as_ref().expect("args").len(), 2);
     assert!(!list[0].enabled);
 }
+
+/// 旧的 `rename_all = "lowercase"` 曾经把 kind 落成 `openaicompatible`，而 `kind` 是
+/// TEXT 列、没有迁移改写它：已经存过的行必须还读得进来。写出的一律是
+/// `openai-compatible`，那条由 `commands::provider` 的用例守住。
+#[test]
+fn provider_kind_still_reads_the_legacy_lowercase_spelling() {
+    use yukinal_database::models::AiProviderKind;
+    assert_eq!(
+        serde_json::from_str::<AiProviderKind>("\"openaicompatible\"").unwrap(),
+        AiProviderKind::OpenaiCompatible
+    );
+}

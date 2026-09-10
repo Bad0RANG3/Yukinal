@@ -15,7 +15,7 @@
  */
 
 import type { ChatMessage, ChatSession } from "@yukinal/shared";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { isDesktopShell } from "../../lib/ipc.js";
@@ -69,7 +69,15 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     onApprovalRequested: () => setAgentOpen(true),
   });
 
-  const [prompt, setPrompt] = useState("");
+  // 草稿和「正在跑」放在 workspace store 里，是因为首次使用引导要先替用户填好
+  // 输入框、并避免覆盖正在进行的任务 —— 两者都是跨面板的事实，不只是本组件状态。
+  const prompt = useWorkspaceStore((state) => state.agentDraft);
+  const setPrompt = useWorkspaceStore((state) => state.setAgentDraft);
+  const setAgentBusy = useWorkspaceStore((state) => state.setAgentBusy);
+  useEffect(() => {
+    setAgentBusy(run.running);
+    return () => setAgentBusy(false);
+  }, [run.running, setAgentBusy]);
   const [runContext, setRunContext] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const follow = useFeedFollow(agentOpen, run.entries);

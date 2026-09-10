@@ -450,7 +450,10 @@ pub struct Identity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AiProviderKind {
-    #[serde(rename = "openai-compatible")]
+    /// 写出去的一律是前端契约里的 `openai-compatible`；`openaicompatible` 是旧的
+    /// `rename_all = "lowercase"` 曾经落盘的拼写，`kind` 是 TEXT 列且没有迁移改写它，
+    /// 所以只放宽读取，避免升级后旧行直接反序列化失败。
+    #[serde(rename = "openai-compatible", alias = "openaicompatible")]
     OpenaiCompatible,
 }
 
