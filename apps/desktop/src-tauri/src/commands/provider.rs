@@ -1,8 +1,6 @@
 //! AI provider 配置命令：设置页写入 provider_configs 行；apiKey 只进 OS keychain，
 //! SQLite 只存 credentialRef（不落盘、不进日志）。
 
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -36,13 +34,6 @@ pub struct ProviderListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSaveResponse {
     pub provider: AiProviderConfig,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderAutoImportResponse {
-    pub imported: usize,
-    pub providers: Vec<AiProviderConfig>,
 }
 
 /// Build the sidecar provider payload without serializing absent optional values
@@ -81,281 +72,6 @@ pub async fn provider_list(state: State<'_, AppState>) -> Result<ProviderListRes
     Ok(ProviderListResponse { providers })
 }
 
-/// Scan local OpenCode/Codex/CC Switch configuration once the desktop starts.
-///
-/// Import IDs are deterministic, so repeated launches update the same rows instead
-/// of creating a new provider on every boot. Existing user-selected providers stay
-/// active; an imported provider is activated only when no provider is active yet.
-#[tauri::command]
-pub async fn provider_import_auto(
-    state: State<'_, AppState>,
-) -> Result<ProviderAutoImportResponse, String> {
-    provider_import_auto_inner(&state)
-}
-
-/// Native startup path uses the same importer as the UI command. Keeping one
-/// implementation prevents a desktop launch from depending on React having
-/// already mounted before credentials are synchronized.
-pub(crate) fn provider_import_auto_inner(
-    state: &AppState,
-) -> Result<ProviderAutoImportResponse, String> {
-    let home = user_home()?;
-    let had_active = state
-        .database
-        .providers()
-        .list_ai()
-        .map_err(|error| error.to_string())?
-        .iter()
-        .any(|provider| provider.enabled);
-    let mut active = had_active;
-    let mut imported = Vec::new();
-
-    if let Ok(providers) = yukinal_core::opencode::read_opencode(&home) {
-        for provider in providers {
-            let api_key = provider.api_key().map(str::to_string);
-            let next = upsert_imported(
-                state,
-                ImportedProvider {
-                    source: "opencode",
-                    source_id: provider.id,
-                    name: provider.name,
-                    base_url: provider.base_url,
-                    model: provider.model,
-                    wire_api: provider.wire_api.as_str().to_string(),
-                    api_key,
-                    custom_headers: provider.custom_headers,
-                    models: provider
-                        .models
-                        .into_iter()
-                        .map(|model| ProviderModelOption {
-                            id: model.id,
-                            label: model.label,
-                            context_window: model.context_window,
-                            supports_tool_calling: true,
-                            supports_streaming: true,
-                        })
-                        .collect(),
-                },
-            )?;
-            if !active {
-                activate_only(state, &next.id)?;
-                active = true;
-            }
-            imported.push(next);
-        }
-    }
-
-    if let Ok(providers) = yukinal_core::ccswitch::read_codex(&home) {
-        for provider in providers {
-            let api_key = provider.api_key().map(str::to_string);
-            let next = upsert_imported(
-                state,
-                ImportedProvider {
-                    source: "codex",
-                    source_id: provider.id,
-                    name: provider.name,
-                    base_url: provider.base_url,
-                    model: provider.model,
-                    wire_api: provider.wire_api.as_str().to_string(),
-                    api_key,
-                    custom_headers: BTreeMap::new(),
-                    models: provider
-                        .models
-                        .into_iter()
-                        .map(|model| ProviderModelOption {
-                            id: model.id,
-                            label: model.label,
-                            context_window: model.context_window,
-                            supports_tool_calling: model.supports_tool_calling,
-                            supports_streaming: model.supports_streaming,
-                        })
-                        .collect(),
-                },
-            )?;
-            if !active {
-                activate_only(state, &next.id)?;
-                active = true;
-            }
-            imported.push(next);
-        }
-    }
-
-    if let Ok(providers) = yukinal_core::ccswitch::read_ccswitch(&home) {
-        for provider in providers {
-            let api_key = provider.api_key().map(str::to_string);
-            let next = upsert_imported(
-                state,
-                ImportedProvider {
-                    source: "ccswitch",
-                    source_id: provider.id,
-                    name: provider.name,
-                    base_url: provider.base_url,
-                    model: provider.model,
-                    wire_api: provider.wire_api.as_str().to_string(),
-                    api_key,
-                    custom_headers: BTreeMap::new(),
-                    models: provider
-                        .models
-                        .into_iter()
-                        .map(|model| ProviderModelOption {
-                            id: model.id,
-                            label: model.label,
-                            context_window: model.context_window,
-                            supports_tool_calling: model.supports_tool_calling,
-                            supports_streaming: model.supports_streaming,
-                        })
-                        .collect(),
-                },
-            )?;
-            if !active {
-                activate_only(state, &next.id)?;
-                active = true;
-            }
-            imported.push(next);
-        }
-    }
-
-    // Older databases could contain more than one enabled row. The Agent resolves
-    // one provider per run, so leave the data in the same single-active state as
-    // the explicit activate/save commands before returning it to the UI.
-    normalize_active_provider(state)?;
-
-    if !imported.is_empty() {
-        record_user_activity(
-            state,
-            None,
-            ActivityType::Configuration,
-            "已自动导入本地 AI 配置",
-            None,
-            ActivityOutcome::Success,
-        )?;
-    }
-
-    Ok(ProviderAutoImportResponse {
-        imported: imported.len(),
-        providers: imported,
-    })
-}
-
-struct ImportedProvider {
-    source: &'static str,
-    source_id: String,
-    name: String,
-    base_url: String,
-    model: String,
-    wire_api: String,
-    api_key: Option<String>,
-    custom_headers: BTreeMap<String, String>,
-    models: Vec<ProviderModelOption>,
-}
-
-fn upsert_imported(state: &AppState, input: ImportedProvider) -> Result<AiProviderConfig, String> {
-    let existing = state
-        .database
-        .providers()
-        .list_ai()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|provider| provider.id == imported_id(input.source, &input.source_id));
-    let id = existing
-        .as_ref()
-        .map(|provider| provider.id.clone())
-        .unwrap_or_else(|| imported_id(input.source, &input.source_id));
-    let api_key_credential_ref = match input.api_key {
-        Some(key) if !key.trim().is_empty() => {
-            let account = format!("{}_{}", input.source, credential_account(&input.source_id));
-            let reference = state
-                .credentials
-                .set("openai", &account, &Secret::from_utf8(key))
-                .map_err(|error| error.to_string())?;
-            Some(reference.to_string_ref())
-        }
-        _ => existing
-            .as_ref()
-            .and_then(|provider| provider.api_key_credential_ref.clone()),
-    };
-    let now = yukinal_core::sidecar::iso8601_now();
-    let imported_headers = sanitize_imported_custom_headers(&input.custom_headers);
-    let provider = AiProviderConfig {
-        id,
-        kind: AiProviderKind::OpenaiCompatible,
-        label: input.name,
-        base_url: input.base_url.trim_end_matches('/').to_string(),
-        model: input.model,
-        api_key_credential_ref,
-        enabled: existing
-            .as_ref()
-            .map(|provider| provider.enabled)
-            .unwrap_or(false),
-        // Authentication material from imported config must go through the OS
-        // credential store. Persist only an allowlist of non-secret metadata headers.
-        custom_headers: imported_headers.or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|provider| sanitize_custom_headers(provider.custom_headers.as_ref()))
-        }),
-        max_input_tokens: existing
-            .as_ref()
-            .and_then(|provider| provider.max_input_tokens),
-        wire_api: input.wire_api,
-        models: (!input.models.is_empty())
-            .then_some(input.models)
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|provider| provider.models.clone())
-            }),
-        created_at: existing
-            .as_ref()
-            .map(|provider| provider.created_at.clone())
-            .unwrap_or_else(|| now.clone()),
-        updated_at: now,
-    };
-    state
-        .database
-        .providers()
-        .upsert_ai(&provider)
-        .map_err(|error| error.to_string())?;
-    Ok(provider)
-}
-
-fn imported_id(source: &str, source_id: &str) -> String {
-    let mut slug = String::new();
-    for character in source_id.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-        } else if !slug.ends_with('_') {
-            slug.push('_');
-        }
-    }
-    while slug.ends_with('_') {
-        slug.pop();
-    }
-    let slug = if slug.is_empty() {
-        "provider"
-    } else {
-        slug.as_str()
-    };
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in source_id.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("prv_{source}_{slug}_{hash:016x}")
-}
-
-fn credential_account(source_id: &str) -> String {
-    let mut account = String::new();
-    for character in source_id.chars() {
-        if character.is_ascii_alphanumeric() {
-            account.push(character.to_ascii_lowercase());
-        } else if !account.ends_with('_') {
-            account.push('_');
-        }
-    }
-    account.trim_matches('_').chars().take(80).collect()
-}
-
 /// 保存 OpenAI-compatible provider。apiKey 给了就换一份（进 keychain）；不给就保留
 /// 旧引用（不然每次保存都要重新粘贴 key）。
 #[tauri::command]
@@ -370,6 +86,27 @@ pub async fn provider_save_openai(
     wire_api: Option<String>,
     models: Option<Vec<ProviderModelOption>>,
 ) -> Result<ProviderSaveResponse, String> {
+    let requested_id = provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(id) = requested_id {
+        if !id
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+            || !id.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || character == '-'
+                    || character == '_'
+            })
+        {
+            return Err(
+                "Provider ID 只能使用小写字母、数字、连字符和下划线，且首字符不能是符号。".into(),
+            );
+        }
+    }
     let existing = state
         .database
         .providers()
@@ -377,8 +114,7 @@ pub async fn provider_save_openai(
         .map_err(|error| error.to_string())?
         .into_iter()
         .find(|provider| {
-            provider_id
-                .as_deref()
+            requested_id
                 .map(|id| provider.id == id)
                 .unwrap_or(provider.enabled)
         });
@@ -386,13 +122,14 @@ pub async fn provider_save_openai(
     let id = existing
         .as_ref()
         .map(|provider| provider.id.clone())
+        .or_else(|| requested_id.map(str::to_string))
         .unwrap_or_else(|| crate::commands::server::next_id("prv"));
 
     let api_key_credential_ref = match api_key {
         Some(key) if !key.trim().is_empty() => {
             let reference = state
                 .credentials
-                .set("openai", "default", &Secret::from_utf8(key))
+                .set("openai", &format!("provider_{id}"), &Secret::from_utf8(key))
                 .map_err(|error| error.to_string())?;
             Some(reference.to_string_ref())
         }
@@ -449,129 +186,6 @@ pub async fn provider_save_openai(
 }
 
 // ---------------------------------------------------------------------------
-// CC Switch 导入（第三方供应商切换工具，如 codex 的 My Codex）
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CcSwitchImportListResponse {
-    pub providers: Vec<serde_json::Value>,
-}
-
-/// 列出 cc-switch 里可导入的候选。**绝不返回 apiKey**：key 在 apply 时才
-/// 由 Rust 进程内取出并进 keychain。
-#[tauri::command]
-pub async fn provider_import_ccswitch(
-    _state: State<'_, AppState>,
-) -> Result<CcSwitchImportListResponse, String> {
-    let home = user_home()?;
-    let providers =
-        yukinal_core::ccswitch::read_ccswitch(&home).map_err(|error| error.to_string())?;
-
-    let items: Vec<serde_json::Value> = providers
-        .into_iter()
-        .map(|provider| {
-            let models = provider.models;
-            serde_json::json!({
-                "id": provider.id,
-                "name": provider.name,
-                "baseUrl": provider.base_url.clone(),
-                "model": provider.model.clone(),
-                "wireApi": provider.wire_api.as_str(),
-                "hasApiKey": provider.has_api_key,
-                "models": models,
-            })
-        })
-        .collect();
-    Ok(CcSwitchImportListResponse { providers: items })
-}
-
-/// 应用一个候选：Rust 读 key → keychain；SQLite 只存 provider 行（含 wireApi）。
-#[tauri::command]
-pub async fn provider_import_ccswitch_apply(
-    state: State<'_, AppState>,
-    cc_switch_provider_id: String,
-) -> Result<ProviderSaveResponse, String> {
-    let home = user_home()?;
-    let providers =
-        yukinal_core::ccswitch::read_ccswitch(&home).map_err(|error| error.to_string())?;
-    let found = providers
-        .into_iter()
-        .find(|provider| provider.id == cc_switch_provider_id)
-        .ok_or_else(|| format!("cc-switch 中没有 `{cc_switch_provider_id}`（可能已被删除）"))?;
-
-    let api_key_credential_ref = match found.api_key() {
-        Some(key) => {
-            // Each imported provider gets its own keychain account. Reusing a
-            // fixed account would make importing provider B silently replace
-            // provider A's credential reference.
-            let account = format!(
-                "ccswitch_{}",
-                cc_switch_provider_id.replace([':', '/'], "_")
-            );
-            let reference = state
-                .credentials
-                .set("openai", &account, &Secret::from_utf8(key.to_string()))
-                .map_err(|error| error.to_string())?;
-            Some(reference.to_string_ref())
-        }
-        None => None,
-    };
-
-    let now = yukinal_core::sidecar::iso8601_now();
-    let provider = AiProviderConfig {
-        id: crate::commands::server::next_id("prv"),
-        kind: AiProviderKind::OpenaiCompatible,
-        label: found.name.clone(),
-        base_url: found.base_url.trim_end_matches('/').to_string(),
-        model: found.model.clone(),
-        api_key_credential_ref,
-        enabled: true,
-        custom_headers: None,
-        max_input_tokens: None,
-        wire_api: match found.wire_api {
-            yukinal_core::ccswitch::WireApi::Responses => "responses".into(),
-            yukinal_core::ccswitch::WireApi::Chat => "chat".into(),
-        },
-        models: Some(
-            found
-                .models
-                .iter()
-                .map(|model| ProviderModelOption {
-                    id: model.id.clone(),
-                    label: model.label.clone(),
-                    context_window: model.context_window,
-                    supports_tool_calling: model.supports_tool_calling,
-                    supports_streaming: model.supports_streaming,
-                })
-                .collect(),
-        ),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    state
-        .database
-        .providers()
-        .upsert_ai(&provider)
-        .map_err(|error| error.to_string())?;
-    activate_only(&state, &provider.id)?;
-    record_user_activity(
-        &state,
-        None,
-        ActivityType::Configuration,
-        "已导入 CC Switch Provider",
-        None,
-        ActivityOutcome::Success,
-    )?;
-    Ok(ProviderSaveResponse { provider })
-}
-
-fn user_home() -> Result<std::path::PathBuf, String> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| "无法确定用户目录（USERPROFILE/HOME 均缺失）".to_string())
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelsResponse {
@@ -625,12 +239,19 @@ pub async fn provider_models(
     Ok(ProviderModelsResponse { models })
 }
 
-fn resolve_api_key(
+/// 解析 provider 的 apiKey：SQLite 里只有 credentialRef，材料在 OS keychain。
+///
+/// 密钥在使用点解析，绝不写进 provider 行、日志或 IPC 参数之外的任何地方。
+///
+/// 这里同时是 `agent_run.rs` 的出处：两个模块原本各有一份行为完全相同的副本，
+/// 而「没有 credentialRef 是合法状态、不是错误」这条规则（本地端点如 Ollama
+/// 不需要 key）只应该有一个实现，否则两份副本很容易在这条规则上分叉。
+pub(crate) fn resolve_api_key(
     state: &AppState,
     provider: &AiProviderConfig,
 ) -> Result<Option<String>, String> {
     let Some(reference) = provider.api_key_credential_ref.as_deref() else {
-        return Ok(None);
+        return Ok(None); // 本地端点（Ollama 等）不需要 key
     };
     let reference = CredentialRef::parse(reference).map_err(|error| error.to_string())?;
     let secret = state
@@ -689,103 +310,6 @@ pub async fn provider_activate(
             ..selected
         },
     })
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalCodexImportListResponse {
-    pub providers: Vec<serde_json::Value>,
-}
-
-#[tauri::command]
-pub async fn provider_import_codex(
-    _state: State<'_, AppState>,
-) -> Result<LocalCodexImportListResponse, String> {
-    let providers =
-        yukinal_core::ccswitch::read_codex(&user_home()?).map_err(|error| error.to_string())?;
-    Ok(LocalCodexImportListResponse {
-        providers: providers
-            .into_iter()
-            .map(|provider| {
-                serde_json::json!({
-                    "id": provider.id,
-                    "name": provider.name,
-                    "baseUrl": provider.base_url,
-                    "model": provider.model,
-                    "wireApi": provider.wire_api.as_str(),
-                    "hasApiKey": provider.has_api_key,
-                    "models": provider.models,
-                })
-            })
-            .collect(),
-    })
-}
-
-#[tauri::command]
-pub async fn provider_import_codex_apply(
-    state: State<'_, AppState>,
-    codex_provider_id: String,
-    model: Option<String>,
-) -> Result<ProviderSaveResponse, String> {
-    let providers =
-        yukinal_core::ccswitch::read_codex(&user_home()?).map_err(|error| error.to_string())?;
-    let found = providers
-        .into_iter()
-        .find(|provider| provider.id == codex_provider_id)
-        .ok_or_else(|| format!("本地 Codex 配置中没有 `{codex_provider_id}`"))?;
-    let api_key_credential_ref = found
-        .api_key()
-        .map(|key| {
-            state
-                .credentials
-                .set("openai", "codex_local", &Secret::from_utf8(key.to_string()))
-                .map(|reference| reference.to_string_ref())
-                .map_err(|error| error.to_string())
-        })
-        .transpose()?;
-    let now = yukinal_core::sidecar::iso8601_now();
-    let provider = AiProviderConfig {
-        id: crate::commands::server::next_id("prv"),
-        kind: AiProviderKind::OpenaiCompatible,
-        label: found.name,
-        base_url: found.base_url,
-        model: model.unwrap_or(found.model),
-        api_key_credential_ref,
-        enabled: true,
-        custom_headers: None,
-        max_input_tokens: None,
-        wire_api: found.wire_api.as_str().to_string(),
-        models: Some(
-            found
-                .models
-                .into_iter()
-                .map(|model| ProviderModelOption {
-                    id: model.id,
-                    label: model.label,
-                    context_window: model.context_window,
-                    supports_tool_calling: model.supports_tool_calling,
-                    supports_streaming: model.supports_streaming,
-                })
-                .collect(),
-        ),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    state
-        .database
-        .providers()
-        .upsert_ai(&provider)
-        .map_err(|error| error.to_string())?;
-    activate_only(&state, &provider.id)?;
-    record_user_activity(
-        &state,
-        None,
-        ActivityType::Configuration,
-        "已导入本地 Codex Provider",
-        None,
-        ActivityOutcome::Success,
-    )?;
-    Ok(ProviderSaveResponse { provider })
 }
 
 fn activate_only(state: &AppState, provider_id: &str) -> Result<(), String> {
@@ -864,19 +388,6 @@ pub(crate) fn normalize_active_provider(state: &AppState) -> Result<(), String> 
     Ok(())
 }
 
-/// Custom headers are for non-secret gateway metadata only. Secrets in an imported
-/// `Authorization`, `X-Api-Key`, cookie, or arbitrary header must never land in
-/// SQLite; the dedicated API-key credential reference is the sole credential path.
-fn sanitize_imported_custom_headers(
-    headers: &BTreeMap<String, String>,
-) -> Option<serde_json::Map<String, Value>> {
-    let values = headers
-        .iter()
-        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
-        .collect::<serde_json::Map<_, _>>();
-    sanitize_custom_headers(Some(&values))
-}
-
 fn sanitize_custom_headers(
     headers: Option<&serde_json::Map<String, Value>>,
 ) -> Option<serde_json::Map<String, Value>> {
@@ -944,6 +455,14 @@ mod tests {
     };
     use serde_json::{json, Value};
     use yukinal_database::models::{AiProviderConfig, AiProviderKind};
+
+    #[test]
+    fn ai_provider_kind_uses_shared_wire_spelling() {
+        assert_eq!(
+            serde_json::to_value(AiProviderKind::OpenaiCompatible).unwrap(),
+            json!("openai-compatible")
+        );
+    }
 
     fn provider(id: &str, enabled: bool) -> AiProviderConfig {
         AiProviderConfig {

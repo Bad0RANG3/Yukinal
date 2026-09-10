@@ -9,9 +9,8 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::State;
 
-use crate::commands::provider::runtime_provider_config;
+use crate::commands::provider::{resolve_api_key, runtime_provider_config};
 use crate::state::AppState;
-use yukinal_credentials::{CredentialRef, CredentialStore};
 use yukinal_database::models::AiProviderConfig;
 
 #[derive(Debug, serde::Deserialize)]
@@ -63,25 +62,6 @@ fn resolve_provider(
         })
 }
 
-/// 解析 apiKey：SQLite 里只有 credentialRef，材料在 OS keychain（使用点解析）。
-fn resolve_api_key(
-    state: &AppState,
-    provider: &AiProviderConfig,
-) -> Result<Option<String>, String> {
-    let Some(ref_) = &provider.api_key_credential_ref else {
-        return Ok(None); // 本地端点（Ollama 等）不需要 key
-    };
-    let reference = CredentialRef::parse(ref_).map_err(|error| error.to_string())?;
-    let secret = state
-        .credentials
-        .get(&reference)
-        .map_err(|error| error.to_string())?;
-    secret
-        .as_utf8()
-        .map(|value| Some(value.into_owned()))
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_run_start(
@@ -98,6 +78,9 @@ pub async fn agent_run_start(
     workspace_id: Option<String>,
     focus_server_id: Option<String>,
     permission_mode: Option<String>,
+    // Run mode (readonly / plan / goal). Forwarded verbatim: the sidecar's
+    // permission engine owns the meaning, so Rust must not reinterpret it.
+    mode: Option<String>,
 ) -> Result<RunStartResponse, String> {
     // Repair legacy databases before resolving the provider. The UI normally does
     // this through provider_list, but run.start must remain safe when invoked
@@ -158,6 +141,9 @@ pub async fn agent_run_start(
     }
     if let Some(permission_mode) = permission_mode {
         params["permissionMode"] = json!(permission_mode);
+    }
+    if let Some(mode) = mode {
+        params["mode"] = json!(mode);
     }
     let response = state
         .supervisor
