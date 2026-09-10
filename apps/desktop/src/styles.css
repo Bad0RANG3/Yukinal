@@ -60,6 +60,27 @@
   --info: #b0b0b0;
   --card-radius: 14px;
   --control-radius: 8px;
+
+  /* 语义色。这套界面刻意保持灰阶文字：颜色只作为边框与底色的浅染色出现，
+     前景沿用 --success / --warning / --danger 的灰阶值，因此状态区分靠
+     底色与描边，而不是靠刺眼的彩色文字。
+     在这里集中定义，改动配色不必再去逐条替换散落的 hex。 */
+  --ok-line: #315a52;
+  --ok-surface: #102621;
+  --warn-line: #655531;
+  --warn-surface: #211c11;
+  --danger-line: #673b42;
+  --danger-surface: #241417;
+  /* 输入控件的聚焦描边：比一般描边更亮，用来补偿灰阶主题下焦点环不显眼。 */
+  --focus-line: #477d71;
+  --focus-halo: #78dfc51a;
+  /* Agent 输入区刻意比工作区略亮一档，让「正在输入」的地方自己浮起来。 */
+  --composer-bg: #151719;
+  --composer-surface: #292a2c;
+  --composer-line: #343638;
+  --composer-accent: #ed72ae;
+  --composer-accent-hover: #f38abd;
+
   --font-ui: "JetBrains Mono", "JetBrains Mono NL", "Cascadia Mono", Consolas, "Microsoft YaHei UI", "Microsoft YaHei", monospace;
   --font-terminal: "JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
 }
@@ -102,7 +123,30 @@ button:disabled {
   min-width: 980px;
   background: var(--bg);
   /* Keep legacy page primitives and terminal ANSI output in the same monochrome
-     contract while their individual selectors are migrated to the gray palette. */
+     contract while their individual selectors are migrated to the gray palette.
+
+     Measured consequences of leaving this in place, so the trade-off is not
+     re-litigated from memory:
+
+     - It suppresses 66 non-neutral colour literals, not just leftovers. Those
+       include deliberately semantic ones — #34d399 (success), #f87171 (error),
+       #7faed8 (info), the amber warning family, the translucent diff tints
+       (#67d39a1c / #ee7f811c) and the ANSI colours this comment names — plus the
+       design tokens --composer-accent (#ed72ae) and --focus-line (#477d71). So
+       this is a broad desaturation, not dead scaffolding: removing it is a visual
+       redesign, not a cleanup.
+     - It has NO layout effect. `filter` does make the element a containing block
+       for `position: fixed` descendants, which matters because the <=1150px rules
+       make .agent-panel / .agent-scrim / .server-sidebar / .sidebar-scrim fixed.
+       But .app-shell is a border-less, full-viewport grid, so its padding box
+       equals the viewport and every offset resolves identically. Verified by
+       measuring each fixed descendant's rect with the filter present and removed
+       at a 1000x760 viewport: zero geometry change.
+     - It does NOT cause a contrast failure. On .agent-send-button (white text on
+       --composer-accent) it actually helps slightly: 3.19:1 grayscaled vs 2.76:1
+       unfiltered. Both miss WCAG AA (4.5:1) for 11px text, so that button has a
+       real contrast problem — but it is caused by white-on-pink, not by this
+       filter, and it needs the text colour changed rather than the filter removed. */
   filter: grayscale(1);
 }
 
@@ -163,9 +207,12 @@ button:disabled {
   color: var(--accent);
 }
 
+/* `.rail-icon` used to hold a text glyph, which is why this rule once carried a
+   font-size. Icons are SVG now and the size lives in the `ICON_SIZE` scale, so
+   the wrapper only has to be a centring box. */
 .rail-icon {
-  font-size: 18px;
-  line-height: 1;
+  display: grid;
+  place-items: center;
 }
 
 .server-sidebar {
@@ -175,18 +222,7 @@ button:disabled {
   border-right: 1px solid var(--line);
   background: #0f1419;
   padding: 23px 16px 14px;
-}
-
-.server-sidebar-header,
-.server-list-meta,
-.workspace-header,
-.section-heading,
-.metric-card-topline,
-.identity-line,
-.agent-header,
-.agent-title,
-.composer-row,
-.approval-heading {
+}.server-sidebar-header, .server-list-meta, .workspace-header, .section-heading, .metric-card-topline, .identity-line, .agent-header, .agent-title, .approval-heading{
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -219,6 +255,10 @@ button:disabled {
   font-size: 17px;
 }
 
+/* A fixed square that centres one icon. The `font-size`/`line-height` pair this
+   rule used to carry was for the text glyphs that predated the SVG icon set;
+   with the icon contract in place the grid does the centring and no glyph
+   metrics are involved. */
 .icon-button {
   display: grid;
   width: 30px;
@@ -228,8 +268,6 @@ button:disabled {
   border-radius: 7px;
   background: var(--panel-raised);
   color: var(--muted);
-  font-size: 20px;
-  line-height: 1;
 }
 
 .icon-button:hover {
@@ -464,7 +502,7 @@ button:disabled {
   border: 0;
   background: transparent;
   color: var(--faint);
-  padding: 13px 1px 12px;
+  padding: 13px 1px;
   font-size: 12px;
 }
 
@@ -717,8 +755,6 @@ button:disabled {
   place-items: center;
   border: 1px solid currentColor;
   border-radius: 50%;
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .attention-panel strong,
@@ -831,7 +867,6 @@ button:disabled {
   border-radius: 9px;
   background: #15332f;
   color: var(--accent);
-  font-size: 17px;
 }
 
 .empty-state h2 {
@@ -858,7 +893,6 @@ button:disabled {
 .compact-empty .empty-state-mark {
   width: 28px;
   height: 28px;
-  font-size: 14px;
 }
 
 .compact-empty p {
@@ -882,12 +916,8 @@ button:disabled {
   border-radius: 7px;
   background: linear-gradient(90deg, #13191f, #192128, #13191f);
   background-size: 200% 100%;
+  /* Keyframes live in the motion layer at the end of this file. */
   animation: shimmer 1.4s ease-in-out infinite;
-}
-
-@keyframes shimmer {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
 }
 
 .loading-panel,
@@ -922,11 +952,8 @@ button:disabled {
   border: 2px solid var(--line-strong);
   border-top-color: var(--accent);
   border-radius: 50%;
+  /* Keyframes live in the motion layer at the end of this file. */
   animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 .error-panel {
@@ -945,20 +972,6 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
-.agent-panel {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  border-left: 1px solid var(--line);
-  background: #0f1419;
-}
-
-.agent-header {
-  min-height: 74px;
-  border-bottom: 1px solid var(--line);
-  padding: 0 18px;
-}
-
 .agent-title {
   justify-content: flex-start;
   gap: 10px;
@@ -966,18 +979,6 @@ button:disabled {
 
 .agent-header h2 {
   font-size: 16px;
-}
-
-.agent-orb {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border: 1px solid #34786b;
-  border-radius: 50%;
-  background: #15332f;
-  color: var(--accent);
-  font-size: 14px;
 }
 
 .agent-status {
@@ -1004,16 +1005,6 @@ button:disabled {
   box-shadow: 0 0 0 4px #63d8c41c;
 }
 
-.agent-feed {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 12px;
-  overflow: auto;
-  padding: 18px;
-}
-
 .agent-empty {
   display: flex;
   flex: 1;
@@ -1023,18 +1014,6 @@ button:disabled {
   justify-content: center;
   color: var(--muted);
   text-align: center;
-}
-
-.agent-empty-mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid #31554f;
-  border-radius: 50%;
-  background: #15332f;
-  color: var(--accent);
-  font-size: 19px;
 }
 
 .agent-empty strong {
@@ -1049,16 +1028,6 @@ button:disabled {
   color: var(--faint);
   font-size: 11px;
   line-height: 1.5;
-}
-
-.agent-notice {
-  border: 1px solid #6f5a32;
-  border-radius: 6px;
-  background: #292217;
-  color: var(--warning);
-  padding: 9px;
-  font-size: 10px;
-  line-height: 1.45;
 }
 
 .agent-entry {
@@ -1077,13 +1046,6 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.agent-entry-user {
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel-raised);
-  padding: 10px;
-}
-
 .agent-entry-user .entry-label {
   color: var(--accent);
 }
@@ -1093,6 +1055,30 @@ button:disabled {
   padding: 0 2px;
 }
 
+/* 应用自己说的话（例如 /help）。刻意做得比 Agent 的回复更轻、更像旁注，
+   以免读者把它当成模型输出。 */
+.agent-entry-system {
+  color: var(--muted);
+  padding: 0 2px;
+}
+
+.agent-entry-system .entry-label {
+  color: var(--faint);
+}
+
+.agent-entry-system-text {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 一次工具调用就是一张卡片：<details> 同时承载「调用了什么」与「结果如何」。
+   默认展开（open 写在 JSX 上），因为这个面板的意义就是可追溯 —— 把结果
+   藏进一次点击之后，等于让审计变难。左侧色条表达这一步的结局。 */
 .tool-card {
   display: flex;
   flex-direction: column;
@@ -1102,12 +1088,29 @@ button:disabled {
   padding: 9px 10px;
 }
 
-.tool-card-call {
-  border-left-color: var(--accent);
+.tool-card > summary {
+  cursor: pointer;
+  list-style: none;
 }
 
-.tool-card-result {
-  border-left-color: var(--success);
+/* 去掉浏览器默认的三角标记：状态色已经说明了这一步的结局，
+   再堆一个与内容无关的箭头只会增加噪声。 */
+.tool-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-card > summary::marker {
+  content: "";
+}
+
+.tool-card-running { border-left-color: var(--warn-line); }
+.tool-card-success { border-left-color: var(--ok-line); }
+.tool-card-failed { border-left-color: var(--danger-line); }
+.tool-card-cancelled { border-left-color: var(--line-strong); }
+
+/* 执行中的卡片轻微脉动，表示「还在等结果」。 */
+.tool-card-running > summary .tool-status {
+  animation: pulse-ring 1.8s ease-in-out infinite;
 }
 
 .tool-card code,
@@ -1175,10 +1178,7 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.approval-button,
-.composer-button {
+}.approval-button{
   border-radius: 5px;
   padding: 6px 9px;
   font-size: 10px;
@@ -1194,101 +1194,11 @@ button:disabled {
   border: 1px solid #b58a3b;
   background: var(--warning);
   color: #241d10;
-}
-
-.agent-composer {
-  border-top: 1px solid var(--line);
-  padding: 13px 14px 15px;
-}
-
-.composer-meta {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+}.composer-permission-standalone {
   margin-bottom: 8px;
-  min-width: 0;
-}
-
-.composer-permission {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 5px;
-  color: var(--faint);
-  font-size: 10px;
-}
-
-.composer-permission-standalone {
-  margin-bottom: 8px;
-}
-
-.composer-select {
-  min-width: 0;
-  max-width: 58%;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: #0b1014;
-  color: var(--muted);
-  padding: 5px 7px;
-  font-size: 10px;
-}
-
-.composer-permission-select {
+}.composer-permission-select {
   max-width: 100%;
-}
-
-.composer-model {
-  overflow: hidden;
-  color: var(--faint);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-row {
-  align-items: stretch;
-  gap: 7px;
-}
-
-.composer-input {
-  min-width: 0;
-  flex: 1;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  outline: 0;
-  background: #0b1014;
-  color: var(--text);
-  padding: 8px 9px;
-  font-size: 11px;
-}
-
-.composer-input:focus {
-  border-color: #3b766d;
-}
-
-.composer-input::placeholder {
-  color: var(--faint);
-}
-
-.composer-button {
-  flex: 0 0 auto;
-  padding-inline: 12px;
-}
-
-.composer-button-send {
-  border: 1px solid #4a9b8b;
-  background: var(--accent);
-  color: #0b211d;
-  font-weight: 650;
-}
-
-.composer-button-stop {
-  border: 1px solid #704044;
-  background: transparent;
-  color: var(--danger);
-}
-
-.server-row-main {
+}.server-row-main {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1326,7 +1236,7 @@ button:disabled {
 .activity-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 9px; background: rgba(9, 14, 18, .46); overflow: hidden; }
 .activity-row { display: flex; gap: 13px; padding: 16px 18px; border-bottom: 1px solid rgba(39, 50, 54, .72); }
 .activity-row:last-child { border-bottom: 0; }
-.activity-type-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #34524d; border-radius: 7px; color: #92c8bc; background: rgba(55, 112, 99, .16); font-size: 14px; }
+.activity-type-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #34524d; border-radius: 7px; color: #92c8bc; background: rgba(55, 112, 99, .16); }
 .activity-type-configuration { color: #b5b4df; border-color: #4a4a72; background: rgba(89, 85, 146, .16); }
 .activity-type-agent_action { color: #e1c58a; border-color: #6b5732; background: rgba(130, 95, 32, .16); }
 .activity-type-health { color: #8fc6dc; border-color: #31596a; background: rgba(43, 111, 140, .16); }
@@ -1469,6 +1379,44 @@ select:focus-visible {
   color: #f4fbf8;
 }
 
+/* ── Icon contract ────────────────────────────────────────────────────────
+   Every icon is one <svg class="icon"> on a 24×24 viewBox, drawn at a step of
+   the `ICON_SIZE` scale in components/Icon.tsx. Three rules keep icons
+   optically centred no matter which control they land in.
+
+   1. An icon is a block and never flexes. Left inline, an SVG sits on the
+      text baseline and inherits the line box's descender space, which is what
+      makes an icon read a pixel or two high next to its own label once the
+      row's `align-items` stops applying.
+
+   2. A control that contains nothing but an icon has zero padding. Chromium's
+      user-agent sheet gives every <button> `padding: 1px 6px`. On a 25px or
+      28px square that padding shrinks the content box below the icon's own
+      width; the icon then overflows its grid track and drifts off-centre by
+      half the overflow — 2.5px on the Agent settings trigger, 2px on the
+      history search clear, 1px on the history delete, 0.5px on the
+      collapsed-panel toggle. The content box must be the icon's box.
+
+   3. Vertical padding on a rail item or tab stays symmetric, so the icon and
+      its label share one optical centre instead of being pulled apart by an
+      asymmetric pair such as 12px over 11px.
+
+   These are grouped in one place on purpose: the failure mode is invisible in
+   review and only shows up as a half-pixel drift in the running app. */
+.icon {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.icon-button,
+.agent-composer-tool,
+.server-row-actions button,
+.search-clear,
+.agent-history-search > button,
+.agent-history-delete {
+  padding: 0;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -1535,7 +1483,7 @@ select:focus-visible {
   gap: 6px;
   border-radius: 9px;
   color: var(--faint);
-  padding: 9px 3px 8px;
+  padding: 9px 3px;
   transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
@@ -1546,8 +1494,8 @@ select:focus-visible {
 }
 
 .rail-button-active {
-  border-color: #315a52;
-  background: #102621;
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
   color: var(--accent);
 }
 
@@ -1591,8 +1539,8 @@ select:focus-visible {
 }
 
 .server-search:focus-within {
-  border-color: #477d71;
-  box-shadow: 0 0 0 3px #78dfc51a;
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
 }
 
 .server-list-meta {
@@ -1616,8 +1564,8 @@ select:focus-visible {
 }
 
 .server-list-item .server-row.server-row-selected {
-  border-color: #315a52;
-  background: #102621;
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
 }
 
 .server-row-main {
@@ -1694,20 +1642,20 @@ select:focus-visible {
 }
 
 .env-badge-production {
-  border-color: #673b42;
-  background: #241417;
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
   color: var(--danger);
 }
 
 .env-badge-staging {
-  border-color: #655531;
-  background: #211c11;
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
   color: var(--warning);
 }
 
 .env-badge-development {
-  border-color: #315a52;
-  background: #102621;
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
   color: var(--success);
 }
 
@@ -1764,9 +1712,9 @@ select:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid #315a52;
+  border: 1px solid var(--ok-line);
   border-radius: 999px;
-  background: #102621;
+  background: var(--ok-surface);
   color: var(--accent);
   padding: 5px 9px;
   font-size: 10px;
@@ -1779,7 +1727,7 @@ select:focus-visible {
 
 .agent-toggle-inline:hover {
   border-color: var(--accent);
-  background: #102621;
+  background: var(--ok-surface);
 }
 
 .server-tabs {
@@ -1795,7 +1743,7 @@ select:focus-visible {
   align-items: center;
   flex-shrink: 0;
   gap: 6px;
-  padding: 12px 1px 11px;
+  padding: 12px 1px;
 }
 
 .workspace-content {
@@ -1861,7 +1809,7 @@ select:focus-visible {
 
 .icon-button-accent {
   border-color: #3b806f;
-  background: #102621;
+  background: var(--ok-surface);
 }
 
 .icon-button:hover,
@@ -1880,7 +1828,7 @@ select:focus-visible {
 .inline-error {
   border-color: #693d43;
   border-radius: 9px;
-  background: #241417;
+  background: var(--danger-surface);
 }
 
 .text-button-danger {
@@ -1978,8 +1926,8 @@ select:focus-visible {
 
 .empty-state-mark,
 .agent-empty-mark {
-  border-color: #315a52;
-  background: #102621;
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
 }
 
 .empty-state h2 {
@@ -2030,6 +1978,9 @@ select:focus-visible {
 }
 
 .agent-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
   border-left: 1px solid var(--line);
   background: var(--surface-1);
 }
@@ -2040,7 +1991,7 @@ select:focus-visible {
 
 .agent-header {
   min-height: 72px;
-  border-bottom-color: var(--line);
+  border-bottom: 1px solid var(--line);
   padding: 0 16px;
 }
 
@@ -2056,18 +2007,24 @@ select:focus-visible {
 }
 
 .agent-orb {
-  border-color: #3b806f;
-  background: #102621;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid #3b806f;
+  border-radius: 50%;
+  background: var(--ok-surface);
+  color: var(--accent);
 }
 
 .agent-feed {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
   gap: 10px;
+  overflow: auto;
   padding: 16px;
-}
-
-.agent-empty-mark {
-  display: grid;
-  place-items: center;
 }
 
 .agent-entry,
@@ -2078,8 +2035,10 @@ select:focus-visible {
 }
 
 .agent-entry-user {
-  border-color: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 7px;
   background: var(--surface-3);
+  padding: 10px;
 }
 
 .agent-entry-text {
@@ -2139,7 +2098,6 @@ select:focus-visible {
 
 .risk-badge,
 .decision-badge,
-.tool-result-status,
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -2155,7 +2113,6 @@ select:focus-visible {
 .risk-low,
 .decision-auto,
 .decision-source,
-.tool-result-success,
 .status-badge-success,
 .settings-status-ready {
   color: var(--success);
@@ -2166,41 +2123,39 @@ select:focus-visible {
 .decision-auto,
 .decision-source,
 .status-badge-success {
-  border-color: #315a52;
-  background: #102621;
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
 }
 
 .risk-medium,
 .risk-high,
-.decision-ask,
-.tool-result-cancelled {
+.decision-ask {
   color: var(--warning);
-  border-color: #655531;
-  background: #211c11;
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
 }
 
 .risk-critical,
-.decision-deny,
-.tool-result-failed {
+.decision-deny {
   color: var(--danger);
-  border-color: #673b42;
-  background: #241417;
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
 }
 
-.tool-result-success {
-  border-left-color: var(--success);
-}
-
-.tool-result-failed,
-.tool-result-cancelled {
-  border-left-color: currentColor;
-}
-
-.tool-result-status {
+/* 工具卡片上的结局文字：贴右显示，颜色沿用语义前景。 */
+.tool-status {
+  display: inline-flex;
+  align-items: center;
   margin-left: auto;
-  border: 0;
-  padding-right: 0;
+  font-size: 10px;
+  line-height: 1.1;
+  white-space: nowrap;
 }
+
+.tool-status-running { color: var(--warning); }
+.tool-status-success { color: var(--success); }
+.tool-status-failed { color: var(--danger); }
+.tool-status-cancelled { color: var(--muted); }
 
 .tool-result-copy {
   display: block;
@@ -2210,33 +2165,16 @@ select:focus-visible {
 }
 
 .approval-card {
-  border-color: #655531;
-  background: #211c11;
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
 }
 
 .approval-icon {
   display: grid;
   place-items: center;
-}
-
-.approval-button,
-.composer-button {
+}.approval-button{
   border-radius: var(--control-radius);
-}
-
-.composer-select,
-.composer-input {
-  border-color: var(--line);
-  border-radius: var(--control-radius);
-  background: var(--surface-2);
-}
-
-.composer-input:focus {
-  border-color: #477d71;
-  box-shadow: 0 0 0 3px #78dfc51a;
-}
-
-.settings-page {
+}.settings-page {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2261,8 +2199,8 @@ select:focus-visible {
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  border: 1px solid #655531;
-  background: #211c11;
+  border: 1px solid var(--warn-line);
+  background: var(--warn-surface);
   color: var(--warning);
   padding: 11px 13px;
   font-size: 11px;
@@ -2360,6 +2298,14 @@ select:focus-visible {
   margin-top: 14px;
 }
 
+.settings-card-header-actions,
+.provider-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .settings-storage-note {
   color: var(--faint);
   font-size: 10px;
@@ -2424,8 +2370,8 @@ select:focus-visible {
 }
 
 .form-input:focus {
-  border-color: #477d71;
-  box-shadow: 0 0 0 3px #78dfc51a;
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
 }
 
 .form-input::placeholder {
@@ -2534,8 +2480,8 @@ select.form-input {
 }
 
 .provider-row-active {
-  border-color: #315a52;
-  background: #102621;
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
 }
 
 .provider-copy,
@@ -2913,19 +2859,14 @@ select.form-input {
 .terminal-page { min-height: 300px; }
 .section-heading h3, .overview-subtitle, .file-preview-panel h3 { overflow-wrap: anywhere; }
 .overview-hero, .identity-line { flex-wrap: wrap; gap: 12px; }
-.empty-icon { display: grid; place-items: center; width: 64px; height: 64px; margin-bottom: 20px; color: var(--accent); border: 1px solid #315a52; border-radius: 18px; background: #102621; }
+.empty-icon { display: grid; place-items: center; width: 64px; height: 64px; margin-bottom: 20px; color: var(--accent); border: 1px solid var(--ok-line); border-radius: 18px; background: var(--ok-surface); }
 .connection-empty .button-primary { margin-top: 20px; }
 .connection-empty small { color: var(--faint); line-height: 1.7; }
 .compact-empty { gap: 10px; padding: 24px 8px; }
 .file-preview-empty { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--faint); text-align: center; }
 .file-preview-empty p { margin-bottom: 5px; color: var(--muted); }
-.file-preview-empty small { line-height: 1.6; }
-
-/* A restrained hierarchy, with text sizes that follow the user's preference. */
-.form-input, .composer-input, .agent-entry, .muted-copy, .provider-name, .server-row-name { font-size: var(--ui-font-size, 13px); }
-.server-tab, .button-primary, .button-secondary, .secondary-button, .field-label, .server-row-detail,
-.settings-card-header p:last-child, .settings-page-heading > p:last-child, .settings-fact dd,
-.agent-empty p, .composer-select, .empty-state p { font-size: calc(var(--ui-font-size, 13px) - 1px); line-height: 1.65; }
+.file-preview-empty small { line-height: 1.6; }/* A restrained hierarchy, with text sizes that follow the user's preference. */
+.form-input, .agent-entry, .muted-copy, .provider-name, .server-row-name{ font-size: var(--ui-font-size, 13px); }.server-tab, .button-primary, .button-secondary, .secondary-button, .field-label, .server-row-detail, .settings-card-header p:last-child, .settings-page-heading > p:last-child, .settings-fact dd, .agent-empty p, .empty-state p{ font-size: calc(var(--ui-font-size, 13px) - 1px); line-height: 1.65; }
 .eyebrow, .server-row-env, .server-status-pill, .settings-storage-note, .agent-status, .agent-notice,
 .provider-meta, .form-hint, .section-note, .metric-hint, .server-facts dt { font-size: calc(var(--ui-font-size, 13px) - 2px); }
 .rail-button { font-size: 11px; }
@@ -2959,19 +2900,13 @@ select.form-input {
 .agent-context > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-context small { flex-shrink: 0; color: var(--faint); font-size: 10px; }
 .agent-empty strong { font-size: 16px; }
-.agent-empty-mark { width: 52px; height: 52px; border-radius: 16px; }
+.agent-empty-mark { display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--ok-line); border-radius: 16px; background: var(--ok-surface); color: var(--accent); }
 .agent-suggestions { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 24px; }
 .agent-suggestions button { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); padding: 11px 12px; text-align: left; font-size: 11px; }
 .agent-suggestions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-.agent-notice { border-color: var(--line); background: var(--surface-2); color: var(--muted); }
+.agent-notice { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); padding: 9px; line-height: 1.45; }
 .agent-notice-error { display: block; margin-top: 6px; color: var(--danger); overflow-wrap: anywhere; }
-.agent-retry { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); padding: 9px 10px; color: var(--muted); font-size: 11px; }
-.composer-row { align-items: flex-end; }
-.composer-input { display: block; resize: vertical; width: 100%; min-width: 0; min-height: 62px; max-height: 180px; padding: 10px 12px; line-height: 1.6; }
-.composer-button { flex-shrink: 0; min-height: 34px; }
-.composer-hint { display: flex; justify-content: space-between; gap: 8px; margin: 10px 0 0; color: var(--faint); font-size: 10px; }
-.composer-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.approval-target { overflow-wrap: anywhere; font-size: 11px; }
+.agent-retry { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); padding: 9px 10px; color: var(--muted); font-size: 11px; }.approval-target { overflow-wrap: anywhere; font-size: 11px; }
 .approval-resolved { color: var(--muted); font-size: 12px; }
 
 @container (max-width: 760px) {
@@ -3063,12 +2998,57 @@ select.form-input {
   }
 }
 
-/* Motion layer: quiet, functional movement for navigation and live data. */
+/* ═══ Motion layer ══════════════════════════════════════════════════════════
+   Movement in Yukinal answers exactly one question: what just changed? It is
+   not decoration. A list that settles tells you the list is new; a panel that
+   slides tells you where it came from; a pulse tells you the app is still
+   waiting on something. Anything that does not answer that question is not
+   animated.
+
+   The rules of the system:
+
+   - Only `opacity` and `transform` carry movement. Both are compositor-only,
+     so an animation never triggers layout or paint. The single exception is
+     the shell's `grid-template-columns`, which is the one thing that cannot be
+     expressed as a transform.
+
+   - Distance stays small. An element already on screen that enters from 10px
+     away reads as a jump; 6px reads as settling.
+
+   - Entrance is slower than exit. A user who dismisses a panel has already
+     decided, so it should get out of the way rather than linger.
+
+   - Every duration and easing comes from a token below. Scattered magic
+     numbers are how a motion system drifts out of tune.
+
+   - `prefers-reduced-motion` and the in-app reduce-motion preference both
+     flatten this entire layer; see the two blocks near the end of the file.
+   ═════════════════════════════════════════════════════════════════════════ */
+
 :root {
-  --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Five durations are enough. Shorter than `instant` reads as a glitch;
+     longer than `entrance` reads as latency. */
+  --motion-instant: 90ms;
   --motion-fast: 160ms;
   --motion-medium: 280ms;
+  --motion-slow: 380ms;
+  --motion-entrance: 520ms;
+
+  /* `ease` decelerates into place and is what almost everything entering
+     uses. `exit` accelerates away so a dismissal feels decisive. `spring`
+     overshoots slightly and is reserved for an element that should feel
+     physically attached to the pointer. */
+  --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --motion-lift: 6px;
+  --motion-slide: 16px;
+  --motion-stagger: 38ms;
+  --motion-press: scale(0.97);
 }
+
+/* ── Entrance ───────────────────────────────────────────────────────────── */
 
 @keyframes shell-enter {
   from { opacity: 0; transform: translateY(8px); }
@@ -3076,23 +3056,23 @@ select.form-input {
 }
 
 @keyframes view-enter {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(var(--motion-lift)); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes list-item-enter {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(var(--motion-lift)); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes panel-enter {
-  from { opacity: 0; transform: translateX(18px); }
+  from { opacity: 0; transform: translateX(var(--motion-slide)); }
   to { opacity: 1; transform: translateX(0); }
 }
 
 @keyframes panel-exit {
   from { opacity: 1; transform: translateX(0); }
-  to { opacity: 0; transform: translateX(18px); }
+  to { opacity: 0; transform: translateX(var(--motion-slide)); }
 }
 
 @keyframes scrim-enter {
@@ -3110,20 +3090,11 @@ select.form-input {
   to { opacity: 1; }
 }
 
-@keyframes icon-pop {
-  0% { transform: scale(0.84); }
-  65% { transform: scale(1.08); }
-  100% { transform: scale(1); }
-}
-
-@keyframes pulse-ring {
-  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 9%, transparent); }
-  50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent); }
-}
-
-@keyframes metric-fill-enter {
-  from { transform: scaleX(0); }
-  to { transform: scaleX(1); }
+/* A notice is inserted above live content, so it opens downward from its own
+   edge rather than lifting into place like a card. */
+@keyframes notice-enter {
+  from { opacity: 0; transform: translateY(calc(var(--motion-lift) * -1)); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes expand-enter {
@@ -3131,13 +3102,80 @@ select.form-input {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* An empty state is the whole answer to "what is here?", so it arrives with a
+   touch of scale instead of a slide. */
+@keyframes empty-enter {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ── Feedback ───────────────────────────────────────────────────────────── */
+
+@keyframes icon-pop {
+  0% { transform: scale(0.84); }
+  65% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+/* A rejected or failed action shakes once. One shake, not a loop: a repeating
+   shake is an alarm, and this is only a correction. */
+@keyframes deny-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
+/* A resolved approval confirms itself with a single brightening, because the
+   decision removes the buttons the user was aiming at. */
+@keyframes resolve-flash {
+  0% { background-color: var(--ok-surface); }
+  100% { background-color: transparent; }
+}
+
+/* ── Live and looping ───────────────────────────────────────────────────── */
+
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 9%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent); }
+}
+
+@keyframes soft-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.28; }
+}
+
+@keyframes metric-fill-enter {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+/* The streaming caret marks the one place in the feed that is still moving. */
+@keyframes caret-blink {
+  0%, 45% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .app-shell {
   position: relative;
   --shell-padding: 12px;
   user-select: text;
   -webkit-user-select: text;
-  animation: shell-enter 520ms var(--motion-ease) both;
-  transition: grid-template-columns 320ms var(--motion-ease);
+  animation: shell-enter var(--motion-entrance) var(--motion-ease) both;
+  /* The one transition in the app that cannot be a transform: collapsing the
+     Agent column changes the grid itself, and doing it with a transform would
+     leave the reclaimed space unusable. */
+  transition: grid-template-columns var(--motion-medium) var(--motion-ease);
 }
 
 /* The workspace is a reading surface: allow dragging across any visible copy
@@ -3172,7 +3210,7 @@ select.form-input {
 }
 
 .brand-mark {
-  animation: icon-pop 520ms var(--motion-ease) 90ms both;
+  animation: icon-pop var(--motion-entrance) var(--motion-ease) 90ms both;
   transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
 }
 
@@ -3183,6 +3221,10 @@ select.form-input {
   transform: translateY(-2px) rotate(-2deg);
 }
 
+.brand-mark:active {
+  transform: translateY(0) rotate(0);
+}
+
 .rail-button {
   transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
 }
@@ -3191,13 +3233,17 @@ select.form-input {
   transform: translateY(-1px);
 }
 
+.rail-button:active:not(:disabled) {
+  transform: translateY(0) var(--motion-press);
+}
+
 .rail-button-active .rail-icon {
-  animation: icon-pop 260ms var(--motion-ease) both;
+  animation: icon-pop var(--motion-medium) var(--motion-ease) both;
 }
 
 .workspace-header,
 .server-tabs {
-  animation: view-enter 360ms var(--motion-ease) both;
+  animation: view-enter var(--motion-slow) var(--motion-ease) both;
 }
 
 .workspace-header {
@@ -3212,26 +3258,44 @@ select.form-input {
   transition: color var(--motion-fast) ease;
 }
 
+/* The active underline is one element that scales, so moving between tabs
+   reads as the marker travelling rather than as two separate lines. */
 .server-tab::after {
   transform: scaleX(0);
   transform-origin: center;
   transition: transform var(--motion-medium) var(--motion-ease);
 }
 
-.server-tab-active::after {
+.server-tab:hover::after {
+  transform: scaleX(0.55);
+}
+
+.server-tab-active::after,
+.server-tab-active:hover::after {
   transform: scaleX(1);
 }
 
-.workspace-content > :not([hidden]) {
-  animation: view-enter 360ms var(--motion-ease) both;
+.server-tab:active:not(:disabled) {
+  transform: var(--motion-press);
 }
 
+.workspace-content > :not([hidden]) {
+  animation: view-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* Promote the three continuously re-rendered surfaces onto their own
+   compositor layers once, so the Agent column's width transition and the
+   feed's entrance animations do not repaint the whole shell. */
 .server-sidebar,
 .workspace-main,
 .agent-panel {
   transform: translateZ(0);
 }
 
+/* List and card entrances stagger so a populated view settles into place
+   instead of appearing all at once. The index is carried on a custom property
+   rather than hard-coded per rule, so every container shares one delay curve
+   and one place to retune it. */
 .server-list > li,
 .remote-file-list > li,
 .service-list > li,
@@ -3243,17 +3307,24 @@ select.form-input {
 .split-sections > .section-block,
 .settings-stack > .settings-card,
 .settings-page > .settings-card {
-  animation: list-item-enter 360ms var(--motion-ease) both;
-  animation-delay: calc(var(--stagger-index, 0) * 42ms);
+  animation: list-item-enter var(--motion-slow) var(--motion-ease) both;
+  animation-delay: calc(var(--stagger-index, 0) * var(--motion-stagger));
 }
 
-.server-list > li:nth-child(1), .remote-file-list > li:nth-child(1), .service-list > li:nth-child(1), .log-list > li:nth-child(1), .project-grid > li:nth-child(1), .activity-list > .activity-row:nth-child(1), .container-list > li:nth-child(1), .metric-grid > .metric-card:nth-child(1), .split-sections > .section-block:nth-child(1), .settings-stack > .settings-card:nth-child(1), .settings-page > .settings-card:nth-child(1) { --stagger-index: 0; }
-.server-list > li:nth-child(2), .remote-file-list > li:nth-child(2), .service-list > li:nth-child(2), .log-list > li:nth-child(2), .project-grid > li:nth-child(2), .activity-list > .activity-row:nth-child(2), .container-list > li:nth-child(2), .metric-grid > .metric-card:nth-child(2), .split-sections > .section-block:nth-child(2), .settings-stack > .settings-card:nth-child(2), .settings-page > .settings-card:nth-child(2) { --stagger-index: 1; }
-.server-list > li:nth-child(3), .remote-file-list > li:nth-child(3), .service-list > li:nth-child(3), .log-list > li:nth-child(3), .project-grid > li:nth-child(3), .activity-list > .activity-row:nth-child(3), .container-list > li:nth-child(3), .metric-grid > .metric-card:nth-child(3), .split-sections > .section-block:nth-child(3), .settings-stack > .settings-card:nth-child(3), .settings-page > .settings-card:nth-child(3) { --stagger-index: 2; }
-.server-list > li:nth-child(4), .remote-file-list > li:nth-child(4), .service-list > li:nth-child(4), .log-list > li:nth-child(4), .project-grid > li:nth-child(4), .activity-list > .activity-row:nth-child(4), .container-list > li:nth-child(4), .metric-grid > .metric-card:nth-child(4), .split-sections > .section-block:nth-child(4), .settings-stack > .settings-card:nth-child(4), .settings-page > .settings-card:nth-child(4) { --stagger-index: 3; }
-.server-list > li:nth-child(5), .remote-file-list > li:nth-child(5), .service-list > li:nth-child(5), .log-list > li:nth-child(5), .project-grid > li:nth-child(5), .activity-list > .activity-row:nth-child(5), .container-list > li:nth-child(5), .metric-grid > .metric-card:nth-child(5), .split-sections > .section-block:nth-child(5), .settings-stack > .settings-card:nth-child(5), .settings-page > .settings-card:nth-child(5) { --stagger-index: 4; }
-.server-list > li:nth-child(6), .remote-file-list > li:nth-child(6), .service-list > li:nth-child(6), .log-list > li:nth-child(6), .project-grid > li:nth-child(6), .activity-list > .activity-row:nth-child(6), .container-list > li:nth-child(6), .metric-grid > .metric-card:nth-child(6), .split-sections > .section-block:nth-child(6), .settings-stack > .settings-card:nth-child(6), .settings-page > .settings-card:nth-child(6) { --stagger-index: 5; }
+/* Only the first eight positions are indexed. Past that the delay would exceed
+   the animation itself and the tail of a long list would visibly lag, so later
+   items enter together with the eighth. */
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(1) { --stagger-index: 0; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(2) { --stagger-index: 1; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(3) { --stagger-index: 2; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(4) { --stagger-index: 3; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(5) { --stagger-index: 4; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(6) { --stagger-index: 5; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(7) { --stagger-index: 6; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(n + 8) { --stagger-index: 7; }
 
+/* Cards lift toward the pointer. The lift is 2px because these cards sit in a
+   grid: a larger offset would collide with the card above. */
 .metric-card,
 .section-block,
 .project-card,
@@ -3270,6 +3341,8 @@ select.form-input {
   transform: translateY(-2px);
 }
 
+/* Rows slide toward the pointer instead of lifting, because a row's job is to
+   say "this whole line is the target". */
 .server-row,
 .remote-file-row,
 .activity-row,
@@ -3292,14 +3365,32 @@ select.form-input {
   transform: translateX(2px);
 }
 
+.server-row:active,
+.remote-file-row:active,
+.provider-row:active,
+.source-item:active {
+  transform: translateX(2px) var(--motion-press);
+}
+
+/* Press feedback is the fastest thing in the system: it has to land inside the
+   same frame as the click to feel like the control moved under the finger. */
 .button-primary,
 .button-secondary,
 .secondary-button,
 .icon-button,
 .agent-toggle-inline,
-.composer-button,
-.approval-button {
-  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
+.approval-button,
+.agent-composer-tool,
+.server-row-actions button,
+.search-clear,
+.agent-history-tabs button,
+.agent-history-delete,
+.agent-send-button,
+.agent-stop-button,
+.composer-suggestion,
+.text-button,
+.icon-text-button {
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-instant) var(--motion-ease);
 }
 
 .button-primary:active:not(:disabled),
@@ -3307,11 +3398,41 @@ select.form-input {
 .secondary-button:active:not(:disabled),
 .icon-button:active:not(:disabled),
 .agent-toggle-inline:active:not(:disabled),
-.composer-button:active:not(:disabled),
-.approval-button:active:not(:disabled) {
-  transform: translateY(1px) scale(0.98);
+.approval-button:active:not(:disabled),
+.agent-composer-tool:active:not(:disabled),
+.server-row-actions button:active:not(:disabled),
+.search-clear:active:not(:disabled),
+.agent-history-tabs button:active:not(:disabled),
+.agent-history-delete:active:not(:disabled),
+.agent-send-button:active:not(:disabled),
+.agent-stop-button:active:not(:disabled),
+.composer-suggestion:active:not(:disabled) {
+  transform: var(--motion-press);
 }
 
+/* Text-only controls have no box to scale, so they lean on colour instead and
+   must not inherit a transform. */
+.text-button:active:not(:disabled),
+.icon-text-button:active:not(:disabled) {
+  transform: none;
+}
+
+/* Inputs settle their border and focus halo rather than snapping, which stops
+   the focus ring from flickering while tabbing through a form. */
+.form-input,
+.server-search,
+.agent-history-search,
+.server-form-fields input,
+.server-form-fields select,
+.server-form-fields textarea,
+.agent-model-select {
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+/* ── Live data ──────────────────────────────────────────────────────────── */
+
+/* A ring that expands and fades reads as "working on it" without moving any
+   pixels of layout, so it never disturbs the row it sits in. */
 .status-pulse {
   animation: pulse-ring 1.8s ease-in-out infinite;
 }
@@ -3321,16 +3442,23 @@ select.form-input {
   animation: pulse-ring 1.8s ease-in-out infinite;
 }
 
+/* The meter fills from the left on mount so a healthy server looks like it
+   settled rather than like it snapped to a value. */
 .metric-fill {
   transform: scaleX(0);
   transform-origin: left center;
   animation: metric-fill-enter 720ms var(--motion-ease) 180ms both;
 }
 
+/* ── Agent panel ────────────────────────────────────────────────────────── */
+
 .agent-panel:not(.agent-panel-hidden) {
-  animation: panel-enter 360ms var(--motion-ease) both;
+  animation: panel-enter var(--motion-slow) var(--motion-ease) both;
 }
 
+/* The closing panel is taken out of the grid and pinned over the space it is
+   vacating, so the workspace reclaims the column while the panel is still
+   sliding out. Both states keep four tracks to make that continuous. */
 .agent-panel.agent-panel-closing {
   position: absolute;
   z-index: 15;
@@ -3340,7 +3468,7 @@ select.form-input {
   width: 328px;
   min-width: 0;
   pointer-events: none;
-  animation: panel-exit 320ms var(--motion-ease) both;
+  animation: panel-exit var(--motion-medium) var(--motion-exit) both;
 }
 
 .agent-context,
@@ -3348,40 +3476,154 @@ select.form-input {
   transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
 }
 
+/* Feed entries arrive as they are appended during a run, staggered just enough
+   that a burst of tool calls reads as a sequence rather than a wall. */
 .agent-feed > :not(.agent-empty) {
-  animation: list-item-enter 300ms var(--motion-ease) both;
+  animation: list-item-enter var(--motion-medium) var(--motion-ease) both;
 }
 
-.agent-feed > :nth-child(2) { animation-delay: 35ms; }
-.agent-feed > :nth-child(3) { animation-delay: 70ms; }
-.agent-feed > :nth-child(4) { animation-delay: 105ms; }
-.agent-feed > :nth-child(5) { animation-delay: 140ms; }
-.agent-feed > :nth-child(6) { animation-delay: 175ms; }
+.agent-feed > :nth-child(n + 2) { animation-delay: var(--motion-stagger); }
+.agent-feed > :nth-child(n + 3) { animation-delay: calc(var(--motion-stagger) * 2); }
+.agent-feed > :nth-child(n + 4) { animation-delay: calc(var(--motion-stagger) * 3); }
+.agent-feed > :nth-child(n + 5) { animation-delay: calc(var(--motion-stagger) * 4); }
 
 .agent-empty-mark {
   animation: pulse-ring 2.6s ease-in-out infinite;
 }
 
-.activity-trace-detail,
-.agent-log-viewer {
-  animation: expand-enter 260ms var(--motion-ease) both;
+/* The caret marks the single place in the feed that is still moving. Without
+   it a slow model turn is indistinguishable from a stalled one. */
+.agent-entry-streaming .agent-entry-text::after {
+  display: inline-block;
+  width: 0.5em;
+  margin-left: 0.15em;
+  background: currentColor;
+  content: "";
+  height: 1em;
+  vertical-align: -0.15em;
+  animation: caret-blink 1s steps(1, end) infinite;
 }
 
+/* A resolved approval flashes once, because the decision removes the buttons
+   the user was aiming at and the card would otherwise look unchanged. */
+.approval-resolved {
+  animation: resolve-flash var(--motion-slow) var(--motion-ease) both;
+}
+
+/* A refused or failed action shakes once. A looping shake would be an alarm;
+   this is a correction. */
+.agent-error,
+.inline-error {
+  animation: deny-shake var(--motion-medium) var(--motion-ease) both;
+}
+
+/* Terminal I/O failure banner. An inline row rather than a panel: the terminal
+   below is still on screen and still worth reading, so this must not take over
+   the pane the way `error-panel` does. */
+.terminal-io-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--muted);
+  font-size: 12px;
+  animation: notice-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+.terminal-io-error > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.terminal-io-error > .icon {
+  color: var(--faint);
+}
+
+.terminal-io-error > button {
+  flex: 0 0 auto;
+}
+
+/* ── Overlays ───────────────────────────────────────────────────────────── */
+
+.activity-trace-detail,
+.agent-log-viewer {
+  animation: expand-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* The modal is a native <dialog>, so it has no exit animation: the browser
+   removes it from the top layer synchronously. Making the entrance slower than
+   the exit is what keeps the dismissal from feeling abrupt. */
 .server-modal[open] {
-  animation: modal-enter 300ms var(--motion-ease) both;
+  animation: modal-enter var(--motion-medium) var(--motion-ease) both;
 }
 
 .server-modal::backdrop {
-  animation: modal-backdrop-enter 220ms ease both;
+  animation: modal-backdrop-enter var(--motion-fast) ease both;
+}
+
+/* Panel-level notices are inserted above live content, so they drop in from
+   their own edge. */
+.agent-notice,
+.agent-retry {
+  animation: notice-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* Empty states are the whole answer to "what is here?", so they arrive with a
+   touch of scale instead of a slide. */
+.empty-state,
+.agent-empty,
+.agent-history-empty,
+/* Inline error text for the two panes that have not been migrated to
+   `.error-panel` yet (ActivityFeed's execution list, RemoteFilesPane's read
+   failure). Both emitted this class with no rule behind it, so the text rendered
+   as ordinary body copy. It is defined here so the class is at least honest;
+   folding these two sites into `.error-panel` is the real fix. */
+.error-copy {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.file-preview-empty,
+.loading-panel,
+.error-panel {
+  animation: empty-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* The settings trigger renders a plus in both states and rotates it 45° to
+   read as a close glyph. Swapping the drawing instead would give the eye
+   nothing to follow, and a 45° rotation is exactly what the close glyph is. */
+.agent-settings-trigger .icon {
+  transition: transform var(--motion-medium) var(--motion-spring);
+}
+
+.agent-settings-trigger.is-open .icon {
+  transform: rotate(45deg);
+}
+
+.agent-model-select .icon {
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+
+.agent-model-select:focus-within .icon {
+  transform: rotate(180deg);
 }
 
 @media (max-width: 820px) {
   .sidebar-open[data-primary="servers"] .server-sidebar {
-    animation: panel-enter 300ms var(--motion-ease) both;
+    animation: panel-enter var(--motion-medium) var(--motion-ease) both;
   }
 
   .sidebar-scrim {
-    animation: scrim-enter 220ms ease both;
+    animation: scrim-enter var(--motion-fast) ease both;
+  }
+
+  .agent-scrim {
+    animation: scrim-enter var(--motion-fast) ease both;
   }
 }
 
@@ -3457,5 +3699,735 @@ select.form-input {
 
   .welcome-steps {
     grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+}
+
+/* Agent composer: intentionally mirrors the compact single-card input in the
+   reference UI. Advanced task configuration stays out of the primary path. */
+.agent-composer {
+  border-top: 1px solid var(--line);
+  background: var(--composer-bg);
+  padding: 10px 12px 12px;
+}
+
+.agent-composer-shell {
+  position: relative;
+  display: flex;
+  min-height: 94px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid var(--composer-line);
+  border-radius: 18px;
+  background: var(--composer-surface);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 18%);
+  padding: 12px 9px 9px 14px;
+}
+
+.agent-composer-input {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  max-height: 120px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #f2f2f2;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.agent-composer-input::placeholder {
+  color: #77797c;
+}
+
+.agent-composer-input:focus::placeholder {
+  color: #8b8d90;
+}
+
+/* @ / 候选列表：浮在输入框上方，不挤动下面的工具条。
+   用 absolute 而不是插入文档流，否则每敲一个字弹窗出现/消失都会让整个
+   输入卡片跳动。 */
+.composer-suggestions {
+  position: absolute;
+  z-index: 20;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  max-height: 208px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--composer-line);
+  border-radius: 12px;
+  background: var(--composer-surface);
+  box-shadow: 0 14px 34px rgb(0 0 0 / 46%);
+}
+
+.composer-suggestion {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 11px;
+}
+
+.composer-suggestion.is-active:not(:disabled) {
+  background: var(--composer-bg);
+  color: var(--text);
+}
+
+.composer-suggestion:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.composer-suggestion-name {
+  flex: 0 0 auto;
+  color: var(--composer-accent);
+  font-weight: 600;
+}
+
+.composer-suggestion:disabled .composer-suggestion-name {
+  color: var(--faint);
+}
+
+.composer-suggestion-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-toolbar,
+.agent-composer-toolbar-left,
+.agent-composer-toolbar-right {
+  display: flex;
+  align-items: center;
+}
+
+.agent-composer-toolbar {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-composer-toolbar-left,
+.agent-composer-toolbar-right {
+  gap: 7px;
+  min-width: 0;
+}
+
+.agent-composer-toolbar-right {
+  justify-content: flex-end;
+}
+
+.agent-composer-tool {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #d6d7d8;
+}
+
+.agent-composer-tool:hover:not(:disabled) {
+  background: #3a3b3d;
+  color: #fff;
+}
+
+/* 这里原本是「帮我批准」勾选框。它把「请求批准」表达成「未勾选」，用户看到的
+   是一个空框，读不出「不勾 = 每次都会问你」；而「帮我批准」的勾选态又和
+   「已经批准了什么」混在一起。现在批准方式是设置面板里的两档选择。 */
+
+/* 当前运行状态的常驻摘要。不展开设置也能一眼看出这次运行会怎样 ——
+   模式是随请求发出的，用户必须能在按下发送前确认它。 */
+.agent-mode-summary,
+.agent-approval-summary {
+  overflow: hidden;
+  color: #a5a6a8;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-mode-summary {
+  border: 1px solid var(--composer-line);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+/* 只读类模式给一个明确的视觉标记：它改变的是「能不能改东西」，
+   和模型、批准方式不是一个层级的信息。 */
+.agent-mode-summary.is-readonly {
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
+  color: #e6e6e6;
+}
+
+.agent-approval-summary {
+  color: #8d8f92;
+}
+
+.agent-settings-trigger.is-open {
+  background: #3a3b3d;
+  color: #fff;
+}
+
+/* 「+」展开的设置面板：运行模式与批准方式。
+   用 absolute 浮在输入框上方，与候选列表同一层，避免撑动整个卡片。 */
+.agent-settings-panel {
+  position: absolute;
+  z-index: 21;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  display: flex;
+  max-height: 60vh;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  border: 1px solid var(--composer-line);
+  border-radius: 14px;
+  background: var(--composer-surface);
+  box-shadow: 0 16px 38px rgb(0 0 0 / 50%);
+  padding: 12px;
+}
+
+.agent-settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-settings-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.agent-settings-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-settings-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-settings-option {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--composer-bg);
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.agent-settings-option:hover:not(:disabled) {
+  border-color: var(--focus-line);
+}
+
+.agent-settings-option.is-selected {
+  border-color: var(--composer-accent);
+  background: #2b2c2e;
+}
+
+.agent-settings-option:disabled {
+  opacity: 0.55;
+}
+
+.agent-settings-option-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.agent-settings-option.is-selected .agent-settings-option-label {
+  color: #fff;
+}
+
+/* 「不改动」标记：只读类模式的选项上直接写清楚它意味着什么。 */
+.agent-settings-badge {
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-surface);
+  color: #dcdcdc;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.agent-settings-option-note {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-settings-option.is-selected .agent-settings-option-note {
+  color: var(--muted);
+}
+
+/* 模型选择器从 10px 纯文本提权为明确的控件：它是「这次运行用哪个模型」
+   的唯一指示，之前小到几乎看不见，用户无从确认自己选的是什么。 */
+.agent-model-select {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--composer-line);
+  border-radius: 999px;
+  background: var(--composer-bg);
+  color: #efefef;
+  padding: 3px 7px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.agent-model-select:hover {
+  border-color: var(--focus-line);
+}
+
+/* 这里曾经写死 outline: 0，而它与全局 input/select 的 focus-visible 规则
+   优先级相同，且全局规则在源码中更靠前 —— 结果是键盘用户 Tab 到模型选择器
+   时看不到任何焦点指示。灰阶主题下这尤其致命，因为颜色本身不提供线索。 */
+.agent-model-select select {
+  max-width: 118px;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: #efefef;
+  cursor: pointer;
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-model-select select:focus-visible {
+  outline: 2px solid var(--focus-line);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.agent-model-select select option {
+  background: var(--composer-surface);
+  color: #efefef;
+}
+
+.agent-model-empty {
+  max-width: 100px;
+  overflow: hidden;
+  color: #96989a;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 发送按钮：只在有内容时出现，且不再兼任停止。
+   原来发送与停止共用一个图标按钮，导致「没有输入」和「正在运行」都表现为
+   一个禁用的图标 —— 鼠标悬停只看到「禁止」，既点不动也说不清原因。
+   现在它是一枚有文字的按钮，出现即代表真的能发。 */
+.agent-send-button {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--composer-accent);
+  color: #fff;
+  padding: 5px 14px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.agent-send-button:hover:not(:disabled) {
+  background: var(--composer-accent-hover);
+}
+
+.agent-send-button:disabled {
+  opacity: 0.42;
+}
+
+/* 停止条：只在运行中出现，和发送按钮互斥，各自都有文字说明。
+   中断是安全功能 —— 它不能藏在一个「看着像禁用」的图标后面。 */
+.agent-running-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--composer-line);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.agent-running-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-running-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--composer-accent);
+  /* `soft-pulse` is the motion layer's one looping opacity animation. */
+  animation: soft-pulse 1.4s ease-in-out infinite;
+}
+
+.agent-stop-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--danger-line);
+  border-radius: 999px;
+  background: var(--danger-surface);
+  color: #efefef;
+  padding: 4px 11px;
+  font-size: 10px;
+}
+
+.agent-stop-button:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.agent-stop-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agent-composer-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+@media (max-width: 480px) {
+  .agent-composer {
+    padding: 8px;
+  }
+
+  .agent-composer-shell {
+    min-height: 92px;
+    border-radius: 16px;
+    padding-left: 12px;
+  }
+
+  .agent-model-select select {
+    max-width: 86px;
+  }
+}
+
+/* Agent history: searchable local sessions stay inside the same panel so a
+   user can move between a live task and its durable record without changing
+   workspace context. */
+.agent-history-toggle.is-active {
+  border-color: var(--focus-line);
+  background: #15332f;
+  color: var(--accent);
+}
+
+.agent-history-pane {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 11px;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.agent-history-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-history-heading h3 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.agent-history-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-history-new {
+  min-height: 28px;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.agent-history-search {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #0a0f13;
+  color: var(--faint);
+  padding: 0 9px;
+}
+
+.agent-history-search:focus-within {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
+}
+
+.agent-history-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.agent-history-search input::placeholder {
+  color: var(--faint);
+}
+
+.agent-history-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.agent-history-search > button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  color: var(--faint);
+}
+
+.agent-history-search > button:hover {
+  color: var(--text);
+}
+
+.agent-history-tabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-history-tabs button {
+  border-bottom: 2px solid transparent;
+  color: var(--faint);
+  padding: 7px 9px;
+  font-size: 10px;
+}
+
+.agent-history-tabs button:hover {
+  color: var(--text);
+}
+
+.agent-history-tabs button.is-selected {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.agent-history-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 7px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.agent-history-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  padding: 9px;
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease;
+}
+
+.agent-history-item:hover,
+.agent-history-item.is-active {
+  border-color: var(--focus-line);
+  background: #12221f;
+}
+
+.agent-history-item-open {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.agent-history-item-top {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-history-item-top strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-history-item-top time {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.agent-history-item-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.agent-history-item-meta {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.agent-history-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-height: 22px;
+}
+
+.agent-history-item-actions .text-button {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.agent-history-item-actions .text-button:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.agent-history-delete {
+  width: 24px;
+  height: 24px;
+  color: var(--faint);
+}
+
+.agent-history-delete:hover:not(:disabled) {
+  border-color: #704044;
+  background: #291a1d;
+  color: var(--danger);
+}
+
+.agent-history-empty {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--faint);
+  text-align: center;
+}
+
+.agent-history-empty > svg {
+  color: var(--accent);
+}
+
+.agent-history-empty strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.agent-history-empty p {
+  max-width: 230px;
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-history-error {
+  border: 1px solid #704044;
+  border-radius: 7px;
+  background: #291a1d;
+  color: var(--danger);
+  padding: 8px 9px;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.agent-history-error-inline {
+  margin: 0 12px 10px;
+}
+
+.agent-history-archived {
+  flex: 0 0 auto;
+  margin: 0 16px;
+}
+
+@media (max-width: 480px) {
+  .agent-history-pane {
+    padding: 11px;
+  }
+
+  .agent-history-new {
+    padding-inline: 7px;
+  }
+
+  .agent-history-item-top {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
   }
 }

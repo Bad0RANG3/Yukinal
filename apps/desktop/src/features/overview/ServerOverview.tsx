@@ -111,7 +111,7 @@ export function ServerOverview() {
   if (!selectedServerId || !server) {
     return (
       <div className="empty-state page-empty">
-        <Icon name="servers" size={24} />
+        <Icon name="servers" size="xl" />
         <h2>选择一台服务器</h2>
         <p>从左侧列表选择目标环境，查看实时健康状态与运行中的容器。</p>
       </div>
@@ -120,12 +120,12 @@ export function ServerOverview() {
 
   if (server.status !== "connected") {
     return <div className="empty-state page-empty connection-empty">
-      <span className="empty-icon"><Icon name="connect" size={26} /></span>
+      <span className="empty-icon"><Icon name="connect" size="xxl" /></span>
       <EnvBadge environment={server.metadata.environment} serverName={server.name} />
       <h2>{server.name}</h2>
       <p>{server.connection.username}@{server.connection.host}:{server.connection.port}</p>
       <small>建立 SSH 连接后，查看系统资源与服务状态。</small>
-      <button type="button" className="button-primary" disabled={busy || server.status === "connecting"} onClick={() => action.mutate({ type: "connect", serverId: server.id })}><Icon name="connect" size={15} />{busy || server.status === "connecting" ? "正在连接…" : "连接服务器"}</button>
+      <button type="button" className="button-primary" disabled={busy || server.status === "connecting"} onClick={() => action.mutate({ type: "connect", serverId: server.id })}><Icon name="connect" size="md" />{busy || server.status === "connecting" ? "正在连接…" : "连接服务器"}</button>
       {action.isError ? <p className="form-error" role="alert">{action.error.message}</p> : null}
     </div>;
   }
@@ -143,7 +143,7 @@ export function ServerOverview() {
   if (!snapshotQuery.data) {
     return (
       <div className="error-panel">
-        <div className="error-panel-icon"><Icon name="warning" size={16} /></div>
+        <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取服务器状态</strong>
           <p>{snapshotQuery.error instanceof Error ? snapshotQuery.error.message : String(snapshotQuery.error)}</p>
@@ -196,7 +196,7 @@ function OverviewContent({
           </p>
         </div>
         <button type="button" className="secondary-button refresh-button" onClick={onRefresh} disabled={refreshing} title="刷新服务器状态" aria-label="刷新服务器状态">
-          <Icon name="refresh" size={14} /> {refreshing ? "采集中" : "刷新状态"}
+          <Icon name="refresh" size="sm" /> {refreshing ? "采集中" : "刷新状态"}
         </button>
       </section>
 
@@ -221,7 +221,7 @@ function OverviewContent({
 
       {health !== "healthy" ? (
         <section className={`attention-panel attention-${health}`}>
-          <span className="attention-icon"><Icon name="warning" size={16} /></span>
+          <span className="attention-icon"><Icon name="warning" size="md" /></span>
           <div><strong>{health === "critical" ? "需要立即关注" : "有资源接近阈值"}</strong><p>CPU、内存或磁盘至少一项已达到 {health === "critical" ? "严重" : "警告"} 阈值。可以让 Agent 进一步检查原因。</p></div>
         </section>
       ) : null}
@@ -239,7 +239,7 @@ function OverviewContent({
         </div>
         <div className="section-block section-block-flex">
           <div className="section-heading"><div><p className="eyebrow">审计流</p><h3>最近动态</h3></div><span className="section-note">暂无数据</span></div>
-          <div className="activity-empty"><Icon name="activity" size={18} /><p>活动历史接入后，这里会显示部署、登录与服务变更。</p></div>
+          <div className="activity-empty"><Icon name="activity" size="lg" /><p>活动历史接入后，这里会显示部署、登录与服务变更。</p></div>
         </div>
       </section>
     </div>
@@ -251,10 +251,10 @@ function PreviewEmpty() {
   return <div className="welcome-page">
     <div className="welcome-copy"><span className="welcome-kicker"><span className="health-dot health-dot-healthy" />远程工作，从这里开始</span><h2>连接环境。<br /><span>专注正在做的事。</span></h2><p>服务器、终端与 Agent，<br />在一个安静、有序的工作区里协作。</p></div>
     <div className="welcome-steps">
-      <div><span className="welcome-step-number">01</span><Icon name="connect" size={18} /><strong>连接服务器</strong><p>在桌面应用中添加 SSH 连接。</p></div>
-      <div><span className="welcome-step-number">02</span><Icon name="activity" size={18} /><strong>了解运行状态</strong><p>集中查看资源、日志和服务。</p></div>
-      <div><span className="welcome-step-number">03</span><Icon name="agent" size={18} /><strong>让 Agent 协助</strong><p>带着明确的目标，开始排查。</p></div>
+      <div><span className="welcome-step-number">01</span><Icon name="connect" size="lg" /><strong>连接服务器</strong><p>在桌面应用中添加 SSH 连接。</p></div>
+      <div><span className="welcome-step-number">02</span><Icon name="activity" size="lg" /><strong>了解运行状态</strong><p>集中查看资源、日志和服务。</p></div>
+      <div><span className="welcome-step-number">03</span><Icon name="agent" size="lg" /><strong>让 Agent 协助</strong><p>带着明确的目标，开始排查。</p></div>
     </div>
-    <div className="welcome-footer"><span><Icon name="servers" size={15} />当前为界面预览，连接功能需在桌面应用中使用。</span><button type="button" className="button-secondary" onClick={() => setPrimary("settings")}>调整工作区 <Icon name="chevronRight" size={14} /></button></div>
+    <div className="welcome-footer"><span><Icon name="servers" size="md" />当前为界面预览，连接功能需在桌面应用中使用。</span><button type="button" className="button-secondary" onClick={() => setPrimary("settings")}>调整工作区 <Icon name="chevronRight" size="sm" /></button></div>
   </div>;
 }

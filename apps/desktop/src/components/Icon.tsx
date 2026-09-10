@@ -1,5 +1,83 @@
 import type { ReactNode } from "react";
 
+/**
+ * The icon size scale.
+ *
+ * Every icon is drawn on a 24×24 viewBox, so a size is just the rendered
+ * square in CSS pixels. The scale is deliberately short: a control should
+ * pick the step that matches its own height, not invent a pixel value.
+ *
+ *   xs  12  inline chevrons and the smallest affordances
+ *   sm  14  icons that sit inside a control next to a text label
+ *   md  16  standalone icon buttons and header affordances
+ *   lg  18  primary actions and card headers
+ *   xl  22  empty-state marks and panel-level illustrations
+ *   xxl 26  full-page empty states
+ */
+export const ICON_SIZE = {
+  xs: 12,
+  sm: 14,
+  md: 16,
+  lg: 18,
+  xl: 22,
+  xxl: 26,
+} as const;
+
+export type IconSize = keyof typeof ICON_SIZE;
+
+/**
+ * Optical stroke weight.
+ *
+ * `strokeWidth` is expressed in viewBox units, so a fixed value renders
+ * thinner as the icon shrinks. Solving for a constant on-screen stroke keeps
+ * a 12px chevron and a 26px empty-state mark looking like the same drawing.
+ *
+ * The bounds are viewBox units, not pixels, so they have to be read against
+ * the scale above. The ceiling of 3 only ever binds at `xs`, where the exact
+ * correction would be 3.0 anyway; it is there to stop a future 8px step from
+ * demanding a stroke so thick that the paths of a 24-unit drawing merge. The
+ * floor of 1.5 only ever binds at `xxl`, where the exact correction would be
+ * 1.385 and a hairline would start to shimmer.
+ */
+const OPTICAL_STROKE_PX = 1.5;
+const VIEW_BOX = 24;
+const MIN_STROKE = 1.5;
+const MAX_STROKE = 3;
+
+function opticalStrokeWidth(size: number): number {
+  const corrected = (OPTICAL_STROKE_PX * VIEW_BOX) / size;
+  return Math.min(MAX_STROKE, Math.max(MIN_STROKE, Math.round(corrected * 100) / 100));
+}
+
+export type IconProps = {
+  name: IconName;
+  /** A step on the size scale, or an explicit pixel size for one-off cases. */
+  size?: IconSize | number;
+  /** Override the optically corrected stroke weight. */
+  strokeWidth?: number;
+};
+
+export function Icon({ name, size = "md", strokeWidth }: IconProps) {
+  const px = typeof size === "number" ? size : ICON_SIZE[size];
+  return (
+    <svg
+      aria-hidden="true"
+      className="icon"
+      width={px}
+      height={px}
+      viewBox={`0 0 ${VIEW_BOX} ${VIEW_BOX}`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth ?? opticalStrokeWidth(px)}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      focusable="false"
+    >
+      {iconBody(name)}
+    </svg>
+  );
+}
+
 export type IconName =
   | "activity"
   | "agent"
@@ -20,31 +98,15 @@ export type IconName =
   | "search"
   | "servers"
   | "services"
+  | "shield"
   | "settings"
   | "sparkle"
   | "stop"
   | "terminal"
   | "trash"
-  | "warning";
-
-export function Icon({ name, size = 16, strokeWidth = 1.8 }: { name: IconName; size?: number; strokeWidth?: number }) {
-  return (
-    <svg
-      aria-hidden="true"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={strokeWidth}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      focusable="false"
-    >
-      {iconBody(name)}
-    </svg>
-  );
-}
+  | "warning"
+  | "mic"
+  | "waveform";
 
 function iconBody(name: IconName): ReactNode {
   switch (name) {
@@ -95,6 +157,12 @@ function iconBody(name: IconName): ReactNode {
       return <><path d="M7 3.8h6l4 4v12.4H7z" /><path d="M13 3.8v4h4M9.5 12h5M9.5 15h5" /></>;
     case "logs":
       return <><path d="M5 5h14M5 10h14M5 15h9M5 20h7" /></>;
+    case "mic":
+      return <><rect x="8" y="3" width="8" height="12" rx="4" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" /></>;
+    case "waveform":
+      return <><path d="M5 12h1M8 9v6M11 6v12M14 8v8M17 5v14M20 10v4" /></>;
+    case "shield":
+      return <><path d="M12 3 19 6v5c0 4.7-2.9 8-7 10-4.1-2-7-5.3-7-10V6l7-3Z" /><path d="m9 12 2 2 4-4" /></>;
     case "services":
       return <><rect x="4" y="5" width="16" height="5" rx="1" /><rect x="4" y="14" width="16" height="5" rx="1" /><path d="M8 7.5h.01M8 16.5h.01" /></>;
   }
