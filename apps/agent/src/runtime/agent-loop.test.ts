@@ -136,11 +136,11 @@ test("approval responses are bound to the run that displayed them", async () => 
   assert.equal(result.toolCalls, 1);
 });
 
-test("auto mode lets the Agent self-approve an allowed tool and labels the audit source", async () => {
+test("auto mode cannot self-approve a dangerous production tool", async () => {
   const registry = new ToolRegistry();
   registry.register({
     name: "danger.test",
-    description: "Test action eligible for delegated approval",
+    description: "Test action requiring direct approval",
     risk: "high",
     timeoutMs: 1_000,
     cancellable: true,
@@ -174,7 +174,11 @@ test("auto mode lets the Agent self-approve an allowed tool and labels the audit
   };
 
   const events: AgentStreamEvent[] = [];
-  const result = await loop.start(
+  let resolveApproval: ((approval: Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>['approval']) => void) | undefined;
+  const approval = new Promise<Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>['approval']>((resolve) => {
+    resolveApproval = resolve;
+  });
+  const run = loop.start(
     {
       runId: "run_agent_auto",
       sessionId: "ses_agent_auto",
@@ -182,16 +186,24 @@ test("auto mode lets the Agent self-approve an allowed tool and labels the audit
       permissionMode: "auto",
       target: { host: "remote", serverId: "srv_agent_auto", environment: "production" },
     },
-    { emit: (event) => events.push(event) },
+    {
+      emit: (event) => {
+        events.push(event);
+        if (event.type === "agent.waiting_approval") resolveApproval?.(event.approval);
+      },
+    },
     provider,
   );
 
+  const request = await approval;
+  assert.equal(loop.respondApproval({ approvalId: request.approvalId, runId: "run_agent_auto", decision: "approve_once", respondedAt: new Date().toISOString() }), true);
+  const result = await run;
   assert.equal(result.state, "completed", JSON.stringify(result));
   assert.equal(result.toolCalls, 1);
-  assert.equal(events.some((event) => event.type === "agent.waiting_approval"), false);
+  assert.equal(events.some((event) => event.type === "agent.waiting_approval"), true);
   const toolResult = events.find((event) => event.type === "agent.tool_result");
   assert(toolResult && toolResult.type === "agent.tool_result");
-  assert.equal(toolResult.approvedBy, "agent");
+  assert.equal(toolResult.approvedBy, "user");
   assert.equal(toolResult.status, "success");
 });
 

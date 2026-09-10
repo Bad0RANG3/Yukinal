@@ -22,10 +22,13 @@ const noop = (): void => {};
 const silent: AgentLogger = { debug: noop, info: noop, warn: noop, error: noop, child: () => silent };
 
 /** 按请求顺序回放脚本的 SSE 服务器。测试结束后必须 close，否则进程不退出。 */
-function mockLlm(script: Array<Array<object> | "hang">): Promise<{ port: number; close(): void }> {
+function mockLlm(script: Array<Array<object> | "hang">, seenRequests: string[] = []): Promise<{ port: number; close(): void }> {
   return new Promise((resolve) => {
     let index = 0;
-    const server: Server = createServer((_req, res) => {
+    const server: Server = createServer(async (request, res) => {
+      let body = "";
+      for await (const chunk of request) body += chunk.toString();
+      seenRequests.push(body);
       const step = script[index] ?? [];
       index += 1;
       if (step === "hang") {
@@ -142,6 +145,24 @@ test("E2E: a general question runs without a server target", async (t) => {
   assert.equal(result.state, "completed", JSON.stringify(result));
   assert.match(result.text, /可以直接回答一般问题/);
   assert.equal(events.some((event) => event.type === "agent.tool_call"), false);
+});
+
+test("E2E: redacts sensitive prompt and model text at the provider boundary", async (t) => {
+  const requests: string[] = [];
+  const { port, close } = await mockLlm([[sseText("response sk-example1")]], requests);
+  t.after(() => close());
+
+  const runtime = createRuntime({ log: silent });
+  const result = await runtime.loop.start(
+    runRequest({ runId: "run_redaction", prompt: "api_key=demo123" }),
+    { emit: noop },
+    new OpenAiCompatibleProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "mock-model" }),
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.doesNotMatch(requests[0] ?? "", /demo123/);
+  assert.doesNotMatch(result.text, /example1/);
+  assert.match(result.text, /\[redacted\]/);
 });
 
 test("E2E: Stop aborts the in-flight call and lands on cancelled", async (t) => {

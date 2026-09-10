@@ -20,6 +20,7 @@ const hasCargo = spawnSync("cargo", ["--version"], { stdio: "ignore" }).status =
 
 const steps = [
   { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
+  { name: "secret scan", command: process.execPath, args: ["scripts/check-secrets.mjs"], required: true },
   {
     name: "build contract libs",
     command: "pnpm",

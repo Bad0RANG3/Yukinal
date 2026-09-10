@@ -37,6 +37,16 @@ const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
 const MAX_FILE_READ_BYTES: usize = 1024 * 1024;
 const MAX_FILE_WRITE_BYTES: usize = 512 * 1024;
 const MAX_REMOTE_PATH_CHARS: usize = 4_096;
+const AGENT_BLOCKED_PATH_PREFIXES: &[&str] = &[
+    "/.aws/",
+    "/.azure/",
+    "/.config/gcloud/",
+    "/.kube/",
+    "/.ssh/",
+    "/proc/",
+    "/run/secrets/",
+    "/var/run/secrets/",
+];
 const DOCKER_PS_COMMAND: &str = "docker ps --format '{{json .}}' 2>/dev/null";
 const DOCKER_PS_ALL_COMMAND: &str = "docker ps -a --format '{{json .}}' 2>/dev/null";
 
@@ -466,6 +476,14 @@ async fn filesystem_read(
     if let Err(error) = validate_remote_path(&input.path) {
         return Ok(failed("invalid_input", error, true, None));
     }
+    if is_agent_blocked_path(&input.path) {
+        return Ok(failed(
+            "denied_by_policy",
+            "Agent file tools cannot access paths that commonly contain credentials or process secrets",
+            false,
+            None,
+        ));
+    }
     let max_bytes = input.max_bytes.unwrap_or(DEFAULT_FILE_READ_BYTES);
     if !(1..=MAX_FILE_READ_BYTES).contains(&max_bytes) {
         return Ok(failed(
@@ -516,6 +534,14 @@ async fn filesystem_write(
     };
     if let Err(error) = validate_remote_path(&input.path) {
         return Ok(failed("invalid_input", error, true, None));
+    }
+    if is_agent_blocked_path(&input.path) {
+        return Ok(failed(
+            "denied_by_policy",
+            "Agent file tools cannot access paths that commonly contain credentials or process secrets",
+            false,
+            None,
+        ));
     }
     if input.content.len() > MAX_FILE_WRITE_BYTES {
         return Ok(failed(
@@ -889,6 +915,41 @@ fn validate_remote_path(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Agent file tools must not become a credential-reading or credential-overwriting
+/// primitive. This guard is host-side so a compromised sidecar cannot bypass it.
+fn is_agent_blocked_path(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    if AGENT_BLOCKED_PATH_PREFIXES
+        .iter()
+        .any(|prefix| normalized.contains(prefix))
+    {
+        return true;
+    }
+
+    let name = normalized.rsplit('/').next().unwrap_or_default();
+    if matches!(
+        name,
+        "shadow" | "gshadow" | "sudoers" | "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
+    ) {
+        return true;
+    }
+    if name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+        || name.ends_with(".jks")
+    {
+        return true;
+    }
+    if name == ".env" || name.starts_with(".env.") {
+        return !matches!(name, ".env.example" | ".env.sample" | ".env.template");
+    }
+    matches!(
+        name,
+        "credentials" | "credentials.json" | "secrets" | "secrets.json"
+    )
+}
+
 fn is_safe_container_ref(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -981,9 +1042,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        bounded_log_lines, cancel_sidecar_request, docker_restart_command, is_safe_container_ref,
-        parse_docker_inspect, parse_docker_ps, shell_quote, validate_remote_path,
-        HostCancellationRegistry,
+        bounded_log_lines, cancel_sidecar_request, docker_restart_command, is_agent_blocked_path,
+        is_safe_container_ref, parse_docker_inspect, parse_docker_ps, shell_quote,
+        validate_remote_path, HostCancellationRegistry,
     };
 
     #[test]
@@ -1069,6 +1130,22 @@ not-json
         assert!(validate_remote_path("relative/app.env").is_err());
         assert!(validate_remote_path("/etc/app\n.env").is_err());
         assert!(validate_remote_path(&format!("/{}", "x".repeat(4_096))).is_err());
+    }
+
+    #[test]
+    fn agent_file_tools_reject_credential_and_process_secret_paths() {
+        for path in [
+            "/home/deploy/.ssh/id_ed25519",
+            "/srv/app/.env.production",
+            "/run/secrets/provider-token",
+            "/proc/123/environ",
+            "/etc/ssl/private/service.key",
+            "/home/deploy/.kube/config",
+        ] {
+            assert!(is_agent_blocked_path(path), "{path}");
+        }
+        assert!(!is_agent_blocked_path("/srv/app/.env.example"));
+        assert!(!is_agent_blocked_path("/etc/app/config.json"));
     }
 
     #[test]

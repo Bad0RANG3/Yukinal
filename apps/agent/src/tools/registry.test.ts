@@ -140,10 +140,10 @@ test("an ask decision cannot be smuggled through as an auto ticket", async () =>
     { kind: "policy_auto", decision },
   );
   assert.equal(result.error?.code, "denied_by_policy");
-  assert.match(result.error?.message ?? "", /policy_auto|"ask"/);
+  assert.match(result.error?.message ?? "", /approval|policy_auto|"ask"/i);
 });
 
-test("a critical call needs the explicit Agent delegation ticket", async () => {
+test("a critical call rejects an Agent delegation ticket and needs user approval", async () => {
   const registry = new ToolRegistry();
   registry.register(echoTool({ name: "test.critical", risk: "critical" }));
   const production: ToolTarget = { host: "remote", serverId: "srv_critical", environment: "production" };
@@ -151,14 +151,36 @@ test("a critical call needs the explicit Agent delegation ticket", async () => {
   assert.ok(declaration);
   const engine = new PermissionEngine();
   const delegated = engine.evaluate({ declaration, target: production, input: { text: "x" }, permissionMode: "auto" });
-  assert.equal(delegated.outcome, "auto");
-  assert.equal(delegated.approvedBy, "agent");
+  assert.equal(delegated.outcome, "ask");
+  assert.equal(delegated.approvedBy, undefined);
 
   const result = await registry.execute(
     { callId: "c", traceId: "t", toolName: "test.critical", input: { text: "x" }, target: production },
-    { kind: "agent_auto", decision: delegated },
+    { kind: "agent_auto", decision: { ...delegated, outcome: "auto", approvedBy: "agent" } },
   );
-  assert.equal(result.status, "success");
+  assert.equal(result.error?.code, "denied_by_policy");
+
+  const userApproved = await registry.execute(
+    { callId: "c_user", traceId: "t", toolName: "test.critical", input: { text: "x" }, target: production },
+    { kind: "user_approved", decision: delegated, approvalId: delegated.approvalId ?? "", respondedAt: new Date().toISOString() },
+  );
+  assert.equal(userApproved.status, "success");
+});
+
+test("Agent auto tickets cannot be forged for a production write", async () => {
+  const registry = new ToolRegistry();
+  registry.register(echoTool({ name: "test.write", risk: "medium" }));
+  const production: ToolTarget = { host: "remote", serverId: "srv_production", environment: "production" };
+  const declaration = registry.declaration("test.write");
+  assert.ok(declaration);
+  const decision = new PermissionEngine().evaluate({ declaration, target: production, input: { text: "x" }, permissionMode: "auto" });
+  assert.equal(decision.outcome, "ask");
+
+  const result = await registry.execute(
+    { callId: "c", traceId: "t", toolName: "test.write", input: { text: "x" }, target: production },
+    { kind: "agent_auto", decision: { ...decision, outcome: "auto", approvedBy: "agent" } },
+  );
+  assert.equal(result.error?.code, "denied_by_policy");
 });
 
 test("a ticket for one server cannot be replayed on another", async () => {

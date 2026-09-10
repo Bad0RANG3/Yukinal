@@ -22,6 +22,7 @@ import {
 } from "@yukinal/shared";
 
 import { NotImplementedError } from "../errors.js";
+import { redactSensitiveText } from "../security/sensitive-data.js";
 import type { TraceRecorder } from "../trace/trace-recorder.js";
 import type { AnyTool, Tool } from "./tool.js";
 
@@ -248,10 +249,10 @@ export function checkTicket(
       retryable: false,
     };
   }
-  if (decision.finalRisk === "critical" && ticket.kind !== "agent_auto" && ticket.kind !== "user_approved") {
+  if (decision.tier === "dangerous" && ticket.kind !== "user_approved") {
     return {
       code: "denied_by_policy",
-      message: "Critical actions require an explicit user approval or Agent auto-delegation",
+      message: "Dangerous and critical actions require an explicit user approval",
       retryable: false,
     };
   }
@@ -270,6 +271,16 @@ export function checkTicket(
   }
   if (ticket.kind === "agent_auto" && decision.approvedBy !== "agent") {
     return { code: "denied_by_policy", message: "Agent auto ticket has no Agent delegation", retryable: false };
+  }
+  if (
+    ticket.kind === "agent_auto" &&
+    (decision.tier !== "write" || (decision.target.environment !== "development" && decision.target.environment !== "staging"))
+  ) {
+    return {
+      code: "denied_by_policy",
+      message: "Agent auto approval is limited to write-tier development and staging targets",
+      retryable: false,
+    };
   }
   if (ticket.kind === "session_auto" && decision.approvedBy !== "user") {
     return { code: "denied_by_policy", message: "Session auto ticket has no user session approval", retryable: false };
@@ -388,7 +399,8 @@ export function summarize(output: unknown): string {
       text = "[unserialisable output]";
     }
   }
-  return text.length > MAX_SUMMARY_CHARS ? `${text.slice(0, MAX_SUMMARY_CHARS)}\n…[truncated]` : text;
+  const redacted = redactSensitiveText(text);
+  return redacted.length > MAX_SUMMARY_CHARS ? `${redacted.slice(0, MAX_SUMMARY_CHARS)}\n…[truncated]` : redacted;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

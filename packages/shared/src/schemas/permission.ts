@@ -7,6 +7,7 @@ import { z } from "zod";
 import { AGENT_PERMISSION_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, ToolTargetSchema } from "./server.js";
+import { SafeCustomHeadersSchema } from "./provider.js";
 
 /** Per-run provider material (mirrors `RuntimeProviderConfig`). */
 const HttpBaseUrlSchema = z.string().trim().min(1).max(2048).refine((value) => {
@@ -23,7 +24,7 @@ export const RuntimeProviderConfigSchema = z.strictObject({
   baseUrl: HttpBaseUrlSchema,
   model: z.string().trim().min(1).max(256),
   apiKey: z.string().max(4096).optional(),
-  customHeaders: z.record(z.string().trim().min(1).max(128), z.string().max(4096)).refine((headers) => Object.keys(headers).length <= 32, "too many custom headers").optional(),
+  customHeaders: SafeCustomHeadersSchema.optional(),
   timeoutMs: z.number().int().min(100).max(10 * 60_000).optional(),
   wireApi: z.enum(["chat", "responses"]).optional(),
 });

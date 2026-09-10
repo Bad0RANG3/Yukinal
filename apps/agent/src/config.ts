@@ -1,3 +1,5 @@
+import { isSensitiveKey, redactSensitiveText } from "./security/sensitive-data.js";
+
 /**
  * Process configuration for the sidecar.
  *
@@ -69,10 +71,10 @@ function safeJson(value: unknown): string {
   const seen = new WeakSet<object>();
   try {
     const encoded = JSON.stringify(value, (key, candidate: unknown) => {
-      if (key && /api.?key|authorization|bearer|token|password|secret|credential|private.?key|passphrase/i.test(key)) {
+      if (key && isSensitiveKey(key)) {
         return "[redacted]";
       }
-      if (typeof candidate === "string") return redactString(candidate);
+      if (typeof candidate === "string") return redactSensitiveText(candidate);
       if (typeof candidate === "object" && candidate !== null) {
         if (seen.has(candidate)) return "[circular]";
         seen.add(candidate);
@@ -83,10 +85,4 @@ function safeJson(value: unknown): string {
   } catch {
     return "{\"unserialisable\":true}";
   }
-}
-
-function redactString(value: string): string {
-  return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "sk-[redacted]");
 }

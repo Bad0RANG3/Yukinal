@@ -14,6 +14,18 @@ use yukinal_database::models::{
     ActivityOutcome, ActivityType, AiProviderConfig, AiProviderKind, ProviderModelOption,
 };
 
+const SAFE_METADATA_HEADER_NAMES: &[&str] = &[
+    "http-referer",
+    "referer",
+    "origin",
+    "user-agent",
+    "x-app-name",
+    "x-app-version",
+    "x-client-name",
+    "x-client-version",
+    "x-title",
+];
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderListResponse {
@@ -52,7 +64,7 @@ pub(crate) fn runtime_provider_config(
     if let Some(api_key) = api_key {
         config["apiKey"] = serde_json::json!(api_key);
     }
-    if let Some(custom_headers) = provider.custom_headers.as_ref() {
+    if let Some(custom_headers) = sanitize_custom_headers(provider.custom_headers.as_ref()) {
         config["customHeaders"] = serde_json::json!(custom_headers);
     }
     config
@@ -263,6 +275,7 @@ fn upsert_imported(state: &AppState, input: ImportedProvider) -> Result<AiProvid
             .and_then(|provider| provider.api_key_credential_ref.clone()),
     };
     let now = yukinal_core::sidecar::iso8601_now();
+    let imported_headers = sanitize_imported_custom_headers(&input.custom_headers);
     let provider = AiProviderConfig {
         id,
         kind: AiProviderKind::OpenaiCompatible,
@@ -274,19 +287,13 @@ fn upsert_imported(state: &AppState, input: ImportedProvider) -> Result<AiProvid
             .as_ref()
             .map(|provider| provider.enabled)
             .unwrap_or(false),
-        custom_headers: if input.custom_headers.is_empty() {
+        // Authentication material from imported config must go through the OS
+        // credential store. Persist only an allowlist of non-secret metadata headers.
+        custom_headers: imported_headers.or_else(|| {
             existing
                 .as_ref()
-                .and_then(|provider| provider.custom_headers.clone())
-        } else {
-            Some(
-                input
-                    .custom_headers
-                    .into_iter()
-                    .map(|(key, value)| (key, Value::String(value)))
-                    .collect(),
-            )
-        },
+                .and_then(|provider| sanitize_custom_headers(provider.custom_headers.as_ref()))
+        }),
         max_input_tokens: existing
             .as_ref()
             .and_then(|provider| provider.max_input_tokens),
@@ -841,8 +848,11 @@ pub(crate) fn normalize_active_provider(state: &AppState) -> Result<(), String> 
 
     for mut provider in providers {
         let should_enable = primary_id.as_deref() == Some(provider.id.as_str());
-        if provider.enabled != should_enable {
+        let sanitized_headers = sanitize_custom_headers(provider.custom_headers.as_ref());
+        let headers_changed = provider.custom_headers != sanitized_headers;
+        if provider.enabled != should_enable || headers_changed {
             provider.enabled = should_enable;
+            provider.custom_headers = sanitized_headers;
             provider.updated_at = yukinal_core::sidecar::iso8601_now();
             state
                 .database
@@ -852,6 +862,45 @@ pub(crate) fn normalize_active_provider(state: &AppState) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// Custom headers are for non-secret gateway metadata only. Secrets in an imported
+/// `Authorization`, `X-Api-Key`, cookie, or arbitrary header must never land in
+/// SQLite; the dedicated API-key credential reference is the sole credential path.
+fn sanitize_imported_custom_headers(
+    headers: &BTreeMap<String, String>,
+) -> Option<serde_json::Map<String, Value>> {
+    let values = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    sanitize_custom_headers(Some(&values))
+}
+
+fn sanitize_custom_headers(
+    headers: Option<&serde_json::Map<String, Value>>,
+) -> Option<serde_json::Map<String, Value>> {
+    let values = headers?;
+    let safe = values
+        .iter()
+        .filter_map(|(name, value)| {
+            let text = value.as_str()?;
+            is_safe_metadata_header(name, text)
+                .then(|| (name.clone(), Value::String(text.to_string())))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    (!safe.is_empty()).then_some(safe)
+}
+
+fn is_safe_metadata_header(name: &str, value: &str) -> bool {
+    let normalized = name.trim().to_ascii_lowercase();
+    SAFE_METADATA_HEADER_NAMES.contains(&normalized.as_str())
+        && !value.trim().is_empty()
+        && value.len() <= 4_096
+        && !value.contains('\r')
+        && !value.contains('\n')
+        && !value.to_ascii_lowercase().starts_with("bearer ")
+        && !value.to_ascii_lowercase().starts_with("basic ")
 }
 
 fn provider_is_usable(state: &AppState, provider: &AiProviderConfig) -> bool {
@@ -890,8 +939,10 @@ fn is_local_endpoint(base_url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_local_endpoint, primary_provider_id, runtime_provider_config};
-    use serde_json::Value;
+    use super::{
+        is_local_endpoint, primary_provider_id, runtime_provider_config, sanitize_custom_headers,
+    };
+    use serde_json::{json, Value};
     use yukinal_database::models::{AiProviderConfig, AiProviderKind};
 
     fn provider(id: &str, enabled: bool) -> AiProviderConfig {
@@ -939,6 +990,22 @@ mod tests {
         assert_eq!(
             config.get("model"),
             Some(&Value::String("test-model".into()))
+        );
+    }
+
+    #[test]
+    fn custom_headers_keep_only_non_secret_gateway_metadata() {
+        let headers = json!({
+            "HTTP-Referer": "https://desktop.example",
+            "Authorization": "Bearer not-for-storage",
+            "X-Api-Key": "not-for-storage",
+        });
+        let headers = headers.as_object().expect("header object");
+        let sanitized = sanitize_custom_headers(Some(headers)).expect("safe header remains");
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            sanitized.get("HTTP-Referer"),
+            Some(&Value::String("https://desktop.example".into()))
         );
     }
 }

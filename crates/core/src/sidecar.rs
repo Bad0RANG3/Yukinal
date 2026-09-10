@@ -284,7 +284,7 @@ impl SidecarHandle {
                 self.forget(id);
                 Err(SidecarError::NotRunning)
             }
-            Ok(Ok(Err(message))) => Err(SidecarError::Remote(message)),
+            Ok(Ok(Err(message))) => Err(SidecarError::Remote(redact_log_line(&message))),
             Ok(Ok(Ok(result))) => Ok(result),
         }
     }
@@ -411,6 +411,7 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     let reader = handle.clone();
     let mut lines = BufReader::new(stdout).lines();
     tokio::spawn(async move {
+        let mut inside_private_key = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
             if line.is_empty() {
@@ -420,7 +421,7 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
                 Ok(frame) => reader.dispatch(frame),
                 Err(error) => reader.broadcast(SidecarEvent::Log(format!(
                     "dropped non-JSON stdout line ({error}): {}",
-                    truncate(line)
+                    redact_process_log_line(&truncate(line), &mut inside_private_key)
                 ))),
             }
         }
@@ -430,8 +431,12 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     let logger = handle.clone();
     let mut err_lines = BufReader::new(stderr).lines();
     tokio::spawn(async move {
+        let mut inside_private_key = false;
         while let Ok(Some(line)) = err_lines.next_line().await {
-            logger.broadcast(SidecarEvent::Log(line));
+            logger.broadcast(SidecarEvent::Log(redact_process_log_line(
+                &line,
+                &mut inside_private_key,
+            )));
         }
     });
 
@@ -479,11 +484,12 @@ impl SidecarHandle {
             return;
         }
         let outcome = match frame.get("error") {
-            Some(error) => Err(error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("agent error")
-                .to_string()),
+            Some(error) => Err(redact_log_line(
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent error"),
+            )),
             None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
         };
         self.resolve(id, outcome);
@@ -497,6 +503,143 @@ fn truncate(line: &str) -> String {
         out.push('…');
     }
     out
+}
+
+const REDACTED: &str = "[redacted]";
+
+/// Redact credentials before they can leave the process boundary via a diagnostic
+/// error. This intentionally favors false positives: sidecar logs are diagnostic
+/// only, while a leaked key cannot be recovered.
+fn redact_log_line(line: &str) -> String {
+    let mut redacted = line.to_string();
+    for marker in [
+        "authorization",
+        "api_key",
+        "api-key",
+        "apikey",
+        "access_token",
+        "access-token",
+        "password",
+        "token",
+    ] {
+        redacted = redact_named_value(&redacted, marker);
+    }
+    for prefix in [
+        "bearer ",
+        "basic ",
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "github_pat_",
+        "akia",
+    ] {
+        redacted = redact_token_after_prefix(&redacted, prefix);
+    }
+    redacted
+}
+
+/// Keep private-key blocks out of process logs even if a future sidecar writes
+/// one line at a time. The delimiters themselves are not useful diagnostics here.
+fn redact_process_log_line(line: &str, inside_private_key: &mut bool) -> String {
+    let uppercase = line.to_ascii_uppercase();
+    let begins_private_key =
+        uppercase.contains("-----BEGIN") && uppercase.contains("PRIVATE KEY-----");
+    let ends_private_key = uppercase.contains("-----END") && uppercase.contains("PRIVATE KEY-----");
+    if *inside_private_key || begins_private_key {
+        *inside_private_key = !ends_private_key;
+        return String::from("[redacted private-key material]");
+    }
+    redact_log_line(line)
+}
+
+fn redact_named_value(line: &str, marker: &str) -> String {
+    let mut output = line.to_string();
+    let mut search_from = 0;
+    loop {
+        let lowercase = output.to_ascii_lowercase();
+        let Some(relative) = lowercase[search_from..].find(marker) else {
+            return output;
+        };
+        let marker_start = search_from + relative;
+        let mut cursor = marker_start + marker.len();
+        let mut found_separator = false;
+        while let Some(character) = output[cursor..].chars().next() {
+            match character {
+                ':' | '=' => {
+                    cursor += character.len_utf8();
+                    found_separator = true;
+                    break;
+                }
+                ' ' | '\t' | '"' | '\'' => cursor += character.len_utf8(),
+                _ => break,
+            }
+        }
+        if !found_separator {
+            search_from = cursor.max(marker_start + marker.len());
+            continue;
+        }
+        while let Some(character) = output[cursor..].chars().next() {
+            if character.is_whitespace() {
+                cursor += character.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let quote = output[cursor..]
+            .chars()
+            .next()
+            .filter(|character| matches!(character, '"' | '\''));
+        if let Some(quote) = quote {
+            cursor += quote.len_utf8();
+        }
+        let value_start = cursor;
+        let value_end = output[value_start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                (if let Some(quote) = quote {
+                    character == quote
+                } else {
+                    character.is_whitespace() || matches!(character, '&' | ',' | ';' | '}' | ']')
+                })
+                .then_some(value_start + offset)
+            })
+            .unwrap_or(output.len());
+        if value_start == value_end {
+            return output;
+        }
+        output.replace_range(value_start..value_end, REDACTED);
+        search_from = value_start + REDACTED.len();
+    }
+}
+
+fn redact_token_after_prefix(line: &str, prefix: &str) -> String {
+    let mut output = line.to_string();
+    let mut search_from = 0;
+    loop {
+        let lowercase = output.to_ascii_lowercase();
+        let Some(relative) = lowercase[search_from..].find(prefix) else {
+            return output;
+        };
+        let start = search_from + relative;
+        let value_start = start + prefix.len();
+        let value_end = output[value_start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                (!character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.'))
+                    .then_some(value_start + offset)
+            })
+            .unwrap_or(output.len());
+        if value_end.saturating_sub(start) >= 12 {
+            output.replace_range(start..value_end, REDACTED);
+            search_from = start + REDACTED.len();
+        } else if value_end == output.len() {
+            return output;
+        } else {
+            search_from = value_end.max(value_start + 1);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -721,5 +864,37 @@ mod tests {
         let long = "x".repeat(400);
         assert_eq!(truncate(&long).chars().count(), 201);
         assert_eq!(truncate("short"), "short");
+    }
+
+    #[test]
+    fn sidecar_diagnostics_redact_known_credential_forms() {
+        let key = format!("{}{}", "sk-proj-", "abcdefghijklmnopqrstuvwxyz");
+        let line = format!("authorization: Bearer {key} api_key=another-secret");
+        let redacted = redact_log_line(&line);
+        assert!(!redacted.contains(&key));
+        assert!(!redacted.contains("another-secret"));
+        assert!(redacted.contains(REDACTED));
+    }
+
+    #[test]
+    fn sidecar_diagnostics_redact_multiline_private_keys() {
+        let mut inside_private_key = false;
+        assert_eq!(
+            redact_process_log_line(
+                "-----BEGIN OPENSSH PRIVATE KEY-----",
+                &mut inside_private_key
+            ),
+            "[redacted private-key material]"
+        );
+        assert!(inside_private_key);
+        assert_eq!(
+            redact_process_log_line("base64-private-key-payload", &mut inside_private_key),
+            "[redacted private-key material]"
+        );
+        assert_eq!(
+            redact_process_log_line("-----END OPENSSH PRIVATE KEY-----", &mut inside_private_key),
+            "[redacted private-key material]"
+        );
+        assert!(!inside_private_key);
     }
 }

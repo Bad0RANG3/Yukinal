@@ -124,7 +124,7 @@ function AppearanceSettings() {
         <Field label="Agent 权限">
           <select className="form-input" value={preferences.agentPermissionMode} onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}>
             <option value="ask">操作前询问（推荐）</option>
-            <option value="auto">委托 Agent 自动批准</option>
+            <option value="auto">委托 Agent 自动批准 开发与预发布写入</option>
           </select>
         </Field>
       </div>
@@ -138,7 +138,7 @@ function AppearanceSettings() {
           <span><strong>减少动效</strong><small>降低过渡和状态动画</small></span>
         </label>
       </div>
-      <p className="form-hint">自动批准只代表你把本次运行的执行判断委托给 Agent；策略禁止的操作仍会拒绝，执行结果会以“Agent 自主批准”写入审计。</p>
+      <p className="form-hint">自动批准只适用于开发或预发布目标上的普通写入。本机、未知、生产、高危和 critical 操作仍需逐项确认；策略禁止的操作始终拒绝，允许的自动执行会以“Agent 自主批准”写入审计。</p>
       <div className="settings-actions">
         <button type="button" className="button-secondary" onClick={preferences.resetPreferences}>
           <Icon name="refresh" size={14} />恢复默认设置

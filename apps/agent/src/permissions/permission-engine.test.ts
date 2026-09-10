@@ -80,7 +80,7 @@ test("layer 3: production turns a medium write into an approval", () => {
   assert.ok(onProduction.reason.includes("Production") || onProduction.reason.length > 0);
 });
 
-test("critical actions need explicit delegation instead of policy-only auto approval", () => {
+test("critical actions always require a direct user approval", () => {
   const engine = new PermissionEngine();
   const policyOnly = engine.evaluate({
     declaration: declaration({ name: "ssh.execute", risk: "read" }),
@@ -98,8 +98,8 @@ test("critical actions need explicit delegation instead of policy-only auto appr
     permissionMode: "auto",
     policy: { ...STAGING_POLICY, tiers: { read: "auto", write: "auto", dangerous: "auto" } },
   });
-  assert.equal(delegated.outcome, "auto");
-  assert.equal(delegated.approvedBy, "agent");
+  assert.equal(delegated.outcome, "ask");
+  assert.equal(delegated.approvedBy, undefined);
 });
 
 test("ask mode pauses before writes while keeping reads automatic", () => {
@@ -125,11 +125,11 @@ test("ask mode pauses before writes while keeping reads automatic", () => {
   assert.equal(read.approvedBy, "policy");
 });
 
-test("auto mode delegates a policy approval and preserves policy denial", () => {
+test("auto mode delegates only a write-tier action on development or staging", () => {
   const engine = new PermissionEngine();
   const delegated = engine.evaluate({
     declaration: declaration({ name: "filesystem.write", risk: "medium" }),
-    target: target("production"),
+    target: target("staging"),
     input: {},
     permissionMode: "auto",
     policy: PRODUCTION_POLICY,
@@ -137,9 +137,19 @@ test("auto mode delegates a policy approval and preserves policy denial", () => 
   assert.equal(delegated.outcome, "auto");
   assert.equal(delegated.approvedBy, "agent");
 
-  const denied = engine.evaluate({
+  const production = engine.evaluate({
     declaration: declaration({ name: "filesystem.write", risk: "medium" }),
     target: target("production"),
+    input: {},
+    permissionMode: "auto",
+    policy: PRODUCTION_POLICY,
+  });
+  assert.equal(production.outcome, "ask");
+  assert.equal(production.approvedBy, undefined);
+
+  const denied = engine.evaluate({
+    declaration: declaration({ name: "filesystem.write", risk: "medium" }),
+    target: target("staging"),
     input: {},
     permissionMode: "auto",
     policy: { ...PRODUCTION_POLICY, tiers: { read: "auto", write: "deny", dangerous: "deny" } },

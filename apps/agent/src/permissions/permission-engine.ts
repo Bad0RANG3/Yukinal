@@ -122,24 +122,28 @@ export class PermissionEngine {
     let approvedBy: PermissionApprovalSource | undefined = outcome === "auto" ? "policy" : undefined;
     let reason = `${declaration.name} is ${finalRisk} on ${describeTarget(target)}; policy "${policy.name}" says ${outcome} for tier "${tier}"`;
 
-    // A critical call still needs an explicit delegation or a user approval.
-    // The old policy-only path cannot silently auto-approve it.
-    if (finalRisk === "critical" && outcome === "auto" && request.permissionMode !== "auto") {
+    // Dangerous and critical actions always need a direct user approval. A custom
+    // policy or malformed caller must not turn them into an automatic decision.
+    if (tier === "dangerous" && outcome === "auto") {
       outcome = "ask";
       approvedBy = undefined;
-      reason = `${describeTarget(target)}: critical risk action cannot be auto-approved even if the policy allows it`;
+      reason = `${describeTarget(target)}: dangerous or critical action cannot be auto-approved`;
     }
 
-    // `auto` is a user-selected delegation: the Agent may choose and execute an
-    // allowed action itself, including a critical action. Policy denial remains
-    // absolute, and the source is persisted so the outcome is accountable.
-    if (request.permissionMode === "auto" && outcome === "ask") {
+    // `auto` is intentionally narrow. It may cover ordinary write-tier work on a
+    // resolved development or staging target, but it must never waive a human
+    // confirmation for local, unknown, production, high-risk, or critical work.
+    // Policy denial remains absolute in every mode.
+    const agentMayAutoApprove =
+      tier === "write" && (target.environment === "development" || target.environment === "staging");
+    if (request.permissionMode === "auto" && outcome !== "deny" && agentMayAutoApprove) {
       outcome = "auto";
       approvedBy = "agent";
-      reason = `${declaration.name} on ${describeTarget(target)} was delegated to the Agent for automatic approval; ${reason}`;
-    } else if (request.permissionMode === "auto" && outcome === "auto") {
-      approvedBy = "agent";
-      reason = `${declaration.name} on ${describeTarget(target)} was delegated to the Agent; ${reason}`;
+      reason = `${declaration.name} on ${describeTarget(target)} was delegated to the Agent within the write-tier development/staging boundary; ${reason}`;
+    } else if (request.permissionMode === "auto" && outcome !== "deny" && tier !== "read") {
+      outcome = "ask";
+      approvedBy = undefined;
+      reason = `${declaration.name} on ${describeTarget(target)} requires explicit user approval outside the Agent auto-approval boundary; ${reason}`;
     }
 
     // Ask mode keeps safe reads frictionless but pauses before every state

@@ -450,7 +450,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
                 className="composer-select composer-permission-select"
               >
                 <option value="ask">操作前询问</option>
-                <option value="auto">委托 Agent 自动批准</option>
+                <option value="auto">委托 Agent 自动批准 开发与预发布写入</option>
               </select>
             </label>
           </div>
@@ -465,7 +465,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
               className="composer-select composer-permission-select"
             >
               <option value="ask">操作前询问</option>
-              <option value="auto">委托 Agent 自动批准</option>
+              <option value="auto">委托 Agent 自动批准 开发与预发布写入</option>
             </select>
           </label>
         )}

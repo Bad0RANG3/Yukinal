@@ -17,9 +17,19 @@ apps/desktop/src-tauri/gen/
 # env / secrets  (secrets live in the OS credential store, never here)
 .env
 .env.*
+.envrc
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+secrets/
+.secrets/
 
 # editors / OS
 .DS_Store
