@@ -14,6 +14,8 @@
 
 use serde::Serialize;
 
+use crate::supervisor::StartOutcome;
+
 /// `core_ping` response: proves the IPC round trip without pretending to work.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +35,33 @@ pub struct AgentSpawnResponse {
     pub entry: String,
     pub tool_count: usize,
     pub already_running: bool,
+}
+
+/// The one place `RuntimeInfo` becomes the wire shape.
+///
+/// This mapping used to be written out field by field in
+/// `apps/desktop/src-tauri/src/commands/mod.rs`, which is exactly what this module's
+/// header forbids ("the desktop crate must not define its own response structs").
+/// A six-field hand copy is not a style problem: adding a field to `RuntimeInfo` and
+/// forgetting the copy produces a response that still compiles, still serialises, and
+/// is silently missing the new field. Living here, a new field must be threaded
+/// through on purpose.
+///
+/// Note what is deliberately dropped: `RuntimeInfo::started_at` is not part of the
+/// spawn response. The contract fixture (`agent_spawn.json`) has no `startedAt`, and
+/// `agent_status` is where a caller learns when the runtime started. Both facts are
+/// pinned by the fixture tests below.
+impl From<&StartOutcome> for AgentSpawnResponse {
+    fn from(outcome: &StartOutcome) -> Self {
+        Self {
+            pid: outcome.runtime.pid,
+            protocol_version: outcome.runtime.protocol_version.clone(),
+            agent_version: outcome.runtime.agent_version.clone(),
+            entry: outcome.runtime.entry.clone(),
+            tool_count: outcome.runtime.tool_count,
+            already_running: outcome.already_running,
+        }
+    }
 }
 
 /// `agent_kill` response.
@@ -103,6 +132,42 @@ mod tests {
         assert_eq!(actual, fixture(FIXTURE_AGENT_SPAWN));
         // pid must stay a JSON number; a stringified pid breaks every UI consumer.
         assert_eq!(actual.get("pid").and_then(Value::as_u64), Some(25_980));
+    }
+
+    /// The `From` impl must carry every contract field across, and must not invent one.
+    ///
+    /// Asserted against the fixture rather than against literal values, because the
+    /// fixture is the thing the TypeScript gate also parses — so this test fails if the
+    /// mapping and the shared contract disagree, not merely if the mapping changes.
+    #[test]
+    fn spawn_response_from_start_outcome_matches_the_contract_fixture() {
+        use crate::supervisor::RuntimeInfo;
+
+        let outcome = StartOutcome {
+            runtime: RuntimeInfo {
+                pid: 25_980,
+                protocol_version: "1.0".into(),
+                agent_version: "0.0.0".into(),
+                entry: "apps/agent/dist/index.js".into(),
+                tool_count: 1,
+                started_at: "2026-01-01T00:00:00Z".into(),
+            },
+            already_running: false,
+        };
+
+        let actual = serde_json::to_value(AgentSpawnResponse::from(&outcome)).expect("serialize");
+        assert_eq!(
+            actual,
+            fixture(FIXTURE_AGENT_SPAWN),
+            "From<&StartOutcome> 与共享契约的 agent_spawn 形状不一致",
+        );
+
+        // `startedAt` 有意不在这个形状里：它的归属是 agent_status。若有人「顺手」把
+        // RuntimeInfo 的新字段全量搬过来，这一条会失败，并指出该去哪看。
+        assert!(
+            actual.get("startedAt").is_none(),
+            "agent_spawn 契约里没有 startedAt；启动时间由 agent_status 报告",
+        );
     }
 
     #[test]

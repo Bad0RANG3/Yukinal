@@ -78,14 +78,10 @@ pub(crate) async fn start_sidecar(app: &AppHandle) -> Result<AgentSpawnResponse,
         forward_sidecar_events(app.clone());
     }
 
-    Ok(AgentSpawnResponse {
-        pid: outcome.runtime.pid,
-        protocol_version: outcome.runtime.protocol_version,
-        agent_version: outcome.runtime.agent_version,
-        entry: outcome.runtime.entry,
-        tool_count: outcome.runtime.tool_count,
-        already_running: outcome.already_running,
-    })
+    // 逐字段手抄改成 `From`：那条映射现在住在 `crates/core/src/ipc.rs`（契约的所在地），
+    // 见那里的注释 —— 手抄的问题不是风格，而是给 RuntimeInfo 加一个字段却忘了这里时，
+    // 响应照样编译、照样序列化，只是悄悄少一个字段。
+    Ok(AgentSpawnResponse::from(&outcome))
 }
 
 #[tauri::command]
