@@ -26,6 +26,7 @@ import test from "node:test";
 
 import { EVENT_NAMES } from "../events/index.js";
 import { tauriEventName } from "../events/index.js";
+import { AGENT_EVENT_MEMBER_SCHEMAS, AGENT_EVENT_TYPES, AgentStreamEventSchema } from "./agent.js";
 import { EVENT_SCHEMAS } from "./ipc.js";
 
 /** Channels the UI can subscribe to: declared *and* gated. */
@@ -117,5 +118,83 @@ test("the agent channels the loop emits are all subscribable", () => {
     (emitted as readonly string[]).includes("agent.text"),
     false,
     "agent.text is now emitted: wire it into SUBSCRIBABLE and delete DECLARED_WITHOUT_A_PRODUCER",
+  );
+});
+
+/**
+ * A payload that is genuinely valid — as `agent.started`.
+ *
+ * Used as the *wrong member* below: it satisfies the stream schema, so before the
+ * channels were narrowed it passed every `agent.*` gate.
+ */
+const VALID_BUT_WRONG_MEMBER = { type: "agent.started", runId: "run_1", at: "2026-01-01T00:00:00Z" };
+
+/**
+ * The members that also have a channel — every member except `agent.text`.
+ *
+ * Kept as a separate list so the tests below index `EVENT_SCHEMAS`, which does not have
+ * an `agent.text` entry; using the full member list to index it is a type error, and
+ * that error is the correct signal.
+ */
+const AGENT_CHANNELS = AGENT_EVENT_TYPES.filter(
+  (name): name is Extract<keyof typeof EVENT_SCHEMAS, `agent.${string}`> => name in EVENT_SCHEMAS,
+);
+
+test("every agent channel rejects a payload that is valid for a different channel", () => {
+  // This is the hole the per-channel schemas exist to close. All eight channels used to
+  // point at `AgentStreamEventSchema`, so the gate could only ask "is this *some* valid
+  // agent event" — this payload answered yes to all eight, and `useAgentRun`'s
+  // `as Extract<…>` cast then told the handler it held a `result` that was not there.
+  //
+  // The channel name *is* the payload's discriminator on the Rust side
+  // (`commands/mod.rs` emits on `tauri_event_name(params.type)`), so a mismatched pair
+  // cannot come off the transport — which is why rejecting it costs nothing real.
+  for (const name of AGENT_CHANNELS) {
+    const parsed = EVENT_SCHEMAS[name].safeParse(VALID_BUT_WRONG_MEMBER);
+    if (name === "agent.started") {
+      assert.equal(parsed.success, true, `${name} must accept its own payload`);
+    } else {
+      assert.equal(
+        parsed.success,
+        false,
+        `${name} accepted an agent.started payload: the channel gate is not per-member`,
+      );
+    }
+  }
+});
+
+test("a member with no channel is rejected by every channel", () => {
+  // `agent.text` is a real union member with a full schema and no channel. It must not
+  // be acceptable anywhere, or dropping it from EVENT_SCHEMAS would be unobservable.
+  const text = { type: "agent.text", runId: "run_1", textDelta: "hi", at: "2026-01-01T00:00:00Z" };
+  assert.equal(AgentStreamEventSchema.safeParse(text).success, true, "agent.text is a valid stream member");
+  for (const name of AGENT_CHANNELS) {
+    assert.equal(EVENT_SCHEMAS[name].safeParse(text).success, false, `${name} accepted an agent.text payload`);
+  }
+});
+
+test("each channel uses its own member schema, and the union is built from the same map", () => {
+  // Reference equality, not merely behavioural equivalence: re-widening one channel back
+  // to `AgentStreamEventSchema` would restore the coarse gate for that channel alone,
+  // and the tests above would still pass for every other channel.
+  for (const name of AGENT_CHANNELS) {
+    assert.equal(
+      EVENT_SCHEMAS[name],
+      AGENT_EVENT_MEMBER_SCHEMAS[name],
+      `${name} is not gated by its own member schema`,
+    );
+  }
+  // The union still validates every member, so the sidecar transport gate (which does
+  // not know the type before parsing) is unaffected by the narrowing.
+  assert.equal(AgentStreamEventSchema.safeParse(VALID_BUT_WRONG_MEMBER).success, true);
+  assert.deepEqual(
+    [...AGENT_CHANNELS].sort(),
+    (SUBSCRIBABLE as readonly string[]).filter((name) => name.startsWith("agent.")).sort(),
+    "the channel set and the subscribable agent channels disagree",
+  );
+  assert.equal(
+    AGENT_EVENT_TYPES.length,
+    AGENT_CHANNELS.length + 1,
+    "the only member without a channel is expected to be agent.text",
   );
 });

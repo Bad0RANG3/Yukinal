@@ -6,7 +6,7 @@ import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
-import { useProviders } from "../../lib/providers.js";
+import { PROVIDERS_QUERY_KEY, useProviders } from "../../lib/providers.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import {
@@ -198,7 +198,10 @@ function ProviderSettings() {
   const onSaved = ({ provider }: { provider: AiProviderConfig }) => {
     selectProvider(provider.id, provider.model);
     setEditorProviderId(provider.id);
-    void queryClient.invalidateQueries({ queryKey: ["providers"] });
+    // 用常量而不是 `["providers"]` 字面量：`servers.ts` 的注释里记过这条教训 ——
+    // invalidateQueries 的 key 拼错**不会报任何错**，只是静默刷新不到东西。
+    // 这里原来就是那个字面量，而 `PROVIDERS_QUERY_KEY` 早已导出、别处已在用。
+    void queryClient.invalidateQueries({ queryKey: PROVIDERS_QUERY_KEY });
   };
   const activate = useMutation({
     mutationKey: ["provider-write"],

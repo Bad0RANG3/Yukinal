@@ -29,12 +29,35 @@ const AgentRunResultSchema = z.strictObject({
   error: z.string().max(4_000).optional(),
 });
 
-/** Events the desktop is allowed to render from the sidecar. */
-export const AgentStreamEventSchema = z.discriminatedUnion("type", [
-  z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, at: TimestampSchema }),
-  z.strictObject({ type: z.literal("agent.thinking"), runId: RunIdSchema, textDelta: z.string().max(20_000).optional(), at: TimestampSchema }),
-  z.strictObject({ type: z.literal("agent.text"), runId: RunIdSchema, textDelta: z.string().max(20_000), at: TimestampSchema }),
-  z.strictObject({
+/**
+ * One schema per event **type**, keyed by the discriminator itself.
+ *
+ * ## Why this exists instead of only the union
+ *
+ * These nine members used to be written inline inside `z.discriminatedUnion`, and every
+ * `EVENT_SCHEMAS` channel pointed at the whole union. The gate could therefore only ask
+ * "is this *some* valid agent event", never "is this *the* event this channel promises".
+ * `DesktopEventPayload<"agent.completed">` was consequently the full union, so the UI had
+ * to cast nine times to reach the member it knew it was handling — and a cast is exactly
+ * where a payload that passed the coarse gate gets handed to a handler as a shape nobody
+ * validated (`event.result` is `undefined` for any other member).
+ *
+ * Deriving the union **from** this map, rather than carving members out of the union,
+ * keeps one source of truth: a channel schema and the union member are the same object.
+ *
+ * This is safe to narrow because of how the Rust side emits, verified at
+ * `apps/desktop/src-tauri/src/commands/mod.rs:470,504`: the Tauri channel name is read
+ * from `params.type` and emitted as `tauri_event_name(event_type)`. The channel and the
+ * payload's discriminator are literally the same field, so a payload arriving on
+ * `agent.completed` cannot carry `type: "agent.started"`. Per-channel validation
+ * therefore cannot reject anything the transport actually delivers — it only stops
+ * accepting what the transport cannot produce.
+ */
+export const AGENT_EVENT_MEMBER_SCHEMAS = {
+  "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, at: TimestampSchema }),
+  "agent.thinking": z.strictObject({ type: z.literal("agent.thinking"), runId: RunIdSchema, textDelta: z.string().max(20_000).optional(), at: TimestampSchema }),
+  "agent.text": z.strictObject({ type: z.literal("agent.text"), runId: RunIdSchema, textDelta: z.string().max(20_000), at: TimestampSchema }),
+  "agent.tool_call": z.strictObject({
     type: z.literal("agent.tool_call"),
     runId: RunIdSchema,
     traceId: z.string().trim().min(1).max(256),
@@ -48,7 +71,7 @@ export const AgentStreamEventSchema = z.discriminatedUnion("type", [
     approvedBy: PermissionApprovalSourceSchema.optional(),
     at: TimestampSchema,
   }),
-  z.strictObject({
+  "agent.tool_result": z.strictObject({
     type: z.literal("agent.tool_result"),
     runId: RunIdSchema,
     traceId: z.string().trim().min(1).max(256),
@@ -68,8 +91,36 @@ export const AgentStreamEventSchema = z.discriminatedUnion("type", [
     durationMs: z.number().nonnegative(),
     at: TimestampSchema,
   }),
-  z.strictObject({ type: z.literal("agent.waiting_approval"), runId: RunIdSchema, approval: ApprovalRequestSchema, at: TimestampSchema }),
-  z.strictObject({ type: z.literal("agent.approval_expired"), runId: RunIdSchema, approvalId: RunIdSchema, at: TimestampSchema }),
-  z.strictObject({ type: z.literal("agent.completed"), runId: RunIdSchema, result: AgentRunResultSchema, at: TimestampSchema }),
-  z.strictObject({ type: z.literal("agent.failed"), runId: RunIdSchema, error: z.string().max(4_000), at: TimestampSchema }),
-]);
+  "agent.waiting_approval": z.strictObject({ type: z.literal("agent.waiting_approval"), runId: RunIdSchema, approval: ApprovalRequestSchema, at: TimestampSchema }),
+  "agent.approval_expired": z.strictObject({ type: z.literal("agent.approval_expired"), runId: RunIdSchema, approvalId: RunIdSchema, at: TimestampSchema }),
+  "agent.completed": z.strictObject({ type: z.literal("agent.completed"), runId: RunIdSchema, result: AgentRunResultSchema, at: TimestampSchema }),
+  "agent.failed": z.strictObject({ type: z.literal("agent.failed"), runId: RunIdSchema, error: z.string().max(4_000), at: TimestampSchema }),
+} as const;
+
+/**
+ * Every member of the stream union, in the map's declared order.
+ *
+ * Note this is the *vocabulary*, not the set of channels: it includes `agent.text`,
+ * which is a valid member with a full schema but has no `EVENT_SCHEMAS` entry and no
+ * producer (see `event-vocabulary.test.ts`). Callers that mean "channels" must filter.
+ */
+export const AGENT_EVENT_TYPES = Object.keys(AGENT_EVENT_MEMBER_SCHEMAS) as Array<
+  keyof typeof AGENT_EVENT_MEMBER_SCHEMAS
+>;
+
+/**
+ * The whole stream as one discriminated union.
+ *
+ * Still the right gate for the *sidecar transport*, which receives a notification whose
+ * type it does not yet know (`packages/agent-sdk` parses `agent.stream` params before
+ * dispatching). Channels use the per-member schemas instead.
+ *
+ * Built from the map's values, so a member can never exist in one and not the other.
+ */
+export const AgentStreamEventSchema = z.discriminatedUnion(
+  "type",
+  Object.values(AGENT_EVENT_MEMBER_SCHEMAS) as [
+    (typeof AGENT_EVENT_MEMBER_SCHEMAS)[keyof typeof AGENT_EVENT_MEMBER_SCHEMAS],
+    ...Array<(typeof AGENT_EVENT_MEMBER_SCHEMAS)[keyof typeof AGENT_EVENT_MEMBER_SCHEMAS]>,
+  ],
+);

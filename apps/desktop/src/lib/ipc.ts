@@ -21,6 +21,8 @@ import {
   type IpcCommandMap,
   type IpcCommandName,
 } from "@yukinal/shared";
+// 只用它的类型层（`z.output`），所以是 `import type`：这行不会进入运行时产物。
+import type { z } from "zod";
 
 /** True when running inside Tauri; false in a plain browser during `vite dev`. */
 export function isDesktopShell(): boolean {
@@ -64,9 +66,24 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
 /** Event channels the UI may subscribe to, and the payload each one carries. */
 export type DesktopEventName = keyof typeof EVENT_SCHEMAS;
 
-export type DesktopEventPayload<E extends DesktopEventName> = ReturnType<
-  (typeof EVENT_SCHEMAS)[E]["parse"]
->;
+/**
+ * The payload type of one channel, resolved **per channel**.
+ *
+ * This used to be `ReturnType<(typeof EVENT_SCHEMAS)[E]["parse"]>`, and it used to
+ * resolve to the union of every payload — `DesktopEventPayload<"agent.completed">` was
+ * not the completed event. The cause was **not** this type: it was `EVENT_SCHEMAS`
+ * mapping all eight `agent.*` channels to one union schema, because with every channel
+ * pointing at the same schema there is nothing for the index to narrow *to*.
+ * `ReturnType` and `z.output` both narrow correctly once the channels are per-member —
+ * measured against a rebuild rather than assumed, since a stale `packages/shared/dist`
+ * made an earlier attempt at this look like a `ReturnType` limitation.
+ *
+ * `z.output` is kept because it is the repo's existing idiom for exactly this job
+ * (a generic schema → its output type): see `Assignable<S extends z.ZodType, …>` in
+ * `schemas/consistency.ts`. It also states the intent directly instead of going through
+ * whichever method happens to be called `parse`.
+ */
+export type DesktopEventPayload<E extends DesktopEventName> = z.output<(typeof EVENT_SCHEMAS)[E]>;
 
 /** The subset of channels that carry an `AgentStreamEvent`. */
 export type AgentEventName = Extract<DesktopEventName, `agent.${string}`>;

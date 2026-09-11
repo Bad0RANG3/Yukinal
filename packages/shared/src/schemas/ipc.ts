@@ -19,7 +19,7 @@ import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
 import { ServerLogsResponseSchema } from "./log.js";
 import { AgentPermissionModeSchema, AgentRunModeSchema, ApprovalResponseSchema } from "./permission.js";
-import { AgentStreamEventSchema } from "./agent.js";
+import { AGENT_EVENT_MEMBER_SCHEMAS } from "./agent.js";
 import {
   ChatMessageAppendResponseSchema,
   ChatMessageRoleSchema,
@@ -285,18 +285,28 @@ export const IPC_SCHEMAS = {
  * Events are notifications, not requests: a payload that fails its schema can only
  * be dropped, never re-asked. So the schema is here to make a drifted Rust payload
  * a *visible* dropped event rather than a silent runtime failure deep in a writer.
+ *
+ * Each `agent.*` channel is gated by **its own member schema**, not by the whole
+ * `AgentStreamEventSchema` union. The union was one level too coarse: it could only
+ * ask "is this some valid agent event", so `DesktopEventPayload<"agent.completed">`
+ * was the entire union and `useAgentRun` had to cast nine times to reach the member it
+ * already knew it was handling. A cast there is where a payload that passed the loose
+ * gate reaches a handler as a shape nothing validated.
+ *
+ * Narrowing is safe because the channel name *is* the payload's discriminator: Rust
+ * reads `params.type` and emits on `tauri_event_name(event_type)`
+ * (`apps/desktop/src-tauri/src/commands/mod.rs:470,504`). Nothing the transport can
+ * deliver is rejected by this; it stops accepting what the transport cannot produce.
  */
 export const EVENT_SCHEMAS = {
-  // Agent stream events all share one discriminated union, so the UI can hand a
-  // payload to the same reducer regardless of which event it arrived on.
-  "agent.started": AgentStreamEventSchema,
-  "agent.thinking": AgentStreamEventSchema,
-  "agent.tool_call": AgentStreamEventSchema,
-  "agent.tool_result": AgentStreamEventSchema,
-  "agent.waiting_approval": AgentStreamEventSchema,
-  "agent.approval_expired": AgentStreamEventSchema,
-  "agent.completed": AgentStreamEventSchema,
-  "agent.failed": AgentStreamEventSchema,
+  "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
+  "agent.thinking": AGENT_EVENT_MEMBER_SCHEMAS["agent.thinking"],
+  "agent.tool_call": AGENT_EVENT_MEMBER_SCHEMAS["agent.tool_call"],
+  "agent.tool_result": AGENT_EVENT_MEMBER_SCHEMAS["agent.tool_result"],
+  "agent.waiting_approval": AGENT_EVENT_MEMBER_SCHEMAS["agent.waiting_approval"],
+  "agent.approval_expired": AGENT_EVENT_MEMBER_SCHEMAS["agent.approval_expired"],
+  "agent.completed": AGENT_EVENT_MEMBER_SCHEMAS["agent.completed"],
+  "agent.failed": AGENT_EVENT_MEMBER_SCHEMAS["agent.failed"],
   "terminal.data": z.strictObject({
     terminalSessionId: IpcTerminalSessionIdSchema,
     // The bound is deliberately loose. This gate exists to catch *shape* drift —

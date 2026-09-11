@@ -16,13 +16,12 @@ import {
   IPC_COMMANDS,
   type AgentPermissionMode,
   type AgentRunMode,
-  type AgentStreamEvent,
   type ApprovalDecision,
   type ApprovalRequest,
 } from "@yukinal/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopSubscription } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
 import { RunLifecycle } from "./run-lifecycle.js";
 import {
   appendAssistantDelta,
@@ -121,32 +120,35 @@ export function useAgentRun(options: {
     // 订阅/退订的竞态由 `subscribeDesktop` 负责；这里只关心两件事 —— 把 8 个通道
     // 接上，以及「全部接上」这个时刻（`ready`），因为 listen 是异步的，在它完成
     // 之前发提示词会丢掉回答。
-    const on = (name: AgentEventName, handler: (payload: AgentStreamEvent) => void): void => {
+    // 泛型**就是重点**：`on` 曾经把 handler 的参数写成 `(payload: AgentStreamEvent) => void`，
+    // 于是 `subscribeDesktop(name, …)` 按通道收窄出来的类型，在这里又被拓宽回整个联合，
+    // 下游只能靠 9 次 `as Extract<…>` 重新收窄 —— 而 cast 正是「通过粗闸门但形状不符的
+    // payload 被当成没校验过的形状交给 handler」的地方（`event.result` 对别的成员就是
+    // undefined）。保留 `E` 之后，每个 handler 拿到的就是它那个通道的**成员**类型。
+    // （`subscribeDesktop(name, …)` 不需要显式写 `<E>`：`name: E` 能从字面量反推出 `E`。）
+    const on = <E extends AgentEventName>(name: E, handler: (payload: DesktopEventPayload<E>) => void): void => {
       subscriptions.push(
         subscribeDesktop(name, (payload) => {
           if (disposed) return;
-          handler(payload as AgentStreamEvent);
+          handler(payload);
         }),
       );
     };
 
     const isActive = (payload: { runId: string }): boolean => lifecycle.current.isActive(payload.runId);
 
-    on("agent.started", (payload) => {
-      const event = payload as AgentStreamEvent;
+    on("agent.started", (event) => {
       if (!lifecycle.current.started(event.runId)) return;
       setRunId(event.runId);
       setRunning(true);
       setRunState("thinking");
     });
-    on("agent.thinking", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.thinking" }>;
+    on("agent.thinking", (event) => {
       if (!isActive(event)) return;
-      const delta = "textDelta" in event && event.textDelta ? event.textDelta : "";
+      const delta = event.textDelta ?? "";
       setEntries((current) => appendAssistantDelta(current, delta));
     });
-    on("agent.tool_call", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.tool_call" }>;
+    on("agent.tool_call", (event) => {
       if (!isActive(event)) return;
       setRunState("running_tool");
       setEntries((current) =>
@@ -160,8 +162,7 @@ export function useAgentRun(options: {
         }),
       );
     });
-    on("agent.tool_result", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.tool_result" }>;
+    on("agent.tool_result", (event) => {
       if (!isActive(event)) return;
       setRunState("thinking");
       setEntries((current) =>
@@ -183,20 +184,17 @@ export function useAgentRun(options: {
         ),
       );
     });
-    on("agent.waiting_approval", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>;
+    on("agent.waiting_approval", (event) => {
       if (!isActive(event)) return;
       setRunState("waiting_approval");
       onApprovalRequested.current?.();
       setEntries((current) => appendEntries(current, [{ kind: "approval", approval: event.approval }]));
     });
-    on("agent.approval_expired", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.approval_expired" }>;
+    on("agent.approval_expired", (event) => {
       if (!isActive(event)) return;
       setApprovalStatuses((current) => ({ ...current, [event.approvalId]: "审批已过期" }));
     });
-    on("agent.completed", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.completed" }>;
+    on("agent.completed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
       setRunning(false);
       setRunState(event.result.state);
@@ -204,8 +202,7 @@ export function useAgentRun(options: {
       onAssistantMessage.current?.(event.result.text);
       setEntries((current) => settleAssistantText(current, event.result.text));
     });
-    on("agent.failed", (payload) => {
-      const event = payload as Extract<AgentStreamEvent, { type: "agent.failed" }>;
+    on("agent.failed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
       setRunning(false);
       setRunState("failed");
