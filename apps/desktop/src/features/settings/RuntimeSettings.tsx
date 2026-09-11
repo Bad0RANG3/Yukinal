@@ -5,6 +5,7 @@ import { useId, useState, type ReactNode } from "react";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
 import { useProviders } from "../../lib/providers.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
 import { usePresence } from "../../hooks/usePresence.js";
@@ -134,9 +135,7 @@ function AppearanceSettings() {
         </Field>
         <Field label="终端字体">
           <select className="form-input" value={preferences.terminalFont} onChange={(event) => setPreferences({ terminalFont: event.target.value as TerminalFont })}>
-            <option value="jetbrains-mono-nl">JetBrains Mono NL</option>
-            <option value="jetbrains-mono">JetBrains Mono</option>
-            <option value="jetbrains-nerd-mono">JetBrains Mono Nerd Font</option>
+            {TERMINAL_FONT_ORDER.map((font) => <option key={font} value={font}>{TERMINAL_FONT_LABEL[font]}</option>)}
           </select>
         </Field>
         <Field label="终端字号">

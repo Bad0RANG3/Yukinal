@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -21,6 +22,9 @@ import {
   EXECUTION_STATUS_LABEL,
   RISK_LEVEL_LABEL,
   SERVER_STATUS_LABEL,
+  TERMINAL_FONT_FAMILY,
+  TERMINAL_FONT_LABEL,
+  TERMINAL_FONT_ORDER,
   approvalSourceLabel,
   decisionLabel,
   environmentLabel,
@@ -223,4 +227,86 @@ test("the terminal closed gate accepts a null exit code", () => {
   // Rust sends exitCode as Option<u32>: a negative or fractional code is drift.
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", exitCode: -1 }).success, false);
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", exitCode: 1.5 }).success, false);
+});
+
+test("every terminal font face has both a label and a family stack", () => {
+  for (const font of TERMINAL_FONT_ORDER) {
+    assert.ok(TERMINAL_FONT_LABEL[font], `${font} has no label`);
+    assert.ok(TERMINAL_FONT_FAMILY[font], `${font} has no family stack`);
+    // The face the user picked must be first in its own stack, otherwise picking a
+    // font silently renders a different one that merely happens to be installed.
+    const first = TERMINAL_FONT_FAMILY[font].split(",")[0].trim();
+    assert.equal(
+      first,
+      `"${TERMINAL_FONT_LABEL[font]}"`,
+      `${font}: the stack does not start with the face its label names`,
+    );
+  }
+  assert.equal(new Set(TERMINAL_FONT_ORDER).size, TERMINAL_FONT_ORDER.length, "a face is listed twice");
+  assert.equal(
+    new Set(TERMINAL_FONT_ORDER.map((font) => TERMINAL_FONT_LABEL[font])).size,
+    TERMINAL_FONT_ORDER.length,
+    "two faces share a label, so the dropdown is ambiguous",
+  );
+});
+
+test("the declared font families exist as real faces in the stylesheet", () => {
+  // A family name that no `@font-face` declares does not fail — it silently falls
+  // back to Consolas. So the names are checked against the stylesheet rather than
+  // trusted, which is the whole reason these stacks were worth centralising.
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const declared = new Set(
+    [...css.matchAll(/@font-face\s*\{[^}]*?font-family:\s*"([^"]+)"/gs)].map((match) => match[1]),
+  );
+  // Five `@font-face` blocks, but three distinct families: the regular and semibold
+  // weights of "JetBrains Mono" and of "JetBrains Mono NL" are each declared twice.
+  assert.equal(
+    declared.size,
+    TERMINAL_FONT_ORDER.length,
+    `expected exactly the ${TERMINAL_FONT_ORDER.length} terminal faces, found ${[...declared].join(", ")}`,
+  );
+
+  for (const font of TERMINAL_FONT_ORDER) {
+    const family = TERMINAL_FONT_LABEL[font];
+    assert.ok(
+      declared.has(family),
+      `"${family}" is not declared by any @font-face, so it would fall back silently`,
+    );
+  }
+  // Every *bundled* face a stack names must be declared too — the fallback order is
+  // what keeps a missing weight from dropping to Consolas. System fonts are exempt:
+  // "Cascadia Mono" and "Consolas" ship with the OS, and `--font-ui` in the same
+  // stylesheet leans on Consolas for the same reason.
+  const SYSTEM_FALLBACKS = new Set(["Cascadia Mono", "Consolas", "Microsoft YaHei UI", "monospace"]);
+  for (const font of TERMINAL_FONT_ORDER) {
+    const families = [...TERMINAL_FONT_FAMILY[font].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    for (const family of families) {
+      if (SYSTEM_FALLBACKS.has(family)) continue;
+      assert.ok(declared.has(family), `"${family}" in the ${font} stack is not declared`);
+    }
+  }
+  // All three stacks end in the same system chain, so a missing bundled face degrades
+  // identically whichever face was picked.
+  const tails = new Set(
+    TERMINAL_FONT_ORDER.map((font) => {
+      const parts = TERMINAL_FONT_FAMILY[font].split(",").map((part) => part.trim());
+      return parts.slice(parts.findIndex((part) => SYSTEM_FALLBACKS.has(part.replace(/"/g, "")))).join(", ");
+    }),
+  );
+  assert.equal(tails.size, 1, `the three stacks have different system fallbacks:\n${[...tails].join("\n")}`);
+});
+
+test("the terminal stack matches the --font-terminal token", () => {
+  // `styles.css` already carries this exact stack as `--font-terminal`, which is what
+  // the xterm container inherits before the JS option overwrites it. Two copies of the
+  // same list drift; this pins them together.
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const token = /--font-terminal:\s*([^;]+);/.exec(css);
+  assert.ok(token, "--font-terminal is not defined");
+  const normalise = (value: string) => value.split(",").map((part) => part.trim().replace(/\s+/g, " ")).join(", ");
+  assert.equal(
+    normalise(TERMINAL_FONT_FAMILY["jetbrains-mono-nl"]),
+    normalise(token[1]),
+    "the default terminal face and --font-terminal have drifted apart",
+  );
 });

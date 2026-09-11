@@ -15,6 +15,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
+import { TERMINAL_FONT_FAMILY, TERMINAL_FONT_LABEL } from "../../lib/labels.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
@@ -245,7 +246,7 @@ export function TerminalPane({ active }: { active: boolean }) {
     <section className="terminal-page">
       <div className="terminal-toolbar">
         <div className="section-heading-inline"><Icon name="terminal" size="md" /><div><p className="eyebrow">SSH</p><h2>终端</h2></div></div>
-        <span className="terminal-toolbar-note">{preferences.terminalFont === "jetbrains-mono" ? "JetBrains Mono" : preferences.terminalFont === "jetbrains-nerd-mono" ? "JetBrains Mono Nerd" : "JetBrains Mono NL"} · {preferences.terminalFontSize}px</span>
+        <span className="terminal-toolbar-note">{TERMINAL_FONT_LABEL[preferences.terminalFont]} · {preferences.terminalFontSize}px</span>
       </div>
       {ioError !== null && (
         <div className="terminal-io-error" role="alert">
@@ -266,7 +267,6 @@ export function TerminalPane({ active }: { active: boolean }) {
 }
 
 function terminalFontFamily(font: TerminalFont): string {
-  if (font === "jetbrains-nerd-mono") return '"JetBrains Mono Nerd", "JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
-  if (font === "jetbrains-mono") return '"JetBrains Mono", "JetBrains Mono NL", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
-  return '"JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
+  // 栈必须是字面量：xterm 自己量字符宽度，不做 CSS 变量替换，传 `var(--…)` 会量错。
+  return TERMINAL_FONT_FAMILY[font];
 }

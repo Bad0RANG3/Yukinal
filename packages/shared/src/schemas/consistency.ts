@@ -32,6 +32,25 @@ import type {
 } from "./permission.js";
 import type { AgentStreamEventSchema } from "./agent.js";
 import type { IPC_SCHEMAS } from "./ipc.js";
+import { EVENT_SCHEMAS } from "./ipc.js";
+import type { EventName } from "../events/index.js";
+
+/**
+ * Every channel the UI is allowed to subscribe to must be a declared event name.
+ *
+ * `EVENT_SCHEMAS` is the runtime gate and `EVENT_NAMES` is the declared protocol
+ * vocabulary; only this direction is an invariant. A declared name with no gate is
+ * not automatically a defect — `server.updated` and `terminal.opened` are on the
+ * wire and Rust emits them, the UI just has no subscriber yet — but a *gate* with no
+ * declared name would mean the UI listens on a channel the contract does not admit,
+ * which is the direction that silently accepts payloads nobody specified.
+ *
+ * `keyof typeof EVENT_SCHEMAS` also drives `AgentEventName` and `DesktopEventName`,
+ * so this pin is what keeps those aliases from naming things the protocol lacks.
+ */
+export type _EveryEventGateIsADeclaredName = Expect<
+  Exclude<keyof typeof EVENT_SCHEMAS, EventName> extends never ? true : false
+>;
 
 /** Succeeds only when the schema's output is assignable to the declared contract type. */
 type Expect<T extends true> = T;

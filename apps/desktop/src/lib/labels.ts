@@ -33,6 +33,9 @@ import type {
   Server,
   ToolExecutionRecord,
 } from "@yukinal/shared";
+// 只借类型。`TerminalFont` 是偏好设置里的一个域类型，`lib/` 不该在运行时依赖 store；
+// `import type` 会被完全擦除，所以产物里不存在这条边。
+import type { TerminalFont } from "../stores/preferences-store.js";
 
 /** Full form, for badges and sentences: "生产环境". */
 export const ENVIRONMENT_LABEL: Record<Environment, string> = {
@@ -131,3 +134,48 @@ export function decisionLabel(decision: PermissionMode): string {
 export function approvalSourceLabel(source: PermissionApprovalSource): string {
   return APPROVAL_SOURCE_LABEL[source];
 }
+
+/**
+ * Terminal font names, and the CSS family stacks they stand for.
+ *
+ * The same preference was worded two ways: `jetbrains-nerd-mono` read "JetBrains Mono
+ * Nerd Font" in the settings dropdown and "JetBrains Mono Nerd" in the terminal
+ * toolbar. They are not two fonts — `styles.css` declares `@font-face { font-family:
+ * "JetBrains Mono Nerd" }`, so the toolbar was naming the family as loaded and the
+ * dropdown was naming it as upstream publishes it. A user who picks "…Nerd Font" in
+ * settings and then reads "…Nerd" on the terminal has no way to tell whether the
+ * choice took effect, which is the one thing that note exists to answer.
+ *
+ * Kept as the shorter family name, since that is what the app actually loads and
+ * what `terminalFontFamily` below must match exactly for the font to resolve.
+ */
+export const TERMINAL_FONT_LABEL: Record<TerminalFont, string> = {
+  "jetbrains-mono-nl": "JetBrains Mono NL",
+  "jetbrains-mono": "JetBrains Mono",
+  "jetbrains-nerd-mono": "JetBrains Mono Nerd",
+};
+
+/** The setting offers three faces; this is the order the dropdown lists them in. */
+export const TERMINAL_FONT_ORDER: readonly TerminalFont[] = [
+  "jetbrains-mono-nl",
+  "jetbrains-mono",
+  "jetbrains-nerd-mono",
+];
+
+/**
+ * CSS `font-family` stack per face, most-wanted first.
+ *
+ * Each stack names its own face first and then degrades through the others, so a
+ * missing weight in one face still renders in the right family rather than dropping
+ * to a generic monospace. The family names must match the `@font-face` declarations
+ * in `styles.css` character for character — a typo here is not a crash, it is a
+ * silent fallback to Consolas, which is why the trailing `monospace` is there and
+ * why `tests/labels.test.ts` checks these strings against the stylesheet.
+ */
+const MONO_FALLBACK = '"Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace';
+
+export const TERMINAL_FONT_FAMILY: Record<TerminalFont, string> = {
+  "jetbrains-mono-nl": `"JetBrains Mono NL", "JetBrains Mono", ${MONO_FALLBACK}`,
+  "jetbrains-mono": `"JetBrains Mono", "JetBrains Mono NL", ${MONO_FALLBACK}`,
+  "jetbrains-nerd-mono": `"JetBrains Mono Nerd", "JetBrains Mono NL", "JetBrains Mono", ${MONO_FALLBACK}`,
+};
