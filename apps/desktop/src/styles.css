@@ -273,7 +273,8 @@ button:disabled {
 .server-sidebar h2,
 .workspace-header h1,
 .agent-header h2,
-.overview-hero h2,
+.overview-title,
+.section-heading h2,
 .section-heading h3,
 .empty-state h2 {
   margin: 0;
@@ -594,9 +595,13 @@ button:disabled {
   gap: 11px;
 }
 
-.overview-hero h2 {
+/* 概览页顶部的大字服务器名。它不再是标题元素（名字已经是这一页的 h1，
+   再标一次 h2 只会让读屏连听两遍），所以排版挂在类上而不是 `h2` 标签上。
+   字号不写在这里 —— 它和各个页头一起在下面那条 `.overview-title, ...-page-header h2`
+   里定，那里才是这套「页面级大字」的统一出处（原先两条规则同权重，靠源码顺序
+   由下面那条生效，字号一直是 23px 而不是这里的 27px）。 */
+.overview-title {
   margin-top: 15px;
-  font-size: 27px;
 }
 
 .overview-subtitle {
@@ -680,6 +685,7 @@ button:disabled {
   margin-bottom: 13px;
 }
 
+.section-heading h2,
 .section-heading h3 {
   font-size: 15px;
 }
@@ -1932,7 +1938,7 @@ select:focus-visible {
   margin: 0 auto;
 }
 
-.overview-hero h2,
+.overview-title,
 .activity-page-header h2,
 .services-page-header h2,
 .logs-page-header h2,
@@ -2951,7 +2957,7 @@ select.form-input {
 .server-modal::backdrop { background: rgb(2 6 9 / 76%); backdrop-filter: blur(6px); }
 .terminal-container { height: 100%; min-height: 0; }
 .terminal-page { min-height: 300px; }
-.section-heading h3, .overview-subtitle, .file-preview-panel h3 { overflow-wrap: anywhere; }
+.section-heading h2, .section-heading h3, .overview-subtitle, .file-preview-panel h3 { overflow-wrap: anywhere; }
 .overview-hero, .identity-line { flex-wrap: wrap; gap: 12px; }
 .empty-icon { display: grid; place-items: center; width: 64px; height: 64px; margin-bottom: 20px; color: var(--accent); border: 1px solid var(--ok-line); border-radius: 18px; background: var(--ok-surface); }
 .connection-empty .button-primary { margin-top: 20px; }

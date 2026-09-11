@@ -122,6 +122,10 @@ export function ModelPicker({
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      // 必须拦住冒泡：外层 .agent-composer-shell 挂了一条 window 级的 Escape
+      // 用来收起整个 Agent 面板（useAgentPanelShell）。不拦的话，用户想关掉这个
+      // 模型菜单，结果是整块 Agent 面板被收起来 —— 菜单没了，上下文也没了。
+      event.stopPropagation();
       setOpen(false);
       return;
     }

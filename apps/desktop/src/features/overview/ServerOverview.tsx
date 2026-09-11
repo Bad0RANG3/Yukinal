@@ -190,7 +190,13 @@ function OverviewContent({
               {HEALTH_LABEL[health]}
             </span>
           </div>
-          <h2>{server.name}</h2>
+          {/* 这里原来是一个 <h2>{server.name}</h2>。名字在紧邻上方的
+              .workspace-header 里已经是这一页的 <h1>，再标一次 h2 会让读屏用户
+              连着听到两遍同一个名字、而且是两个不同层级（「Production API，
+              一级标题」「Production API，二级标题」）。视觉上这个大字要保留，
+              所以改成普通元素 + 同样的排版，不再参与标题层级 —— 页面的标题由
+              h1 独占，下面的小节这才好落在 h2 上。 */}
+          <p className="overview-title">{server.name}</p>
           <p className="overview-subtitle">
             {snapshot.os ? `${snapshot.os.distribution} ${snapshot.os.version}` : "操作系统未知"} · {server.connection.username}@{server.connection.host}
           </p>
@@ -209,7 +215,7 @@ function OverviewContent({
 
       <section className="section-block">
         <div className="section-heading">
-          <div><p className="eyebrow">资源概况</p><h3>系统健康</h3></div>
+          <div><p className="eyebrow">资源概况</p><h2>系统健康</h2></div>
           <span className="section-note">每 15 秒更新</span>
         </div>
         <div className="metric-grid">
@@ -228,7 +234,7 @@ function OverviewContent({
 
       <section className="split-sections">
         <div className="section-block section-block-flex">
-          <div className="section-heading"><div><p className="eyebrow">容器运行时</p><h3>Docker</h3></div><span className="section-note">{docker?.available ? `${docker.containers.length} 个容器` : "不可用"}</span></div>
+          <div className="section-heading"><div><p className="eyebrow">容器运行时</p><h2>Docker</h2></div><span className="section-note">{docker?.available ? `${docker.containers.length} 个容器` : "不可用"}</span></div>
           {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有运行中的容器。</p> : (
             <ul className="container-list">
               {docker.containers.slice(0, 8).map((container, index) => (
@@ -238,7 +244,7 @@ function OverviewContent({
           )}
         </div>
         <div className="section-block section-block-flex">
-          <div className="section-heading"><div><p className="eyebrow">审计流</p><h3>最近动态</h3></div><span className="section-note">暂无数据</span></div>
+          <div className="section-heading"><div><p className="eyebrow">审计流</p><h2>最近动态</h2></div><span className="section-note">暂无数据</span></div>
           <div className="activity-empty"><Icon name="activity" size="lg" /><p>活动历史接入后，这里会显示部署、登录与服务变更。</p></div>
         </div>
       </section>

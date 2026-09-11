@@ -51,11 +51,11 @@ export function RemoteFilesPane() {
       {files.isError ? <div className="error-panel"><div><strong>无法读取目录</strong><p>{files.error instanceof Error ? files.error.message : String(files.error)}</p></div><button type="button" className="button-secondary" onClick={() => void files.refetch()}>重试</button></div> : null}
       <div className="files-layout">
         <div className="file-list-panel">
-          <div className="section-heading"><div><p className="eyebrow">远程文件</p><h3>{path}</h3></div><span className="section-note">{entries.length} 项</span></div>
+          <div className="section-heading"><div><p className="eyebrow">远程文件</p><h2>{path}</h2></div><span className="section-note">{entries.length} 项</span></div>
           {files.isLoading ? <p className="muted-copy" role="status">正在加载…</p> : entries.length ? <ul className="remote-file-list">{entries.map((entry) => <li key={entry.path}><button type="button" className={`remote-file-row ${selectedFile === entry.path ? "remote-file-row-selected" : ""}`} aria-current={selectedFile === entry.path ? "true" : undefined} onClick={() => open(entry)}><span className="remote-file-icon"><Icon name={entry.type === "directory" ? "folder" : "file"} size="md" /></span><span className="remote-file-name">{entry.name}</span><span className="remote-file-size">{entry.type === "directory" ? "目录" : formatSize(entry.size)}</span></button></li>)}</ul> : files.isSuccess ? <p className="muted-copy">目录为空。</p> : null}
         </div>
         <div className="file-preview-panel">
-          <div className="section-heading"><div><p className="eyebrow">预览</p><h3>{selectedFile ?? "选择文件"}</h3></div>{read.data?.truncated ? <span className="section-note">内容已截断</span> : null}</div>
+          <div className="section-heading"><div><p className="eyebrow">预览</p><h2>{selectedFile ?? "选择文件"}</h2></div>{read.data?.truncated ? <span className="section-note">内容已截断</span> : null}</div>
           {!selectedFile ? <div className="file-preview-empty"><Icon name="file" size="xxl" /><p>选择文件查看内容</p><small>目录与文件预览会分别显示在这里。</small></div> : read.isLoading ? <p className="muted-copy" role="status">正在读取…</p> : read.isError ? <div role="alert"><p className="error-copy">{read.error.message}</p><button type="button" className="button-secondary" onClick={() => void read.refetch()}>重新读取</button></div> : read.data ? <pre className="file-preview-content">{read.data.content || "（空文件）"}</pre> : null}
         </div>
       </div>

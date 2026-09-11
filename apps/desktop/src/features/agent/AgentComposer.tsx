@@ -12,7 +12,7 @@
  * 不留「看起来能点、点了没反应」的假入口。
  */
 
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
 
@@ -96,6 +96,8 @@ export function AgentComposer({
   const [dismissed, setDismissed] = useState(false);
   /** 「+」展开的设置面板：运行模式与批准方式都在这里。 */
   const [menuOpen, setMenuOpen] = useState(false);
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsPanelRef = useRef<HTMLDivElement>(null);
 
   /**
    * 输入框随内容长高，封顶由 CSS 的 max-height 决定。
@@ -137,6 +139,58 @@ export function AgentComposer({
   const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
   const sendPresence = usePresence(Boolean(prompt.trim()) && !running, { exitAnimation: "pop-exit" });
   const runningPresence = usePresence(running, { exitAnimation: "expand-exit" });
+
+  /* 面板打开时把焦点送进去。
+     这不是锦上添花，是这一处原先真的走不通：面板在 DOM 里排在工具栏**之前**，
+     所以焦点停在「+」上往前 Tab 只会经过模型选择、发送按钮，一路离开输入区，
+     永远走不到面板里 —— 键盘用户除了用鼠标，没有任何办法操作运行模式（实测）。
+
+     依赖是 `settingsPresence.mounted` 而不是 `menuOpen`：usePresence 是在
+     useEffect 里才 dispatch 的，所以 `mounted` 比 `menuOpen` 晚一帧才变真。
+     盯 `menuOpen` 的话，effect 跑的那一刻面板还没进 DOM，ref 是 null，
+     这一句就静默地什么也没做 —— 而且 menuOpen 之后不再变化，不会再有机会。
+     用 rAF 而不是直接 focus：面板刚挂上时入场动画还没跑完，量不到位置。 */
+  useLayoutEffect(() => {
+    if (!settingsPresence.mounted) return;
+    const frame = requestAnimationFrame(() => {
+      const first = settingsPanelRef.current?.querySelector<HTMLElement>("button:not([disabled])");
+      (first ?? settingsPanelRef.current)?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [settingsPresence.mounted]);
+
+  /* Escape 关掉面板，而不是顺手把整个 Agent 面板收起来。
+     useAgentPanelShell 挂了一条 window 级的 Escape（收起整个面板），
+     不拦冒泡的话用户按 Esc 想关设置，结果是整块 Agent 面板没了。
+     同时把焦点还给触发按钮，否则焦点随面板卸载掉到 body，键盘用户失去位置。
+
+     挂在 <footer> 上而不是面板上：只按 Esc 时焦点可能还在触发按钮上，
+     事件根本不经过面板，挂在面板上的处理函数不会触发。 */
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (event.key !== "Escape" || !menuOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setMenuOpen(false);
+    settingsTriggerRef.current?.focus({ preventScroll: true });
+  };
+
+  /* 点到面板和「+」之外就收起。
+     原先没有这一条：面板只能靠再点一次「+」关掉 —— 点别处（输入框、清单一角、
+     终端）它都会一直浮在那儿，盖住下面的内容，而且没有任何提示说明该怎么关。
+     模型菜单一直有这个行为，两处弹层在这件事上本该一致。
+
+     用 pointerdown 而不是 click：在别处拖动选择文本时浏览器会补一次 click，
+     弹层会在用户还没做完动作时就关掉。 */
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node;
+      if (settingsPanelRef.current?.contains(target) || settingsTriggerRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [menuOpen]);
 
   /* 退场期间必须渲染**上一次的内容**。候选列表是唯一一处「内容也跟着 open
      一起清空」的弹层：`trigger` 一变 null，suggestions 立刻是空数组。如果照它
@@ -214,7 +268,7 @@ export function AgentComposer({
   };
 
   return (
-    <footer className="agent-composer">
+    <footer className="agent-composer" onKeyDown={handleComposerKeyDown}>
       <div className="agent-composer-shell">
         <textarea
           ref={inputRef}
@@ -275,9 +329,14 @@ export function AgentComposer({
 
         {settingsPresence.mounted ? (
           <div
+            ref={settingsPanelRef}
             className={`agent-settings-panel ${settingsPresence.closing ? "is-closing" : ""}`}
+            // 这是一个**非模态**对话框：它不遮挡页面、不拦输入、不需要 aria-modal
+            // （加了反而会让读屏把面板之外的内容整个忽略掉）。它是一个挂在输入区
+            // 上的弹出设置面板，焦点在面板与触发按钮之间自由移动即可。
             role="dialog"
             aria-label="运行设置"
+            tabIndex={-1}
             onAnimationEnd={settingsPresence.onAnimationEnd}
           >
             <section className="agent-settings-group">
@@ -341,6 +400,7 @@ export function AgentComposer({
                 点头）。只读模式下「+」保持可点 —— 用户必须能改主意。 */}
             <button
               type="button"
+              ref={settingsTriggerRef}
               className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}`}
               aria-label="运行设置"
               aria-expanded={menuOpen}
