@@ -11,7 +11,7 @@ Date: 2026-09-09
 
 ## Decision
 
-Rust 启动 sidecar 并持有进程句柄，双方通过 stdin/stdout 传输 **NDJSON 编码的 JSON-RPC 2.0**，每一行是一个完整帧。协议版本常量为 `1.0`，两侧各有一份定义（`packages/shared/src/protocol/jsonrpc.ts` 的 `YUKINAL_RPC_VERSION` 与 `crates/core/src/sidecar.rs` 的 `PROTOCOL_VERSION`），必须一致。
+Rust 启动 sidecar 并持有进程句柄，双方通过 stdin/stdout 传输 **NDJSON 编码的 JSON-RPC 2.0**，每一行是一个完整帧。协议版本常量为 `1.0`，两侧各有一份定义（`packages/shared/src/protocol/jsonrpc.ts` 的 `YUKINAL_RPC_VERSION` 与 `crates/core/src/sidecar/mod.rs` 的 `PROTOCOL_VERSION`），必须一致。
 
 **握手**
 
