@@ -108,7 +108,7 @@ function AppearanceSettings() {
   const setPreferences = preferences.setPreferences;
 
   return (
-    <section className="settings-card settings-appearance">
+    <section className="settings-card">
       <div className="settings-card-header">
         <div>
           <p className="eyebrow">偏好</p>

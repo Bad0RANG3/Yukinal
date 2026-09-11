@@ -61,13 +61,25 @@ export function ServerList({ onClose }: { onClose?: () => void }) {
           {filteredServers.map((server) => (
             <li key={server.id} className="server-list-item">
               <div className={`server-row ${selectedServerId === server.id ? "server-row-selected" : ""}`}>
-                <button type="button" onClick={() => selectServer(server.id)} className="server-row-main" aria-current={selectedServerId === server.id ? "true" : undefined}>
+                {/* 这一行是整块可点的按钮，里面拼了三段文字（名称、主机端口、环境）。
+                    不给它一个明确的 aria-label 的话，无障碍名称就是这三段的直接
+                    连接 —— 实测会被念成「Production APIapi.example.com:22生产」，
+                    三段黏成一坨，读屏用户分不出哪儿是哪儿。显式写出来，用中文逗号
+                    断句。
+
+                    title 也是必需的：名称在 218px 宽的侧栏里会被省略号截断
+                    （「Staging Database Cluster」实测溢出 40px），而这是列表里
+                    唯一能看全它的地方。 */}
+                <button type="button" onClick={() => selectServer(server.id)} className="server-row-main" aria-current={selectedServerId === server.id ? "true" : undefined} aria-label={`${server.name}，${server.connection.host}:${server.connection.port}，${ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}，${SERVER_STATUS_LABEL[server.status]}`} title={server.name}>
                   <span className={`server-dot ${ENV_DOT[server.metadata.environment]}`} aria-hidden="true" />
                   <span className="server-row-copy">
                     <span className="server-row-name">{server.name}</span>
-                    <span className="server-row-detail">{server.connection.host}:{server.connection.port}</span>
+                    <span className="server-row-detail">
+                      <span className="server-row-host">{server.connection.host}</span>
+                      <span className="server-row-port">:{server.connection.port}</span>
+                    </span>
                   </span>
-                  <span className="server-row-env">{ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}</span>
+                  <span className="server-row-env" aria-hidden="true">{ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}</span>
                 </button>
                 <div className="server-row-actions">
                   <span className={`server-status-pill server-status-${server.status}`}>{action.isPending && action.variables.serverId === server.id ? "处理中…" : SERVER_STATUS_LABEL[server.status]}</span>

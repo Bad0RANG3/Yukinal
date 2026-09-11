@@ -444,13 +444,28 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* 「主机:端口」拆成两段来省略，而不是整行一起省略。
+   整行一起省略时，`text-overflow: ellipsis` 从右往左吃掉字符 —— 而排在最后的
+   恰好是端口。窗口收到 1150px 以下时侧栏从 248px 变窄到 228px，这一行只溢出
+   3px，却刚好把 `:22` 整个换成省略号（实测），于是「连哪台机器的哪个端口」
+   这个列表里最要紧的信息没了。
+   拆开之后，可压缩的只有主机名部分：主机可以省，端口永远显示。 */
 .server-row-detail {
-  overflow: hidden;
+  display: flex;
+  min-width: 0;
   color: var(--faint);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 10px;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.server-row-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.server-row-port {
+  flex-shrink: 0;
 }
 
 .server-row-env {
@@ -810,6 +825,12 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
+  /* 概览页的竖直节奏由各块自己的 margin 决定（.server-facts 24px、
+     .section-block 20px），相邻 margin 会合并成较大的那个。但 .split-sections 是
+     网格容器：它的子块带着 margin，网格又不会让它们穿透出去合并 —— 所以缺了这条
+     的话，这一块会**紧贴**上面那张「资源概况」卡片（实测 gap = 0），而页面上其他
+     每一处都是 20–24px。补上 24px，节奏才是连续的。 */
+  margin-top: 24px;
 }
 
 .section-block-flex {
@@ -1022,6 +1043,15 @@ button:disabled {
 
 .agent-status-ready {
   color: var(--success);
+}
+
+/* 未就绪。这条规则之前不存在 —— 组件一直带着 `agent-status-idle`，而样式表里
+   从来没有对应规则，于是这个状态只是「碰巧」继承了 .agent-status 的 --faint。
+   继承来的颜色不算契约：谁改一下 .agent-status，这个状态就跟着变，而没人会想到
+   去看 AgentHeader。三档状态现在各有一条明确的规则：
+   active（运行中，带呼吸环）> ready（已就绪）> idle（未启动/预览）。 */
+.agent-status-idle {
+  color: var(--faint);
 }
 
 .agent-status-active {
@@ -1264,7 +1294,7 @@ button:disabled {
 .remote-file-row:hover, .remote-file-row-selected { background: rgba(63,63,70,.35); }
 .remote-file-icon { color: #71717a; width: 16px; }
 .remote-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remote-file-size { color: #71717a; font-size: 11px; }
+.remote-file-size { color: var(--faint); font-size: 11px; }
 .file-preview-content { overflow: auto; max-height: 470px; margin-top: 12px; padding: 12px; border-radius: 6px; background: #050505; color: #d4d4d8; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 @media (max-width: 900px) { .files-layout { grid-template-columns: 1fr; } }
 .activity-page { min-height: 0; display: flex; flex-direction: column; gap: 18px; }
@@ -1860,6 +1890,24 @@ select:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+/* 只有图标、没有文字的 text-button（侧栏的「刷新服务器列表」）。
+   .text-button 的 `padding: 0` 是给带文字的按钮写的（那里文字本身就是热区），
+   纯图标按钮套上它之后整个点击目标就是图标自己的 14×14 —— 鼠标能点中，但很难
+   点中。
+
+   这里**不能**用 min-width/min-height 撑开：这个按钮坐在 .server-list-meta 里，
+   撑高它会连带把整张服务器列表推下去 12px（实测 .server-list-meta 从 14px 涨到
+   26px）。所以用「内边距 + 等量负外边距」这一对：border box 长到 26×26（热区
+   真的变大了，`elementFromPoint` 在四角都能命中它），而 margin box 仍是 14×14，
+   flex 行按 margin box 排版，于是版面一动不动。
+
+   按钮本身没有底色和描边，多出来的 6px 在视觉上完全不可见；它左侧是
+   space-between 撑出来的空白，也不会抢走别的控件的点击。 */
+.icon-text-button {
+  padding: 6px;
+  margin: -6px;
 }
 
 .inline-error {
@@ -4213,9 +4261,13 @@ select.form-input {
   color: #e6e6e6;
 }
 
-.agent-approval-summary {
-  color: #8d8f92;
-}
+/* 这里原来有一条 `.agent-approval-summary { color: #8d8f92 }`，把批准方式这一格
+   单独压暗。已删除，理由有二：
+     1. .agent-mode-summary 是它的成对项、用 #a5a6a8 —— 同一行里的两句话用两个
+        亮度，读起来像是有层级差别，但它们其实是并列的两个设置。
+     2. #8d8f92 落在 --composer-surface (#292a2c) 上只有 4.43:1，差 0.07 不到
+        WCAG AA 的 4.5:1。灰阶主题里「再暗一档表示次要」这个手法在更亮的底上
+        会直接失效，所以这类覆盖宁可删掉、统一到上面那条基础规则。 */
 
 .agent-settings-trigger.is-open {
   background: #3a3b3d;
@@ -4255,9 +4307,13 @@ select.form-input {
   font-weight: 600;
 }
 
+/* 说明文字用 --muted 而不是 --faint。--faint (#8d8d8d) 在暗色面板上够用
+   （#151515 上是 5.5:1），但这个弹层的底色是更亮的 --composer-surface (#292a2c)，
+   同一档灰在那里只有 4.33:1 —— 差一点点不到 WCAG AA 的 4.5:1。灰阶主题里
+   靠「再暗一档」来表示次要，在亮一档的底上就会失效，所以这一处必须换档。 */
 .agent-settings-note {
   margin: 0;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 10px;
   line-height: 1.5;
 }
@@ -4377,6 +4433,20 @@ select.form-input {
 
 /* 键盘焦点环由全局 button:focus-visible 提供，这里不再写 outline，
    避免又出现「同优先级、靠源码顺序决定谁生效」的老问题。 */
+
+/* ── 滚动条里的焦点环 ───────────────────────────────────────────────────────
+   全局焦点环画在边框盒**外面**（2px 描边 + 2px 偏移）。这一点在滚动容器里会
+   出事：overflow 不是 visible 的元素把绘制裁在自己的 padding box 上，而
+   .server-list / .server-tabs 的 padding 在需要让位的那一侧是 0 —— 于是 Tab 到
+   服务器行或页签时，环被削掉一条边（实测分别少 3px 和 4px）。
+
+   解法不是给容器加内边距（那会把整条工具栏或整个列表推下去，改变版面节奏），
+   而是把这两处的环改成**内缩**：outline-offset 取负值，环画在边框盒里面，
+   任何祖先都裁不到它。选择器的权重也刚好压过全局那条 button:focus-visible。 */
+.server-list .server-row-main:focus-visible,
+.server-tabs .server-tab:focus-visible {
+  outline-offset: -2px;
+}
 
 /* 弹层向上开：输入区贴在面板底部，向下没有空间。 */
 .agent-model-menu {

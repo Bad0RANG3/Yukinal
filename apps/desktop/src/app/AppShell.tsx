@@ -144,7 +144,11 @@ export function AppShell() {
       <main className="workspace-main">
         <header className="workspace-header">
           <div className="workspace-heading">
-            <p className="eyebrow">YUKINAL <span className="breadcrumb-divider">/</span> {primary === "servers" ? "服务器工作区" : "工作区管理"}</p>
+            {/* 这个斜杠是纯装饰：它把「产品名」和「工作区名」在视觉上分开，本身
+                不携带信息。标记成 aria-hidden 之后，读屏不会念出一个孤立的
+                「斜杠」，而它极低的对比度（--line-strong，约 2:1）也就名正言顺 ——
+                WCAG 对纯装饰性文字不作对比度要求。 */}
+            <p className="eyebrow">YUKINAL <span className="breadcrumb-divider" aria-hidden="true">/</span> {primary === "servers" ? "服务器工作区" : "工作区管理"}</p>
             <h1 title={selectedServer?.name}>{primary === "servers" ? selectedServer?.name ?? "基础设施" : PRIMARY_NAV_META[primary].label}</h1>
           </div>
           <div className="workspace-header-meta">
