@@ -17,6 +17,7 @@ import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
+import { usePresence } from "../../hooks/usePresence.js";
 import { ModelPicker } from "./ModelPicker.js";
 import {
   findActiveTrigger,
@@ -127,6 +128,26 @@ export function AgentComposer({
   const open = suggestions.length > 0;
   const active = open ? Math.min(highlight, suggestions.length - 1) : 0;
 
+  /* 这个输入区里有四个元素是「出现/消失」而不是「一直都在」的：候选列表、
+     运行设置面板、发送按钮、运行条。它们各自都值得一段动画 —— 但 React 在条件
+     变假的那一刻就把节点摘掉了，CSS 没有机会播退场。presence 让它们多留
+     160ms，只影响渲染，不影响任何逻辑状态（open / menuOpen / running 仍然是
+     唯一的事实来源）。 */
+  const suggestionsPresence = usePresence(open, { exitAnimation: "popover-exit" });
+  const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
+  const sendPresence = usePresence(Boolean(prompt.trim()) && !running, { exitAnimation: "pop-exit" });
+  const runningPresence = usePresence(running, { exitAnimation: "expand-exit" });
+
+  /* 退场期间必须渲染**上一次的内容**。候选列表是唯一一处「内容也跟着 open
+     一起清空」的弹层：`trigger` 一变 null，suggestions 立刻是空数组。如果照它
+     渲染，退场动画会先把列表抽成 0 高度、再淡出一个空盒子 —— 看起来像弹层
+     被拍扁了，而不是「收回去」。所以这里缓存最后一次非空的列表与高亮位置。
+     这是一份渲染缓存，不是状态：它不参与任何判断，只在 closing 时被读取。 */
+  const lastSuggestions = useRef<{ items: Suggestion[]; active: number }>({ items: [], active: 0 });
+  if (open) lastSuggestions.current = { items: suggestions, active };
+  const visibleSuggestions = suggestionsPresence.closing ? lastSuggestions.current.items : suggestions;
+  const visibleActive = suggestionsPresence.closing ? lastSuggestions.current.active : active;
+
   const syncTrigger = (value: string, caret: number | null): void => {
     const next = findActiveTrigger(value, caret ?? value.length);
     // 同一触发词内继续打字不算「重新打开」，Escape 的状态要保留。
@@ -219,17 +240,22 @@ export function AgentComposer({
           className="agent-composer-input"
         />
 
-        {open ? (
-          <ul className="composer-suggestions" role="listbox" aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的服务器"}>
-            {suggestions.map((suggestion, index) => {
+        {suggestionsPresence.mounted ? (
+          <ul
+            className={`composer-suggestions ${suggestionsPresence.closing ? "is-closing" : ""}`}
+            role="listbox"
+            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的服务器"}
+            onAnimationEnd={suggestionsPresence.onAnimationEnd}
+          >
+            {visibleSuggestions.map((suggestion, index) => {
               const disabled = suggestion.kind === "command" && suggestion.reason !== null;
               return (
                 <li key={suggestion.key}>
                   <button
                     type="button"
                     role="option"
-                    aria-selected={index === active}
-                    className={`composer-suggestion ${index === active ? "is-active" : ""}`}
+                    aria-selected={index === visibleActive}
+                    className={`composer-suggestion ${index === visibleActive ? "is-active" : ""}`}
                     disabled={disabled}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => applySuggestion(suggestion)}
@@ -247,8 +273,13 @@ export function AgentComposer({
           </ul>
         ) : null}
 
-        {menuOpen ? (
-          <div className="agent-settings-panel" role="dialog" aria-label="运行设置">
+        {settingsPresence.mounted ? (
+          <div
+            className={`agent-settings-panel ${settingsPresence.closing ? "is-closing" : ""}`}
+            role="dialog"
+            aria-label="运行设置"
+            onAnimationEnd={settingsPresence.onAnimationEnd}
+          >
             <section className="agent-settings-group">
               <p className="agent-settings-title">运行模式</p>
               <p className="agent-settings-note">决定这次运行能做什么。只读类模式由权限引擎强制，模型无法绕过。</p>
@@ -349,14 +380,15 @@ export function AgentComposer({
             {/* 发送按钮在有内容时才出现；它不再兼任停止。
                 停止单独成一个按钮，只在运行中出现 —— 原来二者共用一个图标按钮，
                 结果是「没有输入」和「等待运行」两种状态都表现为一个禁用的图标。 */}
-            {prompt.trim() && !running ? (
+            {sendPresence.mounted ? (
               <button
                 type="button"
-                className="agent-send-button"
+                className={`agent-send-button ${sendPresence.closing ? "is-closing" : ""}`}
                 aria-label="发送消息"
                 title="发送消息（Enter）"
                 disabled={!canSend}
                 onClick={submit}
+                onAnimationEnd={sendPresence.onAnimationEnd}
               >
                 发送
               </button>
@@ -364,8 +396,11 @@ export function AgentComposer({
           </div>
         </div>
 
-        {running ? (
-          <div className="agent-running-bar">
+        {runningPresence.mounted ? (
+          <div
+            className={`agent-running-bar ${runningPresence.closing ? "is-closing" : ""}`}
+            onAnimationEnd={runningPresence.onAnimationEnd}
+          >
             <span className="agent-running-label">
               <span className="agent-running-dot" aria-hidden="true" />
               运行中

@@ -17,6 +17,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
 import { Icon } from "../../components/Icon.js";
+import { usePresence } from "../../hooks/usePresence.js";
 
 /** 一个可选模型。`key` 是 provider:model 复合键，因为同名模型可能挂在多个 provider 下。 */
 export type ModelPickerChoice = {
@@ -55,6 +56,9 @@ export function ModelPicker({
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
+  // 逻辑上的 open 驱动全部行为；presence 只决定「还在不在 DOM 里」，
+  // 好让 popover-exit 有机会播完。两者绝不能混用。
+  const presence = usePresence(open, { exitAnimation: "popover-exit" });
 
   const selectedIndex = choices.findIndex((choice) => choice.key === selectedKey);
   const selected = selectedIndex >= 0 ? choices[selectedIndex] : choices[0];
@@ -147,8 +151,14 @@ export function ModelPicker({
         <Icon name="chevronDown" size="xs" />
       </button>
 
-      {open ? (
-        <ul className="agent-model-menu" role="listbox" id={listboxId} aria-label="可用模型">
+      {presence.mounted ? (
+        <ul
+          className={`agent-model-menu ${presence.closing ? "is-closing" : ""}`}
+          role="listbox"
+          id={listboxId}
+          aria-label="可用模型"
+          onAnimationEnd={presence.onAnimationEnd}
+        >
           {choices.map((choice, index) => (
             <li
               key={choice.key}

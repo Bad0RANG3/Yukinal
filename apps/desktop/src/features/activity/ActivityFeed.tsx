@@ -13,6 +13,7 @@ import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
 import { environmentLabel } from "../../lib/labels.js";
 import { Icon, type IconName } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
+import { usePresence } from "../../hooks/usePresence.js";
 
 const ACTIVITY_TYPE_META: Record<ActivityType, { label: string; icon: IconName }> = {
   connection: { label: "连接", icon: "connect" },
@@ -122,6 +123,9 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
   });
   const meta = ACTIVITY_TYPE_META[activity.type];
   const outcome = activity.outcome ? OUTCOME_LABEL[activity.outcome] : null;
+  // 展开/收起是一对动作，就该有一对动画。没有 presence 的话收起是瞬移：
+  // 整块步骤直接消失，用户看不出它到底是「被收回去了」还是「没了」。
+  const detailPresence = usePresence(expanded && Boolean(traceId), { exitAnimation: "expand-exit" });
   return (
     <article className="activity-row">
       <div className={`activity-type-icon activity-type-${activity.type}`} aria-hidden="true"><Icon name={meta.icon} size="md" /></div>
@@ -142,8 +146,12 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
         </div>
         <div className="activity-row-meta"><span>{meta.label}</span><span>·</span><span>{actorLabel(activity.actor)}</span>{serverName ? <><span>·</span><span>{serverName}</span></> : null}<time dateTime={activity.createdAt}>{formatTimestamp(activity.createdAt)}</time></div>
         {activity.description || activity.reason ? <p>{activity.description ?? activity.reason}</p> : null}
-        {expanded && traceId ? (
-          <div className="activity-trace-detail" aria-label="工具执行步骤">
+        {detailPresence.mounted ? (
+          <div
+            className={`activity-trace-detail ${detailPresence.closing ? "is-closing" : ""}`}
+            aria-label="工具执行步骤"
+            onAnimationEnd={detailPresence.onAnimationEnd}
+          >
             {executions.isLoading ? <span className="muted-copy">正在读取步骤…</span> : null}
             {executions.isError ? <span className="error-copy">无法读取步骤：{executions.error instanceof Error ? executions.error.message : String(executions.error)}</span> : null}
             {executions.data?.executions.map((execution) => <ExecutionStep key={`${execution.traceId}:${execution.stepId}`} execution={execution} />)}

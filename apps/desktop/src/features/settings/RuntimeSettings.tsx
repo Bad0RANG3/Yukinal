@@ -6,6 +6,7 @@ import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
+import { usePresence } from "../../hooks/usePresence.js";
 import {
   usePreferencesStore,
   type TerminalFont,
@@ -65,12 +66,40 @@ export function RuntimeSettings() {
           </button>
         </div>
         {status.isError || core.isError ? <div className="settings-error-row" role="alert"><span>{status.error?.message ?? core.error?.message}</span><button type="button" className="text-button" onClick={() => { void core.refetch(); void status.refetch(); }}>重试</button></div> : null}
-        {showLogs ? logs.isLoading ? <pre id="runtime-logs" className="agent-log-viewer">正在读取日志…</pre> : logs.isError ? <div className="settings-error-row" role="alert"><span>{logs.error.message}</span><button type="button" className="text-button" onClick={() => void logs.refetch()}>重试</button></div> : <pre id="runtime-logs" className="agent-log-viewer">{logs.data?.lines.length ? logs.data.lines.join("\n") : "（暂无捕获输出）"}</pre> : null}
+        <RuntimeLogs open={showLogs} logs={logs} />
       </section>
 
       <AppearanceSettings />
       <ProviderSettings />
     </section>
+  );
+}
+
+/**
+ * 「查看 Agent 日志」展开的那块输出。
+ *
+ * 从 RuntimeSettings 里拆出来有两个理由：一是它有三种互斥的形态（加载中 /
+ * 读取失败 / 有内容），挤在一行里既读不了也改不动；二是它需要一段收起动画，
+ * 而 presence 要求把 `is-closing` 和 `onAnimationEnd` 交给**当前真正渲染出来的
+ * 那个元素** —— 内联写在三元表达式里做不到这件事。
+ */
+function RuntimeLogs({ open, logs }: { open: boolean; logs: ReturnType<typeof useAgentLogs> }) {
+  const presence = usePresence(open, { exitAnimation: "expand-exit" });
+  if (!presence.mounted) return null;
+  const closing = presence.closing ? " is-closing" : "";
+  if (logs.isLoading) return <pre id="runtime-logs" className={`agent-log-viewer${closing}`} onAnimationEnd={presence.onAnimationEnd}>正在读取日志…</pre>;
+  if (logs.isError) {
+    return (
+      <div className={`settings-error-row${closing}`} role="alert" onAnimationEnd={presence.onAnimationEnd}>
+        <span>{logs.error.message}</span>
+        <button type="button" className="text-button" onClick={() => void logs.refetch()}>重试</button>
+      </div>
+    );
+  }
+  return (
+    <pre id="runtime-logs" className={`agent-log-viewer${closing}`} onAnimationEnd={presence.onAnimationEnd}>
+      {logs.data?.lines.length ? logs.data.lines.join("\n") : "（暂无捕获输出）"}
+    </pre>
   );
 }
 

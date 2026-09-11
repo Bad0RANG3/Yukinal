@@ -11,6 +11,7 @@ import { ServicesPane } from "../features/services/ServicesPane.js";
 import { LogsPane } from "../features/logs/LogsPane.js";
 import { ProjectsPane } from "../features/projects/ProjectsPane.js";
 import { Icon, type IconName } from "../components/Icon.js";
+import brandMark from "../assets/brand-mark.png";
 import {
   PRIMARY_NAV,
   SERVER_PAGES,
@@ -112,7 +113,7 @@ export function AppShell() {
     >
       <nav className="app-rail" aria-label="主导航">
         <div className="brand-mark" aria-label="Yukinal">
-          <span>Y</span>
+          <img src={brandMark} alt="" />
         </div>
         <div className="rail-nav">
           {PRIMARY_NAV.map((item) => {

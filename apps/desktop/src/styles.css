@@ -178,6 +178,14 @@ button:disabled {
   padding: 18px 10px 12px;
 }
 
+/* 左上角这枚标记就是任务栏里那枚应用图标本身：src/assets/brand-mark.png 取自
+   src-tauri/icons/128x128.png（由 scripts/generate-app-icon.ps1 生成、`pnpm --filter
+   @yukinal/desktop icon` 铺开的那套图标里的 128px 一档），所以换了图标就跟着换。
+   图标自带一圈透明留白和 #09090b 的深色底板，底色因此直接取底板同色：留白落在同色底上，
+   rail 里只剩环与节点，不用再画内描边。容器只负责摆位与悬浮反馈，原来那套字形、字重
+   样式随 "Y" 一起删掉了。
+   `.app-shell` 上的 grayscale(1) 会把这枚图标一起压成灰阶（和整屏的灰阶契约一致）：
+   要看它本来的青色，得在这里单独写 filter: grayscale(0)，那属于打破既有契约，别顺手加。 */
 .brand-mark {
   display: grid;
   width: 38px;
@@ -185,11 +193,15 @@ button:disabled {
   place-items: center;
   border: 1px solid #3a625c;
   border-radius: 10px;
-  background: #16332f;
-  color: var(--accent);
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: 0;
+  background: #09090b;
+}
+
+/* 图标铺满容器：等比缩放到 38px，留白由图标自己提供，容器不再加 padding。 */
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  -webkit-user-drag: none;
 }
 
 .rail-nav {
@@ -936,7 +948,7 @@ button:disabled {
   background: linear-gradient(90deg, #13191f, #192128, #13191f);
   background-size: 200% 100%;
   /* Keyframes live in the motion layer at the end of this file. */
-  animation: shimmer 1.4s ease-in-out infinite;
+  animation: shimmer var(--motion-shimmer-cycle) ease-in-out infinite;
 }
 
 .loading-panel,
@@ -972,7 +984,7 @@ button:disabled {
   border-top-color: var(--accent);
   border-radius: 50%;
   /* Keyframes live in the motion layer at the end of this file. */
-  animation: spin 0.8s linear infinite;
+  animation: spin var(--motion-spin-cycle) linear infinite;
 }
 
 .error-panel {
@@ -1016,6 +1028,10 @@ button:disabled {
   color: var(--accent);
 }
 
+/* A ring that expands and fades reads as "working on it" without moving any
+   pixels of layout, so it never disturbs the row it sits in. The ring itself is
+   the `::after` in the Live and looping section; all this rule has to do is give
+   it something to sit on. */
 .status-pulse {
   width: 6px;
   height: 6px;
@@ -1127,9 +1143,11 @@ button:disabled {
 .tool-card-failed { border-left-color: var(--danger-line); }
 .tool-card-cancelled { border-left-color: var(--line-strong); }
 
-/* 执行中的卡片轻微脉动，表示「还在等结果」。 */
+/* 执行中的卡片轻微脉动，表示「还在等结果」。
+   这里呼吸的是**文字**，所以用 soft-pulse（纯 opacity），不是呼吸环 —— 给一行
+   文字套一圈描边会让它看起来像一个可点的控件。 */
 .tool-card-running > summary .tool-status {
-  animation: pulse-ring 1.8s ease-in-out infinite;
+  animation: soft-pulse var(--motion-soft-cycle) ease-in-out infinite;
 }
 
 .tool-card code,
@@ -1489,8 +1507,7 @@ select:focus-visible {
   height: 38px;
   border-color: #345b53;
   border-radius: 11px;
-  background: #10211f;
-  color: var(--accent);
+  background: #09090b;
 }
 
 .rail-nav {
@@ -1503,7 +1520,7 @@ select:focus-visible {
   border-radius: 9px;
   color: var(--faint);
   padding: 9px 3px;
-  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+  /* 过渡统一由动效层给出；这里原本的 `140ms` 是它的死重复。 */
 }
 
 .rail-button:hover {
@@ -1785,7 +1802,8 @@ select:focus-visible {
   padding: 7px 11px;
   font-size: 11px;
   line-height: 1.2;
-  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+  /* 过渡不写在这里：动效层（文件末尾）是 transition 的唯一出处，
+     这里原本那条 `140ms` 因为同权重、后出现而被它整条覆盖，是死声明。 */
 }
 
 .secondary-button,
@@ -2963,7 +2981,7 @@ select.form-input {
   .app-shell, .app-shell.agent-collapsed { grid-template-columns: 60px 228px minmax(0, 1fr); gap: 8px; padding: 8px; }
   .app-shell:not([data-primary="servers"]), .app-shell.agent-collapsed:not([data-primary="servers"]) { grid-template-columns: 60px minmax(0, 1fr); }
   .agent-panel:not(.agent-panel-hidden) { position: fixed; top: 74px; right: 8px; bottom: 8px; z-index: 15; width: min(348px, calc(100vw - 32px)); box-shadow: -16px 0 60px rgb(0 0 0 / 55%); }
-  .agent-scrim { display: block; position: fixed; inset: 0; z-index: 14; border: 0; background: rgb(0 0 0 / 50%); cursor: default; animation: scrim-enter 220ms ease both; }
+  .agent-scrim { display: block; position: fixed; inset: 0; z-index: 14; border: 0; background: rgb(0 0 0 / 50%); cursor: default; animation: scrim-enter var(--motion-medium) ease both; }
 }
 @media (max-width: 820px) {
   .app-shell, .app-shell.agent-collapsed { grid-template-columns: 60px minmax(0, 1fr); }
@@ -3061,6 +3079,16 @@ select.form-input {
   --motion-medium: 280ms;
   --motion-slow: 380ms;
   --motion-entrance: 520ms;
+  /* 一次「测量」的时长：数值落定、仪表填满。比任何入场都慢，因为它表达的不是
+     「有新东西出现」，而是「这个读数已经取到了」。 */
+  --motion-measure: 720ms;
+  --motion-measure-delay: 180ms;
+  /* 循环类动效的周期。呼吸环刻意比心跳慢：它在说明「还在等」，不是「出事了」。 */
+  --motion-ring-cycle: 1.8s;
+  --motion-blink-cycle: 1s;
+  --motion-shimmer-cycle: 1.4s;
+  --motion-spin-cycle: 0.8s;
+  --motion-soft-cycle: 1.4s;
 
   /* `ease` decelerates into place and is what almost everything entering
      uses. `exit` accelerates away so a dismissal feels decisive. `spring`
@@ -3074,6 +3102,14 @@ select.form-input {
   --motion-slide: 16px;
   --motion-stagger: 38ms;
   --motion-press: scale(0.97);
+
+  /* 弹层的「贴附位移」：弹层浮在触发它的控件上方，所以它从**靠近触发器**的
+     方向长出来 —— 起点在下方 5px，落位到 0。反过来（从上方落下）会让它看起来
+     是从别处飞进来的，而不是从这个按钮里长出来的。 */
+  --motion-pop-shift: 5px;
+  /* 控件在行内出现/消失时的起始缩放。比 --motion-press 更小一点，
+     因为它要读成「刚刚被放进这一行」而不是「被按了一下」。 */
+  --motion-pop-scale: 0.9;
 }
 
 /* ── Entrance ───────────────────────────────────────────────────────────── */
@@ -3125,9 +3161,18 @@ select.form-input {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* A block that opens downward from a heading — the trace detail, the log
+   viewer. It grows out of its own top edge, so it starts slightly above where
+   it lands. `expand-exit` is the same movement reversed and faster: collapsing
+   is a decision the user already made. */
 @keyframes expand-enter {
   from { opacity: 0; transform: translateY(-5px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes expand-exit {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
 }
 
 /* An empty state is the whole answer to "what is here?", so it arrives with a
@@ -3135,6 +3180,39 @@ select.form-input {
 @keyframes empty-enter {
   from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: scale(1); }
+}
+
+/* ── Popovers ───────────────────────────────────────────────────────────────
+   Every popover in the composer is anchored to a control *below* it and opens
+   upward, so it grows out of that control: the start position is nudged down
+   toward the anchor and scaled down slightly. Enter and exit are a matched pair
+   with the same origin, which is what makes a dismissal read as "going back
+   where it came from" rather than as a second, unrelated animation.
+
+   `transform-origin` is set per-popover in its own rule, because the anchor is
+   the trigger's corner, not the popover's centre. */
+
+@keyframes popover-enter {
+  from { opacity: 0; transform: translateY(var(--motion-pop-shift)) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes popover-exit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(calc(var(--motion-pop-shift) / 2)) scale(0.985); }
+}
+
+/* A control that mounts into an existing flex row. It has no anchor edge to
+   grow from, so it simply arrives in place: no translation, just the smallest
+   possible scale. */
+@keyframes pop-enter {
+  from { opacity: 0; transform: scale(var(--motion-pop-scale)); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pop-exit {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(var(--motion-pop-scale)); }
 }
 
 /* ── Feedback ───────────────────────────────────────────────────────────── */
@@ -3156,17 +3234,56 @@ select.form-input {
 }
 
 /* A resolved approval confirms itself with a single brightening, because the
-   decision removes the buttons the user was aiming at. */
+   decision removes the buttons the user was aiming at.
+
+   这一次闪光是唯一一处「一次性的、非位移的变化」，而它也必须落在 opacity 上：
+   底色交给一块铺满的 ::before，动画只改它的不透明度。直接动 background-color
+   会让这个元素每帧重新光栅化 —— 一张卡片、一帧而已，但契约里写的是「只有
+   opacity 与 transform」，一处例外就会变成下一处的借口。 */
 @keyframes resolve-flash {
-  0% { background-color: var(--ok-surface); }
-  100% { background-color: transparent; }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 /* ── Live and looping ───────────────────────────────────────────────────── */
 
-@keyframes pulse-ring {
-  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 9%, transparent); }
-  50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent); }
+/* 呼吸环：一圈描边从元素边缘向外放大并淡出，读作「还在等结果」。
+   它画在 ::after 上，只用 transform 与 opacity —— 这两条是合成器唯一不重绘的
+   属性，也是这张契约允许的全部。
+
+   这里原来是一条 `@keyframes pulse-ring`，逐帧改 `box-shadow` 的 spread。
+   两个问题：一是 box-shadow 每帧都要重绘，与本层的契约自相矛盾；二是
+   `0 0 0 3px` → `0 0 0 6px` → `0 0 0 3px` 是「胀一下再缩回去」，而注释里写的
+   意图是「扩大并淡出」。现在两者一致了。
+
+   环的放大倍数由 `--ring-scale` 控制：6px 的小圆点要放大很多才看得出在动，
+   52px 的方块只要一点点，用同一个倍数会让方块的环飞出容器。 */
+@keyframes ring-expand {
+  from { opacity: 0.5; transform: scale(1); }
+  to { opacity: 0; transform: scale(var(--ring-scale, 2.2)); }
+}
+
+.status-pulse,
+.context-chip.server-status-connecting,
+.agent-empty-mark {
+  position: relative;
+  --ring-scale: 2.2;
+}
+
+.agent-empty-mark {
+  --ring-scale: 1.16;
+}
+
+.status-pulse::after,
+.context-chip.server-status-connecting::after,
+.agent-empty-mark::after {
+  position: absolute;
+  border: 1px solid currentColor;
+  border-radius: inherit;
+  content: "";
+  inset: -1px;
+  pointer-events: none;
+  animation: ring-expand var(--motion-ring-cycle) ease-out infinite;
 }
 
 @keyframes soft-pulse {
@@ -3242,9 +3359,10 @@ select.form-input {
   transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
 }
 
+/* 悬浮反馈只留在边框、阴影和位移上。原来那层 #16332f 的绿色底是给字形做背景的，
+   现在底板上压着图标：绿色底会从图标的透明留白里透出来，把图标框成一个绿方块。 */
 .brand-mark:hover {
   border-color: var(--accent);
-  background: #16332f;
   box-shadow: 0 8px 24px rgb(0 0 0 / 24%);
   transform: translateY(-2px) rotate(-2deg);
 }
@@ -3464,23 +3582,25 @@ select.form-input {
 
 /* ── Live data ──────────────────────────────────────────────────────────── */
 
-/* A ring that expands and fades reads as "working on it" without moving any
-   pixels of layout, so it never disturbs the row it sits in. */
-.status-pulse {
-  animation: pulse-ring 1.8s ease-in-out infinite;
-}
+/* The status-pulse ring is the `::after` defined in the Live and looping
+   section; this block only notes what it means. A static rule here would fight
+   that one. */
 
-.server-status-connecting,
-.context-chip.server-status-connecting {
-  animation: pulse-ring 1.8s ease-in-out infinite;
-}
+/* A connecting server says so with the expanding ring. The animation lives on
+   the `::after` (see the Live and looping section), so the chip itself carries
+   no animation and its own box-shadow stays a static resting value. */
 
 /* The meter fills from the left on mount so a healthy server looks like it
-   settled rather than like it snapped to a value. */
+   settled rather than like it snapped to a value.
+
+   This is longer than any --motion-* token on purpose: a value settling is not
+   an element entering, and it has to read as a measurement being taken rather
+   than as the UI appearing. It still comes from tokens so the number lives in
+   one place. */
 .metric-fill {
   transform: scaleX(0);
   transform-origin: left center;
-  animation: metric-fill-enter 720ms var(--motion-ease) 180ms both;
+  animation: metric-fill-enter var(--motion-measure) var(--motion-ease) var(--motion-measure-delay) both;
 }
 
 /* ── Agent panel ────────────────────────────────────────────────────────── */
@@ -3521,8 +3641,10 @@ select.form-input {
 .agent-feed > :nth-child(n + 4) { animation-delay: calc(var(--motion-stagger) * 3); }
 .agent-feed > :nth-child(n + 5) { animation-delay: calc(var(--motion-stagger) * 4); }
 
-.agent-empty-mark {
-  animation: pulse-ring 2.6s ease-in-out infinite;
+/* 空态标记的呼吸环更慢：它在一块静止的空白里唯一的活动，快起来会显得急躁。
+   环本体仍由 Live and looping 里的 `::after` 提供。 */
+.agent-empty-mark::after {
+  animation-duration: 2.6s;
 }
 
 /* The caret marks the single place in the feed that is still moving. Without
@@ -3535,13 +3657,29 @@ select.form-input {
   content: "";
   height: 1em;
   vertical-align: -0.15em;
-  animation: caret-blink 1s steps(1, end) infinite;
+  animation: caret-blink var(--motion-blink-cycle) steps(1, end) infinite;
 }
 
 /* A resolved approval flashes once, because the decision removes the buttons
-   the user was aiming at and the card would otherwise look unchanged. */
+   the user was aiming at and the card would otherwise look unchanged.
+
+   底色画在 ::before 上，动画改的是它的 opacity —— 见上面 resolve-flash 的定义。
+   `isolation: isolate` 把这块自身建成层叠上下文，负 z-index 的底色才会停在
+   文字下面而不是掉到卡片背景后面去。 */
 .approval-resolved {
+  position: relative;
+  isolation: isolate;
+}
+
+.approval-resolved::before {
+  position: absolute;
+  z-index: -1;
+  border-radius: 4px;
+  background: var(--ok-surface);
+  content: "";
+  inset: -3px -6px;
   animation: resolve-flash var(--motion-slow) var(--motion-ease) both;
+  pointer-events: none;
 }
 
 /* A refused or failed action shakes once. A looping shake would be an alarm;
@@ -3585,6 +3723,14 @@ select.form-input {
 .activity-trace-detail,
 .agent-log-viewer {
   animation: expand-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* 收起方向。只有挂了 presence 的那一处会加上 .is-closing —— 没有它的话
+   `both` 填充会把元素留在 opacity:0，而节点还在，等于一块看不见的挡板。 */
+.activity-trace-detail.is-closing,
+.agent-log-viewer.is-closing {
+  pointer-events: none;
+  animation: expand-exit var(--motion-fast) var(--motion-exit) both;
 }
 
 /* The modal is a native <dialog>, so it has no exit animation: the browser
@@ -3635,6 +3781,116 @@ select.form-input {
 .loading-panel,
 .error-panel {
   animation: empty-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* ── Disclosure ─────────────────────────────────────────────────────────────
+   A `<details>` body is `display: none` when closed, so it has nothing to
+   transition. Chromium can animate the disclosure box itself through
+   `::details-content` once `interpolate-size: allow-keywords` lets `block-size`
+   interpolate to and from `auto`.
+
+   This is wrapped in `@supports` on purpose: on an engine without it the
+   declarations are dropped, and the fallback is today's instant open. Without
+   the guard a partial implementation could leave the body at `block-size: 0`
+   and the card would render as an empty shell.
+
+   `content-visibility` has to be in the transition list with `allow-discrete`,
+   otherwise the content is removed from the box tree at the start of the
+   collapse and the height animation has nothing left to measure. */
+
+@supports (interpolate-size: allow-keywords) {
+  :root {
+    interpolate-size: allow-keywords;
+  }
+
+  /* 只有真正的 `<details>` 能用 ::details-content。
+     `.activity-trace-detail` 是一个条件渲染的 div，不是 details —— 它靠
+     presence + expand-enter / expand-exit 走另一条路，不要写在这里。 */
+  .tool-card::details-content {
+    block-size: 0;
+    overflow: hidden;
+    transition:
+      block-size var(--motion-medium) var(--motion-ease),
+      content-visibility var(--motion-medium) allow-discrete;
+  }
+
+  .tool-card[open]::details-content {
+    block-size: auto;
+  }
+}
+
+/* ── Composer popovers ──────────────────────────────────────────────────────
+   Three popovers share one behaviour: the `@`/`/` suggestion list, the `+` run
+   settings panel, and the model listbox. All three open upward out of a control
+   in the toolbar, so all three use the same enter/exit pair and differ only in
+   `transform-origin`, which is the corner of their trigger:
+
+     - the suggestion list is anchored to the whole input card  → bottom centre
+     - the run settings panel is opened by the `+` at the left   → bottom left
+     - the model listbox is opened by the picker at the right    → bottom right
+
+   Without the origin they would all scale from their own centre, which for a
+   left-anchored panel reads as a jump toward the middle.
+
+   The exit class is applied by `usePresence`, which keeps the element in the
+   DOM for the length of `popover-exit` so the animation actually runs. */
+
+.composer-suggestions,
+.agent-settings-panel,
+.agent-model-menu {
+  transform-origin: bottom center;
+  animation: popover-enter var(--motion-fast) var(--motion-ease) both;
+}
+
+.agent-settings-panel {
+  transform-origin: bottom left;
+}
+
+.agent-model-menu {
+  transform-origin: bottom right;
+}
+
+.composer-suggestions.is-closing,
+.agent-settings-panel.is-closing,
+.agent-model-menu.is-closing {
+  pointer-events: none;
+  animation: popover-exit var(--motion-fast) var(--motion-exit) both;
+}
+
+/* 候选列表的高亮是跟着方向键走的，所以它必须能看见「移过去」这个过程。
+   不加过渡的话每按一次方向键都是瞬移，用户看不出自己移动了几格。 */
+.composer-suggestion,
+.agent-settings-option,
+.agent-model-option {
+  transition: background-color var(--motion-instant) linear, color var(--motion-instant) linear, border-color var(--motion-instant) linear;
+}
+
+/* ── Composer controls that mount into the toolbar ──────────────────────────
+   The send button and the running bar are mutually exclusive and both swap in
+   and out as the user types and as a run starts. They have no anchor edge to
+   grow from, so they arrive in place with `pop-enter` — the smallest movement
+   that still says "this just became available" rather than "this was always
+   here and you missed it". */
+
+.agent-send-button {
+  animation: pop-enter var(--motion-fast) var(--motion-spring) both;
+}
+
+.agent-send-button.is-closing {
+  pointer-events: none;
+  animation: pop-exit var(--motion-instant) var(--motion-exit) both;
+}
+
+.agent-running-bar {
+  animation: notice-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* 与它自己的入场配成一对：notice-enter 是从上边缘往下长出来的，所以退场就该
+   往回收，而不是缩成一个点。成对的进/退是「同一个东西来回」；不成对会让退场
+   看起来像另一个动画碰巧发生在同一个位置。 */
+.agent-running-bar.is-closing {
+  pointer-events: none;
+  animation: expand-exit var(--motion-fast) var(--motion-exit) both;
 }
 
 /* The settings trigger renders a plus in both states and rotates it 45° to
@@ -4234,7 +4490,7 @@ select.form-input {
   border-radius: 50%;
   background: var(--composer-accent);
   /* `soft-pulse` is the motion layer's one looping opacity animation. */
-  animation: soft-pulse 1.4s ease-in-out infinite;
+  animation: soft-pulse var(--motion-soft-cycle) ease-in-out infinite;
 }
 
 .agent-stop-button {
