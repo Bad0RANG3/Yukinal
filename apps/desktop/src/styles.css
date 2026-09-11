@@ -2393,6 +2393,15 @@ select:focus-visible {
   box-shadow: 0 0 0 3px var(--focus-halo);
 }
 
+/* 与 .agent-composer-input 同一个坑：上面那条 `outline: 0` 权重 (0,1,0)，
+   压不过全局 `input:focus-visible` 的 (0,1,1)。而 input 属于「可接受键盘输入」
+   的元素，鼠标点进去也命中 :focus-visible —— 于是每个表单字段在已经有一条
+   青色边框 + 光晕的情况下，外面还会再多画一圈 2px 的浅灰方框。
+   这里的焦点提示由 .form-input:focus 独自承担，不需要那圈方框。 */
+.form-input:focus-visible {
+  outline: none;
+}
+
 .form-input::placeholder {
   color: var(--faint);
 }
@@ -3769,6 +3778,14 @@ select.form-input {
   padding: 12px 9px 9px 14px;
 }
 
+/* 焦点提示放在整张输入卡片上，而不是贴着文字画一圈方框。
+   与 .server-search / .agent-history-search 用的是同一套 :focus-within 写法，
+   所以「聚焦的输入区」在全站看起来是一致的一件事。 */
+.agent-composer-shell:focus-within {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
+}
+
 .agent-composer-input {
   display: block;
   width: 100%;
@@ -3784,13 +3801,18 @@ select.form-input {
   line-height: 1.45;
 }
 
-.agent-composer-input::placeholder {
-  color: #77797c;
+/* 上面那条 `outline: 0` 单独一条压不住全局的 `textarea:focus-visible`：
+   后者带伪类，权重 (0,1,1) 高于 (0,1,0)。而 textarea 属于「可接受键盘输入」
+   的元素，规范要求它即使在鼠标点击/拖动获得焦点时也命中 :focus-visible ——
+   于是每次往输入框里拖一下，文字周围就会被画上一圈 2px 的浅灰方框，
+   看起来像「整块输入框被选中了」，而实际上一个字符都没选中。
+   这里显式取消它，焦点提示改由上面卡片上的 :focus-within 承担。 */
+.agent-composer-input:focus-visible {
+  outline: none;
 }
 
-.agent-composer-input:focus::placeholder {
-  color: #8b8d90;
-}
+/* 这两条 ::placeholder 规则随占位提示一起删除 —— 输入框已经没有 placeholder
+   属性了，留着是永不匹配的死规则。 */
 
 /* @ / 候选列表：浮在输入框上方，不挤动下面的工具条。
    用 absolute 而不是插入文档流，否则每敲一个字弹窗出现/消失都会让整个

@@ -209,7 +209,13 @@ export function AgentComposer({
           onKeyDown={handleKeyDown}
           onClick={(event) => syncTrigger(prompt, event.currentTarget.selectionStart)}
           onBlur={() => setTrigger(null)}
-          placeholder={running ? "运行中…" : "随心输入，/ 命令，@ 提及服务器"}
+          /* 这里原本有一句占位提示（"随心输入，/ 命令，@ 提及服务器"）。
+             去掉它有两个理由：
+             1. 占位文本在任何浏览器里都不是可选中内容 —— 空输入框里唯一
+                可见的字却选不中，会让人以为这个框坏了。
+             2. 「运行中…」那半句是冗余的：下面 .agent-running-bar 已经在显示
+                「运行中」+ 状态点 + 停止按钮，状态不缺这一处表达。
+             输入框没有可见标签，所以 aria-label 必须保留。 */
           className="agent-composer-input"
         />
 
