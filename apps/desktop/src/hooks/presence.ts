@@ -15,6 +15,26 @@
  *   - mounted=false          元素不在 DOM 里
  *   - mounted=true, closing=false  正常显示（或正在播入场动画）
  *   - mounted=true, closing=true   逻辑上已关闭，留在 DOM 里播退场动画
+ *
+ * ## 这里**不**管 Agent 面板，那是有意的
+ *
+ * `useAgentPanelShell` 里也有一套 `isClosing` / `hasBeenOpen` 状态，看起来是同一个
+ * 状态机写了两遍。它不是：
+ *
+ *   1. 弹层退场结束后必须**离开 DOM** —— 这正是 `mounted` 这个维度的用途。
+ *      Agent 面板相反，它永远留在 DOM 里，只在 `agent-panel-closing` 与
+ *      `agent-panel-hidden`（`display: none`）之间切换。原因是外壳的
+ *      `grid-template-columns` 按轨道数布局：面板一旦卸载，轨道数变化，整个工作区
+ *      会跳一下。所以它的「隐藏」不能靠卸载表达。
+ *   2. 面板退场动画 `panel-exit` 用 `animation-fill-mode: both`，结束时停在不透明度
+ *      0 的姿态上，而且 `.agent-panel-closing` 自带 `pointer-events: none`。
+ *      即使 `animationend` 永远不来，它也已不可见、不可点 —— 不构成缺陷。弹层这边
+ *      同样用 `both`，但**必须**有兜底计时器：一旦有规则把动画改成
+ *      `animation: none`（减少动效最自然的写法），填充模式随之失效，弹层会停在
+ *      完全不透明、覆盖界面的状态。那才是这个计时器真正防的事。
+ *
+ * 把两者合并只会得到一个「有些调用方永远不解挂」的两用状态机，比现在更难读。
+ * 所以这里记录差异，而不是抹平它。
  */
 
 export type PresenceState = {
@@ -43,14 +63,24 @@ export function initialPresence(open: boolean): PresenceState {
 export function presenceReducer(state: PresenceState, event: PresenceEvent): PresenceState {
   switch (event.type) {
     case "open":
-      // 从「正在退场」里被重新打开：撤消退场，原地复活，不重播入场动画。
-      return state.mounted && state.closing ? { mounted: true, closing: false } : { mounted: true, closing: false };
+      // 从「正在退场」里被重新打开：撤消退场，原地复活。
+      //
+      // 这里曾经写成一个三元表达式，两个分支的返回值**逐字相同** —— 读起来像是
+      // 「退场中途重开要特殊处理」，其实没有这回事，只是同一条赋值被写了两遍。
+      // 真正要保证的是「重开不重播入场动画」，而这一点由 `mounted` 一直为 true
+      // 保证（元素始终在 DOM 里，class 一变就接着原来的位置继续），跟这个三元无关。
+      return { mounted: true, closing: false };
     case "close":
       // 没挂载就没什么可退场的，保持原样，避免渲染出一个空节点。
       if (!state.mounted) return state;
       return { mounted: true, closing: true };
     case "settled":
-      return { mounted: false, closing: false };
+      // 只有「正在退场」才可能被收尾。这条判断是**兜底**，不是当前流程必需的：
+      // hook 侧在重开时会清掉计时器，`animationend` 也用动画名挡了一道。但它值
+      // 得写在状态机里，因为「收尾」的后果是把元素从 DOM 里摘掉 —— 一个迟到的
+      // settled（计时器与 animationend 抢跑、或退场途中被重开）会让一个已经打开
+      // 的弹层凭空消失，而且是那种极难复现的偶发。
+      return state.closing ? { mounted: false, closing: false } : state;
     default:
       return state;
   }

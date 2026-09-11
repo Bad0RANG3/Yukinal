@@ -4,6 +4,17 @@
  * 这些规则跟 Agent 一点关系都没有 —— 任何右侧抽屉都需要它们 —— 但它们极其
  * 容易写错：收起动画期间面板必须留在 DOM 里（否则动画消失）、必须 inert
  * （否则键盘还能进去）、窄屏下必须是模态（否则 Tab 会跑到背后的工作区）。
+ *
+ * ## 这里的 isClosing 与 `hooks/presence.ts` 看着重复，但不能合并
+ *
+ * 两者都是「逻辑上关了、但还留在 DOM 里播退场」的三态，可面板多出一条硬约束：
+ * **它永远不解挂**。外壳的 `grid-template-columns` 按轨道数布局，面板一旦离开
+ * DOM，轨道数就变，整个工作区会跳一下 —— 所以它的「隐藏」是
+ * `agent-panel-hidden`（`display: none`），而不是不渲染。
+ *
+ * `usePresence` 的核心恰恰是 `mounted: false` 这个「从 DOM 摘掉」的状态。把它接到
+ * 这里，等于每次收起都要求面板卸载，正好是要避免的那件事。差异的完整说明写在
+ * `hooks/presence.ts` 的模块注释里。
  */
 
 import { useCallback, useEffect, useRef, useState, type AnimationEvent, type RefObject } from "react";

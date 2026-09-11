@@ -60,6 +60,32 @@ test("重复收尾是幂等的，不会把已卸载的元素弄回 DOM", () => {
 });
 
 /**
+ * 一个迟到的 `settled` 绝不能把已经打开的元素摘掉。
+ *
+ * 这是状态机侧的第二道闸：hook 在重开时会清计时器，`animationend` 也用动画名挡了
+ * 一道。但「收尾」的后果是把元素移出 DOM，而计时器与 animationend 是两条独立的
+ * 触发路径 —— 一旦哪条漏了，用户看到的是弹层无故消失，且极难复现。所以这条
+ * 不变量写在状态机里，而不是指望两条上游路径都不出错。
+ */
+test("未在退场时收到 settled 不改变任何东西", () => {
+  const open = { mounted: true, closing: false };
+  assert.deepEqual(presenceReducer(open, { type: "settled" }), open, "退场途中被重开后，迟到的 settled 摘掉了已打开的弹层");
+
+  const neverMounted = { mounted: false, closing: false };
+  assert.deepEqual(presenceReducer(neverMounted, { type: "settled" }), neverMounted);
+});
+
+/** 退场中途重开、再收到迟到的 settled：必须仍然打开着。 */
+test("重开后迟到的 settled 不会关掉弹层", () => {
+  let state = initialPresence(false);
+  state = presenceReducer(state, { type: "open" });
+  state = presenceReducer(state, { type: "close" });
+  state = presenceReducer(state, { type: "open" }); // 用户又点开了
+  state = presenceReducer(state, { type: "settled" }); // 旧的计时器到点
+  assert.deepEqual(state, { mounted: true, closing: false });
+});
+
+/**
  * 兜底时长必须比 CSS 的退场动画长，否则计时器会先到、把动画截断 ——
  * 表现就是退场只播了一半。`--motion-fast` 是 160ms。
  */
