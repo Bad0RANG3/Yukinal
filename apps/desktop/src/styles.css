@@ -3298,7 +3298,12 @@ select.form-input {
   transform: var(--motion-press);
 }
 
-.workspace-content > :not([hidden]) {
+/* 每个视图进入时的落位动画。`.workspace-pages` 是 `display: contents` 的包装层
+   （它的存在是为了能在引导页与工作区之间整块 hidden），所以视图不再是
+   `.workspace-content` 的直接子元素 —— 只匹配直接子代会让这条规则在正常使用
+   时永远不生效。两条都留着：引导页是直接子代，工作区视图在包装层里。 */
+.workspace-content > :not([hidden]),
+.workspace-pages > :not([hidden]) {
   animation: view-enter var(--motion-slow) var(--motion-ease) both;
 }
 
@@ -3591,10 +3596,19 @@ select.form-input {
 }
 
 /* Empty states are the whole answer to "what is here?", so they arrive with a
-   touch of scale instead of a slide. */
+   touch of scale instead of a slide.
+
+   注意：这一组只能放动画。三个空状态类各自靠 flex 做居中（见 .empty-state /
+   .agent-empty / .agent-history-empty 的定义），而 .error-copy 的
+   `display: block` 曾经和它们写在同一个选择器组里 —— 那条声明会覆盖空状态的
+   `display: flex`，于是 align-items / justify-content / gap 一起失效，图标、
+   标题、说明各自退化成块级左对齐，看起来就是「文字错位」。两者必须分开。 */
 .empty-state,
 .agent-empty,
-.agent-history-empty,
+.agent-history-empty {
+  animation: empty-enter var(--motion-slow) var(--motion-ease) both;
+}
+
 /* Inline error text for the two panes that have not been migrated to
    `.error-panel` yet (ActivityFeed's execution list, RemoteFilesPane's read
    failure). Both emitted this class with no rule behind it, so the text rendered
@@ -3840,6 +3854,10 @@ select.form-input {
 .agent-composer-toolbar {
   justify-content: space-between;
   gap: 8px;
+  /* 这一行不允许靠压缩文字来腾地方。「目标模式」「请求批准」都是三四个字的
+     短标签，被挤掉几个像素就会截断成「目标模…」—— 而发送按钮一出现就必然
+     发生（实测左侧工具组被压掉 4px）。放不下时整组换行，而不是把标签剪短。 */
+  flex-wrap: wrap;
 }
 
 .agent-composer-toolbar-left,
@@ -3848,8 +3866,16 @@ select.form-input {
   min-width: 0;
 }
 
+/* 左侧是「这次运行会怎样」的唯一常驻说明，任何情况下都保持完整。 */
+.agent-composer-toolbar-left {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
 .agent-composer-toolbar-right {
+  flex: 1 1 auto;
   justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .agent-composer-tool {
