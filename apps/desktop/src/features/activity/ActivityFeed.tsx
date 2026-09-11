@@ -18,6 +18,7 @@ import {
   riskLabel,
 } from "../../lib/labels.js";
 import { useServers } from "../../lib/servers.js";
+import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon, type IconName } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { usePresence } from "../../hooks/usePresence.js";
@@ -83,8 +84,8 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
   }, [queryClient, scoped, serverId, shell]);
   const servers = useServers({ enabled: shell && !scoped });
 
-  if (!shell) return <div className="empty-state page-empty"><h2>浏览器预览</h2><p>动态记录需要 Tauri 桌面壳中的本地数据库。</p></div>;
-  if (scoped && !serverId) return <div className="empty-state page-empty"><h2>选择一台服务器</h2><p>选择服务器后查看它的连接、配置和 Agent 活动。</p></div>;
+  if (!shell) return <PreviewEmpty body="动态记录需要 Tauri 桌面壳中的本地数据库。" />;
+  if (scoped && !serverId) return <EmptyPanel title="选择一台服务器" body="选择服务器后查看它的连接、配置和 Agent 活动。" />;
 
   const rows = activities.data ?? [];
   const serverNames = new Map((servers.data ?? []).map((server: Server) => [server.id, server.name]));
@@ -92,13 +93,17 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
     <section className="activity-page">
       <div className="activity-page-header">
         <div><p className="eyebrow">审计流</p><h2>{scoped ? "服务器动态" : "全局动态"}</h2></div>
-        <button type="button" className="secondary-button" onClick={() => void activities.refetch()} disabled={activities.isFetching} title="刷新动态" aria-label="刷新动态"><Icon name="refresh" size="sm" />刷新</button>
+        <button type="button" className="button-secondary" onClick={() => void activities.refetch()} disabled={activities.isFetching} title="刷新动态" aria-label="刷新动态"><Icon name="refresh" size="sm" />刷新</button>
       </div>
       {activities.isError ? (
-        <div className="error-panel"><div><strong>无法读取动态</strong><p>{errorMessage(activities.error)}</p></div><button type="button" className="secondary-button" onClick={() => void activities.refetch()}>重试</button></div>
+        <ErrorPanel
+          title="无法读取动态"
+          message={errorMessage(activities.error)}
+          onRetry={() => void activities.refetch()}
+        />
       ) : null}
-      {activities.isLoading ? <div className="loading-panel"><div className="loading-spinner" /><strong>正在读取动态</strong><span>从本地审计记录加载</span></div> : null}
-      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="empty-state page-empty"><Icon name="activity" size="xl" /><h2>暂无动态</h2><p>服务器连接、配置变更和 Agent 操作会记录在这里。</p></div> : null}
+      {activities.isLoading ? <LoadingPanel title="正在读取动态" hint="从本地审计记录加载" /> : null}
+      {!activities.isLoading && !activities.isError && rows.length === 0 ? <EmptyPanel icon="activity" title="暂无动态" body="服务器连接、配置变更和 Agent 操作会记录在这里。" /> : null}
       {rows.length ? <div className="activity-list">{rows.map((activity) => <ActivityRow key={activity.id} activity={activity} serverName={activity.serverId ? serverNames.get(activity.serverId) : undefined} />)}</div> : null}
     </section>
   );

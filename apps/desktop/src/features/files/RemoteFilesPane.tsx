@@ -3,6 +3,7 @@ import { IPC_COMMANDS, type RemoteFileEntry } from "@yukinal/shared";
 import { useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
+import { EmptyPanel, ErrorPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
@@ -24,8 +25,8 @@ export function RemoteFilesPane() {
     queryFn: () => callDesktop(IPC_COMMANDS.remoteFileRead, { serverId: serverId as string, path: selectedFile as string }),
   });
 
-  if (!serverId) return <div className="empty-state page-empty"><Icon name="folder" size="xl" /><h2>选择一台服务器</h2><p>连接服务器后浏览远程文件。</p></div>;
-  if (!shell) return <div className="empty-state page-empty"><Icon name="folder" size="xl" /><h2>浏览器预览模式</h2><p>远程文件需要 Tauri 原生连接。</p></div>;
+  if (!serverId) return <EmptyPanel icon="folder" title="选择一台服务器" body="连接服务器后浏览远程文件。" />;
+  if (!shell) return <EmptyPanel icon="folder" title="浏览器预览模式" body="远程文件需要 Tauri 原生连接。" />;
 
   const entries = files.data?.entries ?? [];
   const parent = path === "/" ? "/" : path.replace(/\/+$/, "").split("/").slice(0, -1).join("/") || "/";
@@ -49,7 +50,7 @@ export function RemoteFilesPane() {
         <button type="submit" className="button-secondary">前往</button>
         <button type="button" className="button-secondary" onClick={() => void files.refetch()} disabled={files.isFetching} title="刷新远程文件" aria-label="刷新远程文件"><Icon name="refresh" size="sm" />刷新</button>
       </form>
-      {files.isError ? <div className="error-panel"><div><strong>无法读取目录</strong><p>{errorMessage(files.error)}</p></div><button type="button" className="button-secondary" onClick={() => void files.refetch()}>重试</button></div> : null}
+      {files.isError ? <ErrorPanel title="无法读取目录" message={errorMessage(files.error)} onRetry={() => void files.refetch()} /> : null}
       <div className="files-layout">
         <div className="file-list-panel">
           <div className="section-heading"><div><p className="eyebrow">远程文件</p><h2>{path}</h2></div><span className="section-note">{entries.length} 项</span></div>

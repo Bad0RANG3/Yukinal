@@ -553,7 +553,7 @@ button:disabled {
 }
 
 
-.secondary-button:hover {
+.button-secondary:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -844,7 +844,7 @@ button:disabled {
   font-size: 12px;
 }
 
-.compact-empty .secondary-button {
+.compact-empty .button-secondary {
   margin-top: 13px;
 }
 
@@ -1434,14 +1434,7 @@ select:focus-visible {
   color: var(--accent);
 }
 
-.rail-icon,
-.rail-button svg,
-.server-tab svg,
-.button-primary svg,
-.button-secondary svg,
-.secondary-button svg,
-.icon-text-button svg,
-.agent-toggle-inline svg {
+.rail-icon, .rail-button svg, .server-tab svg, .button-primary svg, .button-secondary svg, .icon-text-button svg, .agent-toggle-inline svg{
   display: block;
   flex: 0 0 auto;
 }
@@ -1688,9 +1681,7 @@ select:focus-visible {
   letter-spacing: 0.08em;
 }
 
-.secondary-button,
-.button-secondary,
-.button-primary {
+.button-secondary, .button-primary{
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1701,15 +1692,13 @@ select:focus-visible {
      这里原本那条 `140ms` 因为同权重、后出现而被它整条覆盖，是死声明。 */
 }
 
-.secondary-button,
-.button-secondary {
+.button-secondary{
   border: 1px solid var(--line-strong);
   background: var(--surface-3);
   color: var(--muted);
 }
 
-.secondary-button:hover:not(:disabled),
-.button-secondary:hover:not(:disabled) {
+.button-secondary:hover:not(:disabled){
   border-color: var(--accent);
   background: #12221f;
   color: var(--accent);
@@ -2813,13 +2802,13 @@ select.form-input {
 .file-preview-empty { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--faint); text-align: center; }
 .file-preview-empty p { margin-bottom: 5px; color: var(--muted); }
 .file-preview-empty small { line-height: 1.6; }/* A restrained hierarchy, with text sizes that follow the user's preference. */
-.form-input, .agent-entry, .muted-copy, .provider-name, .server-row-name{ font-size: var(--ui-font-size, 13px); }.server-tab, .button-primary, .button-secondary, .secondary-button, .field-label, .server-row-detail, .settings-card-header p:last-child, .settings-page-heading > p:last-child, .settings-fact dd, .agent-empty p, .empty-state p{ font-size: calc(var(--ui-font-size, 13px) - 1px); line-height: 1.65; }
+.form-input, .agent-entry, .muted-copy, .provider-name, .server-row-name{ font-size: var(--ui-font-size, 13px); }.server-tab, .button-primary, .button-secondary, .field-label, .server-row-detail, .settings-card-header p:last-child, .settings-page-heading > p:last-child, .settings-fact dd, .agent-empty p, .empty-state p{ font-size: calc(var(--ui-font-size, 13px) - 1px); line-height: 1.65; }
 .eyebrow, .server-row-env, .server-status-pill, .settings-storage-note, .agent-status, .agent-notice,
 .provider-meta, .form-hint, .section-note, .metric-hint, .server-facts dt { font-size: calc(var(--ui-font-size, 13px) - 2px); }
 .rail-button { font-size: 11px; }
 .server-row-env { flex-shrink: 0; }
 .form-input { min-height: 38px; }
-.button-primary, .button-secondary, .secondary-button { min-height: 34px; }
+.button-primary, .button-secondary { min-height: 34px; }
 .metric-card { padding: 18px; }
 .metric-card strong { letter-spacing: -0.05em; }
 .metric-track { height: 5px; }
@@ -3426,39 +3415,11 @@ select.form-input {
 
 /* Press feedback is the fastest thing in the system: it has to land inside the
    same frame as the click to feel like the control moved under the finger. */
-.button-primary,
-.button-secondary,
-.secondary-button,
-.icon-button,
-.agent-toggle-inline,
-.approval-button,
-.agent-composer-tool,
-.server-row-actions button,
-.search-clear,
-.agent-history-tabs button,
-.agent-history-delete,
-.agent-send-button,
-.agent-stop-button,
-.composer-suggestion,
-.text-button,
-.icon-text-button {
+.button-primary, .button-secondary, .icon-button, .agent-toggle-inline, .approval-button, .agent-composer-tool, .server-row-actions button, .search-clear, .agent-history-tabs button, .agent-history-delete, .agent-send-button, .agent-stop-button, .composer-suggestion, .text-button, .icon-text-button{
   transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-instant) var(--motion-ease);
 }
 
-.button-primary:active:not(:disabled),
-.button-secondary:active:not(:disabled),
-.secondary-button:active:not(:disabled),
-.icon-button:active:not(:disabled),
-.agent-toggle-inline:active:not(:disabled),
-.approval-button:active:not(:disabled),
-.agent-composer-tool:active:not(:disabled),
-.server-row-actions button:active:not(:disabled),
-.search-clear:active:not(:disabled),
-.agent-history-tabs button:active:not(:disabled),
-.agent-history-delete:active:not(:disabled),
-.agent-send-button:active:not(:disabled),
-.agent-stop-button:active:not(:disabled),
-.composer-suggestion:active:not(:disabled) {
+.button-primary:active:not(:disabled), .button-secondary:active:not(:disabled), .icon-button:active:not(:disabled), .agent-toggle-inline:active:not(:disabled), .approval-button:active:not(:disabled), .agent-composer-tool:active:not(:disabled), .server-row-actions button:active:not(:disabled), .search-clear:active:not(:disabled), .agent-history-tabs button:active:not(:disabled), .agent-history-delete:active:not(:disabled), .agent-send-button:active:not(:disabled), .agent-stop-button:active:not(:disabled), .composer-suggestion:active:not(:disabled){
   transform: var(--motion-press);
 }
 

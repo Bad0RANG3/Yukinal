@@ -9,6 +9,7 @@ import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
 import { useServers } from "../../lib/servers.js";
+import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 
 export function ProjectsPane() {
@@ -25,30 +26,20 @@ export function ProjectsPane() {
   // 与侧栏共用同一份服务器缓存（同一个 key、同一套新鲜度），不再是本地副本。
   const servers = useServers({ enabled: shell });
 
-  if (!shell) return <PreviewEmpty />;
+  if (!shell) return <PreviewEmpty icon="projects" body="本地 workspace 数据只在 Tauri 桌面壳中可用，预览不会伪造项目内容。" />;
 
   if (workspaces.isLoading) {
-    return (
-      <div className="loading-panel">
-        <div className="loading-spinner" />
-        <strong>正在读取项目</strong>
-        <span>从本地 workspace 数据加载</span>
-      </div>
-    );
+    return <LoadingPanel title="正在读取项目" hint="从本地 workspace 数据加载" />;
   }
 
   if (workspaces.isError || !workspaces.data) {
     return (
-      <div className="error-panel">
-        <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
-        <div>
-          <strong>无法读取项目</strong>
-          <p>{errorMessage(workspaces.error)}</p>
-          <button type="button" className="secondary-button" onClick={() => void workspaces.refetch()}>
-            重试
-          </button>
-        </div>
-      </div>
+      <ErrorPanel
+        showIcon
+        title="无法读取项目"
+        message={errorMessage(workspaces.error)}
+        onRetry={() => void workspaces.refetch()}
+      />
     );
   }
 
@@ -63,17 +54,13 @@ export function ProjectsPane() {
           <h2>项目</h2>
           <p>按项目查看关联的服务器和代码仓库，目标环境始终明确可见。</p>
         </div>
-        <button type="button" className="secondary-button" onClick={() => void workspaces.refetch()} disabled={workspaces.isFetching} title="刷新项目" aria-label="刷新项目">
+        <button type="button" className="button-secondary" onClick={() => void workspaces.refetch()} disabled={workspaces.isFetching} title="刷新项目" aria-label="刷新项目">
           <Icon name="refresh" size="sm" /> {workspaces.isFetching ? "读取中" : "刷新"}
         </button>
       </section>
 
       {rows.length === 0 ? (
-        <div className="empty-state page-empty project-empty">
-          <Icon name="projects" size="xl" />
-          <h2>暂无项目</h2>
-          <p>本地数据库还没有 workspace 记录。服务器视图仍可独立使用。</p>
-        </div>
+        <EmptyPanel extraClass="project-empty" icon="projects" title="暂无项目" body="本地数据库还没有 workspace 记录。服务器视图仍可独立使用。" />
       ) : (
         <ul className="project-grid" aria-label="项目列表">
           {rows.map((workspace) => <ProjectCard key={workspace.id} workspace={workspace} serverNames={serverNames} />)}
@@ -127,12 +114,3 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
   );
 }
 
-function PreviewEmpty() {
-  return (
-    <div className="empty-state page-empty">
-      <Icon name="projects" size="xl" />
-      <h2>浏览器预览</h2>
-      <p>本地 workspace 数据只在 Tauri 桌面壳中可用，预览不会伪造项目内容。</p>
-    </div>
-  );
-}

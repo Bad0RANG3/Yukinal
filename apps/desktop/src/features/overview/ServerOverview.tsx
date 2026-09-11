@@ -16,6 +16,7 @@ import {
 
 import { errorMessage } from "../../lib/format.js";
 import { EnvBadge } from "../../components/EnvBadge.js";
+import { EmptyPanel, ErrorPanel, LoadingPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
@@ -116,16 +117,10 @@ export function ServerOverview() {
     enabled: Boolean(selectedServerId) && shell && server?.status === "connected" && !busy,
   });
 
-  if (!shell) return <PreviewEmpty />;
+  if (!shell) return <WelcomePanel />;
 
   if (!selectedServerId || !server) {
-    return (
-      <div className="empty-state page-empty">
-        <Icon name="servers" size="xl" />
-        <h2>选择一台服务器</h2>
-        <p>从左侧列表选择目标环境，查看实时健康状态与运行中的容器。</p>
-      </div>
-    );
+    return <EmptyPanel icon="servers" title="选择一台服务器" body="从左侧列表选择目标环境，查看实时健康状态与运行中的容器。" />;
   }
 
   if (server.status !== "connected") {
@@ -141,27 +136,18 @@ export function ServerOverview() {
   }
 
   if (snapshotQuery.isLoading) {
-    return (
-      <div className="loading-panel">
-        <div className="loading-spinner" />
-        <strong>正在连接并采集</strong>
-        <span>SSH · 7 个采集器 · 预计几秒完成</span>
-      </div>
-    );
+    return <LoadingPanel title="正在连接并采集" hint="SSH · 7 个采集器 · 预计几秒完成" />;
   }
 
   if (!snapshotQuery.data) {
     return (
-      <div className="error-panel">
-        <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
-        <div>
-          <strong>无法读取服务器状态</strong>
-          <p>{errorMessage(snapshotQuery.error)}</p>
-          <button type="button" className="secondary-button" onClick={() => void snapshotQuery.refetch()}>
-            重试采集
-          </button>
-        </div>
-      </div>
+      <ErrorPanel
+        showIcon
+        title="无法读取服务器状态"
+        message={errorMessage(snapshotQuery.error)}
+        onRetry={() => void snapshotQuery.refetch()}
+        retryLabel="重试采集"
+      />
     );
   }
 
@@ -211,7 +197,7 @@ function OverviewContent({
             {snapshot.os ? `${snapshot.os.distribution} ${snapshot.os.version}` : "操作系统未知"} · {server.connection.username}@{server.connection.host}
           </p>
         </div>
-        <button type="button" className="secondary-button refresh-button" onClick={onRefresh} disabled={refreshing} title="刷新服务器状态" aria-label="刷新服务器状态">
+        <button type="button" className="button-secondary refresh-button" onClick={onRefresh} disabled={refreshing} title="刷新服务器状态" aria-label="刷新服务器状态">
           <Icon name="refresh" size="sm" /> {refreshing ? "采集中" : "刷新状态"}
         </button>
       </section>
@@ -262,7 +248,15 @@ function OverviewContent({
   );
 }
 
-function PreviewEmpty() {
+/**
+ * 浏览器预览时的欢迎页。
+ *
+ * 它原先叫 `PreviewEmpty` —— 与 `components/PanelStates.tsx` 里那个「浏览器预览
+ * 占位」同名，但那两件事完全不同：那个是一句「这里没有数据」的占位，这个是
+ * 一块带引导步骤和入口按钮的欢迎面板。名字撞上之后，读到 `PreviewEmpty` 的人
+ * 得先确认是哪一个。改成它实际的样子。
+ */
+function WelcomePanel() {
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   return <div className="welcome-page">
     <div className="welcome-copy"><span className="welcome-kicker"><span className="health-dot health-dot-healthy" />远程工作，从这里开始</span><h2>连接环境。<br /><span>专注正在做的事。</span></h2><p>服务器、终端与 Agent，<br />在一个安静、有序的工作区里协作。</p></div>

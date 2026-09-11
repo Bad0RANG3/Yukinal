@@ -8,6 +8,7 @@ import {
 import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 
@@ -40,40 +41,24 @@ export function LogsPane() {
     },
   });
 
-  if (!shell) return <PreviewEmpty />;
+  if (!shell) return <PreviewEmpty icon="logs" body="原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端日志数据。" />;
 
   if (!selectedServerId) {
-    return (
-      <div className="empty-state page-empty">
-        <Icon name="logs" size="xl" />
-        <h2>选择一台服务器</h2>
-        <p>从左侧列表选择目标环境，查看最近的远端日志。</p>
-      </div>
-    );
+    return <EmptyPanel icon="logs" title="选择一台服务器" body="从左侧列表选择目标环境，查看最近的远端日志。" />;
   }
 
   if (logsQuery.isLoading) {
-    return (
-      <div className="loading-panel">
-        <div className="loading-spinner" />
-        <strong>正在读取最近日志</strong>
-        <span>SSH · 最多 120 行 · 预计几秒完成</span>
-      </div>
-    );
+    return <LoadingPanel title="正在读取最近日志" hint="SSH · 最多 120 行 · 预计几秒完成" />;
   }
 
   if (logsQuery.isError || !logsQuery.data) {
     return (
-      <div className="error-panel">
-        <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
-        <div>
-          <strong>无法读取远端日志</strong>
-          <p>{errorMessage(logsQuery.error)}</p>
-          <button type="button" className="secondary-button" onClick={() => void logsQuery.refetch()}>
-            重试
-          </button>
-        </div>
-      </div>
+      <ErrorPanel
+        showIcon
+        title="无法读取远端日志"
+        message={errorMessage(logsQuery.error)}
+        onRetry={() => void logsQuery.refetch()}
+      />
     );
   }
 
@@ -89,7 +74,7 @@ export function LogsPane() {
           <h2>日志</h2>
           <p>保留原始行，最多读取最近 120 行，便于快速定位问题。</p>
         </div>
-        <button type="button" className="secondary-button" onClick={() => void logsQuery.refetch()} disabled={logsQuery.isFetching} title="刷新日志" aria-label="刷新日志">
+        <button type="button" className="button-secondary" onClick={() => void logsQuery.refetch()} disabled={logsQuery.isFetching} title="刷新日志" aria-label="刷新日志">
           <Icon name="refresh" size="sm" /> {logsQuery.isFetching ? "读取中" : "刷新"}
         </button>
       </section>
@@ -102,11 +87,7 @@ export function LogsPane() {
       {response.message ? <div className="log-notice">{response.message}</div> : null}
 
       {response.lines.length === 0 ? (
-        <div className="empty-state page-empty log-empty">
-          <Icon name="logs" size="xl" />
-          <h2>没有可展示的日志</h2>
-          <p>{response.message ?? "日志源没有返回内容。"}</p>
-        </div>
+        <EmptyPanel extraClass="log-empty" icon="logs" title="没有可展示的日志" body={response.message ?? "日志源没有返回内容。"} />
       ) : (
         <ol className="log-list" aria-label="远端日志列表">
           {response.lines.map((line, index) => (
@@ -118,16 +99,6 @@ export function LogsPane() {
           ))}
         </ol>
       )}
-    </div>
-  );
-}
-
-function PreviewEmpty() {
-  return (
-    <div className="empty-state page-empty">
-      <Icon name="logs" size="xl" />
-      <h2>浏览器预览</h2>
-      <p>原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端日志数据。</p>
     </div>
   );
 }

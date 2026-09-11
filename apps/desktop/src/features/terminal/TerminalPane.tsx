@@ -251,7 +251,7 @@ export function TerminalPane({ active }: { active: boolean }) {
           <span>终端输入发送失败：{ioError}</span>
           <button
             type="button"
-            className="secondary-button"
+            className="button-secondary"
             onClick={() => { setIoError(null); setReconnectNonce((nonce) => nonce + 1); }}
           >
             重新连接

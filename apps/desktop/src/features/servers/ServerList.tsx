@@ -55,7 +55,7 @@ export function ServerList({ onClose }: { onClose?: () => void }) {
       {servers.isError ? <div className="inline-error"><strong>读取失败</strong><span>{errorMessage(servers.error)}</span><button type="button" className="text-button text-button-danger" onClick={() => void servers.refetch()}>重试</button></div> : null}
       {action.isError ? <div className="inline-error" role="alert"><strong>操作未完成</strong><span>{action.error.message}</span><button type="button" className="text-button" onClick={() => action.reset()}>关闭提示</button></div> : null}
       {!shell ? <div className="empty-state compact-empty"><p>浏览器预览模式</p><small>启动 Tauri 后加载本地服务器。</small></div> : null}
-      {shell && !serverRows.length && servers.isSuccess ? <div className="empty-state compact-empty"><Icon name="servers" size="xxl" /><p>连接你的第一台服务器</p><small>添加 SSH 连接，开始管理远程环境。</small><button type="button" className="secondary-button" onClick={() => setAdding(true)}>添加服务器</button></div> : null}
+      {shell && !serverRows.length && servers.isSuccess ? <div className="empty-state compact-empty"><Icon name="servers" size="xxl" /><p>连接你的第一台服务器</p><small>添加 SSH 连接，开始管理远程环境。</small><button type="button" className="button-secondary" onClick={() => setAdding(true)}>添加服务器</button></div> : null}
       {servers.isLoading ? <div className="skeleton-list" aria-label="正在加载服务器" /> : null}
       {filteredServers.length ? (
         <ul className="server-list">

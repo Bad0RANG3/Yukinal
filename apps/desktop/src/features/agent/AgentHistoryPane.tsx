@@ -83,7 +83,7 @@ export function AgentHistoryPane({
           <h3>对话记录</h3>
         </div>
         <div className="agent-history-heading-actions">
-          <button type="button" className="secondary-button agent-history-new" onClick={onNewSession} disabled={busy}>
+          <button type="button" className="button-secondary agent-history-new" onClick={onNewSession} disabled={busy}>
             <Icon name="plus" size="sm" />新建任务
           </button>
           <button type="button" className="icon-button" aria-label="关闭对话记录" title="关闭对话记录" onClick={onClose}>
