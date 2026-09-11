@@ -6,7 +6,12 @@
 //!
 //! 规则：解析失败不是静默 —— 单采集器以 `ok=false` + 错误上抛，拖垮卡片不拖垮整页。
 
-#![allow(dead_code)] // 服务化采集器（nginx/postgres/…）在 MVP 之后补
+// 这里原来有一行 `#![allow(dead_code)]`，理由是「服务化采集器（nginx/postgres/…）
+// 在 MVP 之后补」。实测它什么也没遮住：去掉之后 `--all-targets` 零告警。
+//
+// 原因是那句理由描述的项都是 `pub` —— 库 crate 的 `pub` 项外部可达，rustc 本来就
+// 不会报 dead_code。于是这行 allow 的真实作用只剩下「让本 crate 所有**私有**代码
+// 失去死代码检查」，包括采集器的解析与容错路径。为一句不成立的说明付这个代价不划算。
 
 use std::sync::Arc;
 use std::time::Duration;

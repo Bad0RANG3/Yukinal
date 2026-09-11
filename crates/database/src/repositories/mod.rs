@@ -5,6 +5,7 @@
 
 mod activities;
 mod chat;
+mod decode;
 mod executions;
 mod identities;
 mod providers;

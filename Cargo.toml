@@ -9,6 +9,7 @@ members = [
   "crates/filesystem",
   "crates/ssh",
   "crates/terminal",
+  "crates/time",
 ]
 
 [workspace.package]
@@ -57,6 +58,7 @@ yukinal-database = { path = "crates/database" }
 yukinal-filesystem = { path = "crates/filesystem" }
 yukinal-ssh = { path = "crates/ssh" }
 yukinal-terminal = { path = "crates/terminal" }
+yukinal-time = { path = "crates/time" }
 
 [profile.release]
 codegen-units = 1

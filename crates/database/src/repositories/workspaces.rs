@@ -2,6 +2,7 @@
 
 use rusqlite::{params, OptionalExtension, Row};
 
+use super::decode::decode_error;
 use crate::models::{Environment, Workspace};
 use crate::{json_column, Database, DatabaseError, Result};
 
@@ -95,14 +96,14 @@ impl<'a> WorkspacesRepository<'a> {
 
 fn row_to_workspace(row: &Row<'_>) -> rusqlite::Result<Workspace> {
     let server_ids = json_column::<Vec<String>>(&row.get::<_, String>(2)?)
-        .map_err(|error| decode_err(2, error))?;
+        .map_err(|error| decode_error(2, error))?;
     let repositories =
         json_column::<Vec<crate::models::WorkspaceRepository>>(&row.get::<_, String>(3)?)
-            .map_err(|error| decode_err(3, error))?;
+            .map_err(|error| decode_error(3, error))?;
     let provider_ids = json_column::<Vec<String>>(&row.get::<_, String>(4)?)
-        .map_err(|error| decode_err(4, error))?;
+        .map_err(|error| decode_error(4, error))?;
     let default_environment = Environment::from_db(&row.get::<_, String>(5)?)
-        .ok_or_else(|| decode_err(5, "unknown environment"))?;
+        .ok_or_else(|| decode_error(5, "unknown environment"))?;
 
     Ok(Workspace {
         id: row.get(0)?,
@@ -112,12 +113,4 @@ fn row_to_workspace(row: &Row<'_>) -> rusqlite::Result<Workspace> {
         provider_ids,
         default_environment,
     })
-}
-
-fn decode_err(index: usize, error: impl std::fmt::Display) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        index,
-        rusqlite::types::Type::Text,
-        error.to_string().into(),
-    )
 }

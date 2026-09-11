@@ -3,6 +3,7 @@
 
 use rusqlite::{params, OptionalExtension, Row};
 
+use super::decode::decode_error;
 use crate::models::{Environment, ServerStatus};
 use crate::{optional_json, Database, DatabaseError, Result, Server};
 
@@ -179,8 +180,8 @@ fn row_to_server(row: &Row<'_>) -> rusqlite::Result<Server> {
             region: row.get(10)?,
             hostname: row.get(11)?,
             os: row.get(12)?,
-            tags: tags.map_err(|error| decode_error_with(13, error))?,
-            workspace_ids: workspace_ids.map_err(|error| decode_error_with(14, error))?,
+            tags: tags.map_err(|error| decode_error(13, error))?,
+            workspace_ids: workspace_ids.map_err(|error| decode_error(14, error))?,
         },
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
@@ -188,13 +189,5 @@ fn row_to_server(row: &Row<'_>) -> rusqlite::Result<Server> {
 }
 
 fn decode_json<T: serde::de::DeserializeOwned>(raw: &str, index: usize) -> rusqlite::Result<T> {
-    serde_json::from_str(raw).map_err(|error| decode_error_with(index, error))
-}
-
-fn decode_error(index: usize, message: &str) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, message.into())
-}
-
-fn decode_error_with(index: usize, error: impl std::fmt::Display) -> rusqlite::Error {
-    decode_error(index, &error.to_string())
+    serde_json::from_str(raw).map_err(|error| decode_error(index, error))
 }

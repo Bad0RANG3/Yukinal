@@ -16,6 +16,7 @@ yukinal-collector = { workspace = true }
 yukinal-database = { workspace = true }
 yukinal-ssh = { workspace = true }
 yukinal-terminal = { workspace = true }
+yukinal-time = { workspace = true }
 
 tracing = { workspace = true }
 

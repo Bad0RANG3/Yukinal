@@ -9,7 +9,15 @@
 //! - 超时 / 取消映射到 [`Error::Timeout`] / [`Error::Cancelled`]；host key 不匹配
 //!   必须报 [`Error::HostKeyVerification`]，绝不静默接受。
 
-#![allow(dead_code)] // 契约先行；终端/服务器工具落地前部分方法尚未被上层调用
+// 这里原来有一行 `#![allow(dead_code)]`，理由是「契约先行；终端/服务器工具落地前
+// 部分方法尚未被上层调用」。那句话描述的其实是 `pub` 项 —— 而库 crate 里的 `pub`
+// 项本来就不会触发 dead_code（外部可达），所以这个 allow 从头到尾没有遮住它声称
+// 要遮的东西。它实际遮住的只有两处 `pub(crate)`：`SessionHandle::keepalive_task`
+// 与 `SftpHandle::new`，两处都已按各自的真实情况处理（见 conn.rs）。
+//
+// 拿掉它是有代价意识的选择：留着等于让整个 crate 的私有代码失去死代码检查，
+// 而这个 crate 的私有部分正是连接生命周期与 PTY/SFTP 句柄这些最容易留下残骸的
+// 地方。契约先行的 `pub` 接口不需要靠 lint 豁免来存在。
 
 pub mod backend;
 mod conn;

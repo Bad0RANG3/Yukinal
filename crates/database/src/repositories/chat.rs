@@ -2,6 +2,7 @@
 
 use rusqlite::{params, OptionalExtension, Row};
 
+use super::decode::decode_error;
 use crate::models::{ChatMessage, ChatMessageRole, ChatSession};
 use crate::{Database, DatabaseError, Result};
 
@@ -205,8 +206,4 @@ fn escape_like(value: &str) -> String {
 
 fn preview(value: String) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn decode_error(index: usize, message: &str) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, message.into())
 }

@@ -2,6 +2,7 @@
 
 use rusqlite::{params, Row};
 
+use super::decode::decode_error;
 use crate::models::{
     Environment, PermissionMode, RiskLevel, ToolExecutionRecord, ToolExecutionStatus,
 };
@@ -95,18 +96,18 @@ impl<'a> ToolExecutionsRepository<'a> {
 
 fn row_to_record(row: &Row<'_>) -> rusqlite::Result<ToolExecutionRecord> {
     let environment = Environment::from_db(&row.get::<_, String>(5)?)
-        .ok_or_else(|| decode(5, "unknown environment"))?;
+        .ok_or_else(|| decode_error(5, "unknown environment"))?;
     let risk_level = RiskLevel::from_db(&row.get::<_, String>(6)?)
-        .ok_or_else(|| decode(6, "unknown risk level"))?;
+        .ok_or_else(|| decode_error(6, "unknown risk level"))?;
     let decision = PermissionMode::from_db(&row.get::<_, String>(7)?)
-        .ok_or_else(|| decode(7, "unknown decision"))?;
+        .ok_or_else(|| decode_error(7, "unknown decision"))?;
     let status = ToolExecutionStatus::from_db(&row.get::<_, String>(9)?)
-        .ok_or_else(|| decode(9, "unknown status"))?;
+        .ok_or_else(|| decode_error(9, "unknown status"))?;
 
-    let input =
-        serde_json::from_str(&row.get::<_, String>(10)?).map_err(|error| decode(10, error))?;
-    let output =
-        optional_value(row.get::<_, Option<String>>(11)?).map_err(|error| decode(11, error))?;
+    let input = serde_json::from_str(&row.get::<_, String>(10)?)
+        .map_err(|error| decode_error(10, error))?;
+    let output = optional_value(row.get::<_, Option<String>>(11)?)
+        .map_err(|error| decode_error(11, error))?;
 
     Ok(ToolExecutionRecord {
         trace_id: row.get(0)?,
@@ -132,12 +133,4 @@ fn optional_value(raw: Option<String>) -> Result<Option<serde_json::Value>> {
     raw.map(|value| serde_json::from_str(&value))
         .transpose()
         .map_err(DatabaseError::from)
-}
-
-fn decode(index: usize, error: impl std::fmt::Display) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        index,
-        rusqlite::types::Type::Text,
-        error.to_string().into(),
-    )
 }

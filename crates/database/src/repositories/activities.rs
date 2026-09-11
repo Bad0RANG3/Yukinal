@@ -2,6 +2,7 @@
 
 use rusqlite::{params, Row};
 
+use super::decode::decode_error;
 use crate::models::{Activity, ActivityOutcome, ActivitySource, ActivityType};
 use crate::{Database, Result};
 
@@ -72,12 +73,12 @@ impl<'a> ActivitiesRepository<'a> {
 
 fn row_to_activity(row: &Row<'_>) -> rusqlite::Result<Activity> {
     let r#type = ActivityType::from_db(&row.get::<_, String>(3)?)
-        .ok_or_else(|| decode(3, "unknown activity type"))?;
+        .ok_or_else(|| decode_error(3, "unknown activity type"))?;
     let source = ActivitySource::from_db(&row.get::<_, String>(6)?)
-        .ok_or_else(|| decode(6, "unknown activity source"))?;
+        .ok_or_else(|| decode_error(6, "unknown activity source"))?;
     let outcome = row
         .get::<_, Option<String>>(9)?
-        .map(|raw| ActivityOutcome::from_db(&raw).ok_or_else(|| decode(9, "unknown outcome")))
+        .map(|raw| ActivityOutcome::from_db(&raw).ok_or_else(|| decode_error(9, "unknown outcome")))
         .transpose()?;
 
     Ok(Activity {
@@ -94,12 +95,4 @@ fn row_to_activity(row: &Row<'_>) -> rusqlite::Result<Activity> {
         trace_id: row.get(10)?,
         created_at: row.get(11)?,
     })
-}
-
-fn decode(index: usize, error: impl std::fmt::Display) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        index,
-        rusqlite::types::Type::Text,
-        error.to_string().into(),
-    )
 }

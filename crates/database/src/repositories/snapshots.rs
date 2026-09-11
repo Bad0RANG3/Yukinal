@@ -5,6 +5,8 @@ use rusqlite::{params, OptionalExtension, Row};
 use crate::models::ServerSnapshot;
 use crate::{Database, DatabaseError, Result};
 
+use super::decode::decode_error;
+
 pub struct SnapshotsRepository<'a> {
     db: &'a Database,
 }
@@ -65,11 +67,5 @@ impl<'a> SnapshotsRepository<'a> {
 }
 
 fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<ServerSnapshot> {
-    serde_json::from_str(&row.get::<_, String>(0)?).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            error.to_string().into(),
-        )
-    })
+    serde_json::from_str(&row.get::<_, String>(0)?).map_err(|error| decode_error(0, error))
 }

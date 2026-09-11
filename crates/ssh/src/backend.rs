@@ -53,7 +53,26 @@ impl RusshBackend {
         &self.known_hosts
     }
 
-    /// 供 UI 的"信任这台主机"动作使用：把当前指纹钉进 known_hosts 并落盘。
+    /// 把当前指纹钉进 `known_hosts` 并落盘。
+    ///
+    /// # 这个方法目前没有任何调用者
+    ///
+    /// 它原先的说明是「供 UI 的『信任这台主机』动作使用」—— 而那个动作并不存在：
+    /// 全仓库搜不到第二处 `trust_host`，桌面端也完全不知道 host key 或指纹
+    /// （`apps/desktop/src` 里没有任何 `fingerprint` / `hostKey` / `known_hosts`
+    /// 的引用）。所以现在的实际行为是：
+    ///
+    /// - 指纹不匹配时 `establish` 返回 [`Error::HostKeyVerification`]（见下方 ~397 行），
+    ///   这条错误经由 IPC 落到界面上时只是**一句普通错误文本**
+    ///   （`Display` 在 `lib.rs:62` 拼成 `host key verification failed for {host}
+    ///   (fingerprint {fingerprint})`），用户看不到可操作的「信任」入口；
+    /// - ADR 0002 描述的严格模式（「直接拒绝并提示需要先显式信任」）因此缺少界面侧
+    ///   的补救手段：拒绝是对的，提示是有的，但提示里那个动作没接上。
+    ///
+    /// 保留而不删除，是因为它是那条补救路径唯一已实现的机制，删掉会让严格模式在
+    /// 结构上变成死路。把它接上属于功能改动（要定 IPC 形状、要在界面上摆出指纹
+    /// 与确认动作），不在「重构不改变行为」的范围内 —— 所以这里只把事实写清楚，
+    /// 不留一句会让人以为它已经接好的旧注释。
     pub fn trust_host(
         &self,
         host: &str,

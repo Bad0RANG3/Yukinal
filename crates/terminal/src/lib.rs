@@ -9,7 +9,11 @@
 //! 本 crate 不接触凭据 / 服务器模型：pty 由上层（Rust core）经 [`TerminalPty`]
 //! 注入。测试用内存 pty 覆盖全部路由逻辑，无需真机。
 
-#![allow(dead_code)] // 待 server 工具落地后全面使用
+// 这里原来有一行 `#![allow(dead_code)]`（理由：「待 server 工具落地后全面使用」）。
+// 去掉它之后整个 crate 只剩一处告警，而且那处在**测试**里（`MemoryPty` 的一个
+// 冗余字段，已删）。也就是说这行 allow 多年来遮住的唯一东西是测试夹具里的一块
+// 残骸，代价却是让这个 crate 的私有代码 —— 会话路由、一次性订阅语义这些最容易
+// 出错的地方 —— 完全失去死代码检查。契约先行的 `pub` 接口本来就不需要 lint 豁免。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -338,70 +342,37 @@ impl<P: TerminalPty> fmt::Debug for TerminalManager<P> {
     }
 }
 
-/// ISO-8601 UTC（显示用）。与 core 侧同一套日历算法（civil_from_days），
-/// 保持所有时间戳格式一致。
-fn iso8601_now() -> String {
-    let epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|delta| delta.as_secs())
-        .unwrap_or(0);
-    iso8601_utc(epoch)
-}
-
-fn iso8601_utc(epoch: u64) -> String {
-    let days = (epoch / 86_400) as i64;
-    let time_of_day = epoch % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        time_of_day / 3_600,
-        (time_of_day % 3_600) / 60,
-        time_of_day % 60
-    )
-}
-
-fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
-    let shifted = days_since_epoch + 719_468;
-    let era = if shifted >= 0 {
-        shifted
-    } else {
-        shifted - 146_096
-    } / 146_097;
-    let day_of_era = (shifted - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    } as u32;
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
+/// ISO-8601 UTC（显示用）。
+///
+/// 这里原本是 `iso8601_now` + `iso8601_utc` + `civil_from_days` 三个函数的整份副本，
+/// 旁边还留着「与 core 侧同一套日历算法，保持所有时间戳格式一致」这句注释 —— 也就是
+/// 把一致性寄托在纪律上。现已收进 `yukinal-time`：本 crate 依赖面刻意极窄，
+/// core 又在上层，两者不可能互相依赖，所以共享实现只能放在共同的下层。直接再导出，
+/// 调用点（第 122 行的 `opened_at`）不用改。
+pub use yukinal_time::{iso8601_now, iso8601_utc};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    /// 内存 pty：记录写入/改尺寸，输出可脚本化注入。
+    /// 内存 pty：记录写入 / 改尺寸 / 关闭，但不产生任何输出事件。
+    ///
+    /// 这里原先还有一个 `output_tx` 字段，注释写的是「输出可脚本化注入」——
+    /// 但它的接收端在 `new()` 里当场就被丢掉（`_rx`），信道等于一建就关，
+    /// 也没有任何测试往它发过东西；真正能把输出注入进来的夹具是下面那个
+    /// `ScriptedMemoryPty`。留着这个字段只会让人以为「往这里发就能造输出事件」。
     struct MemoryPty {
         written: StdMutex<Vec<Vec<u8>>>,
         resizes: StdMutex<Vec<(u16, u16)>>,
-        output_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
         closed: StdMutex<bool>,
     }
 
     impl MemoryPty {
         fn new() -> Self {
-            let (output_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             Self {
                 written: StdMutex::new(Vec::new()),
                 resizes: StdMutex::new(Vec::new()),
-                output_tx,
                 closed: StdMutex::new(false),
             }
         }

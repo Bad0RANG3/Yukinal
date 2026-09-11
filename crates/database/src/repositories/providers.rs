@@ -6,6 +6,7 @@
 
 use rusqlite::{params, OptionalExtension, Row};
 
+use super::decode::decode_error;
 use crate::models::{
     AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpServerConfig,
     ProviderModelOption,
@@ -159,9 +160,10 @@ fn row_to_ai(row: &Row<'_>) -> rusqlite::Result<AiProviderConfig> {
         api_key_credential_ref: row.get(5)?,
         enabled: row.get::<_, i64>(6)? != 0,
         custom_headers: optional_json(row.get::<_, Option<String>>(7)?)
-            .map_err(|error| err(7, error))?,
+            .map_err(|error| decode_error(7, error))?,
         max_input_tokens: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-        models: parse_models(row.get::<_, Option<String>>(10)?).map_err(|error| err(10, error))?,
+        models: parse_models(row.get::<_, Option<String>>(10)?)
+            .map_err(|error| decode_error(10, error))?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         wire_api: row
@@ -195,7 +197,7 @@ fn row_to_infra(row: &Row<'_>) -> rusqlite::Result<InfrastructureProviderConfig>
         credential_ref: row.get(9)?,
         enabled: row.get::<_, i64>(6)? != 0,
         settings: optional_json(row.get::<_, Option<String>>(10)?)
-            .map_err(|error| err(10, error))?,
+            .map_err(|error| decode_error(10, error))?,
     })
 }
 
@@ -203,7 +205,7 @@ fn row_to_provider(row: &Row<'_>) -> rusqlite::Result<ProviderRow> {
     match row.get::<_, String>(13)?.as_str() {
         "ai" => row_to_ai(row).map(ProviderRow::Ai),
         "infra" => row_to_infra(row).map(ProviderRow::Infra),
-        other => Err(err(13, format!("unknown provider family {other}"))),
+        other => Err(decode_error(13, format!("unknown provider family {other}"))),
     }
 }
 
@@ -215,14 +217,6 @@ fn optional_json_string(
         .map(serde_json::to_string)
         .transpose()
         .map_err(DatabaseError::from)
-}
-
-fn err(index: usize, error: impl std::fmt::Display) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        index,
-        rusqlite::types::Type::Text,
-        error.to_string().into(),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -279,11 +273,11 @@ impl<'a> McpServersRepository<'a> {
                     transport: row.get(2)?,
                     command: row.get(3)?,
                     args: optional_json(row.get::<_, Option<String>>(4)?)
-                        .map_err(|error| err(4, error))?,
+                        .map_err(|error| decode_error(4, error))?,
                     url: row.get(5)?,
                     enabled: row.get::<_, i64>(6)? != 0,
                     allowed_tools: serde_json::from_str(&row.get::<_, String>(7)?)
-                        .map_err(|error| err(7, error))?,
+                        .map_err(|error| decode_error(7, error))?,
                     trust_level: row.get(8)?,
                 })
             })?;

@@ -128,8 +128,7 @@ fn health_of(
 }
 
 fn now_epoch_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|delta| delta.as_secs())
-        .unwrap_or(0)
+    // 实现已移到 `yukinal-time`；本文件原来那份与 terminal / sidecar / live 测试
+    // 里的三份逐字相同。
+    yukinal_time::now_epoch_seconds()
 }
