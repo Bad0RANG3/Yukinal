@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { RiskLevelSchema, ToolTargetSchema } from "./server.js";
 import { PermissionApprovalSourceSchema, PermissionModeSchema } from "./permission.js";
+import { TOOL_RESULT_STATUSES } from "../types/enums.js";
 
 const RunIdSchema = z.string().trim().min(1).max(256);
 const TimestampSchema = z.string().min(1).max(80);
@@ -83,7 +84,7 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     riskLevel: RiskLevelSchema,
     decision: PermissionModeSchema,
     approvedBy: PermissionApprovalSourceSchema.optional(),
-    status: z.enum(["success", "failed", "cancelled"]),
+    status: z.enum(TOOL_RESULT_STATUSES),
     outputSummary: z.string().max(4_000),
     error: z.string().max(4_000).optional(),
     startedAt: TimestampSchema,

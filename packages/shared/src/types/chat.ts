@@ -4,12 +4,15 @@
  * These types are the vocabulary between: React <-> agent-sdk <-> apps/agent <-> LLM.
  */
 
-import type { AGENT_RUN_STATES } from "./enums.js";
+import type { AGENT_RUN_STATES, TOOL_RESULT_STATUSES } from "./enums.js";
 import type { RuntimeProviderConfig } from "./provider.js";
 import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolTarget } from "./tool.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
+
+/** Derived from the tuple so `schemas/agent.ts` and this type cannot disagree. */
+export type ToolResultStatus = (typeof TOOL_RESULT_STATUSES)[number];
 
 export interface ChatSession {
   id: string;
@@ -177,7 +180,7 @@ export type AgentStreamEvent =
       riskLevel: RiskLevel;
       decision: PermissionMode;
       approvedBy?: PermissionApprovalSource;
-      status: "success" | "failed" | "cancelled";
+      status: ToolResultStatus;
       outputSummary: string;
       error?: string;
       startedAt: string;

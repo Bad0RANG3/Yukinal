@@ -7,6 +7,7 @@ import {
   type HostContextResponse,
   type HostToolExecuteResponse,
 } from "../types/host.js";
+import { TOOL_ERROR_CODES } from "../types/tool.js";
 import { ToolTargetSchema } from "./server.js";
 
 export const HostToolExecuteRequestSchema = z.strictObject({
@@ -18,18 +19,7 @@ export const HostToolExecuteRequestSchema = z.strictObject({
 });
 
 const ToolErrorSchema = z.strictObject({
-  code: z.enum([
-    "invalid_input",
-    "denied_by_policy",
-    "approval_rejected",
-    "approval_timeout",
-    "timeout",
-    "cancelled",
-    "not_found",
-    "transport",
-    "execution_failed",
-    "internal",
-  ]),
+  code: z.enum(TOOL_ERROR_CODES),
   message: z.string(),
   detail: z.unknown().optional(),
   retryable: z.boolean(),

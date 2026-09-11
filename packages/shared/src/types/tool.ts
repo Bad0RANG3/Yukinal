@@ -61,18 +61,30 @@ export interface ToolCallRequest {
   intent?: string;
 }
 
+/**
+ * The tool-error vocabulary, as a tuple so `schemas/host.ts` can write
+ * `z.enum(TOOL_ERROR_CODES)` instead of a second hand-copied list of the same ten
+ * strings. At ten members it was the largest of the unpinned lists: a new code added
+ * to the union only would compile and then be rejected by the host schema at runtime.
+ *
+ * `apps/agent` returns these as plain literals (`tools/registry.ts`), which the compiler
+ * checks against `ToolError["code"]` — so the tuple covers that path too.
+ */
+export const TOOL_ERROR_CODES = [
+  "invalid_input",
+  "denied_by_policy",
+  "approval_rejected",
+  "approval_timeout",
+  "timeout",
+  "cancelled",
+  "not_found",
+  "transport",
+  "execution_failed",
+  "internal",
+] as const;
+
 export interface ToolError {
-  code:
-    | "invalid_input"
-    | "denied_by_policy"
-    | "approval_rejected"
-    | "approval_timeout"
-    | "timeout"
-    | "cancelled"
-    | "not_found"
-    | "transport"
-    | "execution_failed"
-    | "internal";
+  code: (typeof TOOL_ERROR_CODES)[number];
   message: string;
   detail?: unknown;
   /** Whether retrying with the same input may succeed (retries). */

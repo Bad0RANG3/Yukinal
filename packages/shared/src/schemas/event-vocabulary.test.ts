@@ -26,6 +26,7 @@ import test from "node:test";
 
 import { EVENT_NAMES } from "../events/index.js";
 import { tauriEventName } from "../events/index.js";
+import { TOOL_RESULT_STATUSES } from "../types/enums.js";
 import { AGENT_EVENT_MEMBER_SCHEMAS, AGENT_EVENT_TYPES, AgentStreamEventSchema } from "./agent.js";
 import { EVENT_SCHEMAS } from "./ipc.js";
 
@@ -197,4 +198,40 @@ test("each channel uses its own member schema, and the union is built from the s
     AGENT_CHANNELS.length + 1,
     "the only member without a channel is expected to be agent.text",
   );
+});
+
+test("a tool result reports a finished status, not a lifecycle status", () => {
+  // `TOOL_RESULT_STATUSES` is deliberately a *subset* of `TOOL_EXECUTION_STATUSES`,
+  // and this is the test that keeps the distinction honest. Sharing the six-value
+  // lifecycle tuple would have been the obvious-looking simplification and would have
+  // silently widened this schema — by the time a result exists, the call has stopped,
+  // so `pending` / `running` / `waiting_approval` describe a state that cannot be real.
+  const base = {
+    type: "agent.tool_result",
+    runId: "run_1",
+    traceId: "trace_1",
+    stepId: "step_1",
+    callId: "call_1",
+    toolName: "filesystem.read",
+    input: {},
+    target: { host: "remote", serverId: "srv_abc", environment: "production" },
+    riskLevel: "read",
+    decision: "auto",
+    outputSummary: "ok",
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T00:00:01Z",
+    durationMs: 1000,
+    at: "2026-01-01T00:00:01Z",
+  };
+  const schema = AGENT_EVENT_MEMBER_SCHEMAS["agent.tool_result"];
+  for (const status of TOOL_RESULT_STATUSES) {
+    assert.equal(schema.safeParse({ ...base, status }).success, true, `a real result may be ${status}`);
+  }
+  for (const status of ["pending", "running", "waiting_approval"]) {
+    assert.equal(
+      schema.safeParse({ ...base, status }).success,
+      false,
+      `a tool result must not claim the in-flight status ${status}`,
+    );
+  }
 });
