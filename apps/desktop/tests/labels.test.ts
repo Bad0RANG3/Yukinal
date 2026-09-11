@@ -1,15 +1,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ENVIRONMENTS, EVENT_NAMES, EVENT_SCHEMAS, SERVER_STATUSES } from "@yukinal/shared";
+import {
+  ENVIRONMENTS,
+  EVENT_NAMES,
+  EVENT_SCHEMAS,
+  PERMISSION_APPROVAL_SOURCES,
+  PERMISSION_MODES,
+  RISK_LEVELS,
+  SERVER_STATUSES,
+  TOOL_EXECUTION_STATUSES,
+} from "@yukinal/shared";
 
 import {
+  APPROVAL_SOURCE_LABEL,
+  DECISION_LABEL,
   ENVIRONMENT_LABEL,
   ENVIRONMENT_LABEL_SHORT,
   ENVIRONMENTS as UI_ENVIRONMENTS,
+  EXECUTION_STATUS_LABEL,
+  RISK_LEVEL_LABEL,
+  SERVER_STATUS_LABEL,
+  approvalSourceLabel,
+  decisionLabel,
   environmentLabel,
   environmentLabelShort,
-  SERVER_STATUS_LABEL,
+  resultLabel,
 } from "../src/lib/labels.js";
 
 /**
@@ -78,6 +94,52 @@ test("a new server does not default to the environment that widens auto-approval
   assert.ok((ENVIRONMENTS as readonly string[]).includes(defaultEnvironment));
   // And the intended default is not silently the permissive class.
   assert.notEqual(defaultEnvironment, "development");
+});
+
+/**
+ * The risk / decision / approval vocabulary.
+ *
+ * These four maps existed twice — once in `features/agent/transcript.ts` and once in
+ * `features/activity/ActivityFeed.tsx` — and both rendered the same tool call. The
+ * Agent panel and the audit log are two views of one decision about a production
+ * write, so if they disagree about whether it was "需审批" or "自动批准", the screen
+ * contradicts itself. The maps now live in one module; these tests keep them
+ * covering the shared enums, and keep the wording distinguishable.
+ */
+test("the audit dictionaries cover exactly their shared enums", () => {
+  assert.deepEqual(Object.keys(RISK_LEVEL_LABEL).sort(), [...RISK_LEVELS].sort());
+  assert.deepEqual(Object.keys(DECISION_LABEL).sort(), [...PERMISSION_MODES].sort());
+  assert.deepEqual(Object.keys(APPROVAL_SOURCE_LABEL).sort(), [...PERMISSION_APPROVAL_SOURCES].sort());
+  assert.deepEqual(
+    Object.keys(EXECUTION_STATUS_LABEL).sort(),
+    [...TOOL_EXECUTION_STATUSES].sort(),
+  );
+});
+
+test("every audit label is non-empty and distinct within its vocabulary", () => {
+  for (const map of [RISK_LEVEL_LABEL, DECISION_LABEL, APPROVAL_SOURCE_LABEL, EXECUTION_STATUS_LABEL]) {
+    const values = Object.values(map);
+    for (const value of values) assert.ok(value.length > 0, "an audit label is empty");
+    assert.equal(new Set(values).size, values.length, "two members of one vocabulary share a label");
+  }
+});
+
+test("the three approval sources stay distinguishable, because they are not equivalent", () => {
+  // "user approved", "policy approved" and "the Agent approved itself" are three
+  // different safety stories. A label collision would make them indistinguishable
+  // in the audit log — which is the one place that has to tell them apart.
+  const labels = PERMISSION_APPROVAL_SOURCES.map(approvalSourceLabel);
+  assert.equal(new Set(labels).size, PERMISSION_APPROVAL_SOURCES.length);
+  // `deny` must not read like a pending state: it is not a request awaiting a human.
+  assert.notEqual(decisionLabel("deny"), decisionLabel("ask"));
+});
+
+test("the terminal result words are the ones the status map already uses", () => {
+  // `resultLabel` exists for a settled tool call; it must not invent its own
+  // wording for a state `EXECUTION_STATUS_LABEL` already names.
+  for (const status of ["success", "failed", "cancelled"] as const) {
+    assert.equal(resultLabel(status), EXECUTION_STATUS_LABEL[status]);
+  }
 });
 
 /**

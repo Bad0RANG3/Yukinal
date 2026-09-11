@@ -5,11 +5,10 @@
  * 而「列表刷新后当前选择已失效」这条回落规则属于两者之间 —— 它只在这里出现一次。
  */
 
-import { useQuery } from "@tanstack/react-query";
-import { IPC_COMMANDS, type AiProviderConfig } from "@yukinal/shared";
+import type { AiProviderConfig } from "@yukinal/shared";
 import { useEffect } from "react";
 
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { useProviders } from "../../lib/providers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 
 /** 一个可选项 = 一对 (provider, model)，因为同名模型可以挂在多个 provider 下。 */
@@ -26,11 +25,10 @@ export function modelChoiceKey(providerId: string, model: string): string {
 }
 
 export function useAgentModels() {
-  const providers = useQuery({
-    queryKey: ["providers"],
-    enabled: isDesktopShell(),
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
-  });
+  // 复用 `lib/providers.ts` 的规范查询，而不是在这里重写一遍 key 与 queryFn。
+  // 两处写同一个 key 时，缓存是共享的，但 queryFn 是各写各的 —— 一旦 provider
+  // 响应的取法变了（比如将来要多带一个字段），只会改到其中一处。
+  const providers = useProviders();
   const selectedProviderId = useWorkspaceStore((state) => state.selectedProviderId);
   const selectedModel = useWorkspaceStore((state) => state.selectedModel);
   const selectProvider = useWorkspaceStore((state) => state.selectProvider);

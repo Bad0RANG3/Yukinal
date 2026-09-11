@@ -5,6 +5,7 @@ import {
   type LogSource,
 } from "@yukinal/shared";
 
+import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { Icon } from "../../components/Icon.js";
@@ -67,7 +68,7 @@ export function LogsPane() {
         <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取远端日志</strong>
-          <p>{logsQuery.error instanceof Error ? logsQuery.error.message : String(logsQuery.error)}</p>
+          <p>{errorMessage(logsQuery.error)}</p>
           <button type="button" className="secondary-button" onClick={() => void logsQuery.refetch()}>
             重试
           </button>

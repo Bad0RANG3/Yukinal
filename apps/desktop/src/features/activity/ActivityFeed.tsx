@@ -3,14 +3,21 @@ import {
   IPC_COMMANDS,
   type Activity,
   type ActivityType,
-  type RiskLevel,
   type Server,
   type ToolExecutionRecord,
 } from "@yukinal/shared";
 import { useEffect, useState } from "react";
 
+import { errorMessage, formatTimestamp } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
-import { environmentLabel } from "../../lib/labels.js";
+import {
+  DECISION_LABEL,
+  EXECUTION_STATUS_LABEL,
+  approvalSourceLabel,
+  environmentLabel,
+  riskLabel,
+} from "../../lib/labels.js";
+import { useServers } from "../../lib/servers.js";
 import { Icon, type IconName } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { usePresence } from "../../hooks/usePresence.js";
@@ -35,20 +42,11 @@ const OUTCOME_LABEL = {
   denied: "已拒绝",
 } as const;
 
-const EXECUTION_STATUS_LABEL: Record<ToolExecutionRecord["status"], string> = {
-  pending: "排队",
-  running: "执行中",
-  waiting_approval: "等待审批",
-  success: "成功",
-  failed: "失败",
-  cancelled: "已取消",
-};
+/* `EXECUTION_STATUS_LABEL`、`DECISION_LABEL` 和本文件末尾的 `riskLabel` 都已删除：
+   它们与 `features/agent/transcript.ts` 里的同名实现逐字节相同，现统一由
+   `lib/labels.js` 提供。审批用词（自动批准 / 需审批 / 策略禁止）同时出现在 Agent
+   面板和这张审计表里，两处各写一份就等于允许它们互相矛盾。 */
 
-const DECISION_LABEL: Record<ToolExecutionRecord["decision"], string> = {
-  auto: "自动批准",
-  ask: "需审批",
-  deny: "策略禁止",
-};
 
 export function ActivityFeed({ serverId }: { serverId?: string | null }) {
   const shell = isDesktopShell();
@@ -83,11 +81,7 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
       unlisten?.();
     };
   }, [queryClient, scoped, serverId, shell]);
-  const servers = useQuery({
-    queryKey: ["servers"],
-    enabled: shell && !scoped,
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.serverList, {})).servers,
-  });
+  const servers = useServers({ enabled: shell && !scoped });
 
   if (!shell) return <div className="empty-state page-empty"><h2>浏览器预览</h2><p>动态记录需要 Tauri 桌面壳中的本地数据库。</p></div>;
   if (scoped && !serverId) return <div className="empty-state page-empty"><h2>选择一台服务器</h2><p>选择服务器后查看它的连接、配置和 Agent 活动。</p></div>;
@@ -101,7 +95,7 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
         <button type="button" className="secondary-button" onClick={() => void activities.refetch()} disabled={activities.isFetching} title="刷新动态" aria-label="刷新动态"><Icon name="refresh" size="sm" />刷新</button>
       </div>
       {activities.isError ? (
-        <div className="error-panel"><div><strong>无法读取动态</strong><p>{activities.error instanceof Error ? activities.error.message : String(activities.error)}</p></div><button type="button" className="secondary-button" onClick={() => void activities.refetch()}>重试</button></div>
+        <div className="error-panel"><div><strong>无法读取动态</strong><p>{errorMessage(activities.error)}</p></div><button type="button" className="secondary-button" onClick={() => void activities.refetch()}>重试</button></div>
       ) : null}
       {activities.isLoading ? <div className="loading-panel"><div className="loading-spinner" /><strong>正在读取动态</strong><span>从本地审计记录加载</span></div> : null}
       {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="empty-state page-empty"><Icon name="activity" size="xl" /><h2>暂无动态</h2><p>服务器连接、配置变更和 Agent 操作会记录在这里。</p></div> : null}
@@ -153,7 +147,7 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
             onAnimationEnd={detailPresence.onAnimationEnd}
           >
             {executions.isLoading ? <span className="muted-copy">正在读取步骤…</span> : null}
-            {executions.isError ? <span className="error-copy">无法读取步骤：{executions.error instanceof Error ? executions.error.message : String(executions.error)}</span> : null}
+            {executions.isError ? <span className="error-copy">无法读取步骤：{errorMessage(executions.error)}</span> : null}
             {executions.data?.executions.map((execution) => <ExecutionStep key={`${execution.traceId}:${execution.stepId}`} execution={execution} />)}
             {executions.data && executions.data.executions.length === 0 ? <span className="muted-copy">该动态没有已保存的工具步骤。</span> : null}
           </div>
@@ -165,7 +159,7 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
 
 function ExecutionStep({ execution }: { execution: ToolExecutionRecord }) {
   const output = execution.error ?? executionOutput(execution);
-  const approval = execution.approvedBy === "user" ? "用户批准" : execution.approvedBy === "policy" ? "策略批准" : execution.approvedBy === "agent" ? "Agent 自主批准" : null;
+  const approval = execution.approvedBy ? approvalSourceLabel(execution.approvedBy) : null;
   return (
     <div className="activity-trace-step">
       <div className="activity-trace-step-top">
@@ -202,19 +196,11 @@ function formatAuditValue(value: unknown, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
-function formatTimestamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
-}
+/* `formatTimestamp` 曾定义在这里，与 `AgentHistoryPane.tsx` 的 `formatHistoryTime`
+   逐字节相同（包括 `Intl.DateTimeFormat` 的选项对象）。现已统一到 `lib/format.js`。 */
 
 function actorLabel(actor: string): string {
   if (actor === "user") return "用户";
   if (actor === "core") return "Core";
   return actor;
-}
-
-function riskLabel(level: RiskLevel): string {
-  const labels: Record<RiskLevel, string> = { read: "只读", low: "低", medium: "中", high: "高", critical: "严重" };
-  return labels[level] ?? level;
 }

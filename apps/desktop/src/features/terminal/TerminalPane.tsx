@@ -14,6 +14,7 @@ import { IPC_COMMANDS } from "@yukinal/shared";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 
+import { errorMessage } from "../../lib/format.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
 import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
@@ -87,7 +88,7 @@ export function TerminalPane({ active }: { active: boolean }) {
     /** Keep the first failure only; a functional update is a no-op once set. */
     const reportIoError = (error: unknown): void => {
       if (disposed) return;
-      setIoError((current) => current ?? (error instanceof Error ? error.message : String(error)));
+      setIoError((current) => current ?? (errorMessage(error)));
     };
 
     const initialPreferences = usePreferencesStore.getState();

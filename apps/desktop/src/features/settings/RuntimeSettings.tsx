@@ -1,10 +1,11 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IPC_COMMANDS, type AiProviderConfig } from "@yukinal/shared";
+import { HttpBaseUrlSchema, IPC_COMMANDS, type AiProviderConfig } from "@yukinal/shared";
 import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { useProviders } from "../../lib/providers.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import {
@@ -187,10 +188,7 @@ function ProviderSettings() {
   // `undefined` follows the active provider, `null` starts a new configuration,
   // and an id keeps a specific saved provider open for editing.
   const [editorProviderId, setEditorProviderId] = useState<string | null | undefined>(undefined);
-  const providers = useQuery({
-    queryKey: ["providers"], enabled: shell,
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
-  });
+  const providers = useProviders();
   const selectedProvider = providers.data?.find((provider) => provider.id === selectedProviderId)
     ?? providers.data?.find((provider) => provider.enabled);
   const editorProvider = editorProviderId === undefined
@@ -263,8 +261,17 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       const nextProviderId = providerId.trim();
       if (!provider && !nextProviderId) throw new Error("请填写 Provider ID。");
       if (!provider && existingProviderIds.has(nextProviderId)) throw new Error("Provider ID 已存在，请换一个唯一 ID。");
-      const url = new URL(baseUrl.trim());
-      if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Base URL 必须使用 HTTP 或 HTTPS。");
+      // 校验交给共享的那条规则，而不是在这里再手写一遍。
+      //
+      // 原来这里是 `new URL(baseUrl.trim())` 加一句协议判断，有两个洞：
+      //   1. URL 本身不合法时 `new URL` 会先抛出一个英文的 TypeError，
+      //      下面那句中文提示根本没有机会执行；
+      //   2. 它不检查内嵌凭据，所以 `https://user:pass@host` 在界面上是合法的，
+      //      提交后却被 IPC 层的 schema 拒掉 —— 一个说不清来源的错误。
+      // `HttpBaseUrlSchema` 两条都管，而且和 Rust 侧、和 IPC 层用的是同一份定义。
+      if (!HttpBaseUrlSchema.safeParse(baseUrl).success) {
+        throw new Error("Base URL 必须是 http(s) 地址，且不能内嵌账号密码。");
+      }
       return callDesktop(IPC_COMMANDS.providerSaveOpenai, {
         providerId: nextProviderId || undefined, label: label.trim() || undefined, baseUrl: baseUrl.trim(),
         model: model.trim(), apiKey: apiKey.trim() || undefined, wireApi, models: models.length ? models : undefined,

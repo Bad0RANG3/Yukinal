@@ -7,7 +7,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { IPC_COMMANDS } from "@yukinal/shared";
-import type { AgentSpawnResponse, AgentStatus } from "@yukinal/shared";
+import type { AgentSpawnResponse } from "@yukinal/shared";
 
 import { callDesktop, isDesktopShell } from "./ipc.js";
 
@@ -60,25 +60,19 @@ export function useSpawnAgent() {
   });
 }
 
-export function useKillAgent() {
-  const queryClient = useQueryClient();
-  return useMutation<{ killed: boolean }, Error>({
-    mutationFn: () => callDesktop(IPC_COMMANDS.agentKill, {}),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: RUNTIME_QUERY_KEYS.status });
-      void queryClient.invalidateQueries({ queryKey: RUNTIME_QUERY_KEYS.logs });
-    },
-  });
-}
+/* 这里曾经有两个没人用的导出，已删除：
+ *
+ * - `useKillAgent`：绑 `IPC_COMMANDS.agentKill` 的 mutation，除了它自己的函数体
+ *   之外全仓库没有任何引用。留着一个「随手就能杀掉 Agent」的现成钩子在这个
+ *   安全敏感的 IPC 层里，是别人顺手接上按钮的最短路径；而界面目前**故意**不提供
+ *   这个操作，所以钩子应该是「要用的时候再写」。
+ *
+ *   `IPC_COMMANDS.agentKill` 本身**保留** —— 它不是死代码，而是与 Rust 侧的契约：
+ *   `crates/core/src/ipc.rs:66` 用 `packages/shared/fixtures/ipc/agent_kill.json`
+ *   给这个命令的响应做了序列化测试。删掉它会让那条契约测试失去依据。
+ *
+ * - `statusLabel`：拼运行时状态文案。它被两个地方各自内联重写了，措辞还不一样
+ *   （`RuntimeSettings.tsx:48-50` 是「Agent 未启动 / 查询中…」，`AgentHeader.tsx:46-48`
+ *   是另一套）。三份实现里只有这一份没人调用，所以删的是它。
+ */
 
-export function statusLabel(status: AgentStatus | undefined, shellAvailable: boolean): string {
-  if (!shellAvailable) return "浏览器预览 · 原生能力不可用";
-  if (!status) return "正在查询 Core…";
-  if (status.running && status.pid !== null) {
-    return `Agent · PID ${status.pid} · 协议 ${status.protocolVersion ?? "?"} · ${status.toolCount ?? 0} 个工具`;
-  }
-  if (status.lastExit) {
-    return `Agent 已退出（${status.lastExit.code ?? status.lastExit.signal ?? "未知"}）`;
-  }
-  return "Agent 未启动";
-}

@@ -162,26 +162,15 @@ export function runStateLabel(state: string | null): string | null {
   return state ? RUN_STATE_LABEL[state] ?? state : null;
 }
 
-export function decisionLabel(decision: PermissionMode): string {
-  if (decision === "auto") return "自动批准";
-  if (decision === "ask") return "需审批";
-  return "策略禁止";
-}
-
-export function approvalSourceLabel(source: PermissionApprovalSource): string {
-  return source === "agent" ? "Agent 自主批准" : source === "policy" ? "策略批准" : "用户批准";
-}
-
 export function targetLabel(target: ToolTarget): string {
   const scope = target.serverId ?? target.host;
   return `${scope} · ${environmentLabel(target.environment)}`;
 }
 
-export function riskLabel(level: RiskLevel): string {
-  const labels: Record<RiskLevel, string> = { read: "只读", low: "低", medium: "中", high: "高", critical: "严重" };
-  return labels[level];
-}
+/* `riskLabel` / `decisionLabel` / `approvalSourceLabel` / `resultLabel` 曾经定义在这里，
+   现已移入 `lib/labels.js`。原因是活动页（`features/activity/ActivityFeed.tsx`）把
+   同样四个词表又抄了一份，而两个 feature 目录互相 import 都不合适 —— 谁都不该拥有
+   这份共享词汇。它们同时是安全叙事的一部分：Agent 面板和审计日志是同一个「要不要
+   放行这次生产环境写入」决定的两个视图，措辞分叉就等于两处说法互相矛盾。
+   调用方（`AgentEntryView.tsx`）改为直接从 `lib/labels.js` 引入。 */
 
-export function resultLabel(status: "success" | "failed" | "cancelled"): string {
-  return status === "success" ? "成功" : status === "cancelled" ? "已取消" : "失败";
-}

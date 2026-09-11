@@ -9,6 +9,7 @@
 import { IPC_COMMANDS, type ChatMessage, type ChatSession } from "@yukinal/shared";
 import { useCallback, useRef, useState } from "react";
 
+import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { sessionTitleFromPrompt } from "./transcript.js";
 
@@ -62,7 +63,7 @@ export function useChatSessions(): ChatSessions {
       try {
         await callDesktop(IPC_COMMANDS.chatMessageAppend, { sessionId, messageId, role, content });
       } catch (cause) {
-        setError(`对话记录保存失败：${errorText(cause)}`);
+        setError(`对话记录保存失败：${errorMessage(cause)}`);
       }
     },
     [shell],
@@ -81,7 +82,7 @@ export function useChatSessions(): ChatSessions {
           sessionId = created.session.id;
           activate(sessionId, false);
         } catch (cause) {
-          setError(`对话记录创建失败：${errorText(cause)}`);
+          setError(`对话记录创建失败：${errorMessage(cause)}`);
           return EPHEMERAL_SESSION_ID;
         }
       }
@@ -131,6 +132,5 @@ export function useChatSessions(): ChatSessions {
   };
 }
 
-function errorText(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
+/* `errorText` 已删除：它与 `AgentHistoryPane.tsx` 的 `errorMessage` 是同一个表达式。
+   统一到 `lib/format.js` 的 `errorMessage`。 */

@@ -104,9 +104,7 @@ export type IconName =
   | "stop"
   | "terminal"
   | "trash"
-  | "warning"
-  | "mic"
-  | "waveform";
+  | "warning";
 
 function iconBody(name: IconName): ReactNode {
   switch (name) {
@@ -157,10 +155,12 @@ function iconBody(name: IconName): ReactNode {
       return <><path d="M7 3.8h6l4 4v12.4H7z" /><path d="M13 3.8v4h4M9.5 12h5M9.5 15h5" /></>;
     case "logs":
       return <><path d="M5 5h14M5 10h14M5 15h9M5 20h7" /></>;
-    case "mic":
-      return <><rect x="8" y="3" width="8" height="12" rx="4" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" /></>;
-    case "waveform":
-      return <><path d="M5 12h1M8 9v6M11 6v12M14 8v8M17 5v14M20 10v4" /></>;
+    /* `mic` 和 `waveform` 曾在这里，是给一个语音输入按钮画的。
+       那个按钮没有做出来（见 AgentComposer 里关于它的说明），图标也一直没人引用：
+       全仓库搜 `"mic"` / `"waveform"` 只命中过它们自己的类型联合与 case，
+       tests/icon.test.tsx 的清单里也没有它们，所以连「忘了删」的提示都没有。
+       需要时再加回来，比留着一对永远不出现的图标更好 —— 死掉的绘制代码会让人
+       以为某个功能已经存在。 */
     case "shield":
       return <><path d="M12 3 19 6v5c0 4.7-2.9 8-7 10-4.1-2-7-5.3-7-10V6l7-3Z" /><path d="m9 12 2 2 4-4" /></>;
     case "services":

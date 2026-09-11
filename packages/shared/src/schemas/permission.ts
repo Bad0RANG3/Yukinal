@@ -6,19 +6,10 @@ import { z } from "zod";
 
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
-import { EnvironmentSchema, RiskLevelSchema, ToolTargetSchema } from "./server.js";
-import { SafeCustomHeadersSchema } from "./provider.js";
+import { EnvironmentSchema, RiskLevelSchema, SERVER_ID_SCHEMA, ToolTargetSchema } from "./server.js";
+import { HttpBaseUrlSchema, SafeCustomHeadersSchema } from "./provider.js";
 
 /** Per-run provider material (mirrors `RuntimeProviderConfig`). */
-const HttpBaseUrlSchema = z.string().trim().min(1).max(2048).refine((value) => {
-  try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
-  } catch {
-    return false;
-  }
-}, "baseUrl must be an http(s) URL without embedded credentials");
-
 export const RuntimeProviderConfigSchema = z.strictObject({
   kind: z.literal("openai-compatible"),
   baseUrl: HttpBaseUrlSchema,
@@ -131,7 +122,7 @@ export const AgentRunRequestSchema = z.strictObject({
   delivery: z.enum(["async", "sync"]).optional(),
   resume: z.boolean().optional(),
   workspaceId: z.string().trim().min(1).max(256).optional(),
-  focusServerId: z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/).optional(),
+  focusServerId: SERVER_ID_SCHEMA.optional(),
   target: ToolTargetSchema.optional(),
   policyId: z.string().optional(),
   permissionMode: AgentPermissionModeSchema.optional(),

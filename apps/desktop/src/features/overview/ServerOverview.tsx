@@ -8,11 +8,13 @@ import { useQuery } from "@tanstack/react-query";
 import {
   HEALTH_THRESHOLDS,
   IPC_COMMANDS,
+  healthClass,
   type HealthClass,
   type Server,
   type ServerSnapshot,
 } from "@yukinal/shared";
 
+import { errorMessage } from "../../lib/format.js";
 import { EnvBadge } from "../../components/EnvBadge.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
@@ -33,11 +35,19 @@ const HEALTH_LABEL: Record<HealthClass | "unknown", string> = {
   unknown: "未知",
 };
 
+/**
+ * 未取到读数时是 `unknown`，有读数时一律交给 `healthClass`。
+ *
+ * 这里曾经自己重写了一遍阈值比较。那正是 `types/health.ts:8-9` 明令禁止的事：
+ * 「原始数字变成健康等级的换算全项目只有一处，就是这里，外加 Rust 镜像
+ * （crates/core/src/health.rs）—— UI 和 Agent 不允许各算各的」。
+ * 更糟的是本文件已经 `import { HEALTH_THRESHOLDS }` 了：阈值取自共享模块，
+ * 比较逻辑却是本地副本，于是「共享的那份对了、这份没跟上」不会有任何编译或
+ * 测试报错。现在只保留 `undefined` 这一层判断，那确实是 UI 关心的事
+ * （`HealthClass` 里没有 `unknown`，它属于 `HealthState`，见 types/health.ts:18）。
+ */
 function gaugeClass(usage: number | undefined, thresholds: { warning: number; critical: number }): HealthClass | "unknown" {
-  if (usage === undefined) return "unknown";
-  if (usage >= thresholds.critical) return "critical";
-  if (usage >= thresholds.warning) return "warning";
-  return "healthy";
+  return usage === undefined ? "unknown" : healthClass(usage, thresholds);
 }
 
 function MetricCard({
@@ -146,7 +156,7 @@ export function ServerOverview() {
         <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取服务器状态</strong>
-          <p>{snapshotQuery.error instanceof Error ? snapshotQuery.error.message : String(snapshotQuery.error)}</p>
+          <p>{errorMessage(snapshotQuery.error)}</p>
           <button type="button" className="secondary-button" onClick={() => void snapshotQuery.refetch()}>
             重试采集
           </button>

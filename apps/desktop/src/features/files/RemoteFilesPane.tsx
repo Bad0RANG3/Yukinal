@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { IPC_COMMANDS, type RemoteFileEntry } from "@yukinal/shared";
 import { useState } from "react";
 
+import { errorMessage } from "../../lib/format.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
@@ -48,7 +49,7 @@ export function RemoteFilesPane() {
         <button type="submit" className="button-secondary">前往</button>
         <button type="button" className="button-secondary" onClick={() => void files.refetch()} disabled={files.isFetching} title="刷新远程文件" aria-label="刷新远程文件"><Icon name="refresh" size="sm" />刷新</button>
       </form>
-      {files.isError ? <div className="error-panel"><div><strong>无法读取目录</strong><p>{files.error instanceof Error ? files.error.message : String(files.error)}</p></div><button type="button" className="button-secondary" onClick={() => void files.refetch()}>重试</button></div> : null}
+      {files.isError ? <div className="error-panel"><div><strong>无法读取目录</strong><p>{errorMessage(files.error)}</p></div><button type="button" className="button-secondary" onClick={() => void files.refetch()}>重试</button></div> : null}
       <div className="files-layout">
         <div className="file-list-panel">
           <div className="section-heading"><div><p className="eyebrow">远程文件</p><h2>{path}</h2></div><span className="section-note">{entries.length} 项</span></div>

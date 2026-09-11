@@ -5,8 +5,10 @@ import {
   type Workspace,
 } from "@yukinal/shared";
 
+import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
+import { useServers } from "../../lib/servers.js";
 import { Icon } from "../../components/Icon.js";
 
 export function ProjectsPane() {
@@ -20,12 +22,8 @@ export function ProjectsPane() {
       // `IPC_SCHEMAS`, so the command→schema pair has exactly one home.
       callDesktop(IPC_COMMANDS.workspaceList, {}),
   });
-  const servers = useQuery({
-    queryKey: ["servers"],
-    enabled: shell,
-    staleTime: 10_000,
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.serverList, {})).servers,
-  });
+  // 与侧栏共用同一份服务器缓存（同一个 key、同一套新鲜度），不再是本地副本。
+  const servers = useServers({ enabled: shell });
 
   if (!shell) return <PreviewEmpty />;
 
@@ -45,7 +43,7 @@ export function ProjectsPane() {
         <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取项目</strong>
-          <p>{workspaces.error instanceof Error ? workspaces.error.message : String(workspaces.error)}</p>
+          <p>{errorMessage(workspaces.error)}</p>
           <button type="button" className="secondary-button" onClick={() => void workspaces.refetch()}>
             重试
           </button>

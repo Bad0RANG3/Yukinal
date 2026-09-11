@@ -10,7 +10,7 @@
 import { z } from "zod";
 
 import { HEALTH_STATES } from "../types/collector.js";
-import { ServerCapabilitiesSchema } from "./server.js";
+import { SERVER_ID_SCHEMA, ServerCapabilitiesSchema } from "./server.js";
 
 export const HealthStateSchema = z.enum(HEALTH_STATES);
 
@@ -69,7 +69,7 @@ const CollectorSampleSchema = z.strictObject({
 export const ServerSnapshotSchema = z.strictObject({
   id: z.string().min(1),
   /* `srv_` ids only — a snapshot about a prose target is a bug, not data (stable-id rule). */
-  serverId: z.string().regex(/^srv_[a-z0-9]+$/, "server id must be an opaque srv_ id"),
+  serverId: SERVER_ID_SCHEMA,
   collectedAt: z.string().min(1),
   health: HealthStateSchema,
   os: OsInfoSchema.optional(),

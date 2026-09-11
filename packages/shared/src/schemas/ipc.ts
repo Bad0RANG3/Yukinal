@@ -32,12 +32,20 @@ import {
   ProviderModelOptionSchema,
   ProviderSaveInputSchema,
 } from "./provider.js";
+import { SERVER_ID_SCHEMA } from "./server.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
 
-/** Opaque `srv_` ids are the only admissible server references on the wire. */
-export const IpcServerIdSchema = z.string().trim().min(1).max(256).regex(/^srv_[a-z0-9]+$/, "server id must be an opaque srv_ id");
+/**
+ * Opaque `srv_` ids are the only admissible server references on the wire.
+ *
+ * 这里**不再重写一遍正则**，只是给 `SERVER_ID_SCHEMA` 起一个 IPC 语境下的别名。
+ * 原先它是一条独立的等价定义，于是「全项目唯一一处 id 规则」这句话就不成立了：
+ * 改了一条忘了另一条时，`server_update` 接受的 id 与 `server_list` 期望的 id
+ * 会悄悄分叉，而这正是 `consistency.ts` 那套检查想拦住的事。
+ */
+export const IpcServerIdSchema = SERVER_ID_SCHEMA;
 
 const IpcTerminalSessionIdSchema = z.string().trim().min(1).max(256);
 const IpcPortSchema = z.number().int().min(1).max(65535);

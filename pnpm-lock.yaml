@@ -55,9 +55,6 @@ importers:
       '@xterm/xterm':
         specifier: ^5.5.0
         version: 5.5.0
-      '@yukinal/agent-sdk':
-        specifier: workspace:*
-        version: link:../../packages/agent-sdk
       '@yukinal/shared':
         specifier: workspace:*
         version: link:../../packages/shared

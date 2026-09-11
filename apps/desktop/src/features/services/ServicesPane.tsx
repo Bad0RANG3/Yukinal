@@ -5,6 +5,7 @@ import {
   type ServiceState,
 } from "@yukinal/shared";
 
+import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { Icon } from "../../components/Icon.js";
@@ -67,7 +68,7 @@ export function ServicesPane() {
         <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>无法读取服务状态</strong>
-          <p>{servicesQuery.error instanceof Error ? servicesQuery.error.message : String(servicesQuery.error)}</p>
+          <p>{errorMessage(servicesQuery.error)}</p>
           <button type="button" className="secondary-button" onClick={() => void servicesQuery.refetch()}>
             重试
           </button>

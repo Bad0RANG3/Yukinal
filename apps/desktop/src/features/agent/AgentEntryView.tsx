@@ -9,14 +9,8 @@ import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
-import {
-  approvalSourceLabel,
-  decisionLabel,
-  resultLabel,
-  riskLabel,
-  targetLabel,
-  type Entry,
-} from "./transcript.js";
+import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
+import { targetLabel, type Entry } from "./transcript.js";
 
 export function AgentEntryView({
   entry,

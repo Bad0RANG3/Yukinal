@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { ENVIRONMENTS, ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
+import { SERVERS_QUERY_KEY } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { buildServerInput } from "./server-form.js";
 
@@ -54,7 +55,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
         : callDesktop(IPC_COMMANDS.serverAdd, buildServerInput(values));
     },
     onSuccess: (response) => {
-      void queryClient.invalidateQueries({ queryKey: ["servers"] });
+      void queryClient.invalidateQueries({ queryKey: SERVERS_QUERY_KEY });
       selectServer(response.server.id);
       onClose();
     },

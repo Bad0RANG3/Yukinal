@@ -2,6 +2,7 @@ import { IPC_COMMANDS, type ChatMessage, type ChatSession } from "@yukinal/share
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { errorMessage, formatTimestamp } from "../../lib/format.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 
@@ -123,7 +124,7 @@ export function AgentHistoryPane({
           {sessions.data.map((session) => (
             <article className={`agent-history-item ${activeSessionId === session.id ? "is-active" : ""}`} key={session.id}>
               <button type="button" className="agent-history-item-open" onClick={() => void openSession(session)} disabled={busy}>
-                <span className="agent-history-item-top"><strong>{session.title}</strong><time dateTime={session.updatedAt}>{formatHistoryTime(session.updatedAt)}</time></span>
+                <span className="agent-history-item-top"><strong>{session.title}</strong><time dateTime={session.updatedAt}>{formatTimestamp(session.updatedAt)}</time></span>
                 <span className="agent-history-item-preview">{session.lastMessagePreview || "暂无消息"}</span>
                 <span className="agent-history-item-meta">{session.messageCount} 条消息{session.serverId ? ` · ${session.serverId}` : " · 全局工作区"}</span>
               </button>
@@ -139,12 +140,7 @@ export function AgentHistoryPane({
   );
 }
 
-function formatHistoryTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
-}
+/* `formatHistoryTime` 与 `errorMessage` 曾定义在这里，两者都与别处逐字节重复：
+   前者等于 `ActivityFeed.tsx` 里的 `formatTimestamp`，后者等于 `useChatSessions.ts`
+   里的 `errorText`。现已统一到 `lib/format.js`。 */
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
