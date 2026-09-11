@@ -114,7 +114,6 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-ui);
   font-size: var(--ui-font-size, 13px);
   -webkit-font-smoothing: antialiased;
 }
@@ -137,10 +136,7 @@ button:disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 76px 272px minmax(0, 1fr) 356px;
   height: 100%;
-  min-width: 980px;
-  background: var(--bg);
   /* Keep legacy page primitives and terminal ANSI output in the same monochrome
      contract while their individual selectors are migrated to the gray palette.
 
@@ -173,9 +169,6 @@ button:disabled {
   display: flex;
   flex-direction: column;
   align-items: center;
-  border-right: 1px solid var(--line);
-  background: #0d1116;
-  padding: 18px 10px 12px;
 }
 
 /* 左上角这枚标记就是任务栏里那枚应用图标本身：src/assets/brand-mark.png 取自
@@ -188,12 +181,8 @@ button:disabled {
    要看它本来的青色，得在这里单独写 filter: grayscale(0)，那属于打破既有契约，别顺手加。 */
 .brand-mark {
   display: grid;
-  width: 38px;
-  height: 38px;
   place-items: center;
   border: 1px solid #3a625c;
-  border-radius: 10px;
-  background: #09090b;
 }
 
 /* 图标铺满容器：等比缩放到 38px，留白由图标自己提供，容器不再加 padding。 */
@@ -208,8 +197,6 @@ button:disabled {
   display: flex;
   width: 100%;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 34px;
 }
 
 .rail-button {
@@ -217,32 +204,16 @@ button:disabled {
   width: 100%;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
   border: 1px solid transparent;
-  border-radius: 8px;
   background: transparent;
-  color: var(--faint);
-  padding: 9px 3px 8px;
-  font-size: 10px;
 }
 
-.rail-button:hover {
-  border-color: var(--line);
-  background: var(--panel-soft);
-  color: var(--muted);
-}
 
-.rail-button-active {
-  border-color: #28574f;
-  background: #15332f;
-  color: var(--accent);
-}
 
 /* `.rail-icon` used to hold a text glyph, which is why this rule once carried a
    font-size. Icons are SVG now and the size lives in the `ICON_SIZE` scale, so
    the wrapper only has to be a centring box. */
 .rail-icon {
-  display: grid;
   place-items: center;
 }
 
@@ -250,9 +221,6 @@ button:disabled {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  border-right: 1px solid var(--line);
-  background: #0f1419;
-  padding: 23px 16px 14px;
 }.server-sidebar-header, .server-list-meta, .workspace-header, .section-heading, .metric-card-topline, .identity-line, .agent-header, .agent-title, .approval-heading{
   display: flex;
   align-items: center;
@@ -263,9 +231,7 @@ button:disabled {
 .eyebrow {
   margin: 0 0 5px;
   color: var(--faint);
-  font-size: 10px;
   font-weight: 650;
-  letter-spacing: 0.11em;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -283,9 +249,6 @@ button:disabled {
   letter-spacing: -0.01em;
 }
 
-.server-sidebar h2 {
-  font-size: 17px;
-}
 
 /* A fixed square that centres one icon. The `font-size`/`line-height` pair this
    rule used to carry was for the text glyphs that predated the SVG icon set;
@@ -297,19 +260,14 @@ button:disabled {
   height: 30px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 7px;
-  background: var(--panel-raised);
   color: var(--muted);
 }
 
 .icon-button:hover {
-  border-color: var(--accent);
   color: var(--accent);
 }
 
 .icon-button-accent {
-  border-color: #34786b;
-  background: #15332f;
   color: var(--accent);
 }
 
@@ -317,17 +275,11 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin-top: 22px;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #0b1014;
   color: var(--faint);
   padding: 8px 9px;
 }
 
-.server-search:focus-within {
-  border-color: #3b766d;
-}
 
 .server-search input {
   min-width: 0;
@@ -365,7 +317,6 @@ button:disabled {
 .server-list {
   display: flex;
   flex-direction: column;
-  gap: 3px;
   margin: 0;
   padding: 0;
   overflow: auto;
@@ -439,7 +390,6 @@ button:disabled {
 .server-row-name {
   overflow: hidden;
   color: inherit;
-  font-size: 12px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -455,8 +405,6 @@ button:disabled {
   display: flex;
   min-width: 0;
   color: var(--faint);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
   white-space: nowrap;
 }
 
@@ -471,7 +419,6 @@ button:disabled {
 
 .server-row-env {
   color: var(--faint);
-  font-size: 10px;
 }
 
 .inline-error {
@@ -479,8 +426,6 @@ button:disabled {
   flex-direction: column;
   gap: 5px;
   border: 1px solid #704044;
-  border-radius: 7px;
-  background: #291a1d;
   color: var(--danger);
   margin: 4px 0 10px;
   padding: 10px;
@@ -496,7 +441,6 @@ button:disabled {
 
 .text-button-danger {
   align-self: flex-start;
-  color: var(--danger);
   font-size: 11px;
 }
 
@@ -504,33 +448,18 @@ button:disabled {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .workspace-header {
-  min-height: 74px;
   border-bottom: 1px solid var(--line);
-  padding: 0 30px;
 }
 
-.workspace-header h1 {
-  font-size: 20px;
-}
 
 .workspace-header-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
 }
 
-.context-chip {
-  border: 1px solid #31554f;
-  border-radius: 999px;
-  background: #15332f;
-  color: var(--accent);
-  padding: 4px 9px;
-  font-size: 10px;
-}
 
 .shortcut-hint {
   color: var(--faint);
@@ -539,9 +468,7 @@ button:disabled {
 
 .server-tabs {
   display: flex;
-  gap: 20px;
   border-bottom: 1px solid var(--line);
-  padding: 0 30px;
 }
 
 .server-tab {
@@ -549,8 +476,6 @@ button:disabled {
   border: 0;
   background: transparent;
   color: var(--faint);
-  padding: 13px 1px;
-  font-size: 12px;
 }
 
 .server-tab:hover {
@@ -575,24 +500,17 @@ button:disabled {
   min-height: 0;
   flex: 1;
   overflow: auto;
-  padding: 30px;
 }
 
-.overview-page {
-  max-width: 980px;
-  margin: 0 auto;
-}
 
 .overview-hero {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 20px;
 }
 
 .identity-line {
   justify-content: flex-start;
-  gap: 11px;
 }
 
 /* 概览页顶部的大字服务器名。它不再是标题元素（名字已经是这一页的 h1，
@@ -607,7 +525,6 @@ button:disabled {
 .overview-subtitle {
   margin: 8px 0 0;
   color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
 }
 
@@ -635,14 +552,6 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-.secondary-button {
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--panel-raised);
-  color: var(--muted);
-  padding: 7px 11px;
-  font-size: 11px;
-}
 
 .secondary-button:hover {
   border-color: var(--accent);
@@ -652,21 +561,16 @@ button:disabled {
 .server-facts {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px;
-  margin: 30px 0;
   border: 1px solid var(--line);
-  background: var(--line);
 }
 
 .server-facts div {
-  background: var(--panel);
   padding: 14px 16px;
 }
 
 .server-facts dt {
   margin-bottom: 6px;
   color: var(--faint);
-  font-size: 10px;
   text-transform: uppercase;
 }
 
@@ -676,9 +580,6 @@ button:disabled {
   font-size: 12px;
 }
 
-.section-block {
-  margin-top: 30px;
-}
 
 .section-heading {
   align-items: flex-end;
@@ -692,20 +593,15 @@ button:disabled {
 
 .section-note {
   color: var(--faint);
-  font-size: 10px;
 }
 
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
 }
 
 .metric-card {
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  padding: 15px;
 }
 
 .metric-card-topline {
@@ -717,7 +613,6 @@ button:disabled {
   display: block;
   margin: 12px 0 10px;
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 24px;
   font-weight: 500;
 }
@@ -743,7 +638,6 @@ button:disabled {
 }
 
 .metric-track {
-  height: 4px;
   overflow: hidden;
   border-radius: 99px;
   background: #273039;
@@ -775,7 +669,6 @@ button:disabled {
   margin-top: 10px;
   overflow: hidden;
   color: var(--faint);
-  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -786,7 +679,6 @@ button:disabled {
   gap: 11px;
   margin-top: 20px;
   border: 1px solid #6f5a32;
-  border-radius: 7px;
   background: #292217;
   color: var(--warning);
   padding: 14px;
@@ -864,7 +756,6 @@ button:disabled {
 
 .container-name {
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .container-meta {
@@ -900,7 +791,6 @@ button:disabled {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: var(--muted);
   text-align: center;
 }
 
@@ -923,21 +813,17 @@ button:disabled {
   place-items: center;
   border: 1px solid #31554f;
   border-radius: 9px;
-  background: #15332f;
   color: var(--accent);
 }
 
 .empty-state h2 {
   margin-top: 15px;
-  font-size: 17px;
 }
 
 .empty-state p {
   max-width: 390px;
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .empty-state small {
@@ -981,7 +867,6 @@ button:disabled {
 .loading-panel,
 .error-panel {
   display: flex;
-  min-height: 280px;
   align-items: center;
   justify-content: center;
   gap: 13px;
@@ -1008,7 +893,6 @@ button:disabled {
   width: 23px;
   height: 23px;
   border: 2px solid var(--line-strong);
-  border-top-color: var(--accent);
   border-radius: 50%;
   /* Keyframes live in the motion layer at the end of this file. */
   animation: spin var(--motion-spin-cycle) linear infinite;
@@ -1044,7 +928,6 @@ button:disabled {
   align-items: center;
   gap: 5px;
   color: var(--faint);
-  font-size: 10px;
 }
 
 .agent-status-ready {
@@ -1090,19 +973,15 @@ button:disabled {
 .agent-empty strong {
   margin-top: 13px;
   color: var(--text);
-  font-size: 13px;
 }
 
 .agent-empty p {
   max-width: 220px;
   margin: 7px 0 0;
   color: var(--faint);
-  font-size: 11px;
-  line-height: 1.5;
 }
 
 .agent-entry {
-  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -1153,10 +1032,7 @@ button:disabled {
 .tool-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
   border-left: 2px solid var(--line-strong);
-  background: var(--panel-soft);
-  padding: 9px 10px;
 }
 
 .tool-card > summary {
@@ -1196,7 +1072,6 @@ button:disabled {
 
 .agent-error {
   border: 1px solid #704044;
-  border-radius: 6px;
   background: #291a1d;
   color: var(--danger);
   padding: 9px;
@@ -1206,8 +1081,6 @@ button:disabled {
 
 .approval-card {
   border: 1px solid #6f5a32;
-  border-radius: 7px;
-  background: #292217;
   padding: 11px;
 }
 
@@ -1229,10 +1102,8 @@ button:disabled {
 }
 
 .approval-icon {
-  display: grid;
   width: 19px;
   height: 19px;
-  place-items: center;
   border: 1px solid var(--warning);
   border-radius: 50%;
   color: var(--warning);
@@ -1252,7 +1123,6 @@ button:disabled {
   flex-wrap: wrap;
   gap: 6px;
 }.approval-button{
-  border-radius: 5px;
   padding: 6px 9px;
   font-size: 10px;
 }
@@ -1277,7 +1147,6 @@ button:disabled {
   gap: 10px;
   flex: 1;
   min-width: 0;
-  padding: 10px 12px;
   color: inherit;
   text-align: left;
   background: transparent;
@@ -1286,10 +1155,6 @@ button:disabled {
 .server-list-item .server-row { display: flex; align-items: stretch; padding: 0; }
 .server-row-actions { display: flex; align-items: center; gap: 4px; padding: 0 8px 0 0; }
 .server-row-actions button { width: 24px; height: 24px; border: 1px solid var(--line, #27272a); border-radius: 4px; background: transparent; color: var(--muted, #a1a1aa); cursor: pointer; }
-.server-row-actions button:hover { color: var(--text, #f4f4f5); border-color: #52525b; }
-.server-status-pill { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #a1a1aa; }
-.server-status-connected { color: #34d399; }
-.server-status-error { color: #f87171; }
 .remote-files-page { min-height: 0; display: flex; flex-direction: column; gap: 14px; }
 .files-toolbar { display: flex; gap: 8px; align-items: center; }
 .files-toolbar input { flex: 1; min-width: 0; border: 1px solid #27272a; border-radius: 6px; background: #09090b; color: #e4e4e7; padding: 8px 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -1297,7 +1162,6 @@ button:disabled {
 .file-list-panel, .file-preview-panel { border: 1px solid #27272a; border-radius: 8px; background: rgba(9,9,11,.5); padding: 16px; min-width: 0; }
 .remote-file-list { list-style: none; padding: 0; margin: 12px 0 0; }
 .remote-file-row { display: flex; width: 100%; gap: 10px; align-items: center; border: 0; border-bottom: 1px solid rgba(39,39,42,.7); background: transparent; color: #d4d4d8; padding: 9px 4px; text-align: left; cursor: pointer; }
-.remote-file-row:hover, .remote-file-row-selected { background: rgba(63,63,70,.35); }
 .remote-file-icon { color: #71717a; width: 16px; }
 .remote-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .remote-file-size { color: var(--faint); font-size: 11px; }
@@ -1529,7 +1393,6 @@ select:focus-visible {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--card-radius);
-  background: var(--surface-1);
 }
 
 .app-rail {
@@ -1672,7 +1535,6 @@ select:focus-visible {
   margin-right: auto;
   min-width: 45px;
   color: var(--faint);
-  font-size: 9px;
   letter-spacing: 0;
   text-transform: none;
   white-space: nowrap;
@@ -1830,14 +1692,11 @@ select:focus-visible {
 .button-secondary,
 .button-primary {
   display: inline-flex;
-  min-height: 32px;
   align-items: center;
   justify-content: center;
   gap: 7px;
   border-radius: var(--control-radius);
   padding: 7px 11px;
-  font-size: 11px;
-  line-height: 1.2;
   /* 过渡不写在这里：动效层（文件末尾）是 transition 的唯一出处，
      这里原本那条 `140ms` 因为同权重、后出现而被它整条覆盖，是死声明。 */
 }
@@ -2282,8 +2141,6 @@ select:focus-visible {
 .settings-card-header p:last-child {
   margin: 7px 0 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.55;
 }
 
 .settings-notice {
@@ -2305,7 +2162,6 @@ select:focus-visible {
   border: 1px solid var(--line);
   border-radius: var(--card-radius);
   background: var(--surface-2);
-  padding: 18px;
 }
 
 .settings-stack {
@@ -2319,7 +2175,6 @@ select:focus-visible {
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 16px;
 }
 
 .settings-card-header h2 {
@@ -2376,7 +2231,6 @@ select:focus-visible {
 .settings-fact dd {
   margin: 0;
   color: var(--text);
-  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -2399,7 +2253,6 @@ select:focus-visible {
 
 .settings-storage-note {
   color: var(--faint);
-  font-size: 10px;
 }
 
 .agent-log-viewer {
@@ -2420,7 +2273,6 @@ select:focus-visible {
 .settings-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 13px;
 }
 
 .settings-form-grid-provider {
@@ -2446,14 +2298,12 @@ select:focus-visible {
 
 .form-input {
   width: 100%;
-  min-height: 34px;
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
   outline: 0;
   background: var(--surface-3);
   color: var(--text);
   padding: 8px 10px;
-  font-size: 11px;
 }
 
 .form-input:hover {
@@ -2596,7 +2446,6 @@ select.form-input {
   align-items: center;
   gap: 7px;
   color: var(--text);
-  font-size: 11px;
 }
 
 .provider-name > span:nth-last-child(1) {
@@ -2628,7 +2477,6 @@ select.form-input {
   margin-top: 5px;
   overflow: hidden;
   color: var(--faint);
-  font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2755,7 +2603,6 @@ select.form-input {
 .terminal-page {
   display: flex;
   height: 100%;
-  min-height: 420px;
   flex-direction: column;
   gap: 12px;
 }
