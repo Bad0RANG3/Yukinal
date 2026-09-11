@@ -63,6 +63,10 @@ export function ModelPicker({
   const selectedIndex = choices.findIndex((choice) => choice.key === selectedKey);
   const selected = selectedIndex >= 0 ? choices[selectedIndex] : choices[0];
   const activeIndex = Math.min(active, Math.max(0, choices.length - 1));
+  /* 下面 onKeyDown 里的 `% choices.length` 不需要防 0：choices 为空时
+     `selected` 是 undefined，组件会在渲染前就 return null，那个带 onKeyDown 的
+     按钮根本不存在，除零分支不可达。调用方也已经用 `models.length ? ... : ...`
+     兜过一层。与其加一个永远走不到的判断，不如把这段不变量写在这里。 */
 
   // 每次展开都把高亮落在当前选中项上，而不是永远从第一项开始。
   useEffect(() => {
