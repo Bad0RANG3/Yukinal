@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { IPC_COMMANDS, type RemoteFileEntry } from "@yukinal/shared";
 import { useState } from "react";
 
-import { errorMessage } from "../../lib/format.js";
+import { errorMessage, formatBytes } from "../../lib/format.js";
 import { EmptyPanel, ErrorPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
@@ -54,7 +54,7 @@ export function RemoteFilesPane() {
       <div className="files-layout">
         <div className="file-list-panel">
           <div className="section-heading"><div><p className="eyebrow">远程文件</p><h2>{path}</h2></div><span className="section-note">{entries.length} 项</span></div>
-          {files.isLoading ? <p className="muted-copy" role="status">正在加载…</p> : entries.length ? <ul className="remote-file-list">{entries.map((entry) => <li key={entry.path}><button type="button" className={`remote-file-row ${selectedFile === entry.path ? "remote-file-row-selected" : ""}`} aria-current={selectedFile === entry.path ? "true" : undefined} onClick={() => open(entry)}><span className="remote-file-icon"><Icon name={entry.type === "directory" ? "folder" : "file"} size="md" /></span><span className="remote-file-name">{entry.name}</span><span className="remote-file-size">{entry.type === "directory" ? "目录" : formatSize(entry.size)}</span></button></li>)}</ul> : files.isSuccess ? <p className="muted-copy">目录为空。</p> : null}
+          {files.isLoading ? <p className="muted-copy" role="status">正在加载…</p> : entries.length ? <ul className="remote-file-list">{entries.map((entry) => <li key={entry.path}><button type="button" className={`remote-file-row ${selectedFile === entry.path ? "remote-file-row-selected" : ""}`} aria-current={selectedFile === entry.path ? "true" : undefined} onClick={() => open(entry)}><span className="remote-file-icon"><Icon name={entry.type === "directory" ? "folder" : "file"} size="md" /></span><span className="remote-file-name">{entry.name}</span><span className="remote-file-size">{entry.type === "directory" ? "目录" : formatBytes(entry.size)}</span></button></li>)}</ul> : files.isSuccess ? <p className="muted-copy">目录为空。</p> : null}
         </div>
         <div className="file-preview-panel">
           <div className="section-heading"><div><p className="eyebrow">预览</p><h2>{selectedFile ?? "选择文件"}</h2></div>{read.data?.truncated ? <span className="section-note">内容已截断</span> : null}</div>
@@ -63,10 +63,4 @@ export function RemoteFilesPane() {
       </div>
     </section>
   );
-}
-
-function formatSize(size: number): string {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }

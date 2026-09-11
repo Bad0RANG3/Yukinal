@@ -14,7 +14,7 @@ import {
   type ServerSnapshot,
 } from "@yukinal/shared";
 
-import { errorMessage } from "../../lib/format.js";
+import { errorMessage, formatBytes } from "../../lib/format.js";
 import { EnvBadge } from "../../components/EnvBadge.js";
 import { EmptyPanel, ErrorPanel, LoadingPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
@@ -86,18 +86,6 @@ function formatUptime(seconds?: number): string {
   const hours = Math.floor((seconds % 86_400) / 3_600);
   if (hours >= 1) return `${hours} 小时`;
   return `${Math.max(1, Math.floor(seconds / 60))} 分钟`;
-}
-
-function formatBytes(bytes?: number): string {
-  if (bytes === undefined) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
 export function ServerOverview() {

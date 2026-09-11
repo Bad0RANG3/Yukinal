@@ -54,3 +54,37 @@ export function formatTimestamp(value: string): string {
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/**
+ * 字节数 → 「128 B」「1.5 KB」「5.6 GB」。
+ *
+ * 合并自两份实现，它们的**适用范围**不同，所以合并本身修掉了一个真缺陷：
+ *
+ * - `RemoteFilesPane` 的 `formatSize` 只到 MB 就停了。远程目录里一个 5 GB 的
+ *   镜像文件会显示成「5120.0 MB」—— 数值没说错，但没人能一眼读出量级，而这正是
+ *   文件列表要回答的问题。
+ * - `ServerOverview` 的 `formatBytes` 一路走到 TB，但在 KB 上舍入方式不同：
+ *   它保留一位小数，`formatSize` 直接四舍五入。同一个 1536 字节的文件，
+ *   一边说「1.5 KB」，另一边说「2 KB」。
+ *
+ * 采用后者的规则，因为「10 以下保留一位小数、10 以上取整」是列表里更好扫读的
+ * 做法（宽度稳定），而 MB 封顶是没有理由的。
+ *
+ * **这会改变文件列表的显示**：1536 字节从「2 KB」变成「1.5 KB」——
+ * 信息不再在显示层被抹掉；同时 GB/TB 现在有名字了。这是有意的，不是副作用。
+ *
+ * `undefined` 与无法表示的数都退回「—」：概览页里的内存/磁盘读数来自采集器，
+ * 采集器没返回数据是常态，那时显示「NaN B」比显示破折号糟得多。
+ */
+export function formatBytes(bytes?: number): string {
+  if (bytes === undefined || !Number.isFinite(bytes)) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // 取整阈值放在 10：两位数以上再带小数会让每一行的宽度忽长忽短。
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}

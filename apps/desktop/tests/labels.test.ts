@@ -235,7 +235,7 @@ test("every terminal font face has both a label and a family stack", () => {
     assert.ok(TERMINAL_FONT_FAMILY[font], `${font} has no family stack`);
     // The face the user picked must be first in its own stack, otherwise picking a
     // font silently renders a different one that merely happens to be installed.
-    const first = TERMINAL_FONT_FAMILY[font].split(",")[0].trim();
+    const first = TERMINAL_FONT_FAMILY[font].split(",")[0]?.trim() ?? "";
     assert.equal(
       first,
       `"${TERMINAL_FONT_LABEL[font]}"`,
@@ -279,7 +279,7 @@ test("the declared font families exist as real faces in the stylesheet", () => {
   // stylesheet leans on Consolas for the same reason.
   const SYSTEM_FALLBACKS = new Set(["Cascadia Mono", "Consolas", "Microsoft YaHei UI", "monospace"]);
   for (const font of TERMINAL_FONT_ORDER) {
-    const families = [...TERMINAL_FONT_FAMILY[font].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    const families = [...TERMINAL_FONT_FAMILY[font].matchAll(/"([^"]+)"/g)].flatMap((match) => match[1] ?? []);
     for (const family of families) {
       if (SYSTEM_FALLBACKS.has(family)) continue;
       assert.ok(declared.has(family), `"${family}" in the ${font} stack is not declared`);
@@ -303,10 +303,12 @@ test("the terminal stack matches the --font-terminal token", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   const token = /--font-terminal:\s*([^;]+);/.exec(css);
   assert.ok(token, "--font-terminal is not defined");
+  const tokenValue = token[1];
+  assert.ok(tokenValue, "--font-terminal has no value");
   const normalise = (value: string) => value.split(",").map((part) => part.trim().replace(/\s+/g, " ")).join(", ");
   assert.equal(
     normalise(TERMINAL_FONT_FAMILY["jetbrains-mono-nl"]),
-    normalise(token[1]),
+    normalise(tokenValue),
     "the default terminal face and --font-terminal have drifted apart",
   );
 });
