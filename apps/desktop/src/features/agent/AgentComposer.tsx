@@ -17,6 +17,7 @@ import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
+import { ModelPicker } from "./ModelPicker.js";
 import {
   findActiveTrigger,
   matchCommands,
@@ -76,7 +77,7 @@ export function AgentComposer({
   /** 这次运行允许做到什么程度；由 sidecar 权限引擎强制，不只是提示。 */
   runMode: AgentRunMode;
   onRunModeChange: (mode: AgentRunMode) => void;
-  models: ReadonlyArray<{ key: string; label: string }>;
+  models: ReadonlyArray<{ key: string; label: string; providerLabel?: string }>;
   selectedModelKey: string | null;
   /** 当前选中模型的完整名称，用于在输入框上方显示当前运行目标。 */
   selectedModelLabel: string | null;
@@ -328,17 +329,13 @@ export function AgentComposer({
           </div>
           <div className="agent-composer-toolbar-right">
             {models.length ? (
-              <label className="agent-model-select" title={selectedModelLabel ? `当前模型：${selectedModelLabel}` : "选择模型"}>
-                <select
-                  aria-label="选择模型"
-                  value={selectedModelKey ?? models[0]?.key ?? ""}
-                  disabled={running}
-                  onChange={(event) => onSelectModel(event.target.value)}
-                >
-                  {models.map((choice) => <option value={choice.key} key={choice.key}>{choice.label}</option>)}
-                </select>
-                <Icon name="chevronDown" size="xs" />
-              </label>
+              <ModelPicker
+                choices={models}
+                selectedKey={selectedModelKey}
+                selectedTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
+                onSelect={onSelectModel}
+                disabled={running}
+              />
             ) : <span className="agent-model-empty">未配置模型</span>}
             {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
                 点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。

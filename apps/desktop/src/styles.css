@@ -3489,7 +3489,8 @@ select.form-input {
   top: var(--shell-padding);
   right: var(--shell-padding);
   bottom: var(--shell-padding);
-  width: 328px;
+  /* 与网格里的 Agent 列同宽，否则收起动画会在宽度上跳一下。 */
+  width: 448px;
   min-width: 0;
   pointer-events: none;
   animation: panel-exit var(--motion-medium) var(--motion-exit) both;
@@ -3638,11 +3639,15 @@ select.form-input {
   transform: rotate(45deg);
 }
 
+/* 箭头退到 --faint：它只负责说明「这是可展开的」，不该和模型名抢注意力。 */
 .agent-model-select .icon {
+  flex: 0 0 auto;
+  color: var(--faint);
   transition: transform var(--motion-fast) var(--motion-ease);
 }
 
-.agent-model-select:focus-within .icon {
+/* 展开时把箭头翻上来，和弹层的方向一致。 */
+.agent-model-select.is-open .icon {
   transform: rotate(180deg);
 }
 
@@ -3661,15 +3666,22 @@ select.form-input {
 }
 
 /* Keep both states at four tracks so the workspace can reclaim the Agent
-   column continuously instead of jumping after the exit animation. */
+   column continuously instead of jumping after the exit animation.
+
+   Agent 列宽 448px：底栏那一排（+ / 运行模式 / 批准方式 / 模型选择 / 发送）
+   需要的总宽是固定的，328px 时输入卡片只有 302px，必然折成两行 —— 用户看到
+   的就是「模式标签被挤断、模型和发送被顶到下一行」。448px 让这一排在「输入框
+   有内容（发送按钮出现）+ 模型名较长」的最坏组合下仍留有余量。
+   1fr 的下限同时从 420 降到 340：64+248+420+448 已经超过窗口 minWidth 1160
+   减去内边距与间隙，不降的话缩到最小窗口时工作区会被挤爆。 */
 @media (min-width: 1151px) {
   .app-shell {
-    min-width: 1120px;
-    grid-template-columns: 64px 248px minmax(420px, 1fr) 328px;
+    min-width: 1160px;
+    grid-template-columns: 64px 248px minmax(340px, 1fr) 448px;
   }
 
   .app-shell.agent-collapsed {
-    grid-template-columns: 64px 248px minmax(420px, 1fr) 0px;
+    grid-template-columns: 64px 248px minmax(340px, 1fr) 0px;
   }
 
   .app-shell.agent-collapsed .workspace-main {
@@ -3677,11 +3689,11 @@ select.form-input {
   }
 
   .app-shell:not([data-primary="servers"]) {
-    grid-template-columns: 64px minmax(420px, 1fr) 328px;
+    grid-template-columns: 64px minmax(340px, 1fr) 448px;
   }
 
   .app-shell.agent-collapsed:not([data-primary="servers"]) {
-    grid-template-columns: 64px minmax(420px, 1fr);
+    grid-template-columns: 64px minmax(340px, 1fr);
   }
 
   .app-shell:not([data-primary="servers"]) .agent-panel:not(.agent-panel-closing) {
@@ -4041,49 +4053,106 @@ select.form-input {
 }
 
 /* 模型选择器从 10px 纯文本提权为明确的控件：它是「这次运行用哪个模型」
-   的唯一指示，之前小到几乎看不见，用户无从确认自己选的是什么。 */
+   的唯一指示，之前小到几乎看不见，用户无从确认自己选的是什么。
+
+   现在它是自绘的 listbox（见 ModelPicker.tsx），不是原生 <select>：
+   原生控件在关闭态只能显示 option 的完整文本，而模型 ID 常见形如
+   "anthropic/claude-sonnet-4.5" —— 要么把底栏撑到换行，要么被截成省略号，
+   两种都答不出「我现在用的是哪个模型」。自绘之后关闭态只显示模型短名，
+   完整名称留在 title 与列表项里。 */
+.agent-model-picker {
+  position: relative;
+  min-width: 0;
+}
+
 .agent-model-select {
   display: inline-flex;
   min-width: 0;
+  max-width: 100%;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   border: 1px solid var(--composer-line);
   border-radius: 999px;
   background: var(--composer-bg);
   color: #efefef;
-  padding: 3px 7px;
-  font-size: 10px;
+  padding: 4px 6px 4px 10px;
+  font-size: 11px;
+  line-height: 1.4;
   white-space: nowrap;
 }
 
-.agent-model-select:hover {
-  border-color: var(--focus-line);
+.agent-model-select:hover:not(:disabled),
+.agent-model-select.is-open {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
 }
 
-/* 这里曾经写死 outline: 0，而它与全局 input/select 的 focus-visible 规则
-   优先级相同，且全局规则在源码中更靠前 —— 结果是键盘用户 Tab 到模型选择器
-   时看不到任何焦点指示。灰阶主题下这尤其致命，因为颜色本身不提供线索。 */
-.agent-model-select select {
-  max-width: 118px;
-  border: 0;
-  appearance: none;
-  background: transparent;
-  color: #efefef;
-  cursor: pointer;
-  font: inherit;
+/* 关闭态的自适应宽度上限：再长就省略，完整名称由 title 兜底。
+   140px 覆盖了「去掉 vendor 前缀」后最长的常见模型名（约 20 字符），
+   同时给同排的发送按钮留出空间。 */
+.agent-model-value {
+  min-width: 0;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.agent-model-select select:focus-visible {
-  outline: 2px solid var(--focus-line);
-  outline-offset: 3px;
-  border-radius: 4px;
+/* 键盘焦点环由全局 button:focus-visible 提供，这里不再写 outline，
+   避免又出现「同优先级、靠源码顺序决定谁生效」的老问题。 */
+
+/* 弹层向上开：输入区贴在面板底部，向下没有空间。 */
+.agent-model-menu {
+  position: absolute;
+  z-index: 22;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 100%;
+  max-width: min(300px, 84vw);
+  max-height: 264px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--composer-line);
+  border-radius: 12px;
+  background: var(--composer-surface);
+  box-shadow: 0 16px 38px rgb(0 0 0 / 50%);
 }
 
-.agent-model-select select option {
-  background: var(--composer-surface);
-  color: #efefef;
+.agent-model-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 6px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.agent-model-option.is-active {
+  background: var(--composer-bg);
+  color: var(--text);
+}
+
+/* 当前生效项用强调色标出，而不是靠一个需要额外图标的勾。 */
+.agent-model-option[aria-selected="true"] .agent-model-option-name {
+  color: var(--composer-accent);
+  font-weight: 600;
+}
+
+.agent-model-option-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-model-option-from {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 10px;
 }
 
 .agent-model-empty {
@@ -4185,7 +4254,8 @@ select.form-input {
     padding-left: 12px;
   }
 
-  .agent-model-select select {
+  /* 极窄屏优先保住左侧那组状态说明，模型名退到更短。 */
+  .agent-model-value {
     max-width: 86px;
   }
 }
