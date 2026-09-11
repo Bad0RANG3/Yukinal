@@ -144,24 +144,11 @@ export class OpenAiCompatibleProvider implements LLMProvider {
   /** chat/completions 的 SSE：`data:` 行可能是 JSON chunk，`[DONE]` 结尾。工具调用按 index 累积。 */
   async *#consumeSse(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
     let lastFinishReason: string | null = null;
-    const slots = new Map<string, { id: string; name: string; args: string }>();
-
-    const toolCallEvents = (): StreamEvent[] =>
-      [...slots.values()]
-        .filter((slot) => slot.name)
-        .map((slot) => {
-          let args: Record<string, unknown> = {};
-          try {
-            args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
-          } catch {
-            args = { raw: slot.args };
-          }
-          return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
-        });
+    const slots = new Map<string, ToolCallSlot>();
 
     for await (const payload of sseData(body)) {
       if (payload === "[DONE]") {
-        for (const event of toolCallEvents()) yield event;
+        for (const event of toolCallEvents(slots)) yield event;
         slots.clear();
         yield { type: "done", finishReason: finishReasonFor(lastFinishReason) };
         return;
@@ -191,30 +178,17 @@ export class OpenAiCompatibleProvider implements LLMProvider {
       }
     }
     // EOF 而没收到 [DONE]（异常结束）：把手里的工具调用放出来，避免吞掉。
-    for (const event of toolCallEvents()) yield event;
+    for (const event of toolCallEvents(slots)) yield event;
     yield { type: "done", finishReason: finishReasonFor(lastFinishReason) };
   }
 
   /** codex `responses` API 的 SSE。事件：output_text.delta / output_item.added / function_call_arguments.delta。 */
   async *#consumeResponsesSse(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamEvent> {
-    const slots = new Map<string, { id: string; name: string; args: string }>();
-
-    const flush = (): StreamEvent[] =>
-      [...slots.entries()]
-        .filter(([, slot]) => slot.name)
-        .map(([, slot]) => {
-          let args: Record<string, unknown> = {};
-          try {
-            args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
-          } catch {
-            args = { raw: slot.args };
-          }
-          return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
-        });
+    const slots = new Map<string, ToolCallSlot>();
 
     for await (const payload of sseData(body)) {
       if (payload === "[DONE]") {
-        for (const event of flush()) yield event;
+        for (const event of toolCallEvents(slots)) yield event;
         yield { type: "done", finishReason: "stop" };
         return;
       }
@@ -255,16 +229,51 @@ export class OpenAiCompatibleProvider implements LLMProvider {
           };
           return;
         case "response.completed":
-          for (const toolEvent of flush()) yield toolEvent;
+          for (const toolEvent of toolCallEvents(slots)) yield toolEvent;
           yield { type: "done", finishReason: "stop" };
           return;
         default:
           break;
       }
     }
-    for (const event of flush()) yield event;
+    for (const event of toolCallEvents(slots)) yield event;
     yield { type: "done", finishReason: "stop" };
   }
+}
+
+/** 一个正在累积的工具调用：名字与参数都是分片到达，所以要拼起来。 */
+interface ToolCallSlot {
+  id: string;
+  name: string;
+  args: string;
+}
+
+/**
+ * 把手里的工具调用槽位转成 `tool_call` 事件。
+ *
+ * 两个 SSE 消费者（chat/completions 与 responses）各有一份逐字相同的实现，唯一的差别
+ * 是前者遍历 `slots.values()`、后者遍历 `slots.entries()` 再丢掉 key —— 那是同一段
+ * 代码的两种写法，不是两种语义，所以提到模块级共用。
+ *
+ * 两条规则值得写下来，因为它们在两个调用点都必须成立：
+ *
+ * - **没有名字的槽位要跳过**。`output_item.added` 可能先给出 id 与 arguments 而名字
+ *   尚未到达；发一个 `name: ""` 的 tool_call 会让模型看见一个它无法调用的工具。
+ * - **参数解析失败时保留原文**（`{ raw: slot.args }`），不丢弃、不抛错。宁可让模型看到
+ *   一段解析不了的参数并自行纠正，也不要静默吞掉整次调用。
+ */
+function toolCallEvents(slots: Map<string, ToolCallSlot>): StreamEvent[] {
+  return [...slots.values()]
+    .filter((slot) => slot.name)
+    .map((slot) => {
+      let args: Record<string, unknown> = {};
+      try {
+        args = slot.args ? (JSON.parse(slot.args) as Record<string, unknown>) : {};
+      } catch {
+        args = { raw: slot.args };
+      }
+      return { type: "tool_call" as const, call: { id: slot.id, name: slot.name, arguments: args } };
+    });
 }
 
 /** Yield each SSE data line, including a final line without a trailing newline. */

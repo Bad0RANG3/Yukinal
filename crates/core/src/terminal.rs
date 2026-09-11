@@ -44,7 +44,7 @@ impl TerminalPty for SshPty {
             .map_err(|error| yukinal_terminal::TerminalError::Channel(error.to_string()))
     }
 
-    fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent> {
+    fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
         self.backend.pty_output(&self.pty)
     }
 
@@ -72,18 +72,37 @@ impl TerminalService {
         }
     }
 
-    /// 存/取一条已认证的 ssh 连接。调用方（命令层）负责先 connect。
-    pub fn cache_session(&self, server_id: &str, session: Session) {
+    /// 取 `sessions` 的锁，**中毒时照常使用**，而不是 panic。
+    ///
+    /// 为什么这里可以恢复，而 `crates/database` 与 `crates/credentials` 选择报错：
+    /// 中毒标记的意义是「有人握着锁 panic 了，受它保护的数据可能只改了一半」。
+    /// 判据因此是**这个锁后面有没有跨字段的不变量**。
+    ///
+    /// 数据库那边有（一次事务要同时改多行，半途 panic 会留下不一致的账），凭证那边
+    /// 也有（后端句柄与它的元数据必须一起换）。这里没有：数据就是一个
+    /// `HashMap<String, Session>`，三个操作分别是 `insert` / `get().cloned()` /
+    /// `remove()`，`HashMap` 自身的内部一致性在 panic 展开后依然成立，也不存在
+    /// 「必须同时存在两条记录」的约束。一张缓存中毒之后仍然是可用的缓存。
+    ///
+    /// 反面代价才是关键：这三处原本写的是 `.expect("sessions lock")`。只要有任何
+    /// 一次 panic 落在锁内，标记就永久留下，此后**每一次**终端、SFTP、断开调用都会
+    /// 在这里 panic —— 一次故障被放大成该功能整体不可用。而且 `disconnect` 是
+    /// `async`，在运行时工作线程上 panic 的破坏面比在普通线程上更大。
+    /// `crates/ssh/src/conn.rs` 的 `PtyHandle::take_output` 出于同样的理由
+    /// 选择了 `into_inner()`。
+    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
         self.sessions
             .lock()
-            .expect("sessions lock")
-            .insert(server_id.to_string(), session);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 存/取一条已认证的 ssh 连接。调用方（命令层）负责先 connect。
+    pub fn cache_session(&self, server_id: &str, session: Session) {
+        self.sessions().insert(server_id.to_string(), session);
     }
 
     pub fn cached_session(&self, server_id: &str) -> Result<Session> {
-        self.sessions
-            .lock()
-            .expect("sessions lock")
+        self.sessions()
             .get(server_id)
             .cloned()
             .ok_or_else(|| TerminalServiceError::NoSession(server_id.to_string()))
@@ -91,11 +110,10 @@ impl TerminalService {
 
     /// Close all PTYs and remove the cached SSH session for a server.
     pub async fn disconnect(&self, server_id: &str) -> Result<bool> {
-        let session = self
-            .sessions
-            .lock()
-            .expect("sessions lock")
-            .remove(server_id);
+        // 锁在语句结束时释放，**不跨**下面的 `.await`：改写成
+        // `let guard = self.sessions(); let session = guard.remove(..)` 就会把
+        // 互斥量握过 `close_for_server` / `ssh.close` 两次网络往返。
+        let session = self.sessions().remove(server_id);
         let _closed_terminals = self.manager.close_for_server(server_id).await?;
         let Some(session) = session else {
             return Ok(false);

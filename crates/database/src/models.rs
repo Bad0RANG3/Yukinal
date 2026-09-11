@@ -15,6 +15,19 @@ use serde::{Deserialize, Serialize};
 /// second copy is what let `ActivityType` ship a serde rule that disagreed with
 /// `as_str` for `FileChange` and `AgentAction`: the variant list lived in three
 /// places and only two of them were checked.
+///
+/// **`from_db` is generated from the same literal list**, which is the third place
+/// closed. It used to be written out by hand as a reverse `match` after every
+/// invocation — ten tables restating the mapping declared three lines above them.
+/// A test (`every_enum_agrees_across_serde_as_str_and_from_db`) did catch drift, but
+/// a test is a check, not a construction: the bug was still *representable*, and the
+/// fix for a wrong entry was to notice the failure and edit the second table. Now
+/// the reverse direction cannot disagree with the forward one, because there is only
+/// one list.
+///
+/// The match arm uses `$str` as the pattern, so the two directions are generated
+/// from the same token. Adding a variant means adding one `Variant => "literal"` pair
+/// and nothing else.
 macro_rules! enum_as_str {
     ($ty:ident, $($variant:ident => $str:literal),+ $(,)?) => {
         impl $ty {
@@ -27,6 +40,19 @@ macro_rules! enum_as_str {
                     $(Self::$variant => $str),+
                 }
             }
+
+            /// Inverse of [`Self::as_str`]: parse a value read back from SQLite.
+            ///
+            /// `None` for an unrecognised string, so a row written by a newer schema
+            /// (or corrupted by hand) surfaces as a typed error at the call site
+            /// rather than being silently coerced to a default variant.
+            #[must_use]
+            pub fn from_db(raw: &str) -> Option<Self> {
+                match raw {
+                    $($str => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
         }
     };
 }
@@ -34,73 +60,6 @@ macro_rules! enum_as_str {
 enum_as_str!(ServerStatus, Connecting => "connecting", Connected => "connected", Disconnected => "disconnected", Error => "error");
 enum_as_str!(Environment, Local => "local", Development => "development", Staging => "staging", Production => "production", Unknown => "unknown");
 
-impl ServerStatus {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "connecting" => Some(Self::Connecting),
-            "connected" => Some(Self::Connected),
-            "disconnected" => Some(Self::Disconnected),
-            "error" => Some(Self::Error),
-            _ => None,
-        }
-    }
-}
-
-impl Environment {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "local" => Some(Self::Local),
-            "development" => Some(Self::Development),
-            "staging" => Some(Self::Staging),
-            "production" => Some(Self::Production),
-            "unknown" => Some(Self::Unknown),
-            _ => None,
-        }
-    }
-}
-
-impl RiskLevel {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "read" => Some(Self::Read),
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            "critical" => Some(Self::Critical),
-            _ => None,
-        }
-    }
-}
-
-impl PermissionMode {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "auto" => Some(Self::Auto),
-            "ask" => Some(Self::Ask),
-            "deny" => Some(Self::Deny),
-            _ => None,
-        }
-    }
-}
-
-impl ToolExecutionStatus {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "pending" => Some(Self::Pending),
-            "running" => Some(Self::Running),
-            "waiting_approval" => Some(Self::WaitingApproval),
-            "success" => Some(Self::Success),
-            "failed" => Some(Self::Failed),
-            "cancelled" => Some(Self::Cancelled),
-            _ => None,
-        }
-    }
-}
 enum_as_str!(HealthState, Healthy => "healthy", Warning => "warning", Critical => "critical", Unknown => "unknown");
 enum_as_str!(ActivityType, Connection => "connection", Authentication => "authentication", Configuration => "configuration", Deployment => "deployment", Service => "service", Container => "container", FileChange => "file_change", AgentAction => "agent_action", Approval => "approval", Health => "health");
 enum_as_str!(ActivitySource, Agent => "agent", User => "user", System => "system", Docker => "docker", Git => "git", Cloud => "cloud");
@@ -117,79 +76,6 @@ pub enum ChatMessageRole {
     Assistant,
     Tool,
     System,
-}
-
-impl ActivityType {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "connection" => Some(Self::Connection),
-            "authentication" => Some(Self::Authentication),
-            "configuration" => Some(Self::Configuration),
-            "deployment" => Some(Self::Deployment),
-            "service" => Some(Self::Service),
-            "container" => Some(Self::Container),
-            "file_change" => Some(Self::FileChange),
-            "agent_action" => Some(Self::AgentAction),
-            "approval" => Some(Self::Approval),
-            "health" => Some(Self::Health),
-            _ => None,
-        }
-    }
-}
-
-impl ActivitySource {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "agent" => Some(Self::Agent),
-            "user" => Some(Self::User),
-            "system" => Some(Self::System),
-            "docker" => Some(Self::Docker),
-            "git" => Some(Self::Git),
-            "cloud" => Some(Self::Cloud),
-            _ => None,
-        }
-    }
-}
-
-impl ActivityOutcome {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "success" => Some(Self::Success),
-            "failure" => Some(Self::Failure),
-            "cancelled" => Some(Self::Cancelled),
-            "denied" => Some(Self::Denied),
-            _ => None,
-        }
-    }
-}
-
-impl ChatMessageRole {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "user" => Some(Self::User),
-            "assistant" => Some(Self::Assistant),
-            "tool" => Some(Self::Tool),
-            "system" => Some(Self::System),
-            _ => None,
-        }
-    }
-}
-
-impl HealthState {
-    #[must_use]
-    pub fn from_db(raw: &str) -> Option<Self> {
-        match raw {
-            "healthy" => Some(Self::Healthy),
-            "warning" => Some(Self::Warning),
-            "critical" => Some(Self::Critical),
-            "unknown" => Some(Self::Unknown),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,6 +602,22 @@ mod tests {
     ///
     /// Driven by the same macro invocation that defines `as_str`, so a new
     /// variant cannot be added without being covered here.
+    ///
+    /// What each assertion still buys, now that `from_db` is generated from the
+    /// same literal list as `as_str`:
+    ///
+    /// - the serde comparison remains an **independent** check. `serde`'s
+    ///   `rename_all` rule is its own encoder; nothing generates it from the macro
+    ///   list, so a multi-word variant can still drift — which is the original bug.
+    /// - the `from_db` round-trip is no longer proof that the two directions agree
+    ///   (the macro makes that structural). It is retained because it still catches
+    ///   a **duplicate literal** in the invocation: two variants sharing a string
+    ///   make the earlier pattern shadow the later one, so the shadowed variant does
+    ///   not round-trip. Note this is now defence in depth rather than the sole
+    ///   detector — a duplicated literal also breaks the serde comparison above,
+    ///   since `rename_all` derives each variant's own spelling while `as_str` was
+    ///   handed a shared one. Kept because it is one cheap assertion and states the
+    ///   round-trip property directly.
     macro_rules! assert_wire_contract {
         ($ty:ident) => {
             for variant in $ty::ALL {

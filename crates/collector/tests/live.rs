@@ -2,6 +2,11 @@
 //!
 //! 复用 SSH 门控变量：`YUKINAL_SSH_TEST_HOST/USER/PASSWORD`（或 `KEY_PATH`）。
 //! 未设置时跳过，设置为失败让 CI 真红。
+//!
+//! `env()` 与 `crates/ssh/tests/live.rs` 里的同名函数逐字相同，`is_enabled()` 与
+//! `SshConfig` 则**有意不同**（这里必须有密码，那边允许私钥；策略与 server_id 也不同）。
+//! 为什么不共享：那个文件的模块注释里有完整的判断 —— 简述是「跨 crate 共享要求给
+//! `yukinal-ssh` 开一个 cargo feature，代价大于省下的 5 行」。
 
 use std::sync::Arc;
 use std::time::Duration;

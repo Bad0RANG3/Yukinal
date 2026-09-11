@@ -5,6 +5,25 @@
 //! - `YUKINAL_SSH_TEST_PASSWORD`（或 `YUKINAL_SSH_TEST_KEY_PATH`）
 //!
 //! DoD 覆盖：密码 + 私钥登录真机、往返命令、keepalive、host key 变化阻断。
+//!
+//! ## 关于与 `crates/collector/tests/live.rs` 的重复
+//!
+//! 那个文件里有一份逐字相同的 `env()` 和一份形状相近的 `SshConfig` 字面量。审计提过
+//! 把它们抽成共享的测试支持模块，**这里有意不做**，理由如下：
+//!
+//! 集成测试是独立 crate，看不到 `yukinal-ssh` 里的 `#[cfg(test)]` 模块（依赖被编译时
+//! 不设 `cfg(test)`）。要跨 crate 共享，只能给 `yukinal-ssh` 加一个 cargo feature 并
+//! 把模块挂成 `pub`，再由 `yukinal-collector` 的 dev-dependency 打开它。为两个被环境
+//! 变量门控的测试文件，在一个处理密钥与主机指纹的库的公开面上开一个 feature 口子，
+//! 代价大于收益。
+//!
+//! 而且两处**并不是**同一份配置：本文件的 `is_enabled()` 允许私钥登录，collector 的
+//! 要求必须有密码（它的采集链走密码认证）；`known_hosts_policy` 与 `server_id` 也
+//! 各不相同。真正逐字相同的只有那 5 行 env 读取，为此引入上述机制不划算。
+//!
+//! 于是选择记录判断而非共享代码 —— 如果将来这第三份出现（`commands/terminal.rs`
+//! 已有一份生产用的字面量），或者有人真的开始复制 `is_enabled()`,那说明调用点在变多，
+//! 届时再加 feature 才是对的时机。
 
 use yukinal_ssh::{
     Authentication, ConnectionSecrets, Error, KnownHostsPolicy, RusshBackend, SshBackend, SshConfig,

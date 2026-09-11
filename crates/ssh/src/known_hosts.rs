@@ -10,6 +10,28 @@
 //!
 //! Rule: a fingerprint the server presents that differs from the pinned one is a
 //! MITM indicator and must fail the connection (returns [`Check::Mismatch`]).
+//!
+//! ## Where that rule is actually enforced
+//!
+//! Not here — and an auditor reading only this file would reasonably think otherwise,
+//! so it is written down: **the enforcement point is
+//! `ConnHandler::check_server_key` in `backend.rs`.** russh calls it during the
+//! handshake with the key the server actually presented; it returns `false`, which
+//! makes russh abort authentication, when the fingerprint differs from the pin that
+//! `establish` read out of this store.
+//!
+//! The split is deliberate. This module answers "what is pinned for host:port", and
+//! [`KnownHostsStore::check`] is its comparison form for a caller that *has* a
+//! fingerprint in hand. The handshake callback cannot use it, because the fingerprint
+//! only exists inside that callback. So there are two comparison sites by necessity:
+//! `check` (policy-shaped, used by tests and by any future trust prompt) and
+//! `check_server_key` (wired into russh, and the one that protects users today).
+//!
+//! Consequence worth stating plainly: [`Check::Mismatch`] is currently constructed
+//! only in tests. It is not dead by accident — it is the return value the module
+//! documents — but nothing in production reaches it, so its test coverage is the
+//! only thing keeping it honest. Do not read the presence of this variant as proof
+//! that a mismatch check runs on this path.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -90,6 +112,19 @@ impl KnownHostsStore {
                 .insert((entry.host.clone(), entry.port), entry.fingerprint);
         }
         Ok(store)
+    }
+
+    /// The pinned fingerprint for `host:port`, if this host has been pinned.
+    ///
+    /// This is the lookup the connection path uses. It exists so that callers which
+    /// only want the pin do not have to reach for [`Self::check`] and invent a
+    /// `presented` value: `establish` used to call `check(host, port, "")` and
+    /// collapse `Matches` and `Mismatch` together, which read as "compare against
+    /// nothing" and hid the fact that `Check::Mismatch` never fires in production.
+    /// A lookup should not be spelled as a comparison with a sentinel.
+    #[must_use]
+    pub fn pinned_fingerprint(&self, host: &str, port: u16) -> Option<String> {
+        self.entries.get(&(host.to_string(), port)).cloned()
     }
 
     #[must_use]

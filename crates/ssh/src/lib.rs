@@ -284,7 +284,11 @@ pub trait SshBackend {
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// 订阅该 PTY 的输出 / 关闭事件（每会话一个订阅者）。
-    fn pty_output(&self, pty: &PtySession) -> mpsc::UnboundedReceiver<PtyEvent>;
+    ///
+    /// 返回的是**有界**接收端：远端产出快于消费时，生产端会在 `send().await` 上挂起，
+    /// 把背压经 russh 传回远端，而不是在宿主进程里无限堆积。容量见
+    /// `conn::PTY_OUTPUT_CAPACITY`。
+    fn pty_output(&self, pty: &PtySession) -> mpsc::Receiver<PtyEvent>;
 
     /// Close one PTY channel without tearing down the shared SSH session.
     fn pty_close(&self, pty: &PtySession) -> impl std::future::Future<Output = Result<()>> + Send;

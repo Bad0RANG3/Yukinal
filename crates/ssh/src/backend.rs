@@ -13,7 +13,7 @@ use russh::keys::{ssh_key, HashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg, Pty};
 
 use crate::conn::{PtyHandle, SessionHandle, SftpHandle};
-use crate::known_hosts::{Check, KnownHostsStore};
+use crate::known_hosts::KnownHostsStore;
 use crate::{
     Authentication, CommandResult, ConnectionSecrets, Error, PtyEvent, PtySession, Result, Session,
     SftpClient, SshBackend, SshConfig,
@@ -275,7 +275,7 @@ impl SshBackend for RusshBackend {
                             }
                             crate::conn::PtyCmd::Close => {
                                 let _ = channel.close().await;
-                                let _ = output_tx.send(PtyEvent::Closed { code: None });
+                                let _ = output_tx.send(PtyEvent::Closed { code: None }).await;
                                 break;
                             }
                         }
@@ -283,22 +283,31 @@ impl SshBackend for RusshBackend {
                     message = channel.wait() => {
                         match message {
                             None => break,
+                            // `.await` 是有意的：输出队列有界（`PTY_OUTPUT_CAPACITY`），
+                            // 满了就在这里挂起，于是本任务不再 `channel.wait()`，russh 的
+                            // 接收缓冲填满、TCP 窗口关闭，背压传回远端。远端刷屏时应当让
+                            // 远端慢下来，而不是把无界数据堆在宿主内存里。
+                            // 订阅者退出（终端已关）时 `send` 立刻返回 Err，照样 break。
                             Some(ChannelMsg::Data { data }) => {
-                                if output_tx.send(PtyEvent::Output(data.to_vec())).is_err() {
+                                if output_tx.send(PtyEvent::Output(data.to_vec())).await.is_err() {
                                     break; // 订阅者退出 = 终端已关
                                 }
                             }
                             Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
-                                if output_tx.send(PtyEvent::Output(data.to_vec())).is_err() {
+                                if output_tx.send(PtyEvent::Output(data.to_vec())).await.is_err() {
                                     break;
                                 }
                             }
                             Some(ChannelMsg::ExitStatus { exit_status }) => {
-                                let _ = output_tx.send(PtyEvent::Closed { code: Some(exit_status) });
+                                let _ = output_tx
+                                    .send(PtyEvent::Closed {
+                                        code: Some(exit_status),
+                                    })
+                                    .await;
                                 break;
                             }
                             Some(ChannelMsg::Close | ChannelMsg::Eof) => {
-                                let _ = output_tx.send(PtyEvent::Closed { code: None });
+                                let _ = output_tx.send(PtyEvent::Closed { code: None }).await;
                                 break;
                             }
                             Some(_) => {}
@@ -365,7 +374,7 @@ impl SshBackend for RusshBackend {
         Ok(())
     }
 
-    fn pty_output(&self, pty: &PtySession) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent> {
+    fn pty_output(&self, pty: &PtySession) -> tokio::sync::mpsc::Receiver<PtyEvent> {
         pty.inner.take_output()
     }
 
@@ -671,11 +680,13 @@ impl client::Handler for ConnHandler {
 
 impl KnownHostsStore {
     /// 只看是否已钉过、钉子是什么（不比较 presented）。
+    ///
+    /// 这里直接查表，不再借道 `check(host, port, "")` —— 那是以「和空串比较」的形式
+    /// 表达一次查找，读起来像在做校验，实际只是取值，而且顺带掩盖了
+    /// `Check::Mismatch` 在生产路径上从不触发这件事（真正的比对在
+    /// `ConnHandler::check_server_key`，指纹只在该回调里才存在）。
     fn pinned(&self, host: &str, port: u16) -> Option<String> {
-        match self.check(host, port, "") {
-            Check::Matches { pinned } | Check::Mismatch { pinned, .. } => Some(pinned),
-            Check::Unknown => None,
-        }
+        self.pinned_fingerprint(host, port)
     }
 }
 

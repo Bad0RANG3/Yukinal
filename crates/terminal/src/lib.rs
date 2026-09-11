@@ -41,7 +41,11 @@ pub trait TerminalPty: Send + Sync {
     fn write(&self, data: &[u8]) -> impl std::future::Future<Output = Result<()>> + Send;
     fn resize(&self, cols: u16, rows: u16) -> impl std::future::Future<Output = Result<()>> + Send;
     /// 输出事件流（远端字节 / 关闭）。reopen 后新 pty 的新任务重新订阅。
-    fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent>;
+    ///
+    /// 接收端是**有界**的：远端产出快于消费时，生产端在 `send().await` 上挂起并把背压
+    /// 传回远端，而不是在宿主进程里无限堆积。容量由实现方决定（`yukinal-ssh` 用
+    /// `PTY_OUTPUT_CAPACITY`）。
+    fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent>;
     fn close(&self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
@@ -387,8 +391,8 @@ mod tests {
             self.resizes.lock().expect("lock").push((cols, rows));
             Ok(())
         }
-        fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent> {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
             let _ = tx; // 第二次订阅是空的（与 SshPty 的 take_output 语义一致）
             rx
         }
@@ -399,15 +403,19 @@ mod tests {
     }
 
     /// 带"可注入脚本"的 pty：events() 给出与 emit() 同一信道（模拟 SshPty 的一次性订阅）。
+    ///
+    /// 信道与生产侧一样是**有界**的（容量 16，测试里只放两三条事件）。这样 `emit` 就成了
+    /// 异步操作 —— 与 `yukinal-ssh` 里「队列满则生产端挂起」的语义一致，测试也不会因为
+    /// 用了无界队列而无意中掩盖背压行为。
     struct ScriptedMemoryPty {
-        output_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
-        receiver: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<PtyEvent>>>,
+        output_tx: tokio::sync::mpsc::Sender<PtyEvent>,
+        receiver: StdMutex<Option<tokio::sync::mpsc::Receiver<PtyEvent>>>,
         written: StdMutex<Vec<Vec<u8>>>,
     }
 
     impl ScriptedMemoryPty {
         fn new() -> Self {
-            let (output_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (output_tx, rx) = tokio::sync::mpsc::channel(16);
             Self {
                 output_tx,
                 receiver: StdMutex::new(Some(rx)),
@@ -424,13 +432,13 @@ mod tests {
         async fn resize(&self, _cols: u16, _rows: u16) -> Result<()> {
             Ok(())
         }
-        fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent> {
+        fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
             self.receiver
                 .lock()
                 .expect("lock")
                 .take()
                 .unwrap_or_else(|| {
-                    let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (_tx, rx) = tokio::sync::mpsc::channel(1);
                     rx
                 })
         }
@@ -565,7 +573,7 @@ mod tests {
             let emitter = pty.output_tx.clone();
             let id = manager.open("srv_1", 120, 30, pty).await.expect("open");
 
-            let _ = emitter.send(PtyEvent::Output(b"hello\r\n".to_vec()));
+            let _ = emitter.send(PtyEvent::Output(b"hello\r\n".to_vec())).await;
 
             match rx.recv().await.expect("event 1") {
                 TerminalAppEvent::Opened { .. } => {}
@@ -583,7 +591,7 @@ mod tests {
             }
 
             // 远端关闭 → Closed 上抛。
-            let _ = emitter.send(PtyEvent::Closed { code: Some(0) });
+            let _ = emitter.send(PtyEvent::Closed { code: Some(0) }).await;
             match rx.recv().await.expect("event 3") {
                 TerminalAppEvent::Closed {
                     terminal_session_id,

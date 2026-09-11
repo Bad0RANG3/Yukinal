@@ -11,7 +11,6 @@
 import { z } from "zod";
 
 import {
-  RPC_ERROR,
   isValidInternalToolName,
   type JsonSchema,
   type PermissionDecision,
@@ -31,8 +30,6 @@ export type ExecutionTicket =
   | { kind: "agent_auto"; decision: PermissionDecision }
   | { kind: "session_auto"; decision: PermissionDecision }
   | { kind: "user_approved"; decision: PermissionDecision; approvalId: string; respondedAt: string };
-
-export class DeniedByPolicyError extends NotImplementedError {}
 
 export interface ExecuteOptions {
   /** External cancellation (user pressed Stop). */
@@ -420,5 +417,4 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-export const RPC_ERROR_CODES = RPC_ERROR;
 export type { ToolCallRequest, ToolCallResult };

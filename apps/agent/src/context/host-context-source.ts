@@ -1,14 +1,15 @@
 /** Read-only ContextSource backed by the Rust host's local database. */
 
+// 这里只导入 schema：三个行类型的**收窄**由 `parser.parse()` 的返回值完成，
+// 函数签名上并不出现具体类型名。曾经末尾有一行 `export type { Server, … }`
+// 把三个类型再转发一次，但全仓库没有任何地方从本模块导入它们（只有两处导入
+// `createHostContextSource`），所以那行连同它撑着的三条 type 导入一起删掉。
 import {
   ServerSchema,
   ServerSnapshotSchema,
   WorkspaceSchema,
   type HostContextKind,
   type HostContextResponse,
-  type Server,
-  type ServerSnapshot,
-  type Workspace,
 } from "@yukinal/shared";
 
 import type { HostRpcClient } from "../transport/host-client.js";
@@ -36,5 +37,3 @@ async function read<T>(
   if (response.status === "failed") throw new Error(response.error.message);
   return parser.parse(response.data);
 }
-
-export type { Server, ServerSnapshot, Workspace };

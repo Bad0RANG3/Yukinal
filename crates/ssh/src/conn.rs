@@ -145,21 +145,38 @@ pub(crate) enum PtyCmd {
     Close,
 }
 
+/// PTY 输出队列的容量，单位是**事件**（每个 `PtyEvent::Output` 大致对应一个 russh
+/// `ChannelMsg::Data`，通常 ≤32 KiB，所以最坏约 8 MiB 在途）。
+///
+/// 为什么这里必须有界，而命令方向可以无界：
+///
+/// 输出量由**远端**决定，不受本进程控制也不受信任。`cat bigfile`、`yes`、日志 tail
+/// 都能以远超消费速度的速率产出数据。无界队列在这种情况下只会一路增长，把远端的问题
+/// 变成宿主进程的内存问题 —— 而且增长是静默的，直到 OOM 才可见。有界队列则让生产端
+/// 的 `send().await` 阻塞，于是那个持有 `russh::Channel` 的任务停止 `channel.wait()`，
+/// russh 的接收缓冲填满，TCP 窗口关闭，背压一路传回远端。这正是终端应该有的流量控制：
+/// 慢的消费端应当让远端慢下来，而不是把数据堆在本地。
+///
+/// 命令方向（`PtyCmd`）保持无界，是因为它的量由**用户**决定：按键与粘贴，每条都很小，
+/// 速率有物理上限。若把它也改成有界，`pty_write` 就会与输出排空进度耦合 —— 远端刷屏
+/// 时按键会一起卡住。输出慢只应让远端变慢，不应让键盘失灵。
+pub(crate) const PTY_OUTPUT_CAPACITY: usize = 256;
+
 /// One open PTY: commands in, output events out. The single task owning the
 /// russh `Channel` lives in `backend::open_pty`; this handle carries the two ends.
 pub(crate) struct PtyHandle {
-    pub output_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
+    pub output_tx: tokio::sync::mpsc::Sender<PtyEvent>,
     pub commands: tokio::sync::mpsc::UnboundedSender<PtyCmd>,
     // `take_output` is intentionally synchronous because the public PTY trait is
     // synchronous at the subscription seam. A short std mutex avoids calling
     // Tokio's `blocking_lock` from inside an async forwarder (which can panic).
-    receiver: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<PtyEvent>>>,
+    receiver: StdMutex<Option<tokio::sync::mpsc::Receiver<PtyEvent>>>,
 }
 
 impl PtyHandle {
     #[must_use]
     pub fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<PtyCmd>) {
-        let (output_tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (output_tx, receiver) = tokio::sync::mpsc::channel(PTY_OUTPUT_CAPACITY);
         let (commands, commands_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {
@@ -172,7 +189,7 @@ impl PtyHandle {
     }
 
     /// The one output stream of this PTY (terminal owns exactly one subscriber).
-    pub(crate) fn take_output(&self) -> tokio::sync::mpsc::UnboundedReceiver<PtyEvent> {
+    pub(crate) fn take_output(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
         let mut slot = self
             .receiver
             .lock()
@@ -180,7 +197,7 @@ impl PtyHandle {
         slot.take().unwrap_or_else(|| {
             // Not supposed to happen twice; a fresh silent receiver keeps
             // callers from panicking on misuse.
-            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
             rx
         })
     }
@@ -198,3 +215,113 @@ pub(crate) struct SftpHandle {
 // 这里原本另有一个 `SftpHandle::new()`（造一个 `sftp: None` 的句柄），从无调用者：
 // 需要 SFTP 句柄的地方都已经有一个会话，必须用 `new_some`。空构造器是纯残骸，
 // 此前被 crate 级的 `#![allow(dead_code)]` 罩着。已删除。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 输出信道必须是**有界**的，而且生产端真的会在满的时候挂起。
+    ///
+    /// 这条测试存在的理由：把 `channel(N)` 换回 `unbounded_channel()` 不会让任何现有测试
+    /// 失败，也不会产生编译错误 —— 两者的 `send` 在「订阅者在」时都成功。也就是说，这个
+    /// 约束**只靠注释是守不住的**，必须有东西在它退化时变红。
+    ///
+    /// 断言的是行为而不是常量：先灌满队列，再多发一条，然后确认那一条**没有**完成。
+    /// 如果哪天有人改回无界，`send` 会立刻返回，`timeout` 就不会超时，这条测试失败。
+    #[tokio::test]
+    async fn pty_output_channel_is_bounded_and_backpressures() {
+        let (pty, _commands_rx) = PtyHandle::new();
+        let mut receiver = pty.take_output();
+
+        // 灌满。容量是常量，测试跟着它走，不硬编码 256。
+        for index in 0..PTY_OUTPUT_CAPACITY {
+            pty.output_tx
+                .send(PtyEvent::Output(vec![u8::try_from(index % 256).unwrap()]))
+                .await
+                .expect("filling a channel with a live receiver must succeed");
+        }
+
+        // 第 N+1 条必须阻塞：这正是背压。给它一个很短的期限，超时即为通过。
+        let over_capacity = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pty.output_tx
+                .send(PtyEvent::Output(b"one too many".to_vec())),
+        )
+        .await;
+        assert!(
+            over_capacity.is_err(),
+            "队列满时 send 竟然完成了：输出信道已经不是有界的，远端刷屏会无限制地堆在宿主内存里",
+        );
+
+        // 消费一条就该腾出位置 —— 证明刚才只是「等待」而不是「死锁」。
+        assert!(receiver.recv().await.is_some());
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pty.output_tx
+                .send(PtyEvent::Output(b"now there is room".to_vec())),
+        )
+        .await
+        .expect("draining one event must unblock the producer")
+        .expect("receiver is still alive");
+    }
+
+    /// 订阅者消失后，生产端必须立刻拿到 `Err` 而不是永久挂起。
+    ///
+    /// 这是上一条的另一半：有界队列让 `send` 会等待，那么「等待一个永远不会来的消费者」
+    /// 就成了新的风险。`mpsc::Sender` 在接收端被丢弃时会立刻返回 `Err`，`backend` 的 PTY
+    /// 任务据此 break。这条测试把这个前提钉住 —— 它是上面那个 `.await` 能安全存在的基础。
+    #[tokio::test]
+    async fn send_fails_fast_once_the_subscriber_is_gone() {
+        let (pty, _commands_rx) = PtyHandle::new();
+        let receiver = pty.take_output();
+        drop(receiver);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            pty.output_tx
+                .send(PtyEvent::Output(b"nobody is listening".to_vec())),
+        )
+        .await
+        .expect("接收端已丢弃，send 必须立刻返回而不是挂起");
+
+        assert!(
+            result.is_err(),
+            "接收端已丢弃，send 却成功了：PTY 任务将无法感知终端已关闭",
+        );
+    }
+
+    /// 第二次 `take_output` 给一个「沉默」的接收端，而不是 panic。
+    ///
+    /// 记录的是**有意的**降级选择：公开的订阅接缝是同步的（`SshBackend::pty_output`），
+    /// 所以这里用 `std::sync::Mutex` 而不是 `blocking_lock`。误用两次订阅的代价是「收不到
+    /// 输出」，而不是整个进程崩掉。
+    ///
+    /// 具体语义（第一版这条测试写错了，这里按实际行为写清楚）：第二次返回的那个接收端，
+    /// 它的发送端在 `take_output` 内部就被丢弃了，所以它是一个**已关闭**的空流 ——
+    /// `recv()` 立刻返回 `None`，而不是永远挂起。真实的输出仍然只走第一次拿到的那个。
+    #[tokio::test]
+    async fn a_second_subscription_yields_a_silent_receiver() {
+        let (pty, _commands_rx) = PtyHandle::new();
+        let mut first = pty.take_output();
+        let mut second = pty.take_output();
+
+        // 第二个：空流，立刻结束。
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), second.recv())
+                .await
+                .expect("沉默接收端应当立刻返回 None，而不是挂起"),
+            None,
+        );
+
+        // 第一个仍然是真实的那条：发进去的事件能收到，且没有 panic。
+        pty.output_tx
+            .send(PtyEvent::Output(b"real".to_vec()))
+            .await
+            .expect("第一个接收端还活着");
+        assert_eq!(
+            first.recv().await,
+            Some(PtyEvent::Output(b"real".to_vec())),
+            "真实输出应当仍然走第一次订阅拿到的接收端",
+        );
+    }
+}
