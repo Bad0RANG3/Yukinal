@@ -174,13 +174,24 @@ impl Supervisor {
             }
         };
 
+        // `SidecarInfo` already carries `pid`, `entry` and `started_at`, populated by
+        // `sidecar::spawn` from this same config (`sidecar/mod.rs:292-296`).
+        //
+        // This is a simplification, not a bug fix, and the distinction is worth being
+        // precise about: it previously read `config.entry_label.clone()` and called
+        // `info()` twice. Those cannot *currently* disagree, because spawn and this
+        // function both read the same `&config` and nothing mutates `SidecarInfo.entry`
+        // afterwards. What it removes is the redundant second source — the value that
+        // `status()` reports is now unambiguously the handle's, and there is one
+        // `SidecarInfo` clone instead of three.
+        let handle_info = launched.handle.info();
         let info = RuntimeInfo {
-            pid: launched.handle.info().pid,
+            pid: handle_info.pid,
             protocol_version: launched.protocol_version,
             agent_version: launched.agent_version,
-            entry: config.entry_label.clone(),
+            entry: handle_info.entry,
             tool_count: launched.tool_count,
-            started_at: launched.handle.info().started_at,
+            started_at: handle_info.started_at,
         };
 
         let watcher = Watcher {

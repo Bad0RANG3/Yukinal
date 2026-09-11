@@ -37,7 +37,26 @@ export function shutdown(reason: string): void {
   server?.close();
   server = undefined;
   process.stderr.write(`agent sidecar shutting down (${reason})\n`);
-  // In-flight cancellation handling lands with the agent loop.
+  // 在途运行不会被取消，这里以前写的是一句已过期的待办（"In-flight cancellation
+  // handling lands with the agent loop"）—— 那个 loop 早就落地了，而且**确实**有取消：
+  // `AgentLoop.stop(runId)` 会 abort 该次运行的在途请求与待批等待，经 `agent.run.stop`
+  // 暴露（`rpc/router.ts:120-123`）。
+  //
+  // 但这条路径够不着它，两点都是结构性的而非疏忽：`runtime` 是 `main()` 的局部变量，
+  // 而 loop 没有公开任何「枚举在途 runId」的手段（`#tokensByRun` 是私有字段，
+  // 唯一的 getter `pendingApprovals` 给的是 approval id，不是 runId）。所以要在这里
+  // 取消，得先给 loop 加一个 stop-all 并把它接到模块级 —— 那是新增能力，不是重构。
+  //
+  // 两个调用方都不需要它：`stdin-closed` 意味着桌面已经不在了，没人会收到
+  // `agent.cancelled`；而 SIGTERM 那条路实际走不到 —— 监督进程用的是
+  // `child.start_kill()`（`sidecar/mod.rs:228`，即 SIGKILL），本函数根本不会被调用，
+  // 这里只是手工起进程时按 Ctrl-C 的兜底。
+  //
+  // 什么时候这个判断会失效：如果某次运行的副作用需要「优雅收尾」（比如半途回滚），
+  // 或者监督进程改成先发礼貌信号再杀，那么「直接放弃在途运行」就不再是可接受的了。
+  //
+  // 50ms 是上限而不是延时：`.unref()` 让这个定时器不占住事件循环，所以进程在其余
+  // 工作排空后就会退出，这里只是给 stdout/stderr 留出冲刷的窗口。
   setTimeout(() => {
     process.exit(0);
   }, 50).unref();

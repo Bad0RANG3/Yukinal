@@ -201,6 +201,14 @@ async fn the_supervisor_tracks_its_own_child_including_the_exit_record() {
     assert!(status.running);
     assert_eq!(status.pid, Some(outcome.runtime.pid));
     assert_eq!(status.tool_count, Some(outcome.runtime.tool_count));
+    // `start` and `status` reach `entry` through different code paths — `start` builds a
+    // `RuntimeInfo`, `status` reads the stored snapshot — so pin that they agree. This
+    // cannot fail today, since both derive from the same `SidecarInfo`; it is here so a
+    // future change to either path shows up, not because I could demonstrate a bug.
+    assert_eq!(
+        status.entry.as_deref(),
+        Some(outcome.runtime.entry.as_str())
+    );
     assert!(
         status.last_exit.is_none(),
         "a fresh start clears the old crash"
@@ -210,6 +218,9 @@ async fn the_supervisor_tracks_its_own_child_including_the_exit_record() {
     let again = supervisor.start(&config).await.expect("reuse");
     assert!(again.already_running);
     assert_eq!(again.runtime.pid, outcome.runtime.pid);
+    // The reuse path returns the stored snapshot rather than rebuilding one from the
+    // config it was handed, so it is the one that could report a different entry.
+    assert_eq!(again.runtime.entry, outcome.runtime.entry);
 
     // Managed requests go through the supervisor, so commands never touch a handle.
     let described = supervisor
