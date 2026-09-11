@@ -16,7 +16,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
 import { Icon } from "../../components/Icon.js";
-import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 
@@ -130,35 +130,37 @@ export function TerminalPane({ active }: { active: boolean }) {
     // Subscribed through `listenDesktop`, so the payload is parsed against the
     // shared contract before it reaches xterm: this data is read off a remote
     // host, and the previous `listen<T>` cast validated nothing.
-    void listenDesktop("terminal.data", (payload) => {
-      if (disposed) return;
-      if (sessionId === null) {
-        const data = payload.data;
-        while (pendingDataChars + data.length > MAX_PENDING_DATA_CHARS && pendingData.length > 0) {
-          const removed = pendingData.shift();
-          pendingDataChars -= removed?.data.length ?? 0;
+    // Subscribed through `subscribeDesktop`, so the payload is parsed against the
+    // shared contract before it reaches xterm: this data is read off a remote host,
+    // and the previous `listen<T>` cast validated nothing. The subscribe/unsubscribe
+    // race is handled inside that helper —— 这里不再需要手写 `disposed` 标志。
+    unlisteners.push(
+      subscribeDesktop("terminal.data", (payload) => {
+        if (disposed) return;
+        if (sessionId === null) {
+          const data = payload.data;
+          while (pendingDataChars + data.length > MAX_PENDING_DATA_CHARS && pendingData.length > 0) {
+            const removed = pendingData.shift();
+            pendingDataChars -= removed?.data.length ?? 0;
+          }
+          if (data.length <= MAX_PENDING_DATA_CHARS) {
+            pendingData.push(payload);
+            pendingDataChars += data.length;
+          }
+          return;
         }
-        if (data.length <= MAX_PENDING_DATA_CHARS) {
-          pendingData.push(payload);
-          pendingDataChars += data.length;
-        }
-        return;
-      }
-      if (payload.terminalSessionId !== sessionId) return;
-      term.write(payload.data);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else unlisteners.push(unlisten);
-    });
+        if (payload.terminalSessionId !== sessionId) return;
+        term.write(payload.data);
+      }).stop,
+    );
 
-    void listenDesktop("terminal.closed", (payload) => {
-      if (disposed || payload.terminalSessionId !== sessionId) return;
-      const suffix = payload.exitCode === null ? "" : ` (exit ${payload.exitCode})`;
-      term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else unlisteners.push(unlisten);
-    });
+    unlisteners.push(
+      subscribeDesktop("terminal.closed", (payload) => {
+        if (disposed || payload.terminalSessionId !== sessionId) return;
+        const suffix = payload.exitCode === null ? "" : ` (exit ${payload.exitCode})`;
+        term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);
+      }).stop,
+    );
 
     // Open the PTY through the trusted chain.
     const rows = term.rows;

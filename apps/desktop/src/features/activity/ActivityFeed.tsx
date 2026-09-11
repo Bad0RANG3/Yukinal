@@ -9,7 +9,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { errorMessage, formatTimestamp } from "../../lib/format.js";
-import { callDesktop, isDesktopShell, listenDesktop } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import {
   DECISION_LABEL,
   EXECUTION_STATUS_LABEL,
@@ -65,22 +65,15 @@ export function ActivityFeed({ serverId }: { serverId?: string | null }) {
 
   useEffect(() => {
     if (!shell) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listenDesktop("activity.created", (activity) => {
+    // 「退订函数比清理晚到」这件事由 `subscribeDesktop` 负责；这里只剩业务逻辑。
+    const subscription = subscribeDesktop("activity.created", (activity) => {
       if (scoped && activity.serverId !== serverId) return;
       queryClient.setQueryData<Activity[]>(activityQueryKey, (current) => {
         if (!current) return current;
         return [activity, ...current.filter((item) => item.id !== activity.id)].slice(0, scoped ? 50 : 100);
       });
-    }).then((stop) => {
-      if (disposed) stop();
-      else unlisten = stop;
     });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+    return subscription.stop;
   }, [queryClient, scoped, serverId, shell]);
   const servers = useServers({ enabled: shell && !scoped });
 

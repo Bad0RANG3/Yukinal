@@ -102,3 +102,63 @@ function warnDroppedEvent(name: string, error: unknown): void {
   reportedDroppedEvents.add(name);
   console.warn(`[ipc] dropped a malformed "${name}" event payload`, error);
 }
+
+/**
+ * A live native-event subscription.
+ *
+ * `stop()` is deliberately **synchronous**: every caller unsubscribes from a React
+ * effect's cleanup or a teardown path, neither of which can await. `ready` exists
+ * for the one caller that needs to know the subscription is actually established —
+ * `useAgentRun` keeps its composer disabled until every agent channel is registered,
+ * because sending a prompt into a not-yet-listening channel loses the answer.
+ */
+export type DesktopSubscription = {
+  /** Resolves once the native side has accepted the channel; rejects if it did not. */
+  ready: Promise<void>;
+  /** Synchronous teardown. Safe to call before `ready` settles, and safe to call twice. */
+  stop: () => void;
+};
+
+/**
+ * Subscribe to a native event through the same gate as commands.
+ *
+ * This wraps the unlisten race that every call site had to solve by hand.
+ * `listenDesktop` is async — Tauri hands back the unlisten function in a promise —
+ * but teardown is synchronous, so the four existing call sites each wrote their own
+ * version of:
+ *
+ *     let disposed = false;
+ *     let unlisten;
+ *     void listenDesktop(name, handler).then((stop) => {
+ *       if (disposed) stop(); else unlisten = stop;
+ *     });
+ *     return () => { disposed = true; unlisten?.(); };
+ *
+ * The `disposed` flag is the whole point rather than bookkeeping. Without it, a
+ * subscription that resolves *after* teardown has nobody left to call its unlisten,
+ * so the native listener stays registered and keeps firing into a dead handler —
+ * a leak visible only under fast navigation (open a terminal, switch server,
+ * repeat), which is exactly the case review misses. `useAgentRun` and
+ * `TerminalPane` each solved it with a flag, `ActivityFeed` with a flag plus an
+ * `undefined` sentinel. Writing it once means it cannot be reintroduced by
+ * reconstructing those four lines from memory.
+ */
+export function subscribeDesktop<E extends DesktopEventName>(
+  name: E,
+  handler: (payload: DesktopEventPayload<E>) => void,
+): DesktopSubscription {
+  let disposed = false;
+  let unlisten: UnlistenFn | undefined;
+  const ready = listenDesktop(name, handler).then((stop) => {
+    // 订阅比清理晚到：当场退订，而不是存进一个再也不会被读到的变量。
+    if (disposed) stop();
+    else unlisten = stop;
+  });
+  return {
+    ready,
+    stop: () => {
+      disposed = true;
+      unlisten?.();
+    },
+  };
+}

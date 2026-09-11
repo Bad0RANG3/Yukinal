@@ -22,7 +22,7 @@ import {
 } from "@yukinal/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { callDesktop, isDesktopShell, listenDesktop, type AgentEventName } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopSubscription } from "../../lib/ipc.js";
 import { RunLifecycle } from "./run-lifecycle.js";
 import {
   appendAssistantDelta,
@@ -116,16 +116,16 @@ export function useAgentRun(options: {
 
   useEffect(() => {
     if (!isDesktopShell()) return;
-    const unlisteners: Array<() => void> = [];
-    const registrations: Promise<void>[] = [];
+    const subscriptions: DesktopSubscription[] = [];
     let disposed = false;
-    const on = (name: AgentEventName, handler: (payload: AgentStreamEvent) => void): void => {      registrations.push(
-        listenDesktop(name, (payload) => {
+    // 订阅/退订的竞态由 `subscribeDesktop` 负责；这里只关心两件事 —— 把 8 个通道
+    // 接上，以及「全部接上」这个时刻（`ready`），因为 listen 是异步的，在它完成
+    // 之前发提示词会丢掉回答。
+    const on = (name: AgentEventName, handler: (payload: AgentStreamEvent) => void): void => {
+      subscriptions.push(
+        subscribeDesktop(name, (payload) => {
           if (disposed) return;
           handler(payload as AgentStreamEvent);
-        }).then((unlisten) => {
-          if (disposed) unlisten();
-          else unlisteners.push(unlisten);
         }),
       );
     };
@@ -212,7 +212,7 @@ export function useAgentRun(options: {
       setEntries((current) => appendEntries(current, [{ kind: "error", text: event.error }]));
     });
 
-    void Promise.all(registrations)
+    void Promise.all(subscriptions.map((subscription) => subscription.ready))
       .then(() => {
         if (!disposed) setListening(true);
       })
@@ -222,7 +222,7 @@ export function useAgentRun(options: {
 
     return () => {
       disposed = true;
-      unlisteners.splice(0).forEach((unlisten) => unlisten());
+      subscriptions.forEach((subscription) => subscription.stop());
     };
   }, []);
 
