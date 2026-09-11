@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  HOST_CONTEXT_KINDS,
   HOST_METHODS,
   type HostToolCancelResponse,
   type HostContextResponse,
@@ -49,7 +50,7 @@ export const HostToolCancelResponseSchema = z.strictObject({
 }) satisfies z.ZodType<HostToolCancelResponse>;
 
 export const HostContextRequestSchema = z.strictObject({
-  kind: z.enum(["server", "snapshot", "workspace"]),
+  kind: z.enum(HOST_CONTEXT_KINDS),
   id: z.string().min(1).max(160),
 });
 

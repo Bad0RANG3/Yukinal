@@ -30,7 +30,17 @@ export type HostToolExecuteResponse =
   | { status: "failed"; error: ToolError }
   | { status: "cancelled"; error?: ToolError };
 
-export type HostContextKind = "server" | "snapshot" | "workspace";
+/**
+ * The tuple exists so `schemas/host.ts` can write `z.enum(HOST_CONTEXT_KINDS)`.
+ *
+ * It was previously a bare union here plus a hand-written `z.enum([...])` there — two
+ * copies of one list with nothing pinning them. Adding a kind to the union would
+ * compile, and every real payload carrying it would then be rejected at the IPC gate
+ * as a *runtime* failure rather than a compile error. This is the same pattern
+ * `types/enums.ts` and `types/risk.ts` already use.
+ */
+export const HOST_CONTEXT_KINDS = ["server", "snapshot", "workspace"] as const;
+export type HostContextKind = (typeof HOST_CONTEXT_KINDS)[number];
 
 export interface HostContextRequest {
   kind: HostContextKind;

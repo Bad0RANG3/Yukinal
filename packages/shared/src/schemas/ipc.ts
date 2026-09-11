@@ -33,6 +33,7 @@ import {
   ProviderSaveInputSchema,
 } from "./provider.js";
 import { SERVER_ID_SCHEMA } from "./server.js";
+import { REMOTE_FILE_TYPES } from "../types/file.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -138,7 +139,7 @@ export const IPC_SCHEMAS = {
   },
   remote_file_list: {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
-    response: z.strictObject({ path: z.string().min(1), entries: z.array(z.strictObject({ name: z.string(), path: z.string(), type: z.enum(["file", "directory", "symlink", "other"]), size: z.number().nonnegative() })) }),
+    response: z.strictObject({ path: z.string().min(1), entries: z.array(z.strictObject({ name: z.string(), path: z.string(), type: z.enum(REMOTE_FILE_TYPES), size: z.number().nonnegative() })) }),
   },
   remote_file_read: {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),

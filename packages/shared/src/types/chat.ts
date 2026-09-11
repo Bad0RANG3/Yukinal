@@ -130,8 +130,14 @@ export interface ApprovalRequest {
   expiresAt: string;
 }
 
-/** "approve_session" only ever widens within the current run, never across runs. */
-export type ApprovalDecision = "approve_once" | "approve_session" | "reject";
+/**
+ * "approve_session" only ever widens within the current run, never across runs.
+ *
+ * Declared as a tuple so `schemas/permission.ts` can write `z.enum(APPROVAL_DECISIONS)`
+ * instead of a second hand-copied list — see the note on `HOST_CONTEXT_KINDS`.
+ */
+export const APPROVAL_DECISIONS = ["approve_once", "approve_session", "reject"] as const;
+export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
 
 export interface ApprovalResponse {
   approvalId: string;

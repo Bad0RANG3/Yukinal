@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 
+import { APPROVAL_DECISIONS } from "../types/chat.js";
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, SERVER_ID_SCHEMA, ToolTargetSchema } from "./server.js";
@@ -104,7 +105,7 @@ export const ToolExecutionStatusSchema = z.enum(TOOL_EXECUTION_STATUSES);
 export const ApprovalResponseSchema = z.strictObject({
   approvalId: z.string().min(1),
   runId: z.string().min(1),
-  decision: z.enum(["approve_once", "approve_session", "reject"]),
+  decision: z.enum(APPROVAL_DECISIONS),
   respondedAt: z.string(),
 });
 
