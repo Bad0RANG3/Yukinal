@@ -14,9 +14,10 @@
  * 关闭弹层也不需要额外把焦点搬回来。
  */
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
 import { Icon } from "../../components/Icon.js";
+import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 
 /** 一个可选模型。`key` 是 provider:model 复合键，因为同名模型可能挂在多个 provider 下。 */
@@ -73,16 +74,9 @@ export function ModelPicker({
     if (open && selectedIndex >= 0) setActive(selectedIndex);
   }, [open, selectedIndex]);
 
-  // 点到组件之外就收起。用 pointerdown 而不是 click：在别处拖动选择文本时，
-  // 浏览器会补一次 click，弹层会在用户还没做完动作时意外关闭。
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [open]);
+  // 点到组件之外就收起。`pointerdown` 而非 `click` 的理由写在
+  // `hooks/useDismissOnOutsidePointer.ts` —— 那一处同时服务两个弹层。
+  useDismissOnOutsidePointer(open, [rootRef], useCallback(() => setOpen(false), []));
 
   const choose = (key: string): void => {
     onSelect(key);

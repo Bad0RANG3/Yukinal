@@ -12,11 +12,12 @@
  * 不留「看起来能点、点了没反应」的假入口。
  */
 
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
+import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { ModelPicker } from "./ModelPicker.js";
 import {
@@ -179,18 +180,9 @@ export function AgentComposer({
      终端）它都会一直浮在那儿，盖住下面的内容，而且没有任何提示说明该怎么关。
      模型菜单一直有这个行为，两处弹层在这件事上本该一致。
 
-     用 pointerdown 而不是 click：在别处拖动选择文本时浏览器会补一次 click，
-     弹层会在用户还没做完动作时就关掉。 */
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onPointerDown = (event: PointerEvent): void => {
-      const target = event.target as Node;
-      if (settingsPanelRef.current?.contains(target) || settingsTriggerRef.current?.contains(target)) return;
-      setMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [menuOpen]);
+     这里要传两个区域而不是一个：触发器与面板是兄弟节点，不像模型菜单那样被同一个
+     根节点包住。`pointerdown` 而非 `click` 的理由见该 hook。 */
+  useDismissOnOutsidePointer(menuOpen, [settingsPanelRef, settingsTriggerRef], useCallback(() => setMenuOpen(false), []));
 
   /* 退场期间必须渲染**上一次的内容**。候选列表是唯一一处「内容也跟着 open
      一起清空」的弹层：`trigger` 一变 null，suggestions 立刻是空数组。如果照它

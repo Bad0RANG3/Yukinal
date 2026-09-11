@@ -86,12 +86,9 @@ impl SessionHandle {
 
     /// Polite shutdown: stop keepalive, tell the peer, drop the connection.
     ///
-    /// 这里**不能**握着 `conn` 锁去 `await` 断开过程，原来的写法就是这样：
-    ///
-    /// ```ignore
-    /// let conn = self.conn.lock().await;
-    /// let _ = conn.disconnect(...).await;   // 无超时，且锁一直被持有
-    /// ```
+    /// 这里**不能**握着 `conn` 锁去 `await` 断开过程。原来的写法是：先
+    /// `let conn = self.conn.lock().await;`，紧接着 `let _ = conn.disconnect(...).await;`
+    /// —— 无超时，且锁一直被持有。
     ///
     /// `disconnect` 要向对端发 SSH_MSG_DISCONNECT 并等它收尾。对端没响应时它
     /// 会一直等 —— 而「对端没响应」恰恰是用户点断开键的原因，所以这不是理论
