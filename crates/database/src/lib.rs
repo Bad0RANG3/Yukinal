@@ -13,9 +13,24 @@
 //!   refused, never half-migrated.
 //!
 //! The connection is synchronous and guarded by a mutex: desktop-local writes are
-//! short and bounded, and callers that need async run the repository call inside
-//! `spawn_blocking`. Row types in `models` serialise as camelCase, which is the
+//! short and bounded. Row types in `models` serialise as camelCase, which is the
 //! wire shape of the IPC contract, so command layers can pass them through.
+//!
+//! On threading, stated accurately rather than as an aspiration: **no caller uses
+//! `spawn_blocking`.** The command modules that are synchronous (`chat`, `execution`,
+//! `host`, `workspace`) do not need it — Tauri runs non-async commands on a blocking
+//! pool. But the async ones (`server`, `provider`, `terminal`, `agent_run`,
+//! `activity`, `commands/mod`) call repository methods inline, so each query occupies
+//! an async worker thread for its duration.
+//!
+//! That is a deliberate trade for local SQLite: the queries are single-row reads and
+//! small writes against a file on the same disk, and the alternative — wrapping every
+//! call site in `spawn_blocking` — adds a task hop, a `Send` bound on every return
+//! type, and an error mapping that obscures the call. The honest caveat is that this
+//! reasoning is load-bearing: if a query here ever becomes long (a full-table scan,
+//! an unindexed join, a migration run inline), it will stall an async worker rather
+//! than merely being slow, and that is the moment to reach for `spawn_blocking`.
+//! A previous version of this comment described callers doing that already.
 
 pub mod models;
 pub mod repositories;

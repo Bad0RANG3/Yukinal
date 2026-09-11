@@ -4,6 +4,25 @@
  * The recorder is an in-memory, per-run ledger that *emits* as it goes: the UI must
  * see steps while the agent works, not after. Persistence happens in Rust
  * (`tool_executions` / `activities` tables) from the same events.
+ *
+ * ## Current wiring status
+ *
+ * The tool registry already accepts one — `ToolRunOptions.trace` is optional, and
+ * `registry.ts` calls `startToolStep` / `finishToolStep` on it when present — but
+ * **the agent loop does not pass one**, so no run in production builds a trace today.
+ * `registry.test.ts` is the only construction site.
+ *
+ * This is recorded here rather than left to `README.md` because a reader of this file
+ * is the person most likely to act on it, and from inside this file the class looks
+ * fully wired: its methods are called, its events are typed, its emitting is tested.
+ * What is missing is one argument at the call site.
+ *
+ * Kept rather than deleted for the same reason `RusshBackend::trust_host` is kept:
+ * it is the only implementation of the interface the registry is written against, so
+ * removing it would mean deleting the `trace?` parameter and its two call sites,
+ * which is a capability removal dressed as a cleanup. The live trace identifiers the
+ * UI renders come from `agent-loop.ts` directly (`agent.tool_call` carries
+ * `traceId` / `stepId`), which is why the gap is invisible in the product.
  */
 
 import { randomUUID } from "node:crypto";

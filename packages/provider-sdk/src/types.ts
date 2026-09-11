@@ -6,15 +6,22 @@
  * (ADR 0004) — lives behind this interface.
  */
 
-import type { JsonSchema } from "@yukinal/shared";
+import type { JsonSchema, ModelInfo } from "@yukinal/shared";
 
-export interface ModelInfo {
-  id: string;
-  label: string;
-  contextWindow?: number;
-  supportsToolCalling: boolean;
-  supportsStreaming: boolean;
-}
+/**
+ * `ModelInfo` 由 `@yukinal/shared` 定义，这里只做转发。
+ *
+ * 之前两个包各自声明了一份逐字节相同的接口。它们描述的是**同一个**线上的东西：
+ * `ProviderStatus.models`（shared，UI 侧读取）和 `LLMProvider.listModels()`
+ * （provider-sdk，适配器侧返回）指的是同一批模型数据。两份声明意味着可以只改一份，
+ * 而两侧都是纯类型、编译器不会因为它们"不相等"报错 —— 只要每个使用点各自能解析，
+ * 结构差异就一直合法，直到某个字段在跨界时静默变成 undefined。
+ *
+ * provider-sdk 本来就依赖 shared（上一行的 `JsonSchema` 就是），所以这里转发不在
+ * 依赖图里新增任何东西，只是把「谁是权威」写清楚。转发而非重复，意味着漂移在结构上
+ * 不可能发生，不需要再加一条一致性断言去追它。
+ */
+export type { ModelInfo };
 
 export interface ToolCall {
   id: string;
