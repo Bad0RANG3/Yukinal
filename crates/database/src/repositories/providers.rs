@@ -127,6 +127,33 @@ impl<'a> ProviderConfigsRepository<'a> {
         })
     }
 
+    /// 除 `excluding_id` 之外，还有别的 provider 行引用这条凭据引用吗？
+    ///
+    /// 删一行 Provider 时要回答「这份密钥还有人用吗」—— 引用是可以被多行共享的（导入留下
+    /// 的数据里就有一份挂在四行上），无条件删条目会把别的行正在用的密钥抽走。与
+    /// `IdentityStore::attached_to_other_server` 同一条守卫，只是按引用而不是按外键。
+    ///
+    /// 两族都算：AI 行把引用放在 `api_key_credential_ref`，infra 行放在 `credential_ref`，
+    /// 而它们在同一张表里。只看 AI 族的话，一个 infra 行共用的引用会被当成孤儿回收掉 ——
+    /// 那正是这条守卫要防的事，只是换了个 family。
+    pub fn credential_ref_used_elsewhere(
+        &self,
+        reference: &str,
+        excluding_id: &str,
+    ) -> Result<bool> {
+        self.db.with(|connection| {
+            let used: i64 = connection.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM provider_configs
+                     WHERE id <> ?2 AND (api_key_credential_ref = ?1 OR credential_ref = ?1)
+                 )",
+                params![reference, excluding_id],
+                |row| row.get(0),
+            )?;
+            Ok(used != 0)
+        })
+    }
+
     fn list_where<T>(
         &self,
         filter: &str,

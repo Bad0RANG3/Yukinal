@@ -129,6 +129,18 @@ export interface ProviderStatus {
   detail?: string;
 }
 
+/**
+ * 删除一个 Provider 的结果。
+ *
+ * `credentialReclaimed`：那份 keychain 条目在删除后不再被任何 Provider 引用，于是被一并
+ * 移除。引用是可以共享的（导入的数据里就有一份引用挂在四行上），所以「密钥还在不在」是
+ * 这次操作唯一无法从别处看出来的后果。
+ */
+export interface ProviderDeleteResponse {
+  deleted: boolean;
+  credentialReclaimed: boolean;
+}
+
 /** — infrastructure providers contribute tools, they are not called directly. */
 export interface InfrastructureProviderConfig {
   id: string;

@@ -9,9 +9,9 @@
  * the user who installs the result. Steps 1-3 cost a few seconds and close that gap.
  *
  * The installer itself is unsigned: there is no certificate in this repository, and
- * `bundle.signingIdentity` is deliberately not configured (see docs/packaging.md). That
- * does not make a local build impossible -- the bundler simply produces unsigned
- * artifacts, and macOS/Windows warn on first launch.
+ * `bundle.signingIdentity` is deliberately not configured (the repository `README.md`,
+ * 「打包与分发」). That does not make a local build impossible -- the bundler simply
+ * produces unsigned artifacts, and macOS/Windows warn on first launch.
  *
  * Extra arguments are forwarded to `tauri build`, e.g.
  *   pnpm run package -- --no-bundle     compile only, produce no installer
@@ -82,4 +82,4 @@ if (!bundleDir) {
 
 console.log("\nThese installers are UNSIGNED: no certificate or signing identity is configured.");
 console.log("They contain no Node.js runtime — the app needs the user's own `node` on PATH.");
-console.log("See docs/packaging.md.");
+console.log("See the repository README.md, 「打包与分发」.");

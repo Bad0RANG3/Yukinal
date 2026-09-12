@@ -91,12 +91,14 @@ impl SidecarConfig {
                     searched: path.display().to_string(),
                 });
             }
+            // 标签跟着命令行走，而不是照抄环境变量：见下面 packaged 分支的注释。
+            let entry = for_command_line(path);
             return Ok(Self {
                 program: node_program(lookup("YUKINAL_NODE").as_deref()),
-                args: vec![for_command_line(path).into_os_string()],
+                args: vec![entry.clone().into_os_string()],
                 env: Vec::new(),
                 request_timeout,
-                entry_label: entry,
+                entry_label: entry.display().to_string(),
                 client_version: default_client_version(),
                 data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
             });
@@ -110,15 +112,25 @@ impl SidecarConfig {
             .or_else(|| find_dev_bundle(cwd));
 
         match found {
-            Some(path) => Ok(Self {
-                program: node_program(None),
-                args: vec![for_command_line(path.clone()).into_os_string()],
-                env: Vec::new(),
-                request_timeout,
-                entry_label: path.display().to_string(),
-                client_version: default_client_version(),
-                data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
-            }),
+            Some(path) => {
+                // 交给 Node 的路径与报给界面的路径必须是**同一条**。
+                //
+                // `resource_dir()` 在 Windows 上是规范化路径，带 `\\?\` 前缀；把它交给
+                // Node 会让 agent 一行都跑不起来（见 `for_command_line`），所以那里做了清洗。
+                // 但 `entry_label` 原先用的是**清洗之前**的路径 —— 于是设置页的「Sidecar
+                // entry」显示 `\\?\C:\...\agent\index.js`：一段 Node 读不懂、也从来没被
+                // 真正执行过的路径，而用户就是靠这一行确认「到底跑了哪个文件」。
+                let entry = for_command_line(path);
+                Ok(Self {
+                    program: node_program(None),
+                    args: vec![entry.clone().into_os_string()],
+                    env: Vec::new(),
+                    request_timeout,
+                    entry_label: entry.display().to_string(),
+                    client_version: default_client_version(),
+                    data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
+                })
+            }
             None => {
                 let mut searched: Vec<String> = packaged
                     .iter()
@@ -389,6 +401,35 @@ mod tests {
         assert_eq!(
             config.entry_label,
             staged.join("index.js").display().to_string()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Windows 上 `resource_dir()` 是规范化路径，带 `\\?\` 前缀。设置页显示的入口必须
+    /// 与真正交给 Node 的那条命令一致 —— 前缀段是 Node 读不懂、也从没被执行过的字。
+    #[cfg(windows)]
+    #[test]
+    fn the_entry_label_is_the_path_that_was_handed_to_node() {
+        let _guard = env_guard();
+        let root = temp_tagged_dir("verbatim");
+        let resources = root.join("resources");
+        let staged = resources.join("agent");
+        std::fs::create_dir_all(&staged).expect("create staged dir");
+        std::fs::write(staged.join("index.js"), "console.log('packaged')").expect("write bundle");
+
+        // 这正是 Tauri 在 Windows 上给出的形状：`\\?\C:\...\resources`。
+        let verbatim = PathBuf::from(format!(r"\\?\{}", resources.display()));
+        let config = SidecarConfig::from_env_with_resources(&root, Some(&verbatim))
+            .expect("a verbatim resource dir still resolves");
+
+        let entry = staged.join("index.js");
+        assert_eq!(config.args, vec![entry.clone().into_os_string()]);
+        assert_eq!(config.entry_label, entry.display().to_string());
+        assert!(
+            !config.entry_label.contains(r"\\?\"),
+            "the UI must not be shown a prefix Node cannot use: {}",
+            config.entry_label
         );
 
         std::fs::remove_dir_all(&root).ok();

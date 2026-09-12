@@ -2,8 +2,8 @@ name: package
 
 # Installer builds, deliberately NOT part of the three-OS gate in check.yml.
 #
-# Why separate (the short version; docs/packaging.md has the full one): bundling is not a
-# compiler check. It downloads platform toolchains it does not ship -- WiX and NSIS on
+# Why separate (the short version; the repository README.md's 「打包与分发」 has the full
+# one): bundling is not a compiler check. It downloads platform toolchains it does not ship -- WiX and NSIS on
 # Windows, the appimage/dpkg tooling on Linux -- and it builds the whole Rust workspace in
 # release mode with `lto = "thin"` before it copies a single resource. That is minutes per
 # OS on a good runner, versus a gate that has to stay fast and deterministic on every push.

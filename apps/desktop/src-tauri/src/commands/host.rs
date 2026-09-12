@@ -19,7 +19,13 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
-use yukinal_database::models::{ContainerInfo, Environment};
+use yukinal_core::docker::{
+    bounded_log_lines, docker_restart_command, is_safe_container_ref, parse_docker_inspect,
+    parse_docker_ps, shell_quote, truncate_text, DockerLogsResult, DockerRestartResult,
+    DEFAULT_LOG_TAIL, DEFAULT_RESTART_TIMEOUT, DOCKER_PS_ALL_COMMAND, DOCKER_PS_COMMAND,
+    MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
+};
+use yukinal_database::models::Environment;
 use yukinal_database::DatabaseError;
 use yukinal_filesystem::{
     AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error as FilesystemError,
@@ -44,14 +50,6 @@ const DOCKER_RESTART: &str = "docker.restart";
 const FILESYSTEM_READ: &str = "filesystem.read";
 const FILESYSTEM_WRITE: &str = "filesystem.write";
 const FILESYSTEM_EDIT: &str = "filesystem.edit";
-const MAX_CONTAINERS: usize = 200;
-const DEFAULT_LOG_TAIL: usize = 120;
-const MAX_LOG_TAIL: usize = 500;
-const MAX_LOG_LINE_CHARS: usize = 4_000;
-const DEFAULT_RESTART_TIMEOUT: usize = 10;
-const MAX_RESTART_TIMEOUT: usize = 120;
-const DOCKER_PS_COMMAND: &str = "docker ps --format '{{json .}}' 2>/dev/null";
-const DOCKER_PS_ALL_COMMAND: &str = "docker ps -a --format '{{json .}}' 2>/dev/null";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -121,15 +119,6 @@ enum HostContextKind {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DockerRow {
-    names: Option<String>,
-    image: Option<String>,
-    state: Option<String>,
-    status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DockerPsInput {
     all: Option<bool>,
@@ -178,66 +167,6 @@ struct FilesystemEditInput {
     expected_revision: String,
     old_string: String,
     new_string: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DockerInspectRow {
-    id: Option<String>,
-    name: Option<String>,
-    config: Option<DockerConfig>,
-    state: Option<DockerState>,
-    restart_count: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DockerConfig {
-    image: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DockerState {
-    status: Option<String>,
-    started_at: Option<String>,
-    health: Option<DockerHealth>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DockerHealth {
-    status: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DockerLogsResult {
-    container: String,
-    lines: Vec<String>,
-    truncated: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DockerInspectResult {
-    id: String,
-    name: String,
-    image: String,
-    state: String,
-    status: String,
-    restart_count: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    health: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DockerRestartResult {
-    container: String,
-    restarted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -955,123 +884,6 @@ async fn docker_restart(
     ))
 }
 
-fn docker_restart_command(container: &str, timeout: usize) -> String {
-    format!(
-        "docker restart --time {timeout} -- {}",
-        shell_quote(container)
-    )
-}
-
-fn parse_docker_inspect(raw: &str) -> Result<DockerInspectResult, String> {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .ok_or_else(|| "docker inspect returned no JSON object".to_string())?;
-    let row = serde_json::from_str::<DockerInspectRow>(line)
-        .map_err(|error| format!("docker inspect returned invalid JSON: {error}"))?;
-    let id = nonempty(row.id, "Id")?;
-    let name = row
-        .name
-        .map(|value| value.trim_start_matches('/').to_string())
-        .filter(|value| is_safe_container_ref(value))
-        .ok_or_else(|| "docker inspect returned an invalid Name".to_string())?;
-    let image = nonempty(row.config.and_then(|config| config.image), "Config.Image")?;
-    let state = row
-        .state
-        .ok_or_else(|| "docker inspect omitted State".to_string())?;
-    let status = nonempty(state.status, "State.Status")?;
-    let started_at = state.started_at.filter(|value| !value.trim().is_empty());
-    let health = state
-        .health
-        .and_then(|health| health.status)
-        .filter(|value| !value.trim().is_empty());
-    Ok(DockerInspectResult {
-        id,
-        name,
-        image,
-        state: status.clone(),
-        status,
-        restart_count: row.restart_count.unwrap_or(0),
-        started_at,
-        health,
-    })
-}
-
-fn nonempty(value: Option<String>, field: &str) -> Result<String, String> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| value.trim().to_string())
-        .ok_or_else(|| format!("docker inspect omitted {field}"))
-}
-
-fn is_safe_container_ref(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    value.len() <= 128
-        && first.is_ascii_alphanumeric()
-        && chars.all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn bounded_log_lines(raw: &str, limit: usize) -> (Vec<String>, bool) {
-    let mut truncated = false;
-    let lines = raw
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            if index >= limit {
-                truncated = true;
-                return None;
-            }
-            let bounded = truncate_text(line, MAX_LOG_LINE_CHARS);
-            if bounded.chars().count() < line.chars().count() {
-                truncated = true;
-            }
-            Some(bounded)
-        })
-        .collect();
-    (lines, truncated)
-}
-
-fn truncate_text(value: &str, max_chars: usize) -> String {
-    let mut output: String = value.chars().take(max_chars).collect();
-    if value.chars().count() > max_chars {
-        output.push('…');
-    }
-    output
-}
-
-fn parse_docker_ps(raw: &str) -> Vec<ContainerInfo> {
-    raw.lines()
-        .filter_map(|line| serde_json::from_str::<DockerRow>(line.trim()).ok())
-        .filter_map(|row| {
-            let name = row.names?.split(',').next()?.trim().to_string();
-            let image = row.image?.trim().to_string();
-            let state = row.state?.trim().to_string();
-            let status = row.status?.trim().to_string();
-            if name.is_empty() || image.is_empty() || state.is_empty() || status.is_empty() {
-                return None;
-            }
-            Some(ContainerInfo {
-                name,
-                image,
-                state,
-                status,
-                // `docker ps` is intentionally bounded to listing; restartCount
-                // belongs to the later inspect tool and is not guessed here.
-                restart_count: 0,
-            })
-        })
-        .take(MAX_CONTAINERS)
-        .collect()
-}
-
 fn is_empty_object(value: &Value) -> bool {
     value.as_object().is_some_and(serde_json::Map::is_empty)
 }
@@ -1106,11 +918,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use yukinal_filesystem::Error as FilesystemError;
 
-    use super::{
-        bounded_log_lines, cancel_sidecar_request, docker_restart_command, filesystem_failure,
-        is_safe_container_ref, parse_docker_inspect, parse_docker_ps, shell_quote,
-        HostCancellationRegistry,
-    };
+    use super::{cancel_sidecar_request, filesystem_failure, HostCancellationRegistry};
 
     #[test]
     fn the_edit_failures_map_onto_the_existing_failure_codes() {
@@ -1199,71 +1007,5 @@ mod tests {
         let result = cancel_sidecar_request(&registry, json!({ "requestId": 7 }))
             .expect("second cancellation response");
         assert_eq!(result["cancelled"], json!(false));
-    }
-
-    #[test]
-    fn parses_docker_json_lines_into_bounded_structured_rows() {
-        let rows = parse_docker_ps(
-            r#"{"Names":"web,web-old","Image":"nginx:1.27","State":"running","Status":"Up 3 hours"}
-{"Names":"db","Image":"postgres:16","State":"exited","Status":"Exited (0) 2 days ago"}
-not-json
-"#,
-        );
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].name, "web");
-        assert_eq!(rows[0].restart_count, 0);
-        assert_eq!(rows[1].state, "exited");
-    }
-
-    #[test]
-    fn drops_rows_missing_required_fields() {
-        let rows = parse_docker_ps(
-            r#"{"Names":"","Image":"nginx","State":"running","Status":"Up"}
-{"Names":"ok","Image":"","State":"running","Status":"Up"}
-"#,
-        );
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn bounds_log_lines_and_marks_long_output() {
-        let long_line = "x".repeat(4_010);
-        let raw = format!("first\n{long_line}\nthird\n");
-        let (lines, truncated) = bounded_log_lines(&raw, 2);
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "first");
-        assert!(lines[1].ends_with('…'));
-        assert!(truncated);
-    }
-
-    #[test]
-    fn parses_normalized_inspect_fields_without_forwarding_raw_docker_shape() {
-        let result = parse_docker_inspect(
-            r#"{"Id":"sha256:abc","Name":"/web","Config":{"Image":"nginx:1.27"},"State":{"Status":"running","StartedAt":"2026-09-04T06:00:00Z","Health":{"Status":"healthy"}},"RestartCount":2}"#,
-        )
-        .expect("inspect output");
-
-        assert_eq!(result.id, "sha256:abc");
-        assert_eq!(result.name, "web");
-        assert_eq!(result.state, "running");
-        assert_eq!(result.restart_count, 2);
-        assert_eq!(result.health.as_deref(), Some("healthy"));
-    }
-
-    #[test]
-    fn container_reference_validation_and_shell_quote_are_defensive() {
-        assert!(is_safe_container_ref("api_1.2-3"));
-        assert!(!is_safe_container_ref("api;rm -rf /"));
-        assert_eq!(shell_quote("api_1"), "'api_1'");
-    }
-
-    #[test]
-    fn restart_command_is_bounded_and_shell_safe() {
-        assert_eq!(
-            docker_restart_command("api_1", 15),
-            "docker restart --time 15 -- 'api_1'"
-        );
     }
 }

@@ -97,7 +97,8 @@ function describe(serverId: string, tool: string, message: string): string {
  * remote input schema as documentation.
  *
  * The result is still untrusted text — it is a description, and the trace UI and prompt
- * builder are responsible for how they present it (MCP README「描述文本一律视为不可信数据」).
+ * builder are responsible for how they present it (the repository `README.md`,
+ * 「边界：外部工具（MCP）」: description text is untrusted data).
  */
 export function describeMcpTool(tool: HostMcpCatalogTool): string {
   const remote = tool.description.trim().slice(0, MAX_REMOTE_DESCRIPTION_CHARS);

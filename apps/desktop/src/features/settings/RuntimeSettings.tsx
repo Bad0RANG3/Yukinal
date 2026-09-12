@@ -4,7 +4,7 @@ import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { McpSettings } from "./McpSettings.js";
-import { KeywordText } from "../../components/KeywordText.js";
+import { NEW_PROVIDER_VALUE, ProviderPicker } from "./ProviderPicker.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
 import {
@@ -12,6 +12,7 @@ import {
   PROVIDER_KIND_DEFAULT_BASE_URL,
   PROVIDER_KIND_LABEL,
   PROVIDER_KIND_ORDER,
+  providerDeleteNotice,
   providerKindBaseUrlHint,
   providerKindUsesWireApi,
   providerSavePayload,
@@ -226,6 +227,11 @@ function ProviderSettings() {
     : editorProviderId === null
       ? undefined
       : providers.data?.find((provider) => provider.id === editorProviderId);
+  // 选择框里正在看的那一个。没选过时跟着当前启用的 Provider：首屏不该先要求用户选一次
+  // 才能看见任何东西。
+  const viewingProviderId = editorProviderId === undefined
+    ? selectedProvider?.id ?? NEW_PROVIDER_VALUE
+    : editorProviderId ?? NEW_PROVIDER_VALUE;
   const onSaved = ({ provider }: { provider: AiProviderConfig }) => {
     selectProvider(provider.id, provider.model);
     setEditorProviderId(provider.id);
@@ -238,6 +244,28 @@ function ProviderSettings() {
     mutationKey: ["provider-write"],
     mutationFn: (providerId: string) => callDesktop(IPC_COMMANDS.providerActivate, { providerId }), onSuccess: onSaved,
   });
+  /**
+   * 删除：确认块由 `confirmingId` 控制（确认必须在**静态渲染**里也能被测到，所以它不由
+   * 这个控件自己藏着）。
+   *
+   * 删掉之后不在这里给 `selectedProviderId` 补一个值：那条「列表刷新后当前选择已失效」的
+   * 回落规则只住在一处（`useAgentModels.ts`），在这里再写一份就是第二份说法。这里只把
+   * 「在看哪一个」交回给默认回落（当前启用的那个）。
+   */
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<string | null>(null);
+  const remove = useMutation({
+    mutationKey: ["provider-write"],
+    // 变量收整个 Provider（而不是一个 id）：结果提示要说的是「哪个 Provider 被删了」，
+    // 而名称只有这一份。
+    mutationFn: (provider: AiProviderConfig) => callDesktop(IPC_COMMANDS.providerDelete, { providerId: provider.id }),
+    onSuccess: ({ credentialReclaimed }, provider) => {
+      setConfirmingId(null);
+      setRemoved(providerDeleteNotice(provider, credentialReclaimed));
+      setEditorProviderId(undefined);
+      void queryClient.invalidateQueries({ queryKey: PROVIDERS_QUERY_KEY });
+    },
+  });
   return (
     <div className="settings-stack">
       <section className="settings-card">
@@ -246,23 +274,34 @@ function ProviderSettings() {
           <div className="settings-card-header-actions"><span className="settings-count">{providers.data?.length ?? 0} 个已配置</span><button type="button" disabled={busy} onClick={() => setEditorProviderId(null)} className="button-secondary button-small">添加 Provider</button></div>
         </div>
         {providers.isLoading ? <p className="muted-copy" role="status">正在加载 Provider…</p> : providers.isError ? <p className="form-error" role="alert">{providers.error.message}</p> : providers.data?.length ? (
-          <div className="provider-list">
-            {providers.data.map((provider) => (
-              <div key={provider.id} className={`provider-row ${provider.enabled ? "provider-row-active" : ""}`}>
-                <div className="provider-copy">
-                  <div className="provider-name"><span className={`provider-status-dot ${provider.enabled ? "provider-status-on" : "provider-status-off"}`} /><span>{provider.label}</span>{provider.enabled ? <span className="status-badge status-badge-success">当前使用</span> : null}</div>
-                  <div className="provider-meta"><span><KeywordText text={provider.model} /></span><span>·</span><span>{PROVIDER_KIND_LABEL[provider.kind]}</span>{providerKindUsesWireApi(provider.kind) ? <><span>·</span><span><KeywordText text={provider.wireApi ?? "chat"} /></span></> : null}<span>·</span><span>{provider.apiKeyCredentialRef ? "系统密钥链" : "未配置密钥"}</span></div>
-                </div>
-                <div className="provider-row-actions">
-                  <button type="button" disabled={busy} onClick={() => setEditorProviderId(provider.id)} className="button-secondary button-small">编辑</button>
-                  <button type="button" disabled={busy} onClick={() => activate.mutate(provider.id)} className="button-secondary button-small">{provider.enabled ? "设为唯一当前" : "启用"}</button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <ProviderPicker
+            providers={providers.data}
+            viewingId={viewingProviderId}
+            busy={busy}
+            confirmingId={confirmingId}
+            // 「新建」在选择框里是一个取值，而不是一个并列的按钮：否则点开「添加」之后
+            // 选择框还指着上一个 Provider，两处说法就对不上了。
+            onView={(providerId) => {
+              setRemoved(null);
+              setConfirmingId(null);
+              setEditorProviderId(providerId === NEW_PROVIDER_VALUE ? null : providerId);
+            }}
+            onActivate={(providerId) => activate.mutate(providerId)}
+            onRequestDelete={(providerId) => {
+              setRemoved(null);
+              setConfirmingId(providerId);
+            }}
+            onCancelDelete={() => setConfirmingId(null)}
+            onConfirmDelete={() => {
+              const target = providers.data?.find((provider) => provider.id === viewingProviderId);
+              if (target && !remove.isPending) remove.mutate(target);
+            }}
+          />
         ) : <p className="muted-copy">{shell ? "还没有配置 Provider。" : "在桌面应用中配置 AI Provider。"}</p>}
         {providers.isError ? <div className="settings-error-row" role="alert"><span>{providers.error.message}</span><button type="button" className="text-button" onClick={() => void providers.refetch()}>重试</button></div> : null}
         {activate.isError ? <div className="settings-error-row" role="alert"><span>启用失败：{activate.error.message}</span>{activate.variables ? <button type="button" className="text-button" onClick={() => activate.mutate(activate.variables!)}>重试</button> : null}</div> : null}
+        {remove.isError ? <div className="settings-error-row" role="alert"><span>删除失败：{remove.error.message}</span>{remove.variables ? <button type="button" className="text-button" onClick={() => remove.mutate(remove.variables!)}>重试</button> : null}</div> : null}
+        {removed ? <p className="settings-storage-note provider-picker-notice" role="status">{removed}</p> : null}
       </section>
 
       {/* Each provider owns its draft. Query refreshes never overwrite typing. */}

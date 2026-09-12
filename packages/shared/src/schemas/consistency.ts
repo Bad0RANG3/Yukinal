@@ -137,10 +137,12 @@ export type _IpcParamsContracts = {
   chat_session_create: Expect<Assignable<ParamsOf<"chat_session_create">, IpcCommandMap["chat_session_create"]["params"]>>;
   chat_message_append: Expect<Assignable<ParamsOf<"chat_message_append">, IpcCommandMap["chat_message_append"]["params"]>>;
   chat_session_archive: Expect<Assignable<ParamsOf<"chat_session_archive">, IpcCommandMap["chat_session_archive"]["params"]>>;
+  chat_session_rename: Expect<Assignable<ParamsOf<"chat_session_rename">, IpcCommandMap["chat_session_rename"]["params"]>>;
   chat_session_delete: Expect<Assignable<ParamsOf<"chat_session_delete">, IpcCommandMap["chat_session_delete"]["params"]>>;
   provider_list: Expect<Assignable<ParamsOf<"provider_list">, IpcCommandMap["provider_list"]["params"]>>;
   provider_save: Expect<Assignable<ParamsOf<"provider_save">, IpcCommandMap["provider_save"]["params"]>>;
   provider_activate: Expect<Assignable<ParamsOf<"provider_activate">, IpcCommandMap["provider_activate"]["params"]>>;
+  provider_delete: Expect<Assignable<ParamsOf<"provider_delete">, IpcCommandMap["provider_delete"]["params"]>>;
   provider_models: Expect<Assignable<ParamsOf<"provider_models">, IpcCommandMap["provider_models"]["params"]>>;
 };
 
@@ -188,9 +190,11 @@ export type _IpcResponseContracts = {
   chat_session_create: Expect<Assignable<ResponseOf<"chat_session_create">, IpcCommandMap["chat_session_create"]["response"]>>;
   chat_message_append: Expect<Assignable<ResponseOf<"chat_message_append">, IpcCommandMap["chat_message_append"]["response"]>>;
   chat_session_archive: Expect<Assignable<ResponseOf<"chat_session_archive">, IpcCommandMap["chat_session_archive"]["response"]>>;
+  chat_session_rename: Expect<Assignable<ResponseOf<"chat_session_rename">, IpcCommandMap["chat_session_rename"]["response"]>>;
   chat_session_delete: Expect<Assignable<ResponseOf<"chat_session_delete">, IpcCommandMap["chat_session_delete"]["response"]>>;
   provider_list: Expect<Assignable<ResponseOf<"provider_list">, IpcCommandMap["provider_list"]["response"]>>;
   provider_save: Expect<Assignable<ResponseOf<"provider_save">, IpcCommandMap["provider_save"]["response"]>>;
   provider_activate: Expect<Assignable<ResponseOf<"provider_activate">, IpcCommandMap["provider_activate"]["response"]>>;
+  provider_delete: Expect<Assignable<ResponseOf<"provider_delete">, IpcCommandMap["provider_delete"]["response"]>>;
   provider_models: Expect<Assignable<ResponseOf<"provider_models">, IpcCommandMap["provider_models"]["response"]>>;
 };

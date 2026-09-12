@@ -15,7 +15,7 @@
  */
 
 import type { ChatMessage, ChatSession, RestartRecord } from "@yukinal/shared";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { isDesktopShell } from "../../lib/ipc.js";
@@ -95,6 +95,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   }, [run.running, setAgentBusy]);
   const [runContext, setRunContext] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  /** 记录视图关闭时把焦点还给它 —— 见 AgentHistoryPane 的卸载 effect。 */
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
   /**
    * 这次运行按哪套策略判定。**有意不写进偏好设置**：偏好会在重启后自动恢复，而一次
    * 放宽审批的策略选择（比如在本机目标上选「开发策略」）如果留到下次启动、用户又没
@@ -228,6 +230,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
         agentOpen={agentOpen}
         shell={shell}
         historyOpen={historyOpen}
+        historyButtonRef={historyButtonRef}
         onToggleHistory={() => setHistoryOpen((current) => !current)}
         onToggle={panel.toggle}
         closeButtonRef={panel.closeButtonRef}
@@ -236,6 +239,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       {historyOpen ? (
         <AgentHistoryPane
           activeSessionId={sessions.activeSessionId}
+          restoreFocusRef={historyButtonRef}
           onClose={() => setHistoryOpen(false)}
           onNewSession={startNewSession}
           onOpenSession={openStoredSession}

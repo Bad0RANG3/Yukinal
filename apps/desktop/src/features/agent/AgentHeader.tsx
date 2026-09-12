@@ -17,6 +17,7 @@ export function AgentHeader({
   agentOpen,
   shell,
   historyOpen,
+  historyButtonRef,
   onToggleHistory,
   onToggle,
   closeButtonRef,
@@ -27,6 +28,8 @@ export function AgentHeader({
   agentOpen: boolean;
   shell: boolean;
   historyOpen: boolean;
+  /** 记录视图关闭时把焦点还给这个按钮，键盘用户不会掉到 body 上。 */
+  historyButtonRef: RefObject<HTMLButtonElement | null>;
   onToggleHistory: () => void;
   onToggle: () => void;
   closeButtonRef: RefObject<HTMLButtonElement | null>;
@@ -48,6 +51,7 @@ export function AgentHeader({
           </span>
         )}
         <button
+          ref={historyButtonRef}
           type="button"
           className={`icon-button agent-history-toggle ${historyOpen ? "is-active" : ""}`}
           aria-label="打开对话记录"

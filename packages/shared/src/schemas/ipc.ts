@@ -23,12 +23,13 @@ import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema } from "./agent.js";
 import {
   ChatMessageAppendResponseSchema,
   ChatMessageRoleSchema,
-  ChatSessionCreateResponseSchema,
   ChatSessionDetailResponseSchema,
   ChatSessionListResponseSchema,
+  ChatSessionResponseSchema,
 } from "./chat.js";
 import {
   ProviderConfigSchema,
+  ProviderDeleteResponseSchema,
   ProviderModelOptionSchema,
   ProviderSaveInputSchema,
 } from "./provider.js";
@@ -324,6 +325,9 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({
       query: z.string().trim().max(200).optional(),
       archived: z.boolean().optional(),
+      // Bounded like every other page: the host rejects an offset past this rather than
+      // running an unbounded scan.
+      offset: z.number().int().min(0).max(10_000).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     }),
     response: ChatSessionListResponseSchema,
@@ -339,7 +343,7 @@ export const IPC_SCHEMAS = {
       serverId: IpcServerIdSchema.optional(),
       title: z.string().trim().min(1).max(200),
     }),
-    response: ChatSessionCreateResponseSchema,
+    response: ChatSessionResponseSchema,
   },
   chat_message_append: {
     params: z.strictObject({
@@ -354,7 +358,14 @@ export const IPC_SCHEMAS = {
   },
   chat_session_archive: {
     params: z.strictObject({ sessionId: z.string().trim().min(1).max(256), archived: z.boolean() }),
-    response: ChatSessionCreateResponseSchema,
+    response: ChatSessionResponseSchema,
+  },
+  chat_session_rename: {
+    params: z.strictObject({
+      sessionId: z.string().trim().min(1).max(256),
+      title: z.string().trim().min(1).max(200),
+    }),
+    response: ChatSessionResponseSchema,
   },
   chat_session_delete: {
     params: z.strictObject({ sessionId: z.string().trim().min(1).max(256) }),
@@ -368,6 +379,10 @@ export const IPC_SCHEMAS = {
   provider_activate: {
     params: z.strictObject({ providerId: z.string().min(1) }),
     response: z.strictObject({ provider: ProviderConfigSchema }),
+  },
+  provider_delete: {
+    params: z.strictObject({ providerId: z.string().min(1) }),
+    response: ProviderDeleteResponseSchema,
   },
   provider_models: {
     params: z.strictObject({ providerId: z.string().min(1) }),

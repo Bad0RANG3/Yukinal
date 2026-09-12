@@ -45,6 +45,37 @@ export function formatTimestamp(value: string): string {
 }
 
 /**
+ * ISO 时间串 → 「刚刚」「12 分钟前」「3 小时前」「2 天前」，更久则回落到
+ * `formatTimestamp` 的「08-14 15:32」。
+ *
+ * 两条刻意的边界：
+ *
+ * - **只相对到「天」，不再说「3 周前」。** 超过一周之后，相对说法反而更难用：
+ *   人判断「这件事多久以前发生的」时，超过一周就开始换算成日期，而「23 天前」
+ *   还要求对方再减一次。
+ * - **未来时间算「刚刚」。** 记录里的时间是远端宿主写的，本机时钟回拨或两侧时钟
+ *   不一致时会出现「刚发生的事来自 3 分钟后」。显示「-2 分钟前」是谎话，直接报错
+ *   更糟 —— 一条时间戳不该让整张列表崩掉，所以按「刚刚」处理。
+ *
+ * `now` 可注入，因此这个函数可以单测，不必依赖当前时间。
+ */
+export function formatRelativeTime(value: string, now: number = Date.now()): string {
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) return value;
+  const elapsed = now - time;
+  if (elapsed < MINUTE_MS) return "刚刚";
+  if (elapsed < HOUR_MS) return `${Math.floor(elapsed / MINUTE_MS)} 分钟前`;
+  if (elapsed < DAY_MS) return `${Math.floor(elapsed / HOUR_MS)} 小时前`;
+  if (elapsed < WEEK_MS) return `${Math.floor(elapsed / DAY_MS)} 天前`;
+  return formatTimestamp(value);
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+const WEEK_MS = 7 * DAY_MS;
+
+/**
  * 任意抛出物 → 一句可以直接显示给人看的话。
  *
  * 这是 IPC 边界上唯一的兜底：`callDesktop` 会把 Rust 的错误与 zod 的校验失败

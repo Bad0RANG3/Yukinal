@@ -7,10 +7,10 @@ use rusqlite::Connection;
 use serde_json::json;
 use yukinal_database::models::{
     Activity, ActivitySource, ActivityType, AiProviderConfig, AiProviderKind, ChatMessage,
-    ChatMessageRole, ChatSession, Environment, Identity, InfrastructureProviderConfig,
-    McpServerConfig, PermissionMode, RiskLevel, Server, ServerCapabilities, ServerConnection,
-    ServerMetadata, ServerSnapshot, ServerStatus, ToolExecutionRecord, ToolExecutionStatus,
-    Workspace, WorkspaceRepository,
+    ChatMessageRole, ChatSession, ChatSessionCounts, Environment, Identity,
+    InfrastructureProviderConfig, McpServerConfig, PermissionMode, RiskLevel, Server,
+    ServerCapabilities, ServerConnection, ServerMetadata, ServerSnapshot, ServerStatus,
+    ToolExecutionRecord, ToolExecutionStatus, Workspace, WorkspaceRepository,
 };
 use yukinal_database::{Database, DatabaseError};
 
@@ -233,7 +233,7 @@ fn chat_history_can_search_archive_restore_and_delete() {
     .expect("append message");
 
     let active = repo
-        .list(Some("api-server"), Some(false), 50)
+        .list(Some("api-server"), Some(false), 50, 0)
         .expect("search active sessions");
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].message_count, 1);
@@ -251,11 +251,11 @@ fn chat_history_can_search_archive_restore_and_delete() {
         Some("2026-01-01T00:02:00.000Z")
     );
     assert!(repo
-        .list(None, Some(false), 50)
+        .list(None, Some(false), 50, 0)
         .expect("active sessions")
         .is_empty());
     assert_eq!(
-        repo.list(None, Some(true), 50)
+        repo.list(None, Some(true), 50, 0)
             .expect("archived sessions")
             .len(),
         1
@@ -264,7 +264,7 @@ fn chat_history_can_search_archive_restore_and_delete() {
     repo.set_archived("ses_chat", None)
         .expect("restore session");
     assert_eq!(
-        repo.list(None, Some(false), 50)
+        repo.list(None, Some(false), 50, 0)
             .expect("restored sessions")
             .len(),
         1
@@ -274,6 +274,117 @@ fn chat_history_can_search_archive_restore_and_delete() {
         .messages("ses_chat")
         .expect("cascade messages")
         .is_empty());
+}
+
+/// The record view's filter labels, its "load more" button and its rename action.
+///
+/// Three separate claims, all of which the UI depends on and none of which the search
+/// test above touches: counts describe the whole search rather than the page, paging
+/// walks the `updated_at DESC` order without gaps or repeats, and renaming does not
+/// reorder the list.
+#[test]
+fn chat_history_counts_page_and_rename_without_reordering() {
+    let (_path, db) = temp_db("chat-page");
+    let repo = db.chat();
+
+    let session = |id: &str, title: &str, updated_at: &str| ChatSession {
+        id: id.into(),
+        workspace_id: None,
+        server_id: None,
+        title: title.into(),
+        created_at: "2026-01-01T00:00:00.000Z".into(),
+        updated_at: updated_at.into(),
+        archived_at: None,
+        message_count: 0,
+        last_message_preview: None,
+    };
+
+    // Three sessions, newest first by `updated_at`: ses_c, ses_b, ses_a.
+    for (id, title, at) in [
+        ("ses_a", "排查 nginx 502", "2026-01-01T00:01:00.000Z"),
+        ("ses_b", "扩容磁盘", "2026-01-01T00:02:00.000Z"),
+        ("ses_c", "排查 nginx 超时", "2026-01-01T00:03:00.000Z"),
+    ] {
+        repo.create(&session(id, title, at))
+            .expect("create session");
+    }
+    repo.set_archived("ses_b", Some("2026-01-01T00:04:00.000Z"))
+        .expect("archive session");
+
+    // Counts ignore the archive filter the list was asked with, and honour the search.
+    assert_eq!(
+        repo.counts(None).expect("count everything"),
+        ChatSessionCounts {
+            active: 2,
+            archived: 1
+        }
+    );
+    assert_eq!(
+        repo.counts(Some("nginx")).expect("count matches"),
+        ChatSessionCounts {
+            active: 2,
+            archived: 0
+        }
+    );
+    assert_eq!(
+        repo.counts(Some("扩容")).expect("count archived match"),
+        ChatSessionCounts {
+            active: 0,
+            archived: 1
+        }
+    );
+
+    // A search matches message bodies as well as titles, so the counts must too.
+    repo.append_message(&ChatMessage {
+        id: "msg_body".into(),
+        session_id: "ses_a".into(),
+        role: ChatMessageRole::Assistant,
+        content: "upstream timed out".into(),
+        trace_id: None,
+        created_at: "2026-01-01T00:01:30.000Z".into(),
+    })
+    .expect("append message");
+    assert_eq!(
+        repo.counts(Some("upstream"))
+            .expect("count body match")
+            .active,
+        1
+    );
+
+    // Paging: one row at a time over the active list, no gaps and no repeats.
+    let first = repo.list(None, Some(false), 1, 0).expect("page 1");
+    let second = repo.list(None, Some(false), 1, 1).expect("page 2");
+    let past_end = repo.list(None, Some(false), 1, 2).expect("page 3");
+    assert_eq!(first[0].id, "ses_c");
+    assert_eq!(second[0].id, "ses_a");
+    assert!(past_end.is_empty(), "paging past the end yields no rows");
+    // The offset counts rows the filter would have returned, not raw table rows: ses_b
+    // is archived, so it must not shift the active pages.
+    assert!(!second.iter().any(|row| row.id == "ses_b"));
+
+    // Rename keeps the ordering: the title is a label, not activity.
+    //
+    // `updated_at` is read before the rename rather than written out as a literal: the
+    // message appended above already moved it, and what this asserts is that renaming
+    // leaves whatever it was alone.
+    let before = repo.get("ses_a").expect("read before rename");
+    let renamed = repo
+        .rename("ses_a", "排查 nginx 502（已完成）")
+        .expect("rename session");
+    assert_eq!(renamed.title, "排查 nginx 502（已完成）");
+    assert_eq!(renamed.updated_at, before.updated_at);
+    // The archived flag and the message count are not collateral damage either.
+    assert_eq!(renamed.archived_at, before.archived_at);
+    assert_eq!(renamed.message_count, before.message_count);
+    assert_eq!(
+        repo.list(None, Some(false), 10, 0)
+            .expect("active sessions after rename")
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ses_c", "ses_a"]
+    );
+    assert!(repo.rename("ses_missing", "x").is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +456,82 @@ fn provider_ai_upsert_is_idempotent() {
     let got = repo.get_ai("prv_ai").expect("get");
     assert!(!got.enabled);
     assert_eq!(repo.list_ai().expect("list ai").len(), 1);
+}
+
+/// 删除一行 Provider：只删它自己，别的行（包括用同一份密钥引用的那几行）原样留下。
+///
+/// 这条路径原先只有 `AiProviderStore::delete` 没有调用方，`provider_delete` 命令接上它之后
+/// 才第一次真的被走到 —— 所以这里把「删一行、留一行共享引用的兄弟」钉住：命令层的
+/// 「引用还有人用就不回收密钥」正是靠这个前提成立的。
+#[test]
+fn provider_delete_removes_one_row_and_leaves_a_sibling_sharing_its_credential() {
+    let (_path, db) = temp_db("prv-delete");
+    let repo = db.providers();
+    let mut twin = sample_ai_provider("prv_twin");
+    twin.label = "OpenRouter（第二份）".into();
+    repo.upsert_ai(&sample_ai_provider("prv_ai"))
+        .expect("upsert ai");
+    repo.upsert_ai(&twin).expect("upsert twin");
+    repo.upsert_infra(&sample_infra_provider("prv_infra"))
+        .expect("upsert infra");
+
+    repo.delete("prv_ai").expect("delete ai");
+    assert!(repo.get_ai("prv_ai").is_err(), "删掉的行必须真的不在");
+    let survivors = repo.list_ai().expect("list ai");
+    assert_eq!(survivors.len(), 1);
+    assert_eq!(
+        survivors[0].api_key_credential_ref.as_deref(),
+        Some("keychain://openrouter"),
+        "共享同一份引用的兄弟行必须原样留着"
+    );
+    assert_eq!(
+        repo.list_infra().expect("list infra").len(),
+        1,
+        "别的 family 的行不该被这条命令碰到"
+    );
+
+    // 不存在的 id 是错误，不是「删了 0 行」的静默成功。
+    assert!(repo.delete("prv_missing").is_err());
+}
+
+/// 守卫问的是**整张表**：`api_key_credential_ref` 与 `credential_ref` 两列都算，AI 与 infra
+/// 两族都在同一张 `provider_configs` 里。
+///
+/// 只看 AI 族就够用的错觉来自「引用按服务名分区」；这条用例把那个错觉钉掉：一个 infra 行
+/// 与一个 AI 行指向同一条引用时，删除 AI 行不能把它当成孤儿。
+#[test]
+fn credential_ref_used_elsewhere_sees_both_families() {
+    let (_path, db) = temp_db("prv-ref-guard");
+    let repo = db.providers();
+    let mut ai = sample_ai_provider("prv_ai");
+    ai.api_key_credential_ref = Some("keychain://shared/one".into());
+    repo.upsert_ai(&ai).expect("upsert ai");
+
+    // 引用只在这一行上：可以回收。
+    assert!(!repo
+        .credential_ref_used_elsewhere("keychain://shared/one", "prv_ai")
+        .expect("guard"));
+    // 换个 id 问「别人在用吗」，答案就是「是」—— 这一行正是那个「别人」。
+    assert!(repo
+        .credential_ref_used_elsewhere("keychain://shared/one", "prv_other")
+        .expect("guard"));
+
+    let mut infra = sample_infra_provider("prv_infra");
+    infra.credential_ref = Some("keychain://shared/one".into());
+    repo.upsert_infra(&infra).expect("upsert infra");
+    assert!(
+        repo.credential_ref_used_elsewhere("keychain://shared/one", "prv_ai")
+            .expect("guard"),
+        "共享同一条引用的 infra 行也要算进来"
+    );
+
+    // 没有引用的行（本地端点）问什么都答「没有别人」。
+    let mut local = sample_ai_provider("prv_local");
+    local.api_key_credential_ref = None;
+    repo.upsert_ai(&local).expect("upsert local");
+    assert!(!repo
+        .credential_ref_used_elsewhere("keychain://shared/nobody", "prv_local")
+        .expect("guard"));
 }
 
 // ---------------------------------------------------------------------------

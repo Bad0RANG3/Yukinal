@@ -132,3 +132,16 @@ export const ProviderSaveInputSchema = z
     models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
   })
   .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY);
+
+/**
+ * 删除一个 Provider 的结果。
+ *
+ * `credentialReclaimed` 不是装饰：密钥引用可以被多行共享（导入留下的数据里就是这样），
+ * 所以「删了配置之后我的密钥到底还在不在」是这一次操作唯一无法从别处看出来的后果 ——
+ * 二次确认里正是在问这件事。字段是**必填**的，好让每一侧都必须回答它，而不是默认成
+ * 「没删」（那会把「没删」和「没说」变成同一个值）。
+ */
+export const ProviderDeleteResponseSchema = z.strictObject({
+  deleted: z.boolean(),
+  credentialReclaimed: z.boolean(),
+});

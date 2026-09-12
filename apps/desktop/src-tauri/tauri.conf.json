@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm build:libs && pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop build",
+    "beforeBuildCommand": "pnpm -w run build:libs && pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop build",
     "frontendDist": "../dist"
   },
   "app": {

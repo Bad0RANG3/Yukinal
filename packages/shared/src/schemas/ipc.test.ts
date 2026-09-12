@@ -261,6 +261,41 @@ test("tool_execution_list accepts trace/server filters and bounded limit", () =>
   assert.equal(IPC_SCHEMAS.tool_execution_list.params.safeParse({ limit: 101 }).success, false);
 });
 
+test("chat_session_list pages by a bounded offset and reports per-state counts", () => {
+  const params = IPC_SCHEMAS.chat_session_list.params;
+  assert.equal(params.safeParse({ query: "nginx", archived: false, offset: 50, limit: 50 }).success, true);
+  assert.equal(params.safeParse({ offset: 0 }).success, true);
+  // A negative or absurd offset would ask SQLite to walk the table for nothing.
+  assert.equal(params.safeParse({ offset: -1 }).success, false);
+  assert.equal(params.safeParse({ offset: 10_001 }).success, false);
+
+  // `counts` is required, not optional: the filter tabs label themselves with these
+  // numbers, and a response without them would leave the UI guessing page-local totals.
+  const withoutCounts = IPC_SCHEMAS.chat_session_list.response.safeParse({ sessions: [] });
+  assert.equal(withoutCounts.success, false);
+  assert.equal(
+    IPC_SCHEMAS.chat_session_list.response.safeParse({
+      sessions: [],
+      counts: { active: 3, archived: 1 },
+    }).success,
+    true,
+  );
+  assert.equal(
+    IPC_SCHEMAS.chat_session_list.response.safeParse({ sessions: [], counts: { active: -1, archived: 0 } })
+      .success,
+    false,
+  );
+});
+
+test("chat_session_rename carries a bounded title and answers with the stored row", () => {
+  const params = IPC_SCHEMAS.chat_session_rename.params;
+  assert.equal(params.safeParse({ sessionId: "ses_01hqx9", title: "排查 staging 的 nginx 502" }).success, true);
+  // Same bound as create: a renamed title is the same field, so it cannot be longer.
+  assert.equal(params.safeParse({ sessionId: "ses_01hqx9", title: "" }).success, false);
+  assert.equal(params.safeParse({ sessionId: "ses_01hqx9", title: "x".repeat(201) }).success, false);
+  assert.equal(IPC_SCHEMAS.chat_session_rename.response.safeParse({ session: {} }).success, false);
+});
+
 test("filesystem tool schemas bound paths, reads and writes", () => {
   assert.equal(FilesystemReadInputSchema.safeParse({ path: "/etc/app.env", maxBytes: 4096 }).success, true);
   assert.equal(FilesystemReadInputSchema.safeParse({ path: "relative/path" }).success, false);
@@ -333,4 +368,20 @@ test("provider_list can carry all three kinds at once", () => {
   const kinds = (parsed.data as { providers: Array<{ kind: string; wireApi?: string }> }).providers;
   assert.deepEqual(kinds.map((provider) => provider.kind), ["openai-compatible", "anthropic", "gemini"]);
   assert.deepEqual(kinds.map((provider) => provider.wireApi), ["chat", undefined, undefined]);
+});
+
+test("provider_delete answers whether the credential went with the row", () => {
+  // 删除会连带回收 keychain 条目 —— 但只在没有别的 Provider 引用同一份引用时。界面上的
+  // 二次确认正是拿这句话在问用户，所以「密钥还在不在」必须由响应回答，而不是留给界面猜。
+  const parsed = IPC_SCHEMAS.provider_delete.response.safeParse(fixture("provider_delete"));
+  assert.equal(parsed.success, true);
+  assert.equal((parsed.data as { credentialReclaimed: unknown }).credentialReclaimed, true);
+
+  const kept = IPC_SCHEMAS.provider_delete.response.safeParse({ deleted: true, credentialReclaimed: false });
+  assert.equal(kept.success, true);
+  // 两个字段都是必填的：少一个字段不是「没删」，而是这一侧没说清。
+  assert.equal(IPC_SCHEMAS.provider_delete.response.safeParse({ deleted: true }).success, false);
+  // 参数是一个 id，不是下标或名称 —— 名称在真实数据里是会重复的。
+  assert.equal(IPC_SCHEMAS.provider_delete.params.safeParse({ providerId: "prv_1a08a8e7bd95" }).success, true);
+  assert.equal(IPC_SCHEMAS.provider_delete.params.safeParse({ label: "deepseek" }).success, false);
 });

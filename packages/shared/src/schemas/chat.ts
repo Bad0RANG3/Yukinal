@@ -23,17 +23,27 @@ export const ChatMessageSchema = z.strictObject({
   createdAt: z.string().min(1).max(80),
 });
 
+/**
+ * `{ session }` answers. One shape for create / archive / rename: all three hand back
+ * the stored row, which is what the UI needs to update in place.
+ */
+export const ChatSessionResponseSchema = z.strictObject({
+  session: ChatSessionSchema,
+});
+
+export const ChatSessionCountsSchema = z.strictObject({
+  active: z.number().int().nonnegative(),
+  archived: z.number().int().nonnegative(),
+});
+
 export const ChatSessionListResponseSchema = z.strictObject({
   sessions: z.array(ChatSessionSchema),
+  counts: ChatSessionCountsSchema,
 });
 
 export const ChatSessionDetailResponseSchema = z.strictObject({
   session: ChatSessionSchema,
   messages: z.array(ChatMessageSchema),
-});
-
-export const ChatSessionCreateResponseSchema = z.strictObject({
-  session: ChatSessionSchema,
 });
 
 export const ChatMessageAppendResponseSchema = z.strictObject({

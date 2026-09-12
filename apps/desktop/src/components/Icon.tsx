@@ -81,6 +81,7 @@ export function Icon({ name, size = "md", strokeWidth }: IconProps) {
 export type IconName =
   | "activity"
   | "agent"
+  | "archive"
   | "arrowUp"
   | "chevronDown"
   | "chevronRight"
@@ -121,6 +122,10 @@ function iconBody(name: IconName): ReactNode {
       return <path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Zm6.5 12.5.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3Z" />;
     case "plus":
       return <><path d="M12 5v14M5 12h14" /></>;
+    /* 归档：对话记录里「收起来但还留着」的动作。用箱盖 + 箱体，而不是一个向下的箭头 ——
+       箭头在这套界面里已经表示「折叠/展开」（chevronDown），两者同时出现会互相抵消。 */
+    case "archive":
+      return <><rect x="3.5" y="5" width="17" height="4" rx="1" /><path d="M5.5 9v10.2a1.3 1.3 0 0 0 1.3 1.3h10.4a1.3 1.3 0 0 0 1.3-1.3V9" /><path d="M10 13h4" /></>;
     case "search":
       return <><circle cx="10.8" cy="10.8" r="6.3" /><path d="m16 16 4 4" /></>;
     case "refresh":

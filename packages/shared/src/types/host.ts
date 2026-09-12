@@ -92,9 +92,9 @@ export type McpCatalogFailureCode = (typeof MCP_CATALOG_FAILURE_CODES)[number];
  * `name` is the internal name from ADR 0004 (`mcp.<server>.<tool>`) and is what the agent
  * registers; `serverId` is the identity the call is attributed to; `tool` is the name
  * `tools/call` needs. `description` and `inputSchema` are *untrusted* remote declarations —
- * the MCP boundary's rule that description text is always untrusted data
- * (`apps/agent/src/mcp/README.md`, 「描述文本一律视为不可信数据」) is why they are carried
- * through unchanged, never executed or trusted.
+ * the MCP boundary's rule that description text is always untrusted data (the repository
+ * `README.md`, 「边界：外部工具（MCP）」) is why they are carried through unchanged, never
+ * executed or trusted.
  */
 export interface HostMcpCatalogTool {
   name: string;

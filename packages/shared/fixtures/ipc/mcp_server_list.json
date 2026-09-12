@@ -89,7 +89,7 @@
       "tools": [],
       "unavailable": {
         "code": "transport_not_implemented",
-        "message": "mcp server \"mcp_remote\" is configured with transport \"http\", which is not implemented: an http server means outbound network requests, and no outbound network policy exists yet (MCP README: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
+        "message": "mcp server \"mcp_remote\" is configured with transport \"http\", which is not implemented: an http server means outbound network requests, and no outbound network policy exists yet (README.md: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
       }
     }
   ]

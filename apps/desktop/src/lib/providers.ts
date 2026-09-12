@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   AI_PROVIDER_KINDS,
   IPC_COMMANDS,
+  type AiProviderConfig,
   type AiProviderKind,
   type ProviderModelOption,
   type ProviderSaveInput,
@@ -67,6 +68,82 @@ export function providerKindBaseUrlHint(kind: AiProviderKind): string {
     case "openai-compatible":
       return "填完整基地址，例如 https://openrouter.ai/api/v1（尾部斜杠会被去掉）。";
   }
+}
+
+/**
+ * 选择框里的一行：`名称 · 模型`，只有这一对分不开时才补一个**最短的区别**。
+ *
+ * 名称是用户自己起的，重名是现实（同一个网关开几个账号、几把密钥），而两个长得一模一样
+ * 的选项等于让人猜。区别按这个顺序找：
+ *
+ * 1. `名称 · 模型` 已经不重复 —— 什么都不补，一眼能分清的选项不该背着机器名；
+ * 2. 重复，但 `baseUrl` 的 host 不同 —— 补 host（「哪个网关」正是这些同名条目真正不一样
+ *    的地方，也是唯一解释「请求发去哪儿」的字段）；
+ * 3. 连网关也一样 —— 只剩 id。真实数据里有 90 字符的 id（`prv_ccswitch_codex_…_b30acd2f`），
+ *    整条放进下拉等于把选项变成一团乱码，所以取**尾部 6 位**当记号：完整 id 就在下面
+ *    那张表单的「Provider ID」里，这个记号只负责「哪一行是哪一行」。尾部万一在同一个
+ *    名字下撞上，就退回完整 id —— 宁可长，不可歧义。
+ *
+ * 只取 host 还有一层保险：路径与内嵌凭据都不会上界面。
+ *
+ * `all` 是整个列表：判断「是否重复」需要它。条目就是十几个，这里不做缓存。
+ */
+export function providerOptionLabel(
+  provider: AiProviderConfig,
+  all: readonly AiProviderConfig[],
+): string {
+  const base = baseLabel(provider);
+  const sameBase = all.filter((other) => baseLabel(other) === base);
+  if (sameBase.length < 2) return base;
+
+  const host = providerHost(provider.baseUrl);
+  if (host !== null && sameBase.filter((other) => providerHost(other.baseUrl) === host).length === 1) {
+    return `${base} · ${host}`;
+  }
+  const fragment = idFragment(provider.id);
+  const ambiguous = sameBase.filter((other) => idFragment(other.id) === fragment).length > 1;
+  return `${base} · ${ambiguous ? provider.id : fragment}`;
+}
+
+/** `名称 · 模型`。空的一段不留下一个悬挂的分隔符。 */
+function baseLabel(provider: AiProviderConfig): string {
+  return [provider.label, provider.model]
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+    .join(" · ");
+}
+
+/** id 的尾部记号。短 id（手写的 `prv_a` 之类）原样留下。 */
+function idFragment(id: string): string {
+  return id.length <= 12 ? id : `…${id.slice(-6)}`;
+}
+
+/** `baseUrl` 的 host（含端口）。解析不出来时返回 `null` —— 界面不会因此显示半个地址。 */
+export function providerHost(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).host || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 「删掉之后密钥怎么了」这句话 —— 三种情况不能共用一句。
+ *
+ * `credentialReclaimed` 只回答「有没有回收条目」，而**没有引用**的行（本地端点、免鉴权的
+ * 网关）也答 `false`：照那个字段直接拼一句话，会对着一个从来没配过密钥的 Provider 说
+ * 「密钥仍被别的 Provider 使用」。那不是它想说的话，而这句话本来就不该靠猜 —— 界面手上
+ * 有 `apiKeyCredentialRef`，`true/false` 加上「有没有引用」才是完整的答案。
+ */
+export function providerDeleteNotice(
+  provider: AiProviderConfig,
+  credentialReclaimed: boolean,
+): string {
+  const head = `已删除「${provider.label}」`;
+  if (!provider.apiKeyCredentialRef) return `${head}。这份配置本来就没有密钥。`;
+  return credentialReclaimed
+    ? `${head}，那份密钥也已从系统密钥链移除。`
+    : `${head}；那份密钥仍被别的 Provider 使用，没有动它。`;
 }
 
 export interface ProviderDraft {

@@ -1980,9 +1980,189 @@ select:focus-visible {
   padding: 10px;
 }
 
-.agent-entry-text {
+/* 对话正文：动态里唯一可以拖动选中的地方（起点见 `.app-shell` 的 user-select）。
+   两行都挂这个类 —— 你说的话是纯文本，Agent 的那份由 MarkdownText 铺成块级结构。 */
+.agent-entry-body {
   display: block;
   overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 自己敲的多行草稿（Shift+Enter）回到动态里必须还是多行：默认的空白折叠会把
+   整段话压成一行。 */
+.agent-entry-user .agent-entry-body {
+  white-space: pre-wrap;
+}
+
+/* ── Markdown 正文 ────────────────────────────────────────────────────────
+   Agent 的回复常常带结构（标题、列表、表格、代码块）。这里给那些结构一套
+   在窄栏里也读得下去的排版，而不是把 `#` 和 `-` 原样铺在屏幕上。
+
+   规则集中在一处：块间距只由 `margin-bottom` 表达，首尾块的外边距去掉，
+   这样正文与上面的「Agent」标签之间不会凭空多出一道空隙。 */
+.agent-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-markdown .md-paragraph {
+  margin: 0 0 8px;
+}
+
+.agent-markdown .md-heading {
+  margin: 12px 0 6px;
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.agent-markdown > .md-heading:first-child {
+  margin-top: 0;
+}
+
+.agent-markdown h1 { font-size: 15px; }
+.agent-markdown h2 { font-size: 14px; }
+.agent-markdown h3 { font-size: 13px; }
+.agent-markdown h4,
+.agent-markdown h5,
+.agent-markdown h6 {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agent-markdown .md-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.agent-markdown .md-list .md-list {
+  margin: 4px 0 0;
+}
+
+.agent-markdown .md-list li {
+  margin: 2px 0;
+}
+
+/* 嵌套容器里最后一块的外边距归零：间距由容器自己给一次，而不是内外两层叠加。 */
+.agent-markdown blockquote > :last-child,
+.agent-markdown .md-list li > :last-child {
+  margin-bottom: 0;
+}
+
+/* 列表项的第一段贴着项目符号，第二段才需要距离。 */
+.agent-markdown .md-list li > .md-paragraph {
+  margin-bottom: 0;
+}
+
+.agent-markdown .md-list li > .md-paragraph + .md-paragraph {
+  margin-top: 6px;
+}
+
+.agent-markdown .md-task {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.agent-markdown .md-task-mark {
+  margin-right: 5px;
+  color: var(--muted);
+}
+
+.agent-markdown .md-quote {
+  margin: 0 0 8px;
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+  color: var(--muted);
+}
+
+.agent-markdown .md-rule {
+  margin: 10px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.agent-markdown code {
+  border-radius: 4px;
+  background: var(--surface-3);
+  padding: 1px 4px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+}
+
+/* 代码块：横向滚动而不是折行 —— 一段被折断的命令行没法读，也没法对着敲。 */
+.agent-markdown .md-code-block {
+  position: relative;
+  margin: 0 0 8px;
+}
+
+.agent-markdown .md-code-pre {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  padding: 9px 10px;
+  overflow-x: auto;
+}
+
+.agent-markdown .md-code-pre code {
+  display: block;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.agent-markdown .md-code-language {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-markdown .md-table-wrap {
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+
+.agent-markdown .md-table {
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.agent-markdown .md-table th,
+.agent-markdown .md-table td {
+  border: 1px solid var(--line);
+  padding: 4px 7px;
+  text-align: left;
+}
+
+.agent-markdown .md-table th {
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.agent-markdown .md-align-left { text-align: left; }
+.agent-markdown .md-align-center { text-align: center; }
+.agent-markdown .md-align-right { text-align: right; }
+
+/* 链接与图片都不可点（窗口没有 opener 能力，`<a href>` 只会把 webview 导航走），
+   地址放在 title 里。`cursor: text` 是实话：它是一段可以选中的文字。 */
+.agent-markdown .md-link {
+  color: var(--info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: text;
+}
+
+.agent-markdown .md-image {
+  color: var(--faint);
+  font-style: italic;
+  cursor: text;
 }
 
 .tool-card {
@@ -2233,11 +2413,102 @@ select:focus-visible {
 }
 
 .settings-card-header-actions,
+.provider-picker-actions,
 .provider-row-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* 选 Provider：一行 —— 选择框加一个动作，下面一行只讲后果。
+   底端对齐是因为按钮要和输入框的下沿齐平（上面还有 `field-label` 那一行）。 */
+.provider-picker {
+  display: grid;
+  gap: 9px;
+}
+
+.provider-picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.provider-picker-field {
+  min-width: 0;
+  flex: 1 1 220px;
+}
+
+.provider-picker-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--faint);
+  font-size: calc(var(--ui-font-size, 13px) - 2px);
+}
+
+/* 「删除」在有确认之前是克制的描边按钮，不抢「设为当前」的位置；确认块出现后它才用
+   危险色（与对话记录的二次确认同一套 token：`--danger-surface` / `--danger-line`）。
+   两处都刻意用行内确认而不是 `window.confirm`：系统弹窗会盖住上下文，也无法说明
+   「密钥会不会一起删」这种只有这一屏知道的事。 */
+.provider-picker-delete {
+  color: var(--muted);
+}
+
+.provider-picker-delete:hover:not(:disabled) {
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
+  color: var(--text);
+}
+
+.provider-picker-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-radius: 8px;
+  background: var(--danger-surface);
+  padding: 9px 10px;
+}
+
+.provider-picker-confirm p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.provider-picker-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.provider-picker-confirm-actions .text-button {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.provider-picker-confirm-actions .text-button:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.provider-picker-confirm-delete {
+  border-color: var(--danger-line);
+  color: var(--text);
+}
+
+.provider-picker-confirm-delete:hover:not(:disabled) {
+  border-color: var(--danger-line);
+  background: #2f1a1e;
+}
+
+/* 删除后的结果提示：密钥到底有没有被一起删掉，只有这一次响应知道。 */
+.provider-picker-notice {
+  margin: 10px 0 0;
 }
 
 .settings-storage-note {
@@ -2418,10 +2689,8 @@ select.form-input {
   padding: 11px 12px;
 }
 
-.provider-row-active {
-  border-color: var(--ok-line);
-  background: var(--ok-surface);
-}
+/* `.provider-row-active` 随 Provider 列表一起删掉了：那个列表现在是一个选择框，
+   选中状态由控件自己表达。`.provider-list` / `.provider-row` 仍在，MCP 面板还在用。 */
 
 .provider-copy,
 .source-item-copy {
@@ -3204,8 +3473,15 @@ select.form-input {
 .app-shell {
   position: relative;
   --shell-padding: 12px;
-  user-select: text;
-  -webkit-user-select: text;
+  /* 选中策略：**只有「你与 Agent 的对话正文」能拖动选中**，界面其余部分（按钮、
+     标签、工具卡片、日志、设置项）都不参与选择 —— 在窗口里随手一拖不再把半个
+     侧栏涂蓝，也不会在选择时把「Agent」这种标签粘进复制的内容里。
+
+     user-select 是继承属性，所以只在根上关掉、再在正文那一处打开（见
+     `.agent-entry-body`）。不给每个容器补一条 `none`：那样每加一个元素都要记得
+     跟上一条规则，漏掉的那个就是下一个能选中界面的洞。 */
+  user-select: none;
+  -webkit-user-select: none;
   animation: shell-enter var(--motion-entrance) var(--motion-ease) both;
   /* The one transition in the app that cannot be a transform: collapsing the
      Agent column changes the grid itself, and doing it with a transform would
@@ -3213,23 +3489,8 @@ select.form-input {
   transition: grid-template-columns var(--motion-medium) var(--motion-ease);
 }
 
-/* The workspace is a reading surface: allow dragging across any visible copy
-   so logs, paths, diagnostics and Agent output can be copied directly. */
-.app-shell * {
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-/* Copyable content stays selectable, while controls keep native button/select
-   behavior and do not leave labels highlighted after a click. */
-.app-shell button,
-.app-shell select,
-.app-shell [role="button"],
-.app-shell [role="tab"] {
-  user-select: none;
-  -webkit-user-select: none;
-}
-
+/* 可输入的地方当然要能选中自己刚写下的字。原生输入控件在部分浏览器里不吃继承
+   下来的 `none`，这条规则同时也是「composer 里的草稿还能全选」的保证。 */
 .app-shell input,
 .app-shell textarea,
 .app-shell [contenteditable="true"] {
@@ -3510,8 +3771,10 @@ select.form-input {
 }
 
 /* The caret marks the single place in the feed that is still moving. Without
-   it a slow model turn is indistinguishable from a stalled one. */
-.agent-entry-streaming .agent-entry-text::after {
+   it a slow model turn is indistinguishable from a stalled one. It hangs on the
+   last block of the rendered Markdown, so a streaming answer shows it after the
+   paragraph the model is currently writing. */
+.agent-entry-streaming .agent-entry-body > :last-child::after {
   display: inline-block;
   width: 0.5em;
   margin-left: 0.15em;
@@ -3823,14 +4086,14 @@ select.form-input {
     grid-template-columns: 64px minmax(340px, 1fr);
   }
 
-  .app-shell:not([data-primary="servers"]) .agent-panel:not(.agent-panel-closing) {
-    translate: 12px 0;
-  }
-
-  .app-shell:not([data-primary="servers"]) .agent-panel.agent-panel-closing {
-    translate: 0 0;
-  }
-
+  /* Agent 列**不**做任何位移。
+     这里曾经有一条 `translate: 12px 0`（只作用于非服务器栏目，并在收起动画里被
+     `translate: 0 0` 抵消）。它没有补偿任何东西：Agent 面板是最后一列，而
+     `64px 248px minmax(340px,1fr) 448px` 与 `64px minmax(340px,1fr) 448px` 这两种轨道
+     把它的左边缘放在**同一个 x** 上（服务器侧栏的 248px 全部被中间那列吸收），收起动画里
+     它又是绝对定位钉在 `--shell-padding` 上的。于是那 12px 成了纯粹的坏处：离开服务器栏目
+     时整张卡片向右跳一下，右边缘压到窗口边（其余每张卡片都留着 12px 外边距），收起时还会
+     在动画第一帧再跳回去。同一张卡片在两个栏目里位置相同，才是不用解释的行为。 */
 }
 
 @media (max-width: 1150px) {
@@ -4425,6 +4688,19 @@ select.form-input {
 /* Agent history: searchable local sessions stay inside the same panel so a
    user can move between a live task and its durable record without changing
    workspace context. */
+/* ── 对话记录（Agent 面板内可搜索的本地会话） ────────────────────────────────
+   它留在同一个面板里，所以「正在跑的任务」与「它的持久记录」之间切换不会改变工作区
+   上下文。三条决定这块长相的取舍：
+
+   - **按日期分组的标题是粘性的。** 记录会越攒越多，滚到中间时「这是哪天的事」必须还
+     看得见，所以组标题吸在滚动区顶部，并且用不透明底色 —— 否则滚过去的行会从它下面
+     透出来。底色必须与面板底色一致（--surface-1）。
+   - **一行只回答三个问题**：这是什么任务、结论是什么、冲着哪台机器。时间贴在右上角，
+     鼠标停在行上时让位给行内操作（改名 / 归档 / 删除）；操作是浮层，出现时不顶动任何
+     东西，因此列表不会在鼠标划过时抖动。
+   - **危险动作在行内确认，不弹窗。** 删除会把整段对话和它的消息一起抹掉，所以那一行
+     自己变成确认条，并且默认焦点落在「取消」上 —— 回车不会删掉东西。 */
+
 .agent-history-toggle.is-active {
   border-color: var(--focus-line);
   background: #15332f;
@@ -4436,9 +4712,9 @@ select.form-input {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 11px;
+  gap: 10px;
   overflow: hidden;
-  padding: 14px;
+  padding: 14px 12px 12px;
 }
 
 .agent-history-heading {
@@ -4449,9 +4725,17 @@ select.form-input {
 }
 
 .agent-history-heading h3 {
-  margin: 2px 0 0;
+  margin: 0;
   color: var(--text);
   font-size: 15px;
+}
+
+/* 「共 12 段 · 已载入 50」这类计数：等宽数字，免得数字变化时整行宽度跳动。 */
+.agent-history-summary {
+  margin: 3px 0 0;
+  color: var(--faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .agent-history-heading-actions {
@@ -4468,7 +4752,7 @@ select.form-input {
 
 .agent-history-search {
   display: flex;
-  min-height: 34px;
+  min-height: 32px;
   align-items: center;
   gap: 7px;
   border: 1px solid var(--line-strong);
@@ -4476,6 +4760,14 @@ select.form-input {
   background: #0a0f13;
   color: var(--faint);
   padding: 0 9px;
+}
+
+/* 搜索是宿主侧的查询，打字时会重新取一页；转圈是「看到的结果正在重算」的提示，
+   而不是装饰 —— 否则用户会以为列表没反应。 */
+.agent-history-search-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
 }
 
 .agent-history-search:focus-within {
@@ -4515,17 +4807,33 @@ select.form-input {
   color: var(--text);
 }
 
+/* 三个筛选：一枚分段控件，而不是一条带下划线的标签条。
+   它原先是一整条横贯面板的分隔线加一条 2px 强调下划线 —— 在这么窄的列里，标题和搜索框
+   已经排了两种层次，再横一条线就会被读成第三种「栏」，所以显得突兀。现在整枚控件只有
+   一个轮廓：一条浅色轨道，选中的那一段是浮起来的小片，切换时读起来是「这块片动了
+   一下」，而不是「两条线交叉换位」。计数字号更小、跟着一起明暗。 */
 .agent-history-tabs {
   display: flex;
   align-items: center;
-  gap: 3px;
-  border-bottom: 1px solid var(--line);
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 2px;
 }
 
 .agent-history-tabs button {
-  border-bottom: 2px solid transparent;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  /* 边框一直占位、只在选中时换颜色：否则文字会在切换的瞬间左右跳一下。 */
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--faint);
-  padding: 7px 9px;
+  padding: 4px 6px;
   font-size: 10px;
 }
 
@@ -4534,8 +4842,30 @@ select.form-input {
 }
 
 .agent-history-tabs button.is-selected {
-  border-bottom-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--line-strong);
+  background: var(--surface-4);
+  color: var(--text);
+}
+
+/* 计数回答的是「有多少」，不是「我在哪」，所以它比标签暗一档。 */
+.agent-history-tab-count {
+  color: inherit;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+.agent-history-tabs button.is-selected .agent-history-tab-count {
+  opacity: 0.85;
+}
+
+/* 标签对应的内容区。它把空状态、加载、错误和列表放在同一个 tabpanel 里，于是三个
+   标签的 `aria-controls` 指向的东西在任何状态下都真的存在。 */
+.agent-history-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
 }
 
 .agent-history-list {
@@ -4543,40 +4873,93 @@ select.form-input {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 7px;
+  gap: 13px;
   overflow: auto;
   padding-right: 2px;
 }
 
-.agent-history-item {
+.agent-history-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 粘性组标题：底色必须不透明，否则滚到它下面的行会透出来。 */
+.agent-history-group-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  margin: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface-1);
+  color: var(--muted);
+  padding: 1px 3px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.agent-history-group-label span {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-history-row {
+  position: relative;
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 7px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--surface-2);
-  padding: 9px;
   transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease;
 }
 
-.agent-history-item:hover,
-.agent-history-item.is-active {
+.agent-history-row:hover {
+  border-color: var(--line-strong);
+}
+
+/* 当前正在看的这段对话：左侧一条竖线 + 略微染色的底，而不是只换边框颜色 ——
+   面板很窄，一行行看过去时「哪一段是打开的」要能一眼扫到。 */
+.agent-history-row.is-active {
   border-color: var(--focus-line);
   background: #12221f;
 }
 
-.agent-history-item-open {
+.agent-history-row.is-active::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: -1px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--focus-line);
+}
+
+.agent-history-row.is-editing {
+  border-color: var(--focus-line);
+  background: var(--surface-3);
+}
+
+.agent-history-row-open {
   display: flex;
+  width: 100%;
   min-width: 0;
   flex-direction: column;
   gap: 5px;
   border: 0;
-  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  padding: 9px 10px 8px;
   text-align: left;
 }
 
-.agent-history-item-top {
+.agent-history-row-top {
   display: flex;
   min-width: 0;
   align-items: baseline;
@@ -4584,7 +4967,7 @@ select.form-input {
   gap: 8px;
 }
 
-.agent-history-item-top strong {
+.agent-history-row-top strong {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -4594,42 +4977,190 @@ select.form-input {
   white-space: nowrap;
 }
 
-.agent-history-item-top time {
+/* 时间在鼠标停在行上时让位给浮出来的操作条：那一块地方只够放一样东西。 */
+.agent-history-row-top time {
   flex: 0 0 auto;
   color: var(--faint);
   font-size: 9px;
+  white-space: nowrap;
+  transition: opacity var(--motion-fast) ease;
 }
 
-.agent-history-item-preview {
+/* 打开一段对话时那个位置换成转圈：点下去到内容出现之间要有反馈，而整行禁用会
+   让焦点掉到 body（见 AgentHistoryPane 里的 `aria-disabled` 说明）。 */
+.agent-history-row-spinner {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+}
+
+.agent-history-row:hover .agent-history-row-top time {
+  opacity: 0;
+}
+
+.agent-history-row-preview {
   display: -webkit-box;
   overflow: hidden;
   color: var(--muted);
   font-size: 10px;
-  line-height: 1.45;
+  line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
-.agent-history-item-meta {
+.agent-history-row-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
   color: var(--faint);
   font-size: 9px;
 }
 
-.agent-history-item-actions {
+/* 目标是服务器**名字**，不是 srv_ 开头的 id：列表要回答「这是冲着哪台机器去的」。 */
+.agent-history-chip {
+  max-width: 132px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 1px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-history-badge {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 1px 6px;
+}
+
+/* 搜索命中：只染底色，不动字形 —— 一段标题里的命中不该改变它的粗细与行高。 */
+.agent-history-match {
+  border-radius: 2px;
+  background: #2c3f3a;
+  color: inherit;
+  padding: 0 1px;
+}
+
+/* 操作条浮在行的右上角，不参与布局：列表不会因为鼠标划过而重排。 */
+.agent-history-row-actions {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-3);
+  padding: 1px;
+  opacity: 0;
+  /* 没显形时不接受点击：那是时间戳的位置，而这里藏着「删除」。 */
+  pointer-events: none;
+  transition: opacity var(--motion-fast) ease;
+}
+
+/* 键盘仍然进得来：Tab 走到按钮上时 `:focus-within` 把它显出来，所以这里**不能**用
+   `visibility: hidden` —— 那会把三个动作整个从 Tab 序列里删掉。 */
+.agent-history-row:hover .agent-history-row-actions,
+.agent-history-row-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.agent-history-rename {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+}
+
+.agent-history-rename-input {
+  min-height: 30px;
+  font-size: 11px;
+}
+
+.agent-history-rename-actions,
+.agent-history-confirm-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 7px;
-  min-height: 22px;
+  gap: 6px;
 }
 
-.agent-history-item-actions .text-button {
+.agent-history-rename-actions .text-button,
+.agent-history-confirm-actions .text-button {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
 }
 
-.agent-history-item-actions .text-button:hover:not(:disabled) {
+.agent-history-rename-actions .text-button:hover:not(:disabled),
+.agent-history-confirm-actions .text-button:hover:not(:disabled) {
   color: var(--accent);
+}
+
+.agent-history-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-radius: 8px;
+  background: var(--danger-surface);
+  padding: 9px 10px;
+}
+
+.agent-history-confirm p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-history-confirm-delete {
+  border-color: var(--danger-line);
+  color: var(--text);
+}
+
+.agent-history-confirm-delete:hover:not(:disabled) {
+  border-color: var(--danger-line);
+  background: #2f1a1e;
+}
+
+/* 还有更多记录时刻意画成虚线：它是一条「继续往下」的边界，不是一个普通按钮。 */
+.agent-history-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px;
+  font-size: 10px;
+}
+
+.agent-history-more:hover:not(:disabled) {
+  border-style: solid;
+  color: var(--text);
+}
+
+/* 「暂时不接受第二次提交」统一长这样：`aria-disabled` 的元素仍然可聚焦、可点，所以
+   它必须自己看起来是停住的 —— 否则用户会以为点了没反应。 */
+.agent-history-row-open[aria-disabled="true"],
+.agent-history-row-actions button[aria-disabled="true"],
+.agent-history-more[aria-disabled="true"],
+.agent-history-rename-actions button[aria-disabled="true"],
+.agent-history-confirm-actions button[aria-disabled="true"] {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.agent-history-row-open[aria-disabled="true"] {
+  cursor: default;
 }
 
 .agent-history-delete {
@@ -4702,10 +5233,17 @@ select.form-input {
     padding-inline: 7px;
   }
 
-  .agent-history-item-top {
+  /* 极窄屏下标题自己占一行：缩到 300px 以内时，「标题 + 时间」并排会把标题压成
+     一个省略号，而标题是这一行唯一必须读到的内容。 */
+  .agent-history-row-top {
     align-items: flex-start;
     flex-direction: column;
     gap: 3px;
+  }
+
+  /* 时间已经换到第二行了，鼠标停在行上时不必再让它让位。 */
+  .agent-history-row:hover .agent-history-row-top time {
+    opacity: 1;
   }
 }
 

@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension, Row};
 
 use super::decode::decode_error;
-use crate::models::{ChatMessage, ChatMessageRole, ChatSession};
+use crate::models::{ChatMessage, ChatMessageRole, ChatSession, ChatSessionCounts};
 use crate::{Database, DatabaseError, Result};
 
 pub struct ChatRepository<'a> {
@@ -47,11 +47,18 @@ impl<'a> ChatRepository<'a> {
     }
 
     /// Search title and message content while keeping archive state as an exact filter.
+    ///
+    /// `offset` pages the same ordering the caller sees (`updated_at DESC, id DESC`). A
+    /// page boundary is therefore reproducible only while nothing is written in between;
+    /// a conversation that gains a message mid-page moves to the top of the next one
+    /// instead of vanishing, which is the failure mode a rows-skipped cursor cannot have
+    /// but a stable sort key can.
     pub fn list(
         &self,
         query: Option<&str>,
         archived: Option<bool>,
         limit: usize,
+        offset: usize,
     ) -> Result<Vec<ChatSession>> {
         let archive_clause = match archived {
             Some(true) => "AND s.archived_at IS NOT NULL",
@@ -69,13 +76,44 @@ impl<'a> ChatRepository<'a> {
                {archive_clause}
              GROUP BY s.id
              ORDER BY s.updated_at DESC, s.id DESC
-             LIMIT ?2"#,
+             LIMIT ?2 OFFSET ?3"#,
         );
         let pattern = format!("%{}%", escape_like(query.unwrap_or_default().trim()));
         self.db.with(|connection| {
             let mut statement = connection.prepare(&sql)?;
-            let rows = statement.query_map(params![pattern, limit as i64], row_to_session)?;
+            let rows = statement.query_map(
+                params![pattern, limit as i64, offset as i64],
+                row_to_session,
+            )?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(DatabaseError::from)
+        })
+    }
+
+    /// Count the same search the list runs, split by archive state and ignoring the
+    /// list's own archive filter — the filter control needs both numbers at once.
+    pub fn counts(&self, query: Option<&str>) -> Result<ChatSessionCounts> {
+        let pattern = format!("%{}%", escape_like(query.unwrap_or_default().trim()));
+        self.db.with(|connection| {
+            connection
+                .query_row(
+                    r#"SELECT
+                     COALESCE(SUM(CASE WHEN s.archived_at IS NULL THEN 1 ELSE 0 END), 0),
+                     COALESCE(SUM(CASE WHEN s.archived_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     FROM chat_sessions s
+                    WHERE (s.title LIKE ?1 ESCAPE '\'
+                       OR EXISTS (
+                           SELECT 1 FROM chat_messages search_messages
+                            WHERE search_messages.session_id = s.id
+                              AND search_messages.content LIKE ?1 ESCAPE '\'
+                       ))"#,
+                    params![pattern],
+                    |row| {
+                        let active = count_from_i64(row.get::<_, i64>(0)?, 0)?;
+                        let archived = count_from_i64(row.get::<_, i64>(1)?, 1)?;
+                        Ok(ChatSessionCounts { active, archived })
+                    },
+                )
                 .map_err(DatabaseError::from)
         })
     }
@@ -139,6 +177,27 @@ impl<'a> ChatRepository<'a> {
         })
     }
 
+    /// Rename a session. **Deliberately does not touch `updated_at`.**
+    ///
+    /// The list is ordered by `updated_at`, so bumping it here would make a rename look
+    /// like activity and jump the row to the top. `created_at` / `updated_at` describe the
+    /// conversation; the title is a label on it.
+    pub fn rename(&self, id: &str, title: &str) -> Result<ChatSession> {
+        self.db.with(|connection| {
+            let changed = connection.execute(
+                "UPDATE chat_sessions SET title = ?2 WHERE id = ?1",
+                params![id, title],
+            )?;
+            if changed == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            let sql = session_query("WHERE s.id = ?1");
+            connection
+                .query_row(&sql, params![id], row_to_session)
+                .map_err(DatabaseError::from)
+        })
+    }
+
     pub fn delete(&self, id: &str) -> Result<()> {
         self.db.with(|connection| {
             let changed =
@@ -182,6 +241,15 @@ fn row_to_session(row: &Row<'_>) -> rusqlite::Result<ChatSession> {
         message_count,
         last_message_preview: row.get::<_, Option<String>>(8)?.map(preview),
     })
+}
+
+/// `COUNT(*)` is an i64 on the wire; a count that does not fit in u32 means the table is
+/// not the one this build wrote, so it fails the read instead of wrapping the number the
+/// filter control will display.
+fn count_from_i64(value: i64, column: usize) -> rusqlite::Result<u32> {
+    value
+        .try_into()
+        .map_err(|_| decode_error(column, "chat session count out of u32 range"))
 }
 
 fn row_to_message(row: &Row<'_>) -> rusqlite::Result<ChatMessage> {

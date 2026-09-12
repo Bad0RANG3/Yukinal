@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { errorMessage, formatBytes, formatTimestamp } from "../src/lib/format.js";
+import { errorMessage, formatBytes, formatRelativeTime, formatTimestamp } from "../src/lib/format.js";
 
 test("a timestamp renders as month-day and time, with no year or seconds", () => {
   const formatted = formatTimestamp("2025-08-14T15:32:07.000Z");
@@ -83,4 +83,37 @@ test("a missing or unrepresentable size degrades to a dash", () => {
   assert.equal(formatBytes(Number.NaN), "—");
   assert.equal(formatBytes(Number.POSITIVE_INFINITY), "—");
   assert.equal(formatBytes(Number.NEGATIVE_INFINITY), "—");
+});
+
+test("a recent record says how long ago it was, and an old one becomes a date", () => {
+  const now = Date.parse("2026-03-10T12:00:00.000Z");
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  assert.equal(formatRelativeTime(ago(0), now), "刚刚");
+  assert.equal(formatRelativeTime(ago(59_000), now), "刚刚");
+  assert.equal(formatRelativeTime(ago(60_000), now), "1 分钟前");
+  assert.equal(formatRelativeTime(ago(59 * 60_000), now), "59 分钟前");
+  assert.equal(formatRelativeTime(ago(60 * 60_000), now), "1 小时前");
+  assert.equal(formatRelativeTime(ago(23 * 60 * 60_000), now), "23 小时前");
+  assert.equal(formatRelativeTime(ago(2 * 24 * 60 * 60_000), now), "2 天前");
+  assert.equal(formatRelativeTime(ago(6 * 24 * 60 * 60_000), now), "6 天前");
+});
+
+test("past a week the label is a date again, because a relative one stops helping", () => {
+  const now = Date.parse("2026-03-10T12:00:00.000Z");
+  const old = new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString();
+  const label = formatRelativeTime(old, now);
+  // "23 天前" forces the reader to subtract anyway; the row timestamp already exists.
+  assert.equal(label.includes("天前"), false, `${label} should have become a date`);
+  assert.equal(label, formatTimestamp(old));
+});
+
+test("a timestamp from the future reads as just now rather than as a negative", () => {
+  // Host and app clocks disagree. "-2 分钟前" is not a thing anyone wants to read, and
+  // throwing would take down the list that row sits in.
+  const now = Date.parse("2026-03-10T12:00:00.000Z");
+  assert.equal(formatRelativeTime(new Date(now + 120_000).toISOString(), now), "刚刚");
+  for (const bad of ["", "not a date"]) {
+    assert.doesNotThrow(() => formatRelativeTime(bad, now));
+    assert.equal(formatRelativeTime(bad, now), bad);
+  }
 });

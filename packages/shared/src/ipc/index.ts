@@ -14,9 +14,11 @@ import type {
   ChatMessage,
   ChatMessageAppendInput,
   ChatSession,
+  ChatSessionCounts,
   ChatSessionCreateInput,
   ChatSessionDetail,
   ChatSessionListInput,
+  ChatSessionRenameInput,
 } from "../types/chat.js";
 import type { AgentPermissionMode, AgentRunMode } from "../types/risk.js";
 import type {
@@ -36,7 +38,7 @@ import type {
   ServerHostKeyStatus,
   ServerHostKeyTrustResult,
 } from "../types/host-key.js";
-import type { AiProviderConfig, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
+import type { AiProviderConfig, ProviderDeleteResponse, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
 import type {
   McpServerDeleteResponse,
   McpServerListResponse,
@@ -99,6 +101,11 @@ export const IPC_COMMANDS = {
   chatMessageAppend: "chat_message_append",
   chatSessionArchive: "chat_session_archive",
   chatSessionDelete: "chat_session_delete",
+  /**
+   * Renaming is the one edit the record view offers, because the title is derived from
+   * the first prompt and is therefore often the wrong name for the task afterwards.
+   */
+  chatSessionRename: "chat_session_rename",
   /** AI provider config: settings panel only; the key never leaves the keychain. */
   providerList: "provider_list",
   /**
@@ -111,6 +118,15 @@ export const IPC_COMMANDS = {
    */
   providerSave: "provider_save",
   providerActivate: "provider_activate",
+  /**
+   * Deletes one provider config, and reclaims its keychain entry **only** when no other
+   * provider row still references it — a reference can be shared (imported data has four
+   * rows pointing at one `keychain://openai/…`), so an unconditional delete would pull the
+   * key out from under the siblings. Deleting the *enabled* row is allowed on purpose:
+   * `provider_list` re-derives which provider is current, so the state afterwards is a
+   * definite one rather than "nothing works".
+   */
+  providerDelete: "provider_delete",
   providerModels: "provider_models",
   providerTest: "provider_test",
   /**
@@ -213,11 +229,12 @@ export interface IpcCommandMap {
   };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
   agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };
-  chat_session_list: { params: ChatSessionListInput; response: { sessions: ChatSession[] } };
+  chat_session_list: { params: ChatSessionListInput; response: { sessions: ChatSession[]; counts: ChatSessionCounts } };
   chat_session_get: { params: { sessionId: string }; response: ChatSessionDetail };
   chat_session_create: { params: ChatSessionCreateInput; response: { session: ChatSession } };
   chat_message_append: { params: ChatMessageAppendInput; response: { message: ChatMessage } };
   chat_session_archive: { params: { sessionId: string; archived: boolean }; response: { session: ChatSession } };
+  chat_session_rename: { params: ChatSessionRenameInput; response: { session: ChatSession } };
   chat_session_delete: { params: { sessionId: string }; response: { deleted: boolean } };
   provider_list: { params: Record<string, never>; response: { providers: AiProviderConfig[] } };
   provider_save: {
@@ -227,6 +244,10 @@ export interface IpcCommandMap {
   provider_activate: {
     params: { providerId: string };
     response: { provider: AiProviderConfig };
+  };
+  provider_delete: {
+    params: { providerId: string };
+    response: ProviderDeleteResponse;
   };
   provider_models: {
     params: { providerId: string };

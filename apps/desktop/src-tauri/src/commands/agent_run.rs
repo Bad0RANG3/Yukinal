@@ -11,8 +11,9 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::State;
 
-use crate::commands::provider::{resolve_api_key, runtime_provider_config};
+use crate::commands::provider::resolve_api_key;
 use crate::state::AppState;
+use yukinal_core::provider::runtime_provider_config;
 use yukinal_database::models::AiProviderConfig;
 
 #[derive(Debug, serde::Deserialize)]

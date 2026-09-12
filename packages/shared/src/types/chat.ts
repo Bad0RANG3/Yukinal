@@ -36,11 +36,36 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+/**
+ * How many sessions the current search would return, per archive state.
+ *
+ * The filter tabs label themselves with these numbers, so they have to be counted
+ * under the *same* query the list was asked for — a client-side count of the rows it
+ * happens to hold would silently describe only the first page.
+ */
+export interface ChatSessionCounts {
+  active: number;
+  archived: number;
+}
+
 export interface ChatSessionListInput {
   query?: string;
   /** Omitted returns both states; false returns active sessions, true archived sessions. */
   archived?: boolean;
+  /**
+   * Rows to skip, for paging past the first page.
+   *
+   * Offset rather than a cursor: the only ordering is `updatedAt DESC`, which a page
+   * boundary can express, and a conversation that is updated while the user pages
+   * simply moves to the top instead of being skipped by a stale cursor.
+   */
+  offset?: number;
   limit?: number;
+}
+
+export interface ChatSessionRenameInput {
+  sessionId: string;
+  title: string;
 }
 
 export interface ChatSessionDetail {

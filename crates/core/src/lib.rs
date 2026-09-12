@@ -20,9 +20,12 @@
 //! crate 落地之后就错了，而错的是**文档**而不是依赖清单：依赖清单本来就对。）
 
 pub mod collector;
+pub mod docker;
 pub mod health;
+pub mod identity;
 pub mod ipc;
 pub mod mcp;
+pub mod provider;
 
 /// 一行不可信文本 → 可以安全写进日志/错误的东西。
 ///

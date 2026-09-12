@@ -3,12 +3,17 @@
  *
  * 纯展示：只接一个 Entry 和它在审批上的两个状态位，不读 store、不发 IPC。
  * 四类行各自长什么样，全部集中在这里，因此调整样式不必碰运行逻辑。
+ *
+ * Agent 的回复是唯一走结构化渲染的一类（`components/MarkdownText.js`），因为它是
+ * 模型写回来的、带格式的正文；你说的话与应用自己的提示保持纯文本 —— 那两处出现
+ * `#` 或 `-` 时，它是你要说的话，不是要渲染的标记。
  */
 
 import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
+import { MarkdownText } from "../../components/MarkdownText.js";
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
 import { targetLabel, type Entry } from "./transcript.js";
 
@@ -27,18 +32,21 @@ export function AgentEntryView({
   streaming?: boolean;
 }) {
   switch (entry.kind) {
+    /* 你与 Agent 的正文是动态里**唯一**能拖动选中的东西（见 styles.css 的
+       `.agent-entry-body`）：标签、工具卡片、审批按钮都不参与选择，一次拖动
+       得到的就是要说的话本身，而不是「你 / Agent」这些框。 */
     case "user":
       return (
         <div className="agent-entry agent-entry-user">
           <span className="entry-label">你</span>
-          <div>{entry.text}</div>
+          <div className="agent-entry-body">{entry.text}</div>
         </div>
       );
     case "assistant":
       return (
         <div className={`agent-entry agent-entry-assistant${streaming ? " agent-entry-streaming" : ""}`}>
           <span className="entry-label">Agent</span>
-          <KeywordText text={entry.text || "…"} className="agent-entry-text" />
+          <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" />
         </div>
       );
     case "tool":

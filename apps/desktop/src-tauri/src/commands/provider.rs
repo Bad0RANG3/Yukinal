@@ -7,22 +7,13 @@ use tauri::State;
 
 use crate::commands::activity::record_user_activity;
 use crate::state::AppState;
+use yukinal_core::provider::{
+    primary_provider_id, runtime_provider_config, sanitize_custom_headers,
+};
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{
     ActivityOutcome, ActivityType, AiProviderConfig, AiProviderKind, ProviderModelOption,
 };
-
-const SAFE_METADATA_HEADER_NAMES: &[&str] = &[
-    "http-referer",
-    "referer",
-    "origin",
-    "user-agent",
-    "x-app-name",
-    "x-app-version",
-    "x-client-name",
-    "x-client-version",
-    "x-title",
-];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,75 +25,6 @@ pub struct ProviderListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSaveResponse {
     pub provider: AiProviderConfig,
-}
-
-/// 原生协议各自的公开端点，用于 provider 行里没有（或只有一个空白）base URL 的情况。
-///
-/// **有意不为 `openai-compatible` 提供默认值。** 那个 kind 覆盖的是我们不拥有的端点
-/// （OpenRouter、Ollama、vLLM、内部网关……），填一个 `https://api.openai.com/v1` 的默认值
-/// 等于把用户的密钥送去一个他从未选择的服务商 —— 这是「默认值」这个词唯一真正危险的地方。
-/// 原生协议的端点则没有歧义：协议本身就是那家服务商的（ADR 0011 第 5 点）。
-const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-const GEMINI_DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
-
-/// Build the sidecar provider payload without serializing absent optional values
-/// as JSON null. The shared runtime schema treats apiKey/customHeaders as optional
-/// fields, so `null` would be a contract violation.
-///
-/// `kind` 与 `wireApi` 在这里分开处理，因为两者是正交的轴：`wireApi` 只在
-/// `openai-compatible` 里被写进 payload，另外两种 kind 连这个键都不出现 —— 共享 schema
-/// 把「原生 kind 带 wireApi」判为非法输入，所以「顺手带上」会直接让运行以 INVALID_PARAMS 失败。
-pub(crate) fn runtime_provider_config(
-    provider: &AiProviderConfig,
-    model: &str,
-    api_key: Option<String>,
-    timeout_ms: u64,
-) -> Value {
-    let kind = provider.kind;
-    let base_url = match kind {
-        AiProviderKind::Anthropic => base_url_or(provider, ANTHROPIC_DEFAULT_BASE_URL),
-        AiProviderKind::Gemini => base_url_or(provider, GEMINI_DEFAULT_BASE_URL),
-        AiProviderKind::OpenaiCompatible => provider.base_url.trim().to_string(),
-    };
-    let mut config = serde_json::json!({
-        "kind": kind.as_str(),
-        "baseUrl": base_url,
-        "model": model,
-        "timeoutMs": timeout_ms,
-    });
-    if let Some(wire_api) = wire_api_of(provider) {
-        config["wireApi"] = serde_json::json!(wire_api);
-    }
-    if let Some(api_key) = api_key {
-        config["apiKey"] = serde_json::json!(api_key);
-    }
-    if let Some(custom_headers) = sanitize_custom_headers(provider.custom_headers.as_ref()) {
-        config["customHeaders"] = serde_json::json!(custom_headers);
-    }
-    config
-}
-
-/// 行里的方言，**仅当这个 kind 有方言轴**。原生协议没有，所以这里返回 `None`：
-/// payload 里连 `wireApi` 这个键都不该出现（共享 schema 拒绝「原生 kind 带 wireApi」，
-/// 而不是把它当作可以忽略的字段）。
-fn wire_api_of(provider: &AiProviderConfig) -> Option<&str> {
-    if !provider.kind.has_wire_api() {
-        return None;
-    }
-    provider
-        .wire_api
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-}
-
-/// 行里的 base URL，空白时退到该协议自己的公开端点。
-fn base_url_or(provider: &AiProviderConfig, fallback: &str) -> String {
-    let configured = provider.base_url.trim().trim_end_matches('/');
-    if configured.is_empty() {
-        fallback.to_string()
-    } else {
-        configured.to_string()
-    }
 }
 
 #[tauri::command]
@@ -385,6 +307,91 @@ pub struct ProviderActivateResponse {
     pub provider: AiProviderConfig,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDeleteResponse {
+    pub deleted: bool,
+    /// 那份 keychain 条目在删除后不再被别的 Provider 引用，于是被一并移除。
+    pub credential_reclaimed: bool,
+}
+
+/// 删除一个 Provider，并回收它**独占的**密钥条目。
+///
+/// 两条规则来自同一处先例（`server_delete` 的 `reclaim_if_unshared`）：
+///
+/// 1. 密钥引用**可以被多行共享** —— 库里就有四行 `deepseek` 指向同一份
+///    `keychain://openai/ccswitch_codex_…`（导入留下的）。所以只有在没有别的 Provider
+///    还引用它时才删；无条件删会把另外几行的密钥一起抽走，而那几行看起来一切正常，
+///    直到下一次运行报「密钥读不出来」。
+/// 2. 但也不能留下没人引用的孤儿条目：`reclaim` 的注释里说过这件事（拿不回来，也没人
+///    会清）。
+///
+/// 「删除当前启用的那一个」是**允许**的，而且不是半坏状态：`normalize_active_provider`
+/// 会在下一次 `provider_list`（以及每次运行开始前）按同样的确定性规则挑出新的当前项。
+/// 所以这里既不阻止删除，也不在背后替用户启用另一个 —— 那会是一次没人要求的配置改动。
+#[tauri::command]
+pub async fn provider_delete(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<ProviderDeleteResponse, String> {
+    // 先确认它存在：一个不存在的 id 该报错，而不是回一句「删了」。这条错误消息与
+    // `provider_activate` 逐字相同 —— 界面把它直接显示给用户，两处不该有两种说法。
+    let providers = state
+        .database
+        .providers()
+        .list_ai()
+        .map_err(|error| error.to_string())?;
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| format!("未找到 Provider `{provider_id}`"))?;
+    let reference = provider.api_key_credential_ref.clone();
+    // 「还有别人引用它吗」必须在删除**之前**问：行一删，这条信息就没了。这条守卫在数据库层
+    // 问的是整张表（AI 与 infra 两族都算），所以二次确认里那句话是字面成立的。
+    let shared = match reference.as_deref() {
+        Some(reference) => state
+            .database
+            .providers()
+            .credential_ref_used_elsewhere(reference, &provider_id)
+            .map_err(|error| error.to_string())?,
+        None => false,
+    };
+
+    // 顺序与 `server_delete` 相同：先删行、再回收引用。回收失败会作为错误返回，而那一行
+    // 已经删掉了 —— 这个取舍照抄自那处先例，代价是「删了配置、留了一个没人引用的条目」，
+    // 而不是反过来「密钥没了、留了一行用不了的配置」。
+    state
+        .database
+        .providers()
+        .delete(&provider_id)
+        .map_err(|error| error.to_string())?;
+
+    let credential_reclaimed = match reference.as_deref() {
+        Some(reference) if !shared => {
+            let reference = CredentialRef::parse(reference).map_err(|error| error.to_string())?;
+            state
+                .credentials
+                .delete(&reference)
+                .map_err(|error| error.to_string())?;
+            true
+        }
+        _ => false,
+    };
+
+    record_user_activity(
+        &state,
+        None,
+        ActivityType::Configuration,
+        "已删除 AI Provider",
+        None,
+        ActivityOutcome::Success,
+    )?;
+    Ok(ProviderDeleteResponse {
+        deleted: true,
+        credential_reclaimed,
+    })
+}
+
 #[tauri::command]
 pub async fn provider_activate(
     state: State<'_, AppState>,
@@ -448,31 +455,6 @@ fn activate_only(state: &AppState, provider_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn primary_provider_id<F>(providers: &[AiProviderConfig], is_usable: F) -> Option<String>
-where
-    F: Fn(&AiProviderConfig) -> bool,
-{
-    providers
-        .iter()
-        .filter(|provider| is_usable(provider))
-        .filter(|provider| provider.enabled)
-        .max_by(provider_recency)
-        .or_else(|| {
-            providers
-                .iter()
-                .filter(|provider| is_usable(provider))
-                .max_by(provider_recency)
-        })
-        .map(|provider| provider.id.clone())
-}
-
-fn provider_recency(left: &&AiProviderConfig, right: &&AiProviderConfig) -> std::cmp::Ordering {
-    left.updated_at
-        .cmp(&right.updated_at)
-        .then_with(|| left.created_at.cmp(&right.created_at))
-        .then_with(|| left.id.cmp(&right.id))
-}
-
 pub(crate) fn normalize_active_provider(state: &AppState) -> Result<(), String> {
     let providers = state
         .database
@@ -503,73 +485,24 @@ pub(crate) fn normalize_active_provider(state: &AppState) -> Result<(), String> 
     Ok(())
 }
 
-fn sanitize_custom_headers(
-    headers: Option<&serde_json::Map<String, Value>>,
-) -> Option<serde_json::Map<String, Value>> {
-    let values = headers?;
-    let safe = values
-        .iter()
-        .filter_map(|(name, value)| {
-            let text = value.as_str()?;
-            is_safe_metadata_header(name, text)
-                .then(|| (name.clone(), Value::String(text.to_string())))
-        })
-        .collect::<serde_json::Map<_, _>>();
-    (!safe.is_empty()).then_some(safe)
-}
-
-fn is_safe_metadata_header(name: &str, value: &str) -> bool {
-    let normalized = name.trim().to_ascii_lowercase();
-    SAFE_METADATA_HEADER_NAMES.contains(&normalized.as_str())
-        && !value.trim().is_empty()
-        && value.len() <= 4_096
-        && !value.contains('\r')
-        && !value.contains('\n')
-        && !value.to_ascii_lowercase().starts_with("bearer ")
-        && !value.to_ascii_lowercase().starts_with("basic ")
-}
-
+/// 「这份 provider 的凭据现在解析得出来吗」。
+///
+/// 判定规则（没有 ref 时只有本地端点算可用、ref 解不出来即不可用）住在
+/// [`yukinal_core::provider::provider_is_usable`]；这里只负责把 keychain 查一次交给它 ——
+/// 凭据存储不属于 `yukinal-core`，所以解析动作是本层的参数。
 fn provider_is_usable(state: &AppState, provider: &AiProviderConfig) -> bool {
-    let Some(reference) = provider.api_key_credential_ref.as_deref() else {
-        return is_local_endpoint(&provider.base_url);
-    };
-    let Ok(reference) = CredentialRef::parse(reference) else {
-        return false;
-    };
-    let Ok(secret) = state.credentials.get(&reference) else {
-        return false;
-    };
-    secret
-        .as_utf8()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn is_local_endpoint(base_url: &str) -> bool {
-    let normalized = base_url.trim().to_ascii_lowercase();
-    [
-        "http://localhost",
-        "https://localhost",
-        "http://127.0.0.1",
-        "https://127.0.0.1",
-        "http://[::1]",
-        "https://[::1]",
-    ]
-    .iter()
-    .any(|prefix| {
-        normalized == *prefix
-            || normalized.starts_with(&format!("{prefix}:"))
-            || normalized.starts_with(&format!("{prefix}/"))
+    yukinal_core::provider::provider_is_usable(provider, |reference| {
+        let reference = CredentialRef::parse(reference).ok()?;
+        let secret = state.credentials.get(&reference).ok()?;
+        secret.as_utf8().ok().map(std::borrow::Cow::into_owned)
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_local_endpoint, primary_provider_id, runtime_provider_config, sanitize_custom_headers,
-    };
+    use super::ProviderDeleteResponse;
     use serde_json::{json, Value};
-    use yukinal_database::models::{AiProviderConfig, AiProviderKind};
+    use yukinal_database::models::AiProviderKind;
 
     #[test]
     fn ai_provider_kind_uses_shared_wire_spelling() {
@@ -589,165 +522,30 @@ mod tests {
         );
     }
 
-    fn provider(id: &str, enabled: bool) -> AiProviderConfig {
-        AiProviderConfig {
-            id: id.into(),
-            kind: AiProviderKind::OpenaiCompatible,
-            label: id.into(),
-            base_url: "http://127.0.0.1:1234".into(),
-            model: "test-model".into(),
-            wire_api: Some("chat".into()),
-            api_key_credential_ref: None,
-            enabled,
-            custom_headers: None,
-            max_input_tokens: None,
-            models: None,
-            created_at: "2026-01-01T00:00:00Z".into(),
-            updated_at: "2026-01-01T00:00:00Z".into(),
-        }
-    }
-
-    fn provider_of_kind(kind: AiProviderKind, base_url: &str) -> AiProviderConfig {
-        AiProviderConfig {
-            kind,
-            base_url: base_url.into(),
-            // 只有 openai-compatible 有方言轴；另外两种的 `None` 是读路径会产出的形状。
-            wire_api: kind.has_wire_api().then(|| "chat".to_string()),
-            ..provider("prv_kind", true)
-        }
-    }
-
+    /// 契约 fixture 是两侧共同解析的那一份 JSON；这里断言 Rust 那一半 —— serde 的输出必须
+    /// 等于 TypeScript 那一半（`schemas/ipc.test.ts`）解析的文件。
+    ///
+    /// `provider_delete` 是新命令，所以顺手把它做成两侧都钉住的那一半：provider 这一族此前
+    /// 一份 Rust 断言都没有（README 的「当前限制」就是这么写的）。
     #[test]
-    fn primary_provider_is_deterministic_when_legacy_data_has_multiple_enabled_rows() {
-        let mut second = provider("prv_second", true);
-        second.updated_at = "2026-01-01T00:00:01Z".into();
-        let providers = vec![provider("prv_first", true), second];
-        assert_eq!(
-            primary_provider_id(&providers, |_| true),
-            Some("prv_second".into())
-        );
-    }
+    fn the_delete_response_matches_the_shared_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../packages/shared/fixtures/ipc/provider_delete.json"
+        ))
+        .expect("contract fixture must be valid JSON");
 
-    #[test]
-    fn local_endpoints_can_work_without_a_credential() {
-        assert!(is_local_endpoint("http://127.0.0.1:11434/v1"));
-        assert!(is_local_endpoint("http://localhost:1234"));
-        assert!(!is_local_endpoint("https://api.openai.com/v1"));
-    }
+        let actual = serde_json::to_value(ProviderDeleteResponse {
+            deleted: true,
+            credential_reclaimed: true,
+        })
+        .expect("serializes");
+        assert_eq!(actual, fixture);
 
-    #[test]
-    fn runtime_provider_config_omits_absent_optional_values() {
-        let config =
-            runtime_provider_config(&provider("prv_test", true), "test-model", None, 30_000);
-        assert!(config.get("apiKey").is_none());
-        assert!(config.get("customHeaders").is_none());
-        assert_eq!(
-            config.get("model"),
-            Some(&Value::String("test-model".into()))
-        );
-    }
-
-    /// 每种 kind 都要产出**自己那个协议**的配置（ADR 0011 第 6 点）。
-    #[test]
-    fn runtime_provider_config_speaks_the_protocol_of_each_kind() {
-        let compatible = runtime_provider_config(
-            &provider_of_kind(
-                AiProviderKind::OpenaiCompatible,
-                "https://gw.example.com/v1",
-            ),
-            "gpt-5.2",
-            None,
-            30_000,
-        );
-        assert_eq!(compatible["kind"], json!("openai-compatible"));
-        assert_eq!(compatible["baseUrl"], json!("https://gw.example.com/v1"));
-        assert_eq!(compatible["wireApi"], json!("chat"));
-
-        let anthropic = runtime_provider_config(
-            &provider_of_kind(AiProviderKind::Anthropic, "https://api.anthropic.com"),
-            "claude-sonnet-4-5",
-            None,
-            30_000,
-        );
-        assert_eq!(anthropic["kind"], json!("anthropic"));
-        assert_eq!(anthropic["baseUrl"], json!("https://api.anthropic.com"));
-        // 原生协议没有方言轴：这个键不该出现，否则共享 schema 会拒绝整份配置。
-        assert!(anthropic.get("wireApi").is_none());
-
-        let gemini = runtime_provider_config(
-            &provider_of_kind(
-                AiProviderKind::Gemini,
-                "https://generativelanguage.googleapis.com",
-            ),
-            "gemini-2.5-flash",
-            None,
-            30_000,
-        );
-        assert_eq!(gemini["kind"], json!("gemini"));
-        assert_eq!(
-            gemini["baseUrl"],
-            json!("https://generativelanguage.googleapis.com")
-        );
-        assert!(gemini.get("wireApi").is_none());
-    }
-
-    /// 没有 base URL 时，原生协议退到**自己**的公开端点，而不是一个 OpenAI 形状的地址；
-    /// openai-compatible 则没有默认值 —— 它覆盖的端点不是我们的，编一个默认值等于把用户的
-    /// 密钥送去一个他没选过的服务商。
-    #[test]
-    fn a_missing_base_url_falls_back_to_the_protocols_own_endpoint() {
-        for blank in ["", "   ", "/"] {
-            let anthropic = runtime_provider_config(
-                &provider_of_kind(AiProviderKind::Anthropic, blank),
-                "claude-sonnet-4-5",
-                None,
-                30_000,
-            );
-            assert_eq!(
-                anthropic["baseUrl"],
-                json!("https://api.anthropic.com"),
-                "blank base URL {blank:?}"
-            );
-
-            let gemini = runtime_provider_config(
-                &provider_of_kind(AiProviderKind::Gemini, blank),
-                "gemini-2.5-flash",
-                None,
-                30_000,
-            );
-            assert_eq!(
-                gemini["baseUrl"],
-                json!("https://generativelanguage.googleapis.com"),
-                "blank base URL {blank:?}"
-            );
-        }
-
-        let compatible = runtime_provider_config(
-            &provider_of_kind(AiProviderKind::OpenaiCompatible, "  "),
-            "m",
-            None,
-            30_000,
-        );
-        assert_eq!(
-            compatible["baseUrl"],
-            json!(""),
-            "openai-compatible must not be given an invented endpoint"
-        );
-    }
-
-    #[test]
-    fn custom_headers_keep_only_non_secret_gateway_metadata() {
-        let headers = json!({
-            "HTTP-Referer": "https://desktop.example",
-            "Authorization": "Bearer not-for-storage",
-            "X-Api-Key": "not-for-storage",
-        });
-        let headers = headers.as_object().expect("header object");
-        let sanitized = sanitize_custom_headers(Some(headers)).expect("safe header remains");
-        assert_eq!(sanitized.len(), 1);
-        assert_eq!(
-            sanitized.get("HTTP-Referer"),
-            Some(&Value::String("https://desktop.example".into()))
+        // 两个字段都是必填的：只回一个 `{deleted:true}` 等于把「密钥没删」和「不知道」
+        // 变成同一个值，而二次确认里问的正是这件事。
+        assert!(
+            actual.get("credentialReclaimed").is_some(),
+            "the caller cannot tell whether the key is gone without this field"
         );
     }
 }
