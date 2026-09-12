@@ -112,10 +112,16 @@ pub async fn agent_logs(state: State<'_, AppState>) -> Result<AgentLogsResponse,
 /// this build keeps its resources and supplies the app data dir when the caller did not set
 /// one.
 ///
-/// The resource dir is passed even in a dev run, where it holds no staged bundle: the
-/// packaged path then simply fails the `is_file()` check and resolution falls through to the
-/// repo walk-up, so one code path covers both shapes without a `cfg!(debug_assertions)`
-/// branch that would make the installed case the untested one.
+/// The resource dir is passed in both shapes, and the original comment here was wrong about
+/// dev: `tauri dev` *does* stage `bundle.resources` into the target directory
+/// (`target/debug/agent/index.js`), so in a dev run the packaged path usually wins and the
+/// repo walk-up is the fallback (a bare `cargo run` without Tauri's staging). One resolution
+/// path for both shapes is still the point — it is what makes the installed case the
+/// exercised one instead of a `cfg!(debug_assertions)` branch nothing runs.
+///
+/// Whatever this returns hands Node a path that went through
+/// `SidecarConfig::for_command_line`: `resource_dir()` is canonicalised, and Node cannot
+/// resolve a `\\?\` path — it dies with `EISDIR` on `lstat('C:')` before running the agent.
 fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let resources = app.path().resource_dir().ok();
@@ -131,6 +137,14 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
         config.data_dir = data_dir.display().to_string();
     }
     let data_dir = config.data_dir.clone();
+    // 「为什么起不来」的一半答案是「到底起了什么」。一条启动行比事后猜文件名便宜得多：
+    // `node C:` 这种崩法在日志里看起来完全不像路径解析问题，而它确实是。
+    eprintln!(
+        "[yukinal] sidecar command: {} {:?} (data dir {})",
+        config.program.display(),
+        config.args,
+        data_dir
+    );
     Ok(config.with_env("YUKINAL_DATA_DIR", &data_dir))
 }
 

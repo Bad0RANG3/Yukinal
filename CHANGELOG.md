@@ -35,6 +35,7 @@
 - **`filesystem.edit` 的正文过去会进审计记录**：审计输入掩掉了 `content`，却没掩 `oldString`/`newString`，而它们同样是任意文件内容。两者现在与 `content` 同等处理。
 - 一个工具**结果**事件若声称 `status: "running"`，原本会被当作终态落库，在审计里留下「已结束但还在跑」的记录。
 - **MCP 子进程曾经只靠 `kill_on_drop` 回收**：宿主正常退出时没有调用 `McpSupervisor::shutdown_all()`，而 `kill_on_drop` 是一个 `Drop` 实现 —— 在 Windows 上强杀宿主时不会执行，于是关掉窗口可能留下一串第三方进程。退出路径现在和 sidecar 一样显式关闭它们，一台服务器关不掉也不影响其余几台。
+- **桌面应用在 Windows 上根本起不来 sidecar**：`resource_dir()` 返回的是规范化路径，带 `\\?\` 前缀，而 Node 解析不了它 —— 拿到 `\\?\C:\...\target\debug\agent\index.js` 时它会去 `lstat('C:')`、以 `EISDIR` 退出，agent 一行都没跑，界面上只剩「agent sidecar exited」。交给 Node 的入口路径现在过一遍 `SidecarConfig::for_command_line`，它只去掉有普通等价形式的两种 verbatim 前缀（盘符与 UNC）；`\\?\Volume{…}` 保持原样，因为去掉前缀指的是另一条路径。同一处补上了这次的教训：启动失败时把 sidecar 死前写下的 stderr 打进日志，并在启动前打印解析出来的命令 —— 否则一次握手期间的崩溃在日志里只有「exited」几个字，看日志的人无从下手。
 
 ## [0.1.0] - 2026-09-12
 

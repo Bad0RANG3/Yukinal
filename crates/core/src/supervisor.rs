@@ -337,6 +337,21 @@ impl Supervisor {
         let launched = match sidecar::handshake(&handle, config).await {
             Ok(launched) => launched,
             Err(error) => {
+                // 握手失败时，`receiver` 里已经躺着这个进程说过的最后几句话（`ready`、
+                // 掉帧警告、Node 自己的解析错误），但把日志写进保留尾巴的那个循环还没
+                // 起来 —— 它要等握手成功后的 `RuntimeState`。于是「为什么起不来」的证据
+                // 恰好在这一条路径上被丢掉，界面与日志里只剩一句「agent sidecar exited」。
+                // 先把已经到达的行落进尾巴，再关进程。
+                // 子进程死了不等于它的话已经到手：读 stderr 的任务还在排空操作系统里的那段
+                // 管道，所以抽一次是不够的。给两轮、每轮之间让出一点时间。
+                for _ in 0..2 {
+                    while let Ok(event) = receiver.try_recv() {
+                        if let SidecarEvent::Log(line) = event {
+                            self.inner.remember_log(&line).await;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
                 handle.shutdown().await;
                 return Err(error);
             }

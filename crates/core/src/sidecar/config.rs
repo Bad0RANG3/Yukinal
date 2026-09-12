@@ -93,7 +93,7 @@ impl SidecarConfig {
             }
             return Ok(Self {
                 program: node_program(lookup("YUKINAL_NODE").as_deref()),
-                args: vec![path.into_os_string()],
+                args: vec![for_command_line(path).into_os_string()],
                 env: Vec::new(),
                 request_timeout,
                 entry_label: entry,
@@ -112,7 +112,7 @@ impl SidecarConfig {
         match found {
             Some(path) => Ok(Self {
                 program: node_program(None),
-                args: vec![path.clone().into_os_string()],
+                args: vec![for_command_line(path.clone()).into_os_string()],
                 env: Vec::new(),
                 request_timeout,
                 entry_label: path.display().to_string(),
@@ -198,6 +198,52 @@ fn node_program(override_path: Option<&str>) -> PathBuf {
     }
 }
 
+/// Turn a path into one Node.js can actually resolve.
+///
+/// `resource_dir()` comes back canonicalised, and on Windows that means the verbatim prefix
+/// (`\\?\C:\...`). Win32 itself treats it as transparent, but Node does not: handed
+/// `\\?\C:\...\agent\index.js` it ends up calling `lstat('C:')`, dies with `EISDIR` and never
+/// runs a line of the agent. That is not a guess — it is what the app printed when this was
+/// fixed (`node.exe ["\\?\C:\...\target\debug\agent\index.js"]` followed by the crash).
+///
+/// Only the two verbatim forms with a plain equivalent are rewritten. `\\?\Volume{…}` has
+/// none: dropping the prefix would name a different path, so it is left alone rather than
+/// silently pointed somewhere else.
+#[must_use]
+pub fn for_command_line(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(plain) = plain_windows_path(&path) {
+        return plain;
+    }
+    path
+}
+
+#[cfg(windows)]
+fn plain_windows_path(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return None;
+    };
+    let rest: PathBuf = components.collect();
+    match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => {
+            let mut plain = PathBuf::from(format!("{}:\\", char::from(letter)));
+            plain.push(rest);
+            Some(plain)
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            let mut plain = PathBuf::from(r"\\");
+            plain.push(server);
+            plain.push(share);
+            plain.push(rest);
+            Some(plain)
+        }
+        _ => None,
+    }
+}
+
 fn find_dev_bundle(cwd: &Path) -> Option<PathBuf> {
     ancestors(cwd)
         .map(|dir| dir.join("apps").join("agent").join("dist").join("index.js"))
@@ -240,6 +286,40 @@ mod tests {
         ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Guards the bug that kept the desktop app from starting its sidecar at all.
+    ///
+    /// `resource_dir()` is canonicalised, so on Windows the entry arrives with a `\\?\`
+    /// prefix, and Node dies on it before running anything. The app printed exactly this:
+    /// `node.exe ["\\?\C:\...\target\debug\agent\index.js"]` and then `EISDIR ... lstat 'C:'`.
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_path_is_stripped_before_it_becomes_a_command_line_argument() {
+        assert_eq!(
+            for_command_line(PathBuf::from(r"\\?\C:\Users\me\agent\index.js")),
+            PathBuf::from(r"C:\Users\me\agent\index.js")
+        );
+        assert_eq!(
+            for_command_line(PathBuf::from(r"\\?\UNC\server\share\agent\index.js")),
+            PathBuf::from(r"\\server\share\agent\index.js")
+        );
+        // Nothing to repair: returned unchanged, so this cannot quietly rewrite a good path.
+        assert_eq!(
+            for_command_line(PathBuf::from(r"C:\already\plain\index.js")),
+            PathBuf::from(r"C:\already\plain\index.js")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_packaged_entry_never_reaches_node_with_a_verbatim_prefix() {
+        let entry = for_command_line(packaged_entry(Path::new(r"\\?\C:\app\resources")));
+        assert!(
+            !entry.to_string_lossy().starts_with(r"\\?\"),
+            "{}",
+            entry.display()
+        );
     }
 
     fn temp_tagged_dir(tag: &str) -> PathBuf {

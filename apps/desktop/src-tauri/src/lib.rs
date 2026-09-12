@@ -40,7 +40,19 @@ pub fn run() {
                         "[yukinal] autostart ok pid={} protocol={} tools={}",
                         spawned.pid, spawned.protocol_version, spawned.tool_count
                     ),
-                    Err(error) => eprintln!("[yukinal] autostart failed: {error}"),
+                    Err(error) => {
+                        eprintln!("[yukinal] autostart failed: {error}");
+                        // 失败的原因几乎总在 sidecar 死之前写下的 stderr 里，而事件泵只转发
+                        // 「它订阅之后」的行：启动期（含整个握手）的那些行只进了保留尾巴，
+                        // 而泵在建立时打的那一次尾巴还是空的 —— 它的注释说「agent 启动时说了
+                        // 什么永远不会看不见」，那对「启动之后才订阅」这种情况才成立。
+                        // 所以这里必须再打一次，否则一次握手中的崩溃在日志里只剩下
+                        // 「agent sidecar exited」这几个字，看日志的人无从下手。
+                        let supervisor = handle.state::<AppState>().supervisor.clone();
+                        for line in supervisor.logs().await {
+                            eprintln!("[agent:last] {line}");
+                        }
+                    }
                 }
             });
             Ok(())
