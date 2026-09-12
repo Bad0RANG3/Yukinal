@@ -60,7 +60,7 @@ pnpm run package           # 契约库 -> agent 单文件 -> 打包契约 -> tau
 
 代价与边界：多一个资源文件；那份文件**只能**有 `type` 一个键（多出 `name`/`exports` 会让 Node 把 `agent/` 当成一个包并按包规则解析，而这里要的只是「这个目录里的 `.js` 是 ESM」）；`scripts/check-packaging.mjs` 因此断言 `agent/` 下**恰好**这两个目的地并检查那份 JSON 的内容 —— 它是一份契约，不是随手放的配置文件。
 
-（`apps/agent/package.json` 的 `typecheck` 曾经是 `tsc -p tsconfig.json`，而那份 tsconfig 的 `outDir` 就是 `dist`、`noEmit` 为 false：跑一次类型检查会把逐文件的 tsc 产物写进 `dist`，覆盖掉 esbuild 的单文件 bundle，于是「类型检查通过」之后打包契约反而红了 —— 这条路径真的发生过一次。现在 `typecheck` 带 `--noEmit`，构建产物只有一个来源。）
+（`apps/agent` 的项目曾经把 `outDir` 指向 `dist` 且允许 emit：跑一次 `tsc -p tsconfig.json` 就会把逐文件的 tsc 产物写进 `dist`、覆盖掉 esbuild 的单文件 bundle，而「类型检查通过」这句话本身不会提示任何异常 —— 真正变红的是几步之后的打包契约。这条路径真的发生过两次：第二次是有人绕过 `package.json` 的脚本直接调用 tsc，所以修在脚本上是不够的。现在 `noEmit` 写在 `apps/agent/tsconfig.json` 里，`outDir`/`rootDir` 也一并去掉 —— 构建产物只有一个来源，无论 tsc 怎么被调用。）
 
 ## 安装包里没有 Node.js
 

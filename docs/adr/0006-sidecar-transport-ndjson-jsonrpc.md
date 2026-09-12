@@ -1,6 +1,6 @@
 # ADR 0006 sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信
 
-Status: Accepted
+Status: Accepted（「握手」一节里 `capabilities.mcp` 取值为 `false` 的**理由**由 [0014](0014-mcp-integration.md) 取代：MCP 已经接入，该标志报告的仍是握手那一刻注册表里有没有 MCP 工具 —— 取值没变，解释变了，所以这里留原文不改写）
 Date: 2026-09-09
 
 ## Context

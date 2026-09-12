@@ -60,7 +60,7 @@ Date: YYYY-MM-DD
 | [0003](0003-openai-compatible-only-for-mvp.md) | 只实现一个 OpenAI-compatible Provider，两种请求方言覆盖兼容端点 | Accepted（「只实现一个 Provider」一节由 [0011](0011-native-anthropic-and-gemini-providers.md) 取代） |
 | [0004](0004-tool-name-mapping.md) | 内部工具名用点号，Provider 边界用双下划线，映射集中在一处 | Accepted |
 | [0005](0005-permission-engine-sole-decision-maker.md) | Permission Engine 是唯一的执行授权决策者 | Accepted |
-| [0006](0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted |
+| [0006](0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted（`capabilities.mcp` 为 `false` 的理由由 [0014](0014-mcp-integration.md) 取代） |
 | [0007](0007-monorepo-and-day-one-abstractions.md) | pnpm 与 Cargo 双 workspace，并优先稳定变化最频繁的边界 | Accepted |
 | [0008](0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted（「不自动重启」一节由 [0010](0010-bounded-sidecar-recovery.md) 取代） |
 | [0009](0009-agent-permission-delegation.md) | Agent 权限使用显式的运行级委托，与运行模式互相正交 | Accepted |
@@ -68,5 +68,6 @@ Date: YYYY-MM-DD
 | [0011](0011-native-anthropic-and-gemini-providers.md) | 增加原生 Anthropic 与 Gemini Provider，身份分支仍只允许发生在装配点 | Accepted |
 | [0012](0012-host-key-trust-model.md) | 主机指纹默认 TOFU，但必须能人工核验、钉住与遗忘 | Accepted |
 | [0013](0013-installer-distribution.md) | 启用安装包打包、随包分发 agent bundle，但使用用户自己的 Node | Accepted |
+| [0014](0014-mcp-integration.md) | MCP 接入：宿主独占进程与目录，agent 只注册与调用 | Accepted |
 
 新增记录后，请同时更新[文档入口](../README.md)的表格与根目录 [README](../../README.md) 的文档索引。如果某个决定的实际含义已经变化，也要一并更新受影响的[能力边界说明](../../apps/agent/src/providers/README.md)。

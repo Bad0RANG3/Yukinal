@@ -27,7 +27,8 @@
 4. [ADR 0005](adr/0005-permission-engine-sole-decision-maker.md) + [ADR 0009](adr/0009-agent-permission-delegation.md) —— 一次工具调用凭什么被执行，用户委托与模型文本的区别在哪里。
 5. [ADR 0004](adr/0004-tool-name-mapping.md) + [Provider 边界](../apps/agent/src/providers/README.md) —— 模型看到的世界和内部审计记录的世界如何对齐。
 6. [ADR 0002](adr/0002-ssh-backend-russh.md)、[ADR 0003](adr/0003-openai-compatible-only-for-mvp.md)、[ADR 0011](adr/0011-native-anthropic-and-gemini-providers.md)、[ADR 0007](adr/0007-monorepo-and-day-one-abstractions.md)、[MCP 边界](../apps/agent/src/mcp/README.md) —— 按需要查阅。
-7. 准备改协议或跨层类型时，先读 `packages/shared/src/` 与 `packages/shared/fixtures/ipc/`，它们是契约本身。
+7. [打包](packaging.md) —— 分发时才需要：安装包里到底有什么、Node 运行时从哪来（答案是用户自己的）、哪些环节在这里从未真正跑过。
+8. 准备改协议或跨层类型时，先读 `packages/shared/src/` 与 `packages/shared/fixtures/ipc/`，它们是契约本身。
 
 ## 必须保持的架构边界
 
@@ -59,6 +60,7 @@
 | [0011](adr/0011-native-anthropic-and-gemini-providers.md) | 增加原生 Anthropic 与 Gemini Provider，身份分支仍只允许发生在装配点 | Accepted |
 | [0012](adr/0012-host-key-trust-model.md) | 主机指纹默认 TOFU，但必须能人工核验、钉住与遗忘 | Accepted |
 | [0013](adr/0013-installer-distribution.md) | 启用安装包打包、随包分发 agent bundle，但使用用户自己的 Node | Accepted |
+| [0014](adr/0014-mcp-integration.md) | MCP 接入：宿主独占进程与目录，agent 只注册与调用 | Accepted |
 
 ## 更新文档
 
