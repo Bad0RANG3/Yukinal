@@ -31,7 +31,7 @@ import type { McpCatalogFailureCode } from "./host.js";
  * labelled these as internal names would be showing a name the model never calls.
  *
  * `description` and `inputSchema` are untrusted remote text; the UI may *show* them, and that is
- * all (MCP README §6).
+ * all (MCP README「描述文本一律视为不可信数据」).
  */
 export interface McpToolDescriptor {
   /** The name `tools/call` needs — the server's own spelling, before normalization. */

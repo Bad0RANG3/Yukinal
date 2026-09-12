@@ -6,7 +6,7 @@
 //!
 //! 1. **配置**（`mcp_server_*` 命令）：`mcp_servers` 表的读写，以及「这一行能不能起」的
 //!    判断 —— 判断本身不在这里重写，而是问 [`McpStdioConfig::from_server_config`]，因为
-//!    「`http` 被拒绝」这件事只允许有一个来源（MCP README §7）。
+//!    「`http` 被拒绝」这件事只允许有一个来源（MCP README「进程生命周期仍然归 Rust」）。
 //! 2. **目录**（[`catalog`]，走 `host.mcp.catalog`）：把宿主正在跑的服务器与它们的工具
 //!    描述符交给 sidecar。这是 sidecar 唯一能知道 MCP 存在的地方，所以它也是
 //!    `capabilities.mcp` 的唯一依据。
@@ -53,7 +53,7 @@ pub const CATALOG_START_BUDGET: Duration = Duration::from_secs(4);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpFailureCode {
-    /// `http` 传输：类型层面就不存在（MCP README §7）。不仅仅是「没实现」，而是目前没有
+    /// `http` 传输：类型层面就不存在（MCP README「进程生命周期仍然归 Rust」）。不仅仅是「没实现」，而是目前没有
     /// 任何出站网络策略可以让它成立。
     TransportNotImplemented,
     Disabled,
@@ -192,7 +192,7 @@ pub struct ShutdownOutcome {
 // sidecar 的目录（host.mcp.catalog）
 
 /// 目录里的一个工具。字段来自 `McpToolDescriptor`，不是另造一套形状：`description` 与
-/// `input_schema` 是远端声明**原样**带出来的不可信内容（README §6）。
+/// `input_schema` 是远端声明**原样**带出来的不可信内容（MCP README「描述文本一律视为不可信数据」）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCatalogTool {
@@ -704,7 +704,7 @@ pub(crate) fn save(
 /// 这一行的**传输方式**能不能用。
 ///
 /// 判断不在这里重写：问 [`McpStdioConfig::from_server_config`]，因为「`http` 被拒绝」这件事
-/// 只允许有一个来源（MCP README §7）。它同时会拒绝一个无法变成内部名段的 id —— 那种行永远
+/// 只允许有一个来源（MCP README「进程生命周期仍然归 Rust」）。它同时会拒绝一个无法变成内部名段的 id —— 那种行永远
 /// 不可能有工具，早一点拒绝比留一个永远不工作的条目好。
 ///
 /// 「还没写完」的错误（禁用、没填 command）**允许**保存：草稿是合法的，用户是先写下来再补的。
@@ -716,7 +716,7 @@ fn check_transport(config: &McpServerConfig) -> Result<(), String> {
             | McpError::UnsupportedTransport { .. }
             | McpError::InvalidConfig { .. }),
         ) => Err(format!(
-            "{}。当前只支持 stdio 传输（MCP README §7：出站网络策略还不存在）。",
+            "{}。当前只支持 stdio 传输（MCP README「进程生命周期仍然归 Rust」：出站网络策略还不存在）。",
             error
         )),
         Err(_) => Ok(()),
@@ -1180,7 +1180,7 @@ mod tests {
     /* ── 已经存在的 http 行 ────────────────────────────────────────────────── */
 
     /// 表里已经有一行 `http`（旧版本写的、或者手工改的）时，目录与视图都必须**说出来**，
-    /// 而不是静默无事发生（MCP README §7）。
+    /// 而不是静默无事发生（MCP README「进程生命周期仍然归 Rust」）。
     #[tokio::test]
     async fn an_http_row_in_the_table_refuses_with_the_same_reason() {
         let (path, db) = temp_db("http-row");

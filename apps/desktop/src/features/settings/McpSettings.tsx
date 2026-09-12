@@ -10,7 +10,7 @@
  * ## 四条不会让步的规则
  *
  * 1. **传输方式只提供 stdio。** `http` 不是一个「暂时不可用」的选项，而是**在类型层面就不存在**
- *    的东西（`McpStdioConfig` 拒绝它，MCP README §7：出站网络策略还没有）。所以这里没有
+ *    的东西（`McpStdioConfig` 拒绝它，MCP README「进程生命周期仍然归 Rust」：出站网络策略还没有）。所以这里没有
  *    `http` 选项 —— 摆一个保存时才失败的选项，等于用一个下拉框骗人。
  * 2. **已经存在的 `http` 行要说出来。** 表里可能有旧版本写下的 `http` 行：它照原样显示，
  *    加上后端给出的完整拒绝理由，并且**没有**任何「忽略并继续」的路径。它既不是静默的
@@ -363,7 +363,7 @@ export function McpSettingsPanel({
             />
             <p className="form-hint">
               传输方式固定为 <strong>stdio</strong>：Yukinal 派生这个进程，用标准输入输出与它说话。
-              目前<strong>不提供 http 传输</strong> —— 那需要出站网络策略，而它还不存在（MCP README §7），
+              目前<strong>不提供 http 传输</strong> —— 那需要出站网络策略，而它还不存在（MCP README「进程生命周期仍然归 Rust」），
               所以这里没有这个选项，而不是留一个保存时才失败的选项。
             </p>
           </div>
