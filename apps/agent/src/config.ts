@@ -1,3 +1,5 @@
+import { APP_VERSION } from "@yukinal/shared";
+
 import { isSensitiveKey, redactSensitiveText } from "./security/sensitive-data.js";
 
 /**
@@ -7,7 +9,8 @@ import { isSensitiveKey, redactSensitiveText } from "./security/sensitive-data.j
  * (the UI never manages the agent's lifecycle itself).
  */
 
-export const AGENT_VERSION = "0.0.0";
+/** Reported in the handshake; the same constant the manifests and the UI report. */
+export const AGENT_VERSION = APP_VERSION;
 
 export interface AgentConfig {
   /** Per-user data dir passed by Rust; used for SQLite/trace spool, never for secrets. */

@@ -41,3 +41,4 @@ export * from "./ipc/index.js";
 export * from "./naming/tool-name.js";
 export * from "./protocol/jsonrpc.js";
 export * from "./protocol/ndjson.js";
+export * from "./version.js";

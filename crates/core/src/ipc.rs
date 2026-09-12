@@ -107,14 +107,14 @@ mod tests {
     #[test]
     fn core_ping_serializes_to_the_contract_fixture() {
         let actual = serde_json::to_value(PingResponse {
-            version: "0.0.0",
+            version: "0.1.0",
             os: "windows",
         })
         .expect("serialize");
         assert_eq!(actual, fixture(FIXTURE_CORE_PING));
         assert_eq!(
             actual,
-            serde_json::json!({ "version": "0.0.0", "os": "windows" })
+            serde_json::json!({ "version": "0.1.0", "os": "windows" })
         );
     }
 
@@ -123,7 +123,7 @@ mod tests {
         let actual = serde_json::to_value(AgentSpawnResponse {
             pid: 25_980,
             protocol_version: "1.0".into(),
-            agent_version: "0.0.0".into(),
+            agent_version: "0.1.0".into(),
             entry: "apps/agent/dist/index.js".into(),
             tool_count: 1,
             already_running: false,
@@ -147,7 +147,7 @@ mod tests {
             runtime: RuntimeInfo {
                 pid: 25_980,
                 protocol_version: "1.0".into(),
-                agent_version: "0.0.0".into(),
+                agent_version: "0.1.0".into(),
                 entry: "apps/agent/dist/index.js".into(),
                 tool_count: 1,
                 started_at: "2026-01-01T00:00:00Z".into(),
@@ -199,7 +199,7 @@ mod tests {
             running: true,
             pid: Some(25_980),
             protocol_version: Some("1.0".into()),
-            agent_version: Some("0.0.0".into()),
+            agent_version: Some("0.1.0".into()),
             tool_count: Some(1),
             entry: Some("apps/agent/dist/index.js".into()),
             started_at: Some("2026-01-01T00:00:00Z".into()),

@@ -23,7 +23,7 @@ Yukinal 是一个把「远程开发与基础设施运维」和「AI Agent」放�
 
 ## 项目状态
 
-Yukinal 目前是一个可以跑起来的开发版本，版本号为 `0.0.0`（`package.json` 与 Cargo workspace 使用同一版本号）。桌面端、Rust 宿主和 Node.js Agent sidecar 之间的完整链路已经打通并可验证：从界面发起一次 Agent 运行，经过模型流式输出、工具调用、权限决策、宿主执行，到审计落库和界面反馈，都有真实代码和测试覆盖。
+Yukinal 目前是一个可以跑起来的开发版本，版本号为 `0.1.0`。这个版本号只有一处来源（`packages/shared/src/version.ts` 的 `APP_VERSION`），其余六个 `package.json`、Cargo workspace、`tauri.conf.json` 和 IPC fixture 都由 `packages/shared/src/version.test.ts` 钉在同一个值上，改一处而漏改其余会让 `pnpm check` 变红；发布历史见 [CHANGELOG](CHANGELOG.md)。桌面端、Rust 宿主和 Node.js Agent sidecar 之间的完整链路已经打通并可验证：从界面发起一次 Agent 运行，经过模型流式输出、工具调用、权限决策、宿主执行，到审计落库和界面反馈，都有真实代码和测试覆盖。
 
 但这不是一个可以分发的产品：
 
@@ -309,11 +309,11 @@ pwsh -File scripts/check-desktop-window.ps1
 - **`policyId`** 在运行请求里可以被传入，但当前运行路径只使用目标环境推导出的内建策略。
 - **`crates/filesystem` 是契约占位**，没有任何实现，也没有被其他 crate 引用。
 - **`TraceRecorder`** 存在于 `apps/agent/src/trace/`，但只在测试里被构造；实际运行时的追踪标识由 agent loop 直接生成，持久化则发生在 Rust 侧。
-- **版本号全是 `0.0.0`**，没有发布历史可以对照。
 
 ## 文档
 
 - [文档入口](docs/README.md) —— 文档放在哪里、按什么顺序读、哪些边界不能跨
+- [变更日志](CHANGELOG.md) —— 版本号含义、发布历史与破坏性变化
 - [架构决策记录](docs/adr/README.md) —— 长期决策与它们的代价
 - [Provider 边界](apps/agent/src/providers/README.md) —— Provider 抽象、两种请求方言、模型目录与工具名翻译
 - [MCP 边界](apps/agent/src/mcp/README.md) —— 当前实现状态与未来接入必须遵守的约束

@@ -9,6 +9,7 @@
 import {
   AGENT_METHODS,
   AGENT_NOTIFICATIONS,
+  APP_VERSION,
   AgentStreamEventSchema,
   RPC_ERROR,
   isJsonRpcResponse,
@@ -93,7 +94,7 @@ export class AgentClient {
   }
 
   get clientVersion(): string {
-    return this.options.clientVersion ?? "0.0.0";
+    return this.options.clientVersion ?? APP_VERSION;
   }
 
   onStream(handler: (event: AgentStreamEvent) => void): () => void {
