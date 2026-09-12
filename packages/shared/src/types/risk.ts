@@ -86,39 +86,67 @@ export interface PermissionPolicy {
   builtin: boolean;
 }
 
-/** Built-in defaults, straight from table. */
-export const DEVELOPMENT_POLICY: PermissionPolicy = {
+/**
+ * Built-in defaults, straight from table.
+ *
+ * `as const satisfies PermissionPolicy` rather than `: PermissionPolicy`, so the
+ * `id` stays a literal. That literal is what makes `BuiltinPolicyId` a real union
+ * instead of `string`, which in turn is what turns a *missing* label or a *misspelled*
+ * policy id in a `Record<BuiltinPolicyId, …>` into a compile error. Widening the
+ * annotation back to `PermissionPolicy` silently re-opens that hole.
+ */
+export const DEVELOPMENT_POLICY = {
   id: "policy.development",
   name: "Development",
   environment: "development",
   tiers: { read: "auto", write: "auto", dangerous: "ask" },
   builtin: true,
-};
+} as const satisfies PermissionPolicy;
 
-export const STAGING_POLICY: PermissionPolicy = {
+export const STAGING_POLICY = {
   id: "policy.staging",
   name: "Staging",
   environment: "staging",
   tiers: { read: "auto", write: "auto", dangerous: "ask" },
   builtin: true,
-};
+} as const satisfies PermissionPolicy;
 
-export const PRODUCTION_POLICY: PermissionPolicy = {
+export const PRODUCTION_POLICY = {
   id: "policy.production",
   name: "Production",
   environment: "production",
   // WRITE asks, DANGEROUS always asks. makes production identity explicit.
   tiers: { read: "auto", write: "ask", dangerous: "ask" },
   builtin: true,
-};
+} as const satisfies PermissionPolicy;
 
-export const LOCAL_POLICY: PermissionPolicy = {
+export const LOCAL_POLICY = {
   id: "policy.local",
   name: "Local machine",
   environment: "local",
   tiers: { read: "auto", write: "ask", dangerous: "ask" },
   builtin: true,
-};
+} as const satisfies PermissionPolicy;
+
+/**
+ * The four built-in policies, and the id union derived from them.
+ *
+ * This tuple — not a hand-written list of id strings — is what a registry, a
+ * `system.describe` reply or a UI picker iterates, so an id cannot exist here and
+ * be missing from the policy object it names.
+ */
+export const BUILTIN_POLICIES = [
+  LOCAL_POLICY,
+  DEVELOPMENT_POLICY,
+  STAGING_POLICY,
+  PRODUCTION_POLICY,
+] as const;
+
+export type BuiltinPolicyId = (typeof BUILTIN_POLICIES)[number]["id"];
+
+export const BUILTIN_POLICY_IDS: readonly BuiltinPolicyId[] = BUILTIN_POLICIES.map(
+  (policy) => policy.id,
+);
 
 export function defaultPolicyFor(environment: Environment): PermissionPolicy {
   switch (environment) {

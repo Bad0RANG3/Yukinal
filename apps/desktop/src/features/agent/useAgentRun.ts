@@ -57,6 +57,11 @@ export type StartRunInput = {
   permissionMode?: AgentPermissionMode;
   /** 运行模式：只读 / 计划 / 目标。由 sidecar 的权限引擎强制。 */
   mode?: AgentRunMode;
+  /**
+   * 这次运行按哪套策略判定。不传 = 按目标环境自动（sidecar 用内建表推导）；
+   * 传了就必须是 sidecar 认得的内建策略 id，否则整次调用被拒。
+   */
+  policyId?: string;
 };
 
 export type AgentRun = {
@@ -267,6 +272,9 @@ export function useAgentRun(options: {
         focusServerId: input.focusServerId ?? undefined,
         permissionMode: input.permissionMode,
         mode: input.mode,
+        // 不传 = 由 sidecar 按目标环境推导策略。这里不做任何「默认策略」的猜测：
+        // 猜错就是让这次运行受另一套策略约束，而界面显示的却是「按环境自动」。
+        policyId: input.policyId ?? undefined,
       });
       if (lifecycle.current.acknowledge(started)) {
         setRunId(started);

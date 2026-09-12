@@ -33,6 +33,7 @@ import {
   type Submission,
 } from "./composer-triggers.js";
 import { APPROVAL_OPTIONS, APPROVAL_ORDER, RUN_MODE_ORDER, RUN_MODE_SPECS, approvalOptionSpec, runModeSpec } from "./run-mode.js";
+import { RUN_POLICY_ORDER, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
 type Suggestion =
@@ -52,6 +53,8 @@ export function AgentComposer({
   onPermissionModeChange,
   runMode,
   onRunModeChange,
+  runPolicy,
+  onRunPolicyChange,
   models,
   selectedModelKey,
   selectedModelLabel,
@@ -79,6 +82,9 @@ export function AgentComposer({
   /** 这次运行允许做到什么程度；由 sidecar 权限引擎强制，不只是提示。 */
   runMode: AgentRunMode;
   onRunModeChange: (mode: AgentRunMode) => void;
+  /** 这次运行按哪套策略判定；`null` = 按环境自动（请求里不带 policyId）。 */
+  runPolicy: RunPolicyChoice;
+  onRunPolicyChange: (policy: RunPolicyChoice) => void;
   models: ReadonlyArray<{ key: string; label: string; providerLabel?: string }>;
   selectedModelKey: string | null;
   /** 当前选中模型的完整名称，用于在输入框上方显示当前运行目标。 */
@@ -383,13 +389,44 @@ export function AgentComposer({
                 })}
               </ul>
             </section>
+
+            <section className="agent-settings-group">
+              <p className="agent-settings-title">目标策略</p>
+              {/* 这两句是这一组存在的理由，不能省：选定的策略**取代**按环境自动的那套，
+                  即使用户选的和目标环境对不上；而高危操作换不来自动批准。 */}
+              <p className="agent-settings-note">
+                决定这次运行按哪套策略判定。选定的策略会取代「按环境自动」，即使目标环境与它不一致；而 high / critical 操作无论选哪套都必须由你批准。
+              </p>
+              <ul className="agent-settings-options">
+                {RUN_POLICY_ORDER.map((key) => {
+                  const spec = runPolicySpec(key);
+                  return (
+                  <li key={spec.value ?? "environment"}>
+                    <button
+                      type="button"
+                      className={`agent-settings-option ${spec.value === runPolicy ? "is-selected" : ""}`}
+                      aria-pressed={spec.value === runPolicy}
+                      // 与运行模式同一条理由：策略随请求发出，中途改变会让「这次运行
+                      // 受哪套策略约束」说不清。
+                      disabled={running}
+                      onClick={() => onRunPolicyChange(spec.value)}
+                    >
+                      <span className="agent-settings-option-label">{spec.label}</span>
+                      <span className="agent-settings-option-note">{spec.summary}</span>
+                    </button>
+                  </li>
+                  );
+                })}
+              </ul>
+            </section>
           </div>
         ) : null}
 
         <div className="agent-composer-toolbar">
           <div className="agent-composer-toolbar-left">
-            {/* 最左侧的「+」展开设置：运行模式（做到什么程度）与批准方式（谁
-                点头）。只读模式下「+」保持可点 —— 用户必须能改主意。 */}
+            {/* 最左侧的「+」展开设置：运行模式（做到什么程度）、批准方式（谁
+                点头）与目标策略（按哪套策略判定）。只读模式下「+」保持可点 ——
+                用户必须能改主意。 */}
             <button
               type="button"
               ref={settingsTriggerRef}

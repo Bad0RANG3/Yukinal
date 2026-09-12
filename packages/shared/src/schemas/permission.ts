@@ -125,7 +125,14 @@ export const AgentRunRequestSchema = z.strictObject({
   workspaceId: z.string().trim().min(1).max(256).optional(),
   focusServerId: SERVER_ID_SCHEMA.optional(),
   target: ToolTargetSchema.optional(),
-  policyId: z.string().optional(),
+  /**
+   * Deliberately not `z.enum(BUILTIN_POLICY_IDS)`: the *registry* is the authority on
+   * which ids exist (`apps/agent/src/permissions/policy-registry.ts`), and it answers an
+   * unknown id with an error that names the id and the known ones. Pinning the built-ins
+   * here as well would add a second place to change and turn that error into a generic
+   * "invalid params". Bounded, because the value crosses into a decision.
+   */
+  policyId: z.string().trim().min(1).max(256).optional(),
   permissionMode: AgentPermissionModeSchema.optional(),
   /** Omitted -> `goal`, the unconstrained mode. */
   mode: AgentRunModeSchema.optional(),

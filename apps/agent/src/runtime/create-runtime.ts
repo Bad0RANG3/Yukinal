@@ -5,19 +5,14 @@
  * Startup order mirrors the layering: registry -> permissions -> context -> loop -> rpc.
  */
 
-import {
-  DEVELOPMENT_POLICY,
-  LOCAL_POLICY,
-  PRODUCTION_POLICY,
-  STAGING_POLICY,
-  type ToolDeclaration,
-} from "@yukinal/shared";
+import type { ToolDeclaration } from "@yukinal/shared";
 
 import { createLogger, type AgentLogger } from "../config.js";
 import { ContextEngine } from "../context/context-engine.js";
 import { createEmptyContextSource } from "../context/empty-source.js";
 import { createHostContextSource } from "../context/host-context-source.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
+import { KNOWN_POLICY_IDS } from "../permissions/policy-registry.js";
 import { RpcRouter } from "../rpc/router.js";
 import { AgentLoop, type AgentLoopDeps } from "./agent-loop.js";
 import { dockerInspectTool } from "../tools/builtin/docker-inspect.js";
@@ -30,13 +25,6 @@ import { serverInfoTool } from "../tools/builtin/server-info.js";
 import { systemEchoTool } from "../tools/builtin/system-echo.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { HostRpcClient } from "../transport/host-client.js";
-
-export const BUILTIN_POLICY_IDS = [
-  LOCAL_POLICY.id,
-  DEVELOPMENT_POLICY.id,
-  STAGING_POLICY.id,
-  PRODUCTION_POLICY.id,
-];
 
 export interface Runtime {
   registry: ToolRegistry;
@@ -89,7 +77,9 @@ export function createRuntime(
     registry,
     loop,
     log: log.child("rpc"),
-    policyIds: BUILTIN_POLICY_IDS,
+    // The registry, not a second hand-written list: the ids `system.describe` reports
+    // are exactly the ids a run request may name.
+    policyIds: [...KNOWN_POLICY_IDS],
   });
 
   return { registry, permission, context, loop, router, log, declarations };

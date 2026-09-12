@@ -83,15 +83,29 @@ export interface AgentRunRequest {
   messageId?: string;
   /** OpenCode-compatible message parts; `prompt` remains the compatibility fallback. */
   parts?: AgentPromptPart[];
-  /** A UI submission is admitted and executed asynchronously. */
+  /**
+   * `sync` holds the `agent.run.start` response until the run reaches a terminal state
+   * and answers with its result; `async` (the default) answers as soon as the message
+   * is admitted. The `agent.*` notifications stream identically either way — with
+   * `sync` the response frame necessarily arrives after them.
+   */
   delivery?: "async" | "sync";
-  /** Whether the runner should resume execution after admitting the message. */
+  /**
+   * Whether the runner should resume execution after admitting the message. `false`
+   * admits the message and records the receipt without starting anything; a later call
+   * with the same `messageId` starts that admitted run and keeps its `runId`.
+   */
   resume?: boolean;
   workspaceId?: string;
   /** Currently focused server; the agent may still need to disambiguate. */
   focusServerId?: string;
   target?: ToolTarget;
-  /** Overrides the policy that would otherwise be derived from the environment. */
+  /**
+   * The policy this run must be decided under, overriding the one derived from the
+   * target environment. It is resolved before the run starts and every tool call of
+   * the run is evaluated against it; an unknown id is rejected rather than falling
+   * back to the environment default. Omitted -> the environment's built-in policy.
+   */
   policyId?: string;
   /** User-selected execution delegation for this run. */
   permissionMode?: AgentPermissionMode;
@@ -156,6 +170,15 @@ export interface ApprovalResponse {
   respondedAt: string;
 }
 
+/**
+ * The stream the UI renders.
+ *
+ * `policyId` on the two tool events is the policy the Permission Engine actually
+ * decided under — carried here so "which policy governed this call" is observable
+ * from the stream instead of only inferable from the target environment. Optional
+ * for the same reason `AgentRunResult.traceId` is: an older sidecar build does not
+ * send it, and the consumer has to keep parsing whatever sidecar is running.
+ */
 export type AgentStreamEvent =
   | { type: "agent.started"; runId: string; at: string }
   | { type: "agent.thinking"; runId: string; textDelta?: string; at: string }
@@ -172,6 +195,7 @@ export type AgentStreamEvent =
       riskLevel: RiskLevel;
       decision: PermissionMode;
       approvedBy?: PermissionApprovalSource;
+      policyId?: string;
       at: string;
     }
   | {
@@ -186,6 +210,7 @@ export type AgentStreamEvent =
       riskLevel: RiskLevel;
       decision: PermissionMode;
       approvedBy?: PermissionApprovalSource;
+      policyId?: string;
       status: ToolResultStatus;
       outputSummary: string;
       error?: string;

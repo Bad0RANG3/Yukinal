@@ -4,7 +4,8 @@
  */
 
 import { AGENT_VERSION, createLogger, readConfig } from "./config.js";
-import { BUILTIN_POLICY_IDS, createRuntime } from "./runtime/create-runtime.js";
+import { KNOWN_POLICY_IDS } from "./permissions/policy-registry.js";
+import { createRuntime } from "./runtime/create-runtime.js";
 import { HostRpcClient } from "./transport/host-client.js";
 import { startStdioRpc, type StdioServer } from "./transport/stdio.js";
 
@@ -27,7 +28,7 @@ export function main(): void {
   log.info("ready", {
     version: AGENT_VERSION,
     tools: runtime.declarations.map((declaration) => declaration.name),
-    policies: BUILTIN_POLICY_IDS,
+    policies: KNOWN_POLICY_IDS,
     dataDir: config.dataDir === "" ? "(unset)" : config.dataDir,
     maxRunMs: config.maxRunMs,
   });

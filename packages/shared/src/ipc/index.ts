@@ -10,6 +10,7 @@ import type {
   ApprovalResponse,
   AgentPromptPart,
   AgentRunRequest,
+  AgentRunResult,
   ChatMessage,
   ChatMessageAppendInput,
   ChatSession,
@@ -131,8 +132,25 @@ export interface IpcCommandMap {
       permissionMode?: AgentPermissionMode;
       /** Bounds what the run may accomplish; enforced by the permission engine. */
       mode?: AgentRunMode;
+      /**
+       * Which policy must decide the run. Forwarded verbatim — Rust does not know what
+       * a policy id means, and the sidecar's registry is what rejects an unknown one.
+       * Omitted -> the sidecar derives the policy from the target environment.
+       */
+      policyId?: string;
     };
-    response: { runId: string };
+    /**
+     * `started` says whether *this* call began execution. It is the sidecar's own
+     * answer, forwarded rather than assumed: an admitted-but-not-executed message
+     * (`resume: false`) and a retry of an already-running one both answer `false`.
+     *
+     * `result` is present exactly when the request asked for `delivery: "sync"`, and
+     * carrying it is the whole point of that mode — the call already waits for the run
+     * to reach a terminal state, and the run's outcome is what it was waiting for. For
+     * `async` the same information arrives as the `agent.completed` / `agent.failed`
+     * notification instead.
+     */
+    response: { runId: string; started: boolean; result?: AgentRunResult };
   };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
   agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };

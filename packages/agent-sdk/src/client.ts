@@ -14,6 +14,7 @@ import {
   RPC_ERROR,
   isJsonRpcResponse,
   type AgentRunRequest,
+  type AgentRunResult,
   type AgentStreamEvent,
   type ApprovalResponse,
   type InitializeParams,
@@ -42,7 +43,20 @@ export type AgentMethodResults = {
   "system.describe": SystemDescribeResult;
   "system.ping": { pong: string; agentPid: number };
   "tools.list": { tools: ToolDeclaration[] };
-  "agent.run.start": { runId: string; started: boolean; duplicate?: boolean };
+  /**
+   * `started` says whether this call began execution (an admitted-but-not-executed
+   * message and a retry of a run already under way both answer `false`); `duplicate`
+   * marks the retry, `resumed` marks the call that started a previously admitted
+   * message, and `result` carries the run's outcome when the request asked for
+   * `delivery: "sync"`.
+   */
+  "agent.run.start": {
+    runId: string;
+    started: boolean;
+    duplicate?: boolean;
+    resumed?: boolean;
+    result?: AgentRunResult;
+  };
   "agent.run.stop": { stopped: boolean };
   "agent.approval.respond": { accepted: boolean };
 };
@@ -148,7 +162,7 @@ export class AgentClient {
     return this.request(AGENT_METHODS.listTools, {}).then((result) => result.tools);
   }
 
-  startRun(run: AgentRunRequest): Promise<{ runId: string; started: boolean; duplicate?: boolean }> {
+  startRun(run: AgentRunRequest): Promise<AgentMethodResults["agent.run.start"]> {
     return this.request(AGENT_METHODS.runStart, run);
   }
 

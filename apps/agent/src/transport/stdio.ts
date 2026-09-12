@@ -38,6 +38,9 @@ export function startStdioRpc(deps: {
     process.stdout.write(encodeFrame(frame));
   };
 
+  // 响应帧在 handler 结算时才写出。于是「会等待的」handler（`delivery: "sync"` 的
+  // run.start 要等到运行结束）写出的响应必然排在它自己触发的那串通知之后 —— 响应最后
+  // 到是合法的，因为匹配靠 id：响应帧带 id、通知帧不带，desktop 侧按 id 找 pending。
   const respond = async (request: JsonRpcRequest): Promise<void> => {
     try {
       const result = await deps.router.handle(request);

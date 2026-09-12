@@ -21,7 +21,14 @@ const ApprovalRequestSchema = z.strictObject({
   expiresAt: TimestampSchema,
 });
 
-const AgentRunResultSchema = z.strictObject({
+/**
+ * The loop's outcome for one run.
+ *
+ * Exported because it is not only embedded in `agent.completed`: a `delivery: "sync"`
+ * run request answers with the same object, and that crossing (sidecar -> Rust ->
+ * IPC) needs the same runtime gate as the streaming one.
+ */
+export const AgentRunResultSchema = z.strictObject({
   runId: RunIdSchema,
   state: AgentRunStateSchema,
   text: z.string().max(200_000),
@@ -73,6 +80,10 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     riskLevel: RiskLevelSchema,
     decision: PermissionModeSchema,
     approvedBy: PermissionApprovalSourceSchema.optional(),
+    // Optional on purpose: the loop always sets it, but an older sidecar build does
+    // not send it, and the UI has to keep parsing the events of whatever sidecar is
+    // running (same reasoning as `traceId` on `AgentRunResultSchema`).
+    policyId: z.string().trim().min(1).max(256).optional(),
     at: TimestampSchema,
   }),
   "agent.tool_result": z.strictObject({
@@ -87,6 +98,8 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     riskLevel: RiskLevelSchema,
     decision: PermissionModeSchema,
     approvedBy: PermissionApprovalSourceSchema.optional(),
+    /** The policy this decision was made under; see `agent.tool_call` above. */
+    policyId: z.string().trim().min(1).max(256).optional(),
     status: z.enum(TOOL_RESULT_STATUSES),
     outputSummary: z.string().max(4_000),
     error: z.string().max(4_000).optional(),

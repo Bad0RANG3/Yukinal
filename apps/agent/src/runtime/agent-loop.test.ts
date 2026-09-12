@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
 
-import { RPC_ERROR, type AgentRunState, type AgentStreamEvent } from "@yukinal/shared";
+import { DEVELOPMENT_POLICY, PRODUCTION_POLICY, RPC_ERROR, type AgentRunState, type AgentStreamEvent } from "@yukinal/shared";
 import type { LLMProvider } from "@yukinal/provider-sdk";
 
 import { createEmptyContextSource } from "../context/empty-source.js";
@@ -263,4 +263,155 @@ test("approval expiry is streamed and does not leave a live approval", async () 
   assert(rejected && rejected.type === "agent.tool_result");
   assert.equal(rejected.outputSummary, "审批已过期");
   assert.match(result.text, /continued after expiry/);
+});
+
+/** One tool-calling turn followed by a text turn; a fresh instance per run. */
+function writeThenAnswer(): LLMProvider {
+  let turns = 0;
+  return {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      turns += 1;
+      if (turns === 1) {
+        yield { type: "tool_call", call: { id: "call_write", name: "write__test", arguments: {} } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "写入已处理" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+}
+
+/**
+ * `policyId` is honoured per call, and it is visible on the stream.
+ *
+ * Same tool declaration, same development target, same run mode — the only difference
+ * between the two runs below is the policy the caller named. The environment default for
+ * `development` auto-approves an ordinary write; `policy.production` asks. Asserting on
+ * the emitted `agent.tool_call` is the whole path rather than the engine alone: it is
+ * what the UI renders and what the audit row is written from.
+ */
+test("a requested policy decides the run, and the event stream says which one", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "write.test",
+    description: "Test write",
+    risk: "medium",
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({}),
+    execute: async () => ({ ok: true }),
+  });
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+  const request = {
+    sessionId: "ses_policy",
+    prompt: "write the config file",
+    target: { host: "remote" as const, serverId: "srv_dev", environment: "development" as const },
+  };
+
+  // No policy named: the engine's environment default applies, as it always has.
+  const defaultEvents: AgentStreamEvent[] = [];
+  const defaultRun = await loop.start(
+    { ...request, runId: "run_env_default" },
+    { emit: (event) => defaultEvents.push(event) },
+    writeThenAnswer(),
+  );
+  assert.equal(defaultRun.state, "completed", JSON.stringify(defaultRun));
+  const defaultCall = defaultEvents.find((event) => event.type === "agent.tool_call");
+  assert(defaultCall && defaultCall.type === "agent.tool_call");
+  assert.equal(defaultCall.policyId, DEVELOPMENT_POLICY.id);
+  assert.equal(defaultCall.decision, "auto");
+
+  // The same call, under the policy the caller named instead.
+  const overrideEvents: AgentStreamEvent[] = [];
+  let resolveApproval: ((approval: Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>["approval"]) => void) | undefined;
+  const approval = new Promise<Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>["approval"]>((resolve) => {
+    resolveApproval = resolve;
+  });
+  const override = loop.start(
+    { ...request, runId: "run_policy_override", policyId: PRODUCTION_POLICY.id },
+    {
+      emit: (event) => {
+        overrideEvents.push(event);
+        if (event.type === "agent.waiting_approval") resolveApproval?.(event.approval);
+      },
+    },
+    writeThenAnswer(),
+  );
+
+  const pending = await approval;
+  const overrideCall = overrideEvents.find((event) => event.type === "agent.tool_call");
+  assert(overrideCall && overrideCall.type === "agent.tool_call");
+  assert.equal(overrideCall.policyId, PRODUCTION_POLICY.id);
+  // The development default said `auto` for this very call; asking under production must
+  // change the decision, not merely the label on it.
+  assert.equal(overrideCall.decision, "ask");
+  assert.equal(overrideCall.riskLevel, defaultCall.riskLevel);
+
+  assert.equal(
+    loop.respondApproval({ approvalId: pending.approvalId, runId: "run_policy_override", decision: "approve_once", respondedAt: new Date().toISOString() }),
+    true,
+  );
+  const overrideRun = await override;
+  assert.equal(overrideRun.state, "completed", JSON.stringify(overrideRun));
+  const overrideResult = overrideEvents.find((event) => event.type === "agent.tool_result");
+  assert(overrideResult && overrideResult.type === "agent.tool_result");
+  assert.equal(overrideResult.policyId, PRODUCTION_POLICY.id);
+  assert.equal(overrideResult.status, "success");
+});
+
+test("an unknown policyId fails the run before it touches the provider", async () => {
+  const loop = new AgentLoop({
+    registry: new ToolRegistry(),
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+  let streamed = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      streamed += 1;
+      yield { type: "done", finishReason: "stop" };
+    },
+  };
+  const events: AgentStreamEvent[] = [];
+
+  await assert.rejects(
+    loop.start(
+      {
+        runId: "run_unknown_policy",
+        sessionId: "ses_unknown_policy",
+        prompt: "check the api",
+        policyId: "policy.terraform",
+      },
+      { emit: (event) => events.push(event) },
+      provider,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof RpcFailure, String(error));
+      assert.equal(error.code, RPC_ERROR.INVALID_PARAMS);
+      assert.match(error.message, /policy\.terraform/);
+      return true;
+    },
+  );
+
+  // "Before any provider call" is the point: no `agent.started`, no request, nothing the
+  // caller could mistake for a run that had begun.
+  assert.deepEqual(events, []);
+  assert.equal(streamed, 0);
+  assert.equal(loop.pendingApprovals.length, 0);
 });

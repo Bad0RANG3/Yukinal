@@ -45,6 +45,31 @@ test("the exited agent_status variant parses too", () => {
   assert.equal(parsed.success, true);
 });
 
+test("a sync run.start response carries the run's result", () => {
+  // The async fixture (`agent_run_start.json`) is the one the per-command loop above
+  // checks, and it has no `result` — which is correct for `delivery: "async"`. This is
+  // the other half of the pair: the shape a `delivery: "sync"` call answers with, and
+  // the reason that mode is worth waiting for. It is not covered by the loop above
+  // because there is only one fixture per command name.
+  const parsed = IPC_SCHEMAS.agent_run_start.response.safeParse(fixture("agent_run_start_sync"));
+  assert.equal(parsed.success, true, "the sync response must parse");
+  const response = parsed.data as { started: boolean; result?: { state: string; steps: number } };
+  assert.equal(response.started, true);
+  assert.equal(response.result?.state, "completed");
+  assert.equal(response.result?.steps, 3);
+});
+
+test("a result on a sync response is validated, not passed through", () => {
+  // The result object reaches the UI through a response frame, so it does not pass the
+  // event gate. If a sidecar ever sends a malformed one, this is where it has to fail.
+  const malformed = {
+    runId: "run_20260101",
+    started: true,
+    result: { runId: "run_20260101", state: "not-a-state", text: "", steps: 0, toolCalls: 0 },
+  };
+  assert.equal(IPC_SCHEMAS.agent_run_start.response.safeParse(malformed).success, false);
+});
+
 test("responses are strict: a serde drift (extra field) must fail, not be stripped", () => {
   const drifted = { ...(fixture("agent_status") as Record<string, unknown>), toolCount: 1, os: "klingon" };
   assert.equal(AgentStatusSchema.safeParse(drifted).success, false);

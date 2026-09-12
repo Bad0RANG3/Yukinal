@@ -19,7 +19,7 @@ import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
 import { ServerLogsResponseSchema } from "./log.js";
 import { AgentPermissionModeSchema, AgentRunModeSchema, ApprovalResponseSchema } from "./permission.js";
-import { AGENT_EVENT_MEMBER_SCHEMAS } from "./agent.js";
+import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema } from "./agent.js";
 import {
   ChatMessageAppendResponseSchema,
   ChatMessageRoleSchema,
@@ -204,8 +204,20 @@ export const IPC_SCHEMAS = {
       permissionMode: AgentPermissionModeSchema.optional(),
       /** Bounds what the run may accomplish; enforced by the permission engine. */
       mode: AgentRunModeSchema.optional(),
+      /** Forwarded verbatim to the sidecar, which owns what a policy id means. */
+      policyId: z.string().trim().min(1).max(256).optional(),
     }),
-    response: z.strictObject({ runId: z.string().min(1) }),
+    /**
+     * `result` is present only for `delivery: "sync"`; it is the run's outcome, and the
+     * same object the `agent.completed` notification carries. Validated here as well as
+     * there, because it reaches the UI through a response frame rather than the event
+     * channel and therefore does not pass the event gate.
+     */
+    response: z.strictObject({
+      runId: z.string().min(1),
+      started: z.boolean(),
+      result: AgentRunResultSchema.optional(),
+    }),
   },
   agent_run_stop: {
     params: z.strictObject({ runId: z.string().trim().min(1).max(256) }),

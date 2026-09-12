@@ -2,6 +2,7 @@
  * Agent Loop — the run is executed here, end to end.
  *
  *   user message
+ *     -> policy resolution (the requested policyId, else the environment default)
  *     -> context build
  *     -> provider.stream (real OpenAI-compatible endpoint, ADR 0003/0004 name mapping)
  *     -> tool calls?
@@ -36,6 +37,7 @@ import { createProviderNameIndex, type LLMProvider, type LlmMessage, type Stream
 
 import { ContextEngine } from "../context/context-engine.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
+import { resolveRequestedPolicy } from "../permissions/policy-registry.js";
 import { RpcFailure } from "../errors.js";
 import { redactSensitiveText, redactSensitiveValue } from "../security/sensitive-data.js";
 import { TraceRecorder } from "../trace/trace-recorder.js";
@@ -201,6 +203,14 @@ export class AgentLoop {
       throw new RpcFailure(RPC_ERROR.NOT_IMPLEMENTED, "agent loop requires a configured LLM provider");
     }
 
+    // Resolved before anything else happens in this run: before the run gets a token,
+    // before the first `agent.started` is emitted and before the provider is touched.
+    // A run that names a policy must either run under *that* policy or not run at all —
+    // a fallback to the environment default would silently execute the caller's request
+    // under a policy it did not ask for, in whichever direction that environment
+    // happens to point.
+    const policy = resolveRequestedPolicy(request.policyId);
+
     const { emit, signal } = hooks;
     const runId = request.runId;
     if (this.#tokensByRun.has(runId)) {
@@ -240,6 +250,12 @@ export class AgentLoop {
       riskLevel: PermissionDecision["finalRisk"];
       decision: PermissionDecision["outcome"];
       approvedBy?: PermissionApprovalSource;
+      /**
+       * The policy the decision was made under, taken from the decision itself rather
+       * than from the request: the engine is the authority on which policy it applied,
+       * and this is the field that makes that observable from the event stream.
+       */
+      policyId: PermissionDecision["policyId"];
     }): void => {
       emit({
         type: "agent.tool_call",
@@ -253,6 +269,7 @@ export class AgentLoop {
         riskLevel: call.riskLevel,
         decision: call.decision,
         approvedBy: call.approvedBy,
+        policyId: call.policyId,
         at: now(),
       });
     };
@@ -267,6 +284,7 @@ export class AgentLoop {
       riskLevel: PermissionDecision["finalRisk"];
       decision: PermissionDecision["outcome"];
       approvedBy?: PermissionApprovalSource;
+      policyId: PermissionDecision["policyId"];
       status: "success" | "failed" | "cancelled";
       outputSummary: string;
       error?: string;
@@ -286,6 +304,7 @@ export class AgentLoop {
         riskLevel: result.riskLevel,
         decision: result.decision,
         approvedBy: result.approvedBy,
+        policyId: result.policyId,
         status: result.status,
         outputSummary: redactSensitiveText(result.outputSummary),
         error: result.error === undefined ? undefined : redactSensitiveText(result.error),
@@ -395,6 +414,10 @@ export class AgentLoop {
             input: call.call.arguments,
             permissionMode: request.permissionMode,
             mode: request.mode,
+            // `undefined` (no policy named in the request) keeps the engine's own
+            // environment -> policy default; a named policy was resolved above and is
+            // the same one for every call of this run.
+            policy,
           });
           assistantToolCalls.push({
             id: call.call.id,
@@ -422,6 +445,7 @@ export class AgentLoop {
             riskLevel: decision.finalRisk,
             decision: decision.outcome,
             approvedBy: decision.approvedBy,
+            policyId: decision.policyId,
           });
 
           let ticket: ExecutionTicket;
@@ -468,6 +492,7 @@ export class AgentLoop {
                 target,
                 riskLevel: decision.finalRisk,
                 decision: decision.outcome,
+                policyId: decision.policyId,
                 status: "failed",
                 outputSummary: rejectionSummary,
                 error: approvalOutcome === "expired" ? "approval expired" : decision.reason,
@@ -501,6 +526,7 @@ export class AgentLoop {
               target,
               riskLevel: decision.finalRisk,
               decision: decision.outcome,
+              policyId: decision.policyId,
               status: "failed",
               outputSummary: "策略禁止",
               error: decision.reason,
@@ -547,6 +573,7 @@ export class AgentLoop {
             riskLevel: decision.finalRisk,
             decision: decision.outcome,
             approvedBy: ticket.kind === "policy_auto" ? "policy" : ticket.kind === "agent_auto" ? "agent" : "user",
+            policyId: decision.policyId,
             status: result.status === "success" ? "success" : result.status === "cancelled" ? "cancelled" : "failed",
             outputSummary: redactSensitiveText(result.outputSummary ?? summarize(result.output)),
             error: result.error?.message === undefined ? undefined : redactSensitiveText(result.error.message),

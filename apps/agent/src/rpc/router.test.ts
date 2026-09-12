@@ -6,6 +6,8 @@ import {
   AGENT_METHODS,
   YUKINAL_RPC_VERSION,
   RPC_ERROR,
+  type AgentRunResult,
+  type AgentStreamEvent,
   type JsonRpcRequest,
   type SystemDescribeResult,
 } from "@yukinal/shared";
@@ -37,6 +39,67 @@ function silentLogger(): AgentLogger {
   const noop = (): void => {};
   return { debug: noop, info: noop, warn: noop, error: noop, child: () => silentLogger() };
 }
+
+/**
+ * A real OpenAI-compatible SSE endpoint that answers every request with one text turn
+ * and remembers the bodies it was sent.
+ *
+ * These admission tests must observe whether a run happened at all, and the only honest
+ * witness of that is the model endpoint: the number of requests it received. Reusing the
+ * production provider client (rather than a stub provider) keeps the test on the wire
+ * format the sidecar actually speaks.
+ */
+async function mockLlm(text: string): Promise<{ baseUrl: string; bodies: string[]; close(): void }> {
+  const bodies: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk.toString();
+    bodies.push(body);
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: "stop" }] })}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    bodies,
+    close: () => {
+      server.closeAllConnections();
+      server.close();
+    },
+  };
+}
+
+interface NotificationCapture {
+  events: AgentStreamEvent[];
+  waitFor(type: AgentStreamEvent["type"]): Promise<AgentStreamEvent>;
+}
+
+/** The `agent.stream` sink the transport would attach, so a test can watch the wire. */
+function captureNotifications(runtime: Runtime): NotificationCapture {
+  const events: AgentStreamEvent[] = [];
+  const waiting = new Map<string, Array<(event: AgentStreamEvent) => void>>();
+  runtime.router.attachNotifications((_method, params) => {
+    const event = params as AgentStreamEvent;
+    events.push(event);
+    const resolvers = waiting.get(event.type);
+    if (!resolvers) return;
+    waiting.delete(event.type);
+    for (const resolve of resolvers) resolve(event);
+  });
+  return {
+    events,
+    waitFor: (type) =>
+      new Promise<AgentStreamEvent>((resolve) => {
+        waiting.set(type, [...(waiting.get(type) ?? []), resolve]);
+      }),
+  };
+}
+
+/** Long enough for the router's deferred run to have started, had it been started. */
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
 
 for (const dialect of ["chat", "responses"] as const) {
   test(`provider test makes a real ${dialect} request without tools or workspace content`, async () => {
@@ -250,6 +313,169 @@ test("agent.run.start rejects a duplicate run id while the first run is active",
     runtime.router.handle(request(AGENT_METHODS.runStart, params, 2)),
     (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,
   );
+});
+
+test("resume: false admits the message without running it", async (t) => {
+  const llm = await mockLlm("this answer must never be produced");
+  t.after(() => llm.close());
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const capture = captureNotifications(runtime);
+
+  const admitted = await runtime.router.handle(
+    request(AGENT_METHODS.runStart, {
+      runId: "run_held",
+      sessionId: "ses_held",
+      messageId: "msg_held",
+      prompt: "重启 staging 的 nginx",
+      resume: false,
+      providerConfig: { kind: "openai-compatible", baseUrl: llm.baseUrl, model: "m" },
+    }),
+  );
+
+  // The exact answer matters: nothing was started, so there is no `resumed`, no
+  // `duplicate` and no result to report.
+  assert.deepEqual(admitted, { runId: "run_held", started: false });
+  // Nothing ran, so nothing may be observable: no event, and no model call.
+  await settle();
+  assert.deepEqual(capture.events, []);
+  assert.deepEqual(llm.bodies, []);
+});
+
+test("resume: false without a messageId is refused instead of admitting nothing", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const capture = captureNotifications(runtime);
+
+  // Admission is keyed by message identity. Answering `started: false` without recording
+  // anything would leave the caller unable to tell whether it may resume, or under which
+  // run id — so this is a param error, not a silent no-op.
+  await assert.rejects(
+    runtime.router.handle(
+      request(AGENT_METHODS.runStart, {
+        runId: "run_anonymous_hold",
+        sessionId: "ses_anonymous",
+        prompt: "hold this",
+        resume: false,
+        providerConfig: { kind: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "m" },
+      }),
+    ),
+    (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS && /messageId/.test(error.message),
+  );
+  await settle();
+  assert.deepEqual(capture.events, []);
+});
+
+test("a later resume starts the admitted message once, under the admitted run id", async (t) => {
+  const llm = await mockLlm("admitted answer");
+  t.after(() => llm.close());
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const capture = captureNotifications(runtime);
+
+  const params = {
+    sessionId: "ses_resume_admitted",
+    messageId: "msg_resume_admitted",
+    prompt: "部署这次改动",
+    providerConfig: { kind: "openai-compatible" as const, baseUrl: llm.baseUrl, model: "m" },
+  };
+  const admitted = (await runtime.router.handle(
+    request(AGENT_METHODS.runStart, { ...params, runId: "run_admitted", resume: false }, 1),
+  )) as { runId: string; started: boolean };
+  assert.deepEqual(admitted, { runId: "run_admitted", started: false });
+
+  const completed = capture.waitFor("agent.completed");
+  // The resuming call carries a different runId on purpose: the message's identity is
+  // the admitted one, and that is the id the run must have.
+  const resumed = (await runtime.router.handle(
+    request(AGENT_METHODS.runStart, { ...params, runId: "run_resuming_call", resume: true }, 2),
+  )) as { runId: string; started: boolean; resumed?: boolean; duplicate?: boolean };
+  assert.deepEqual(resumed, { runId: "run_admitted", started: true, resumed: true });
+
+  // A third call for the same message — the shape a transport retry takes — must not
+  // fork a second run, whether the first one is still in flight or already finished.
+  const retry = await runtime.router.handle(request(AGENT_METHODS.runStart, { ...params, runId: "run_third_call" }, 3));
+  assert.deepEqual(retry, { runId: "run_admitted", started: false, duplicate: true });
+
+  const finished = (await completed) as Extract<AgentStreamEvent, { type: "agent.completed" }>;
+  assert.equal(finished.result.runId, "run_admitted");
+  assert.equal(finished.result.state, "completed");
+  assert.equal(llm.bodies.length, 1, "three calls for one message must produce exactly one run");
+});
+
+test("delivery: sync answers with the run result, after the events have streamed", async (t) => {
+  const llm = await mockLlm("同步运行的回答");
+  t.after(() => llm.close());
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+
+  // One ordered log rather than two collectors: the property under test is *when* the
+  // response arrives relative to the run's notifications.
+  const observed: string[] = [];
+  runtime.router.attachNotifications((_method, params) => {
+    observed.push(`event:${(params as AgentStreamEvent).type}`);
+  });
+
+  const response = (await runtime.router.handle(
+    request(AGENT_METHODS.runStart, {
+      runId: "run_sync",
+      sessionId: "ses_sync",
+      prompt: "只回答一句话",
+      delivery: "sync",
+      providerConfig: { kind: "openai-compatible", baseUrl: llm.baseUrl, model: "m" },
+    }),
+  )) as { runId: string; started: boolean; result?: AgentRunResult };
+  observed.push("response");
+
+  assert.equal(response.started, true);
+  assert.equal(response.result?.state, "completed");
+  assert.equal(response.result?.runId, "run_sync");
+  assert.match(response.result?.text ?? "", /同步运行的回答/);
+  // A sync response necessarily comes last — the transport matches frames by request id,
+  // so the events of the run are delivered while the caller waits. This is the ordering
+  // the router documents, and the one an async call deliberately does not have.
+  assert.equal(observed.at(-1), "response", observed.join(", "));
+  assert.deepEqual(observed, ["event:agent.started", "event:agent.thinking", "event:agent.completed", "response"]);
+  assert.equal(llm.bodies.length, 1);
+});
+
+test("an unknown policyId is refused and starts nothing", async (t) => {
+  const llm = await mockLlm("must not run");
+  t.after(() => llm.close());
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const capture = captureNotifications(runtime);
+
+  const params = {
+    runId: "run_policy",
+    sessionId: "ses_policy",
+    prompt: "重启生产环境",
+    providerConfig: { kind: "openai-compatible" as const, baseUrl: llm.baseUrl, model: "m" },
+  };
+  await assert.rejects(
+    runtime.router.handle(request(AGENT_METHODS.runStart, { ...params, policyId: "policy.terraform" }, 1)),
+    (error: unknown) => {
+      assert.ok(error instanceof RpcFailure, String(error));
+      assert.equal(error.code, RPC_ERROR.INVALID_PARAMS);
+      // The report names what was rejected *and* what exists: a fallback to the
+      // environment default would have run this request under a policy nobody asked for.
+      assert.match(error.message, /policy\.terraform/);
+      assert.match(error.message, /policy\.production/);
+      return true;
+    },
+  );
+  await settle();
+  assert.deepEqual(capture.events, []);
+  assert.deepEqual(llm.bodies, []);
+
+  // The refusal left nothing behind: the same runId is still usable, which it would not
+  // be if the rejected call had registered itself as in flight.
+  const completed = capture.waitFor("agent.completed");
+  const accepted = (await runtime.router.handle(request(AGENT_METHODS.runStart, params, 2))) as { runId: string; started: boolean };
+  assert.equal(accepted.started, true);
+  assert.equal(accepted.runId, "run_policy");
+  await completed;
+  assert.equal(llm.bodies.length, 1);
 });
 
 test("unknown methods are rejected", async () => {

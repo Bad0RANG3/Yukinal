@@ -25,11 +25,13 @@ import {
 import {
   AGENT_NOTIFICATIONS,
   type AgentRunRequest,
+  type AgentRunResult,
   type AgentStreamEvent,
   type ApprovalResponse,
   type RuntimeProviderConfig,
 } from "@yukinal/shared";
 import { AGENT_VERSION, type AgentLogger } from "../config.js";
+import { resolveRequestedPolicy } from "../permissions/policy-registry.js";
 import { AgentLoop } from "../runtime/agent-loop.js";
 import { RpcFailure } from "../errors.js";
 import { OpenAiCompatibleProvider } from "../providers/openai-compatible.js";
@@ -47,12 +49,39 @@ export const IMPLEMENTATION_STATUS: Record<string, boolean> = {
   [AGENT_METHODS.providerTest]: true,
 };
 
+/**
+ * `agent.run.start`'s answer (mirrored by `AgentMethodResults` in `@yukinal/agent-sdk`).
+ *
+ * `runId` is always the identity the run has, which for a resume is the admitted one
+ * rather than the id the resuming call happened to carry. `result` is present exactly
+ * when the request asked for `delivery: "sync"`.
+ */
+interface RunStartResponse {
+  runId: string;
+  started: boolean;
+  duplicate?: boolean;
+  resumed?: boolean;
+  result?: AgentRunResult;
+}
+
 export class RpcRouter {
   #initialized = false;
   #activeRuns = new Set<string>();
 
-  /** OpenCode-style admission receipts: retries of one message never fork a second run. */
-  #admissions = new Map<string, { sessionId: string; prompt: string; runId: string; completed: boolean }>();
+  /**
+   * OpenCode-style admission receipts: retries of one message never fork a second run.
+   *
+   * A receipt outlives the call that created it, because a message identity is what a
+   * transport retries against. `started` records whether execution ever began (an
+   * admitted message with `resume: false` has not), and `completed` is the eviction
+   * predicate — an admitted message is deliberately *not* completed, since evicting it
+   * would let a later resume open a second, differently-named run for a message the
+   * runner already accepted.
+   */
+  #admissions = new Map<
+    string,
+    { sessionId: string; prompt: string; runId: string; started: boolean; completed: boolean }
+  >();
 
   #notificationSink: ((method: string, params: unknown) => void) | undefined;
 
@@ -84,39 +113,8 @@ export class RpcRouter {
         return { tools: this.deps.registry.list() } satisfies { tools: ToolDeclaration[] };
       case AGENT_METHODS.describe:
         return this.#describe();
-      case AGENT_METHODS.runStart: {
-        const parsed = parseOrThrow(AgentRunRequestSchema, request.params) as AgentRunRequest;
-        const prompt = requestPrompt(parsed);
-        if (parsed.messageId) {
-          const admitted = this.#admissions.get(parsed.messageId);
-          if (admitted) {
-            if (admitted.sessionId !== parsed.sessionId || admitted.prompt !== prompt) {
-              throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `messageId "${parsed.messageId}" was already admitted with different content`);
-            }
-            return { runId: admitted.runId, started: true, duplicate: true };
-          }
-        }
-        if (this.#activeRuns.has(parsed.runId)) {
-          throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `runId "${parsed.runId}" is already running`);
-        }
-        const provider = buildProvider(parsed.providerConfig);
-        this.#activeRuns.add(parsed.runId);
-        // run 是流式的：先回 runId（响应帧必须先于任何 agent.* 通知），
-        // 过程全走 agent.stream 通知。timers 保证响应先写、事件后到。
-        if (parsed.messageId) {
-          this.#admissions.set(parsed.messageId, {
-            sessionId: parsed.sessionId,
-            prompt,
-            runId: parsed.runId,
-            completed: false,
-          });
-          this.#pruneAdmissions();
-        }
-        setTimeout(() => {
-          void this.#spinRun(parsed, provider);
-        }, 0);
-        return { runId: parsed.runId, started: true };
-      }
+      case AGENT_METHODS.runStart:
+        return this.#runStart(request.params);
       case AGENT_METHODS.runStop: {
         const { runId } = parseOrThrow(AgentRunStopSchema, request.params);
         return { stopped: this.deps.loop.stop(runId) };
@@ -153,14 +151,158 @@ export class RpcRouter {
     }
   }
 
-  /** 后台跑 run：所有可见输出都是 agent.* 通知。 */
-  async #spinRun(parsed: AgentRunRequest, provider: OpenAiCompatibleProvider): Promise<void> {
+  /**
+   * `agent.run.start`: admit one message, then either execute it or not.
+   *
+   * The response answers three separate questions that used to be collapsed into one
+   * `{ runId, started: true }`:
+   *
+   *   - `started` — did *this* call begin execution? An admitted-but-not-executed
+   *     message (`resume: false`) and a retry of a message already under way both
+   *     answer `false`, because neither started anything.
+   *   - `duplicate` — was the message already admitted, so that no new run was opened?
+   *     This is the property that keeps a transport retry from forking a second run.
+   *   - `resumed` — did this call start a run that an earlier `resume: false` had
+   *     admitted? The admitted `runId` is reused, so the caller's later retries of that
+   *     same message keep collapsing onto one run.
+   *
+   * `delivery: "sync"` additionally holds the response until the run reaches a terminal
+   * state and returns its result. The wait is bounded by the loop's own `maxRunMs`
+   * timer, not by anything added here.
+   */
+  async #runStart(params: unknown): Promise<RunStartResponse> {
+    const parsed = parseOrThrow(AgentRunRequestSchema, params) as AgentRunRequest;
+    // `policyId` is a param, and params are validated here. This is not only a shape
+    // check: an async run is spun *after* this call has answered, so a policy the
+    // registry does not know would otherwise be reported as `started: true` and only
+    // surface later as an `agent.failed` notification — a run the caller was told had
+    // started, which never did. Throwing here makes it this request's `INVALID_PARAMS`,
+    // before any receipt, before any registration.
+    //
+    // The loop resolves the requested policy again for the run itself: that precondition
+    // belongs to the loop, which must hold it for every caller rather than trusting this
+    // one to have checked.
+    const requestedPolicy = resolveRequestedPolicy(parsed.policyId);
+    this.deps.log.debug("run policy", {
+      runId: parsed.runId,
+      policyId: requestedPolicy?.id ?? "(environment default)",
+    });
+
+    const prompt = requestPrompt(parsed);
+    const admission = parsed.messageId ? this.#admissions.get(parsed.messageId) : undefined;
+
+    if (admission) {
+      if (admission.sessionId !== parsed.sessionId || admission.prompt !== prompt) {
+        throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `messageId "${parsed.messageId}" was already admitted with different content`);
+      }
+      // Already executing, or finished: this call may not open a second run for a
+      // message the runner has accepted once. A `sync` retry is answered immediately
+      // for the same reason — the run it duplicates belongs to another call, and that
+      // call's response is where the result is delivered.
+      if (admission.started) return { runId: admission.runId, started: false, duplicate: true };
+      // Admitted and never executed. A repeat of `resume: false` has nothing to do —
+      // the admission is already recorded and already idempotent.
+      if (parsed.resume === false) return { runId: admission.runId, started: false, duplicate: true };
+      // The resume. It runs under the admitted identity, not under the `runId` this
+      // call happens to carry: the receipt is keyed by message, and reusing its `runId`
+      // is what makes a later retry collapse onto this run instead of forking.
+      return this.#beginRun({ ...parsed, runId: admission.runId }, admission, true);
+    }
+
+    if (parsed.resume === false) {
+      // Admitted, not executed, no events. The receipt is recorded here and nowhere
+      // else: it is the whole of the promise `resume: false` makes, and it is what a
+      // later resume addresses.
+      //
+      // A message with no identity cannot be admitted this way. Admission is keyed by
+      // `messageId` (that is how a retry is recognised at all), so answering
+      // `{ started: false }` without a receipt would be a promise nothing can ever
+      // resume — the caller would have to guess whether anything was recorded.
+      if (!parsed.messageId) {
+        throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "resume: false requires messageId: the admission is keyed by it");
+      }
+      this.#admissions.set(parsed.messageId, {
+        sessionId: parsed.sessionId,
+        prompt,
+        runId: parsed.runId,
+        started: false,
+        completed: false,
+      });
+      this.#pruneAdmissions();
+      return { runId: parsed.runId, started: false };
+    }
+
+    return this.#beginRun(parsed, undefined, false);
+  }
+
+  /**
+   * Register the run and hand it to the loop.
+   *
+   * Everything that another `agent.run.start` could observe — the active-run entry and
+   * the receipt's `started` flag — is set *before* the first `await`, so a concurrent
+   * retry of the same run or message can never slip through this window.
+   */
+  async #beginRun(
+    parsed: AgentRunRequest,
+    admission: { started: boolean } | undefined,
+    resumed: boolean,
+  ): Promise<RunStartResponse> {
+    if (this.#activeRuns.has(parsed.runId)) {
+      throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `runId "${parsed.runId}" is already running`);
+    }
+    const provider = buildProvider(parsed.providerConfig);
+    this.#activeRuns.add(parsed.runId);
+    if (admission) admission.started = true;
+    if (parsed.messageId && !admission) {
+      this.#admissions.set(parsed.messageId, {
+        sessionId: parsed.sessionId,
+        prompt: requestPrompt(parsed),
+        runId: parsed.runId,
+        started: true,
+        completed: false,
+      });
+      this.#pruneAdmissions();
+    }
+
+    // A run streams: the response frame carries the identity, and everything the run
+    // observes arrives as `agent.stream` notifications. With `delivery: "async"` the
+    // response is written first — the `setTimeout` puts the run after this synchronous
+    // return, so `respond()` in the transport wins the race. With `delivery: "sync"`
+    // the response necessarily comes *last*, after every notification of the run.
+    // That reordering is safe on both sides of the transport: stdio writes each
+    // response when its handler settles (frames carry the request id, and notifications
+    // carry none), and Rust's supervisor keeps a pending map keyed by id, so a response
+    // arriving after other frames is matched, not mis-assigned.
+    if (parsed.delivery === "sync") {
+      const result = await this.#spinRun(parsed, provider);
+      return { runId: parsed.runId, started: true, result };
+    }
+    // The crash is already visible as `agent.failed` on the event stream, and this
+    // call's response has long been written, so there is nothing left to reject.
+    setTimeout(() => {
+      void this.#spinRun(parsed, provider).catch(() => undefined);
+    }, 0);
+    return resumed
+      ? { runId: parsed.runId, started: true, resumed: true }
+      : { runId: parsed.runId, started: true };
+  }
+
+  /**
+   * 后台跑 run：所有可见输出都是 agent.* 通知。
+   *
+   * 这里抛出来的是**契约**错误（provider 没配好、prompt 为空、runId 已在跑），不是「这次
+   * 运行失败了」——后者是 loop 自己返回的 `state: "failed"`。所以它被重新抛出：`sync`
+   * 调用方的响应帧要带上这个错误，而 `async` 调用方早已拿到响应，只能从它发出的
+   * `agent.failed` 通知里看到。
+   */
+  async #spinRun(parsed: AgentRunRequest, provider: OpenAiCompatibleProvider): Promise<AgentRunResult> {
     const emit = (event: AgentStreamEvent): void => {
       this.#notificationSink?.(AGENT_NOTIFICATIONS.stream, event);
     };
     try {
       const result = await this.deps.loop.start(parsed, { emit }, provider);
       this.deps.log.info("run finished", { runId: parsed.runId, state: result.state, steps: result.steps, toolCalls: result.toolCalls });
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.deps.log.error("run crashed", { runId: parsed.runId, error: message.slice(0, 300) });
@@ -170,6 +312,15 @@ export class RpcRouter {
         error: message,
         at: new Date().toISOString(),
       });
+      // The notification above is emitted for both delivery modes, and deliberately so:
+      // the event stream stays a complete record of what happened to a run no matter how
+      // the caller asked for the answer. The rethrow is what a `sync` caller additionally
+      // gets — its response frame carries the failure — while an `async` caller took its
+      // response before the run began and has only the notification. So a `sync` failure
+      // is visible twice, in two channels that mean different things; that is not a
+      // duplicate report, and suppressing the event for `sync` would punch a hole in the
+      // stream exactly when someone is debugging a failed run.
+      throw error;
     } finally {
       this.#activeRuns.delete(parsed.runId);
       if (parsed.messageId) {
@@ -184,7 +335,11 @@ export class RpcRouter {
 
   /**
    * Keep retry receipts bounded without evicting an active receipt. Evicting an
-   * in-flight message would make a transport retry start a second run.
+   * in-flight message would make a transport retry start a second run, and evicting an
+   * admitted-but-not-yet-resumed one would make the later resume open a run under a new
+   * id instead of the admitted one. Only `completed` receipts — runs that reached a
+   * terminal state — are evictable, so the map is bounded by completed receipts plus
+   * whatever is admitted or in flight.
    */
   #pruneAdmissions(): void {
     const limit = 256;
