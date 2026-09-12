@@ -116,7 +116,7 @@ MCP Server → MCP Client → 适配器 → ToolRegistry（外部工具变成 To
 
 **现在：** 这三条全部成立，而且**没有**新写一条 ADR（ADR 0014 是 MCP 接入本身的那条，不是「打破 Rust 拥有进程」的那条 —— 它没有打破任何东西）：进程由 `crates/core/src/mcp/` 的 `McpSupervisor` 派生与回收，`AppState.mcp` 持有它，agent 侧一行 `spawn` 都没有。`http` 被类型层面拒绝，出站网络策略仍然不存在，所以那一条仍然是「接入前必须先定义」的状态（也就是说：没有接入）。
 
-**已知缺口：** 宿主正常退出路径（`lib.rs` 的 `RunEvent::ExitRequested`）目前没有调用 `state.mcp.shutdown_all()`，MCP 子进程依赖 `kill_on_drop`；Windows 上强杀宿主不会执行 Drop，可能留下孤儿进程。这是本次未修的问题，写在 ADR 0014 的 Consequences 里。
+**已知缺口（已修）：** 宿主正常退出路径（`lib.rs` 的 `RunEvent::ExitRequested`）现在会调用 `state.mcp.shutdown_all()`，一台服务器关不掉不影响其余几台；`kill_on_drop` 只作为兜底。见 `CHANGELOG.md` 的「修复」一节。
 
 ### 8. 不要暗示已经可用
 
@@ -135,4 +135,4 @@ MCP Server → MCP Client → 适配器 → ToolRegistry（外部工具变成 To
 
 如果将来要让用户配置 MCP 服务器，需要同时增加：`IPC_COMMANDS` 中的命令、`packages/shared/src/schemas/` 下的 Zod schema、`fixtures/ipc/` 下的契约样例（Rust 与 TypeScript 两侧都会解析它们），以及 Rust 侧的命令与仓库方法。只加一侧会让这个契约在运行时不成立。
 
-**现在（这条只完成了一半，写清楚）：** Rust 侧（五个命令 + 仓库方法）与 Zod schema（`packages/shared/src/schemas/mcp.ts`）都已就位，界面代码也已写好（`apps/desktop/src/lib/mcp.ts`、`apps/desktop/src/features/settings/McpSettings.tsx`）。**但 `IPC_COMMANDS` / `IpcCommandMap` / `IPC_SCHEMAS` 里的五条 MCP 条目与 `fixtures/ipc/` 下的样例还没有加入** —— 那两个文件（`packages/shared/src/ipc/index.ts`、`packages/shared/src/schemas/ipc.ts`）由 IPC 契约的拥有者维护。后果就是这条约束预言的：`pnpm --filter @yukinal/desktop typecheck` 目前会报 5 个「`IPC_COMMANDS` 上没有 `mcpServerList` 之类的属性」。补齐之前，MCP 设置面板不会被挂进设置页。
+**现在：** 这条已经补齐，而且两侧都补齐了。Rust 侧五个命令与仓库方法、Zod schema（`packages/shared/src/schemas/mcp.ts`）、`IPC_COMMANDS` / `IpcCommandMap` / `IPC_SCHEMAS` 里的五条 MCP 条目、`fixtures/ipc/` 下的五份样例（`mcp_server_list/save/delete/start/stop.json`），以及界面代码（`apps/desktop/src/lib/mcp.ts`、`apps/desktop/src/features/settings/McpSettings.tsx`）都已就位，设置面板已挂进设置页（`RuntimeSettings.tsx`）。

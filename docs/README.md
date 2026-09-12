@@ -47,19 +47,19 @@
 
 | 编号 | 决定 | 状态 |
 | --- | --- | --- |
-| [0001](adr/0001-agent-runtime-as-node-sidecar.md) | Agent Runtime 作为独立 Node.js sidecar，由 Rust 拥有其生命周期 | Accepted |
+| [0001](adr/0001-agent-runtime-as-node-sidecar.md) | Agent Runtime 作为独立 Node.js sidecar，由 Rust 拥有其生命周期 | Accepted（「随应用分发受信任的 Node 运行时」由 [0013](adr/0013-installer-distribution.md) 取代；「不自动重启 sidecar」一节由 [0010](adr/0010-bounded-sidecar-recovery.md) 取代） |
 | [0002](adr/0002-ssh-backend-russh.md) | SSH 后端采用 russh，并封装在 `crates/ssh` 的 `SshBackend` 之后 | Accepted |
-| [0003](adr/0003-openai-compatible-only-for-mvp.md) | 只实现一个 OpenAI-compatible Provider，两种请求方言覆盖兼容端点 | Accepted（「只实现一个 Provider」一节由 [0011](adr/0011-native-anthropic-and-gemini-providers.md) 取代） |
-| [0004](adr/0004-tool-name-mapping.md) | 内部工具名用点号，Provider 边界用双下划线，映射集中在一处 | Accepted |
+| [0003](adr/0003-openai-compatible-only-for-mvp.md) | 只实现一个 OpenAI-compatible Provider，两种请求方言覆盖兼容端点 | Accepted（「只实现一个 Provider」一节由 [0011](adr/0011-native-anthropic-and-gemini-providers.md) 取代；「`reasoning_delta` 与 `usage` 不会产出」同样已失效） |
+| [0004](adr/0004-tool-name-mapping.md) | 内部工具名用点号，Provider 边界用双下划线，映射集中在一处 | Accepted（成本一节「未来接入 MCP」已落地，见 [0014](adr/0014-mcp-integration.md)） |
 | [0005](adr/0005-permission-engine-sole-decision-maker.md) | Permission Engine 是唯一的执行授权决策者 | Accepted |
-| [0006](adr/0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted |
-| [0007](adr/0007-monorepo-and-day-one-abstractions.md) | pnpm 与 Cargo 双 workspace，并优先稳定变化最频繁的边界 | Accepted |
-| [0008](adr/0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted（「不自动重启」一节由 [0010](adr/0010-bounded-sidecar-recovery.md) 取代） |
+| [0006](adr/0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted（`capabilities.mcp` 为 `false` 的理由由 [0014](adr/0014-mcp-integration.md) 取代；方法面已扩大：多了 `provider.test` 与 `host.mcp.catalog`） |
+| [0007](adr/0007-monorepo-and-day-one-abstractions.md) | pnpm 与 Cargo 双 workspace，并优先稳定变化最频繁的边界 | Accepted（Decision 的 `members` 列表漏了后加的 `crates/time`） |
+| [0008](adr/0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted（「不自动重启」一节由 [0010](adr/0010-bounded-sidecar-recovery.md) 取代，「随包分发 Node 运行时」与 `bundle.active: false` 由 [0013](adr/0013-installer-distribution.md) 取代；「退出记录保留到下一次成功启动」也不再成立） |
 | [0009](adr/0009-agent-permission-delegation.md) | Agent 权限使用显式的运行级委托，与运行模式互相正交 | Accepted |
 | [0010](adr/0010-bounded-sidecar-recovery.md) | 崩溃后的自动恢复有界，且只恢复能力、不复活状态 | Accepted |
 | [0011](adr/0011-native-anthropic-and-gemini-providers.md) | 增加原生 Anthropic 与 Gemini Provider，身份分支仍只允许发生在装配点 | Accepted |
 | [0012](adr/0012-host-key-trust-model.md) | 主机指纹默认 TOFU，但必须能人工核验、钉住与遗忘 | Accepted |
-| [0013](adr/0013-installer-distribution.md) | 启用安装包打包、随包分发 agent bundle，但使用用户自己的 Node | Accepted |
+| [0013](adr/0013-installer-distribution.md) | 启用安装包打包、随包分发 agent bundle，但使用用户自己的 Node | Accepted（正文 Alternatives 里指向「浏览器预览」那篇 ADR 的链接无效——这条决定从未被记成 ADR） |
 | [0014](adr/0014-mcp-integration.md) | MCP 接入：宿主独占进程与目录，agent 只注册与调用 | Accepted |
 
 ## 更新文档

@@ -1,6 +1,6 @@
 # ADR 0007 使用 monorepo 和早期就稳定的抽象边界
 
-Status: Accepted
+Status: Accepted（Decision 一节的 `members` 列表写于 `crates/time` 出现之前，漏了它：根 `Cargo.toml` 现在还有 `crates/time`（`yukinal-time`，时间戳的唯一实现，被 `crates/core` 与 `crates/terminal` 依赖）。它正好是成本一节那句话的现成例子 —— 新增成员要按同一套标准被审视，而不是只往列表里补一行。双 workspace、依赖集中声明、契约库先构建与 fixture 双向校验这些结论不变）
 Date: 2026-09-09
 
 ## Context

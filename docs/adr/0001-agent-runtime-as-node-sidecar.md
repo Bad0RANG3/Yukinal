@@ -1,6 +1,6 @@
 # ADR 0001 Agent Runtime 作为独立 Node.js sidecar
 
-Status: Accepted（「发布成安装包时必须随应用分发受信任的 Node 运行时」一处已由 [ADR 0013](0013-installer-distribution.md) 取代：安装包随包分发 agent bundle，但使用用户系统上的 Node。其余部分仍然有效）
+Status: Accepted（「发布成安装包时必须随应用分发受信任的 Node 运行时」一处已由 [ADR 0013](0013-installer-distribution.md) 取代：安装包随包分发 agent bundle，但使用用户系统上的 Node。另：「当前**不自动重启**崩溃的 sidecar」一节已由 [ADR 0010](0010-bounded-sidecar-recovery.md) 取代：supervisor 现在会在有界预算内自动重启，并把这几次重启（或预算已用尽）如实写进 `agent_status`，界面看到的是「重启过」而不是「无事发生」。所以上面那句「其余部分仍然有效」不再涵盖这一节；独立进程、stdio 协议、宿主独占原生能力与凭据这些结论仍然有效）
 Date: 2026-09-09
 
 ## Context

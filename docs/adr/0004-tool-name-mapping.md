@@ -1,6 +1,6 @@
 # ADR 0004 工具名称在 Provider 边界映射
 
-Status: Accepted
+Status: Accepted（成本一节「未来接入外部工具（例如 MCP）时，外来名称必须先被命名空间化并经过冲突检查才能注册」已经落地：[ADR 0014](0014-mcp-integration.md) 接入 MCP 后，`ToolRegistry.register()` 强制 `mcp.` 前缀与 `origin: { kind: "mcp" }` 互相匹配，外部来源无法冒充内置工具，命名冲突仍在注册期由 `assertUniqueProviderNames()` 发现。点号内部名、双下划线 Provider 名、单一映射实现与「不猜测未知工具名」四条不变）
 Date: 2026-09-09
 
 ## Context

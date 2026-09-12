@@ -1,6 +1,6 @@
 # ADR 0008 Rust 负责 sidecar 的启动和生命周期
 
-Status: Accepted（本记录中「当前不自动重启」一节已由 [ADR 0010](0010-bounded-sidecar-recovery.md) 取代；「必须随包分发受信任的 Node 运行时」与「`bundle.active` 为 `false`」两处已由 [ADR 0013](0013-installer-distribution.md) 取代——启动顺序本身仍然有效，只是多了一层安装包资源目录。原文保留，以保留当时的约束与代价）
+Status: Accepted（本记录中「当前不自动重启」一节已由 [ADR 0010](0010-bounded-sidecar-recovery.md) 取代；「必须随包分发受信任的 Node 运行时」与「`bundle.active` 为 `false`」两处已由 [ADR 0013](0013-installer-distribution.md) 取代——启动顺序本身仍然有效，只是多了一层安装包资源目录。另有一处随之失效：「上一次异常退出的退出码、信号和时间会保留到下一次成功启动」在自动恢复落地后不再成立 —— 那条记录只在用户主动的 `start` 时清除，自动重启会刻意把它留下（`crates/core/src/supervisor.rs` 的 `start_with_history` 按 `keep_history` 区分这两条路径），界面因此可能同时显示「正在运行」与「上次崩溃过」。原文保留，以保留当时的约束与代价）
 Date: 2026-09-09
 
 ## Context

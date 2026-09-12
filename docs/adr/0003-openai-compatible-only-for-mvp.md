@@ -1,6 +1,6 @@
 # ADR 0003 只实现一个 OpenAI-compatible Provider
 
-Status: Accepted（「只实现一个 Provider」一节已由 [ADR 0011](0011-native-anthropic-and-gemini-providers.md) 取代；「Provider 身份只在装配点分支」与「不做方言自动探测」两条仍然有效。原文保留，以保留当时的约束与代价）
+Status: Accepted（「只实现一个 Provider」一节已由 [ADR 0011](0011-native-anthropic-and-gemini-providers.md) 取代；「Provider 身份只在装配点分支」与「不做方言自动探测」两条仍然有效。另：成本一节「`reasoning_delta` 与 `usage` 当前实现不会产出」同样被 0011 取代 —— 两个原生适配器都会发这两个事件（thinking / thought part → `reasoning_delta`，流末 `usage`），所以「依赖 token 计费的功能暂时无法实现」不再普遍成立，只有 OpenAI-compatible 这条路确实仍然不产出；同段的「`AiProviderKind` 只有 `openai-compatible` 一个取值」也已被取代，现在是三个。原文保留，以保留当时的约束与代价）
 Date: 2026-09-09
 
 ## Context

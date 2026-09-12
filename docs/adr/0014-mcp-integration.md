@@ -1,6 +1,6 @@
 # ADR 0014 MCP 接入：宿主独占进程与目录，agent 只注册与调用
 
-Status: Accepted
+Status: Accepted（Context 里「17 个集成测试」这个计数不准：`crates/core/tests/mcp_stdio.rs` 现在是 18 个 `#[tokio::test]`，跑在同一个已提交的 Node fixture 上 —— 这个数字在本记录写下时就已经错了，所以它仍然只证明「与 fixture 的行为一致」，不证明任何真实第三方服务器的兼容性。其余描述与今天的代码一致，原文不改写）
 Date: 2026-09-12
 
 ## Context

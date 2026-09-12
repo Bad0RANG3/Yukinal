@@ -1,6 +1,6 @@
 # ADR 0013 安装包分发：随包分发 agent bundle，但使用用户自己的 Node
 
-Status: Accepted
+Status: Accepted（Alternatives 里「只把前端作为静态站点分发（浏览器预览模式）」一条指向的 `0005-browser-preview-without-native-capabilities.md` 在本仓库并不存在 —— `docs/adr/0005` 是「Permission Engine 是唯一的执行授权决策者」，浏览器预览这条决定从来没有被单独记成 ADR，所以那个链接是无效的，读者应直接从本记录的取舍理由理解它为什么被否决。其余部分与今天的代码一致：`bundle.active: true` 与 nsis/msi/app/dmg/deb/rpm/appimage 目标、bundle 打成单个自包含 ESM 文件、不随包分发 Node 且下限 Node 24、`SidecarConfig::packaged_entry()` 与 `scripts/check-packaging.mjs` 之间的契约、以及不做签名/公证/自动更新，都仍然如此）
 Date: 2026-09-12
 
 ## Context

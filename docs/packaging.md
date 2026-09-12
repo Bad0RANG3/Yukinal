@@ -47,7 +47,7 @@ pnpm run package           # 契约库 -> agent 单文件 -> 打包契约 -> tau
 ## 安装包里有什么
 
 - 桌面程序本身：Rust 宿主、前端静态资源（由 Tauri 内嵌进可执行文件）、图标和元数据。
-- Agent sidecar：`<resource_dir>/agent/index.js`，**一个文件**。esbuild 把 `zod`、`@yukinal/shared`、`@yukinal/provider-sdk` 以及 agent 自己的全部源码内联进去（当前约 850 KiB）。`node:` 开头的内置模块是唯一保留的外部件。
+- Agent sidecar：`<resource_dir>/agent/index.js` 加上一份一行的 `agent/package.json`（两份资源文件，理由见下），bundle 本身**是一个文件**。esbuild 把 `zod`、`@yukinal/shared`、`@yukinal/provider-sdk` 以及 agent 自己的全部源码内联进去（当前约 900 KiB）。`node:` 开头的内置模块是唯一保留的外部件。
 - `<resource_dir>` 由 Tauri 决定：macOS 是 `Yukinal.app/Contents/Resources`，Windows 是可执行文件旁边的 `resources` 目录，Linux 是随包安装的资源目录。
 
 为什么必须是一个文件：安装后的应用没有 `node_modules`，任何一个没被内联的裸模块名都会让 `node <resource>/agent/index.js` 直接以 `ERR_MODULE_NOT_FOUND` 退出。`scripts/smoke-packaged-agent.mjs` 针对的就是这件事 —— 它把 bundle 复制到一个空目录（没有 `node_modules`，连 `package.json` 都没有），按 `<resources>/agent/index.js` 的形状跑同一套协议断言。
