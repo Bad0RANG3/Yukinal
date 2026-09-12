@@ -175,13 +175,19 @@ for (const token of order) {
 // ─────────────────────────────────────────── 2. the Rust side of the same contract
 const configRs = join(root, "crates", "core", "src", "sidecar", "config.rs");
 const configSource = read(configRs);
-const packagedEntry = configSource.slice(configSource.indexOf("pub fn packaged_entry"));
-if (!packagedEntry) {
+// Test the index, not the slice: `slice(-1)` on a miss returns the file's last
+// character, which is truthy, so `if (!packagedEntry)` could never fire and the
+// diagnostic below was unreachable. The rename case then surfaced through the
+// body check further down, with a message about the resource directory -- true
+// but not the reason.
+const packagedEntryAt = configSource.indexOf("pub fn packaged_entry");
+if (packagedEntryAt === -1) {
   fail(
     `${configRs}: packaged_entry() not found — it is the other half of the resource path ` +
       "(if it was renamed, update this check and tauri.conf.json together)",
   );
 } else {
+  const packagedEntry = configSource.slice(packagedEntryAt);
   // Accept any spelling of the same subpath -- separate "agent"/"index.js" literals, one
   // "agent/index.js" literal, or a constant elsewhere in the file. What must not change is
   // the subpath itself: a rename on one side alone is invisible until an installed user

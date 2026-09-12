@@ -68,11 +68,16 @@ export function useSpawnAgent() {
  *   这个操作，所以钩子应该是「要用的时候再写」。
  *
  *   `IPC_COMMANDS.agentKill` 本身**保留** —— 它不是死代码，而是与 Rust 侧的契约：
- *   `crates/core/src/ipc.rs:66` 用 `packages/shared/fixtures/ipc/agent_kill.json`
- *   给这个命令的响应做了序列化测试。删掉它会让那条契约测试失去依据。
+ *   `crates/core/src/ipc.rs` 的 `agent_kill_serializes_to_the_contract_fixture`
+ *   用 `packages/shared/fixtures/ipc/agent_kill.json` 给这个命令的响应做了序列化
+ *   测试（fixture 由 `include_str!` 编译进来，逐字节比对）。删掉它会让那条契约
+ *   测试失去依据。
+ *
+ *   这里原本写的是 `ipc.rs:66`，那个行号早就漂了（那一行现在是空的）；所以改成
+ *   指向测试函数名 —— 这个文件里的行号已经被证明会漂，名字不会。
  *
  * - `statusLabel`：拼运行时状态文案。它被两个地方各自内联重写了，措辞还不一样
- *   （`RuntimeSettings.tsx:48-50` 是「Agent 未启动 / 查询中…」，`AgentHeader.tsx:46-48`
- *   是另一套）。三份实现里只有这一份没人调用，所以删的是它。
+ *   （`RuntimeSettings.tsx:62` 是「查询中… / Agent 未启动」，`AgentHeader.tsx:50`
+ *   是「预览 / 已就绪 / 未启动」）。三份实现里只有这一份没人调用，所以删的是它。
  */
 
