@@ -120,7 +120,20 @@ export class OpenAiCompatibleProvider implements LLMProvider {
         return;
       }
       if (error instanceof ProviderError) throw error;
-      yield { type: "error", message: error instanceof Error ? error.message : String(error), retryable: false };
+      // 未分类的失败也要过一遍脱敏：走到这里的有 SSE 帧的 JSON 解析错误（消息里会带上
+      // 原始帧文本）、body 读取中途的连接错误，以及 `fetch` 本身的传输失败。网关把
+      // 请求原样回显在错误里是常见事，而这条消息会进事件流、进界面、进审计记录 ——
+      // 与 `listModels` 那条路径不同，这里以前没有过滤，所以它比另一条更该过滤。
+      //
+      // `retryable: false` 是**有意**的，不是遗漏：能到这一层的失败都可能发生在已经
+      // 吐出部分文本之后，而这一层无从知道吐了多少 —— 盲目重试会把已经显示给用户的
+      // 内容再叠一遍。真正的重试判断在 `ProviderError` 上（HTTP 状态码那一层），
+      // 那条路径在上面被原样抛给调用方。
+      yield {
+        type: "error",
+        message: safeProviderMessage(error instanceof Error ? error.message : String(error)),
+        retryable: false,
+      };
     } finally {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onParentAbort);

@@ -162,6 +162,227 @@ for (const outcome of ["unauthorized", "empty", "failed"] as const) {
 }
 
 test("initialize negotiates the protocol version", async () => {
+/* ── kind 轴：三种 Provider 都必须能从装配点构造出来，并且真的被用（ADR 0011） ────── */
+
+interface RecordedRequest {
+  url: string;
+  method: string | undefined;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+}
+
+/**
+ * 注入假 `fetch`：记下适配器实际打出去的 URL、头与 body，并把脚本化的响应喂回去。
+ *
+ * 这个仓库的开发环境没有网络，所以测试从不触达真实上游。它证明的是**翻译逻辑**与装配
+ * —— 请求形状、鉴权头、SSE 解析能不能跑完一个回合 —— 不是协议保真度（后者需要真实端点）。
+ */
+function installFetch(handler: (request: RecordedRequest) => Response): {
+  seen: RecordedRequest[];
+  restore: () => void;
+} {
+  const original = globalThis.fetch;
+  const seen: RecordedRequest[] = [];
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const recorded: RecordedRequest = {
+      url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      method: init?.method,
+      headers: (init?.headers ?? {}) as Record<string, string>,
+      body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {},
+    };
+    seen.push(recorded);
+    return handler(recorded);
+  };
+  return {
+    seen,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+/** 一段构造好的 SSE：字符串按原样发（`[DONE]` 这类哨兵不是 JSON），对象序列化后发。 */
+function sseResponse(frames: Array<unknown>): Response {
+  const body = frames.map((frame) => `data: ${typeof frame === "string" ? frame : JSON.stringify(frame)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+const API_KEY = "sk-router-test";
+
+interface KindWire {
+  kind: "openai-compatible" | "anthropic" | "gemini";
+  baseUrl: string;
+  model: string;
+  wireApi?: "chat";
+  /** 适配器必须打到的完整 URL。 */
+  endpoint: string;
+  /** 鉴权头由适配器自己写：三种协议的写法各不相同，这正是各自实现存在的理由之一。 */
+  auth: { header: string; value: string };
+  frames: unknown[];
+  /** 请求体里必须成立的那条协议事实。 */
+  assertBody: (body: Record<string, unknown>) => void;
+}
+
+const KIND_WIRES: KindWire[] = [
+  {
+    kind: "openai-compatible",
+    baseUrl: "https://compatible.example.com/v1",
+    model: "gpt-test",
+    wireApi: "chat",
+    endpoint: "https://compatible.example.com/v1/chat/completions",
+    auth: { header: "authorization", value: `Bearer ${API_KEY}` },
+    frames: [{ choices: [{ delta: { content: "OK" }, finish_reason: "stop" }] }, "[DONE]"],
+    assertBody: (body) => {
+      const messages = body.messages as Array<{ role: string }>;
+      assert.equal(messages[0]?.role, "system", "chat 方言把系统提示放在 messages 里");
+    },
+  },
+  {
+    kind: "anthropic",
+    baseUrl: "https://api.anthropic.example.com",
+    model: "claude-test",
+    endpoint: "https://api.anthropic.example.com/v1/messages",
+    auth: { header: "x-api-key", value: API_KEY },
+    frames: [
+      { type: "message_start", message: { usage: { input_tokens: 5 } } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "OK" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } },
+      { type: "message_stop" },
+    ],
+    assertBody: (body) => {
+      // 适配器存在的两个理由之一：系统提示是顶层字段，`messages` 里没有 system 角色。
+      assert.equal(typeof body.system, "string");
+      const messages = body.messages as Array<{ role: string }>;
+      assert.ok(!messages.some((message) => message.role === "system"));
+      const tools = body.tools as Array<Record<string, unknown>>;
+      assert.ok(tools.length > 0);
+      assert.ok("input_schema" in (tools[0] ?? {}), "工具用 input_schema，而不是 parameters");
+      assert.ok(typeof body.max_tokens === "number", "max_tokens 是必填字段");
+    },
+  },
+  {
+    kind: "gemini",
+    baseUrl: "https://generativelanguage.example.com",
+    model: "gemini-test",
+    endpoint: "https://generativelanguage.example.com/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+    auth: { header: "x-goog-api-key", value: API_KEY },
+    frames: [{ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] }],
+    assertBody: (body) => {
+      assert.equal(typeof body.systemInstruction, "object");
+      const contents = body.contents as Array<{ role: string }>;
+      assert.ok(!contents.some((content) => content.role === "system"));
+      const tools = body.tools as Array<{ functionDeclarations?: unknown[] }>;
+      assert.ok((tools[0]?.functionDeclarations?.length ?? 0) > 0);
+      assert.equal(body.model, undefined, "模型在 URL 路径里，不在 body 里");
+    },
+  },
+];
+
+/**
+ * `buildProvider()` 是唯一按 kind 分支的地方（ADR 0011 第 3 点），所以三种 kind 都必须能
+ * 从它被构造**并且真的被用起来**。
+ *
+ * 判据不是「构造没抛错」，而是适配器打出去的请求：URL、鉴权头、以及系统提示与工具被翻译
+ * 成了各自协议的形状。运行本身走的是真实的 `agent.run.start`（`delivery: "sync"`），
+ * 所以这条用例覆盖的是装配点 → agent loop → 适配器 → SSE 解析这一整条路径。
+ */
+for (const wire of KIND_WIRES) {
+  test(`agent.run.start drives a ${wire.kind} provider through buildProvider`, async (t) => {
+    const fetch = installFetch(() => sseResponse(wire.frames));
+    t.after(fetch.restore);
+
+    const { runtime, initialize } = await withRuntime();
+    await initialize();
+    const response = (await runtime.router.handle(
+      request(AGENT_METHODS.runStart, {
+        runId: `run_${wire.kind}`,
+        sessionId: `ses_${wire.kind}`,
+        prompt: "只回答 OK",
+        delivery: "sync",
+        providerConfig: {
+          kind: wire.kind,
+          baseUrl: wire.baseUrl,
+          model: wire.model,
+          apiKey: API_KEY,
+          ...(wire.wireApi ? { wireApi: wire.wireApi } : {}),
+        },
+      }),
+    )) as { started: boolean; result?: AgentRunResult };
+
+    assert.equal(response.started, true);
+    assert.equal(response.result?.state, "completed");
+    assert.match(response.result?.text ?? "", /OK/);
+
+    // 一次运行只该打一次上游：构造失败了会有异常，构造成功了但没被使用则这里会是 0 次。
+    assert.equal(fetch.seen.length, 1);
+    const sent = fetch.seen[0]!;
+    assert.equal(sent.url, wire.endpoint);
+    assert.equal(sent.method, "POST");
+    // 凭据只以该协议自己的头出现，别的写法都不该同时存在：多一个 Authorization 就多一条
+    // 泄漏路径，而两种头同时出现时「哪一个是权威」会变成上游的解释。
+    assert.equal(sent.headers[wire.auth.header], wire.auth.value);
+    for (const other of ["authorization", "x-api-key", "x-goog-api-key"]) {
+      if (other !== wire.auth.header) {
+        assert.equal(sent.headers[other], undefined, `${wire.kind} must not also send ${other}`);
+      }
+    }
+    wire.assertBody(sent.body);
+  });
+}
+
+/**
+ * 目录读取同样按各自协议（ADR 0011 第 5 点）：两个原生适配器都有可用的 `listModels()`，
+ * 而设置界面的模型选择器就是从这里拿数据的 —— 它如果不能工作，新的 kind 依然配不出来。
+ */
+for (const catalog of [
+  {
+    kind: "openai-compatible" as const,
+    baseUrl: "https://compatible.example.com/v1",
+    endpoint: "https://compatible.example.com/v1/models",
+    payload: { data: [{ id: "gpt-test" }] },
+    listed: "gpt-test",
+  },
+  {
+    kind: "anthropic" as const,
+    baseUrl: "https://api.anthropic.example.com",
+    endpoint: "https://api.anthropic.example.com/v1/models",
+    payload: { data: [{ id: "claude-test", display_name: "Claude Test" }] },
+    listed: "claude-test",
+  },
+  {
+    kind: "gemini" as const,
+    baseUrl: "https://generativelanguage.example.com",
+    endpoint: "https://generativelanguage.example.com/v1beta/models",
+    payload: {
+      models: [
+        { name: "models/gemini-test", supportedGenerationMethods: ["generateContent"] },
+        // 目录里也有只支持别的方法的模型：选择器不该把它列出来。
+        { name: "models/text-embedding-004", supportedGenerationMethods: ["embedContent"] },
+      ],
+    },
+    listed: "gemini-test",
+  },
+]) {
+  test(`provider.models reads the ${catalog.kind} catalog from its own endpoint`, async (t) => {
+    const fetch = installFetch(() => Response.json(catalog.payload));
+    t.after(fetch.restore);
+
+    const { runtime, initialize } = await withRuntime();
+    await initialize();
+    const { models } = (await runtime.router.handle(
+      request(AGENT_METHODS.providerModels, {
+        kind: catalog.kind,
+        baseUrl: catalog.baseUrl,
+        model: "unused-for-the-catalog",
+        apiKey: API_KEY,
+      }),
+    )) as { models: Array<{ id: string }> };
+
+    assert.equal(fetch.seen[0]?.url, catalog.endpoint);
+    assert.deepEqual(models.map((model) => model.id), [catalog.listed]);
+  });
+}
+
   const { initialize } = await withRuntime();
   const result = (await initialize()) as { protocolVersion: string; capabilities: Record<string, boolean> };
   assert.equal(result.protocolVersion, YUKINAL_RPC_VERSION);
@@ -286,14 +507,15 @@ test("agent.run.start requires providerConfig and validates it", async () => {
   assert.equal(ok.started, true);
   assert.equal(ok.runId, "run_2");
 
-  // 畸形 provider kind：契约错误。
+  // 契约里没有的 kind 仍然是契约错误。`anthropic` 曾经也走这条断言（那时它确实不被支持）；
+  // 现在它是一条正例，见下面的「三种 kind 都能从装配点被构造并被真正使用」。
   await assert.rejects(
     runtime.router.handle(
       request(AGENT_METHODS.runStart, {
         runId: "run_3",
         sessionId: "ses_3",
         prompt: "hi",
-        providerConfig: { kind: "anthropic", baseUrl: "http://x", model: "m" } as never,
+        providerConfig: { kind: "cohere", baseUrl: "http://x", model: "m" } as never,
       }),
     ),
     (error: unknown) => error instanceof RpcFailure && error.code === RPC_ERROR.INVALID_PARAMS,

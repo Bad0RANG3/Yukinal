@@ -36,22 +36,43 @@ pub struct ProviderSaveResponse {
     pub provider: AiProviderConfig,
 }
 
+/// 原生协议各自的公开端点，用于 provider 行里没有（或只有一个空白）base URL 的情况。
+///
+/// **有意不为 `openai-compatible` 提供默认值。** 那个 kind 覆盖的是我们不拥有的端点
+/// （OpenRouter、Ollama、vLLM、内部网关……），填一个 `https://api.openai.com/v1` 的默认值
+/// 等于把用户的密钥送去一个他从未选择的服务商 —— 这是「默认值」这个词唯一真正危险的地方。
+/// 原生协议的端点则没有歧义：协议本身就是那家服务商的（ADR 0011 第 5 点）。
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const GEMINI_DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
+
 /// Build the sidecar provider payload without serializing absent optional values
 /// as JSON null. The shared runtime schema treats apiKey/customHeaders as optional
 /// fields, so `null` would be a contract violation.
+///
+/// `kind` 与 `wireApi` 在这里分开处理，因为两者是正交的轴：`wireApi` 只在
+/// `openai-compatible` 里被写进 payload，另外两种 kind 连这个键都不出现 —— 共享 schema
+/// 把「原生 kind 带 wireApi」判为非法输入，所以「顺手带上」会直接让运行以 INVALID_PARAMS 失败。
 pub(crate) fn runtime_provider_config(
     provider: &AiProviderConfig,
     model: &str,
     api_key: Option<String>,
     timeout_ms: u64,
 ) -> Value {
+    let kind = provider.kind;
+    let base_url = match kind {
+        AiProviderKind::Anthropic => base_url_or(provider, ANTHROPIC_DEFAULT_BASE_URL),
+        AiProviderKind::Gemini => base_url_or(provider, GEMINI_DEFAULT_BASE_URL),
+        AiProviderKind::OpenaiCompatible => provider.base_url.trim().to_string(),
+    };
     let mut config = serde_json::json!({
-        "kind": "openai-compatible",
-        "baseUrl": provider.base_url,
+        "kind": kind.as_str(),
+        "baseUrl": base_url,
         "model": model,
         "timeoutMs": timeout_ms,
-        "wireApi": provider.wire_api,
     });
+    if let Some(wire_api) = wire_api_of(provider) {
+        config["wireApi"] = serde_json::json!(wire_api);
+    }
     if let Some(api_key) = api_key {
         config["apiKey"] = serde_json::json!(api_key);
     }
@@ -59,6 +80,29 @@ pub(crate) fn runtime_provider_config(
         config["customHeaders"] = serde_json::json!(custom_headers);
     }
     config
+}
+
+/// 行里的方言，**仅当这个 kind 有方言轴**。原生协议没有，所以这里返回 `None`：
+/// payload 里连 `wireApi` 这个键都不该出现（共享 schema 拒绝「原生 kind 带 wireApi」，
+/// 而不是把它当作可以忽略的字段）。
+fn wire_api_of(provider: &AiProviderConfig) -> Option<&str> {
+    if !provider.kind.has_wire_api() {
+        return None;
+    }
+    provider
+        .wire_api
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// 行里的 base URL，空白时退到该协议自己的公开端点。
+fn base_url_or(provider: &AiProviderConfig, fallback: &str) -> String {
+    let configured = provider.base_url.trim().trim_end_matches('/');
+    if configured.is_empty() {
+        fallback.to_string()
+    } else {
+        configured.to_string()
+    }
 }
 
 #[tauri::command]
@@ -72,12 +116,19 @@ pub async fn provider_list(state: State<'_, AppState>) -> Result<ProviderListRes
     Ok(ProviderListResponse { providers })
 }
 
-/// 保存 OpenAI-compatible provider。apiKey 给了就换一份（进 keychain）；不给就保留
-/// 旧引用（不然每次保存都要重新粘贴 key）。
+/// 保存一个 AI provider（三种 kind 共用这一条保存路径，ADR 0011 第 6 点）。
+///
+/// 命令名曾经是 `provider_save_openai` —— 一个把「只有一种 kind」写进名字里的名字；kind
+/// 现在是**必填参数**，因为一个不说明自己是什么的 Provider 配置根本没法解释：同一个
+/// base URL 用 OpenAI 方言还是 Messages API 去调，是完全不同的两件事。未知 kind 在这里
+/// 就失败，而不是落库成一个「看起来正常」的 openai-compatible。
+///
+/// apiKey 给了就换一份（进 keychain）；不给就保留旧引用（不然每次保存都要重新粘贴 key）。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn provider_save_openai(
+pub async fn provider_save(
     state: State<'_, AppState>,
+    kind: String,
     base_url: String,
     model: String,
     label: Option<String>,
@@ -86,6 +137,14 @@ pub async fn provider_save_openai(
     wire_api: Option<String>,
     models: Option<Vec<ProviderModelOption>>,
 ) -> Result<ProviderSaveResponse, String> {
+    // `from_db`（严格拼写）而不是 `from_db_column`：旧拼写只该被**读**进来，写出的一律是
+    // `as_str()` 的当前拼写，所以受理一个旧写法只会让界面能把历史拼写再存一遍。
+    let kind = AiProviderKind::from_db(kind.trim()).ok_or_else(|| {
+        format!(
+            "不支持的 Provider kind `{}`：只支持 openai-compatible、anthropic、gemini。",
+            kind.trim()
+        )
+    })?;
     let requested_id = provider_id
         .as_deref()
         .map(str::trim)
@@ -119,6 +178,40 @@ pub async fn provider_save_openai(
                 .unwrap_or(provider.enabled)
         });
 
+    // `kind` 与 `wireApi` 正交：原生协议只有一种请求形状，所以给它们配一个方言是**请求错误**，
+    // 不是被忽略的字段。共享 schema 已经拒绝这种组合；这里再拒一次，因为这个参数会直接落库。
+    let requested_wire_api = wire_api
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if !kind.has_wire_api() && requested_wire_api.is_some() {
+        return Err(format!(
+            "kind `{}` 没有 wireApi：原生协议只有一种请求形状。",
+            kind.as_str()
+        ));
+    }
+    let wire_api = if kind.has_wire_api() {
+        if let Some(value) = requested_wire_api {
+            if value != "chat" && value != "responses" {
+                return Err(format!(
+                    "wireApi `{value}` 无效：只支持 chat 或 responses。"
+                ));
+            }
+        }
+        Some(
+            requested_wire_api
+                .map(str::to_string)
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|provider| provider.wire_api.clone())
+                })
+                .unwrap_or_else(|| "chat".into()),
+        )
+    } else {
+        None
+    };
+
     let id = existing
         .as_ref()
         .map(|provider| provider.id.clone())
@@ -142,7 +235,7 @@ pub async fn provider_save_openai(
     let now = yukinal_core::sidecar::iso8601_now();
     let provider = AiProviderConfig {
         id: id.clone(),
-        kind: AiProviderKind::OpenaiCompatible,
+        kind,
         label: label.unwrap_or_else(|| base_url.clone()),
         base_url: base_url.trim().trim_end_matches('/').to_string(),
         model: model.trim().to_string(),
@@ -150,12 +243,7 @@ pub async fn provider_save_openai(
         enabled: true,
         custom_headers: None,
         max_input_tokens: None,
-        wire_api: wire_api.unwrap_or_else(|| {
-            existing
-                .as_ref()
-                .map(|provider| provider.wire_api.clone())
-                .unwrap_or_else(|| "chat".into())
-        }),
+        wire_api,
         models: models.or_else(|| {
             existing
                 .as_ref()
@@ -489,6 +577,16 @@ mod tests {
             serde_json::to_value(AiProviderKind::OpenaiCompatible).unwrap(),
             json!("openai-compatible")
         );
+        // 三种 kind 的拼写必须与 `packages/shared` 的 `AI_PROVIDER_KINDS` 逐字一致：
+        // 两端各写一遍枚举，其中一端漂了只会表现为「界面存得进、Agent 认不出」。
+        assert_eq!(
+            serde_json::to_value(AiProviderKind::Anthropic).unwrap(),
+            json!("anthropic")
+        );
+        assert_eq!(
+            serde_json::to_value(AiProviderKind::Gemini).unwrap(),
+            json!("gemini")
+        );
     }
 
     fn provider(id: &str, enabled: bool) -> AiProviderConfig {
@@ -498,7 +596,7 @@ mod tests {
             label: id.into(),
             base_url: "http://127.0.0.1:1234".into(),
             model: "test-model".into(),
-            wire_api: "chat".into(),
+            wire_api: Some("chat".into()),
             api_key_credential_ref: None,
             enabled,
             custom_headers: None,
@@ -506,6 +604,16 @@ mod tests {
             models: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn provider_of_kind(kind: AiProviderKind, base_url: &str) -> AiProviderConfig {
+        AiProviderConfig {
+            kind,
+            base_url: base_url.into(),
+            // 只有 openai-compatible 有方言轴；另外两种的 `None` 是读路径会产出的形状。
+            wire_api: kind.has_wire_api().then(|| "chat".to_string()),
+            ..provider("prv_kind", true)
         }
     }
 
@@ -536,6 +644,94 @@ mod tests {
         assert_eq!(
             config.get("model"),
             Some(&Value::String("test-model".into()))
+        );
+    }
+
+    /// 每种 kind 都要产出**自己那个协议**的配置（ADR 0011 第 6 点）。
+    #[test]
+    fn runtime_provider_config_speaks_the_protocol_of_each_kind() {
+        let compatible = runtime_provider_config(
+            &provider_of_kind(
+                AiProviderKind::OpenaiCompatible,
+                "https://gw.example.com/v1",
+            ),
+            "gpt-5.2",
+            None,
+            30_000,
+        );
+        assert_eq!(compatible["kind"], json!("openai-compatible"));
+        assert_eq!(compatible["baseUrl"], json!("https://gw.example.com/v1"));
+        assert_eq!(compatible["wireApi"], json!("chat"));
+
+        let anthropic = runtime_provider_config(
+            &provider_of_kind(AiProviderKind::Anthropic, "https://api.anthropic.com"),
+            "claude-sonnet-4-5",
+            None,
+            30_000,
+        );
+        assert_eq!(anthropic["kind"], json!("anthropic"));
+        assert_eq!(anthropic["baseUrl"], json!("https://api.anthropic.com"));
+        // 原生协议没有方言轴：这个键不该出现，否则共享 schema 会拒绝整份配置。
+        assert!(anthropic.get("wireApi").is_none());
+
+        let gemini = runtime_provider_config(
+            &provider_of_kind(
+                AiProviderKind::Gemini,
+                "https://generativelanguage.googleapis.com",
+            ),
+            "gemini-2.5-flash",
+            None,
+            30_000,
+        );
+        assert_eq!(gemini["kind"], json!("gemini"));
+        assert_eq!(
+            gemini["baseUrl"],
+            json!("https://generativelanguage.googleapis.com")
+        );
+        assert!(gemini.get("wireApi").is_none());
+    }
+
+    /// 没有 base URL 时，原生协议退到**自己**的公开端点，而不是一个 OpenAI 形状的地址；
+    /// openai-compatible 则没有默认值 —— 它覆盖的端点不是我们的，编一个默认值等于把用户的
+    /// 密钥送去一个他没选过的服务商。
+    #[test]
+    fn a_missing_base_url_falls_back_to_the_protocols_own_endpoint() {
+        for blank in ["", "   ", "/"] {
+            let anthropic = runtime_provider_config(
+                &provider_of_kind(AiProviderKind::Anthropic, blank),
+                "claude-sonnet-4-5",
+                None,
+                30_000,
+            );
+            assert_eq!(
+                anthropic["baseUrl"],
+                json!("https://api.anthropic.com"),
+                "blank base URL {blank:?}"
+            );
+
+            let gemini = runtime_provider_config(
+                &provider_of_kind(AiProviderKind::Gemini, blank),
+                "gemini-2.5-flash",
+                None,
+                30_000,
+            );
+            assert_eq!(
+                gemini["baseUrl"],
+                json!("https://generativelanguage.googleapis.com"),
+                "blank base URL {blank:?}"
+            );
+        }
+
+        let compatible = runtime_provider_config(
+            &provider_of_kind(AiProviderKind::OpenaiCompatible, "  "),
+            "m",
+            None,
+            30_000,
+        );
+        assert_eq!(
+            compatible["baseUrl"],
+            json!(""),
+            "openai-compatible must not be given an invented endpoint"
         );
     }
 

@@ -74,7 +74,7 @@ pub fn run() {
             commands::files::remote_file_list,
             commands::files::remote_file_read,
             commands::provider::provider_list,
-            commands::provider::provider_save_openai,
+            commands::provider::provider_save,
             commands::provider::provider_activate,
             commands::provider::provider_models,
             commands::provider::provider_test,

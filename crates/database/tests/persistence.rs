@@ -290,7 +290,7 @@ fn sample_ai_provider(id: &str) -> AiProviderConfig {
         enabled: true,
         custom_headers: None,
         max_input_tokens: Some(200_000),
-        wire_api: "chat".into(),
+        wire_api: Some("chat".into()),
         models: None,
         created_at: "2026-01-01T00:00:00.000Z".into(),
         updated_at: "2026-01-01T00:00:00.000Z".into(),
@@ -791,4 +791,117 @@ fn provider_kind_still_reads_the_legacy_lowercase_spelling() {
         serde_json::from_str::<AiProviderKind>("\"openaicompatible\"").unwrap(),
         AiProviderKind::OpenaiCompatible
     );
+
+    // 同一条规则必须在**列**这条路径上也成立：serde 的 alias 只管 JSON，而
+    // `openaicompatible` 恰恰是库里的实际拼写。
+    let (path, db) = temp_db("prv-legacy-kind");
+    drop(db);
+    let legacy = Connection::open(&path).expect("open raw");
+    legacy
+        .execute(
+            "INSERT INTO provider_configs (id, family, kind, label, base_url, model, enabled, created_at, updated_at)
+             VALUES ('prv_legacy', 'ai', 'openaicompatible', 'Legacy', 'https://api.openai.com/v1', 'gpt-5.2', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .expect("insert legacy row");
+    drop(legacy);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let row = reopened
+        .providers()
+        .get_ai("prv_legacy")
+        .expect("legacy row");
+    assert_eq!(row.kind, AiProviderKind::OpenaiCompatible);
+    // 旧行没有 wire_api（迁移 2 之前），落到这一列自己的默认值。
+    assert_eq!(row.wire_api.as_deref(), Some("chat"));
+    cleanup(&path);
+}
+
+/// **这条就是那个本可以抓到 `kind` 被忽略的用例。**
+///
+/// 读路径曾经无视 `kind` 列、把每一行都解码成 `openai-compatible`，写路径又把
+/// `'openai-compatible'` 写死在 SQL 里：于是三种 kind 存进去读回来都变成同一种，而
+/// 协议完全不同（用 OpenAI 方言去调 Anthropic/Gemini 端点）。因此这里对**每一个** kind
+/// 走一遍写→（关库、重开）→读，并额外确认 `kind` 真的落在了那一列里。
+#[test]
+fn every_ai_provider_kind_round_trips_through_the_kind_column() {
+    let (path, db) = temp_db("prv-kind-round-trip");
+    for (index, kind) in AiProviderKind::ALL.iter().copied().enumerate() {
+        let mut config = sample_ai_provider(&format!("prv_kind_{index}"));
+        config.kind = kind;
+        config.base_url = format!("https://{}.example.com", kind.as_str());
+        // 只有 openai-compatible 有方言轴；另外两种的 `None` 与 `ProviderKind::has_wire_api`
+        // 是同一条规则。
+        config.wire_api = kind.has_wire_api().then(|| "responses".to_string());
+        db.providers().upsert_ai(&config).expect("upsert");
+    }
+    drop(db);
+
+    // 直接看列：写路径把 kind 写死成 `'openai-compatible'` 时，这条断言先红。
+    let raw = Connection::open(&path).expect("open raw");
+    let stored: Vec<String> = raw
+        .prepare("SELECT kind FROM provider_configs WHERE family = 'ai' ORDER BY id")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect");
+    assert_eq!(stored, vec!["openai-compatible", "anthropic", "gemini"]);
+    drop(raw);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let listed = reopened.providers().list_ai().expect("list ai");
+    assert_eq!(listed.len(), AiProviderKind::ALL.len());
+    for (index, kind) in AiProviderKind::ALL.iter().copied().enumerate() {
+        let row = reopened
+            .providers()
+            .get_ai(&format!("prv_kind_{index}"))
+            .expect("get ai");
+        assert_eq!(row.kind, kind, "kind {kind:?} did not round-trip");
+        assert_eq!(
+            row.wire_api.is_some(),
+            kind.has_wire_api(),
+            "wireApi must exist exactly for the kind that has a dialect axis",
+        );
+        assert_eq!(
+            row.base_url,
+            format!("https://{}.example.com", kind.as_str())
+        );
+    }
+    cleanup(&path);
+}
+
+/// 认不出的 kind 必须让读取失败，而不是被当成 `openai-compatible`（那会拿 OpenAI 方言去调
+/// 一个我们并不认识的端点）。`kind` 是 TEXT 列，所以这种行只能来自更新的版本、外部工具或
+/// 手改 —— 三种情况都不该被静默解释成一个能用的 Provider。
+#[test]
+fn an_unknown_provider_kind_fails_the_read_instead_of_becoming_openai_compatible() {
+    let (path, db) = temp_db("prv-unknown-kind");
+    let repo = db.providers();
+    repo.upsert_ai(&sample_ai_provider("prv_known"))
+        .expect("upsert known");
+    drop(db);
+
+    let raw = Connection::open(&path).expect("open raw");
+    raw.execute(
+        "INSERT INTO provider_configs (id, family, kind, label, base_url, model, enabled, created_at, updated_at)
+         VALUES ('prv_future', 'ai', 'cohere', 'From the future', 'https://api.cohere.com', 'command-r', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        [],
+    )
+    .expect("insert unknown-kind row");
+    drop(raw);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let error = reopened
+        .providers()
+        .get_ai("prv_future")
+        .expect_err("an unknown kind must not decode");
+    assert!(
+        error.to_string().contains("cohere"),
+        "the error must name the value it could not read: {error}"
+    );
+    // 同一行坏数据也让 list_ai() 失败：这是刻意的 —— 一行读不出来的配置比一整页「看起来
+    // 正常但协议是错的」Provider 更好排查。
+    assert!(reopened.providers().list_ai().is_err());
+    cleanup(&path);
 }

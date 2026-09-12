@@ -34,7 +34,10 @@ import { AGENT_VERSION, type AgentLogger } from "../config.js";
 import { resolveRequestedPolicy } from "../permissions/policy-registry.js";
 import { AgentLoop } from "../runtime/agent-loop.js";
 import { RpcFailure } from "../errors.js";
+import { AnthropicProvider } from "../providers/anthropic.js";
+import { GeminiProvider } from "../providers/gemini.js";
 import { OpenAiCompatibleProvider } from "../providers/openai-compatible.js";
+import type { LLMProvider } from "@yukinal/provider-sdk";
 import type { ToolRegistry } from "../tools/registry.js";
 
 export const IMPLEMENTATION_STATUS: Record<string, boolean> = {
@@ -295,7 +298,7 @@ export class RpcRouter {
    * 调用方的响应帧要带上这个错误，而 `async` 调用方早已拿到响应，只能从它发出的
    * `agent.failed` 通知里看到。
    */
-  async #spinRun(parsed: AgentRunRequest, provider: OpenAiCompatibleProvider): Promise<AgentRunResult> {
+  async #spinRun(parsed: AgentRunRequest, provider: LLMProvider): Promise<AgentRunResult> {
     const emit = (event: AgentStreamEvent): void => {
       this.#notificationSink?.(AGENT_NOTIFICATIONS.stream, event);
     };
@@ -420,20 +423,39 @@ const InitializeParamsSchema = z.strictObject({
 const PingParamsSchema = z.strictObject({ echo: z.string().max(1_000).optional() });
 const AgentRunStopSchema = z.strictObject({ runId: z.string().trim().min(1).max(256) });
 
-/** 每次 run 由 Rust 注入 provider 材料；构造失败立即报错（不是 run 的失败）。 */
-function buildProvider(config: RuntimeProviderConfig | undefined): OpenAiCompatibleProvider {
+/**
+ * The single place in the agent allowed to branch on provider identity (ADR 0003 /
+ * ADR 0011 point 3: `buildProvider()` is the assembly point).
+ *
+ * Everything downstream — the loop, the permission engine, the tool registry — sees only
+ * `LLMProvider` and `StreamEvent`. Adding a protocol means adding an adapter and a case
+ * here, never an `if (provider === …)` inside the run.
+ *
+ * `kind` and `wireApi` are orthogonal (ADR 0011 point 2): `wireApi` picks the dialect of
+ * the OpenAI-compatible translation and is therefore passed to that adapter **only** —
+ * the schema already refuses a `wireApi` on the two native kinds, rather than letting it
+ * mean something different here.
+ *
+ * An unsupported kind is INVALID_PARAMS at construction time, not a run that fails later:
+ * this is a contract violation (the caller sent a provider we agreed not to accept), and
+ * `agent.run.start` must not answer `started: true` for a run that cannot be built.
+ */
+function buildProvider(config: RuntimeProviderConfig | undefined): LLMProvider {
   if (!config) {
     throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "run.start requires providerConfig (resolved by the core)");
   }
-  if (config.kind !== "openai-compatible") {
-    throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `unsupported provider kind "${config.kind}"`);
+  const { baseUrl, model, apiKey, customHeaders, timeoutMs } = config;
+  switch (config.kind) {
+    case "openai-compatible":
+      return new OpenAiCompatibleProvider({ baseUrl, model, apiKey, customHeaders, timeoutMs, wireApi: config.wireApi });
+    case "anthropic":
+      return new AnthropicProvider({ baseUrl, model, apiKey, customHeaders, timeoutMs });
+    case "gemini":
+      return new GeminiProvider({ baseUrl, model, apiKey, customHeaders, timeoutMs });
   }
-  return new OpenAiCompatibleProvider({
-    baseUrl: config.baseUrl,
-    model: config.model,
-    apiKey: config.apiKey,
-    customHeaders: config.customHeaders,
-    timeoutMs: config.timeoutMs,
-    wireApi: config.wireApi,
-  });
+  // 走到这里说明 `AiProviderKind` 里有一个 kind 还没有适配器 —— 那是一次**契约**失败，不是
+  // 运行失败，所以同一个 `INVALID_PARAMS`：调用方拿到的错误与「kind 拼错了」是同一种。
+  // 新增 kind 时这一段会先以编译错误的形式出现（`config.kind` 在这里是 `never`），
+  // 提醒装配点必须一起改；这行只是把它变成一句可读的错误而不是未捕获的异常。
+  throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `unsupported provider kind "${String(config.kind)}"`);
 }

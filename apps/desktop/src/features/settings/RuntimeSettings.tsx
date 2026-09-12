@@ -1,12 +1,21 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HttpBaseUrlSchema, IPC_COMMANDS, type AiProviderConfig } from "@yukinal/shared";
+import { HttpBaseUrlSchema, IPC_COMMANDS, type AiProviderConfig, type AiProviderKind } from "@yukinal/shared";
 import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
-import { PROVIDERS_QUERY_KEY, useProviders } from "../../lib/providers.js";
+import {
+  PROVIDERS_QUERY_KEY,
+  PROVIDER_KIND_DEFAULT_BASE_URL,
+  PROVIDER_KIND_LABEL,
+  PROVIDER_KIND_ORDER,
+  providerKindBaseUrlHint,
+  providerKindUsesWireApi,
+  providerSavePayload,
+  useProviders,
+} from "../../lib/providers.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import {
@@ -235,7 +244,7 @@ function ProviderSettings() {
               <div key={provider.id} className={`provider-row ${provider.enabled ? "provider-row-active" : ""}`}>
                 <div className="provider-copy">
                   <div className="provider-name"><span className={`provider-status-dot ${provider.enabled ? "provider-status-on" : "provider-status-off"}`} /><span>{provider.label}</span>{provider.enabled ? <span className="status-badge status-badge-success">当前使用</span> : null}</div>
-                  <div className="provider-meta"><span><KeywordText text={provider.model} /></span><span>·</span><span><KeywordText text={provider.wireApi ?? "chat"} /></span><span>·</span><span>{provider.apiKeyCredentialRef ? "系统密钥链" : "未配置密钥"}</span></div>
+                  <div className="provider-meta"><span><KeywordText text={provider.model} /></span><span>·</span><span>{PROVIDER_KIND_LABEL[provider.kind]}</span>{providerKindUsesWireApi(provider.kind) ? <><span>·</span><span><KeywordText text={provider.wireApi ?? "chat"} /></span></> : null}<span>·</span><span>{provider.apiKeyCredentialRef ? "系统密钥链" : "未配置密钥"}</span></div>
                 </div>
                 <div className="provider-row-actions">
                   <button type="button" disabled={busy} onClick={() => setEditorProviderId(provider.id)} className="button-secondary button-small">编辑</button>
@@ -267,6 +276,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
   const [wireApi, setWireApi] = useState<"chat" | "responses">(provider?.wireApi ?? "chat");
   const [saved, setSaved] = useState(false);
   const modelsId = useId();
+  const [kind, setKind] = useState<AiProviderKind>(provider?.kind ?? "openai-compatible");
   const catalog = useQuery({
     queryKey: ["providers", "models", provider?.id], enabled: shell && Boolean(provider),
     queryFn: async () => (await callDesktop(IPC_COMMANDS.providerModels, { providerId: provider!.id })).models, retry: 0,
@@ -274,6 +284,21 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
   const models = catalog.data ?? provider?.models ?? [];
   const save = useMutation({
     mutationKey: ["provider-write"],
+  /**
+   * 切换协议。
+   *
+   * kind 决定「由谁翻译」，所以它一变，base URL 的含义也变了；但**绝不覆盖用户手写的地址**。
+   * 只有当字段是空的、或还停在某个协议自己的默认端点上时才接管 —— 否则切一次协议就会把
+   * 用户填的网关地址悄悄换掉，而那个地址是唯一能解释「请求到底发去哪儿」的东西。
+   */
+  const changeKind = (next: AiProviderKind) => {
+    const current = baseUrl.trim();
+    const untouched =
+      current === "" ||
+      Object.values(PROVIDER_KIND_DEFAULT_BASE_URL).includes(current);
+    setKind(next);
+    if (untouched) setBaseUrl(PROVIDER_KIND_DEFAULT_BASE_URL[next] ?? "");
+  };
     mutationFn: () => {
       const nextProviderId = providerId.trim();
       if (!provider && !nextProviderId) throw new Error("请填写 Provider ID。");
@@ -289,10 +314,11 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       if (!HttpBaseUrlSchema.safeParse(baseUrl).success) {
         throw new Error("Base URL 必须是 http(s) 地址，且不能内嵌账号密码。");
       }
-      return callDesktop(IPC_COMMANDS.providerSaveOpenai, {
-        providerId: nextProviderId || undefined, label: label.trim() || undefined, baseUrl: baseUrl.trim(),
-        model: model.trim(), apiKey: apiKey.trim() || undefined, wireApi, models: models.length ? models : undefined,
-      });
+      // payload 形状（kind 必带、wireApi 只在 openai-compatible 出现）由那一个纯函数决定，
+      // 而不是在这里写第二遍 —— 它同时被用例钉住。
+      return callDesktop(IPC_COMMANDS.providerSave, providerSavePayload({
+        providerId: nextProviderId, kind, label, baseUrl, model, apiKey, wireApi, models,
+      }));
     },
     onSuccess: (response) => {
       setProviderId(response.provider.id);
@@ -303,18 +329,28 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       setSaved(true);
       onSaved(response);
     },
+      setKind(response.provider.kind);
   });
   return (
     <section className="settings-card">
-      <div className="settings-card-header"><div><p className="eyebrow">自定义 Provider</p><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>按 OpenCode 的 custom provider 方式填写唯一 ID、名称、Base URL、API Key 和模型。API Key 仅保存在系统密钥链。</p></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
+      <div className="settings-card-header"><div><p className="eyebrow">自定义 Provider</p><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>先选协议，再填唯一 ID、名称、Base URL、API Key 和模型。API Key 仅保存在系统密钥链。</p></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
       <form onSubmit={(event) => { event.preventDefault(); if (shell && !busy) save.mutate(); }} onChange={() => { setSaved(false); save.reset(); }}>
         <fieldset className="settings-form-fields" disabled={busy}>
           <div className="settings-form-grid settings-form-grid-provider">
             <Field label="Provider ID" className="field-wide"><input className="form-input" value={providerId} onChange={(event) => setProviderId(event.target.value.toLowerCase())} placeholder="myprovider" required={!provider} disabled={Boolean(provider)} spellCheck={false} pattern="[a-z0-9][a-z0-9-_]*" title="只能使用小写字母、数字、连字符和下划线，且首字符不能是符号" /></Field>
             <Field label="名称" className="field-wide"><input className="form-input" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="My AI Provider" required /></Field>
-            <Field label="Base URL" className="field-wide"><input type="url" className="form-input" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required spellCheck={false} /></Field>
+            {/*
+              协议是这张表单的第一个决定：它决定谁翻译请求，也决定后面哪些字段有意义。
+              没有它，同一个 base URL 用 chat completions 还是 Messages API 去调是说不清的。
+            */}
+            <Field label="协议" className="field-wide"><select className="form-input" value={kind} onChange={(event) => changeKind(event.target.value as AiProviderKind)}>{PROVIDER_KIND_ORDER.map((option) => <option key={option} value={option}>{PROVIDER_KIND_LABEL[option]}</option>)}</select></Field>
+            <Field label="Base URL" className="field-wide"><input type="url" className="form-input" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={PROVIDER_KIND_DEFAULT_BASE_URL[kind] ?? "https://api.example.com/v1"} required spellCheck={false} /></Field>
             <Field label="Model"><input className="form-input" list={modelsId} value={model} onChange={(event) => setModel(event.target.value)} placeholder="选择或输入模型 ID" required spellCheck={false} /><datalist id={modelsId}>{models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</datalist></Field>
-            <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field>
+            {/*
+              `wireApi` 只在 openai-compatible 里选方言，所以另外两种 kind **根本不渲染**这一格：
+              显示一个没有作用的控件比不显示更糟（它会让人以为这可以配）。
+            */}
+            {providerKindUsesWireApi(kind) ? <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
             <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
           </div>
         </fieldset>
@@ -325,6 +361,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
           <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size="sm" />{save.isPending ? "保存中…" : provider ? "保存并启用" : "添加并启用"}</button>
           {provider ? <button type="button" disabled={!shell || busy || catalog.isFetching} onClick={() => void catalog.refetch()} className="button-secondary">{catalog.isFetching ? "检查中…" : "刷新模型"}</button> : null}
           {models.length ? <span className="settings-storage-note">{models.length} 个可选模型</span> : null}
+        <p className="form-hint">{providerKindBaseUrlHint(kind)}</p>
         </div>
       </form>
     </section>

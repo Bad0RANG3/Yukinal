@@ -8,7 +8,9 @@
 | `anthropic.ts` | `anthropic` | Anthropic Messages API（`POST /v1/messages`） |
 | `gemini.ts` | `gemini` | Gemini `generateContent`（`POST /v1beta/models/{model}:streamGenerateContent`） |
 
-**状态：** 三个适配器都已实现并有离线测试；装配（`AiProviderKind`、`buildProvider()`、Rust 与设置界面）目前仍只认识 `openai-compatible`，因此另外两个暂时无法从界面配置。这不是遗漏描述，是当前的准确状态。
+**状态：** 三个适配器都已实现、有离线测试，并且**已经装配完成**：`AiProviderKind` 现在是三值轴（`packages/shared/src/types/provider.ts`），`provider_configs.kind` 的写入与读取都按 kind 走（`crates/database/src/repositories/providers.rs`），设置界面能选协议，`runtime_provider_config()` 按 kind 产出各自协议的配置，`buildProvider()` 按 kind 构造。三种 kind 都能从界面配出来并跑起来。
+
+**仍未做到的：** 两个原生适配器没有对真实上游验证过（见文末「这两个适配器的协议细节未对真实 API 验证」）；`RuntimeProviderConfig` 里没有 `apiVersion`，所以 Anthropic 的 `anthropic-version` 只能用适配器的缺省日期；也没有任何界面入口去覆盖它。这两条都是当前状态，不是待办清单上的省略描述。
 
 Provider 的职责只有适配上游 API。它不做权限判断、不执行宿主操作、不决定工具是否能被调用，也不允许上游协议细节渗进 agent loop。
 
@@ -16,13 +18,15 @@ Provider 的职责只有适配上游 API。它不做权限判断、不执行宿�
 agent loop
    │  只用 LLMProvider + ChatRequest + StreamEvent
    ▼
-buildProvider()（唯一按 kind 分支的地方）
+buildProvider()（唯一按 kind 分支的地方；kind 是选择器，不是适配器的配置字段）
    ├─ OpenAiCompatibleProvider ─ baseUrl · wireApi · apiKey · customHeaders · timeoutMs
    ├─ AnthropicProvider        ─ baseUrl · apiVersion · apiKey · customHeaders · timeoutMs
    └─ GeminiProvider           ─ baseUrl · apiKey · customHeaders · timeoutMs
    ▼
 各自的上游端点
 ```
+
+`kind`（谁翻译）与 `wireApi`（同一种翻译里的哪套方言）是**正交的两个轴**（ADR 0011 第 2 点）。`wireApi` 只对 `openai-compatible` 有意义，所以另外两种 kind 带着它既不会被发送、也不会被接受：`packages/shared` 的 schema 把这种组合判为非法输入（不是「被忽略的字段」），Rust 的读路径也不会给它们读出这个字段。
 
 ## 抽象是什么
 
@@ -45,26 +49,29 @@ export interface LLMProvider {
 
 **硬规则：agent loop 不根据 Provider 身份分支。** 三种 `kind` 的差别全部留在各自适配器里；新增协议的正确做法是新增一个实现，而不是在 loop 里加 `if (provider === ...)`。
 
-## 一个 OpenAI-compatible 端点是怎么被适配的
+## 一个 Provider 是怎么被装配的
 
 配置来自 Rust 侧解析出的 `RuntimeProviderConfig`（`packages/shared/src/types/provider.ts`），每次运行注入一次：
 
 | 字段 | 含义 |
 | --- | --- |
-| `baseUrl` | 完整基地址，例如 `https://openrouter.ai/api/v1`（尾部的 `/` 会被去掉） |
+| `kind` | `openai-compatible` / `anthropic` / `gemini`——决定由哪个适配器翻译（ADR 0011） |
+| `baseUrl` | 基地址。`openai-compatible` 是完整地址，例如 `https://openrouter.ai/api/v1`（尾部的 `/` 会被去掉）；两个原生 kind 填到域名层级，适配器自己接协议路径（`/v1/messages`、`/v1beta/models/{model}:…`） |
 | `model` | 模型 ID |
 | `apiKey` | 可选。本地端点（Ollama 等）可以没有；Rust 只在存在时传这个字段 |
 | `customHeaders` | 可选。仅限非敏感的网关元数据 |
 | `timeoutMs` | 可选。一次运行为 120 秒，模型目录请求为 30 秒，缺省 60 秒 |
-| `wireApi` | `chat`（默认）或 `responses` |
+| `wireApi` | `chat`（默认）或 `responses`。**只在 `kind: "openai-compatible"` 时允许出现**；另外两种 kind 带上它会被 schema 拒绝，而不是被忽略 |
 
-解析与构造发生在 `apps/agent/src/rpc/router.ts` 的 `buildProvider()`：`agent.run.start` 与 `provider.models` 都要求携带这个配置，缺失或 `kind` 不受支持时立刻返回 `INVALID_PARAMS`——这是构造失败，不是运行失败。
+**base URL 的缺省**：`anthropic` 与 `gemini` 在行里没有（或只有空白）base URL 时回落到协议自己的公开端点（`https://api.anthropic.com`、`https://generativelanguage.googleapis.com`），因为协议本身就是那家服务商的。`openai-compatible` **没有**这种回落：那个 kind 覆盖的是我们不拥有的端点（OpenRouter、Ollama、vLLM、内部网关……），替用户编一个 OpenAI 形状的默认地址等于把密钥送去一个他没选过的服务商。设置界面在切换协议时会把这两种默认端点填进空字段，所以正常路径下这个兜底不参与。
 
-请求头的处理顺序是有意为之：先合并 `customHeaders`，如果存在 API key，则**先删除所有大小写形式的 `authorization`**，再写入 `Bearer <key>`。凭据库里的 key 永远是权威来源，自定义头不能覆盖它。
+解析与构造发生在 `apps/agent/src/rpc/router.ts` 的 `buildProvider()`：`agent.run.start` 与 `provider.models` 都要求携带这个配置，缺失、`kind` 不在契约里、或某个 kind 还没有适配器时立刻返回 `INVALID_PARAMS`——这是构造失败，不是运行失败。
 
-## 两种请求方言
+请求头的处理顺序是有意为之，三个适配器都是同一条规则、只是换成自己协议的凭据头：先合并 `customHeaders`，如果存在 API key，则**先删除所有大小写形式的既有凭据头**（`openai-compatible` 与 `gemini` 删 `authorization`，`anthropic` 删 `authorization` 与 `x-api-key`），再写入自己的那一条（`Bearer <key>` / `x-api-key` / `x-goog-api-key`）。凭据库里的 key 永远是权威来源，自定义头不能覆盖它。`anthropic` 另外无条件删掉自定义头里的 `anthropic-version`，因为版本头归适配器所有（旋钮是 `config.apiVersion`）。
 
-由 `wireApi` 选择，二者都在同一个文件里实现，并用同一套 `StreamEvent` 输出。
+## 两种请求方言（只有 `openai-compatible` 有方言）
+
+由 `wireApi` 选择，二者都在同一个文件里实现，并用同一套 `StreamEvent` 输出。两个原生协议没有这一节，因为它们的请求与响应形状就是它们唯一的形状。
 
 ### `chat`（默认）
 
@@ -85,15 +92,24 @@ export interface LLMProvider {
 
 ## 模型目录怎么工作
 
-`listModels()` 请求 `GET {baseUrl}/models`，用严格的 Zod schema 校验响应（`data` 为最多 1000 个 `{id}` 的数组；`data` 缺失视为空目录，因为部分网关就是这样回答的）。校验失败或 HTTP 状态异常时抛出 `ProviderError`，不返回半截数据；网络层异常会被包成 `retryable: true` 的错误。
+三种 kind 都实现了 `listModels()`，各自读**自己协议**的目录端点：
 
-返回的每个条目都填成 `{id, label: id, supportsToolCalling: true, supportsStreaming: true}`——端点不会告诉我们这些能力，因此这里是乐观默认值，调用方不应把它当作能力探测结果。目录与方言无关，`chat` 与 `responses` 用的是同一个端点。
+| kind | 端点 | 过滤 |
+| --- | --- | --- |
+| `openai-compatible` | `GET {baseUrl}/models` | 无 |
+| `anthropic` | `GET {baseUrl}/v1/models` | 无（`display_name` 作为显示名） |
+| `gemini` | `GET {baseUrl}/v1beta/models` | 只保留 `supportedGenerationMethods` 含 `generateContent` 的项，并去掉名字里的 `models/` 前缀 |
+
+`openai-compatible` 用严格的 Zod schema 校验响应（`data` 为最多 1000 个 `{id}` 的数组；`data` 缺失视为空目录，因为部分网关就是这样回答的）。校验失败或 HTTP 状态异常时抛出 `ProviderError`，不返回半截数据；网络层异常会被包成 `retryable: true` 的错误。
+
+返回的每个条目都填成 `{id, label, supportsToolCalling: true, supportsStreaming: true}`——端点不会告诉我们这些能力，因此这里是乐观默认值，调用方不应把它当作能力探测结果。目录与方言无关，`openai-compatible` 的 `chat` 与 `responses` 用的是同一个端点。
 
 链路上的实际行为：
 
 - 设置界面通过 Tauri 命令 `provider_models` 触发一次读取。传递到 Provider 的超时是 30 秒，宿主给这次 RPC 的期限是 35 秒，让 Provider 自己的超时先触发并返回一个可读的错误；失败时界面不重试（`retry: 0`）。
 - 读取成功的结果会被缓存进 Provider 配置行（`models` 字段），供模型选择器在离线时使用。
-- 目录不可用时用户仍可手动填写模型 ID，因此一个不实现 `/models` 的网关依然可用。
+- 目录不可用时用户仍可手动填写模型 ID，因此一个不实现 `/models` 的网关、或者目录格式漂移的上游，都仍然可用。
+
 
 ## 工具名如何跨过边界
 
@@ -112,7 +128,7 @@ loop 用 `specs()` 构造请求，用 `internalFor()` 把模型返回的名称�
 - `ChatRequest.signal` 被接到内部的 `AbortController` 上并传递给 `fetch`，用户按停止会真正中断在途请求；父信号在流结束时会解绑监听器。
 - 超时由独立定时器触发（`request.timeoutMs ?? config.timeoutMs ?? 60 秒`），到期即中止。
 - 用户主动取消产出 `done` 且 `finishReason` 为 `cancelled`；超时则会以 `error` 事件的形式浮出，因为它是内部中止而不是父信号取消。调用方需要区分这两者。
-- 错误信息统一经过 `safeProviderMessage()`：把 `api key`、`authorization`、`bearer`、`token` 形式的赋值替换成 `[redacted]`，并截断到 300 字符。上游网关在错误体里回显掩码密钥是真实存在的情况，界面不应该成为它的出口。
+- 上游给出的错误文本统一经过 `safeProviderMessage()`：把 `api key`、`authorization`、`bearer`、`token` 形式的赋值替换成 `[redacted]`，并截断到 300 字符。上游网关在错误体里回显掩码密钥是真实存在的情况，界面不应该成为它的出口。**这条覆盖的是「Provider 自己构造的错误」**：目录读取失败、`response.failed` / `response.incomplete`、Anthropic 的 `error` 事件、Gemini 的 `error` / `promptFeedback.blockReason`、以及三个适配器 `stream()` 里被包成 `error` 事件的异常。唯一没有走这条的是 `openai-compatible` 在 chat 方言下抛出的网络层异常（`openai-compatible.ts` 的 catch 分支直接透传 `error.message`）——它只可能是 fetch 自身的文本，但按本条规则它也该过一遍清理。
 
 ## 另外两个协议怎么被适配的
 
@@ -120,7 +136,7 @@ loop 用 `specs()` 构造请求，用 `internalFor()` 把模型返回的名称�
 
 ### `anthropic`（Messages API）
 
-- 请求：`POST {baseUrl}/v1/messages`，头为 `x-api-key` 与 `anthropic-version`（缺省 `2023-06-01`，可用 `config.apiVersion` 覆盖，因为它按日期版本化）。
+- 请求：`POST {baseUrl}/v1/messages`，头为 `x-api-key` 与 `anthropic-version`（缺省 `2023-06-01`，可用 `config.apiVersion` 覆盖，因为它按日期版本化）。**`apiVersion` 目前没有任何配置路径把它送进来**：`RuntimeProviderConfig` 里没有这个字段，Rust 也就不可能传，所以运行起来永远是那个缺省日期；要把它做成用户可配的，需要同时动 shared schema 与 `runtime_provider_config()`。
 - **系统提示是顶层 `system` 字段**：Messages API 的 `messages` 数组里没有 `system` 角色。空的 system 会被省略而不是发一个空串。
 - **工具流量是内容块**：assistant 的 `toolCalls` 变成 `tool_use` 块；`tool` 角色的消息变成 user 轮里的 `tool_result` 块并用 `tool_use_id` 指回调用，连续的 `tool_result` 会合并进同一轮（协议要求结果块排在内容最前面）。
 - `tools` 用 `{name, description, input_schema}` 形状；面向模型的名字原样传递，不做任何改写。
@@ -159,18 +175,21 @@ loop 用 `specs()` 构造请求，用 `internalFor()` 把模型返回的名称�
 
 ## 怎么新增一个 Provider
 
+下面每一步都是**已经装配过一次的形状**（`anthropic` 与 `gemini` 走的正是这条路），所以它现在描述的是实际操作，而不是设想：
+
 1. **只实现接口。** 新建一个实现 `LLMProvider` 的类，`id` 取一个稳定字符串，`stream()` 用异步生成器产出 `StreamEvent`。不要引入 Provider 专属的返回类型给上层使用。
-2. **导出与装配。** 在 `packages/shared/src/types/provider.ts` 的 `AiProviderKind` 与 `RuntimeProviderConfig` 里加入新的 `kind`，在 Rust 侧 `commands/provider.rs` 的 `runtime_provider_config()` 中产出对应配置，并在 `apps/agent/src/rpc/router.ts` 的 `buildProvider()` 里按 `kind` 构造——这是唯一允许按 Provider 身份分支的地方，因为它就是装配点。
-3. **把 kind 存进数据库并读回来。** `provider_configs.kind` 是自由文本列，但读路径曾硬编码成 `openai-compatible`；新增 kind 必须同时改写入与读取，否则新 kind 存进去会被读成旧的。
-4. **补齐设置界面。** `provider_save_openai` 只处理一种 kind；新增 kind 需要同时提供保存路径、凭据引用与模型目录读取，否则用户在设置页无法配置它。
-5. **写测试，且不依赖真实网络。** 现有测试的做法是注入假的 `fetch` 与构造好的 SSE 流，覆盖文本增量、分片工具调用、`[DONE]`、EOF 无终止符、错误脱敏与取消。两个原生适配器的测试就在本目录，可以直接照抄结构。
-6. **不要改变这些语义：** 权限模型、ToolRegistry 的票据校验、宿主工具的输入输出形状，以及工具名的映射规则。新增 Provider 只应影响「怎么和模型说话」。
+2. **把 `kind` 加进契约。** `packages/shared/src/types/provider.ts` 的 `AI_PROVIDER_KINDS`（三处类型都从它派生）与 `packages/shared/src/schemas/provider.ts` 的 `AiProviderKindSchema`；Rust 侧 `crates/database/src/models.rs` 的 `AiProviderKind`（一个 `enum_as_str!` 调用 + 一个变体，`ALL`/`as_str`/`from_db` 由宏生成）。两端的拼写必须逐字一致，用例 `ai_provider_kind_uses_shared_wire_spelling` 守这条。
+3. **装配。** 在 `apps/agent/src/rpc/router.ts` 的 `buildProvider()` 里按 `kind` 构造，并在 `commands/provider.rs` 的 `runtime_provider_config()` 里产出对应协议需要的字段（`kind`、`baseUrl`、以及该协议自己才有的键；`wireApi` 只有 `openai-compatible` 会有）。`buildProvider()` 是唯一允许按 Provider 身份分支的地方，因为它就是装配点。
+4. **数据库两向都走 `kind`。** 写入用 `config.kind.as_str()`，读取用 `AiProviderKind::from_db_column()`；认不出的取值是**硬错误**（`decode_error`），不是被当成 `openai-compatible` —— 那正是「一个用错协议去调的 Provider」。`every_ai_provider_kind_round_trips_through_the_kind_column` 与 `an_unknown_provider_kind_fails_the_read_instead_of_becoming_openai_compatible` 是这两条性质的用例。
+5. **补齐界面与保存路径。** 保存命令是 `provider_save`（kind 是必填参数，不再是 `provider_save_openai` 那种把「只有一种 kind」写进命令名的形式）。设置界面在 `apps/desktop/src/features/settings/RuntimeSettings.tsx`，kind 的显示顺序、默认端点与「哪些字段有意义」的判断在 `apps/desktop/src/lib/providers.ts`。新增 kind 必须同时给出这些，否则用户在设置页配不出它——只写适配器等于没做。
+6. **写测试，且不依赖真实网络。** 现有测试的做法是注入假的 `fetch` 与构造好的 SSE 流，覆盖文本增量、分片工具调用、`[DONE]`、EOF 无终止符、错误脱敏与取消。两个原生适配器的测试就在本目录，可以直接照抄结构；`apps/agent/src/rpc/router.test.ts` 里每个 kind 都有一条从 `agent.run.start` 走到底的用例。
+7. **不要改变这些语义：** 权限模型、ToolRegistry 的票据校验、宿主工具的输入输出形状，以及工具名的映射规则。新增 Provider 只应影响「怎么和模型说话」。
 
 ## 安全的凭证边界
 
 Agent 每次运行只接收一份 `RuntimeProviderConfig`。API key 是唯一允许的认证材料，并且必须来自操作系统凭据库；它不写入 Agent 的配置文件，也不得出现在 Provider 日志、活动记录或审计里（`apps/agent/src/config.ts` 的日志器会对敏感键名与文本做清理）。
 
-`customHeaders` 只允许非敏感的网关元数据：`Referer`、`Origin`、`User-Agent`、`X-App-Name`、`X-App-Version`、`X-Client-Name`、`X-Client-Version`、`X-Title`（`HTTP-Referer` 亦在允许列表内）。名字比较不区分大小写；值必须非空、不超过 4096 字符、不含换行，也不能以 `Bearer ` 或 `Basic ` 开头。`Authorization`、`X-Api-Key`、cookie 以及任何 `Bearer`/`Basic` 值都不能保存在 SQLite 或随运行配置传递；保存路径会把允许列表之外的头全部丢弃。当前 `provider_save_openai` 实际上不写入自定义头，这层允许列表用于约束历史数据与导入来源。
+`customHeaders` 只允许非敏感的网关元数据：`Referer`、`Origin`、`User-Agent`、`X-App-Name`、`X-App-Version`、`X-Client-Name`、`X-Client-Version`、`X-Title`（`HTTP-Referer` 亦在允许列表内）。名字比较不区分大小写；值必须非空、不超过 4096 字符、不含换行，也不能以 `Bearer ` 或 `Basic ` 开头。`Authorization`、`X-Api-Key`、cookie 以及任何 `Bearer`/`Basic` 值都不能保存在 SQLite 或随运行配置传递；保存路径会把允许列表之外的头全部丢弃。当前 `provider_save` 实际上不写入自定义头（落库时 `custom_headers` 恒为 `None`），这层允许列表用于约束历史数据与导入来源。
 
 没有凭据引用的 Provider 只有在 `baseUrl` 指向本机时才被视为可用（`localhost`、`127.0.0.1`、`[::1]` 的 http 或 https 形式）；其他地址缺少密钥时会在运行前被判为不可用，而不是等请求失败。
 

@@ -28,12 +28,15 @@ impl<'a> ProviderConfigsRepository<'a> {
                 "INSERT INTO provider_configs (
                     id, family, kind, label, base_url, model, api_key_credential_ref,
                     enabled, custom_headers, max_input_tokens, settings, wire_api, created_at, updated_at
-                 ) VALUES (?1, 'ai', 'openai-compatible', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ) VALUES (?1, 'ai', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
-                    label = ?2, base_url = ?3, model = ?4, api_key_credential_ref = ?5,
-                    enabled = ?6, custom_headers = ?7, max_input_tokens = ?8, settings = ?9, wire_api = ?10, updated_at = ?12",
+                    kind = ?2, label = ?3, base_url = ?4, api_key_credential_ref = ?6,
+                    enabled = ?7, custom_headers = ?8, max_input_tokens = ?9, settings = ?10, wire_api = ?11, updated_at = ?13",
                 params![
                     config.id,
+                    // `kind` 是**写出来的**，而不是写死的 `'openai-compatible'`：写死的那一版
+                    // 让任何一个新 kind 存进去都变成 openai-compatible（ADR 0011 点名的那处错误）。
+                    config.kind.as_str(),
                     config.label,
                     config.base_url,
                     config.model,
@@ -47,7 +50,9 @@ impl<'a> ProviderConfigsRepository<'a> {
                         .map(|models| serde_json::to_string(&serde_json::json!({ "models": models })))
                         .transpose()
                         .map_err(DatabaseError::from)?,
-                    config.wire_api,
+                    // `wire_api` 是 `NOT NULL DEFAULT 'chat'` 的列，写不进 NULL：`None`（原生
+                    // kind 没有方言轴）落成空串，读回来时按 kind 决定它是不是 `None`。
+                    config.wire_api.as_deref().unwrap_or(""),
                     config.created_at,
                     config.updated_at,
                 ],
@@ -150,10 +155,24 @@ pub enum ProviderRow {
     Infra(InfrastructureProviderConfig),
 }
 
+/// One row of `provider_configs` with `family = 'ai'`.
+///
+/// 两个方向都必须经过 `kind`（ADR 0011 的后果一节点名了这里）：读路径曾经**无视**第 1 列、
+/// 把每一行都解码成 `OpenaiCompatible`，于是写进去的 `gemini` 读回来变成 openai-compatible ——
+/// 一个用 OpenAI 方言去调的 Gemini 端点，而配置看起来完全正常。写路径对应地把
+/// `'openai-compatible'` 写死在 SQL 里，所以它连「存进去」都做不到。
+///
+/// **认不出的 kind 是硬错误，不是默认值。** 把一个未知字符串当成 openai-compatible，正是上面
+/// 那个失败模式：错误信息里会带着真实的 base URL，而协议是错的。所以这里走本文件其他列
+/// 同样的路（`decode_error`），让它在读的那一刻就失败，而不是等到请求打出去。
+/// 代价是一行坏数据会让 `list_ai()` 整个失败 —— 那也比静默换一种协议好，而且行还在库里可查。
 fn row_to_ai(row: &Row<'_>) -> rusqlite::Result<AiProviderConfig> {
+    let raw_kind: String = row.get(1)?;
+    let kind = AiProviderKind::from_db_column(&raw_kind)
+        .ok_or_else(|| decode_error(1, format!("unknown AI provider kind {raw_kind:?}")))?;
     Ok(AiProviderConfig {
         id: row.get(0)?,
-        kind: AiProviderKind::OpenaiCompatible,
+        kind,
         label: row.get(2)?,
         base_url: row.get(3)?,
         model: row.get(4)?,
@@ -166,10 +185,22 @@ fn row_to_ai(row: &Row<'_>) -> rusqlite::Result<AiProviderConfig> {
             .map_err(|error| decode_error(10, error))?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
-        wire_api: row
-            .get::<_, Option<String>>(14)?
-            .unwrap_or_else(|| "chat".to_string()),
+        wire_api: wire_api_for_kind(kind, row.get::<_, Option<String>>(14)?),
     })
+}
+
+/// `wireApi` 只属于 `openai-compatible`（ADR 0011 第 2 点），所以这一列要不要读由 `kind` 决定：
+/// 原生 kind 一律是 `None`，即使库里因为历史原因写着 `chat`。反过来，openai-compatible 行缺值
+/// （NULL 或空串）落到这一列自己的默认值 `chat`，与迁移 2 的写法一致。
+fn wire_api_for_kind(kind: AiProviderKind, stored: Option<String>) -> Option<String> {
+    if !kind.has_wire_api() {
+        return None;
+    }
+    Some(
+        stored
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "chat".to_string()),
+    )
 }
 
 fn parse_models(
@@ -222,6 +253,27 @@ fn optional_json_string(
 // ---------------------------------------------------------------------------
 // mcp_servers
 
+/// One statement, so `list` and `get` cannot drift apart in column order.
+const SELECT_ALL: &str =
+    "SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level
+     FROM mcp_servers ORDER BY label";
+
+fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServerConfig> {
+    Ok(McpServerConfig {
+        id: row.get(0)?,
+        label: row.get(1)?,
+        transport: row.get(2)?,
+        command: row.get(3)?,
+        args: optional_json(row.get::<_, Option<String>>(4)?)
+            .map_err(|error| decode_error(4, error))?,
+        url: row.get(5)?,
+        enabled: row.get::<_, i64>(6)? != 0,
+        allowed_tools: serde_json::from_str(&row.get::<_, String>(7)?)
+            .map_err(|error| decode_error(7, error))?,
+        trust_level: row.get(8)?,
+    })
+}
+
 pub struct McpServersRepository<'a> {
     db: &'a Database,
 }
@@ -262,27 +314,34 @@ impl<'a> McpServersRepository<'a> {
 
     pub fn list(&self) -> Result<Vec<McpServerConfig>> {
         self.db.with(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level
-                 FROM mcp_servers ORDER BY label",
-            )?;
-            let rows = statement.query_map([], |row| {
-                Ok(McpServerConfig {
-                    id: row.get(0)?,
-                    label: row.get(1)?,
-                    transport: row.get(2)?,
-                    command: row.get(3)?,
-                    args: optional_json(row.get::<_, Option<String>>(4)?)
-                        .map_err(|error| decode_error(4, error))?,
-                    url: row.get(5)?,
-                    enabled: row.get::<_, i64>(6)? != 0,
-                    allowed_tools: serde_json::from_str(&row.get::<_, String>(7)?)
-                        .map_err(|error| decode_error(7, error))?,
-                    trust_level: row.get(8)?,
-                })
-            })?;
+            let mut statement = connection.prepare(SELECT_ALL)?;
+            let rows = statement.query_map([], row_to_mcp)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(DatabaseError::from)
+        })
+    }
+
+    /// One row, or [`DatabaseError::NotFound`].
+    ///
+    /// Added with the MCP wiring: `upsert` / `list` / `delete` were the whole surface, and
+    /// every caller that acts on **one** server (start it, stop it, delete it) would have
+    /// had to read the whole table and find the row itself — an O(n) search that also
+    /// turns "this id does not exist" into a `None` the caller has to remember to check.
+    /// Same id lookups already exist next door (`ServersRepository::get`,
+    /// `ProviderConfigsRepository::get_ai`), so this is the missing member of an existing
+    /// shape rather than a new one.
+    pub fn get(&self, id: &str) -> Result<McpServerConfig> {
+        self.db.with(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level
+                     FROM mcp_servers WHERE id = ?1",
+                    params![id],
+                    row_to_mcp,
+                )
+                .optional()
+                .map_err(DatabaseError::from)?
+                .ok_or(DatabaseError::NotFound)
         })
     }
 
