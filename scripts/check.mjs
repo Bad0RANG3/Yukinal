@@ -6,8 +6,10 @@
  * Order is deliberate:
  *   1. build the contract libs   (consumers import their dist/*.d.ts)
  *   2. typecheck every workspace
- *   3. run every workspace's unit tests
- *   4. rust fmt + clippy + check, when a Rust toolchain is installed
+ *   3. bundle the agent, then check it against the packaging contract
+ *   4. run every workspace's unit tests
+ *   5. smoke the agent bundle, both in the checkout and in its installed shape
+ *   6. rust fmt + clippy + check, when a Rust toolchain is installed
  *
  * Exits non-zero on the first failure.
  */
@@ -28,10 +30,15 @@ const steps = [
     required: true,
   },
   { name: "typecheck", command: "pnpm", args: ["-r", "--if-present", "typecheck"], required: true },
-  { name: "agent bundle (tsc)", command: "pnpm", args: ["--filter", "@yukinal/agent", "build"], required: true },
+  { name: "agent bundle (esbuild)", command: "pnpm", args: ["--filter", "@yukinal/agent", "build"], required: true },
+  // Needs the bundle to exist, so it sits right after the build that produces it.
+  { name: "packaging contract", command: process.execPath, args: ["scripts/check-packaging.mjs"], required: true },
   { name: "unit tests", command: "pnpm", args: ["-r", "--if-present", "test"], required: true },
   { name: "desktop bundle (vite build)", command: "pnpm", args: ["--filter", "@yukinal/desktop", "build"], required: true },
   { name: "sidecar stdio smoke", command: process.execPath, args: ["scripts/smoke-sidecar.mjs"], required: true },
+  // The same bundle, run from a directory shaped like <resource_dir>/agent/ with no
+  // node_modules above it: the shape an installed app actually launches.
+  { name: "packaged agent smoke", command: process.execPath, args: ["scripts/smoke-packaged-agent.mjs"], required: true },
   { name: "rustfmt check", command: "cargo", args: ["fmt", "--all", "--check"], required: false, skip: !hasCargo },
   {
     name: "clippy",

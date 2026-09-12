@@ -32,7 +32,30 @@ impl SidecarConfig {
     ///
     /// Never a silent default: if nothing resolves, the caller gets a message naming
     /// the build step to run.
+    ///
+    /// No packaged resources: see [`SidecarConfig::from_env_with_resources`] for the
+    /// installer case. This entry point stays because every test and the dev loop use it.
     pub fn from_env_with_cwd(cwd: &Path) -> Result<Self, SidecarError> {
+        Self::from_env_with_resources(cwd, None)
+    }
+
+    /// Resolution order for a **packaged** app:
+    /// 1. `YUKINAL_AGENT_COMMAND` (+ optional `YUKINAL_AGENT_ARGS`, `;`-separated)
+    /// 2. `YUKINAL_AGENT_ENTRY` (+ optional `YUKINAL_NODE`)
+    /// 3. `<resources>/agent/index.js` — where `tauri.conf.json` puts the bundle
+    /// 4. dev fallback: nearest `apps/agent/dist/index.js` walking up from `cwd`
+    ///
+    /// The packaged path outranks the dev one on purpose: an installed app has no repo
+    /// checkout to walk up from, while a dev run has no staged resources, so each order
+    /// picks the right answer in the case that matters and neither can shadow the other.
+    ///
+    /// `resources` is the Tauri resource directory. It is a parameter rather than an
+    /// `env!`-style constant because only the caller knows where it is, and the crate must
+    /// stay launchable from tests.
+    pub fn from_env_with_resources(
+        cwd: &Path,
+        resources: Option<&Path>,
+    ) -> Result<Self, SidecarError> {
         let lookup = |key: &str| {
             std::env::var(key)
                 .ok()
@@ -79,7 +102,14 @@ impl SidecarConfig {
             });
         }
 
-        match find_dev_bundle(cwd) {
+        let packaged = resources.map(packaged_entry);
+        let found = packaged
+            .as_ref()
+            .filter(|candidate| candidate.is_file())
+            .cloned()
+            .or_else(|| find_dev_bundle(cwd));
+
+        match found {
             Some(path) => Ok(Self {
                 program: node_program(None),
                 args: vec![path.clone().into_os_string()],
@@ -89,12 +119,18 @@ impl SidecarConfig {
                 client_version: default_client_version(),
                 data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
             }),
-            None => Err(SidecarError::NotFound {
-                searched: ancestors(cwd)
-                    .map(|dir| format!("{}/apps/agent/dist/index.js", dir.display()))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            }),
+            None => {
+                let mut searched: Vec<String> = packaged
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                searched.extend(
+                    ancestors(cwd).map(|dir| format!("{}/apps/agent/dist/index.js", dir.display())),
+                );
+                Err(SidecarError::NotFound {
+                    searched: searched.join(", "),
+                })
+            }
         }
     }
 
@@ -103,11 +139,57 @@ impl SidecarConfig {
         self.env.push((key.to_string(), value.to_string()));
         self
     }
+
+    /// True when `program` is a bare command name for the OS to resolve through `PATH`,
+    /// rather than a path some caller chose.
+    ///
+    /// Only this case may be blamed on `PATH` in an error message: `YUKINAL_NODE` and
+    /// `YUKINAL_AGENT_COMMAND` always produce a path with a separator (or should), and
+    /// telling a user to fix `PATH` when they set an explicit override sends them to the
+    /// wrong place.
+    #[must_use]
+    pub fn resolved_through_path(&self) -> bool {
+        self.program.components().count() == 1
+    }
+
+    /// Turn a failed `Command::spawn` into something the user can act on.
+    ///
+    /// A packaged app does not ship a Node runtime, so "no Node installed" is the first
+    /// failure a new user is likely to hit, and the bare OS error — `program not found` —
+    /// names neither the prerequisite nor a way out. That case gets a real message; every
+    /// other spawn failure keeps the plain `program: error` form, because inventing advice
+    /// for a permissions error or a bad interpreter would be worse than saying nothing.
+    ///
+    /// Deliberately *not* a pre-flight `node --version` check: that would spawn a second
+    /// process on every start, and it still cannot catch a Node that exists but is too old
+    /// (which fails as a parse error on stderr — visible in the retained log tail).
+    #[must_use]
+    pub fn launch_error(&self, error: &std::io::Error) -> SidecarError {
+        if error.kind() == std::io::ErrorKind::NotFound && self.resolved_through_path() {
+            return SidecarError::Launch(format!(
+                "Node.js was not found on PATH (`{}`). This build does not bundle a Node \
+                 runtime, so Node.js {REQUIRED_NODE_MAJOR} or newer must be installed \
+                 (https://nodejs.org), or set YUKINAL_NODE to an absolute path to the \
+                 executable",
+                self.program.display()
+            ));
+        }
+        SidecarError::Launch(format!("{}: {error}", self.program.display()))
+    }
 }
 
 fn default_client_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
+
+/// The Node major the agent bundle is built for.
+///
+/// The installer does **not** ship a Node runtime (ADR 0013), so this is a prerequisite the
+/// user's machine has to satisfy. It is duplicated from three places that must agree, and a
+/// test below pins it against the first of them: `engines.node` in the root `package.json`,
+/// the `--target` in the agent's esbuild step, and the text of the error a user sees when
+/// Node is missing.
+pub const REQUIRED_NODE_MAJOR: u32 = 24;
 
 fn node_program(override_path: Option<&str>) -> PathBuf {
     match override_path {
@@ -120,6 +202,14 @@ fn find_dev_bundle(cwd: &Path) -> Option<PathBuf> {
     ancestors(cwd)
         .map(|dir| dir.join("apps").join("agent").join("dist").join("index.js"))
         .find(|candidate| candidate.is_file())
+}
+
+/// Where a bundled app keeps the agent. Must match `bundle.resources` in
+/// `apps/desktop/src-tauri/tauri.conf.json`; `scripts/check.mjs` asserts the two agree,
+/// because a rename on one side only would be discovered by an installed user, not by CI.
+#[must_use]
+pub fn packaged_entry(resources: &Path) -> PathBuf {
+    resources.join("agent").join("index.js")
 }
 
 fn ancestors(start: &Path) -> impl Iterator<Item = PathBuf> {
@@ -139,6 +229,18 @@ fn ancestors(start: &Path) -> impl Iterator<Item = PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `std::env` is process-global and the test harness runs these tests on parallel
+    /// threads, so every test that *reads* the resolution environment has to hold this lock
+    /// while one that *writes* it is running. Without it `missing_bundle_error_names_the_fix`
+    /// intermittently sees the `YUKINAL_AGENT_COMMAND` another test just set.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn temp_tagged_dir(tag: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -166,6 +268,7 @@ mod tests {
 
     #[test]
     fn missing_bundle_error_names_the_fix() {
+        let _guard = env_guard();
         let root = temp_tagged_dir("empty");
         let error =
             SidecarConfig::from_env_with_cwd(&root).expect_err("should fail when nothing resolves");
@@ -180,6 +283,7 @@ mod tests {
     #[test]
     fn explicit_command_override_wins_and_splits_args_on_semicolon() {
         // Guarded: these env vars are process-global, so this test owns them.
+        let _guard = env_guard();
         std::env::set_var("YUKINAL_AGENT_COMMAND", "/usr/bin/true");
         std::env::set_var("YUKINAL_AGENT_ARGS", "one;two with space");
         let config = SidecarConfig::from_env_with_cwd(Path::new(".")).expect("explicit config");
@@ -188,5 +292,156 @@ mod tests {
         assert_eq!(config.args[1], OsString::from("two with space"));
         std::env::remove_var("YUKINAL_AGENT_COMMAND");
         std::env::remove_var("YUKINAL_AGENT_ARGS");
+    }
+
+    #[test]
+    fn a_packaged_bundle_is_found_in_the_resource_directory() {
+        let _guard = env_guard();
+        let root = temp_tagged_dir("packaged");
+        let resources = root.join("resources");
+        let staged = resources.join("agent");
+        std::fs::create_dir_all(&staged).expect("create staged dir");
+        std::fs::write(staged.join("index.js"), "console.log('packaged')").expect("write bundle");
+
+        let config = SidecarConfig::from_env_with_resources(&root, Some(&resources))
+            .expect("packaged bundle resolves");
+        assert_eq!(config.args, vec![staged.join("index.js").into_os_string()]);
+        assert_eq!(
+            config.entry_label,
+            staged.join("index.js").display().to_string()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_packaged_bundle_outranks_a_dev_checkout_and_an_absent_one_falls_back() {
+        let _guard = env_guard();
+        let root = temp_tagged_dir("precedence");
+        let dev_bundle = root.join("apps").join("agent").join("dist");
+        std::fs::create_dir_all(&dev_bundle).expect("create dev bundle dir");
+        std::fs::write(dev_bundle.join("index.js"), "console.log('dev')")
+            .expect("write dev bundle");
+
+        let resources = root.join("resources");
+        let staged = resources.join("agent");
+        std::fs::create_dir_all(&staged).expect("create staged dir");
+        std::fs::write(staged.join("index.js"), "console.log('packaged')").expect("write bundle");
+
+        let packaged = SidecarConfig::from_env_with_resources(&root, Some(&resources))
+            .expect("packaged bundle resolves");
+        assert_eq!(
+            packaged.entry_label,
+            staged.join("index.js").display().to_string(),
+            "an installed app must run the bundle that was installed with it"
+        );
+
+        // A dev checkout has no staged resources, and that must not be an error: the
+        // ancestor lookup still has to answer.
+        std::fs::remove_file(staged.join("index.js")).expect("remove staged bundle");
+        let dev = SidecarConfig::from_env_with_resources(&root, Some(&resources))
+            .expect("dev bundle resolves");
+        assert_eq!(
+            dev.entry_label,
+            dev_bundle.join("index.js").display().to_string()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_not_found_error_names_the_packaged_path_too() {
+        let _guard = env_guard();
+        let root = temp_tagged_dir("searched");
+        let resources = root.join("resources");
+        let error = SidecarConfig::from_env_with_resources(&root, Some(&resources))
+            .expect_err("nothing resolves");
+        let message = error.to_string();
+        let expected = packaged_entry(&resources).display().to_string();
+        assert!(
+            message.contains(&expected),
+            "an installed user has to be told which packaged path was missing: {message}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A config whose program is resolved through `PATH`, i.e. the packaged shape.
+    ///
+    /// Built as a literal instead of by reading the environment: the ambient
+    /// `YUKINAL_AGENT_*` variables are process-global and the integration harness sets them,
+    /// so "what does the resolution path produce here" would be a different answer under
+    /// `cargo test --workspace` than under `cargo test -p yukinal-core`.
+    fn path_resolved_config() -> SidecarConfig {
+        SidecarConfig {
+            program: node_program(None),
+            args: vec![OsString::from("/opt/agent/index.js")],
+            env: Vec::new(),
+            request_timeout: Duration::from_secs(10),
+            entry_label: String::from("/opt/agent/index.js"),
+            client_version: default_client_version(),
+            data_dir: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_missing_path_node_is_reported_as_a_missing_prerequisite() {
+        let config = path_resolved_config();
+        assert!(config.resolved_through_path());
+
+        let error = config.launch_error(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "program not found",
+        ));
+        let message = error.to_string();
+        // The version has to be in the message: "install Node" without a floor sends the
+        // user to a download page that may hand them something too old to run the bundle.
+        assert!(
+            message.contains(&format!("Node.js {REQUIRED_NODE_MAJOR}")),
+            "{message}"
+        );
+        assert!(message.contains("YUKINAL_NODE"), "{message}");
+    }
+
+    #[test]
+    fn an_explicit_program_path_is_never_blamed_on_path_lookup() {
+        let mut config = path_resolved_config();
+        config.program = PathBuf::from("/usr/local/bin/node");
+        assert!(!config.resolved_through_path());
+        let error = config.launch_error(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "program not found",
+        ));
+        let message = error.to_string();
+        assert!(
+            !message.contains("PATH"),
+            "an explicit override must not be told to fix PATH: {message}"
+        );
+        assert!(message.contains("/usr/local/bin/node"), "{message}");
+    }
+
+    #[test]
+    fn a_non_notfound_spawn_failure_keeps_the_plain_message() {
+        let config = path_resolved_config();
+        let error = config.launch_error(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "access is denied",
+        ));
+        let message = error.to_string();
+        assert!(!message.contains("nodejs.org"), "{message}");
+        assert!(message.contains("access is denied"), "{message}");
+    }
+
+    /// The Node floor is stated in four places that cannot import each other: this constant,
+    /// the root `package.json` `engines.node`, the agent's esbuild `--target`, and the
+    /// installed-app docs. They are only allowed to agree, and this is the one pair a test
+    /// can actually check, so it is checked rather than trusted.
+    #[test]
+    fn the_node_floor_matches_the_declared_engine_range() {
+        let manifest = include_str!("../../../../package.json");
+        let expected = format!("\">={REQUIRED_NODE_MAJOR}\"");
+        assert!(
+            manifest.contains(&expected),
+            "root package.json engines.node must stay {expected}; raise both together"
+        );
     }
 }

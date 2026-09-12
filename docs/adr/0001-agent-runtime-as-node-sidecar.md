@@ -1,6 +1,6 @@
 # ADR 0001 Agent Runtime 作为独立 Node.js sidecar
 
-Status: Accepted
+Status: Accepted（「发布成安装包时必须随应用分发受信任的 Node 运行时」一处已由 [ADR 0013](0013-installer-distribution.md) 取代：安装包随包分发 agent bundle，但使用用户系统上的 Node。其余部分仍然有效）
 Date: 2026-09-09
 
 ## Context

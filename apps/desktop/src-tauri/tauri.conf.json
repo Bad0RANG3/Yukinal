@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm --filter @yukinal/desktop build",
+    "beforeBuildCommand": "pnpm build:libs && pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -28,7 +28,22 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["nsis", "msi", "app", "dmg", "deb", "rpm", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../../agent/dist/index.js": "agent/index.js",
+      "resources/agent-package.json": "agent/package.json"
+    },
+    "category": "DeveloperTool",
+    "shortDescription": "AI-native remote development workspace",
+    "publisher": "Yukinal contributors",
+    "copyright": "MIT licensed"
   }
 }

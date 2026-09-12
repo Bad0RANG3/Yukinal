@@ -1,6 +1,6 @@
 # ADR 0008 Rust 负责 sidecar 的启动和生命周期
 
-Status: Accepted（本记录中「当前不自动重启」一节已由 [ADR 0010](0010-bounded-sidecar-recovery.md) 取代；原文保留，以保留当时的约束与代价）
+Status: Accepted（本记录中「当前不自动重启」一节已由 [ADR 0010](0010-bounded-sidecar-recovery.md) 取代；「必须随包分发受信任的 Node 运行时」与「`bundle.active` 为 `false`」两处已由 [ADR 0013](0013-installer-distribution.md) 取代——启动顺序本身仍然有效，只是多了一层安装包资源目录。原文保留，以保留当时的约束与代价）
 Date: 2026-09-09
 
 ## Context

@@ -14,6 +14,7 @@
     "build:libs": "pnpm --filter \"./packages/**\" --if-present build",
     "test": "pnpm -r --if-present test",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
+    "package": "node scripts/package.mjs",
     "desktop:dev": "pnpm --filter @yukinal/desktop dev",
     "agent:dev": "pnpm --filter @yukinal/agent dev",
     "clean": "node scripts/clean.mjs"

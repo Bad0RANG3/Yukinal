@@ -1,0 +1,80 @@
+name: package
+
+# Installer builds, deliberately NOT part of the three-OS gate in check.yml.
+#
+# Why separate (the short version; docs/packaging.md has the full one): bundling is not a
+# compiler check. It downloads platform toolchains it does not ship -- WiX and NSIS on
+# Windows, the appimage/dpkg tooling on Linux -- and it builds the whole Rust workspace in
+# release mode with `lto = "thin"` before it copies a single resource. That is minutes per
+# OS on a good runner, versus a gate that has to stay fast and deterministic on every push.
+# Tags and manual runs are rare enough to pay for it, and a gate that flakes on a mirror
+# outage would be a gate people start ignoring.
+#
+# It still runs `pnpm check` verbatim before bundling: an installer built from a tree whose
+# tests fail is worse than no installer, and reusing the one command keeps CI and local
+# honest instead of maintaining a second, looser copy of the step list.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  installer:
+    name: installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+          # Not ubuntu-latest like the gate: an artifact's glibc baseline is the runner it
+          # was built on, and 22.04 keeps the .deb/AppImage installable on older distros.
+          - os: ubuntu-22.04
+            artifact: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `version:` here: package.json pins `packageManager: pnpm@11.8.0`, and
+      # action-setup v4 fails when both are present.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Same package list the gate job installs (Tauri needs webkit2gtk at link time).
+      - name: Install Linux system deps (Tauri / webkit2gtk)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: pnpm install --frozen-lockfile
+
+      # The gate, unchanged: contract libs -> typecheck -> agent bundle -> packaging
+      # contract -> tests -> vite build -> both sidecar smokes -> cargo.
+      - run: pnpm check
+
+      # Contract libs, agent bundle, packaging contract, then `tauri build`. The agent
+      # bundle is rebuilt by `beforeBuildCommand` inside the same command, so the file that
+      # gets staged as <resources>/agent/index.js is never stale.
+      - run: pnpm run package
+
+      # Unsigned on purpose: no signing identity or certificate exists in this repository,
+      # so these artifacts are for local installation and review, not for release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yukinal-${{ matrix.artifact }}
+          if-no-files-found: error
+          path: target/release/bundle/**
