@@ -12,7 +12,7 @@ use super::error::McpError;
 use super::handle::{McpServerHandle, McpServerStart, McpServerStatus, ShutdownReport};
 use super::truncated;
 
-/// 谁来派生、谁来回收（MCP README「进程生命周期仍然归 Rust」：
+/// 谁来派生、谁来回收（README.md 的「进程生命周期仍然归 Rust」：
 /// 本架构里唯一派生进程的地方是 Rust 宿主）。
 ///
 /// sidecar 的 `Supervisor` 管**一个**进程；MCP 的服务器是**多个**，所以这里按 serverId

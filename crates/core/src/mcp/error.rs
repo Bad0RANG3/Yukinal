@@ -12,7 +12,7 @@ pub enum McpError {
     #[error(
         "mcp server \"{server_id}\" is configured with transport \"{transport}\", which is not \
          implemented: an http server means outbound network requests, and no outbound network \
-         policy exists yet (MCP README: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
+         policy exists yet (README.md: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
     )]
     TransportNotImplemented {
         server_id: String,
