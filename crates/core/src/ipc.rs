@@ -84,7 +84,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::supervisor::{ExitRecord, SupervisorStatus};
+    use crate::supervisor::{ExitRecord, RestartRecord, SupervisorStatus};
 
     /// `include_str!` paths are relative to this file: crates/core/src -> repo root.
     const FIXTURE_CORE_PING: &str =
@@ -99,6 +99,8 @@ mod tests {
         include_str!("../../../packages/shared/fixtures/ipc/agent_status.json");
     const FIXTURE_AGENT_STATUS_EXITED: &str =
         include_str!("../../../packages/shared/fixtures/ipc/agent_status_exited.json");
+    const FIXTURE_AGENT_STATUS_RESTARTED: &str =
+        include_str!("../../../packages/shared/fixtures/ipc/agent_status_restarted.json");
 
     fn fixture(raw: &str) -> Value {
         serde_json::from_str(raw).expect("contract fixture must be valid JSON")
@@ -229,5 +231,36 @@ mod tests {
         })
         .expect("serialize");
         assert_eq!(actual, fixture(FIXTURE_AGENT_STATUS_EXITED));
+    }
+
+    /// The automatic-recovery record (ADR 0010) has to survive the trip to the UI, and the
+    /// two fixtures pin the property that makes it safe to add: `restart` appears only when
+    /// there is a restart to report. The statuses above (`restart: None`) are byte-identical
+    /// to the fixtures that predate the feature, which is why an older UI keeps parsing a
+    /// newer supervisor's status.
+    #[test]
+    fn a_restarted_agent_status_serializes_to_the_contract_fixture() {
+        let actual = serde_json::to_value(SupervisorStatus {
+            running: true,
+            pid: Some(4_321),
+            protocol_version: Some("1.0".into()),
+            agent_version: Some("0.1.0".into()),
+            tool_count: Some(12),
+            entry: Some("C:\\Users\\dev\\AppData\\Local\\Yukinal\\agent\\index.js".into()),
+            started_at: Some("2026-01-01T00:06:00Z".into()),
+            last_exit: Some(ExitRecord {
+                code: Some(1),
+                signal: None,
+                at: "2026-01-01T00:05:00Z".into(),
+            }),
+            restart: Some(RestartRecord {
+                attempt: 2,
+                max_attempts: 5,
+                exhausted: false,
+                at: "2026-01-01T00:06:00Z".into(),
+            }),
+        })
+        .expect("serialize");
+        assert_eq!(actual, fixture(FIXTURE_AGENT_STATUS_RESTARTED));
     }
 }

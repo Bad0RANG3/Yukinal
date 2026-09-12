@@ -3,7 +3,7 @@
 import { z } from "zod";
 
 import { RiskLevelSchema, ToolTargetSchema } from "./server.js";
-import { PermissionApprovalSourceSchema, PermissionModeSchema } from "./permission.js";
+import { PermissionApprovalSourceSchema, PermissionModeSchema, ToolOriginSchema } from "./permission.js";
 import { TOOL_RESULT_STATUSES } from "../types/enums.js";
 
 const RunIdSchema = z.string().trim().min(1).max(256);
@@ -84,6 +84,13 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     // not send it, and the UI has to keep parsing the events of whatever sidecar is
     // running (same reasoning as `traceId` on `AgentRunResultSchema`).
     policyId: z.string().trim().min(1).max(256).optional(),
+    /**
+     * Where the tool came from. Optional for the same reason `policyId` is: an older
+     * sidecar build does not send it. A consumer that *needs* to distinguish a
+     * third-party tool from a built-in one must therefore treat "absent" as "unknown"
+     * rather than as "builtin".
+     */
+    origin: ToolOriginSchema.optional(),
     at: TimestampSchema,
   }),
   "agent.tool_result": z.strictObject({
@@ -100,6 +107,8 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     approvedBy: PermissionApprovalSourceSchema.optional(),
     /** The policy this decision was made under; see `agent.tool_call` above. */
     policyId: z.string().trim().min(1).max(256).optional(),
+    /** See `agent.tool_call` above. */
+    origin: ToolOriginSchema.optional(),
     status: z.enum(TOOL_RESULT_STATUSES),
     outputSummary: z.string().max(4_000),
     error: z.string().max(4_000).optional(),

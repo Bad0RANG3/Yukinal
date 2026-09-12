@@ -5,6 +5,8 @@
 
 import { z } from "zod";
 
+import { AI_PROVIDER_KINDS, type AiProviderKind } from "../types/provider.js";
+
 /**
  * 一个可用的 http(s) base URL，**不带**内嵌凭据。
  *
@@ -37,6 +39,36 @@ export const ProviderModelOptionSchema = z.strictObject({
   supportsStreaming: z.boolean(),
 });
 
+/** 三个 kind 的唯一取值表在 `types/provider.ts`；这里只是把同一份列表交给 Zod。 */
+export const AiProviderKindSchema = z.enum(AI_PROVIDER_KINDS);
+
+export const WireApiSchema = z.enum(["chat", "responses"]);
+
+/**
+ * `kind` 与 `wireApi` 是正交的两轴（ADR 0011 第 2 点），因此它们的组合里有一半是非法的：
+ * `wireApi` 只在 `openai-compatible` 里选方言，另外两种 kind 的协议本身就是方言。
+ *
+ * 这里选的是**拒绝**，不是忽略：一个带 `wireApi: "responses"` 的 `gemini` 配置如果被静默
+ * 接受，它的含义就取决于读它的那段代码有没有记得跳过这个字段 —— 数据库里存一份、读回来是
+ * 另一回事，正是「配了一个不知道自己是什么的 Provider」。所以三个 schema（保存输入、
+ * 随运行下发的 `RuntimeProviderConfig`、从数据库读回的 `ProviderConfig`）用的是同一条规则：
+ * kind 不是 `openai-compatible` 时 `wireApi` 必须**缺省**，带上它就是非法输入。
+ *
+ * Rust 侧对应地只对 `openai-compatible` 序列化这个字段（`commands/provider.rs` 的
+ * `runtime_provider_config()` 与 `repositories/providers.rs` 的读路径）。
+ */
+export function wireApiAppliesTo(value: {
+  kind: AiProviderKind;
+  wireApi?: "chat" | "responses";
+}): boolean {
+  return value.wireApi === undefined || value.kind === "openai-compatible";
+}
+
+const WIRE_API_IS_OPENAI_ONLY = {
+  message: 'wireApi only applies to kind "openai-compatible"; native kinds have no dialect axis',
+  path: ["wireApi"],
+};
+
 /**
  * Provider credentials must use apiKey + the OS credential store. Custom headers
  * are limited to non-secret gateway metadata so a custom provider cannot persist
@@ -66,28 +98,37 @@ export const SafeCustomHeadersSchema = z
   .record(SafeCustomHeaderNameSchema, SafeCustomHeaderValueSchema)
   .refine((headers) => Object.keys(headers).length <= 32, "too many custom headers");
 
-export const ProviderConfigSchema = z.strictObject({
-  id: z.string().trim().min(1).max(256),
-  kind: z.literal("openai-compatible"),
-  label: z.string().trim().min(1).max(256),
-  baseUrl: ProviderBaseUrlSchema,
-  model: z.string().trim().min(1).max(256),
-  apiKeyCredentialRef: z.string().trim().min(1).max(512).optional(),
-  enabled: z.boolean(),
-  customHeaders: SafeCustomHeadersSchema.optional(),
-  maxInputTokens: z.number().int().positive().max(10_000_000).optional(),
-  wireApi: z.enum(["chat", "responses"]).optional(),
-  models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
-  createdAt: z.string().min(1).max(80),
-  updatedAt: z.string().min(1).max(80),
-});
+export const ProviderConfigSchema = z
+  .strictObject({
+    id: z.string().trim().min(1).max(256),
+    kind: AiProviderKindSchema,
+    label: z.string().trim().min(1).max(256),
+    baseUrl: ProviderBaseUrlSchema,
+    model: z.string().trim().min(1).max(256),
+    apiKeyCredentialRef: z.string().trim().min(1).max(512).optional(),
+    enabled: z.boolean(),
+    customHeaders: SafeCustomHeadersSchema.optional(),
+    maxInputTokens: z.number().int().positive().max(10_000_000).optional(),
+    wireApi: WireApiSchema.optional(),
+    models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
+    createdAt: z.string().min(1).max(80),
+    updatedAt: z.string().min(1).max(80),
+  })
+  .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY);
 
-export const ProviderSaveInputSchema = z.strictObject({
-  providerId: z.string().trim().min(1).max(256).regex(/^[a-z0-9][a-z0-9-_]*$/, "providerId must use lowercase letters, numbers, hyphens or underscores").optional(),
-  label: z.string().trim().max(256).optional(),
-  baseUrl: ProviderBaseUrlSchema,
-  model: z.string().trim().min(1).max(256),
-  apiKey: z.string().min(1).max(4_096).optional(),
-  wireApi: z.enum(["chat", "responses"]).optional(),
-  models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
-});
+export const ProviderSaveInputSchema = z
+  .strictObject({
+    providerId: z.string().trim().min(1).max(256).regex(/^[a-z0-9][a-z0-9-_]*$/, "providerId must use lowercase letters, numbers, hyphens or underscores").optional(),
+    /**
+     * Required rather than defaulted: `provider_save` writes the kind into the row, and a
+     * save that leaves it out would have to pick one of the three on the user's behalf.
+     */
+    kind: AiProviderKindSchema,
+    label: z.string().trim().max(256).optional(),
+    baseUrl: ProviderBaseUrlSchema,
+    model: z.string().trim().min(1).max(256),
+    apiKey: z.string().min(1).max(4_096).optional(),
+    wireApi: WireApiSchema.optional(),
+    models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
+  })
+  .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY);

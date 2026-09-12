@@ -21,6 +21,8 @@ export * from "./types/service.js";
 export * from "./types/log.js";
 export * from "./types/docker.js";
 export * from "./types/host.js";
+export * from "./types/host-key.js";
+export * from "./types/mcp.js";
 
 export * from "./schemas/server.js";
 export * from "./schemas/activity.js";
@@ -35,6 +37,7 @@ export * from "./schemas/log.js";
 export * from "./schemas/file.js";
 export * from "./schemas/docker.js";
 export * from "./schemas/host.js";
+export * from "./schemas/mcp.js";
 
 export * from "./events/index.js";
 export * from "./ipc/index.js";

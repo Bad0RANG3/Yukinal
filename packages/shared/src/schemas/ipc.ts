@@ -33,6 +33,15 @@ import {
   ProviderSaveInputSchema,
 } from "./provider.js";
 import { SERVER_ID_SCHEMA } from "./server.js";
+import {
+  McpServerDeleteResponseSchema,
+  McpServerIdSchema,
+  McpServerListResponseSchema,
+  McpServerSaveInputSchema,
+  McpServerStopResponseSchema,
+  McpServerViewSchema,
+} from "./mcp.js";
+import { HOST_KEY_COMPARISONS } from "../types/host-key.js";
 import { REMOTE_FILE_TYPES } from "../types/file.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
@@ -79,6 +88,20 @@ export const AgentSpawnResponseSchema = z.strictObject({
   alreadyRunning: z.boolean(),
 });
 
+/**
+ * One entry of the bounded automatic-recovery budget (ADR 0010), present only while a
+ * restart is in progress — `None` whenever the supervisor is idle, running normally, or
+ * has spent its budget. `exhausted` is the field that matters to a reader: at that point
+ * no further restart will happen without a user action, and the UI has to say so instead
+ * of leaving the user waiting for a recovery that is not coming.
+ */
+export const RestartRecordSchema = z.strictObject({
+  attempt: z.number().int().positive(),
+  maxAttempts: z.number().int().positive(),
+  exhausted: z.boolean(),
+  at: z.string().min(1),
+});
+
 export const AgentStatusSchema = z.strictObject({
   running: z.boolean(),
   pid: z.number().int().positive().nullable(),
@@ -88,11 +111,65 @@ export const AgentStatusSchema = z.strictObject({
   entry: z.string().min(1).nullable(),
   startedAt: z.string().min(1).nullable(),
   lastExit: SidecarExitSchema.nullable(),
+  /**
+   * Optional rather than nullable: the field is *omitted* when there is nothing to
+   * report (`skip_serializing_if` on the Rust side), so the status of an idle supervisor
+   * stays byte-identical to the fixture that predates automatic recovery.
+   */
+  restart: RestartRecordSchema.optional(),
 });
 
 export const AgentLogsResponseSchema = z.strictObject({
   lines: z.array(z.string()),
   capacity: z.number().int().positive(),
+});
+
+/**
+ * Host-key trust (ADR 0012).
+ *
+ * A fingerprint's canonical form is `SHA256:` + 43 base64 characters (unpadded — that is
+ * what `ssh-key` prints and what the `known_hosts` file stores, ADR 0012 point 6), so the
+ * gate checks the shape rather than only a length. This matters most on `trust`: that
+ * fingerprint is what gets written to disk, and a gate that accepted "not pinned (first
+ * connect must be explicitly trusted)" would let a placeholder string become a pin.
+ */
+export const IpcFingerprintSchema = z
+  .string()
+  .trim()
+  .regex(/^SHA256:[A-Za-z0-9+/]{43}$/, "fingerprint must be SHA256:<43 base64 chars, unpadded>");
+
+/**
+ * `pinnedFingerprint` is optional, never nullable: Rust omits the field when there is no
+ * pin (`skip_serializing_if`), and a `null` here would mean both sides disagree about
+ * what "no pin" looks like.
+ */
+export const ServerHostKeyStatusResponseSchema = z.strictObject({
+  host: z.string().trim().min(1).max(256),
+  port: IpcPortSchema,
+  pinned: z.boolean(),
+  pinnedFingerprint: IpcFingerprintSchema.optional(),
+});
+
+export const ServerHostKeyProbeResponseSchema = z.strictObject({
+  host: z.string().trim().min(1).max(256),
+  port: IpcPortSchema,
+  /** What the server presented. Not "verified" — see `types/host-key.ts`. */
+  presentedFingerprint: IpcFingerprintSchema,
+  comparison: z.enum(HOST_KEY_COMPARISONS),
+  pinnedFingerprint: IpcFingerprintSchema.optional(),
+});
+
+export const ServerHostKeyTrustResponseSchema = z.strictObject({
+  host: z.string().trim().min(1).max(256),
+  port: IpcPortSchema,
+  fingerprint: IpcFingerprintSchema,
+  alreadyPinned: z.boolean(),
+});
+
+export const ServerHostKeyForgetResponseSchema = z.strictObject({
+  host: z.string().trim().min(1).max(256),
+  port: IpcPortSchema,
+  forgotten: z.boolean(),
 });
 
 type IpcCommandSchemaMap = {
@@ -124,6 +201,22 @@ export const IPC_SCHEMAS = {
   server_disconnect: {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
     response: EMPTY_PAYLOAD,
+  },
+  server_host_key_status: {
+    params: z.strictObject({ serverId: IpcServerIdSchema }),
+    response: ServerHostKeyStatusResponseSchema,
+  },
+  server_host_key_probe: {
+    params: z.strictObject({ serverId: IpcServerIdSchema }),
+    response: ServerHostKeyProbeResponseSchema,
+  },
+  server_host_key_trust: {
+    params: z.strictObject({ serverId: IpcServerIdSchema, fingerprint: IpcFingerprintSchema }),
+    response: ServerHostKeyTrustResponseSchema,
+  },
+  server_host_key_forget: {
+    params: z.strictObject({ serverId: IpcServerIdSchema }),
+    response: ServerHostKeyForgetResponseSchema,
   },
   server_snapshot: {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
@@ -268,7 +361,7 @@ export const IPC_SCHEMAS = {
     response: z.strictObject({ deleted: z.boolean() }),
   },
   provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
-  provider_save_openai: {
+  provider_save: {
     params: ProviderSaveInputSchema,
     response: z.strictObject({ provider: ProviderConfigSchema }),
   },
@@ -279,6 +372,23 @@ export const IPC_SCHEMAS = {
   provider_models: {
     params: z.strictObject({ providerId: z.string().min(1) }),
     response: z.strictObject({ models: z.array(ProviderModelOptionSchema) }),
+  },
+  mcp_server_list: { params: z.strictObject({}), response: McpServerListResponseSchema },
+  mcp_server_save: {
+    params: z.strictObject({ input: McpServerSaveInputSchema }),
+    response: McpServerViewSchema,
+  },
+  mcp_server_delete: {
+    params: z.strictObject({ serverId: McpServerIdSchema }),
+    response: McpServerDeleteResponseSchema,
+  },
+  mcp_server_start: {
+    params: z.strictObject({ serverId: McpServerIdSchema }),
+    response: McpServerViewSchema,
+  },
+  mcp_server_stop: {
+    params: z.strictObject({ serverId: McpServerIdSchema }),
+    response: McpServerStopResponseSchema,
   },
   provider_test: {
     params: z.strictObject({ providerId: z.string().min(1) }),

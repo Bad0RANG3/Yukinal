@@ -31,7 +31,13 @@ import type {
   ToolDeclarationSchema,
 } from "./permission.js";
 import type { AgentStreamEventSchema } from "./agent.js";
-import type { IPC_SCHEMAS } from "./ipc.js";
+import type {
+  IPC_SCHEMAS,
+  ServerHostKeyForgetResponseSchema,
+  ServerHostKeyProbeResponseSchema,
+  ServerHostKeyStatusResponseSchema,
+  ServerHostKeyTrustResponseSchema,
+} from "./ipc.js";
 import { EVENT_SCHEMAS } from "./ipc.js";
 import type { EventName } from "../events/index.js";
 
@@ -107,6 +113,10 @@ export type _IpcParamsContracts = {
   server_snapshot: Expect<Assignable<ParamsOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["params"]>>;
   server_services: Expect<Assignable<ParamsOf<"server_services">, IpcCommandMap["server_services"]["params"]>>;
   server_logs: Expect<Assignable<ParamsOf<"server_logs">, IpcCommandMap["server_logs"]["params"]>>;
+  server_host_key_status: Expect<Assignable<ParamsOf<"server_host_key_status">, IpcCommandMap["server_host_key_status"]["params"]>>;
+  server_host_key_probe: Expect<Assignable<ParamsOf<"server_host_key_probe">, IpcCommandMap["server_host_key_probe"]["params"]>>;
+  server_host_key_trust: Expect<Assignable<ParamsOf<"server_host_key_trust">, IpcCommandMap["server_host_key_trust"]["params"]>>;
+  server_host_key_forget: Expect<Assignable<ParamsOf<"server_host_key_forget">, IpcCommandMap["server_host_key_forget"]["params"]>>;
   remote_file_list: Expect<Assignable<ParamsOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["params"]>>;
   remote_file_read: Expect<Assignable<ParamsOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["params"]>>;
   activity_list: Expect<Assignable<ParamsOf<"activity_list">, IpcCommandMap["activity_list"]["params"]>>;
@@ -129,7 +139,7 @@ export type _IpcParamsContracts = {
   chat_session_archive: Expect<Assignable<ParamsOf<"chat_session_archive">, IpcCommandMap["chat_session_archive"]["params"]>>;
   chat_session_delete: Expect<Assignable<ParamsOf<"chat_session_delete">, IpcCommandMap["chat_session_delete"]["params"]>>;
   provider_list: Expect<Assignable<ParamsOf<"provider_list">, IpcCommandMap["provider_list"]["params"]>>;
-  provider_save_openai: Expect<Assignable<ParamsOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["params"]>>;
+  provider_save: Expect<Assignable<ParamsOf<"provider_save">, IpcCommandMap["provider_save"]["params"]>>;
   provider_activate: Expect<Assignable<ParamsOf<"provider_activate">, IpcCommandMap["provider_activate"]["params"]>>;
   provider_models: Expect<Assignable<ParamsOf<"provider_models">, IpcCommandMap["provider_models"]["params"]>>;
 };
@@ -146,6 +156,18 @@ export type _IpcResponseContracts = {
   server_snapshot: Expect<Assignable<ResponseOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["response"]>>;
   server_services: Expect<Assignable<ResponseOf<"server_services">, IpcCommandMap["server_services"]["response"]>>;
   server_logs: Expect<Assignable<ResponseOf<"server_logs">, IpcCommandMap["server_logs"]["response"]>>;
+  server_host_key_status: Expect<
+    Assignable<typeof ServerHostKeyStatusResponseSchema, IpcCommandMap["server_host_key_status"]["response"]>
+  >;
+  server_host_key_probe: Expect<
+    Assignable<typeof ServerHostKeyProbeResponseSchema, IpcCommandMap["server_host_key_probe"]["response"]>
+  >;
+  server_host_key_trust: Expect<
+    Assignable<typeof ServerHostKeyTrustResponseSchema, IpcCommandMap["server_host_key_trust"]["response"]>
+  >;
+  server_host_key_forget: Expect<
+    Assignable<typeof ServerHostKeyForgetResponseSchema, IpcCommandMap["server_host_key_forget"]["response"]>
+  >;
   remote_file_list: Expect<Assignable<ResponseOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["response"]>>;
   remote_file_read: Expect<Assignable<ResponseOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["response"]>>;
   activity_list: Expect<Assignable<ResponseOf<"activity_list">, IpcCommandMap["activity_list"]["response"]>>;
@@ -168,7 +190,7 @@ export type _IpcResponseContracts = {
   chat_session_archive: Expect<Assignable<ResponseOf<"chat_session_archive">, IpcCommandMap["chat_session_archive"]["response"]>>;
   chat_session_delete: Expect<Assignable<ResponseOf<"chat_session_delete">, IpcCommandMap["chat_session_delete"]["response"]>>;
   provider_list: Expect<Assignable<ResponseOf<"provider_list">, IpcCommandMap["provider_list"]["response"]>>;
-  provider_save_openai: Expect<Assignable<ResponseOf<"provider_save_openai">, IpcCommandMap["provider_save_openai"]["response"]>>;
+  provider_save: Expect<Assignable<ResponseOf<"provider_save">, IpcCommandMap["provider_save"]["response"]>>;
   provider_activate: Expect<Assignable<ResponseOf<"provider_activate">, IpcCommandMap["provider_activate"]["response"]>>;
   provider_models: Expect<Assignable<ResponseOf<"provider_models">, IpcCommandMap["provider_models"]["response"]>>;
 };

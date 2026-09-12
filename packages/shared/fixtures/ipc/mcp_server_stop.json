@@ -1,0 +1,29 @@
+{
+  "server": {
+    "config": {
+      "id": "mcp_time",
+      "label": "Time server",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-time"],
+      "enabled": true,
+      "allowedTools": [],
+      "trustLevel": "unreviewed"
+    },
+    "status": {
+      "serverId": "mcp_time",
+      "running": false,
+      "pid": null,
+      "program": null,
+      "startedAt": null,
+      "protocolVersion": null,
+      "serverName": null,
+      "serverVersion": null,
+      "toolCount": 0,
+      "stderrTail": [],
+      "diagnostics": []
+    },
+    "tools": []
+  },
+  "shutdown": { "wasRunning": true, "killed": false, "unreaped": false }
+}

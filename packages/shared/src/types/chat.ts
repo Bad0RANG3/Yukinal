@@ -7,7 +7,7 @@
 import type { AGENT_RUN_STATES, TOOL_RESULT_STATUSES } from "./enums.js";
 import type { RuntimeProviderConfig } from "./provider.js";
 import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
-import type { ToolTarget } from "./tool.js";
+import type { ToolOrigin, ToolTarget } from "./tool.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
 
@@ -178,6 +178,11 @@ export interface ApprovalResponse {
  * from the stream instead of only inferable from the target environment. Optional
  * for the same reason `AgentRunResult.traceId` is: an older sidecar build does not
  * send it, and the consumer has to keep parsing whatever sidecar is running.
+ *
+ * `origin` is where the tool came from (`builtin` / `mcp` / `provider`). It is the
+ * difference between "the agent ran a tool this build shipped" and "the agent ran a tool a
+ * third-party MCP server declared five minutes ago" — an audit trail that cannot tell those
+ * apart is not answering the question people actually ask of it (ADR 0014).
  */
 export type AgentStreamEvent =
   | { type: "agent.started"; runId: string; at: string }
@@ -196,6 +201,7 @@ export type AgentStreamEvent =
       decision: PermissionMode;
       approvedBy?: PermissionApprovalSource;
       policyId?: string;
+      origin?: ToolOrigin;
       at: string;
     }
   | {
@@ -211,6 +217,7 @@ export type AgentStreamEvent =
       decision: PermissionMode;
       approvedBy?: PermissionApprovalSource;
       policyId?: string;
+      origin?: ToolOrigin;
       status: ToolResultStatus;
       outputSummary: string;
       error?: string;

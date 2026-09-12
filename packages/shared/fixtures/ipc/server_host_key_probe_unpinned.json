@@ -1,0 +1,6 @@
+{
+  "host": "api.example.com",
+  "port": 22,
+  "presentedFingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "comparison": "unpinned"
+}

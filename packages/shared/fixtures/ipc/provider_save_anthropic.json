@@ -1,0 +1,1 @@
+{"provider":{"id":"prv_claude","kind":"anthropic","label":"Claude","baseUrl":"https://api.anthropic.com","model":"claude-sonnet-4-5","apiKeyCredentialRef":"keychain://anthropic/prv_claude","enabled":true,"createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z"}}

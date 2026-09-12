@@ -45,6 +45,21 @@ test("the exited agent_status variant parses too", () => {
   assert.equal(parsed.success, true);
 });
 
+test("a status carrying an automatic-restart record parses, and the field stays optional", () => {
+  // Not covered by the per-command loop above: there is only one fixture per command
+  // name, and `agent_status.json` is the shape an idle supervisor reports.
+  const parsed = AgentStatusSchema.safeParse(fixture("agent_status_restarted"));
+  assert.equal(parsed.success, true, "a restart record must parse");
+  const status = parsed.data as { restart?: { attempt: number; exhausted: boolean } };
+  assert.equal(status.restart?.attempt, 2);
+  assert.equal(status.restart?.exhausted, false);
+  // Optional, not nullable: an idle supervisor omits it entirely, and the fixture from
+  // before automatic recovery existed must keep parsing.
+  const idle = AgentStatusSchema.safeParse(fixture("agent_status"));
+  assert.equal(idle.success, true);
+  assert.equal((idle.data as { restart?: unknown }).restart, undefined);
+});
+
 test("a sync run.start response carries the run's result", () => {
   // The async fixture (`agent_run_start.json`) is the one the per-command loop above
   // checks, and it has no `result` — which is correct for `delivery: "async"`. This is
@@ -81,7 +96,14 @@ test("empty payloads reject unknown keys", () => {
 });
 
 test("server ids on the wire must be opaque srv_ ids", () => {
-  for (const name of ["server_connect", "server_disconnect", "server_snapshot"] as const) {
+  for (const name of [
+    "server_connect",
+    "server_disconnect",
+    "server_snapshot",
+    "server_host_key_status",
+    "server_host_key_probe",
+    "server_host_key_forget",
+  ] as const) {
     assert.equal(
       IPC_SCHEMAS[name].params.safeParse({ serverId: "api.example.com:22" }).success,
       false,
@@ -89,6 +111,16 @@ test("server ids on the wire must be opaque srv_ ids", () => {
     );
     assert.equal(IPC_SCHEMAS[name].params.safeParse({ serverId: "srv_01abc" }).success, true);
   }
+  // `server_host_key_trust` 还带一个指纹，所以单独来一遍（上面的循环里它会因为
+  // 缺指纹而失败，那样这半条断言就变成了「缺字段也报错」，什么都没证明）。
+  assert.equal(
+    IPC_SCHEMAS.server_host_key_trust.params.safeParse({
+      serverId: "api.example.com:22",
+      fingerprint: "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+    }).success,
+    false,
+    "server_host_key_trust must reject a host-derived id",
+  );
   const open = IPC_SCHEMAS.terminal_open.params.safeParse({
     serverId: "api.example.com:22",
     cols: 120,
@@ -97,6 +129,71 @@ test("server ids on the wire must be opaque srv_ ids", () => {
   assert.equal(open.success, false, "terminal_open must reject a host-derived id");
   assert.equal(IpcServerIdSchema.safeParse("srv_01abc").success, true);
   assert.equal(IpcServerIdSchema.safeParse("production").success, false);
+});
+
+/* ── 主机指纹（ADR 0012） ───────────────────────────────────────────────────── */
+
+test("the unpinned status shape has no fingerprint field at all", () => {
+  // 未核验不等于「指纹是空字符串」也不等于「指纹是 null」：Rust 会整个省掉这个字段，
+  // 而界面要靠它的**缺席**显示「未核验」。这条钉住的是这个区别，不是 JSON 的美观。
+  const unpinned = IPC_SCHEMAS.server_host_key_status.response.safeParse(
+    fixture("server_host_key_status_unpinned"),
+  );
+  assert.equal(unpinned.success, true);
+  assert.equal(
+    Object.hasOwn(unpinned.data as object, "pinnedFingerprint"),
+    false,
+    "未核验时不该有 pinnedFingerprint",
+  );
+
+  // 反过来：显式给一个 null 是 drift，必须被拒。
+  const nulled = { host: "api.example.com", port: 22, pinned: false, pinnedFingerprint: null };
+  assert.equal(IPC_SCHEMAS.server_host_key_status.response.safeParse(nulled).success, false);
+});
+
+test("a probe answer is a comparison, and a mismatch carries both fingerprints", () => {
+  // 主 fixture 就是 mismatch：契约里最要紧的那种形状（ADR 0012 第 3 条）必须是
+  // 被逐字验证过的那个，而不是只存在于某个测试的局部对象里。
+  const parsed = IPC_SCHEMAS.server_host_key_probe.response.safeParse(fixture("server_host_key_probe"));
+  assert.equal(parsed.success, true);
+  const probe = parsed.data as { comparison: string; pinnedFingerprint?: string; presentedFingerprint: string };
+  assert.equal(probe.comparison, "mismatch");
+  assert.notEqual(probe.pinnedFingerprint, probe.presentedFingerprint);
+
+  const unpinned = IPC_SCHEMAS.server_host_key_probe.response.safeParse(
+    fixture("server_host_key_probe_unpinned"),
+  );
+  assert.equal(unpinned.success, true);
+  assert.equal((unpinned.data as { comparison: string }).comparison, "unpinned");
+
+  // 只有三种比较结果，拼错的第四个词必须是 drift。
+  const invented = { ...(fixture("server_host_key_probe") as Record<string, unknown>), comparison: "verified" };
+  assert.equal(IPC_SCHEMAS.server_host_key_probe.response.safeParse(invented).success, false);
+});
+
+test("a fingerprint on the wire is a real SHA256 fingerprint, not a placeholder", () => {
+  const params = IPC_SCHEMAS.server_host_key_trust.params;
+  const real = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+  assert.equal(params.safeParse({ serverId: "srv_01abc", fingerprint: real }).success, true);
+
+  for (const bogus of [
+    // 这正是被替换掉的那个占位字符串：它曾经被塞进一个叫 fingerprint 的字段。
+    "not pinned (first connect must be explicitly trusted)",
+    "SHA256:",
+    "MD5:aa:bb:cc",
+    // 带 padding 的 base64 不是 ssh-key 的写法（ADR 0012 第 6 条）。
+    "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    "",
+  ]) {
+    assert.equal(
+      params.safeParse({ serverId: "srv_01abc", fingerprint: bogus }).success,
+      false,
+      `trust must refuse to pin ${JSON.stringify(bogus)}`,
+    );
+  }
+
+  // 指纹是必填的：一个「钉住……什么？」的请求不存在。
+  assert.equal(params.safeParse({ serverId: "srv_01abc" }).success, false);
 });
 
 test("terminal param shapes match the contract", () => {
@@ -177,4 +274,63 @@ test("docker restart schema keeps the mutating input bounded", () => {
   assert.equal(DockerRestartInputSchema.safeParse({ container: "api;rm -rf /" }).success, false);
   assert.equal(DockerRestartInputSchema.safeParse({ container: "api_1", timeoutSeconds: 0 }).success, false);
   assert.equal(DockerRestartResultSchema.safeParse({ container: "api_1", restarted: true }).success, true);
+});
+
+/* ── kind 轴跨过 IPC 的那一段（ADR 0011） ──────────────────────────────────── */
+
+test("provider_save is the one save command, and it carries the kind", () => {
+  // 命令名曾经是 `provider_save_openai` —— 一个把「只有一种 kind」写进名字里的名字。
+  // 这条钉住的是：保存路径不再对 kind 有隐含取值，缺了它就是一个非法请求。
+  assert.equal(
+    IPC_SCHEMAS.provider_save.params.safeParse({
+      baseUrl: "https://api.example.com/v1",
+      model: "model-id",
+    }).success,
+    false,
+    "the save must not default the kind",
+  );
+  assert.equal(
+    IPC_SCHEMAS.provider_save.params.safeParse({
+      kind: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      model: "claude-sonnet-4-5",
+    }).success,
+    true,
+  );
+  // 未知 kind 在这里失败，而不是被当成 openai-compatible 落库。
+  assert.equal(
+    IPC_SCHEMAS.provider_save.params.safeParse({
+      kind: "cohere",
+      baseUrl: "https://api.example.com/v1",
+      model: "model-id",
+    }).success,
+    false,
+  );
+});
+
+test("a saved provider can be any of the three kinds, and native ones carry no wireApi", () => {
+  // 每个 kind 一份 fixture：响应 schema 必须能解析全部三种，否则界面上根本显示不出来。
+  for (const [fixtureName, kind] of [
+    ["provider_save", "openai-compatible"],
+    ["provider_save_anthropic", "anthropic"],
+    ["provider_save_gemini", "gemini"],
+  ] as const) {
+    const parsed = IPC_SCHEMAS.provider_save.response.safeParse(fixture(fixtureName));
+    assert.equal(parsed.success, true, `${fixtureName} must parse`);
+    assert.equal((parsed.data as { provider: { kind: string } }).provider.kind, kind);
+  }
+
+  // 反过来：原生 kind 带着 wireApi 是 drift，不是可以忽略的字段。
+  const drifted = { provider: { ...(fixture("provider_save_gemini") as { provider: object }).provider, wireApi: "responses" } };
+  assert.equal(IPC_SCHEMAS.provider_save.response.safeParse(drifted).success, false);
+});
+
+test("provider_list can carry all three kinds at once", () => {
+  // 读路径（数据库 → Rust → IPC → 界面）曾经把每一行都当成 openai-compatible 解码，
+  // 所以这份 fixture 里三种 kind 同时存在，而不是只有被硬编码的那一种。
+  const parsed = IPC_SCHEMAS.provider_list.response.safeParse(fixture("provider_list"));
+  assert.equal(parsed.success, true);
+  const kinds = (parsed.data as { providers: Array<{ kind: string; wireApi?: string }> }).providers;
+  assert.deepEqual(kinds.map((provider) => provider.kind), ["openai-compatible", "anthropic", "gemini"]);
+  assert.deepEqual(kinds.map((provider) => provider.wireApi), ["chat", undefined, undefined]);
 });

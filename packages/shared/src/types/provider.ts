@@ -6,11 +6,27 @@
  *  - Infrastructure providers -> expose Tools (github.*, aws.*, sentry.*)
  */
 
-export type AiProviderKind = "openai-compatible";
+/**
+ * Which protocol translates this provider. The complete vocabulary, in one place,
+ * because it is the axis that reaches every layer of the app: the Zod schemas, the
+ * Rust enum and the `provider_configs.kind` column, `runtime_provider_config()`, the
+ * settings UI, and `buildProvider()` — the one place allowed to branch on it.
+ *
+ *  - `openai-compatible` — one adapter covering every endpoint that speaks the OpenAI
+ *    shape (OpenAI, OpenRouter, Ollama, LM Studio, vLLM, in-house gateways).
+ *  - `anthropic` / `gemini` — native protocols whose translation cannot be expressed
+ *    as a compatible endpoint, so each has its own adapter (ADR 0011).
+ *
+ * Adding a kind here is not enough on its own: a kind that cannot be *saved* is a
+ * kind the user cannot configure (ADR 0011 point 6).
+ */
+export const AI_PROVIDER_KINDS = ["openai-compatible", "anthropic", "gemini"] as const;
+
+export type AiProviderKind = (typeof AI_PROVIDER_KINDS)[number];
 
 /**
- * MVP ships exactly one kind: OpenAI-compatible (ADR 0003). Anthropic / Google /
- * Ollama / OpenRouter all speak it via baseUrl, so they need no extra kind here.
+ * One AI provider row. `kind` and `wireApi` are **orthogonal axes** (ADR 0011 point 2):
+ * `kind` says *who translates*, `wireApi` says *which dialect of that one translation*.
  * Adding a native kind must not leak `if (provider === "...")` into the loop.
  */
 export interface AiProviderConfig {
@@ -25,7 +41,17 @@ export interface AiProviderConfig {
   /** Extra headers for corporate gateways. */
   customHeaders?: Record<string, string>;
   maxInputTokens?: number;
-  /** Endpoint dialect (codex `responses` vs chat completions). */
+  /**
+   * Endpoint dialect (codex `responses` vs chat completions). **Only meaningful for
+   * `openai-compatible`**: the two native kinds have no dialect axis, because the
+   * protocol *is* the adapter's whole reason to exist.
+   *
+   * Both sides enforce that rather than ignoring the field: on a native kind the key
+   * must be absent (`schemas/provider.ts` rejects it), and Rust omits it when it
+   * serializes the row. So "present" always means "this is a chat-dialect choice",
+   * and a `gemini` config carrying `wireApi: "responses"` is a rejected input instead
+   * of a value whose meaning depends on whether the reader remembered to ignore it.
+   */
   wireApi?: "chat" | "responses";
   /** Cached non-sensitive catalog entries used by the model selector. */
   models?: ProviderModelOption[];
@@ -47,26 +73,42 @@ export interface ProviderModelOption {
  * logged — while the durable config (baseUrl/model/label) lives in SQLite.
  */
 export interface RuntimeProviderConfig {
-  kind: "openai-compatible";
-  /** Full base URL, e.g. https://openrouter.ai/api/v1 */
+  kind: AiProviderKind;
+  /**
+   * Full base URL. Rust falls back to the protocol's own public endpoint when the row
+   * has none (or a blank one): `https://api.anthropic.com` for `anthropic`,
+   * `https://generativelanguage.googleapis.com` for `gemini`. There is deliberately no
+   * such fallback for `openai-compatible` — that kind covers endpoints we do not own,
+   * so inventing a default would send the user's key somewhere they never chose.
+   */
   baseUrl: string;
   model: string;
   /** Resolved at the point of use; absent for local endpoints (Ollama…). */
   apiKey?: string;
   customHeaders?: Record<string, string>;
   timeoutMs?: number;
-  /** Endpoint dialect: chat completions (default) or the codex `responses` API. */
+  /**
+   * Endpoint dialect: chat completions (default) or the codex `responses` API.
+   * Only `openai-compatible` may carry it — see `AiProviderConfig.wireApi`.
+   */
   wireApi?: "chat" | "responses";
 }
 
 /** Settings form: label optional (defaults to baseUrl), apiKey goes to the keychain here. */
 export interface ProviderSaveInput {
   providerId?: string;
+  /**
+   * Which protocol this row speaks. Required, not defaulted: the whole point of the
+   * kind axis is that a stored provider says what it is, and a save that omits the kind
+   * would have to be interpreted as one of the three (ADR 0011 point 6).
+   */
+  kind: AiProviderKind;
   label?: string;
   baseUrl: string;
   model: string;
   /** Present only when the user enters a new key; absent keeps the existing ref. */
   apiKey?: string;
+  /** Rejected for the two native kinds; see `AiProviderConfig.wireApi`. */
   wireApi?: "chat" | "responses";
   models?: ProviderModelOption[];
 }

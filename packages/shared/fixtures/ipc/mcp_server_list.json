@@ -1,0 +1,96 @@
+{
+  "servers": [
+    {
+      "config": {
+        "id": "mcp_1",
+        "label": "fixture ok",
+        "transport": "stdio",
+        "command": "node",
+        "args": ["crates/core/tests/fixtures/mcp-server.js", "ok"],
+        "enabled": true,
+        "allowedTools": [],
+        "trustLevel": "unreviewed"
+      },
+      "status": {
+        "serverId": "mcp_1",
+        "running": true,
+        "pid": 4242,
+        "program": "node",
+        "startedAt": "2026-01-01T00:00:00.000Z",
+        "protocolVersion": "2025-11-25",
+        "serverName": "yukinal-mcp-fixture",
+        "serverVersion": "0.1.0",
+        "toolCount": 2,
+        "stderrTail": ["mcp-fixture: ready in mode ok"],
+        "diagnostics": []
+      },
+      "tools": [
+        {
+          "name": "echo",
+          "description": "Echo the text back. Fixture tool.",
+          "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+        },
+        {
+          "name": "explode",
+          "description": "Always reports a tool-level error, never a transport failure.",
+          "inputSchema": { "type": "object", "properties": {} }
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": "mcp_time",
+        "label": "Time server",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["mcp-server-time"],
+        "enabled": true,
+        "allowedTools": [],
+        "trustLevel": "unreviewed"
+      },
+      "status": {
+        "serverId": "mcp_time",
+        "running": false,
+        "pid": null,
+        "program": null,
+        "startedAt": null,
+        "protocolVersion": null,
+        "serverName": null,
+        "serverVersion": null,
+        "toolCount": 0,
+        "stderrTail": [],
+        "diagnostics": []
+      },
+      "tools": []
+    },
+    {
+      "config": {
+        "id": "mcp_remote",
+        "label": "Remote MCP",
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "enabled": false,
+        "allowedTools": [],
+        "trustLevel": "unreviewed"
+      },
+      "status": {
+        "serverId": "mcp_remote",
+        "running": false,
+        "pid": null,
+        "program": null,
+        "startedAt": null,
+        "protocolVersion": null,
+        "serverName": null,
+        "serverVersion": null,
+        "toolCount": 0,
+        "stderrTail": [],
+        "diagnostics": []
+      },
+      "tools": [],
+      "unavailable": {
+        "code": "transport_not_implemented",
+        "message": "mcp server \"mcp_remote\" is configured with transport \"http\", which is not implemented: an http server means outbound network requests, and no outbound network policy exists yet (MCP README: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
+      }
+    }
+  ]
+}

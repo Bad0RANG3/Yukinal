@@ -8,18 +8,28 @@ import { APPROVAL_DECISIONS } from "../types/chat.js";
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, SERVER_ID_SCHEMA, ToolTargetSchema } from "./server.js";
-import { HttpBaseUrlSchema, SafeCustomHeadersSchema } from "./provider.js";
+import { HttpBaseUrlSchema, SafeCustomHeadersSchema, AiProviderKindSchema, WireApiSchema, wireApiAppliesTo } from "./provider.js";
 
-/** Per-run provider material (mirrors `RuntimeProviderConfig`). */
-export const RuntimeProviderConfigSchema = z.strictObject({
-  kind: z.literal("openai-compatible"),
-  baseUrl: HttpBaseUrlSchema,
-  model: z.string().trim().min(1).max(256),
-  apiKey: z.string().max(4096).optional(),
-  customHeaders: SafeCustomHeadersSchema.optional(),
-  timeoutMs: z.number().int().min(100).max(10 * 60_000).optional(),
-  wireApi: z.enum(["chat", "responses"]).optional(),
-});
+/**
+ * Per-run provider material (mirrors `RuntimeProviderConfig`).
+ *
+ * 「哪些 kind 能带 `wireApi`」这条规则与保存路径共用同一份实现，而不是各自再写一遍：
+ * 这是同一件事实（`wireApi` 只属于 openai-compatible），分成两份就会分叉。
+ */
+export const RuntimeProviderConfigSchema = z
+  .strictObject({
+    kind: AiProviderKindSchema,
+    baseUrl: HttpBaseUrlSchema,
+    model: z.string().trim().min(1).max(256),
+    apiKey: z.string().max(4096).optional(),
+    customHeaders: SafeCustomHeadersSchema.optional(),
+    timeoutMs: z.number().int().min(100).max(10 * 60_000).optional(),
+    wireApi: WireApiSchema.optional(),
+  })
+  .refine(wireApiAppliesTo, {
+    message: 'wireApi only applies to kind "openai-compatible"; native kinds have no dialect axis',
+    path: ["wireApi"],
+  });
 
 export const PermissionTierSchema = z.enum(PERMISSION_TIERS);
 export const PermissionModeSchema = z.enum(PERMISSION_MODES);

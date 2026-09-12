@@ -30,7 +30,20 @@ import type { ServerServicesResponse } from "../types/service.js";
 import type { ServerLogsResponse } from "../types/log.js";
 import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
 import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
+import type {
+  ServerHostKeyForgetResult,
+  ServerHostKeyProbeResult,
+  ServerHostKeyStatus,
+  ServerHostKeyTrustResult,
+} from "../types/host-key.js";
 import type { AiProviderConfig, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
+import type {
+  McpServerDeleteResponse,
+  McpServerListResponse,
+  McpServerSaveInput,
+  McpServerStopResponse,
+  McpServerView,
+} from "../types/mcp.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -44,6 +57,18 @@ export const IPC_COMMANDS = {
   /** SSH connect / disconnect. */
   serverConnect: "server_connect",
   serverDisconnect: "server_disconnect",
+  /**
+   * Host-key trust (ADR 0012): status / probe / trust / forget, keyed by `host:port`.
+   *
+   * Four separate commands rather than one "manage host key" call, because they have
+   * four different side effects — none (status), none (probe), write a pin (trust),
+   * delete a pin (forget) — and collapsing them would make "I only looked at it" and
+   * "I trusted it" the same IPC call.
+   */
+  serverHostKeyStatus: "server_host_key_status",
+  serverHostKeyProbe: "server_host_key_probe",
+  serverHostKeyTrust: "server_host_key_trust",
+  serverHostKeyForget: "server_host_key_forget",
   /** Latest collected snapshot. */
   serverSnapshot: "server_snapshot",
   /** Read-only systemd/Docker service discovery. */
@@ -76,10 +101,31 @@ export const IPC_COMMANDS = {
   chatSessionDelete: "chat_session_delete",
   /** AI provider config: settings panel only; the key never leaves the keychain. */
   providerList: "provider_list",
-  providerSaveOpenai: "provider_save_openai",
+  /**
+   * One save command for every kind, with `kind` on the params (ADR 0011 point 6).
+   *
+   * It used to be `provider_save_openai`, a name that encoded "there is only one kind":
+   * widening `AiProviderKind` would have left it either lying about what it saves or
+   * quietly defaulting the kind. The old name is gone rather than aliased — this is
+   * pre-1.0 and there is no released caller to keep working.
+   */
+  providerSave: "provider_save",
   providerActivate: "provider_activate",
   providerModels: "provider_models",
   providerTest: "provider_test",
+  /**
+   * MCP servers (ADR 0014). The host owns the processes, the config and the catalog; the
+   * UI can configure, start, stop and delete, but never sees a tool *call* — those travel
+   * to the sidecar through `host.tool.execute`, which is not an IPC command.
+   *
+   * `list` deliberately does not start anything: looking at a list must not spawn a
+   * third-party program.
+   */
+  mcpServerList: "mcp_server_list",
+  mcpServerSave: "mcp_server_save",
+  mcpServerDelete: "mcp_server_delete",
+  mcpServerStart: "mcp_server_start",
+  mcpServerStop: "mcp_server_stop",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
@@ -94,6 +140,19 @@ export interface IpcCommandMap {
   server_delete: { params: { serverId: string }; response: { deleted: boolean } };
   server_connect: { params: { serverId: string }; response: { status: "connected" } };
   server_disconnect: { params: { serverId: string }; response: Record<string, never> };
+  /**
+   * Host-key trust (ADR 0012). The params carry the **server row's** id, not a
+   * `host:port`: the pin is keyed by `host:port` (point 7), but resolving the row is
+   * this side of the boundary.
+   */
+  server_host_key_status: { params: { serverId: string }; response: ServerHostKeyStatus };
+  server_host_key_probe: { params: { serverId: string }; response: ServerHostKeyProbeResult };
+  /** The confirmed fingerprint rides on the params: it is the whole request. */
+  server_host_key_trust: {
+    params: { serverId: string; fingerprint: string };
+    response: ServerHostKeyTrustResult;
+  };
+  server_host_key_forget: { params: { serverId: string }; response: ServerHostKeyForgetResult };
   server_snapshot: { params: { serverId: string }; response: { snapshot: ServerSnapshot } };
   server_services: { params: { serverId: string }; response: ServerServicesResponse };
   server_logs: { params: { serverId: string }; response: ServerLogsResponse };
@@ -161,7 +220,7 @@ export interface IpcCommandMap {
   chat_session_archive: { params: { sessionId: string; archived: boolean }; response: { session: ChatSession } };
   chat_session_delete: { params: { sessionId: string }; response: { deleted: boolean } };
   provider_list: { params: Record<string, never>; response: { providers: AiProviderConfig[] } };
-  provider_save_openai: {
+  provider_save: {
     params: ProviderSaveInput;
     response: { provider: AiProviderConfig };
   };
@@ -173,6 +232,11 @@ export interface IpcCommandMap {
     params: { providerId: string };
     response: { models: ProviderModelOption[] };
   };
+  mcp_server_list: { params: Record<string, never>; response: McpServerListResponse };
+  mcp_server_save: { params: { input: McpServerSaveInput }; response: McpServerView };
+  mcp_server_delete: { params: { serverId: string }; response: McpServerDeleteResponse };
+  mcp_server_start: { params: { serverId: string }; response: McpServerView };
+  mcp_server_stop: { params: { serverId: string }; response: McpServerStopResponse };
 }
 
 /**
@@ -200,6 +264,26 @@ export interface AgentStatus {
   startedAt: string | null;
   /** Last abnormal exit, kept until the next successful spawn so a crash stays visible. */
   lastExit: SidecarExit | null;
+  /**
+   * The automatic-recovery budget while a restart is under way (ADR 0010). Omitted when
+   * there is nothing to report: an idle supervisor, a healthy run, and a spent budget
+   * after the user's own restart all look like "no restart pending".
+   */
+  restart?: RestartRecord;
+}
+
+/**
+ * A bounded restart attempt, reported so recovery is *visible* rather than inferred.
+ *
+ * `exhausted` says the budget is gone: the supervisor has stopped trying, and only a
+ * user action starts the sidecar again. The UI must not present an exhausted record as
+ * "recovering".
+ */
+export interface RestartRecord {
+  attempt: number;
+  maxAttempts: number;
+  exhausted: boolean;
+  at: string;
 }
 
 export interface SidecarExit {
