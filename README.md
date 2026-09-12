@@ -54,7 +54,7 @@ Yukinal 是一个把「远程开发与基础设施运维」和「AI Agent」放�
 
 ## 项目状态
 
-Yukinal 目前是一个可以跑起来的开发版本，版本号为 `0.1.0`。这个版本号只有一处来源（`packages/shared/src/version.ts` 的 `APP_VERSION`），其余七个 `package.json`、Cargo workspace、`tauri.conf.json` 和 IPC fixture 都由 `packages/shared/src/version.test.ts` 钉在同一个值上，改一处而漏改其余会让 `pnpm check` 变红。桌面端、Rust 宿主和 Node.js Agent sidecar 之间的完整链路已经打通并可验证：从界面发起一次 Agent 运行，经过模型流式输出、工具调用、权限决策、宿主执行，到审计落库和界面反馈，都有真实代码和测试覆盖。
+Yukinal 目前是一个可以跑起来的开发版本，版本号为 `0.1.0`。这个版本号只有一处来源（`packages/shared/src/version.ts` 的 `APP_VERSION`），其余六个 `package.json` 与 `tauri.conf.json`、Cargo workspace 和 IPC fixture 都由 `packages/shared/src/version.test.ts` 钉在同一个值上，改一处而漏改其余会让 `pnpm check` 变红。桌面端、Rust 宿主和 Node.js Agent sidecar 之间的完整链路已经打通并可验证：从界面发起一次 Agent 运行，经过模型流式输出、工具调用、权限决策、宿主执行，到审计落库和界面反馈，都有真实代码和测试覆盖。
 
 但这不是一个可以分发的产品：
 
@@ -558,16 +558,23 @@ export interface LLMProvider {
 
 | 约束 | 满足方式 |
 | --- | --- |
-| 进程生命周期仍然归 Rust | 只有 `crates/core/src/mcp/` 派生进程；agent 侧没有 `child_process` |
-| 一个服务器一个进程 | supervisor 按 id 去重，重复启动复用同一个进程 |
-| 传输方式只有 stdio | 类型层面拒绝 http，失败理由只有一个来源 |
-| 目标必须在本地解析 | `ToolTarget` 由调用侧给出，远端文本不参与解析 |
-| 风险等级由本地决定 | 一律 `critical`，不读远端注解 |
-| 输入、输出与超时由本地强制 | 本地 schema 只校验「是一个对象」；输出摘要 4000 字符上限；每次调用有超时 |
-| 外部工具必须先变成 Yukinal 的工具声明 | 适配器只产出 `Tool`，注册走同一个 registry |
-| 命名空间与名称冲突 | 强制 `mcp.` 前缀与来源声明互相匹配，注册期检查 Provider 侧名称冲突 |
+| 外部工具必须先变成 Yukinal 的工具声明 | 适配器只产出 `Tool`，此后与内置工具走同一条路径：权限、票据、超时竞赛、取消、trace、审计都无特殊待遇 |
+| 命名空间与名称冲突 | 强制 `mcp.` 前缀与来源声明互相匹配；段在宿主侧规范化，两条 id 撞车时只让一个进目录；Provider 侧名称冲突在注册期拒绝 |
+| 风险等级由本地决定 | 一律 `critical`，不读远端注解；档位不是「默认 `medium`」而是最严的那一档，见下面的取舍说明 |
+| 输入、输出与超时由本地强制 | 本地 schema 只校验「是一个对象」；远端 `inputSchema` 只作文档；输出摘要 4000 字符上限；每次调用有超时（工具侧 45 秒比宿主侧 30 秒长，好让先放弃的是宿主），且 `retry.maxAttempts` 为 1 |
+| 目标必须在本地解析 | `ToolTarget` 由调用侧给出，远端文本不参与解析。`mcp.` 分流发生在目标校验之前，因为一次 MCP 调用打给的是本机派生的进程、不是某台 SSH 服务器 |
 | 描述文本一律视为不可信数据 | 只搬运与展示，不执行、不校验、不拼进系统提示词 |
-| 不要暗示已经可用 | 能力报告来自注册表实际内容，不是意图 |
+| 进程生命周期仍然归 Rust | 只有 `crates/core/src/mcp/` 派生进程，agent 侧一行 `spawn` 都没有；按 id 去重，所以一个服务器只有一个进程；`http` 在类型层面被拒绝，因为出站网络策略还不存在 |
+| 不要暗示已经可用 | 能力报告来自注册表实际内容，不是意图；没有目录就不显示工具数量 |
+| 数据库变更走新迁移 | 本次没有改表结构，所以没有新迁移；数据库侧新增的只有 `McpServersRepository::get()` |
+| 新增界面要补齐契约 | 两侧都补齐了：五个命令与仓库方法、Zod schema、`IPC_COMMANDS` / `IPC_SCHEMAS` 的五条、五份 fixture，以及 `apps/desktop/src/lib/mcp.ts` 与 `McpSettings.tsx` |
+
+**一处与最初约束不同的地方，是有意收紧的。** 约束里写的是「外部工具默认至少 `medium`」，实际做成了 `critical`；
+约束里还说 `trustLevel` 为 `unreviewed` 的工具「不应被自动注册」，而它们**确实被注册了**。两者并不矛盾：
+注册一个工具只让它出现在模型可用的列表里，而**每一次调用都要用户逐项批准**——「不自动信任」在这套模型里由权限引擎
+保证，而不是由「不注册」保证。后者在没有评审流程的今天等于让 MCP 完全不可用（`allowedTools` 永远是空表、
+`trustLevel` 永远是 `unreviewed`，没有任何界面会改它们）。这是显式的取舍：**将来若出现「用户看过描述并降低某个工具档位」
+的流程，这里就是它该接入的地方**；在那之前，任何 MCP 工具都不该有一个比 `critical` 更低的值。
 
 **未验证的部分。** MCP 只在一个自带的 Node fixture 上验证过（`crates/core/tests/fixtures/mcp-server.js`，9 种模式）。**真实的第三方 MCP 服务器没有被跑过**，本环境没有网络也没有 `npx`。另外 `crates/core/src/mcp/` 里那条「与 fixture 的行为一致」的集成测试计数在记录写下时就已经不准（当时写 17，实际是 18），所以它只证明与 fixture 一致，不证明任何真实服务器的兼容性。
 
@@ -851,7 +858,7 @@ Agent 面板过去把模型回复当纯文本铺在动态里（`# 结论`、`- �
 
 ## 版本与发布历史
 
-版本号遵循语义化版本，并且是**唯一**的：七个 `package.json`、Cargo workspace、`tauri.conf.json` 和 IPC fixture 里的版本由 `packages/shared/src/version.test.ts` 钉在一起。`1.0.0` 之前不承诺向后兼容：Tauri IPC 命令、sidecar JSON-RPC 方法和跨层类型都可能变化，破坏性变化会写在这一节里。这一节取代了过去那份独立的变更日志文件。
+版本号遵循语义化版本，并且是**唯一**的：六个 `package.json` 与 `tauri.conf.json`、Cargo workspace、IPC fixture 里的版本由 `packages/shared/src/version.test.ts` 钉在一起（那张清单就是它的 `MANIFESTS`，一共七项）。`1.0.0` 之前不承诺向后兼容：Tauri IPC 命令、sidecar JSON-RPC 方法和跨层类型都可能变化，破坏性变化会写在这一节里。这一节取代了过去那份独立的变更日志文件。
 
 ### 未发布
 
