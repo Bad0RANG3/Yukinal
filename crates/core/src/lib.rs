@@ -19,6 +19,14 @@
 pub mod collector;
 pub mod health;
 pub mod ipc;
+pub mod mcp;
+
+/// 一行不可信文本 → 可以安全写进日志/错误的东西。
+///
+/// 它是 crate 级能力而不是 `sidecar` 的私有工具：sidecar 的日志转发与 MCP 客户端的
+/// stderr/诊断尾部都要用它，而**脱敏逻辑只能有一份**——第二份迟早与第一份漂移，而这里
+/// 的漏报代价是一把收不回的密钥。私有（`mod`，非 `pub mod`）是因为 crate 之外无人该用它。
+mod redact;
 pub mod sidecar;
 
 pub mod supervisor;

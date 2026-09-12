@@ -15,7 +15,8 @@
 //! 现在：
 //!
 //! - [`config`]：**启动什么**（路径/环境解析，纯逻辑，不碰 tokio）
-//! - [`redact`]：一行不可信文本 → 可以安全写进日志的东西（本模块唯一的安全能力）
+//! - [`crate::redact`]：一行不可信文本 → 可以安全写进日志的东西（本 crate 的唯一安全能力，
+//!   已搬到 crate 根，因为 MCP 客户端也需要它）
 //! - 本文件：进程生命周期与线协议 —— spawn / 握手 / 请求关联 / 事件转发
 //!
 //! 公开路径完全不变：`SidecarConfig` 等仍从 `yukinal_core::sidecar::` 导出（见下面的
@@ -36,13 +37,12 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 
 mod config;
-mod redact;
 
 /// 启动配置仍从这里导出 —— 路径与拆分类名前一致，调用方无需知道它换了文件。
 pub use config::SidecarConfig;
-// 脱敏能力**不**对外导出：它只服务于本模块的错误消息与日志转发（全仓库没有别的调用者）。
-// 保持私有，改它的时候能确定爆炸半径就是这里。
-use redact::{redact_log_line, redact_process_log_line, truncate};
+// 脱敏逻辑住在 crate 根（`crate::redact`），搬出去的起因是 MCP 客户端也要用它：
+// 同一个 crate 内两处处理不可信子进程文本，就必须共用一份实现，否则第二份会漂移。
+use crate::redact::{redact_log_line, redact_process_log_line, truncate};
 
 /// Must match `YUKINAL_RPC_VERSION` in `@yukinal/shared` (ADR 0006). A mismatch is
 /// refused instead of treated as "probably compatible": half-speaking protocols are how
@@ -268,7 +268,7 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
 
     let mut child = command
         .spawn()
-        .map_err(|error| SidecarError::Launch(format!("{}: {error}", config.program.display())))?;
+        .map_err(|error| config.launch_error(&error))?;
     // Rust 1.98 returns the pid as u32 already; no conversion, no silent fallback.
     let pid = child
         .id()
