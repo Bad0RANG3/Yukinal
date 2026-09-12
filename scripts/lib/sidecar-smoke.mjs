@@ -43,6 +43,17 @@ export async function runSidecarSmoke(entry, options = {}) {
   let buffer = "";
   const queue = [];
   const waiters = [];
+  // The agent also talks *to* the host on this same stream (`host.mcp.catalog`, ADR 0014),
+  // and its requests carry ids from its own counter — the same numbers we use. Direction,
+  // not the id, is what tells the two apart: a frame with a `method` is a request, a frame
+  // with only an `id` is an answer. Treating the former as an answer is what this harness
+  // did until MCP landed, and it consumed the agent's catalog request as the reply to
+  // `initialize`.
+  const hostMethodsSeen = new Set();
+  const HOST_HANDLERS = {
+    // "No MCP servers are configured" is the ordinary host: an empty catalog, not an error.
+    "host.mcp.catalog": () => ({ servers: [], failures: [] }),
+  };
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     buffer += chunk;
@@ -52,9 +63,30 @@ export async function runSidecarSmoke(entry, options = {}) {
       buffer = buffer.slice(index + 1);
       if (line.trim() !== "") {
         const frame = JSON.parse(line);
-        // 只把「响应帧」（带 id）交给 ask；agent.* 通知不进匹配队列，
-        // 否则后台 run 的事件会把后来的断言喂错帧。
-        if (typeof frame.id === "number") {
+        if (typeof frame.method === "string") {
+          // Three frame kinds arrive here, and only one of them gets an answer:
+          //   - a request from the agent (method + id) → answer it like the Rust host would;
+          //   - an *upward notification* (method, no id) — `agent.stream` carries
+          //     `AgentStreamEvent` (ADR 0006). Replying to one would put a frame on the wire
+          //     that neither side expects, so it is recorded and dropped;
+          //   - everything else is a reply, handled below.
+          hostMethodsSeen.add(frame.method);
+          if (typeof frame.id === "number") {
+            const handler = HOST_HANDLERS[frame.method];
+            // An unknown host method gets the answer a real Rust host gives. Being silent
+            // would hang the agent, and inventing a result would hide a real gap.
+            send(
+              handler
+                ? { jsonrpc: "2.0", id: frame.id, result: handler(frame.params) }
+                : {
+                    jsonrpc: "2.0",
+                    id: frame.id,
+                    error: { code: -32601, message: `this smoke host does not implement ${frame.method}` },
+                  },
+            );
+            console.log(`✓ host request ${frame.method}`);
+          }
+        } else if (typeof frame.id === "number") {
           const waiter = waiters.shift();
           if (waiter) waiter(frame);
           else queue.push(frame);
@@ -133,6 +165,14 @@ export async function runSidecarSmoke(entry, options = {}) {
   const [code] = await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(() => resolve([-1]), 5_000))]);
   assert(code === 0, `sidecar must exit when its parent closes stdin, got ${code}`);
   console.log("✓ clean shutdown on stdin close");
+
+  // Pinning the MCP wiring from the outside, where it cannot be faked: the agent must ask
+  // the host for a catalog. Drop `loadMcpCatalog` and this smoke fails, which is the whole
+  // reason it is asserted here and not only in a unit test with a fake client.
+  assert(
+    hostMethodsSeen.has("host.mcp.catalog"),
+    "the agent never asked the host for an MCP catalog (ADR 0014)",
+  );
 
   console.log("sidecar smoke: green");
 }

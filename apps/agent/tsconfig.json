@@ -1,9 +1,15 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src",
-    "noEmit": false,
+    // `noEmit` 在这里是**契约**，不是偷懒：`dist/` 里必须只有一个文件 ——
+    // esbuild 打出来的 bundle（`scripts/check-packaging.mjs` 与
+    // `scripts/smoke-packaged-agent.mjs` 都依赖这一点）。这个项目以前把
+    // `outDir` 指向 `dist` 且允许 emit，于是任何一次 `tsc -p tsconfig.json`
+    // 都会把逐模块的产物写进去、覆盖掉 bundle，而「类型检查通过」这句话
+    // 不会提示任何异常：真正变红的是几步之后的打包契约。把 emit 关在
+    // tsconfig 里，比在 `package.json` 的脚本上关更彻底 —— 手写一条 tsc
+    // 命令不会再造成这个后果。
+    "noEmit": true,
     "types": ["node"]
   },
   "include": ["src"]

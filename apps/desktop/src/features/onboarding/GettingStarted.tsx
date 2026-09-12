@@ -71,7 +71,7 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
       {step === 0 ? <>
         <section className="settings-card">
           <h3>选择模型连接</h3>
-          <p>可以使用已有配置，也可以添加一个兼容端点。测试会发送一条简短消息，可能产生少量模型费用。</p>
+          <p>可以使用已有配置，也可以新建一个：先选协议（OpenAI-compatible、Anthropic 或 Gemini），再填端点、模型与密钥。测试会发送一条简短消息，可能产生少量模型费用。</p>
           <label className="settings-field"><span className="field-label">模型连接</span>
             <select className="form-input" disabled={!shell || test.isPending || workspace.agentBusy} value={creatingProvider ? "" : provider?.id ?? ""} onChange={(event) => {
               setProviderId(event.target.value || null); setCreatingProvider(!event.target.value); setEditingProvider(false); test.reset();
