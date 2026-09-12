@@ -11,7 +11,7 @@ import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse }
 import type { Activity, ToolExecutionListResponse } from "../types/activity.js";
 import type { ServerService, ServerServicesResponse } from "../types/service.js";
 import type { ServerLogLine, ServerLogsResponse } from "../types/log.js";
-import type { FilesystemReadInput, FilesystemReadOutput, FilesystemWriteInput, FilesystemWriteOutput } from "../types/file.js";
+import type { FilesystemEditInput, FilesystemEditOutput, FilesystemReadInput, FilesystemReadOutput, FilesystemWriteInput, FilesystemWriteOutput } from "../types/file.js";
 import type { DockerInspectResult, DockerLogsResult, DockerRestartInput, DockerRestartResult } from "../types/docker.js";
 import type { HostContextRequest, HostContextResponse } from "../types/host.js";
 import type { ToolDeclaration } from "../types/tool.js";
@@ -21,7 +21,7 @@ import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, Works
 import type { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import type { ServerServiceSchema, ServerServicesResponseSchema } from "./service.js";
 import type { ServerLogLineSchema, ServerLogsResponseSchema } from "./log.js";
-import type { FilesystemReadInputSchema, FilesystemReadOutputSchema, FilesystemWriteInputSchema, FilesystemWriteOutputSchema } from "./file.js";
+import type { FilesystemEditInputSchema, FilesystemEditOutputSchema, FilesystemReadInputSchema, FilesystemReadOutputSchema, FilesystemWriteInputSchema, FilesystemWriteOutputSchema } from "./file.js";
 import type { DockerInspectResultSchema, DockerLogsResultSchema, DockerRestartInputSchema, DockerRestartResultSchema } from "./docker.js";
 import type { HostContextRequestSchema, HostContextResponseSchema } from "./host.js";
 import type {
@@ -68,6 +68,8 @@ export type _ServerLogLineContract = Expect<Assignable<typeof ServerLogLineSchem
 export type _ServerLogsContract = Expect<Assignable<typeof ServerLogsResponseSchema, ServerLogsResponse>>;
 export type _FilesystemReadInputContract = Expect<Assignable<typeof FilesystemReadInputSchema, FilesystemReadInput>>;
 export type _FilesystemReadOutputContract = Expect<Assignable<typeof FilesystemReadOutputSchema, FilesystemReadOutput>>;
+export type _FilesystemEditInputContract = Expect<Assignable<typeof FilesystemEditInputSchema, FilesystemEditInput>>;
+export type _FilesystemEditOutputContract = Expect<Assignable<typeof FilesystemEditOutputSchema, FilesystemEditOutput>>;
 export type _FilesystemWriteInputContract = Expect<Assignable<typeof FilesystemWriteInputSchema, FilesystemWriteInput>>;
 export type _FilesystemWriteOutputContract = Expect<Assignable<typeof FilesystemWriteOutputSchema, FilesystemWriteOutput>>;
 export type _DockerLogsContract = Expect<Assignable<typeof DockerLogsResultSchema, DockerLogsResult>>;

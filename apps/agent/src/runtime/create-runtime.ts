@@ -19,6 +19,7 @@ import { dockerInspectTool } from "../tools/builtin/docker-inspect.js";
 import { dockerLogsTool } from "../tools/builtin/docker-logs.js";
 import { dockerPsTool } from "../tools/builtin/docker-ps.js";
 import { dockerRestartTool } from "../tools/builtin/docker-restart.js";
+import { filesystemEditTool } from "../tools/builtin/filesystem-edit.js";
 import { filesystemReadTool } from "../tools/builtin/filesystem-read.js";
 import { filesystemWriteTool } from "../tools/builtin/filesystem-write.js";
 import { serverInfoTool } from "../tools/builtin/server-info.js";
@@ -57,6 +58,9 @@ export function createRuntime(
     declarations.push(registry.register(dockerRestartTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemReadTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemWriteTool(options.hostToolClient)));
+    // 读-改-写是**独立**的一项能力，不是 write 的开关：write 覆盖整个文件，edit 要求
+    // 内容与刚读过的一致才替换。两者都给，模型才能自己选「要看清楚再改」还是「整份重写」。
+    declarations.push(registry.register(filesystemEditTool(options.hostToolClient)));
   }
 
   const permission = new PermissionEngine();

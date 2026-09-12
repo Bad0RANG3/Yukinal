@@ -20,6 +20,19 @@ pub const MAX_AGENT_READ_BYTES: usize = 1024 * 1024;
 /// Agent `filesystem.write` 允许写入的最大字节数。
 pub const MAX_AGENT_WRITE_BYTES: usize = 512 * 1024;
 
+/// Agent `filesystem.edit` 能安全编辑的文件最大字节数。
+///
+/// 编辑的形状是「读**全文** → 校验 revision → 替换 → 写回全文」，所以这个数字同时受两边约束：
+/// 文件必须能整个读进来（否则 revision 与写回的缓冲区都只是前缀），而且写回去的内容不能超过
+/// `write` 的上限 —— 它取 [`MAX_AGENT_WRITE_BYTES`] 正是为了后者，同时 `MAX_AGENT_EDIT_BYTES
+/// <= MAX_AGENT_READ_BYTES` 由 limits 的测试钉住。
+///
+/// 为什么这个常量是安全性的关键而不是调参：`read` 的 revision 只描述它**读到的那些字节**。
+/// 截断读取（`truncated = true`）拿到的是文件**前缀**的 revision；如果允许以它为凭据写回，
+/// 「校验通过 → 写回缓冲区」就会把用户 1 MiB 的文件截成 128 KiB。拒绝超限文件是让那件事
+/// 不可能的**唯一**手段 —— 不是优化，也不是可以放宽的阈值。
+pub const MAX_AGENT_EDIT_BYTES: usize = MAX_AGENT_WRITE_BYTES;
+
 /// UI 远端文件浏览器的单次读取上限（1 MiB）。浏览器无法请求更大的量。
 pub const BROWSER_READ_BYTES: usize = 1024 * 1024;
 
@@ -63,8 +76,8 @@ pub fn decode_bounded(bytes: &[u8], max_bytes: usize) -> BoundedRead {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_bounded, BROWSER_READ_BYTES, DEFAULT_AGENT_READ_BYTES, MAX_AGENT_READ_BYTES,
-        MAX_AGENT_WRITE_BYTES, MAX_REMOTE_PATH_CHARS,
+        decode_bounded, BROWSER_READ_BYTES, DEFAULT_AGENT_READ_BYTES, MAX_AGENT_EDIT_BYTES,
+        MAX_AGENT_READ_BYTES, MAX_AGENT_WRITE_BYTES, MAX_REMOTE_PATH_CHARS,
     };
 
     #[test]
@@ -75,6 +88,7 @@ mod tests {
         assert_eq!(DEFAULT_AGENT_READ_BYTES, 131_072);
         assert_eq!(MAX_AGENT_READ_BYTES, 1_048_576);
         assert_eq!(MAX_AGENT_WRITE_BYTES, 524_288);
+        assert_eq!(MAX_AGENT_EDIT_BYTES, 524_288);
         assert_eq!(BROWSER_READ_BYTES, 1_048_576);
     }
 
@@ -83,6 +97,15 @@ mod tests {
         // 这个关系编译期就能证明，所以钉在 const block 里：默认值一旦被改到上限之上，
         // 构建直接失败，而不是等到某个不传 maxBytes 的调用在运行时报 invalid_input。
         const { assert!(DEFAULT_AGENT_READ_BYTES <= MAX_AGENT_READ_BYTES) };
+    }
+
+    #[test]
+    fn the_edit_cap_stays_within_what_a_read_can_return_in_full() {
+        // 编辑的上限**必须**不超过读上限，否则 `edit` 会拿到一份截断的内容并把它当作全文写回
+        // —— 那正是「文件被截成前缀」这种数据丢失。这个不等式是那条规则的可执行形式。
+        const { assert!(MAX_AGENT_EDIT_BYTES <= MAX_AGENT_READ_BYTES) };
+        // 一次编辑写回去的内容同样不能超过 `write` 的上限：否则编辑就成了绕过写入上限的路。
+        const { assert!(MAX_AGENT_EDIT_BYTES <= MAX_AGENT_WRITE_BYTES) };
     }
 
     #[test]

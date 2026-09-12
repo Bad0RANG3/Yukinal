@@ -4,10 +4,14 @@
 //! resolve credentials. This module is the narrow, deny-by-default bridge from the
 //! sidecar request to Rust-owned state.
 //!
-//! The file tools (`filesystem.read` / `filesystem.write`) delegate to `yukinal-filesystem`:
-//! path policy, byte caps and bounded decoding live there, and this module only maps the
-//! capability's typed failures onto the host protocol's failure codes
+//! The file tools (`filesystem.read` / `filesystem.write` / `filesystem.edit`) delegate to
+//! `yukinal-filesystem`: path policy, byte caps and bounded decoding live there, and this module
+//! only maps the capability's typed failures onto the host protocol's failure codes
 //! (see [`filesystem_failure`]).
+//!
+//! `filesystem.write` overwrites and `filesystem.edit` is a guarded read-then-modify; the
+//! capability's crate docs state why both exist and what the edit guard does **not** guarantee
+//! (SFTP has no compare-and-swap, so the check and the write are two round trips apart).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,7 +21,9 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use yukinal_database::models::{ContainerInfo, Environment};
 use yukinal_database::DatabaseError;
-use yukinal_filesystem::{AgentReadRequest, AgentWriteRequest, Error as FilesystemError};
+use yukinal_filesystem::{
+    AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error as FilesystemError,
+};
 use yukinal_ssh::SshBackend;
 
 use crate::commands::files::remote_file_service;
@@ -34,6 +40,7 @@ const DOCKER_INSPECT: &str = "docker.inspect";
 const DOCKER_RESTART: &str = "docker.restart";
 const FILESYSTEM_READ: &str = "filesystem.read";
 const FILESYSTEM_WRITE: &str = "filesystem.write";
+const FILESYSTEM_EDIT: &str = "filesystem.edit";
 const MAX_CONTAINERS: usize = 200;
 const DEFAULT_LOG_TAIL: usize = 120;
 const MAX_LOG_TAIL: usize = 500;
@@ -159,6 +166,17 @@ struct FilesystemWriteInput {
     content: String,
 }
 
+/// `filesystem.edit` 的宿主入参。`expectedRevision` 是 `filesystem.read` 返回的那个 revision，
+/// `oldString` 必须**恰好一次**出现在文件里。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesystemEditInput {
+    path: String,
+    expected_revision: String,
+    old_string: String,
+    new_string: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct DockerInspectRow {
@@ -225,6 +243,8 @@ struct FilesystemReadResult {
     path: String,
     content: String,
     truncated: bool,
+    /// The content revision of the bytes that were read (SHA-256, lowercase hex).
+    revision: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +252,17 @@ struct FilesystemReadResult {
 struct FilesystemWriteResult {
     path: String,
     bytes_written: usize,
+}
+
+/// `filesystem.edit` 的宿主返回：写回之后的 revision 与一个小结。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemEditResult {
+    path: String,
+    revision: String,
+    bytes_before: usize,
+    bytes_after: usize,
+    line_delta: i64,
 }
 
 /// Host request entry point with a cancellation token owned by the sidecar
@@ -315,6 +346,7 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
         DOCKER_RESTART => docker_restart(state, server_id, &request.input, &cancel).await,
         FILESYSTEM_READ => filesystem_read(state, server_id, &request.input, &cancel).await,
         FILESYSTEM_WRITE => filesystem_write(state, server_id, &request.input, &cancel).await,
+        FILESYSTEM_EDIT => filesystem_edit(state, server_id, &request.input, &cancel).await,
         other => Ok(failed(
             "not_found",
             format!("host tool `{other}` is not enabled"),
@@ -408,12 +440,32 @@ fn transport_or_cancel(error: impl std::fmt::Display, cancel: &CancellationToken
 /// protocol, not to the file capability, so the mapping stays here while the rules, the messages
 /// and the limits live in `yukinal-filesystem`. `retryable` follows the existing table: a bad
 /// argument can be fixed by the Agent, a policy denial cannot.
+///
+/// The two edit refusals ride on the existing `invalid_input` code — the vocabulary has no
+/// edit-specific code, and both messages say what to do next:
+/// - a **revision mismatch** is exactly "your input is stale, re-read and retry", so it is
+///   retryable, and `detail` carries both revision strings so the Agent can see the drift;
+/// - a file **over the edit cap** cannot be fixed by retrying anything (the file has to shrink),
+///   so it is `retryable: false`: the fix is a different tool, not another attempt.
 fn filesystem_failure(error: FilesystemError, cancel: &CancellationToken) -> Value {
+    // The wording belongs to the capability, so it is taken from the typed error itself instead of
+    // being re-written here, where it could drift away from the rule it explains.
+    let message = error.to_string();
     match error {
-        FilesystemError::InvalidInput(message) => failed("invalid_input", message, true, None),
-        FilesystemError::DeniedByPolicy(message) => {
-            failed("denied_by_policy", message, false, None)
-        }
+        FilesystemError::InvalidInput(_) => failed("invalid_input", message, true, None),
+        FilesystemError::DeniedByPolicy(_) => failed("denied_by_policy", message, false, None),
+        FilesystemError::RevisionMismatch { expected, actual } => failed(
+            "invalid_input",
+            message,
+            true,
+            Some(json!({ "expectedRevision": expected, "actualRevision": actual })),
+        ),
+        FilesystemError::FileTooLargeToEdit { limit } => failed(
+            "invalid_input",
+            message,
+            false,
+            Some(json!({ "maxEditableBytes": limit })),
+        ),
         FilesystemError::Transport(error) => transport_or_cancel(error, cancel),
     }
 }
@@ -506,6 +558,7 @@ async fn filesystem_read(
             path: read.path,
             content: read.content,
             truncated: read.truncated,
+            revision: read.revision,
         })
         .map_err(|error| error.to_string())?,
     ))
@@ -547,6 +600,60 @@ async fn filesystem_write(
         serde_json::to_value(FilesystemWriteResult {
             path: write.path,
             bytes_written: write.bytes_written,
+        })
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+/// `filesystem.edit`: read the file, verify its revision, replace one exact match, write it back.
+///
+/// All of that happens inside one capability call (`RemoteFileService::agent_edit`) and is
+/// cancellable as a whole, because a half-applied edit is exactly what the guard exists to
+/// prevent. The checks themselves (cap, revision, single match) live in `yukinal-filesystem`.
+async fn filesystem_edit(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
+    let input = match serde_json::from_value::<FilesystemEditInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("filesystem.edit input is invalid: {error}"),
+                true,
+                None,
+            ))
+        }
+    };
+    let request = match AgentEditRequest::check(
+        &input.path,
+        &input.expected_revision,
+        input.old_string,
+        input.new_string,
+    ) {
+        Ok(request) => request,
+        Err(error) => return Ok(filesystem_failure(error, cancel)),
+    };
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
+    }
+    let service = remote_file_service(state);
+    let edit = tokio::select! {
+        result = service.agent_edit(server_id, &request) => match result {
+            Ok(edit) => edit,
+            Err(error) => return Ok(filesystem_failure(error, cancel)),
+        },
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+    };
+    Ok(success(
+        serde_json::to_value(FilesystemEditResult {
+            path: edit.path,
+            revision: edit.revision,
+            bytes_before: edit.bytes_before,
+            bytes_after: edit.bytes_after,
+            line_delta: edit.line_delta,
         })
         .map_err(|error| error.to_string())?,
     ))
@@ -970,11 +1077,83 @@ mod tests {
 
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
+    use yukinal_filesystem::Error as FilesystemError;
 
     use super::{
-        bounded_log_lines, cancel_sidecar_request, docker_restart_command, is_safe_container_ref,
-        parse_docker_inspect, parse_docker_ps, shell_quote, HostCancellationRegistry,
+        bounded_log_lines, cancel_sidecar_request, docker_restart_command, filesystem_failure,
+        is_safe_container_ref, parse_docker_inspect, parse_docker_ps, shell_quote,
+        HostCancellationRegistry,
     };
+
+    #[test]
+    fn the_edit_failures_map_onto_the_existing_failure_codes() {
+        let cancel = CancellationToken::new();
+
+        // 过期 revision：这是「你的入参旧了，重读再来一次」，所以可重试，并且把两个 revision
+        // 都放进 detail —— 模型据此知道文件确实变了，而不是自己抄错了。
+        let mismatch = filesystem_failure(
+            FilesystemError::RevisionMismatch {
+                expected: "aa".repeat(32),
+                actual: "bb".repeat(32),
+            },
+            &cancel,
+        );
+        assert_eq!(mismatch["status"], json!("failed"));
+        assert_eq!(mismatch["error"]["code"], json!("invalid_input"));
+        assert_eq!(mismatch["error"]["retryable"], json!(true));
+        assert_eq!(
+            mismatch["error"]["detail"]["expectedRevision"],
+            json!("aa".repeat(32))
+        );
+        assert_eq!(
+            mismatch["error"]["detail"]["actualRevision"],
+            json!("bb".repeat(32))
+        );
+
+        // 文件超过编辑上限：重试同一个调用永远不会成功（要变的是文件），所以不可重试；文案里
+        // 必须出现 `filesystem.write`，因为那才是用户/模型该走的下一步。
+        let too_large = filesystem_failure(
+            FilesystemError::FileTooLargeToEdit { limit: 524_288 },
+            &cancel,
+        );
+        assert_eq!(too_large["error"]["code"], json!("invalid_input"));
+        assert_eq!(too_large["error"]["retryable"], json!(false));
+        assert_eq!(
+            too_large["error"]["detail"]["maxEditableBytes"],
+            json!(524_288)
+        );
+        let message = too_large["error"]["message"]
+            .as_str()
+            .expect("the refusal carries a message");
+        assert!(message.contains("524288"), "{message}");
+        assert!(message.contains("truncate"), "{message}");
+        assert!(message.contains("filesystem.write"), "{message}");
+
+        // 已有的两类映射不变：入参问题可重试，策略拒绝不可重试。
+        let invalid = filesystem_failure(FilesystemError::InvalidInput("bad".to_string()), &cancel);
+        assert_eq!(invalid["error"]["code"], json!("invalid_input"));
+        assert_eq!(invalid["error"]["retryable"], json!(true));
+
+        let denied = filesystem_failure(
+            FilesystemError::DeniedByPolicy("blocked".to_string()),
+            &cancel,
+        );
+        assert_eq!(denied["error"]["code"], json!("denied_by_policy"));
+        assert_eq!(denied["error"]["retryable"], json!(false));
+
+        // 传输失败与取消仍然走 `transport_or_cancel`：取消后报 cancelled，否则报 transport。
+        let transport = filesystem_failure(
+            FilesystemError::Transport(yukinal_filesystem::TransportError::new("link down")),
+            &cancel,
+        );
+        assert_eq!(transport["error"]["code"], json!("transport"));
+        cancel.cancel();
+        let cancelled = filesystem_failure(
+            FilesystemError::Transport(yukinal_filesystem::TransportError::new("link down")),
+            &cancel,
+        );
+        assert_eq!(cancelled["error"]["code"], json!("cancelled"));
+    }
 
     #[test]
     fn cancellation_registry_cancels_and_removes_a_running_request() {

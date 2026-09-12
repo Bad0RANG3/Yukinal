@@ -105,11 +105,20 @@ pub async fn agent_logs(state: State<'_, AppState>) -> Result<AgentLogsResponse,
     })
 }
 
-/// Decide what to launch. Resolution order lives in `SidecarConfig::from_env_with_cwd`
-/// (ADR 0008); this only supplies the app data dir when the caller did not set one.
+/// Decide what to launch. Resolution order lives in
+/// `SidecarConfig::from_env_with_resources` (ADR 0008, ADR 0013); this only tells it where
+/// this build keeps its resources and supplies the app data dir when the caller did not set
+/// one.
+///
+/// The resource dir is passed even in a dev run, where it holds no staged bundle: the
+/// packaged path then simply fails the `is_file()` check and resolution falls through to the
+/// repo walk-up, so one code path covers both shapes without a `cfg!(debug_assertions)`
+/// branch that would make the installed case the untested one.
 fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let mut config = SidecarConfig::from_env_with_cwd(&cwd).map_err(|error| error.to_string())?;
+    let resources = app.path().resource_dir().ok();
+    let mut config = SidecarConfig::from_env_with_resources(&cwd, resources.as_deref())
+        .map_err(|error| error.to_string())?;
 
     if config.data_dir.trim().is_empty() {
         let data_dir = app
@@ -465,6 +474,11 @@ fn is_sensitive_key(value: &str) -> bool {
             | "secret"
             | "token"
             | "content"
+            // `filesystem.edit` 的参数里装着**任意文件内容**，和 `filesystem.write` 的
+            // `content` 是同一种东西 —— 一份 `.env` 的改动片段里就有密钥。三者都要标成
+            // 敏感，否则审计里只有 write 被抹掉，而 edit 把同一份内容原样留下。
+            | "oldstring"
+            | "newstring"
     )
 }
 
@@ -540,6 +554,25 @@ mod tests {
         assert_eq!(input["content"], "[redacted]");
         assert_eq!(input["nested"]["password"], "[redacted]");
         assert_eq!(input["command"], "echo hello");
+    }
+
+    /// `filesystem.edit` 的两个字符串参数同样是任意文件内容，所以和 `content` 一样处理。
+    ///
+    /// 这条测试存在的理由很具体：这三个键分属三个工具，而漏掉其中一个不会有任何报错 ——
+    /// 审计里只是安静地多出一份 `.env` 的片段。名字也按 `sanitize_audit_input` 的归一化
+    /// 规则写（`old_string` / `newString` 都算命中）。
+    #[test]
+    fn audit_input_treats_edit_content_like_write_content() {
+        let input = sanitize_audit_input(json!({
+            "path": "/srv/app/.env",
+            "expectedRevision": "0000000000000000000000000000000000000000000000000000000000000000",
+            "oldString": "API_KEY=old-do-not-persist",
+            "newString": "API_KEY=new-do-not-persist",
+        }));
+        assert_eq!(input["oldString"], "[redacted]");
+        assert_eq!(input["newString"], "[redacted]");
+        // 路径与摘要不是内容，留着才有排障价值。
+        assert_eq!(input["path"], "/srv/app/.env");
     }
 
     #[test]

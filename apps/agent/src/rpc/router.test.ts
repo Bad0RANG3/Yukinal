@@ -15,6 +15,7 @@ import {
 import type { AgentLogger } from "../config.js";
 import { RpcFailure } from "../errors.js";
 import { createRuntime, type Runtime } from "../runtime/create-runtime.js";
+import { HostRpcClient } from "../transport/host-client.js";
 
 function request(method: string, params?: unknown, id = 1): JsonRpcRequest {
   return { jsonrpc: "2.0", id, method, params };
@@ -211,6 +212,34 @@ test("tools.list returns declarations, never implementations", async () => {
   };
   assert.ok(tools.some((tool) => tool.name === "system.echo"));
   assert.ok(tools.every((tool) => tool.timeoutMs > 0 && typeof tool.risk === "string"));
+});
+
+/**
+ * 宿主文件工具必须**同时**存在实现与注册。
+ *
+ * 这个仓库真的发生过「工具写完了、测试全绿、但没人注册」：模型永远看不到它，而任何单元
+ * 测试都不会红，因为测试直接构造工具、不经过 `createRuntime`。这条测试走 `createRuntime`
+ * 那条路径（也就是 sidecar 真实启动时走的那条），把「注册」这件事本身钉住。
+ *
+ * 它同时钉住一条边界：没有宿主客户端时这些工具**不该**出现。它们每一次调用都要过
+ * `host.tool.execute`，没有宿主就没有实现可言。
+ */
+test("the host file tools are registered, not merely implemented", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const bare = (await runtime.router.handle(request(AGENT_METHODS.listTools, {}))) as {
+    tools: Array<{ name: string }>;
+  };
+  assert.ok(
+    !bare.tools.some((tool) => tool.name.startsWith("filesystem.")),
+    "without a host client there is nothing to serve these tools",
+  );
+
+  const hosted = createRuntime({ log: silentLogger(), hostToolClient: new HostRpcClient(() => {}) });
+  const declared = hosted.declarations.map((tool) => tool.name);
+  for (const name of ["filesystem.read", "filesystem.write", "filesystem.edit"]) {
+    assert.ok(declared.includes(name), `${name} must be declared to the model`);
+  }
 });
 
 test("describe advertises what is and is not implemented yet", async () => {
