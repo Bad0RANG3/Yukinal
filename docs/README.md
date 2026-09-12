@@ -26,7 +26,7 @@
 3. [ADR 0006](adr/0006-sidecar-transport-ndjson-jsonrpc.md) —— 两侧到底怎么说话；这是调试时最先需要的东西。
 4. [ADR 0005](adr/0005-permission-engine-sole-decision-maker.md) + [ADR 0009](adr/0009-agent-permission-delegation.md) —— 一次工具调用凭什么被执行，用户委托与模型文本的区别在哪里。
 5. [ADR 0004](adr/0004-tool-name-mapping.md) + [Provider 边界](../apps/agent/src/providers/README.md) —— 模型看到的世界和内部审计记录的世界如何对齐。
-6. [ADR 0002](adr/0002-ssh-backend-russh.md)、[ADR 0003](adr/0003-openai-compatible-only-for-mvp.md)、[ADR 0007](adr/0007-monorepo-and-day-one-abstractions.md)、[MCP 边界](../apps/agent/src/mcp/README.md) —— 按需要查阅。
+6. [ADR 0002](adr/0002-ssh-backend-russh.md)、[ADR 0003](adr/0003-openai-compatible-only-for-mvp.md)、[ADR 0011](adr/0011-native-anthropic-and-gemini-providers.md)、[ADR 0007](adr/0007-monorepo-and-day-one-abstractions.md)、[MCP 边界](../apps/agent/src/mcp/README.md) —— 按需要查阅。
 7. 准备改协议或跨层类型时，先读 `packages/shared/src/` 与 `packages/shared/fixtures/ipc/`，它们是契约本身。
 
 ## 必须保持的架构边界
@@ -48,7 +48,7 @@
 | --- | --- | --- |
 | [0001](adr/0001-agent-runtime-as-node-sidecar.md) | Agent Runtime 作为独立 Node.js sidecar，由 Rust 拥有其生命周期 | Accepted |
 | [0002](adr/0002-ssh-backend-russh.md) | SSH 后端采用 russh，并封装在 `crates/ssh` 的 `SshBackend` 之后 | Accepted |
-| [0003](adr/0003-openai-compatible-only-for-mvp.md) | 只实现一个 OpenAI-compatible Provider，两种请求方言覆盖兼容端点 | Accepted |
+| [0003](adr/0003-openai-compatible-only-for-mvp.md) | 只实现一个 OpenAI-compatible Provider，两种请求方言覆盖兼容端点 | Accepted（「只实现一个 Provider」一节由 [0011](adr/0011-native-anthropic-and-gemini-providers.md) 取代） |
 | [0004](adr/0004-tool-name-mapping.md) | 内部工具名用点号，Provider 边界用双下划线，映射集中在一处 | Accepted |
 | [0005](adr/0005-permission-engine-sole-decision-maker.md) | Permission Engine 是唯一的执行授权决策者 | Accepted |
 | [0006](adr/0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted |
@@ -56,6 +56,9 @@
 | [0008](adr/0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted（「不自动重启」一节由 [0010](adr/0010-bounded-sidecar-recovery.md) 取代） |
 | [0009](adr/0009-agent-permission-delegation.md) | Agent 权限使用显式的运行级委托，与运行模式互相正交 | Accepted |
 | [0010](adr/0010-bounded-sidecar-recovery.md) | 崩溃后的自动恢复有界，且只恢复能力、不复活状态 | Accepted |
+| [0011](adr/0011-native-anthropic-and-gemini-providers.md) | 增加原生 Anthropic 与 Gemini Provider，身份分支仍只允许发生在装配点 | Accepted |
+| [0012](adr/0012-host-key-trust-model.md) | 主机指纹默认 TOFU，但必须能人工核验、钉住与遗忘 | Accepted |
+| [0013](adr/0013-installer-distribution.md) | 启用安装包打包、随包分发 agent bundle，但使用用户自己的 Node | Accepted |
 
 ## 更新文档
 

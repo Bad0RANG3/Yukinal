@@ -1,6 +1,6 @@
 # ADR 0003 只实现一个 OpenAI-compatible Provider
 
-Status: Accepted
+Status: Accepted（「只实现一个 Provider」一节已由 [ADR 0011](0011-native-anthropic-and-gemini-providers.md) 取代；「Provider 身份只在装配点分支」与「不做方言自动探测」两条仍然有效。原文保留，以保留当时的约束与代价）
 Date: 2026-09-09
 
 ## Context
