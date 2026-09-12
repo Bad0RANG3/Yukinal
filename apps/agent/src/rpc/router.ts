@@ -364,7 +364,15 @@ export class RpcRouter {
     return {
       protocolVersion: YUKINAL_RPC_VERSION,
       agentVersion: AGENT_VERSION,
-      capabilities: { streaming: true, toolCalling: true, cancellation: true, mcp: false },
+      capabilities: {
+        streaming: true,
+        toolCalling: true,
+        cancellation: true,
+        // 这是一个**事实**，不是意图（ADR 0014）：只有注册表里此刻真的有 MCP 工具才为真。
+        // 目录只能在 stdio 通道起来之后去取（宿主在握手完成前不转发 sidecar 的请求），所以
+        // 握手时它通常是 false —— 那正是实话，而不是「MCP 没接」。
+        mcp: this.deps.registry.list().some((declaration) => declaration.origin.kind === "mcp"),
+      },
     };
   }
 

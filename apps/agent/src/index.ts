@@ -4,8 +4,9 @@
  */
 
 import { AGENT_VERSION, createLogger, readConfig } from "./config.js";
+import { loadCatalogFromHost } from "./mcp/catalog.js";
 import { KNOWN_POLICY_IDS } from "./permissions/policy-registry.js";
-import { createRuntime } from "./runtime/create-runtime.js";
+import { createRuntime, type Runtime } from "./runtime/create-runtime.js";
 import { HostRpcClient } from "./transport/host-client.js";
 import { startStdioRpc, type StdioServer } from "./transport/stdio.js";
 
@@ -25,12 +26,50 @@ export function main(): void {
     onParentGone: () => shutdown("stdin-closed"),
   });
 
+  // MCP tools are discovered **after** the RPC server is up, never before.
+  //
+  // Not a style choice: the host only republishes sidecar requests after it has finished the
+  // initialize handshake (`crates/core/src/supervisor.rs` spawns the event pump after
+  // `sidecar::handshake`), so a catalog request sent before `startStdioRpc` would wait for a
+  // host that is still waiting for us, and the launch would time out
+  // (`YUKINAL_AGENT_TIMEOUT_SECS`, 10s by default). The cost of getting this wrong is a
+  // sidecar that never starts.
+  //
+  // The consequence is that `initialize` answers `capabilities.mcp` before the catalog exists.
+  // That is answered truthfully by asking the registry at that moment (see the note in the
+  // report / ADR 0014): the flag is a *fact about this session so far*, and
+  // `agent.list_tools` / `system.describe.toolCount` are the live view.
+  void loadMcpCatalog(runtime, hostToolClient, log);
+
   log.info("ready", {
     version: AGENT_VERSION,
     tools: runtime.declarations.map((declaration) => declaration.name),
     policies: KNOWN_POLICY_IDS,
     dataDir: config.dataDir === "" ? "(unset)" : config.dataDir,
     maxRunMs: config.maxRunMs,
+  });
+}
+
+/**
+ * Fetch the MCP catalog and register it. Never throws, never retries.
+ *
+ * Failures are logged and dropped: a dead MCP server must not keep the agent from answering,
+ * and `capabilities.mcp` reports what actually happened rather than what was hoped for.
+ */
+async function loadMcpCatalog(
+  runtime: Runtime,
+  hostToolClient: HostRpcClient,
+  log: ReturnType<typeof createLogger>,
+): Promise<void> {
+  await loadCatalogFromHost({
+    registry: runtime.registry,
+    // `executeOnHost` is the same host channel every other host-backed tool uses: MCP calls
+    // are not a second execution path (ADR 0014).
+    executeOnHost: (request, signal) => hostToolClient.execute(request, signal),
+    fetchCatalog: (signal) => hostToolClient.fetchMcpCatalog(signal),
+    log: (message, meta) => {
+      log.info(message, meta);
+    },
   });
 }
 

@@ -452,6 +452,58 @@ async fn starting_the_same_server_twice_reuses_one_process() {
 }
 
 #[tokio::test]
+async fn shutdown_all_kills_every_server_it_manages() {
+    let Some(config) = config("ok") else { return };
+    let supervisor = McpSupervisor::new();
+
+    let handle = supervisor.start(&config).await.expect("start");
+    let pid = handle.info.pid;
+    assert!(
+        pid_is_alive(pid),
+        "the fixture must be running before we ask it to stop"
+    );
+
+    // This is the host's exit path (`RunEvent::ExitRequested` in `apps/desktop/src-tauri/
+    // src/lib.rs`): MCP servers are third-party programs we spawned, so leaving them to
+    // `kill_on_drop` is not enough — a force-kill on Windows runs no `Drop`.
+    let reports = supervisor.shutdown_all().await;
+
+    assert_eq!(
+        reports.len(),
+        1,
+        "one started server means exactly one report"
+    );
+    let (server_id, report) = &reports[0];
+    assert_eq!(server_id, SERVER_ID);
+    assert!(
+        report.was_running,
+        "the report must admit it had something to kill"
+    );
+    assert!(
+        !report.unreaped,
+        "a killed child must be reaped, not left as a zombie"
+    );
+    wait_until_pid_is_gone(pid, Duration::from_secs(5)).await;
+
+    // The handle stays on purpose: a shutdown is still an exit, and the exit record is what
+    // lets the settings page explain why a server is gone. What must change is the *state*,
+    // not the bookkeeping — so assert that rather than an empty list.
+    let status = supervisor.status(SERVER_ID).await;
+    assert!(
+        !status.running,
+        "nothing may still be reported as running after shutdown_all"
+    );
+    assert!(
+        status.pid.is_none(),
+        "no pid may be reported for a stopped server"
+    );
+    assert!(
+        status.last_exit.is_some(),
+        "shutdown_all is an exit too, and it must be recorded"
+    );
+}
+
+#[tokio::test]
 async fn an_http_server_is_refused_with_the_reason_and_nothing_is_spawned() {
     let row = StoredMcpServer {
         id: SERVER_ID.to_string(),

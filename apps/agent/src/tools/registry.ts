@@ -78,6 +78,21 @@ export class ToolRegistry {
     if (tool.description.trim().length === 0) {
       throw new Error(`Tool "${tool.name}" must declare a description the model can read`);
     }
+    // An external tool may only live in its own namespace. The name alone cannot prove where
+    // a tool came from, so the two facts are pinned to each other: `mcp.`-prefixed names must
+    // declare `origin: mcp`, and an `mcp` origin must use an `mcp.`-prefixed name. A tool that
+    // got either half wrong would land in the audit trail as something it is not.
+    const inMcpNamespace = tool.name.startsWith("mcp.");
+    if (inMcpNamespace && tool.origin?.kind !== "mcp") {
+      throw new Error(
+        `Tool "${tool.name}" is in the MCP namespace but does not declare origin { kind: "mcp", serverId } (ADR 0014); refusing to register.`,
+      );
+    }
+    if (tool.origin?.kind === "mcp" && !inMcpNamespace) {
+      throw new Error(
+        `Tool "${tool.name}" claims MCP origin but is outside the "mcp." namespace (ADR 0004); refusing to register.`,
+      );
+    }
 
     const declaration: ToolDeclaration = {
       name: tool.name,
@@ -87,7 +102,7 @@ export class ToolRegistry {
       cancellable: tool.cancellable,
       retry: tool.retry,
       inputSchema: toJsonSchema(tool.input),
-      origin: { kind: "builtin" },
+      origin: tool.origin ?? { kind: "builtin" },
     };
 
     this.#tools.set(tool.name, tool as unknown as AnyTool);

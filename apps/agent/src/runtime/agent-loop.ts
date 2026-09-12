@@ -32,6 +32,7 @@ import {
   type PermissionDecision,
   type ToolCallRequest,
   type ToolCallResult,
+  type ToolDeclaration,
 } from "@yukinal/shared";
 import { createProviderNameIndex, type LLMProvider, type LlmMessage, type StreamEvent } from "@yukinal/provider-sdk";
 
@@ -256,6 +257,11 @@ export class AgentLoop {
        * and this is the field that makes that observable from the event stream.
        */
       policyId: PermissionDecision["policyId"];
+      /**
+       * Where the tool came from. Carried on the event so the audit trail and the UI can tell
+       * a third-party (MCP) tool from a built-in one without inferring it from the name.
+       */
+      origin: ToolDeclaration["origin"];
     }): void => {
       emit({
         type: "agent.tool_call",
@@ -270,6 +276,7 @@ export class AgentLoop {
         decision: call.decision,
         approvedBy: call.approvedBy,
         policyId: call.policyId,
+        origin: call.origin,
         at: now(),
       });
     };
@@ -285,6 +292,8 @@ export class AgentLoop {
       decision: PermissionDecision["outcome"];
       approvedBy?: PermissionApprovalSource;
       policyId: PermissionDecision["policyId"];
+      /** See the note on the same field in `emitToolCall`. */
+      origin: ToolDeclaration["origin"];
       status: "success" | "failed" | "cancelled";
       outputSummary: string;
       error?: string;
@@ -305,6 +314,7 @@ export class AgentLoop {
         decision: result.decision,
         approvedBy: result.approvedBy,
         policyId: result.policyId,
+        origin: result.origin,
         status: result.status,
         outputSummary: redactSensitiveText(result.outputSummary),
         error: result.error === undefined ? undefined : redactSensitiveText(result.error),
@@ -446,6 +456,7 @@ export class AgentLoop {
             decision: decision.outcome,
             approvedBy: decision.approvedBy,
             policyId: decision.policyId,
+            origin: declaration.origin,
           });
 
           let ticket: ExecutionTicket;
@@ -493,6 +504,7 @@ export class AgentLoop {
                 riskLevel: decision.finalRisk,
                 decision: decision.outcome,
                 policyId: decision.policyId,
+                origin: declaration.origin,
                 status: "failed",
                 outputSummary: rejectionSummary,
                 error: approvalOutcome === "expired" ? "approval expired" : decision.reason,
@@ -527,6 +539,7 @@ export class AgentLoop {
               riskLevel: decision.finalRisk,
               decision: decision.outcome,
               policyId: decision.policyId,
+              origin: declaration.origin,
               status: "failed",
               outputSummary: "策略禁止",
               error: decision.reason,
@@ -574,6 +587,7 @@ export class AgentLoop {
             decision: decision.outcome,
             approvedBy: ticket.kind === "policy_auto" ? "policy" : ticket.kind === "agent_auto" ? "agent" : "user",
             policyId: decision.policyId,
+            origin: declaration.origin,
             status: result.status === "success" ? "success" : result.status === "cancelled" ? "cancelled" : "failed",
             outputSummary: redactSensitiveText(result.outputSummary ?? summarize(result.output)),
             error: result.error?.message === undefined ? undefined : redactSensitiveText(result.error.message),

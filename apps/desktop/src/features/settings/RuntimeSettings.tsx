@@ -3,6 +3,7 @@ import { HttpBaseUrlSchema, IPC_COMMANDS, type AiProviderConfig, type AiProvider
 import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
+import { McpSettings } from "./McpSettings.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
@@ -69,16 +70,6 @@ export function RuntimeSettings() {
           <Row label="Tools" value={text(status.data?.toolCount, shell)} />
           <Row label="Sidecar entry" value={text(status.data?.entry, shell)} wide />
           <Row label="Last exit" value={status.data?.lastExit ? `${status.data.lastExit.code ?? status.data.lastExit.signal ?? "未知"} @ ${status.data.lastExit.at}` : "无"} wide />
-        </dl>
-        <div className="settings-card-actions">
-          <button type="button" className="button-secondary" disabled={!shell} aria-expanded={showLogs} aria-controls="runtime-logs" onClick={() => setShowLogs((current) => !current)}>
-            <Icon name={showLogs ? "chevronUp" : "logs"} size="sm" />
-            {showLogs ? "隐藏 Agent 日志" : "查看 Agent 日志"}
-          </button>
-        </div>
-        {status.isError || core.isError ? <div className="settings-error-row" role="alert"><span>{status.error?.message ?? core.error?.message}</span><button type="button" className="text-button" onClick={() => { void core.refetch(); void status.refetch(); }}>重试</button></div> : null}
-        <RuntimeLogs open={showLogs} logs={logs} />
-      </section>
           {/*
             自动恢复是一句事实，不能只靠一闪而过的通知：崩溃时用户可能正在别的页面，
             回到设置里必须能查到「它自己起来过几次、还是已经放弃了」。
@@ -94,9 +85,25 @@ export function RuntimeSettings() {
             }
             wide
           />
+        </dl>
+        <div className="settings-card-actions">
+          <button type="button" className="button-secondary" disabled={!shell} aria-expanded={showLogs} aria-controls="runtime-logs" onClick={() => setShowLogs((current) => !current)}>
+            <Icon name={showLogs ? "chevronUp" : "logs"} size="sm" />
+            {showLogs ? "隐藏 Agent 日志" : "查看 Agent 日志"}
+          </button>
+        </div>
+        {status.isError || core.isError ? <div className="settings-error-row" role="alert"><span>{status.error?.message ?? core.error?.message}</span><button type="button" className="text-button" onClick={() => { void core.refetch(); void status.refetch(); }}>重试</button></div> : null}
+        <RuntimeLogs open={showLogs} logs={logs} />
+      </section>
 
       <AppearanceSettings />
       <ProviderSettings />
+      {/*
+        MCP 放在 Provider 之后：它和 Provider 一样是「把外部能力接进来」，但方向相反 ——
+        Provider 决定模型从哪来，MCP 决定模型能碰哪些第三方进程。两者的风险等级差得很远，
+        所以它是独立一张卡，不是 Provider 卡里的一节。
+      */}
+      <McpSettings />
     </section>
   );
 }
@@ -269,6 +276,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
   const [providerId, setProviderId] = useState(provider?.id ?? "");
+  const [kind, setKind] = useState<AiProviderKind>(provider?.kind ?? "openai-compatible");
   const [label, setLabel] = useState(provider?.label ?? "");
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? "");
   const [model, setModel] = useState(provider?.model ?? "");
@@ -276,14 +284,6 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
   const [wireApi, setWireApi] = useState<"chat" | "responses">(provider?.wireApi ?? "chat");
   const [saved, setSaved] = useState(false);
   const modelsId = useId();
-  const [kind, setKind] = useState<AiProviderKind>(provider?.kind ?? "openai-compatible");
-  const catalog = useQuery({
-    queryKey: ["providers", "models", provider?.id], enabled: shell && Boolean(provider),
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerModels, { providerId: provider!.id })).models, retry: 0,
-  });
-  const models = catalog.data ?? provider?.models ?? [];
-  const save = useMutation({
-    mutationKey: ["provider-write"],
   /**
    * 切换协议。
    *
@@ -299,6 +299,13 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
     setKind(next);
     if (untouched) setBaseUrl(PROVIDER_KIND_DEFAULT_BASE_URL[next] ?? "");
   };
+  const catalog = useQuery({
+    queryKey: ["providers", "models", provider?.id], enabled: shell && Boolean(provider),
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerModels, { providerId: provider!.id })).models, retry: 0,
+  });
+  const models = catalog.data ?? provider?.models ?? [];
+  const save = useMutation({
+    mutationKey: ["provider-write"],
     mutationFn: () => {
       const nextProviderId = providerId.trim();
       if (!provider && !nextProviderId) throw new Error("请填写 Provider ID。");
@@ -322,6 +329,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
     },
     onSuccess: (response) => {
       setProviderId(response.provider.id);
+      setKind(response.provider.kind);
       setLabel(response.provider.label);
       setBaseUrl(response.provider.baseUrl);
       setModel(response.provider.model);
@@ -329,7 +337,6 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       setSaved(true);
       onSaved(response);
     },
-      setKind(response.provider.kind);
   });
   return (
     <section className="settings-card">
@@ -354,6 +361,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
             <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
           </div>
         </fieldset>
+        <p className="form-hint">{providerKindBaseUrlHint(kind)}</p>
         {catalog.isError ? <p className="form-hint form-hint-warning">实时模型列表暂不可用，可手动输入模型 ID。</p> : null}
         {save.isError ? <div className="settings-error-row" role="alert"><span>{save.error.message}</span><button type="button" className="text-button" onClick={() => save.mutate()}>重试</button></div> : null}
         {saved ? <p className="form-success" role="status">Provider 配置已保存。</p> : null}
@@ -361,7 +369,6 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
           <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size="sm" />{save.isPending ? "保存中…" : provider ? "保存并启用" : "添加并启用"}</button>
           {provider ? <button type="button" disabled={!shell || busy || catalog.isFetching} onClick={() => void catalog.refetch()} className="button-secondary">{catalog.isFetching ? "检查中…" : "刷新模型"}</button> : null}
           {models.length ? <span className="settings-storage-note">{models.length} 个可选模型</span> : null}
-        <p className="form-hint">{providerKindBaseUrlHint(kind)}</p>
         </div>
       </form>
     </section>

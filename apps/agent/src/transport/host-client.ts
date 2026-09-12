@@ -6,10 +6,12 @@ import {
   HostContextRequestSchema,
   HostContextResponseSchema,
   HOST_METHODS,
+  HostMcpCatalogResponseSchema,
   HostToolExecuteRequestSchema,
   HostToolExecuteResponseSchema,
   type HostContextRequest,
   type HostContextResponse,
+  type HostMcpCatalogResponse,
   type HostToolExecuteRequest,
   type HostToolExecuteResponse,
 } from "@yukinal/shared";
@@ -49,6 +51,18 @@ export class HostRpcClient {
       signal,
       false,
     );
+  }
+
+  /**
+   * Ask the host for the MCP tool catalog (ADR 0014).
+   *
+   * Takes no parameters: the host reads its own `mcp_servers` table and owns every server
+   * process, so there is nothing for the sidecar to pass in. Not cancel-on-abort: a
+   * cancelled catalog request stops the host from *waiting*, and the host answers with
+   * `failures` for anything it could not bring up, which is more useful than a rejection.
+   */
+  fetchMcpCatalog(signal?: AbortSignal): Promise<HostMcpCatalogResponse> {
+    return this.#request(HOST_METHODS.mcpCatalog, {}, (value) => HostMcpCatalogResponseSchema.parse(value), signal, false);
   }
 
   #request<T>(

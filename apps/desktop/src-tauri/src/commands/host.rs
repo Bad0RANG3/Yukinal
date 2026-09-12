@@ -27,11 +27,14 @@ use yukinal_filesystem::{
 use yukinal_ssh::SshBackend;
 
 use crate::commands::files::remote_file_service;
+use crate::commands::mcp;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
 const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
+/// `host.mcp.catalog`（ADR 0014）：启用的 MCP 服务器 + 它们的工具描述符。
+pub(crate) const HOST_MCP_CATALOG: &str = "host.mcp.catalog";
 pub(crate) const HOST_TOOL_CANCEL: &str = "host.tool.cancel";
 const SERVER_INFO: &str = "server.info";
 const DOCKER_PS: &str = "docker.ps";
@@ -277,12 +280,27 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
     }
+    if method == HOST_MCP_CATALOG {
+        // 目录是 sidecar 唯一能知道 MCP 存在的地方，所以它也就是 `capabilities.mcp`
+        // 的唯一依据（ADR 0014）。
+        let catalog = mcp::catalog(&state.database, &state.mcp).await?;
+        return serde_json::to_value(catalog).map_err(|error| error.to_string());
+    }
     if method != HOST_TOOL_EXECUTE {
         return Err(format!("unknown host method `{method}`"));
     }
 
     let request = serde_json::from_value::<HostToolExecuteRequest>(params)
         .map_err(|error| format!("invalid host tool request: {error}"))?;
+
+    // MCP 工具先分流，而且必须在目标校验**之前**：它们是宿主的本地子进程，不是远端 SSH 上
+    // 的工具，所以既没有 `srv_` 目标、也不该被要求有一个。这个判断放在 match 里做不到 ——
+    // match 在目标校验之后，那时候 `mcp.<server>.<tool>` 已经被「remote host tools require
+    // a concrete serverId」拒掉了。其余工具的那条路一个字节都没变。
+    if mcp::is_mcp_tool_name(&request.tool_name) {
+        return mcp::execute(&state.mcp, &request.tool_name, &request.input, &cancel).await;
+    }
+
     let Some(server_id) = request.target.server_id.as_deref() else {
         return Ok(failed(
             "invalid_input",
@@ -470,7 +488,7 @@ fn filesystem_failure(error: FilesystemError, cancel: &CancellationToken) -> Val
     }
 }
 
-fn cancelled_failure() -> Value {
+pub(crate) fn cancelled_failure() -> Value {
     failed("cancelled", "Host operation cancelled", false, None)
 }
 
@@ -1058,11 +1076,20 @@ fn is_empty_object(value: &Value) -> bool {
     value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
-fn success(output: Value) -> Value {
+/// The three response shapes of this protocol, `pub(crate)` because the MCP path
+/// (`commands/mcp.rs`) answers with the same envelope: two hand-written copies of
+/// `{"status": "failed", "error": {...}}` is exactly how one of them ends up with a
+/// field the schema does not accept.
+pub(crate) fn success(output: Value) -> Value {
     json!({ "status": "success", "output": output })
 }
 
-fn failed(code: &str, message: impl Into<String>, retryable: bool, detail: Option<Value>) -> Value {
+pub(crate) fn failed(
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+    detail: Option<Value>,
+) -> Value {
     let mut error = json!({ "code": code, "message": message.into(), "retryable": retryable });
     if let Some(detail) = detail {
         error["detail"] = detail;

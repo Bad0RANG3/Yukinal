@@ -28,6 +28,7 @@ pub mod files;
 pub mod host;
 pub mod host_key;
 pub mod logs;
+pub mod mcp;
 pub mod provider;
 pub mod server;
 pub mod services;

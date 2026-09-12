@@ -78,6 +78,11 @@ pub fn run() {
             commands::provider::provider_activate,
             commands::provider::provider_models,
             commands::provider::provider_test,
+            commands::mcp::mcp_server_list,
+            commands::mcp::mcp_server_save,
+            commands::mcp::mcp_server_delete,
+            commands::mcp::mcp_server_start,
+            commands::mcp::mcp_server_stop,
             commands::server::server_snapshot,
             commands::services::server_services,
             commands::logs::server_logs,
@@ -94,9 +99,20 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 // Killing the sidecar here is the "no orphan process" guarantee
                 //; `kill_on_drop` is the backstop if we never get here.
-                let supervisor = app_handle.state::<AppState>().supervisor.clone();
+                let state = app_handle.state::<AppState>();
+                let supervisor = state.supervisor.clone();
+                // MCP servers are third-party programs we started, so they get the same
+                // treatment as our own sidecar. `kill_on_drop` alone is not enough: it is
+                // a `Drop` impl, and a force-kill on Windows never runs one — the children
+                // would outlive the window that owns them, which is precisely the outcome
+                // the MCP boundary refuses to accept.
+                let mcp = state.mcp.clone();
                 tauri::async_runtime::block_on(async move {
                     let _ = supervisor.stop().await;
+                    // Servers are independent of each other, so one failing to die must
+                    // not keep the rest alive. `shutdown_all` reports per-server outcomes
+                    // instead of failing as a whole.
+                    let _ = mcp.shutdown_all().await;
                 });
             }
         });

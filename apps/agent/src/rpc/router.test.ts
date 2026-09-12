@@ -15,6 +15,7 @@ import {
 import type { AgentLogger } from "../config.js";
 import { RpcFailure } from "../errors.js";
 import { createRuntime, type Runtime } from "../runtime/create-runtime.js";
+import { registerCatalog } from "../mcp/catalog.js";
 import { HostRpcClient } from "../transport/host-client.js";
 
 function request(method: string, params?: unknown, id = 1): JsonRpcRequest {
@@ -161,7 +162,6 @@ for (const outcome of ["unauthorized", "empty", "failed"] as const) {
   });
 }
 
-test("initialize negotiates the protocol version", async () => {
 /* ── kind 轴：三种 Provider 都必须能从装配点构造出来，并且真的被用（ADR 0011） ────── */
 
 interface RecordedRequest {
@@ -383,10 +383,60 @@ for (const catalog of [
   });
 }
 
+test("initialize negotiates the protocol version", async () => {
   const { initialize } = await withRuntime();
   const result = (await initialize()) as { protocolVersion: string; capabilities: Record<string, boolean> };
   assert.equal(result.protocolVersion, YUKINAL_RPC_VERSION);
   assert.equal(result.capabilities.cancellation, true);
+});
+
+test("capabilities.mcp reports the registry, not an intention", async () => {
+  const { initialize } = await withRuntime();
+  const first = (await initialize()) as { capabilities: Record<string, boolean> };
+  // At handshake time the catalog cannot have arrived yet: the host does not relay sidecar
+  // requests before the handshake completes. So `false` here is the truth about this
+  // instant, and the point of the assertion is that it is *read*, not written down.
+  assert.equal(first.capabilities.mcp, false, "nothing is registered yet, so the flag is false");
+
+  // Register one tool that really came from a server, and the same flag must flip. A
+  // literal `false` would pass the assertion above and be wrong forever after.
+  const runtime = createRuntime({ log: silentLogger() });
+  registerCatalog(
+    runtime.registry,
+    {
+      servers: [
+        {
+          serverId: "mcp_1",
+          segment: "mcp-1",
+          label: "fixture",
+          tools: [
+            {
+              name: "mcp.mcp-1.echo",
+              serverId: "mcp_1",
+              tool: "echo",
+              description: "Echo text back.",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+        },
+      ],
+      failures: [],
+    },
+    {
+      executeOnHost: async () => ({
+        status: "success",
+        output: { serverId: "mcp_1", tool: "echo", isError: false, text: "", content: [] },
+      }),
+    },
+  );
+  const second = (await runtime.router.handle(
+    request(AGENT_METHODS.initialize, {
+      protocolVersion: YUKINAL_RPC_VERSION,
+      clientVersion: "test",
+      dataDir: "/tmp/yukinal-test",
+    }),
+  )) as { capabilities: Record<string, boolean> };
+  assert.equal(second.capabilities.mcp, true, "a registered MCP tool makes the flag true");
 });
 
 test("initialize cannot be negotiated twice on one sidecar session", async () => {

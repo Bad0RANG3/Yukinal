@@ -8,6 +8,7 @@ import type { LLMProvider } from "@yukinal/provider-sdk";
 import { createEmptyContextSource } from "../context/empty-source.js";
 import { ContextEngine } from "../context/context-engine.js";
 import { RpcFailure } from "../errors.js";
+import { mcpToolFromCatalog } from "../mcp/tool.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { AgentLoop, InvalidTransitionError, isTerminal, transition } from "./agent-loop.js";
@@ -415,3 +416,97 @@ test("an unknown policyId fails the run before it touches the provider", async (
   assert.equal(streamed, 0);
   assert.equal(loop.pendingApprovals.length, 0);
 });
+
+/**
+ * 审计里能分辨 MCP 与内置工具（ADR 0014）。
+ *
+ * 宿主把 `agent.tool_result` 落成 `tool_executions` 那一行，所以「这次调用是不是某个第三方
+ * 服务器声明的工具」必须在**这个事件**里可读。两条证据同时断言：事件里的结构化 `origin`
+ * （`{kind: "mcp", serverId}`）与工具名里的 `mcp.` 段 —— 后者是今天就已经写在审计行上的东西
+ * （`tool_name` 列），前者是给未来那条「把 origin 也落库」的迁移准备的。只看名称前缀是不够的：
+ * 一个内置工具永远有可能被起名叫 `mcp.something`，而注册表已经拒绝这种冒充。
+ */
+test("an MCP call is emitted with its server as origin", async () => {
+  const registry = new ToolRegistry();
+  const target = { host: "local" as const, environment: "unknown" as const };
+  registry.register(
+    mcpToolFromCatalog(
+      {
+        name: "mcp.mcp-1.echo",
+        serverId: "mcp_1",
+        tool: "echo",
+        description: "Echo text back.",
+        inputSchema: { type: "object" },
+      },
+      {
+        executeOnHost: async () => ({
+          status: "success",
+          output: { serverId: "mcp_1", tool: "echo", isError: false, text: "echo: hi", content: [] },
+        }),
+      },
+    ),
+  );
+
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "tool_call", call: { id: "call_mcp", name: "mcp__mcp-1__echo", arguments: { text: "hi" } } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "done" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+
+  const events: AgentStreamEvent[] = [];
+  let resolveApproval: ((approval: Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>["approval"]) => void) | undefined;
+  const approval = new Promise<Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>["approval"]>((resolve) => {
+    resolveApproval = resolve;
+  });
+
+  const run = loop.start(
+    {
+      runId: "run_mcp",
+      sessionId: "ses_mcp",
+      prompt: "echo something",
+      target,
+    },
+    {
+      emit: (event) => {
+        events.push(event);
+        if (event.type === "agent.waiting_approval") resolveApproval?.(event.approval);
+      },
+    },
+    provider,
+  );
+
+  // 第三方工具永远要用户批准：这一条在 catalog.test.ts 里从权限引擎那一侧也钉了一次。
+  const request = await approval;
+  assert.equal(loop.respondApproval({ approvalId: request.approvalId, runId: "run_mcp", decision: "approve_once", respondedAt: new Date().toISOString() }), true);
+  const result = await run;
+  assert.equal(result.state, "completed", JSON.stringify(result));
+
+  const call = events.find((event) => event.type === "agent.tool_call");
+  const toolResult = events.find((event) => event.type === "agent.tool_result");
+  assert.ok(call && call.type === "agent.tool_call");
+  assert.ok(toolResult && toolResult.type === "agent.tool_result");
+  assert.deepEqual(call.origin, { kind: "mcp", serverId: "mcp_1" });
+  assert.deepEqual(toolResult.origin, { kind: "mcp", serverId: "mcp_1" });
+  assert.equal(call.toolName, "mcp.mcp-1.echo", "审计行上的名字必须带得出服务器段");
+  assert.equal(call.toolName.startsWith("mcp."), true);
+});
+

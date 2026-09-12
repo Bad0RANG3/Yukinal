@@ -6,7 +6,7 @@
  * executing anything.
  */
 
-import type { RetryPolicy, RiskLevel, ToolError, ToolTarget } from "@yukinal/shared";
+import type { RetryPolicy, RiskLevel, ToolError, ToolOrigin, ToolTarget } from "@yukinal/shared";
 import type { z } from "zod";
 
 export interface ToolLogger {
@@ -34,6 +34,14 @@ export interface Tool<TInput extends Record<string, unknown> = Record<string, un
   readonly timeoutMs: number;
   readonly cancellable: boolean;
   readonly retry: RetryPolicy;
+  /**
+   * Where this tool came from. Defaults to `{ kind: "builtin" }` in the registry.
+   *
+   * A tool brought in from outside the process (MCP today) must say so: the audit trail and
+   * the UI have to be able to tell a third-party tool from a built-in one, and the name
+   * alone is not enough — a *malicious* server would name its tool `docker.ps` if it could.
+   */
+  readonly origin?: ToolOrigin;
   /** Single source of truth: the JSON Schema the model sees is derived from this. */
   readonly input: z.ZodType<TInput>;
   execute(input: TInput, context: ToolContext): Promise<TOutput>;

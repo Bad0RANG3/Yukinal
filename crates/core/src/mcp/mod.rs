@@ -341,7 +341,8 @@ pub struct McpServerStatus {
     /// 「怎么死的」留在状态里，直到下一次显式启动把它盖掉 —— 崩溃必须比崩溃后的安静更显眼。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<McpExitRecord>,
-    /// 子进程 stderr 的有界尾部（[`STDERR_TAIL_LINES`] 行）。**未脱敏**：见模块头最后一条。
+    /// 子进程 stderr 的有界尾部（[`STDERR_TAIL_LINES`] 行）。**已截断并脱敏**：见模块头
+    /// 最后一条（它来自一个我们并不信任的进程，而尾部是要给用户看的）。
     pub stderr_tail: Vec<String>,
     /// 协议噪声的有界尾部：stdout 上的非 JSON 行、被忽略的通知与请求。
     pub diagnostics: Vec<String>,

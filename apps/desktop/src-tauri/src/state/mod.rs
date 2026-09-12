@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use yukinal_core::mcp::McpSupervisor;
 use yukinal_core::supervisor::Supervisor;
 use yukinal_core::terminal::TerminalService;
 use yukinal_credentials::os::OsCredentialStore;
@@ -23,6 +24,9 @@ pub struct AppState {
     pub ssh: Arc<RusshBackend>,
     /// PTY Manager（terminal_open/write/resize/close + 事件广播）。
     pub terminals: TerminalService,
+    /// MCP 服务进程（ADR 0014）。与 sidecar 的 `Supervisor` 并列：sidecar 管**一个**进程，
+    /// MCP 管**多个**，两者由同一个 crate 负责，谁派生进程这件事仍然只有 Rust。
+    pub mcp: McpSupervisor,
 }
 
 impl AppState {
@@ -41,6 +45,10 @@ impl AppState {
             credentials: Arc::new(OsCredentialStore),
             ssh,
             terminals,
+            // 空 supervisor：**不在这里**启动任何 MCP 服务器。启动第三方进程是用户按下的
+            // 动作（`mcp_server_start`），或者第一次要目录时（`mcp::catalog`，只对从未启动
+            // 过的服务器）。装配阶段派生进程会让「打开应用」变成一次副作用。
+            mcp: McpSupervisor::new(),
         })
     }
 }
