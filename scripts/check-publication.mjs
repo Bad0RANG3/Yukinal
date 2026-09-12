@@ -12,9 +12,22 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+/**
+ * 例外：**公开标准**的章节号。
+ *
+ * 这条规则拦的是指向「未发布文档」的指针 —— 读者打不开、编号还会随我们的文档变动。
+ * `FIPS 180-4` 的章节号正好相反：它是公开的、编号固定、读者可以自己去核对，
+ * `crates/filesystem/src/revision.rs` 里手写的 SHA-256 常量正是靠它才能被验证。
+ * 删掉那个指针对读者毫无好处，只会让常量少一个来源。
+ *
+ * 所以例外要求**标准名 + 编号**同时出现；`§4` 这种没有出处的裸编号仍然会被拦下，
+ * 那才是这条规则真正要抓的东西。
+ */
+const PUBLIC_STANDARD = /\b(?:FIPS|RFC|ISO\/IEC|ISO|IEEE|NIST(?:\s+SP)?|POSIX|Unicode)\s*[\d][\d.-]*/i;
+
 const RULES = [
-  { pattern: /§\s*\d/, label: "章节引用 §NN", why: "引用的是未发布的文档" },
-  { pattern: /\bspec\s+§|\bspec\b\s*[:：]\s*\d/, label: "spec 指针", why: "同上" },
+  { pattern: /§\s*\d/, label: "章节引用 §NN", why: "引用的是未发布的文档", allow: PUBLIC_STANDARD },
+  { pattern: /\bspec\s+§|\bspec\b\s*[:：]\s*\d/, label: "spec 指针", why: "同上", allow: PUBLIC_STANDARD },
   { pattern: /\bS\d{2}\b/, label: "内部阶段号 SNN", why: "私有计划的编号，写成组件/能力名" },
   { pattern: /(?:MODULES\.md|AGENTS\.md)/, label: "私有文档名", why: "这些文件不在仓库里" },
   { pattern: /\.private\/[^\s)》，、]*\.(?:md|txt|pdf)/, label: "指向 .private 的链接", why: "读者打不开" },
@@ -39,6 +52,7 @@ for (const file of tracked) {
   source.split("\n").forEach((line, index) => {
     // A comment line in this gate's own neighbour files is still checked on purpose.
     for (const rule of RULES) {
+      if (rule.allow?.test(line)) continue;
       if (rule.pattern.test(line)) {
         problems.push(`${file}:${index + 1}: ${rule.label} — ${rule.why}\n      ${line.trim().slice(0, 120)}`);
       }

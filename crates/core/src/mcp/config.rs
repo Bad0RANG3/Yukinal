@@ -28,7 +28,7 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 允许的最小超时。
 ///
-/// 注册表要求 `timeoutMs > 0`（README §4），而零超时在这里等于「每次调用立刻失败」：
+/// 注册表要求 `timeoutMs > 0`（MCP README「输入、输出与超时由本地强制」），而零超时在这里等于「每次调用立刻失败」：
 /// 那不是一种配置，是一个错误。
 pub const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -42,11 +42,11 @@ pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// 类型本身是一道闸门：**它无法表示 http 服务器**。`transport: "http"` 在
 /// [`McpStdioConfig::from_server_config`] 那里就被拒绝了，所以后面任何一条代码路径都不可能
-/// 「顺手」把 http 配置当成 stdio 起起来（README §7：出站网络策略还不存在）。
+/// 「顺手」把 http 配置当成 stdio 起起来（MCP README「进程生命周期仍然归 Rust」：出站网络策略还不存在）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpStdioConfig {
     /// 数据库里的服务器 id。它是**身份**：状态查询、事件、`ToolOrigin { kind: "mcp",
-    /// serverId }`（README §5）用的都是这个值，而不是下面那个规范化后的段。
+    /// serverId }`（MCP README「目标必须在本地解析」）用的都是这个值，而不是下面那个规范化后的段。
     pub server_id: String,
     /// 内部名段：`mcp.<segment>.<tool>` 里的那一段（ADR 0004），由 `server_id` 规范化而来。
     ///
@@ -201,7 +201,8 @@ impl McpStdioConfig {
 
     /// 内部工具名（ADR 0004）：`mcp.<segment>.<tool>`。
     ///
-    /// 适配器（README §1）把远端工具变成 `ToolDeclaration` 时需要它，所以这个函数必须和
+    /// 适配器（MCP README「外部工具必须先变成 Yukinal 的工具声明」）把远端工具变成
+    /// `ToolDeclaration` 时需要它，所以这个函数必须和
     /// 名字规则一起被校验，而不是让调用方自己 `format!` 一个点号名字出来。
     pub fn internal_tool_name(&self, tool_segment: &str) -> Result<String, NameRejection> {
         descriptor::internal_tool_name(&self.segment, tool_segment)
@@ -225,7 +226,8 @@ mod tests {
             url: None,
             enabled: true,
             // 这两个字段本模块不读（allowed_tools 为空表示什么都不自动信任，trust_level
-            // 决定要不要注册 —— 都是注册期的事，README §3），但记录里有，就直接收下。
+            // 决定要不要注册 —— 都是注册期的事，MCP README「风险等级由本地决定」），
+            // 但记录里有，就直接收下。
             allowed_tools: Vec::new(),
             trust_level: "unreviewed".to_string(),
         }
@@ -264,7 +266,7 @@ mod tests {
         );
         assert!(
             message.contains("outbound network policy"),
-            "the error must name the reason (MCP README §7): {message}"
+            "the error must name the reason (MCP README: the process lifecycle stays with Rust): {message}"
         );
     }
 

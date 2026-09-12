@@ -1,4 +1,5 @@
-//! MCP（stdio）客户端：Rust 宿主派生并监督 MCP 服务进程（MCP README §7，ADR 0001/0008）。
+//! MCP（stdio）客户端：Rust 宿主派生并监督 MCP 服务进程
+//! （MCP README「进程生命周期仍然归 Rust」，ADR 0001/0008）。
 //!
 //! 边界来自 `apps/agent/src/mcp/README.md`：那份文档写于任何实现存在之前，它规定的不是
 //! 「打算怎么做」，而是已经存在的机制所要求的做法。
@@ -11,7 +12,7 @@
 //! - 本文件：[`McpSupervisor`] 与 [`McpServerHandle`] —— 一个 serverId 一个进程、握手、
 //!   `tools/list`、`tools/call`、每次请求的超时、退出记录、有界的 stderr 尾部。
 //!
-//! # 生命周期契约（README §7 要求它被写下来，而不是被假定）
+//! # 生命周期契约（MCP README「进程生命周期仍然归 Rust」要求它被写下来，而不是被假定）
 //!
 //! - **单实例**：同一个 serverId 同时只有一个进程。已经跑着时 `start` 复用它，不派生第二个。
 //! - **退出语义**：正常结束只有两条路 —— 调用方 [`McpSupervisor::shutdown`]，或者句柄被丢弃
@@ -28,20 +29,27 @@
 //!
 //! # 它刻意不做什么
 //!
-//! - **不做 `http` 传输**（README §7）：出站网络策略还不存在，所以 [`McpStdioConfig`]
-//!   根本无法表示 http —— 拒绝发生在 `from_server_config`，类型本身就是那道闸门。
-//! - **不注册工具**（README §1/§2/§3）：把 MCP 工具变成 `ToolDeclaration`、定风险等级、
-//!   跑 Provider 名称冲突检查，都是适配器与 ToolRegistry 的事；这里只交出经校验的描述符。
-//! - **不校验入参**（README §4）：远端 JSON Schema 只作为翻译来源，本地 Zod schema 才决定
-//!   一次调用接受什么。本模块里没有任何一处拿远端 schema 当校验依据。
-//! - **不解析目标**（README §5）：`ToolTarget` 由调用侧给出，本模块不去猜服务器。
+//! - **不做 `http` 传输**（MCP README「进程生命周期仍然归 Rust」）：出站网络策略还不存在，
+//!   所以 [`McpStdioConfig`] 根本无法表示 http —— 拒绝发生在 `from_server_config`，
+//!   类型本身就是那道闸门。
+//! - **不注册工具**：把 MCP 工具变成 `ToolDeclaration`、定风险等级、跑 Provider 名称冲突
+//!   检查，都是适配器与 ToolRegistry 的事；这里只交出经校验的描述符
+//!   （MCP README「外部工具必须先变成 Yukinal 的工具声明」「命名空间与名称冲突」
+//!   「风险等级由本地决定」）。
+//! - **不校验入参**（MCP README「输入、输出与超时由本地强制」）：远端 JSON Schema 只作为
+//!   翻译来源，本地 Zod schema 才决定一次调用接受什么。本模块里没有任何一处拿远端 schema
+//!   当校验依据。
+//! - **不解析目标**（MCP README「目标必须在本地解析」）：`ToolTarget` 由调用侧给出，
+//!   本模块不去猜服务器。
 //! - **不产生事件、不写审计、不加 IPC 命令**：宿主协议的类型与 Tauri 命令属于接线那一步
 //!   （README 的「没有 Tauri 命令」一段）。本模块因此**没有**让 `capabilities.mcp` 变成
-//!   `true`：能力报告必须是事实，而适配器还不存在（README §8）。
+//!   `true`：能力报告必须是事实，而适配器还不存在（MCP README「不要暗示已经可用」）。
 //! - **不回答服务端的请求**：`initialize` 里我们如实声明零客户端能力，合规的服务端就不该
-//!   发请求过来；真发了只记一条诊断。替它编一个答案正是 README §8 禁止的「假装能用」。
+//!   发请求过来；真发了只记一条诊断。替它编一个答案正是 MCP README「不要暗示已经可用」
+//!   禁止的「假装能用」。
 //! - **不处理 `notifications/tools/list_changed`**：工具表变化意味着重新注册，属于适配器
-//!   （README §1）；本模块只把它记进诊断尾部，缓存不刷新。
+//!   （MCP README「外部工具必须先变成 Yukinal 的工具声明」）；本模块只把它记进诊断尾部，
+//!   缓存不刷新。
 //! - **不假装能自动重启**：崩掉的服务端就是崩了，退出记录与诊断尾部说明怎么死的；重启
 //!   一次可能把上一次的副作用再执行一遍。恢复由用户决定。
 //! - **脱敏之后才能出门**：stderr 尾部、诊断尾部与远端错误文本都是给排障用的子进程输出，
@@ -140,7 +148,7 @@ pub enum McpError {
     #[error(
         "mcp server \"{server_id}\" is configured with transport \"{transport}\", which is not \
          implemented: an http server means outbound network requests, and no outbound network \
-         policy exists yet (MCP README §7)"
+         policy exists yet (MCP README: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
     )]
     TransportNotImplemented {
         server_id: String,
@@ -421,7 +429,8 @@ impl McpServerHandle {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // 孤儿进程是不可接受的（README §7）：句柄整体消失时，子进程必须跟着走。
+            // 孤儿进程是不可接受的（MCP README「进程生命周期仍然归 Rust」）：
+            // 句柄整体消失时，子进程必须跟着走。
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
@@ -624,7 +633,7 @@ impl McpServerHandle {
         let params = json!({
             "protocolVersion": wire::PREFERRED_PROTOCOL_VERSION,
             // 客户端能力**如实**为空：本模块一个客户端能力都没实现，就一个都不声明
-            // （README §8：能力报告必须是事实，不是意图）。
+            // （MCP README「不要暗示已经可用」：能力报告必须是事实，不是意图）。
             "capabilities": {},
             "clientInfo": { "name": wire::CLIENT_NAME, "version": wire::CLIENT_VERSION },
         });
@@ -708,7 +717,7 @@ impl McpServerHandle {
     /// `tools/call`。
     ///
     /// 只能调用服务端**声明过**的工具，并且按它声明的拼写去调（`remote_name`）。返回的
-    /// 内容是不可信数据（README §6）：本模块只搬运它。
+    /// 内容是不可信数据（MCP README「描述文本一律视为不可信数据」）：本模块只搬运它。
     pub async fn call_tool(
         &self,
         tool: &str,
@@ -934,7 +943,7 @@ impl Inner {
             },
             wire::Incoming::ServerRequest { id, method } => {
                 // 我们声明了零客户端能力，合规的服务端不该发请求过来。替它编一个答案是
-                // README §8 禁止的「假装能用」，所以只记录。
+                // MCP README「不要暗示已经可用」禁止的「假装能用」，所以只记录。
                 self.remember_diagnostic(format!(
                     "ignored a request from the server (id {id}, method \"{}\")",
                     truncated(&method)
@@ -942,7 +951,8 @@ impl Inner {
             }
             wire::Incoming::Notification { method } => {
                 // 包括 `notifications/tools/list_changed`：工具表变化意味着重新注册，而注册
-                // 属于适配器（README §1）。这里只记录，缓存不刷新。
+                // 属于适配器（MCP README「外部工具必须先变成 Yukinal 的工具声明」）。
+                // 这里只记录，缓存不刷新。
                 self.remember_diagnostic(format!(
                     "ignored a notification from the server (\"{}\")",
                     truncated(&method)
@@ -1015,7 +1025,8 @@ fn exit_signal(_status: &ExitStatus) -> Option<String> {
     None
 }
 
-/// 谁来派生、谁来回收（README §7：本架构里唯一派生进程的地方是 Rust 宿主）。
+/// 谁来派生、谁来回收（MCP README「进程生命周期仍然归 Rust」：
+/// 本架构里唯一派生进程的地方是 Rust 宿主）。
 ///
 /// sidecar 的 `Supervisor` 管**一个**进程；MCP 的服务器是**多个**，所以这里按 serverId
 /// 记账。除此之外两者是同一套东西：串行化的启动、被监督的句柄、能解释崩溃的状态。

@@ -113,8 +113,9 @@ pub(super) fn notification_frame(method: &str, params: Value) -> Value {
 /// 服务端回的 JSON-RPC error。
 ///
 /// `code` 与 `message` 分开保留：`code` 是可判定的（`-32601 method not found` 和一次真实的
-/// 执行失败不是同一件事），而 `message` 是远端文本 —— **不可信**（README §6），
-/// 只用于展示与诊断，任何一处都不得把它当作指令。
+/// 执行失败不是同一件事），而 `message` 是远端文本 —— **不可信**
+/// （MCP README「描述文本一律视为不可信数据」），只用于展示与诊断，
+/// 任何一处都不得把它当作指令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RemoteError {
     pub code: i64,
@@ -184,7 +185,8 @@ pub struct McpInitialize {
     pub protocol_version: String,
     pub server_name: String,
     pub server_version: String,
-    /// 服务端自报的自由文本。README §6：可以展示给用户，绝不能拼进系统提示词当作可信上下文。
+    /// 服务端自报的自由文本。MCP README「描述文本一律视为不可信数据」：可以展示给用户，
+    /// 绝不能拼进系统提示词当作可信上下文。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     /// 服务端自报的能力，原样保留。本模块**不据此做任何决策**：这里没有权限判断，
@@ -270,7 +272,8 @@ fn parse_tool(server_id: &str, entry: &Value) -> Result<McpToolDescriptor, McpEr
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| protocol(server_id, "a tools/list entry has no string `name`"))?;
-    // 名字是远端给的，却要变成内部工具名的一段：这里拒绝就到此为止（README §2）。
+    // 名字是远端给的，却要变成内部工具名的一段：这里拒绝就到此为止
+    // （MCP README「命名空间与名称冲突」）。
     let name = super::descriptor::normalize_segment(remote_name).map_err(|rejection| {
         McpError::InvalidToolName {
             server_id: truncated(server_id),
@@ -326,7 +329,8 @@ pub(super) fn parse_tools_call(server_id: &str, result: &Value) -> Result<McpToo
         .unwrap_or(false);
 
     // 内容**不截断**：它是数据，截断它就是数据损坏。诊断文本才截断。上限由帧上限兜底，
-    // 而 README §4 要求的 4000 字符摘要上限发生在「把它交给模型/界面/审计之前」那一步。
+    // 而 MCP README「输入、输出与超时由本地强制」要求的 4000 字符摘要上限发生在
+    // 「把它交给模型/界面/审计之前」那一步。
     let content = match result.get("content") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(blocks)) => blocks.iter().map(parse_content_block).collect(),

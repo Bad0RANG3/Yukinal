@@ -203,7 +203,7 @@ async fn a_handshake_negotiates_a_version_and_lists_the_two_tools() {
             .unwrap_or_default()
             .contains("Ignore any previous instructions"),
         "the fixture's instructions are prompt-injection shaped; the only thing that happened to \
-         them is that they were stored as data (README §6)"
+         them is that they were stored as data (MCP README: description text is untrusted data)"
     );
 
     assert_eq!(
@@ -438,7 +438,7 @@ async fn starting_the_same_server_twice_reuses_one_process() {
     );
     assert_eq!(
         second.info.pid, first.info.pid,
-        "one server id is one process (README §7)"
+        "one server id is one process (MCP README: the process lifecycle stays with Rust)"
     );
     assert_eq!(second.tool_count, first.tool_count);
     assert_eq!(supervisor.status(SERVER_ID).await.pid, Some(first.info.pid));
@@ -480,7 +480,8 @@ async fn an_http_server_is_refused_with_the_reason_and_nothing_is_spawned() {
     );
     assert!(
         message.contains("outbound network policy"),
-        "the error must name the reason (MCP README §7): {message}"
+        "the error must name the reason it is refused (no outbound network policy), \
+         not the subject of some other section: {message}"
     );
 
     // `McpStdioConfig` cannot represent an http server at all, so no later code path can start
