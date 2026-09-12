@@ -7,6 +7,7 @@ import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { ENVIRONMENTS, ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
 import { SERVERS_QUERY_KEY } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { HostKeySection } from "./HostKeySection.js";
 import { buildServerInput } from "./server-form.js";
 
 export function AddServerModal({ onClose, server }: { onClose: () => void; server?: Server }) {
@@ -141,6 +142,17 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
           </fieldset>
 
           {save.isError ? <p className="form-error" role="alert">{save.error.message}</p> : null}
+
+          {server ? (
+            // 指纹面板只挂在「编辑已有服务器」这一侧：它操作的是**已保存**的主机与端口
+            // （命令按 serverId 去数据库里取），新建的服务器还没有对象可用。
+            //
+            // 于是有一个需要说清楚的错位：用户在这里改了主机名、还没保存时，下面那一栏
+            // 描述的仍是旧主机。面板自己把那台主机:端口 显示在标题旁边，并写明「指纹按
+            // 主机:端口 记录，不按服务器条目记录」，所以看到的那一刻就能对上号 —— 这也
+            // 正是它不能把端点藏起来的理由。
+            <HostKeySection serverId={server.id} />
+          ) : null}
 
           <div className="modal-actions">
             <button type="button" disabled={save.isPending} onClick={onClose} className="button-secondary">取消</button>

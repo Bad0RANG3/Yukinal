@@ -4708,3 +4708,114 @@ select.form-input {
     gap: 3px;
   }
 }
+
+/* ── 主机指纹面板（ADR 0012） ─────────────────────────────────────────────────
+   这一块整体是「危险动作」区：钉住与遗忘都改变今后的连接是否被核验，所以它用边框
+   与区块把它和服务器的其它字段分开，而不是混在普通表单项里。不一致状态额外带一层
+   警告色 —— 那是这个面板唯一需要用户停下来做判断的时刻。 */
+
+.host-key-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-3);
+  padding: 14px;
+}
+
+.host-key-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.host-key-header h3 {
+  margin: 2px 0 0;
+  font-size: 14px;
+}
+
+.host-key-endpoint {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
+.host-key-current,
+.host-key-fingerprint-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.host-key-label {
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+/* 指纹会被用户逐字对比，所以它必须等宽、可选中、可换行（窄窗里 43 个字符会折行），
+   而且不能被省略号截断 —— 截断的指纹没有任何用处。 */
+.host-key-fingerprint {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 8px 9px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.host-key-unpinned {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.host-key-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+/* 不一致：整块换成警告色，且两个指纹都在上面（缺一个就无法判断）。 */
+.host-key-compare-mismatch {
+  border-top-color: var(--danger);
+}
+
+.host-key-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--text);
+  padding: 10px;
+}
+
+.host-key-warning p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.host-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.host-key-forget {
+  margin-left: auto;
+}

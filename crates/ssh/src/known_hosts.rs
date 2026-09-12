@@ -14,24 +14,37 @@
 //! ## Where that rule is actually enforced
 //!
 //! Not here — and an auditor reading only this file would reasonably think otherwise,
-//! so it is written down: **the enforcement point is
-//! `ConnHandler::check_server_key` in `backend.rs`.** russh calls it during the
-//! handshake with the key the server actually presented; it returns `false`, which
-//! makes russh abort authentication, when the fingerprint differs from the pin that
-//! `establish` read out of this store.
+//! so it is written down: **the enforcement point is `ConnHandler::check_server_key`
+//! in `backend.rs`.** russh calls it during the handshake with the key the server
+//! actually presented; when that fingerprint differs from the pin `establish` read out
+//! of this store it returns a typed `HandshakeError::Mismatch`, which `establish` turns
+//! into `Error::HostKeyVerification` — carrying **both** fingerprints, so the failure
+//! says "it used to be X, it is now Y" instead of surfacing as a generic handshake
+//! failure (ADR 0012 point 3).
 //!
 //! The split is deliberate. This module answers "what is pinned for host:port", and
 //! [`KnownHostsStore::check`] is its comparison form for a caller that *has* a
 //! fingerprint in hand. The handshake callback cannot use it, because the fingerprint
 //! only exists inside that callback. So there are two comparison sites by necessity:
-//! `check` (policy-shaped, used by tests and by any future trust prompt) and
-//! `check_server_key` (wired into russh, and the one that protects users today).
+//! `check` (policy-shaped; the host-key probe uses it to answer
+//! unpinned/matches/mismatch) and `check_server_key` (wired into russh, and the one
+//! that protects users today).
 //!
-//! Consequence worth stating plainly: [`Check::Mismatch`] is currently constructed
-//! only in tests. It is not dead by accident — it is the return value the module
-//! documents — but nothing in production reaches it, so its test coverage is the
-//! only thing keeping it honest. Do not read the presence of this variant as proof
-//! that a mismatch check runs on this path.
+//! Consequence worth stating plainly: [`Check::Mismatch`] is **not** what blocks a
+//! changed key on the connection path — `check_server_key` is. The probe path does
+//! construct `Check::Mismatch`, and that is how the UI gets to show both fingerprints,
+//! but do not read the presence of this variant as proof that every connection is
+//! compared here.
+//!
+//! ## Who writes a pin
+//!
+//! Two callers, and only two: the TOFU path in `establish` (first connect) and
+//! [`KnownHostsStore::trust`] (the user confirmed a fingerprint). `trust` refuses a
+//! fingerprint that differs from an existing pin (ADR 0012 point 5) — changing a pinned
+//! key requires an explicit [`KnownHostsStore::forget`] first, so that no single user
+//! action can silently accept a changed key, and there is never an "accept the new key
+//! anyway" shortcut. Both decisions are pure functions ([`decide_trust`] here, and the
+//! `ForgetOutcome` of `forget`) so they can be tested without a server.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -53,6 +66,107 @@ pub enum Check {
     Matches { pinned: String },
     /// Pinned but the server presented something else. Must block.
     Mismatch { pinned: String, presented: String },
+}
+
+/// The three, exhaustive relations between a presented fingerprint and the pin.
+///
+/// This is a reading of [`Check`], not a fifth concept: [`Check`] also carries *which*
+/// fingerprints were involved (the point of ADR 0012 point 3), while this carries only
+/// the classification — which is what an IPC `comparison` field and the UI need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    /// This host has never been pinned.
+    Unpinned,
+    /// The presented fingerprint is the pinned one.
+    Matches,
+    /// The presented fingerprint is *not* the pinned one. Must block.
+    Mismatch,
+}
+
+impl Comparison {
+    /// The wire word for this classification.
+    ///
+    /// It lives here rather than being spelled out at each call site because these three
+    /// words are part of the contract (`HOST_KEY_MATCH_STATES` in `@yukinal/shared`):
+    /// writing `"mismach"` at a call site is not a compile error anywhere.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unpinned => "unpinned",
+            Self::Matches => "matches",
+            Self::Mismatch => "mismatch",
+        }
+    }
+}
+
+impl Check {
+    /// The pin this comparison was made against, if the host is pinned at all.
+    #[must_use]
+    pub fn pinned(&self) -> Option<&str> {
+        match self {
+            Self::Unknown => None,
+            Self::Matches { pinned } | Self::Mismatch { pinned, .. } => Some(pinned),
+        }
+    }
+
+    #[must_use]
+    pub fn comparison(&self) -> Comparison {
+        match self {
+            Self::Unknown => Comparison::Unpinned,
+            Self::Matches { .. } => Comparison::Matches,
+            Self::Mismatch { .. } => Comparison::Mismatch,
+        }
+    }
+}
+
+/// What a `trust` call should do, given the current pin and the fingerprint the user
+/// confirmed.
+///
+/// Pure: no store, no disk, no server. That is the point — the rule that matters here is
+/// a policy rule, and policy rules that can only be exercised against a live host are
+/// rules nobody exercises.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustDecision {
+    /// Nothing was pinned: write the confirmed fingerprint.
+    Pin { fingerprint: String },
+    /// The same fingerprint is already pinned: nothing to do (and nothing to write).
+    AlreadyPinned { fingerprint: String },
+    /// A **different** fingerprint is pinned: refuse.
+    ///
+    /// Hard rule from ADR 0012 point 5 — there is deliberately no "accept the new key
+    /// anyway" branch. Changing a pin takes two explicit user actions (forget, then
+    /// probe-and-confirm), so no *single* action can silently accept a changed key.
+    RefusedDifferentPin { pinned: String, confirmed: String },
+}
+
+/// Decide what `trust` does. See [`TrustDecision`].
+#[must_use]
+pub fn decide_trust(pinned: Option<&str>, confirmed: &str) -> TrustDecision {
+    match pinned {
+        None => TrustDecision::Pin {
+            fingerprint: confirmed.to_string(),
+        },
+        Some(pinned) if pinned == confirmed => TrustDecision::AlreadyPinned {
+            fingerprint: confirmed.to_string(),
+        },
+        Some(pinned) => TrustDecision::RefusedDifferentPin {
+            pinned: pinned.to_string(),
+            confirmed: confirmed.to_string(),
+        },
+    }
+}
+
+/// What a `forget` call actually did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetOutcome {
+    /// A pin was removed; this is the fingerprint that was there.
+    Removed { fingerprint: String },
+    /// There was nothing pinned for this `host:port`.
+    ///
+    /// Not an error (clicking "forget" twice is not a failure) but not silent either:
+    /// the caller has to be able to say "本来就没有钉子" instead of claiming a removal
+    /// that never happened.
+    NothingPinned,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -142,6 +256,11 @@ impl KnownHostsStore {
     }
 
     /// Pin or replace an entry; persists when a path is configured.
+    ///
+    /// Callers that pin on a **user's** behalf should use [`Self::trust`] instead: this
+    /// method replaces whatever was there, which is exactly the "silently accept a
+    /// changed key" behaviour ADR 0012 point 5 forbids. It stays for the TOFU path,
+    /// where `establish` has already established that nothing was pinned.
     pub fn register(
         &mut self,
         host: &str,
@@ -155,6 +274,52 @@ impl KnownHostsStore {
             self.save(path)?;
         }
         Ok(())
+    }
+
+    /// Pin the fingerprint the user **confirmed**.
+    ///
+    /// The decision is the pure function [`decide_trust`]; this method only applies it
+    /// (and persists). It therefore cannot drift from the tested rule: a differing
+    /// fingerprint comes back as [`TrustDecision::RefusedDifferentPin`] and **nothing is
+    /// written**.
+    ///
+    /// Note the refusal is not an error: it is a policy answer the caller has to render
+    /// ("先遗忘旧的钉子"), which is why it is returned rather than reported as an IO-style
+    /// failure of the store.
+    pub fn trust(
+        &mut self,
+        host: &str,
+        port: u16,
+        confirmed: &str,
+    ) -> Result<TrustDecision, KnownHostsError> {
+        let decision = decide_trust(self.pinned_fingerprint(host, port).as_deref(), confirmed);
+        if matches!(decision, TrustDecision::Pin { .. }) {
+            self.register(host, port, confirmed)?;
+        }
+        Ok(decision)
+    }
+
+    /// Remove the pin for `host:port` and persist the removal.
+    ///
+    /// Returns what actually happened ([`ForgetOutcome`]) instead of `()`: "there was
+    /// nothing to forget" is a different answer from "removed SHA256:…", and a caller
+    /// that cannot tell them apart ends up claiming a removal that never happened.
+    ///
+    /// A failed save rolls the in-memory removal back. Without that, the running process
+    /// would believe the pin is gone (the user reads "已遗忘") while the file still has
+    /// it — and the pin would be back on the next launch, silently.
+    pub fn forget(&mut self, host: &str, port: u16) -> Result<ForgetOutcome, KnownHostsError> {
+        let key = (host.to_string(), port);
+        let Some(fingerprint) = self.entries.remove(&key) else {
+            return Ok(ForgetOutcome::NothingPinned);
+        };
+        if let Some(path) = &self.path {
+            if let Err(error) = self.save(path) {
+                self.entries.insert(key, fingerprint);
+                return Err(error);
+            }
+        }
+        Ok(ForgetOutcome::Removed { fingerprint })
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), KnownHostsError> {

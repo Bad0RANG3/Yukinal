@@ -1,6 +1,6 @@
 # ADR 0002 SSH 后端采用 russh
 
-Status: Accepted
+Status: Accepted（本记录中「认证方式限于密码和未加密的 OpenSSH 私钥」一节已由后续实现取代：现在还有 ssh-agent、带口令的私钥，以及用户证书认证（`Authentication::Certificate` → `authenticate_openssh_cert`）；`Authentication::Agent` 不再是「调用即返回未实现」。选型本身 —— russh、不自研协议、不在本地做代理跳板 —— 仍然有效。两条保留的限制：证书认证在后端可用，但**桌面界面还不能配置**（没有这一项表单）；**服务器**出示 host 证书时仍然拒绝（`Error::HostKeyUnsupported`，这个构建没有 host CA 信任存储 —— 那是另一件事，不是用户证书）。原文保留，以保留当时的约束与代价）
 Date: 2026-09-09
 
 ## Context

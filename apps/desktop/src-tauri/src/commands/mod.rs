@@ -26,6 +26,7 @@ pub mod chat;
 pub mod execution;
 pub mod files;
 pub mod host;
+pub mod host_key;
 pub mod logs;
 pub mod provider;
 pub mod server;

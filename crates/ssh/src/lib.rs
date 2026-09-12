@@ -7,7 +7,13 @@
 //!   （Rust core，使用点）经 `yukinal-credentials` 解析后以 [`ConnectionSecrets`]
 //!   传入 —— 本 crate 不依赖 credentials crate，也从不解析引用。
 //! - 超时 / 取消映射到 [`Error::Timeout`] / [`Error::Cancelled`]；host key 不匹配
-//!   必须报 [`Error::HostKeyVerification`]，绝不静默接受。
+//!   必须报 [`Error::HostKeyVerification`]，绝不静默接受 —— 而那条错误同时带着
+//!   **钉住的**与**出示的**两个指纹，因为用户要判断的正是「它变了，还是它在装」
+//!   （ADR 0012 第 3 条）。
+//! - 「策略要求已钉过指纹，但这台主机还没有钉子」是另一条错误
+//!   （[`Error::HostKeyNotPinned`]）：它不是一次不匹配，用户要做的动作也不同。
+//! - 指纹的**核验**、**钉住**与**遗忘**是三个显式动作，探针只回答「服务器出示了
+//!   什么」且不写任何状态（ADR 0012 第 2、4 条）。
 //! - 认证材料的问题各自成套上报（[`Error::PrivateKey`] / [`Error::Agent`] /
 //!   [`Error::Certificate`]），并且一种方式失败后**绝不**静默改试另一种：
 //!   「agent 没起来」不能表现成「密码不对」。
@@ -55,9 +61,40 @@ pub enum Error {
     Agent(AgentError),
     /// OpenSSH 用户证书不可用（路径定不下来 / 读不出 / 解析失败 / 与私钥不配对）。
     Certificate(CertificateError),
-    /// Host key 不在 known_hosts（首次连接需显式信任），或与已存的指纹不一致
-    /// （MITM 指示，必须中断）。
-    HostKeyVerification { host: String, fingerprint: String },
+    /// 策略要求主机必须已钉过指纹，而这台主机**还没有钉子**。
+    ///
+    /// 与 [`Error::HostKeyVerification`] 分开，是 ADR 0012 第 3 条的直接要求：这不是
+    /// 「钉住的与出示的不一致」，而是「根本没有可比的钉子」—— 用户要做的事完全不同
+    /// （前者要先判断是不是攻击，后者只是还没核验过）。
+    ///
+    /// 旧代码把 `"not pinned (first connect must be explicitly trusted)"` 这句占位说明
+    /// 塞进 `HostKeyVerification::fingerprint`，于是那个字段有时是**真指纹**、有时是
+    /// **一句英文说明**；界面拿它当指纹显示就是错的，拿它当说明解析也是错的。一个
+    /// 字段不能同时是两种东西，所以这里把它拆成一个语义明确的前置条件错误。
+    HostKeyNotPinned { host: String, port: u16 },
+    /// 已钉住的指纹与服务器**出示**的不一致（MITM 指示，必须中断）。
+    ///
+    /// 两个指纹都给出来是这条错误的**全部意义**：用户要能一眼看出「哪一个是它、
+    /// 哪一个是它变了」（ADR 0012 第 3 条）。旧实现只在 `check_server_key` 里返回
+    /// `false`，不匹配因此表现为一次通用握手失败，一个指纹都没有 —— 一次正当的服务器
+    /// 密钥轮换与一次中间人攻击在界面上完全一样，而且都看不出新指纹。
+    HostKeyVerification {
+        host: String,
+        /// 本地钉住的那个。
+        pinned: String,
+        /// 服务器这次出示的那个。
+        presented: String,
+    },
+    /// 服务器出示的 host key 形状本 crate 无法钉住（目前只有 host 证书一种）。
+    ///
+    /// 同样是为了不让失败变成一句「握手失败」：本 crate 没有 host CA 信任库，
+    /// 所以既不能验证也不能钉住一张 host 证书（见 `ConnHandler::check_server_key`），
+    /// 而用户需要知道的是这件事本身，不是「连接断了」。
+    HostKeyUnsupported {
+        host: String,
+        port: u16,
+        detail: String,
+    },
     /// Channel / session 层失败。
     Channel(String),
     /// 命令或连接超时。
@@ -76,11 +113,29 @@ impl fmt::Display for Error {
             Error::PrivateKey(error) => write!(f, "ssh private key error: {error}"),
             Error::Agent(error) => write!(f, "ssh-agent error: {error}"),
             Error::Certificate(error) => write!(f, "ssh certificate error: {error}"),
-            Error::HostKeyVerification { host, fingerprint } => {
+            Error::HostKeyVerification {
+                host,
+                pinned,
+                presented,
+            } => {
                 write!(
                     f,
-                    "host key verification failed for {host} (fingerprint {fingerprint})"
+                    "host key verification failed for {host}: the pinned fingerprint is \
+                     {pinned}, but the server presented {presented}"
                 )
+            }
+            // 措辞刻意不像一条指纹错误：这是一次**策略/前置条件**失败，不是
+            // 「钥匙变了」。用户要做的动作是「先核验并钉住」，不是「去查是不是中间人」。
+            Error::HostKeyNotPinned { host, port } => {
+                write!(
+                    f,
+                    "host {host}:{port} is not pinned, and the active policy requires a pinned \
+                     host key (trust the fingerprint explicitly before connecting; this is a \
+                     policy precondition failure, not a key mismatch)"
+                )
+            }
+            Error::HostKeyUnsupported { host, port, detail } => {
+                write!(f, "host key of {host}:{port} cannot be pinned: {detail}")
             }
             Error::Channel(message) => write!(f, "ssh channel error: {message}"),
             Error::Timeout => write!(f, "ssh operation timed out"),
@@ -241,8 +296,9 @@ impl ConnectionSecrets {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum KnownHostsPolicy {
-    /// 默认：host key 必须是 known_hosts 里已有的；未知主机直接失败，由 UI
-    /// 显式决定是否信任。
+    /// 默认：host key 必须是 known_hosts 里已有的；未知主机以
+    /// [`Error::HostKeyNotPinned`] 拒绝（在 TCP 之前），由用户显式核验并钉住
+    /// （桌面端：`server_host_key_probe` → `server_host_key_trust`）。
     #[default]
     RequireMatch,
     /// 首次连接信任并记录，之后必须匹配。UI 必须明确告知用户。
@@ -362,6 +418,19 @@ impl fmt::Debug for SftpClient {
     }
 }
 
+/// 一次 host key 探针的答案（[`SshBackend::probe_host_key`]）。
+///
+/// 它**不是**一次验证结果，刻意不叫 `VerifiedHostKey` 之类的名字：这是服务器对
+/// 「我是谁」的声称，在用户把它与自己手上的指纹核对并钉住之前不可信（ADR 0012
+/// 第 4 条）。带 `host`/`port` 是因为那个声称只对这一个 `host:port` 成立。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyProbe {
+    pub host: String,
+    pub port: u16,
+    /// `SHA256:<base64 无填充>`（OpenSSH 的写法，与 known_hosts 里存的形式一致）。
+    pub fingerprint: String,
+}
+
 /// SSH backend 必须可替换（russh 默认实现；未来可换 openssh-compat）。
 pub trait SshBackend {
     /// 建立连接并完成认证。`secrets` 由使用点解析（见 [`ConnectionSecrets`]）。
@@ -370,6 +439,23 @@ pub trait SshBackend {
         config: SshConfig,
         secrets: ConnectionSecrets,
     ) -> impl std::future::Future<Output = Result<Session>> + Send;
+
+    /// 做一次握手，返回服务器**出示**的 host key 指纹（不做别的事）。
+    ///
+    /// 三件刻意不做的事：
+    ///
+    /// - **不认证**。探针不需要任何凭据，也不会登录 —— 它只走到 host key 交换为止。
+    /// - **不读写 known_hosts**。看一眼不该有副作用：探针不得顺手记下 pin，也不得
+    ///   因为「探到了」就改变任何信任状态（ADR 0012 第 2、3 条）。
+    /// - **不判断可信**。返回值是服务器对「我是谁」的声称，在用户确认之前不可信
+    ///   （ADR 0012 第 4 条）—— 界面文案必须叫它「服务器出示的指纹」。
+    ///
+    /// 超时上限与 [`SshBackend::connect`] 一致（`CONNECT_TIMEOUT`）。
+    fn probe_host_key(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> impl std::future::Future<Output = Result<HostKeyProbe>> + Send;
 
     /// 执行一次性命令；`cancel` 触发时返回 [`Error::Cancelled`] 并关闭通道，
     /// `None` 超时 = 不设上限。想跳过取消的调用方传一个全新 token。

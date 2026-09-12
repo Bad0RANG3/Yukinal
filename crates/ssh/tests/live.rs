@@ -238,6 +238,10 @@ async fn keepalive_keeps_session_alive() {
 }
 
 /// host key 变化必须阻断：TOFU 记下指纹后，人为改 store 的钉子，再次连接要求匹配。
+///
+/// 这条真机测试同时验证 ADR 0012 第 3 条的**呈现**：错误里必须同时有被篡改的钉子与
+/// 服务器真实的出示指纹。在真机上这才有意义 —— 只有真的握手过，`presented` 才是
+/// 「服务器这次出示的」，而不是测试自己编的字符串。
 #[tokio::test]
 async fn host_key_change_is_blocked() {
     if !is_enabled() {
@@ -258,6 +262,17 @@ async fn host_key_change_is_blocked() {
         .expect("first connect");
     backend.close(&session).await.expect("close");
 
+    // 真指纹：探针拿到的那个（也不写任何东西）。
+    let real = backend
+        .probe_host_key(
+            &env("YUKINAL_SSH_TEST_HOST").expect("host"),
+            env("YUKINAL_SSH_TEST_PORT")
+                .and_then(|raw| raw.parse().ok())
+                .unwrap_or(22),
+        )
+        .await
+        .expect("probe");
+
     // 篡改 known_hosts 里的指纹 → 服务器"看起来换了 key"。
     let store_path = dir.join("known_hosts");
     let raw = std::fs::read_to_string(&store_path).expect("read store");
@@ -275,10 +290,109 @@ async fn host_key_change_is_blocked() {
             secrets(),
         )
         .await;
+    match result {
+        Err(Error::HostKeyVerification {
+            pinned, presented, ..
+        }) => {
+            assert_ne!(pinned, presented);
+            assert_eq!(
+                presented, real.fingerprint,
+                "出示的那个必须是服务器真的出示过的指纹，否则用户核对的是个假字符串",
+            );
+        }
+        other => panic!("tampered host key must be blocked, got {other:?}"),
+    }
+    cleanup_and_remove(&dir);
+}
+
+/// 探针：真连一次拿指纹，**什么都不写**；用户确认后再钉住，连接才被放行。
+///
+/// 这条覆盖的是新入口的完整闭环（探针 → 钉住 → 连接），而它只有在真机上才有意义：
+/// 本地没有服务器时，唯一能验证的是「未钉住被拒」和「不匹配被拒」。
+#[tokio::test]
+async fn probe_then_trust_unblocks_a_require_match_connection() {
+    if !is_enabled() {
+        eprintln!("skipped: requires real host");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("yukinal-ssh-probe-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let store_path = dir.join("known_hosts");
+    let _ = std::fs::remove_file(&store_path);
+
+    let backend = RusshBackend::from_data_dir(&dir).expect("backend");
+    let host = env("YUKINAL_SSH_TEST_HOST").expect("host");
+    let port = env("YUKINAL_SSH_TEST_PORT")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(22);
+
+    // 探针不写任何东西 —— 包括不许顺手写下 pin。
+    let probed = backend.probe_host_key(&host, port).await.expect("probe");
+    assert!(!store_path.exists(), "探针不得落盘");
+    assert_eq!(backend.host_key_pin(&host, port).expect("pin"), None);
+
+    // 未钉住 + RequireMatch：拒绝，而且是本地拒绝。
+    let refused = backend
+        .connect(
+            test_config("srv_probe", KnownHostsPolicy::RequireMatch),
+            secrets(),
+        )
+        .await;
     assert!(
-        matches!(result, Err(Error::HostKeyVerification { .. })),
-        "tampered host key must be blocked, got {result:?}"
+        matches!(refused, Err(Error::HostKeyNotPinned { .. })),
+        "没核验过就该被挡在门外，got {refused:?}",
     );
+
+    // 用户确认这个指纹 → 钉住 → 同样的连接放行。
+    let decision = backend
+        .trust_host(&host, port, &probed.fingerprint)
+        .expect("trust");
+    assert!(matches!(
+        decision,
+        yukinal_ssh::known_hosts::TrustDecision::Pin { .. }
+    ));
+    let session = backend
+        .connect(
+            test_config("srv_probe", KnownHostsPolicy::RequireMatch),
+            secrets(),
+        )
+        .await
+        .expect("pinned host must connect");
+    backend.close(&session).await.expect("close");
+
+    // 同一个指纹再确认一次不是错误，但也不是一次写入。
+    assert!(matches!(
+        backend
+            .trust_host(&host, port, &probed.fingerprint)
+            .expect("trust"),
+        yukinal_ssh::known_hosts::TrustDecision::AlreadyPinned { .. }
+    ));
+
+    // 换一个指纹：拒绝，且钉子不变。
+    assert!(matches!(
+        backend
+            .trust_host(
+                &host,
+                port,
+                "SHA256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefde"
+            )
+            .expect("trust"),
+        yukinal_ssh::known_hosts::TrustDecision::RefusedDifferentPin { .. }
+    ));
+    assert_eq!(
+        backend.host_key_pin(&host, port).expect("pin"),
+        Some(probed.fingerprint.clone())
+    );
+
+    // 遗忘 → 回到 TOFU 的起点（内存与文件都回到起点）。
+    assert!(matches!(
+        backend.forget_host(&host, port).expect("forget"),
+        yukinal_ssh::known_hosts::ForgetOutcome::Removed { .. }
+    ));
+    assert_eq!(backend.host_key_pin(&host, port).expect("pin"), None);
+    let reloaded = RusshBackend::from_data_dir(&dir).expect("reload");
+    assert_eq!(reloaded.host_key_pin(&host, port).expect("pin"), None);
+
     cleanup_and_remove(&dir);
 }
 
