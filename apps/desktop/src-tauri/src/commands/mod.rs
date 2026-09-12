@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::AppState;
+use yukinal_core::ids::is_stable_server_id;
 use yukinal_core::ipc::{AgentKillResponse, AgentLogsResponse, AgentSpawnResponse, PingResponse};
 use yukinal_core::sidecar::{SidecarConfig, SidecarEvent};
 use yukinal_core::supervisor::{SupervisorStatus, LOG_HISTORY};
@@ -418,15 +419,6 @@ fn is_valid_agent_target(target: &AgentToolTarget) -> bool {
     }
 }
 
-fn is_stable_server_id(value: &str) -> bool {
-    value.len() > 4
-        && value.starts_with("srv_")
-        && value
-            .bytes()
-            .skip(4)
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 fn bounded_audit_text(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let bounded: String = chars.by_ref().take(max_chars).collect();
@@ -608,6 +600,10 @@ mod tests {
         assert!(is_stable_server_id("srv_01abc"));
         assert!(!is_stable_server_id("server_01abc"));
         assert!(!is_stable_server_id("srv_ABC"));
+        // 这条断言是这次修复补上的：审计管道曾经允许下划线，于是它接受的服务器目标
+        // 比契约和 `tool_execution_list` 都宽。规则本身在 `yukinal_core::ids`，
+        // 这里保留一行是为了让「审计接受的目标必须与契约一致」继续被钉住。
+        assert!(!is_stable_server_id("srv_01_abc"));
     }
 
     #[test]

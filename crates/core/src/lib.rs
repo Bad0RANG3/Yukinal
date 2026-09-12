@@ -23,6 +23,7 @@ pub mod collector;
 pub mod docker;
 pub mod health;
 pub mod identity;
+pub mod ids;
 pub mod ipc;
 pub mod mcp;
 pub mod provider;

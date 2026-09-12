@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::state::AppState;
+use yukinal_core::ids::is_stable_server_id;
 use yukinal_database::models::{ChatMessage, ChatMessageRole, ChatSession, ChatSessionCounts};
 
 const DEFAULT_LIMIT: usize = 50;
@@ -269,15 +270,6 @@ fn validate_text(value: &str, max_chars: usize, field: &str) -> Result<String, S
     Ok(value.to_string())
 }
 
-fn is_stable_server_id(value: &str) -> bool {
-    value.len() > 4
-        && value.starts_with("srv_")
-        && value
-            .bytes()
-            .skip(4)
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -339,6 +331,8 @@ mod tests {
         assert!(bounded_limit(Some(101)).is_err());
         assert!(is_stable_server_id("srv_01abc"));
         assert!(!is_stable_server_id("srv_ABC"));
+        // 聊天记录曾经与审计管道一起接受下划线；规则现在只有 `yukinal_core::ids` 一份。
+        assert!(!is_stable_server_id("srv_01_abc"));
     }
 
     #[test]
