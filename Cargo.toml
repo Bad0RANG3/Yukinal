@@ -40,6 +40,11 @@ russh-sftp = "2.0"
 # Cancellation primitive for tool execution (shareable stop signal).
 tokio-util = "0.7"
 
+# Test-only randomness: generating throwaway SSH key material (and passphrase-encrypting
+# it) in `yukinal-ssh` tests. Same version the russh stack already pulls in, so it adds
+# no new crate to the build graph.
+rand = "0.10"
+
 # OS credential store: keyring over Keychain / Credential Manager / Secret Service.
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
 

@@ -21,6 +21,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+# Key-material generation for the auth tests (matching known_hosts tests, which build
+# their fixtures on the fly instead of committing key files).
+rand = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -3,8 +3,14 @@
 //! - `YUKINAL_SSH_TEST_HOST` / `YUKINAL_SSH_TEST_PORT`（默认 22）
 //! - `YUKINAL_SSH_TEST_USER`
 //! - `YUKINAL_SSH_TEST_PASSWORD`（或 `YUKINAL_SSH_TEST_KEY_PATH`）
+//! - `YUKINAL_SSH_TEST_KEY_PASSPHRASE`（加密私钥；只给 `YUKINAL_SSH_TEST_KEY_PATH` 时
+//!   视为该 key 不带口令）
+//! - `YUKINAL_SSH_TEST_KEY_CERT`（该私钥的 `*-cert.pub` 用户证书）
+//! - `YUKINAL_SSH_TEST_AGENT`（任意非空值 = 允许跑 agent 认证，用**本机正在跑的**
+//!   agent；不设这个变量就跳过，因为 agent 里有什么 key 是环境的属性，不是仓库的属性）
 //!
-//! DoD 覆盖：密码 + 私钥登录真机、往返命令、keepalive、host key 变化阻断。
+//! DoD 覆盖：密码 + 私钥（含加密私钥）+ 证书 + ssh-agent 登录真机、往返命令、
+//! keepalive、host key 变化阻断。
 //!
 //! ## 关于与 `crates/collector/tests/live.rs` 的重复
 //!
@@ -61,7 +67,7 @@ fn secrets() -> ConnectionSecrets {
     ConnectionSecrets {
         password: env("YUKINAL_SSH_TEST_PASSWORD"),
         private_key_pem: key_pem,
-        private_key_passphrase: None,
+        private_key_passphrase: env("YUKINAL_SSH_TEST_KEY_PASSPHRASE"),
     }
 }
 
@@ -119,6 +125,90 @@ async fn private_key_auth_connects() {
         passphrase_ref: None,
     };
     let session = backend.connect(config, secrets()).await.expect("connect");
+    backend.close(&session).await.expect("close");
+}
+
+/// 加密私钥：口令经 `ConnectionSecrets` 传下来，key 在认证那一刻才解密。
+#[tokio::test]
+async fn passphrase_protected_key_auth_connects() {
+    if !is_enabled() || env("YUKINAL_SSH_TEST_KEY_PATH").is_none() {
+        eprintln!("skipped: encrypted key test needs YUKINAL_SSH_TEST_KEY_PATH");
+        return;
+    }
+    if env("YUKINAL_SSH_TEST_KEY_PASSPHRASE").is_none() {
+        eprintln!("skipped: encrypted key test needs YUKINAL_SSH_TEST_KEY_PASSPHRASE");
+        return;
+    }
+    let backend = RusshBackend::from_data_dir(&std::env::temp_dir()).expect("backend");
+    let mut config = test_config("srv_key_enc", KnownHostsPolicy::TrustOnFirstUse);
+    config.authentication = Authentication::PrivateKey {
+        credential_ref: "keychain://ssh-test/key".into(),
+        passphrase_ref: Some("keychain://ssh-test/key-passphrase".into()),
+    };
+    let session = backend.connect(config, secrets()).await.expect("connect");
+    backend.close(&session).await.expect("close");
+}
+
+/// 用户证书：私钥与 `<key>-cert.pub` 放同一目录，认证时按 OpenSSH 的 sibling 约定找证书。
+///
+/// 之所以先复制到临时目录：只有「私钥路径 + 约定」这一种输入，才能真的走一遍 sibling
+/// 推导；直接指定 `certificate_path` 会把那条路径绕过去。
+#[tokio::test]
+async fn certificate_auth_connects() {
+    if !is_enabled() || env("YUKINAL_SSH_TEST_KEY_PATH").is_none() {
+        eprintln!("skipped: certificate test needs YUKINAL_SSH_TEST_KEY_PATH");
+        return;
+    }
+    let Some(certificate) = env("YUKINAL_SSH_TEST_KEY_CERT") else {
+        eprintln!("skipped: certificate test needs YUKINAL_SSH_TEST_KEY_CERT");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("yukinal-ssh-cert-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let key_path = dir.join("id_live");
+    std::fs::copy(
+        env("YUKINAL_SSH_TEST_KEY_PATH").expect("key path"),
+        &key_path,
+    )
+    .expect("copy key");
+    std::fs::copy(certificate, dir.join("id_live-cert.pub")).expect("copy certificate");
+
+    let backend = RusshBackend::from_data_dir(&std::env::temp_dir()).expect("backend");
+    let mut config = test_config("srv_cert", KnownHostsPolicy::TrustOnFirstUse);
+    config.authentication = Authentication::Certificate {
+        credential_ref: "keychain://ssh-test/key".into(),
+        passphrase_ref: env("YUKINAL_SSH_TEST_KEY_PASSPHRASE")
+            .map(|_| "keychain://ssh-test/key-passphrase".to_string()),
+        private_key_path: Some(key_path.display().to_string()),
+        certificate_path: None,
+    };
+    let session = backend.connect(config, secrets()).await.expect("connect");
+    backend.close(&session).await.expect("close");
+    cleanup_and_remove(&dir);
+}
+
+/// ssh-agent：用本机正在跑的那个 agent。要显式打开才跑 —— agent 里有哪些身份是环境的
+/// 属性，让 CI 去断言它没有意义。
+#[tokio::test]
+async fn agent_auth_connects() {
+    if !is_enabled() || env("YUKINAL_SSH_TEST_AGENT").is_none() {
+        eprintln!("skipped: agent test needs YUKINAL_SSH_TEST_AGENT (any non-empty value)");
+        return;
+    }
+    let backend = RusshBackend::from_data_dir(&std::env::temp_dir()).expect("backend");
+    let mut config = test_config("srv_agent", KnownHostsPolicy::TrustOnFirstUse);
+    config.authentication = Authentication::Agent { socket_path: None };
+    let session = backend.connect(config, secrets()).await.expect("connect");
+    let result = backend
+        .execute(
+            &session,
+            "echo agent-auth",
+            Some(std::time::Duration::from_secs(10)),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("execute");
+    assert_eq!(result.stdout_lossy().trim(), "agent-auth");
     backend.close(&session).await.expect("close");
 }
 
