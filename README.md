@@ -54,6 +54,7 @@ Yukinal 目前是一个可以跑起来的开发版本，版本号为 `0.1.0`。�
 - 权限决策：三层风险事实合成一个决策，产出可执行的 ticket（`apps/agent/src/permissions/`）。
 - 审批往返：等待用户批准，2 分钟未响应按「已过期」处理并拒绝，不会永久挂起运行。
 - 取消：停止一次运行会中止在途的 HTTP 流、工具执行和等待中的审批，并把取消状态如实上报。
+- 执行追踪：每次运行有一个 `TraceRecorder` 账本，工具事件携带的 `traceId` / `stepId` 都由它发出，被策略拒绝或被驳回的调用也会把步骤收尾（不会留下永远 `running` 的步骤），完成的运行在结果里带上自己的 `traceId`，Rust 侧写入的审计行因此可以按运行检索（`apps/agent/src/trace/`）。
 - 运行模式与批准方式两个正交的轴：`goal`/`plan`/`readonly` 决定这次运行**能改到什么程度**，`ask`/`auto` 决定**允许的部分由谁点头**（`packages/shared/src/types/risk.ts`）。
 
 **Provider**
@@ -308,7 +309,6 @@ pwsh -File scripts/check-desktop-window.ps1
 - **`delivery` 与 `resume` 字段**目前在协议里被接受，但只用于「同一条消息重试不会开出第二个运行」的去重，不具备完整的同步/恢复语义。
 - **`policyId`** 在运行请求里可以被传入，但当前运行路径只使用目标环境推导出的内建策略。
 - **`crates/filesystem` 是契约占位**，没有任何实现，也没有被其他 crate 引用。
-- **`TraceRecorder`** 存在于 `apps/agent/src/trace/`，但只在测试里被构造；实际运行时的追踪标识由 agent loop 直接生成，持久化则发生在 Rust 侧。
 
 ## 文档
 

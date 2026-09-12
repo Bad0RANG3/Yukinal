@@ -28,6 +28,9 @@ const AgentRunResultSchema = z.strictObject({
   steps: z.number().int().nonnegative(),
   toolCalls: z.number().int().nonnegative(),
   error: z.string().max(4_000).optional(),
+  // Optional on purpose: the loop always sets it, but an older sidecar build does not,
+  // and the UI has to keep parsing the events of whatever sidecar is running.
+  traceId: z.string().trim().min(1).max(256).optional(),
 });
 
 /**

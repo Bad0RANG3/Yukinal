@@ -38,7 +38,8 @@ import { ContextEngine } from "../context/context-engine.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { RpcFailure } from "../errors.js";
 import { redactSensitiveText, redactSensitiveValue } from "../security/sensitive-data.js";
-import { ToolRegistry, type ExecutionTicket } from "../tools/registry.js";
+import { TraceRecorder } from "../trace/trace-recorder.js";
+import { ToolRegistry, toolStepTitle, type ExecutionTicket } from "../tools/registry.js";
 
 export const RUN_EVENT_TRANSITIONS = {
   idle: ["user_prompt"],
@@ -117,6 +118,13 @@ export interface AgentLoopDeps {
   maxRunMs?: number;
   /** Approval expiry is injectable so the expiry path can be tested without a two-minute wait. */
   approvalTtlMs?: number;
+  /**
+   * How the run's `TraceRecorder` is built. Injectable for the same reason
+   * `approvalTtlMs` is: the ledger is otherwise unreachable from a test, and "the step
+   * of a denied call is closed rather than left running" is a property worth asserting
+   * end to end instead of trusting.
+   */
+  createTrace?: (info: { runId: string; title: string }) => TraceRecorder;
 }
 
 export interface AgentRunHooks {
@@ -212,6 +220,16 @@ export class AgentLoop {
     let finalText = "";
     let textTruncated = false;
 
+    // One trace per run, and it is the source of both ids every tool event carries:
+    // `traceId` names the ledger the audit rows are written against, `stepId` names the
+    // card the UI opened. Built here, before the first provider call, because
+    // `#finishInterrupted` closes it from every exit path.
+    const prompt = request.parts?.map((part) => part.text).join("\n").trim() || request.prompt.trim();
+    const title = runTitle(prompt);
+    const trace = this.deps.createTrace
+      ? this.deps.createTrace({ runId, title })
+      : new TraceRecorder(runId, title);
+
     const emitToolCall = (call: {
       traceId: string;
       stepId: string;
@@ -282,7 +300,6 @@ export class AgentLoop {
       emit({ type: "agent.started", runId, at: now() });
 
       const bundle = await this.deps.context.build(request);
-      const prompt = request.parts?.map((part) => part.text).join("\n").trim() || request.prompt.trim();
       if (!prompt) throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "prompt must not be blank");
       const permissionGuidance = renderPermissionGuidance(request.permissionMode);
       const modeGuidance = renderRunModeGuidance(request.mode);
@@ -301,7 +318,7 @@ export class AgentLoop {
       const nameIndex = createProviderNameIndex(this.deps.registry.list());
 
       for (; steps < this.maxSteps; steps++) {
-        if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+        if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
 
         const events: StreamEvent[] = [];
         let streamError: string | null = null;
@@ -334,7 +351,7 @@ export class AgentLoop {
               break;
             case "done":
               if (event.finishReason === "cancelled") {
-                return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+                return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
               }
               break;
             default:
@@ -342,23 +359,22 @@ export class AgentLoop {
           }
         }
 
-        if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+        if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
         const calls = events.filter((event): event is Extract<StreamEvent, { type: "tool_call" }> => event.type === "tool_call");
         if (streamError !== null) {
           throw new Error(`provider error: ${streamError}`);
         }
         if (calls.length === 0) break; // 纯文本回合：回答完成
 
-        const traceId = `trc_${randomUUID()}`;
+        const traceId = trace.traceId;
         const assistantToolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
         const toolMessages: LlmMessage[] = [];
 
         for (let index = 0; index < calls.length; index++) {
-          if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+          if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
           const call = calls[index];
           if (!call) continue;
           const internalName = nameIndex.internalFor(call.call.name);
-          const stepId = `step_${steps}_${index}`;
 
           if (!internalName) {
             toolMessages.push({ role: "tool", toolCallId: call.call.id, content: `unknown tool: ${call.call.name}` });
@@ -385,6 +401,17 @@ export class AgentLoop {
             name: call.call.name,
             arguments: redactSensitiveValue(call.call.arguments) as Record<string, unknown>,
           });
+          // The step is opened *before* the card is emitted, because the card carries its
+          // id. Every outcome below closes it — including the ones that never reach the
+          // registry (denied, rejected, expired), which is where an unclosed step would
+          // otherwise sit in the ledger as "running" forever.
+          const step = trace.startToolStep({
+            title: toolStepTitle(declaration),
+            toolName: internalName,
+            callInput: call.call.arguments,
+            intent: decision.reason,
+          });
+          const stepId = step.stepId;
           emitToolCall({
             traceId,
             stepId,
@@ -417,9 +444,10 @@ export class AgentLoop {
               target,
               expiresAt: new Date(Date.now() + this.approvalTtlMs).toISOString(),
             };
+            trace.requireApproval(decision, stepId);
             emit({ type: "agent.waiting_approval", runId, approval, at: now() });
             const approvalOutcome = await this.#awaitApproval(runId, approval, decision, token);
-            if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+            if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
             if (approvalOutcome === "reject" || approvalOutcome === "expired") {
               const rejectedAt = now();
               const rejectionSummary = approvalOutcome === "expired" ? "审批已过期" : "权限拒绝";
@@ -447,9 +475,20 @@ export class AgentLoop {
                 endedAt: rejectedAt,
                 durationMs: 0,
               });
+              trace.updateStep(stepId, {
+                status: "failed",
+                kind: "tool",
+                outputSummary: rejectionSummary,
+                error: approvalOutcome === "expired" ? "approval expired" : decision.reason,
+                endedAt: rejectedAt,
+                durationMs: 0,
+              });
               continue;
             }
             ticket = { kind: "user_approved", decision, approvalId: approval.approvalId, respondedAt: now() };
+            // Approval turns the step back into an execution in progress; the registry
+            // closes it when the call actually finishes.
+            trace.updateStep(stepId, { status: "running", kind: "tool" });
           } else {
             const deniedAt = now();
             toolMessages.push({ role: "tool", toolCallId: call.call.id, content: `策略禁止：${decision.reason}` });
@@ -469,6 +508,14 @@ export class AgentLoop {
               endedAt: deniedAt,
               durationMs: 0,
             });
+            trace.updateStep(stepId, {
+              status: "failed",
+              kind: "tool",
+              outputSummary: "策略禁止",
+              error: decision.reason,
+              endedAt: deniedAt,
+              durationMs: 0,
+            });
             continue;
           }
 
@@ -484,9 +531,9 @@ export class AgentLoop {
               intent: decision.reason,
             } satisfies ToolCallRequest,
             ticket,
-            { signal: token.signal },
+            { signal: token.signal, trace, stepId },
           );
-          if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+          if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
           this.#consumeResult(result, (output) =>
             toolMessages.push({ role: "tool", toolCallId: call.call.id, content: output }),
           );
@@ -514,20 +561,22 @@ export class AgentLoop {
         messages.push(...toolMessages);
       }
 
-      if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+      if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
       if (steps >= this.maxSteps && finalText.trim().length === 0) {
         throw new RpcFailure(RPC_ERROR.TIMEOUT, `run exceeded maxSteps=${this.maxSteps}`);
       }
 
       finalText = finalText.trim();
-      const result: AgentRunResult = { runId, state: "completed", text: finalText, steps, toolCalls };
+      const result: AgentRunResult = { runId, state: "completed", text: finalText, steps, toolCalls, traceId: trace.traceId };
       emit({ type: "agent.completed", runId, result, at: now() });
+      trace.finish("completed");
       return result;
     } catch (error) {
-      if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal);
+      if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
       const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
-      const result: AgentRunResult = { runId, state: "failed", text: finalText.trim(), steps, toolCalls, error: message };
+      const result: AgentRunResult = { runId, state: "failed", text: finalText.trim(), steps, toolCalls, error: message, traceId: trace.traceId };
       emit({ type: "agent.failed", runId, error: message, at: now() });
+      trace.finish("failed");
       return result;
     } finally {
       clearTimeout(runTimer);
@@ -565,16 +614,34 @@ export class AgentLoop {
     emit: (event: AgentStreamEvent) => void,
     now: () => string,
     signal: AbortSignal,
+    trace: TraceRecorder,
   ): AgentRunResult {
     if (isRunTimeout(signal)) {
       const error = `run exceeded maxRunMs=${this.maxRunMs}`;
-      const result: AgentRunResult = { runId: info.runId, state: "failed", text: info.text.trim(), steps: info.steps, toolCalls: info.toolCalls, error };
+      const result: AgentRunResult = {
+        runId: info.runId,
+        state: "failed",
+        text: info.text.trim(),
+        steps: info.steps,
+        toolCalls: info.toolCalls,
+        error,
+        traceId: trace.traceId,
+      };
       emit({ type: "agent.failed", runId: info.runId, error, at: now() });
+      trace.finish("failed");
       return result;
     }
-    const result: AgentRunResult = { runId: info.runId, state: "cancelled", text: info.text.trim(), steps: info.steps, toolCalls: info.toolCalls };
+    const result: AgentRunResult = {
+      runId: info.runId,
+      state: "cancelled",
+      text: info.text.trim(),
+      steps: info.steps,
+      toolCalls: info.toolCalls,
+      traceId: trace.traceId,
+    };
     emit({ type: "agent.thinking", runId: info.runId, textDelta: "\n\n[已停止]", at: now() });
     emit({ type: "agent.completed", runId: info.runId, result, at: now() });
+    trace.finish("cancelled");
     return result;
   }
 
@@ -609,6 +676,24 @@ export class AgentLoop {
 function positiveInteger(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
+}
+
+/**
+ * The trace ledger's title for one run: the first non-blank line of the user's prompt,
+ * redacted and bounded.
+ *
+ * Taken from the prompt rather than from the model's answer because the title exists to
+ * make a **finished** run recognisable in a list of traces — and a run that failed before
+ * it produced any text is exactly the one a reader is looking for.
+ */
+function runTitle(prompt: string): string {
+  const firstLine =
+    redactSensitiveText(prompt)
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "";
+  if (!firstLine) return "Agent run";
+  return firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine;
 }
 
 function isRunTimeout(signal: AbortSignal): boolean {

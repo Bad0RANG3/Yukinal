@@ -16,6 +16,8 @@ import type { AgentRunRequest, AgentStreamEvent } from "@yukinal/shared";
 
 import type { AgentLogger } from "../config.js";
 import { OpenAiCompatibleProvider } from "../providers/openai-compatible.js";
+import { TraceRecorder } from "../trace/trace-recorder.js";
+import { HostRpcClient } from "../transport/host-client.js";
 import { createRuntime } from "./create-runtime.js";
 
 const noop = (): void => {};
@@ -124,6 +126,61 @@ test("E2E: prompt -> tool call -> permission -> execute -> report", async (t) =>
   assert.equal(toolResult.status, "success");
   assert.match(toolResult.outputSummary, /hello from mock/);
   assert(types.includes("agent.completed"), JSON.stringify(types));
+});
+
+test("E2E: a denied call still closes its trace step, and the run names its trace", async (t) => {
+  const { port, close } = await mockLlm([
+    [
+      sseToolCall({
+        index: 0,
+        type: "function",
+        id: "call_denied",
+        function: { name: "filesystem__write", arguments: '{"path":"/etc/motd","content":"x"}' },
+      }),
+    ],
+    [sseText("这个写入被只读模式拒绝了")],
+  ]);
+  t.after(() => close());
+
+  // The stub only has to answer the context reads: the call under test is denied by the
+  // permission engine, so it never reaches the host — which is exactly what is asserted.
+  const hostClient = new HostRpcClient((frame) => {
+    const sent = JSON.parse(frame) as { id: number; method: string };
+    if (sent.method === "host.context.fetch") {
+      hostClient.handleIncoming({ jsonrpc: "2.0", id: sent.id, result: { status: "not_found" } });
+    }
+  });
+  const ledgers: TraceRecorder[] = [];
+  const runtime = createRuntime({
+    log: silent,
+    hostToolClient: hostClient,
+    createTrace: (info) => {
+      const recorder = new TraceRecorder(info.runId, info.title);
+      ledgers.push(recorder);
+      return recorder;
+    },
+  });
+  const events: AgentStreamEvent[] = [];
+
+  const result = await runtime.loop.start(
+    runRequest({ runId: "run_denied", mode: "readonly" }),
+    { emit: (event) => events.push(event) },
+    new OpenAiCompatibleProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "mock-model" }),
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  const toolCall = events.find((event) => event.type === "agent.tool_call");
+  assert(toolCall && toolCall.type === "agent.tool_call", "the denied call must still be visible");
+  assert.equal(toolCall.decision, "deny");
+  assert.equal(result.traceId, toolCall.traceId, "the run must name the trace its steps were recorded under");
+
+  assert.equal(ledgers.length, 1, "exactly one ledger per run");
+  const ledger = ledgers[0];
+  assert(ledger);
+  assert.equal(ledger.steps.length, 1);
+  assert.equal(ledger.steps[0]?.stepId, toolCall.stepId);
+  assert.equal(ledger.steps[0]?.status, "failed", "a denied step is closed, not left running");
+  assert.match(ledger.steps[0]?.error ?? "", /readonly/);
 });
 
 test("E2E: a general question runs without a server target", async (t) => {

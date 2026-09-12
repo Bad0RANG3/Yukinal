@@ -35,6 +35,15 @@ export interface ExecuteOptions {
   /** External cancellation (user pressed Stop). */
   signal?: AbortSignal;
   trace?: TraceRecorder;
+  /**
+   * A trace step the caller already opened for this call.
+   *
+   * The agent loop has to emit `agent.tool_call` with its `stepId` *before* executing
+   * (the UI opens the card from that event), so it opens the step itself and hands the
+   * id down. Without this the registry would open a second step for the same call and
+   * the ledger would show every tool twice.
+   */
+  stepId?: string;
   /** Injectable clock for tests. */
   now?: () => number;
   log?: (message: string, meta?: Record<string, unknown>) => void;
@@ -138,12 +147,16 @@ export class ToolRegistry {
       });
     }
 
-    const step = options.trace?.startToolStep({
-      title: humanTitle(declaration),
-      toolName: declaration.name,
-      callInput: request.input,
-      intent: request.intent,
-    });
+    const stepId =
+      options.trace === undefined
+        ? undefined
+        : (options.stepId ??
+          options.trace.startToolStep({
+            title: toolStepTitle(declaration),
+            toolName: declaration.name,
+            callInput: request.input,
+            intent: request.intent,
+          }).stepId);
 
     const controller = new AbortController();
     const abortFromCaller = () => controller.abort(new Error("cancelled-by-user"));
@@ -219,7 +232,7 @@ export class ToolRegistry {
         }
       : failure(base, startedAt, endedAtMs, cancelled ? cancelledError(controller.signal) : (lastError ?? fallbackError()));
 
-    if (options.trace && step) options.trace.finishToolStep(step.stepId, result);
+    if (options.trace && stepId) options.trace.finishToolStep(stepId, result);
     return result;
   }
 }
@@ -379,7 +392,13 @@ function toJsonSchema(schema: z.ZodType): JsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as JsonSchema;
 }
 
-function humanTitle(declaration: ToolDeclaration): string {
+/**
+ * The step title shown in the trace ledger, derived from the tool name so a namespace
+ * never renders as raw dots. Exported because the agent loop opens the step before the
+ * registry runs (`ExecuteOptions.stepId`); two spellings of the same title is how the
+ * ledger and the UI would drift apart.
+ */
+export function toolStepTitle(declaration: ToolDeclaration): string {
   const [namespace, action] = declaration.name.split(".");
   if (!namespace || !action) return declaration.name;
   return `${namespace} ${action.replace(/-/g, " ")}`;

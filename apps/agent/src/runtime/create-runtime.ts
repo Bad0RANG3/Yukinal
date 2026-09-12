@@ -19,7 +19,7 @@ import { createEmptyContextSource } from "../context/empty-source.js";
 import { createHostContextSource } from "../context/host-context-source.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { RpcRouter } from "../rpc/router.js";
-import { AgentLoop } from "./agent-loop.js";
+import { AgentLoop, type AgentLoopDeps } from "./agent-loop.js";
 import { dockerInspectTool } from "../tools/builtin/docker-inspect.js";
 import { dockerLogsTool } from "../tools/builtin/docker-logs.js";
 import { dockerPsTool } from "../tools/builtin/docker-ps.js";
@@ -48,7 +48,15 @@ export interface Runtime {
   declarations: ToolDeclaration[];
 }
 
-export function createRuntime(options: { log?: AgentLogger; hostToolClient?: HostRpcClient; maxRunMs?: number } = {}): Runtime {
+export function createRuntime(
+  options: {
+    log?: AgentLogger;
+    hostToolClient?: HostRpcClient;
+    maxRunMs?: number;
+    /** Forwarded to the loop verbatim; tests use it to read the ledger a run wrote. */
+    createTrace?: AgentLoopDeps["createTrace"];
+  } = {},
+): Runtime {
   const log = options.log ?? createLogger({ level: "info", scope: "agent" });
 
   const registry = new ToolRegistry();
@@ -69,7 +77,13 @@ export function createRuntime(options: { log?: AgentLogger; hostToolClient?: Hos
   );
   // The router supplies a configured provider for each run; the loop refuses
   // direct calls without one instead of faking a response.
-  const loop = new AgentLoop({ registry, permission, context, maxRunMs: options.maxRunMs });
+  const loop = new AgentLoop({
+    registry,
+    permission,
+    context,
+    maxRunMs: options.maxRunMs,
+    createTrace: options.createTrace,
+  });
 
   const router = new RpcRouter({
     registry,

@@ -118,6 +118,12 @@ export interface AgentRunResult {
   steps: number;
   toolCalls: number;
   error?: string;
+  /**
+   * The execution trace this run wrote. Same value as the `traceId` carried by every
+   * `agent.tool_call` / `agent.tool_result` of the run, so a finished run's audit rows
+   * can be looked up without replaying the event stream.
+   */
+  traceId?: string;
 }
 
 /** Approval round-trip between the desktop and the sidecar. */

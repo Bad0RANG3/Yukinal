@@ -5,24 +5,19 @@
  * see steps while the agent works, not after. Persistence happens in Rust
  * (`tool_executions` / `activities` tables) from the same events.
  *
- * ## Current wiring status
+ * ## Wiring
  *
- * The tool registry already accepts one — `ToolRunOptions.trace` is optional, and
- * `registry.ts` calls `startToolStep` / `finishToolStep` on it when present — but
- * **the agent loop does not pass one**, so no run in production builds a trace today.
- * `registry.test.ts` is the only construction site.
+ * `AgentLoop.start` constructs exactly one recorder per run and passes it to every
+ * `ToolRegistry.execute` call, so the ledger — not the loop's local variables — is the
+ * source of the `traceId` and `stepId` that ride on `agent.tool_call` /
+ * `agent.tool_result`. The loop opens each step itself (`ExecuteOptions.stepId` tells the
+ * registry not to open a second one) because the card's id has to exist before the card
+ * is emitted, and it closes the steps that never reach the registry — a denied call, a
+ * rejected approval — so no step is left claiming `running`. The finished run reports its
+ * `traceId`, which is what makes the audit rows of one run findable.
  *
- * This is recorded here rather than left to `README.md` because a reader of this file
- * is the person most likely to act on it, and from inside this file the class looks
- * fully wired: its methods are called, its events are typed, its emitting is tested.
- * What is missing is one argument at the call site.
- *
- * Kept rather than deleted for the same reason `RusshBackend::trust_host` is kept:
- * it is the only implementation of the interface the registry is written against, so
- * removing it would mean deleting the `trace?` parameter and its two call sites,
- * which is a capability removal dressed as a cleanup. The live trace identifiers the
- * UI renders come from `agent-loop.ts` directly (`agent.tool_call` carries
- * `traceId` / `stepId`), which is why the gap is invisible in the product.
+ * The event stream is therefore a projection of this ledger, and the ledger is the thing
+ * the UI and `tool_executions` agree on.
  */
 
 import { randomUUID } from "node:crypto";
