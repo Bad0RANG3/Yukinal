@@ -304,6 +304,16 @@ fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
         return;
     }
 
+    // 一个**结果**事件必须是终态。`AgentToolResultEvent.status` 的类型是完整的六值
+    // `ToolExecutionStatus`（它按线上契约反序列化，契约里两者共用同一套名字），所以
+    // 一个声称 `status: "running"` 的结果事件在类型上是合法的 —— 但它自相矛盾：它同时
+    // 带着 `ended_at`。落库就会留下一行「还在跑、但已经结束」的记录，而那正是
+    // 「崩溃中断的调用」本该由**缺失**表达的东西，审计里从此分不清两者。
+    if !is_terminal_result_status(&event.status) {
+        eprintln!("[agent] ignored tool result event whose status is not terminal");
+        return;
+    }
+
     let summary =
         if event.tool_name == "filesystem.read" && event.status == ToolExecutionStatus::Success {
             FILE_CONTENT_AUDIT_OMITTED.to_string()
@@ -458,6 +468,21 @@ fn sanitize_audit_input(value: Value) -> Value {
     }
 }
 
+/// 一个工具**结果**的状态只能是终态。
+///
+/// `pending` / `running` / `waiting_approval` 描述的是「还没结束」，而结果事件同时带着
+/// `ended_at`。放它们进来，审计里就会出现「已结束但还在跑」的行，而崩溃中断的调用在账本
+/// 里是**没有行**——两者一旦混同，就再也分不出「跑完了」和「进程死了」。
+///
+/// 这条规则由契约保证（`TOOL_RESULT_STATUSES` 只有三个取值），但 Rust 侧的类型是从线上
+/// 反序列化的完整六值枚举，所以必须在这里挡一次。
+fn is_terminal_result_status(status: &ToolExecutionStatus) -> bool {
+    matches!(
+        status,
+        ToolExecutionStatus::Success | ToolExecutionStatus::Failed | ToolExecutionStatus::Cancelled
+    )
+}
+
 fn is_sensitive_key(value: &str) -> bool {
     let normalized: String = value
         .chars()
@@ -534,8 +559,35 @@ fn forward_agent_frame(app: &AppHandle, frame: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_stable_server_id, safe_audit_summary, sanitize_audit_input, tauri_event_name};
+    use super::{
+        is_stable_server_id, is_terminal_result_status, safe_audit_summary, sanitize_audit_input,
+        tauri_event_name,
+    };
     use serde_json::json;
+    use yukinal_database::models::ToolExecutionStatus;
+
+    /// 三个终态放行，三个在途状态一律挡住 —— 挡住的那三个正是「崩溃中断」会留下的形状，
+    /// 而审计里它们必须表现为「没有这一行」。
+    #[test]
+    fn only_terminal_statuses_may_be_persisted_as_a_result() {
+        for status in [
+            ToolExecutionStatus::Success,
+            ToolExecutionStatus::Failed,
+            ToolExecutionStatus::Cancelled,
+        ] {
+            assert!(is_terminal_result_status(&status), "{status:?} is a result");
+        }
+        for status in [
+            ToolExecutionStatus::Pending,
+            ToolExecutionStatus::Running,
+            ToolExecutionStatus::WaitingApproval,
+        ] {
+            assert!(
+                !is_terminal_result_status(&status),
+                "{status:?} cannot describe a finished call",
+            );
+        }
+    }
 
     #[test]
     fn stable_server_ids_are_lowercase_and_scoped() {
