@@ -144,6 +144,12 @@ export type _IpcParamsContracts = {
   provider_activate: Expect<Assignable<ParamsOf<"provider_activate">, IpcCommandMap["provider_activate"]["params"]>>;
   provider_delete: Expect<Assignable<ParamsOf<"provider_delete">, IpcCommandMap["provider_delete"]["params"]>>;
   provider_models: Expect<Assignable<ParamsOf<"provider_models">, IpcCommandMap["provider_models"]["params"]>>;
+  provider_test: Expect<Assignable<ParamsOf<"provider_test">, IpcCommandMap["provider_test"]["params"]>>;
+  mcp_server_list: Expect<Assignable<ParamsOf<"mcp_server_list">, IpcCommandMap["mcp_server_list"]["params"]>>;
+  mcp_server_save: Expect<Assignable<ParamsOf<"mcp_server_save">, IpcCommandMap["mcp_server_save"]["params"]>>;
+  mcp_server_delete: Expect<Assignable<ParamsOf<"mcp_server_delete">, IpcCommandMap["mcp_server_delete"]["params"]>>;
+  mcp_server_start: Expect<Assignable<ParamsOf<"mcp_server_start">, IpcCommandMap["mcp_server_start"]["params"]>>;
+  mcp_server_stop: Expect<Assignable<ParamsOf<"mcp_server_stop">, IpcCommandMap["mcp_server_stop"]["params"]>>;
 };
 
 export type _IpcResponseContracts = {
@@ -197,4 +203,34 @@ export type _IpcResponseContracts = {
   provider_activate: Expect<Assignable<ResponseOf<"provider_activate">, IpcCommandMap["provider_activate"]["response"]>>;
   provider_delete: Expect<Assignable<ResponseOf<"provider_delete">, IpcCommandMap["provider_delete"]["response"]>>;
   provider_models: Expect<Assignable<ResponseOf<"provider_models">, IpcCommandMap["provider_models"]["response"]>>;
+  provider_test: Expect<Assignable<ResponseOf<"provider_test">, IpcCommandMap["provider_test"]["response"]>>;
+  mcp_server_list: Expect<Assignable<ResponseOf<"mcp_server_list">, IpcCommandMap["mcp_server_list"]["response"]>>;
+  mcp_server_save: Expect<Assignable<ResponseOf<"mcp_server_save">, IpcCommandMap["mcp_server_save"]["response"]>>;
+  mcp_server_delete: Expect<Assignable<ResponseOf<"mcp_server_delete">, IpcCommandMap["mcp_server_delete"]["response"]>>;
+  mcp_server_start: Expect<Assignable<ResponseOf<"mcp_server_start">, IpcCommandMap["mcp_server_start"]["response"]>>;
+  mcp_server_stop: Expect<Assignable<ResponseOf<"mcp_server_stop">, IpcCommandMap["mcp_server_stop"]["response"]>>;
 };
+
+/**
+ * The two maps above say "every command", and these pins are what make that true rather
+ * than aspirational: `IPC_SCHEMAS` is the command list, so a key missing from a map is a
+ * command whose params (or response) contract nothing checks. Same idiom as
+ * `_EveryEventGateIsADeclaredName` at the top of this file.
+ *
+ * Six commands were missing when these pins were written — `mcp_server_list/save/delete/
+ * start/stop` and `provider_test`. All six had runtime gates (`IPC_SCHEMAS` is what
+ * `callDesktopParsed` parses with) but no compile-time structural check, so a schema
+ * whose output drifted from its `IpcCommandMap` entry would have compiled.
+ *
+ * **Two pins, not one over `keyof A | keyof B`.** The union form is silently weaker: a
+ * command present in *either* map satisfies it, so removing an entry from one map alone
+ * still compiles. That was this pin's first draft, and only deleting an entry and
+ * re-running the compiler revealed it — the type reads as if it covered both.
+ */
+export type _EveryCommandHasAParamsContract = Expect<
+  Exclude<keyof typeof IPC_SCHEMAS, keyof _IpcParamsContracts> extends never ? true : false
+>;
+
+export type _EveryCommandHasAResponseContract = Expect<
+  Exclude<keyof typeof IPC_SCHEMAS, keyof _IpcResponseContracts> extends never ? true : false
+>;
