@@ -25,6 +25,10 @@ pub fn run() {
             app.manage(app_state);
 
             forward_terminal_events(app.handle().clone());
+            // Once per window, before anything can start the agent: the forwarder has to
+            // outlive an agent crash so the restarted process is still reported, and it must
+            // never be duplicated (two forwarders execute every `host.*` request twice).
+            commands::forward_sidecar_events(app.handle().clone());
 
             // The Agent is a core interaction service, so it starts with the window
             // instead of being hidden behind a status control in the rail. The same

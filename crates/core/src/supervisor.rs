@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -20,11 +20,66 @@ pub const LOG_HISTORY: usize = 200;
 
 const UI_CHANNEL_CAPACITY: usize = 512;
 
+/// How the supervisor reacts to an exit **it did not ask for**.
+///
+/// Bounded on purpose, and the bound is the point: an agent that dies during startup
+/// (a missing `node`, a syntax error in the bundle) would otherwise be respawned
+/// forever, burning a process slot and filling the log tail with the same failure. Once
+/// the budget is spent the supervisor stops trying and says so
+/// ([`RestartRecord::exhausted`]), and the next start has to come from the user.
+///
+/// `healthy_after` is what keeps the budget from being consumed by an unrelated crash
+/// hours later: a process that served longer than this is treated as a fresh baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartPolicy {
+    pub enabled: bool,
+    pub max_attempts: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+    pub healthy_after: Duration,
+}
+
+impl Default for RestartPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: 5,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            healthy_after: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Exponential backoff, capped. Attempts are numbered from 1, so the first retry waits
+/// `base_delay` rather than twice it.
+#[must_use]
+pub fn restart_delay(policy: &RestartPolicy, attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(16);
+    policy
+        .base_delay
+        .saturating_mul(2u32.saturating_pow(exponent))
+        .min(policy.max_delay)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitRecord {
     pub code: Option<i32>,
     pub signal: Option<String>,
+    pub at: String,
+}
+
+/// The supervisor's own account of an automatic restart, for the UI to render instead of
+/// leaving a crash and a restart looking like nothing happened.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartRecord {
+    /// The attempt this record describes: 1 for the first retry.
+    pub attempt: u32,
+    pub max_attempts: u32,
+    /// True once the budget is spent and the supervisor has stopped trying.
+    pub exhausted: bool,
     pub at: String,
 }
 
@@ -41,6 +96,74 @@ pub struct SupervisorStatus {
     pub started_at: Option<String>,
     /// Survives until the next successful start, so a crash stays visible.
     pub last_exit: Option<ExitRecord>,
+    /// Present only while a restart is pending, or after the budget was spent.
+    ///
+    /// `skip_serializing_if` keeps the field out of the payload when nothing has gone
+    /// wrong: the fixture gate parses these responses strictly, and a permanent
+    /// `"restart": null` would be a contract change for a state that is not news.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartRecord>,
+}
+
+/// What the supervisor decided about one unexpected exit. Pure data so the backoff and the
+/// budget can be tested without spawning a process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestartDecision {
+    Retry { attempt: u32, delay: Duration },
+    Exhausted { attempts: u32 },
+}
+
+#[derive(Debug, Default)]
+struct RestartState {
+    /// Attempts spent since the last healthy start.
+    attempts: u32,
+    /// When the current process started; `None` while nothing is running. Cleared on exit
+    /// so a second decision inside the same outage cannot reset the budget a second time.
+    started_at: Option<Instant>,
+    record: Option<RestartRecord>,
+}
+
+impl RestartState {
+    fn decide(&mut self, policy: &RestartPolicy, now: Instant, at: String) -> RestartDecision {
+        let was_healthy = self
+            .started_at
+            .is_some_and(|started| now.duration_since(started) >= policy.healthy_after);
+        self.started_at = None;
+        if was_healthy {
+            self.attempts = 0;
+        }
+
+        if !policy.enabled || self.attempts >= policy.max_attempts {
+            self.record = Some(RestartRecord {
+                attempt: self.attempts,
+                max_attempts: policy.max_attempts,
+                exhausted: true,
+                at,
+            });
+            return RestartDecision::Exhausted {
+                attempts: self.attempts,
+            };
+        }
+
+        self.attempts += 1;
+        let delay = restart_delay(policy, self.attempts);
+        self.record = Some(RestartRecord {
+            attempt: self.attempts,
+            max_attempts: policy.max_attempts,
+            exhausted: false,
+            at,
+        });
+        RestartDecision::Retry {
+            attempt: self.attempts,
+            delay,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.attempts = 0;
+        self.started_at = None;
+        self.record = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +199,18 @@ struct Inner {
     last_exit: AsyncMutex<Option<ExitRecord>>,
     logs: AsyncMutex<VecDeque<String>>,
     events: broadcast::Sender<SidecarEvent>,
+    /// Read only by the restart path, which is why it lives in the shared state rather
+    /// than being passed to the watcher: the watcher is created per process, the policy
+    /// belongs to the supervisor.
+    restart_policy: RestartPolicy,
+    restart: AsyncMutex<RestartState>,
+    /// The config the running (or most recently started) sidecar was launched with.
+    ///
+    /// The restart path needs exactly the config that worked. Re-running the resolution
+    /// rules in the watcher would put a second copy of them in a task that runs *after*
+    /// the failed start, which is precisely when a second, subtly different answer would
+    /// go unnoticed.
+    config: AsyncMutex<Option<SidecarConfig>>,
 }
 
 /// Cheap to clone; every clone addresses the same supervision state.
@@ -93,6 +228,13 @@ impl Default for Supervisor {
 impl Supervisor {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_restart_policy(RestartPolicy::default())
+    }
+
+    /// Build a supervisor with an explicit restart policy. Tests use a fast one; the
+    /// desktop uses the default.
+    #[must_use]
+    pub fn with_restart_policy(restart_policy: RestartPolicy) -> Self {
         let (events, _) = broadcast::channel(UI_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(Inner {
@@ -101,6 +243,9 @@ impl Supervisor {
                 last_exit: AsyncMutex::new(None),
                 logs: AsyncMutex::new(VecDeque::new()),
                 events,
+                restart_policy,
+                restart: AsyncMutex::new(RestartState::default()),
+                config: AsyncMutex::new(None),
             }),
         }
     }
@@ -114,6 +259,7 @@ impl Supervisor {
     pub async fn status(&self) -> SupervisorStatus {
         let runtime = self.inner.runtime.lock().await.clone();
         let last_exit = self.inner.last_exit.lock().await.clone();
+        let restart = self.inner.restart.lock().await.record.clone();
         match runtime.filter(|state| state.handle.is_running()) {
             Some(state) => SupervisorStatus {
                 running: true,
@@ -124,6 +270,7 @@ impl Supervisor {
                 entry: Some(state.info.entry),
                 started_at: Some(state.info.started_at),
                 last_exit,
+                restart,
             },
             None => SupervisorStatus {
                 running: false,
@@ -134,6 +281,7 @@ impl Supervisor {
                 entry: None,
                 started_at: None,
                 last_exit,
+                restart,
             },
         }
     }
@@ -150,7 +298,27 @@ impl Supervisor {
 
     /// Launch (or reuse) the sidecar and handshake with it. Never leaves a half-alive
     /// child behind: `sidecar::launch` kills on handshake failure.
+    ///
+    /// This is the *asked-for* start, so it also clears the two records that describe an
+    /// outage: a fresh start by the user is not the continuation of a crash loop.
     pub async fn start(&self, config: &SidecarConfig) -> Result<StartOutcome, SidecarError> {
+        self.start_with_history(config, false).await
+    }
+
+    /// Start the agent again after an exit nobody asked for.
+    ///
+    /// Identical to [`Supervisor::start`] except that the crash and the restart stay
+    /// visible: an automatic restart that erases its own cause is indistinguishable from
+    /// "nothing happened", which is exactly the report a user must not get.
+    async fn restart(&self, config: &SidecarConfig) -> Result<StartOutcome, SidecarError> {
+        self.start_with_history(config, true).await
+    }
+
+    async fn start_with_history(
+        &self,
+        config: &SidecarConfig,
+        keep_history: bool,
+    ) -> Result<StartOutcome, SidecarError> {
         let _start_guard = self.inner.start_lock.lock().await;
         if let Some(state) = self.inner.runtime.lock().await.as_ref() {
             if state.handle.is_running() {
@@ -199,12 +367,33 @@ impl Supervisor {
             pid: info.pid,
         };
 
-        // A stale lastExit from a previous crash must not be attributed to this run.
-        *self.inner.last_exit.lock().await = None;
+        // A stale lastExit from a previous crash must not be attributed to this run — but a
+        // crash we are restarting *from* is exactly the context of this run, so it stays.
+        if !keep_history {
+            *self.inner.last_exit.lock().await = None;
+        }
         *self.inner.runtime.lock().await = Some(RuntimeState {
             handle: launched.handle,
             info: info.clone(),
         });
+
+        // The restart path reuses this exact config, and the "was this process healthy?"
+        // clock starts here rather than at spawn: the uptime that matters is uptime of a
+        // *handshaked* agent, not of a process that may still die during `initialize`.
+        *self.inner.config.lock().await = Some(config.clone());
+        {
+            let mut state = self.inner.restart.lock().await;
+            state.started_at = Some(Instant::now());
+            if !keep_history {
+                state.record = None;
+            }
+        }
+        // Mark the generation boundary in the tail. Without it the previous process's last
+        // words and the new one's first words run together, and "which line came from the
+        // process that died?" is unanswerable exactly when it matters.
+        self.inner
+            .remember_log(&format!("[supervisor] sidecar started (pid {})", info.pid))
+            .await;
 
         tokio::spawn(async move {
             loop {
@@ -212,7 +401,9 @@ impl Supervisor {
                     Ok(event) => match event {
                         SidecarEvent::Log(line) => watcher.remember_log(&line).await,
                         SidecarEvent::Exited { code, signal } => {
-                            watcher.record_exit(code, signal).await;
+                            Arc::clone(&watcher.inner)
+                                .handle_exit(watcher.pid, code, signal)
+                                .await;
                             break;
                         }
                         frame @ SidecarEvent::Frame(_) => watcher.publish(frame).await,
@@ -235,11 +426,17 @@ impl Supervisor {
     }
 
     /// Stop the sidecar. Returns whether a process was actually running.
+    ///
+    /// This is the *asked-for* exit: it takes the runtime slot before shutting the child
+    /// down, which is what tells the watcher that the exit it is about to observe was not a
+    /// crash. The restart policy is reset with it — a stop followed by a start is a fresh
+    /// session, not attempt N of an outage.
     pub async fn stop(&self) -> bool {
         // Coordinate with start so a stop racing the spawn/handshake/publish sequence
         // cannot observe an empty runtime slot and leave the newly launched child alive.
         let _start_guard = self.inner.start_lock.lock().await;
         let runtime = self.inner.runtime.lock().await.take();
+        self.inner.restart.lock().await.reset();
         match runtime {
             Some(state) => {
                 state.handle.shutdown().await;
@@ -270,31 +467,357 @@ struct Watcher {
 
 impl Watcher {
     async fn remember_log(&self, line: &str) {
-        let mut logs = self.inner.logs.lock().await;
+        self.inner.remember_log(line).await;
+    }
+
+    async fn publish(&self, event: SidecarEvent) {
+        self.inner.publish(event).await;
+    }
+}
+
+impl Inner {
+    /// Bounded stderr tail: evict the oldest line so a chatty agent cannot grow it forever.
+    async fn remember_log(&self, line: &str) {
+        let mut logs = self.logs.lock().await;
         if logs.len() >= LOG_HISTORY {
             logs.pop_front();
         }
         logs.push_back(line.to_string());
     }
 
-    async fn record_exit(&self, code: Option<i32>, signal: Option<String>) {
-        let record = ExitRecord {
+    async fn publish(&self, event: SidecarEvent) {
+        // No UI subscriber yet is normal; never an error path.
+        let _ = self.events.send(event);
+    }
+
+    /// Fold one observed exit into: the record the UI reads, the event the forwarder logs,
+    /// and — only for an exit nobody asked for — the restart decision.
+    ///
+    /// "Nobody asked for it" is decided by pid, not by a separate flag: `stop()` takes the
+    /// runtime slot *before* shutting the child down, so an exit whose pid is no longer the
+    /// recorded one was either requested by the user or already superseded by a newer
+    /// process. Concluding that from a flag would mean trusting every present and future
+    /// caller to set it.
+    async fn handle_exit(self: &Arc<Self>, pid: u32, code: Option<i32>, signal: Option<String>) {
+        *self.last_exit.lock().await = Some(ExitRecord {
             code,
-            signal,
+            signal: signal.clone(),
             at: sidecar::iso8601_now(),
+        });
+        // Published rather than swallowed: the forwarder is created once and has to survive
+        // a restart, and "the agent died" is the one line a reader of the desktop console
+        // needs in order to make sense of the lines that follow it.
+        self.publish(SidecarEvent::Exited {
+            code,
+            signal: signal.clone(),
+        })
+        .await;
+
+        let was_current = {
+            let mut runtime = self.runtime.lock().await;
+            if runtime
+                .as_ref()
+                .is_some_and(|state| state.handle.info().pid == pid)
+            {
+                *runtime = None;
+                true
+            } else {
+                false
+            }
         };
-        *self.inner.last_exit.lock().await = Some(record);
-        let mut runtime = self.inner.runtime.lock().await;
-        if runtime
-            .as_ref()
-            .is_some_and(|state| state.handle.info().pid == self.pid)
-        {
-            *runtime = None;
+        if !was_current {
+            return;
+        }
+
+        let exit_note = match (code, signal.as_deref()) {
+            (Some(code), _) => format!("exit code {code}"),
+            (None, Some(signal)) => format!("signal {signal}"),
+            (None, None) => "no exit status".to_string(),
+        };
+        let decision = {
+            let mut state = self.restart.lock().await;
+            state.decide(&self.restart_policy, Instant::now(), sidecar::iso8601_now())
+        };
+        match decision {
+            RestartDecision::Exhausted { attempts } => {
+                if self.restart_policy.enabled {
+                    self.remember_log(&format!(
+                        "[supervisor] sidecar exited ({exit_note}); restart budget of {attempts} attempt(s) is spent, not restarting"
+                    ))
+                    .await;
+                }
+            }
+            RestartDecision::Retry { attempt, delay } => {
+                self.remember_log(&format!(
+                    "[supervisor] sidecar exited ({exit_note}); restart {attempt}/{} in {} ms",
+                    self.restart_policy.max_attempts,
+                    delay.as_millis()
+                ))
+                .await;
+                let config = self.config.lock().await.clone();
+                spawn_restart(Arc::clone(self), config, delay, attempt);
+            }
+        }
+    }
+}
+
+/// Start the restart attempt in a fresh task.
+///
+/// The future is boxed on purpose. `start` spawns the watcher, the watcher handles an exit,
+/// the exit path restarts through `start` again — a genuinely cyclic call graph, which the
+/// compiler refuses to give an opaque type to ("cycle detected when computing type of opaque
+/// `start`"). Erasing the future here is what breaks that cycle; it is not a style choice.
+fn spawn_restart(inner: Arc<Inner>, config: Option<SidecarConfig>, delay: Duration, attempt: u32) {
+    let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move { restart_loop(inner, config, delay, attempt).await });
+    tokio::spawn(future);
+}
+
+/// Wait, then try to bring the agent back, and keep trying within the same budget.
+///
+/// A restart that itself fails (`node` removed while the app was open, a bundle that no
+/// longer parses) produces no `Exited` event, so nothing else would notice it: without this
+/// loop the supervisor would simply stop trying after the first failure and the UI would
+/// show a dead agent with attempts left unspent.
+async fn restart_loop(
+    inner: Arc<Inner>,
+    config: Option<SidecarConfig>,
+    mut delay: Duration,
+    attempt: u32,
+) {
+    let Some(config) = config else {
+        inner
+            .remember_log("[supervisor] no remembered sidecar config; not restarting")
+            .await;
+        return;
+    };
+
+    let mut attempt = attempt;
+    loop {
+        tokio::time::sleep(delay).await;
+        let supervisor = Supervisor {
+            inner: Arc::clone(&inner),
+        };
+        match supervisor.restart(&config).await {
+            Ok(outcome) => {
+                inner
+                    .remember_log(&format!(
+                        "[supervisor] restart {attempt} succeeded (pid {}, reusing a running process: {})",
+                        outcome.runtime.pid, outcome.already_running
+                    ))
+                    .await;
+                return;
+            }
+            Err(error) => {
+                inner
+                    .remember_log(&format!("[supervisor] restart {attempt} failed: {error}"))
+                    .await;
+                let decision = {
+                    let mut state = inner.restart.lock().await;
+                    state.decide(
+                        &inner.restart_policy,
+                        Instant::now(),
+                        sidecar::iso8601_now(),
+                    )
+                };
+                match decision {
+                    RestartDecision::Retry {
+                        attempt: next,
+                        delay: next_delay,
+                    } => {
+                        attempt = next;
+                        delay = next_delay;
+                    }
+                    RestartDecision::Exhausted { attempts } => {
+                        inner
+                            .remember_log(&format!(
+                                "[supervisor] restart budget of {attempts} attempt(s) is spent, giving up"
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> RestartPolicy {
+        RestartPolicy {
+            enabled: true,
+            max_attempts: 3,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(400),
+            healthy_after: Duration::from_secs(60),
         }
     }
 
-    async fn publish(&self, event: SidecarEvent) {
-        // No UI subscriber yet is normal; never an error path.
-        let _ = self.inner.events.send(event);
+    fn at(seconds: u64) -> String {
+        format!("2026-01-01T00:00:{seconds:02}Z")
+    }
+
+    #[test]
+    fn backoff_doubles_from_the_base_and_stops_at_the_cap() {
+        let policy = policy();
+        assert_eq!(restart_delay(&policy, 1), Duration::from_millis(100));
+        assert_eq!(restart_delay(&policy, 2), Duration::from_millis(200));
+        assert_eq!(restart_delay(&policy, 3), Duration::from_millis(400));
+        assert_eq!(
+            restart_delay(&policy, 4),
+            Duration::from_millis(400),
+            "attempt 4 would be 800 ms; the cap is what the agent actually waits"
+        );
+        // A huge attempt must not overflow into a panic or a nonsense delay.
+        assert_eq!(restart_delay(&policy, u32::MAX), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn the_budget_is_spent_and_then_the_supervisor_stops() {
+        let policy = policy();
+        let start = Instant::now();
+        let mut state = RestartState {
+            attempts: 0,
+            started_at: Some(start),
+            record: None,
+        };
+
+        for expected in 1u32..=3 {
+            let decision = state.decide(
+                &policy,
+                start + Duration::from_secs(1),
+                at(u64::from(expected)),
+            );
+            assert_eq!(
+                decision,
+                RestartDecision::Retry {
+                    attempt: expected,
+                    delay: restart_delay(&policy, expected),
+                }
+            );
+        }
+
+        let decision = state.decide(&policy, start + Duration::from_secs(2), at(4));
+        assert_eq!(decision, RestartDecision::Exhausted { attempts: 3 });
+        let record = state.record.as_ref().expect("a record must be kept");
+        assert!(record.exhausted);
+        assert_eq!(record.attempt, 3);
+        assert_eq!(record.max_attempts, 3);
+    }
+
+    #[test]
+    fn a_disabled_policy_never_retries_even_with_budget_left() {
+        let policy = RestartPolicy {
+            enabled: false,
+            ..policy()
+        };
+        let mut state = RestartState {
+            attempts: 0,
+            started_at: Some(Instant::now()),
+            record: None,
+        };
+        assert_eq!(
+            state.decide(&policy, Instant::now(), at(1)),
+            RestartDecision::Exhausted { attempts: 0 }
+        );
+    }
+
+    #[test]
+    fn a_process_that_stayed_up_counts_as_a_fresh_baseline() {
+        let policy = policy();
+        let start = Instant::now();
+        let mut state = RestartState {
+            attempts: 3,
+            started_at: Some(start),
+            record: None,
+        };
+
+        // Crash after two minutes of service: the budget of a long dead incident must not
+        // be charged to this one.
+        let decision = state.decide(&policy, start + Duration::from_secs(120), at(9));
+        assert_eq!(
+            decision,
+            RestartDecision::Retry {
+                attempt: 1,
+                delay: Duration::from_millis(100),
+            }
+        );
+    }
+
+    #[test]
+    fn a_second_decision_in_one_outage_cannot_reset_the_budget_twice() {
+        let policy = policy();
+        let start = Instant::now();
+        let mut state = RestartState {
+            attempts: 0,
+            started_at: Some(start),
+            record: None,
+        };
+
+        // The crash of a long-running process...
+        assert_eq!(
+            state.decide(&policy, start + Duration::from_secs(120), at(1)),
+            RestartDecision::Retry {
+                attempt: 1,
+                delay: Duration::from_millis(100),
+            }
+        );
+        // ...and then the *restart failing* must spend the budget rather than see the same
+        // ancient `started_at` and hand out a fresh attempt. This is the loop that would
+        // otherwise retry forever.
+        assert_eq!(
+            state.decide(&policy, start + Duration::from_secs(121), at(2)),
+            RestartDecision::Retry {
+                attempt: 2,
+                delay: Duration::from_millis(200),
+            }
+        );
+        assert_eq!(
+            state.decide(&policy, start + Duration::from_secs(122), at(3)),
+            RestartDecision::Retry {
+                attempt: 3,
+                delay: Duration::from_millis(400),
+            }
+        );
+        assert_eq!(
+            state.decide(&policy, start + Duration::from_secs(123), at(4)),
+            RestartDecision::Exhausted { attempts: 3 }
+        );
+    }
+
+    #[test]
+    fn reset_clears_both_the_budget_and_the_record() {
+        let policy = policy();
+        let start = Instant::now();
+        let mut state = RestartState {
+            attempts: 2,
+            started_at: Some(start),
+            record: None,
+        };
+        state.decide(&policy, start + Duration::from_secs(1), at(1));
+        assert!(state.record.is_some());
+
+        state.reset();
+
+        assert_eq!(state.attempts, 0);
+        assert!(state.started_at.is_none());
+        assert!(state.record.is_none(), "a user stop is not an outage");
+    }
+
+    #[tokio::test]
+    async fn a_status_without_trouble_omits_the_restart_field_entirely() {
+        let status = Supervisor::new().status().await;
+        let payload = serde_json::to_value(&status).expect("serialize");
+        assert!(
+            payload.get("restart").is_none(),
+            "a permanent \"restart\": null would be a contract change for a non-event"
+        );
+        assert_eq!(
+            payload.get("running").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
     }
 }

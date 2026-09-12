@@ -22,7 +22,7 @@
 ## 新读者按什么顺序读
 
 1. [项目 README](../README.md) —— 先知道这是什么、现在能做什么、还差什么。
-2. [ADR 0001](adr/0001-agent-runtime-as-node-sidecar.md) + [ADR 0008](adr/0008-sidecar-launch-and-lifecycle.md) —— Agent 为什么是一个独立进程，以及谁负责它的生死。
+2. [ADR 0001](adr/0001-agent-runtime-as-node-sidecar.md) + [ADR 0008](adr/0008-sidecar-launch-and-lifecycle.md) + [ADR 0010](adr/0010-bounded-sidecar-recovery.md) —— Agent 为什么是一个独立进程，谁负责它的生死，以及崩溃之后会发生什么。
 3. [ADR 0006](adr/0006-sidecar-transport-ndjson-jsonrpc.md) —— 两侧到底怎么说话；这是调试时最先需要的东西。
 4. [ADR 0005](adr/0005-permission-engine-sole-decision-maker.md) + [ADR 0009](adr/0009-agent-permission-delegation.md) —— 一次工具调用凭什么被执行，用户委托与模型文本的区别在哪里。
 5. [ADR 0004](adr/0004-tool-name-mapping.md) + [Provider 边界](../apps/agent/src/providers/README.md) —— 模型看到的世界和内部审计记录的世界如何对齐。
@@ -53,8 +53,9 @@
 | [0005](adr/0005-permission-engine-sole-decision-maker.md) | Permission Engine 是唯一的执行授权决策者 | Accepted |
 | [0006](adr/0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted |
 | [0007](adr/0007-monorepo-and-day-one-abstractions.md) | pnpm 与 Cargo 双 workspace，并优先稳定变化最频繁的边界 | Accepted |
-| [0008](adr/0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted |
+| [0008](adr/0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted（「不自动重启」一节由 [0010](adr/0010-bounded-sidecar-recovery.md) 取代） |
 | [0009](adr/0009-agent-permission-delegation.md) | Agent 权限使用显式的运行级委托，与运行模式互相正交 | Accepted |
+| [0010](adr/0010-bounded-sidecar-recovery.md) | 崩溃后的自动恢复有界，且只恢复能力、不复活状态 | Accepted |
 
 ## 更新文档
 

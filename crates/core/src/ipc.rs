@@ -204,6 +204,7 @@ mod tests {
             entry: Some("apps/agent/dist/index.js".into()),
             started_at: Some("2026-01-01T00:00:00Z".into()),
             last_exit: None,
+            restart: None,
         })
         .expect("serialize");
         assert_eq!(actual, fixture(FIXTURE_AGENT_STATUS));
@@ -224,6 +225,7 @@ mod tests {
                 signal: None,
                 at: "2026-01-01T00:05:00Z".into(),
             }),
+            restart: None,
         })
         .expect("serialize");
         assert_eq!(actual, fixture(FIXTURE_AGENT_STATUS_EXITED));

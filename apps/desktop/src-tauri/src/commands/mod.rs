@@ -74,9 +74,9 @@ pub(crate) async fn start_sidecar(app: &AppHandle) -> Result<AgentSpawnResponse,
         .await
         .map_err(|error| error.to_string())?;
 
-    if !outcome.already_running {
-        forward_sidecar_events(app.clone());
-    }
+    // Nothing to wire up here: the event forwarder belongs to the window (see
+    // `forward_sidecar_events`), so a start — from the UI, from the dev autostart hook, or
+    // from the supervisor's own restart path — reuses the one that is already running.
 
     // 逐字段手抄改成 `From`：那条映射现在住在 `crates/core/src/ipc.rs`（契约的所在地），
     // 见那里的注释 —— 手抄的问题不是风格，而是给 RuntimeInfo 加一个字段却忘了这里时，
@@ -125,7 +125,14 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
 
 /// One task per launched sidecar: keeps stderr visible and maps sidecar notifications
 /// onto the desktop event channels.
-fn forward_sidecar_events(app: AppHandle) {
+///
+/// Created **once**, from the window setup, not per start. It used to be called by
+/// `start_sidecar` for every non-reused start and relied on `SidecarEvent::Exited` to end
+/// the task; the supervisor deliberately did not republish that event, so after a crash
+/// and a restart two forwarders were attached to the same broadcast channel. Every frame
+/// was then forwarded twice, and every `host.tool.execute` request — which is answered by a
+/// task spawned per received event — was *executed twice* on the target.
+pub(crate) fn forward_sidecar_events(app: AppHandle) {
     let supervisor = app.state::<AppState>().supervisor.clone();
     let mut receiver = supervisor.subscribe();
     let cancellations: host::HostCancellationRegistry =
@@ -194,8 +201,13 @@ fn forward_sidecar_events(app: AppHandle) {
                         });
                     }
                     SidecarEvent::Exited { code, signal } => {
+                        // Observed, not a reason to leave: this forwarder is created once for
+                        // the life of the window, and the supervisor may already be bringing
+                        // a new agent up behind it. Breaking here would silently stop
+                        // forwarding the *restarted* agent's frames, and the next start would
+                        // have to create a second forwarder — which is how one `host.*`
+                        // request ends up executed twice.
                         eprintln!("[agent] exited code={code:?} signal={signal:?}");
-                        break;
                     }
                 },
                 Err(error) => {

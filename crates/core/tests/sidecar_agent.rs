@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use yukinal_core::sidecar::{self, SidecarConfig, SidecarEvent, PROTOCOL_VERSION};
-use yukinal_core::supervisor::Supervisor;
+use yukinal_core::supervisor::{RestartPolicy, Supervisor};
 
 fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var(key).ok().map(PathBuf::from).filter(|path| {
@@ -275,4 +275,109 @@ async fn the_supervisor_tracks_its_own_child_including_the_exit_record() {
             "expected either an Exited event or a recorded lastExit"
         );
     }
+}
+
+/// Kill `pid` from outside the process, which is what a crash looks like to the supervisor:
+/// nothing told it to expect this exit.
+fn kill_process(pid: u32) {
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status();
+    #[cfg(unix)]
+    let status = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
+    let status = status.expect("the platform kill command must be runnable");
+    assert!(status.success(), "killing pid {pid} must succeed");
+}
+
+fn fast_restart_policy(base_delay_ms: u64) -> RestartPolicy {
+    RestartPolicy {
+        enabled: true,
+        max_attempts: 3,
+        base_delay: Duration::from_millis(base_delay_ms),
+        max_delay: Duration::from_millis(base_delay_ms * 4),
+        healthy_after: Duration::from_secs(60),
+    }
+}
+
+/// The claim "a crashed sidecar is brought back automatically" is only worth making if it is
+/// observed: this kills the real child and waits for a *different* pid to report running.
+#[tokio::test]
+async fn a_crashed_sidecar_is_restarted_and_the_restart_is_reported() {
+    let Some(config) = config() else { return };
+    let supervisor = Supervisor::with_restart_policy(fast_restart_policy(150));
+
+    let first = supervisor.start(&config).await.expect("first start");
+    let first_pid = first.runtime.pid;
+    kill_process(first_pid);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut revived = None;
+    while tokio::time::Instant::now() < deadline {
+        let status = supervisor.status().await;
+        if status.running {
+            if let Some(pid) = status.pid.filter(|pid| *pid != first_pid) {
+                revived = Some((pid, status));
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let (pid, status) = revived.expect("an unexpected exit must bring the agent back");
+    assert_ne!(
+        pid, first_pid,
+        "a restart means a new process, not a revived pid"
+    );
+    assert!(
+        status.last_exit.is_some(),
+        "the crash must stay visible after the restart, not be erased by it"
+    );
+    let record = status
+        .restart
+        .expect("an automatic restart has to be reported, or it looks like nothing happened");
+    assert_eq!(record.attempt, 1);
+    assert!(!record.exhausted);
+
+    let logs = supervisor.logs().await;
+    assert!(
+        logs.iter().any(|line| line.contains("restart 1/3")),
+        "the tail must explain the restart: {logs:?}"
+    );
+
+    let _ = supervisor.stop().await;
+}
+
+/// The asked-for exit is not an outage. If a user's Stop could be answered with a restart,
+/// the stop button would be a lie, and the attempt budget would be spent on nothing.
+#[tokio::test]
+async fn a_requested_stop_is_not_restarted() {
+    let Some(config) = config() else { return };
+    let supervisor = Supervisor::with_restart_policy(fast_restart_policy(50));
+
+    let started = supervisor.start(&config).await.expect("start");
+    assert!(started.runtime.pid > 0);
+    assert!(supervisor.stop().await);
+
+    // Several base delays: long enough that a restart triggered by the stop would be visible.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let status = supervisor.status().await;
+    assert!(
+        !status.running,
+        "a stopped agent must stay stopped: {status:?}"
+    );
+    assert!(
+        status.restart.is_none(),
+        "a stop the user asked for is not an outage, and must not appear as one: {status:?}"
+    );
+    let logs = supervisor.logs().await;
+    assert!(
+        !logs
+            .iter()
+            .any(|line| line.starts_with("[supervisor]") && line.contains("restart")),
+        "no restart may be attempted after a requested stop: {logs:?}"
+    );
 }

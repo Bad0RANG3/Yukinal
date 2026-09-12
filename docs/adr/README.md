@@ -62,7 +62,8 @@ Date: YYYY-MM-DD
 | [0005](0005-permission-engine-sole-decision-maker.md) | Permission Engine 是唯一的执行授权决策者 | Accepted |
 | [0006](0006-sidecar-transport-ndjson-jsonrpc.md) | sidecar 通过 stdio 上的 NDJSON JSON-RPC 通信，协议版本 `1.0` | Accepted |
 | [0007](0007-monorepo-and-day-one-abstractions.md) | pnpm 与 Cargo 双 workspace，并优先稳定变化最频繁的边界 | Accepted |
-| [0008](0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted |
+| [0008](0008-sidecar-launch-and-lifecycle.md) | Rust 负责 sidecar 的启动、握手、监督与回收 | Accepted（「不自动重启」一节由 [0010](0010-bounded-sidecar-recovery.md) 取代） |
 | [0009](0009-agent-permission-delegation.md) | Agent 权限使用显式的运行级委托，与运行模式互相正交 | Accepted |
+| [0010](0010-bounded-sidecar-recovery.md) | 崩溃后的自动恢复有界，且只恢复能力、不复活状态 | Accepted |
 
 新增记录后，请同时更新[文档入口](../README.md)的表格与根目录 [README](../../README.md) 的文档索引。如果某个决定的实际含义已经变化，也要一并更新受影响的[能力边界说明](../../apps/agent/src/providers/README.md)。
