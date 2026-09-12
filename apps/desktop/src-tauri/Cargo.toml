@@ -22,5 +22,6 @@ tokio-util = { workspace = true }
 yukinal-core = { workspace = true }
 yukinal-credentials = { workspace = true }
 yukinal-database = { workspace = true }
+yukinal-filesystem = { workspace = true }
 yukinal-ssh = { workspace = true }
 yukinal-terminal = { workspace = true }

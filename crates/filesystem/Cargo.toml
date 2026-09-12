@@ -7,8 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+thiserror = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints.rust]
 unsafe_code = "forbid"

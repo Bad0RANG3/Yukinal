@@ -41,7 +41,7 @@ Yukinal 目前是一个可以跑起来的开发版本，版本号为 `0.1.0`。�
 - 连接管理：连接、断开、连接状态与最近错误；同一服务器的连接会被缓存复用（`commands/terminal.rs` 的 `ensure_session`）。
 - 概览页的真实健康快照：7 个采集器（OS、CPU、内存、运行时长、磁盘、网络、Docker）各带 5 秒命令超时，采集结果入库并可回看（`crates/collector`）。
 - 终端：基于 russh 的 PTY（`xterm-256color`），支持多会话、写入、改尺寸和关闭，数据通过 `terminal:data` 等事件流回界面（`crates/terminal`）。
-- 远程文件：SFTP 目录列表与有上限的文本读取（上限 1 MiB，超出部分标记为已截断）（`commands/files.rs`、`crates/ssh`）。覆盖写入只作为 Agent 工具 `filesystem.write` 存在，界面没有写文件的入口。
+- 远程文件：SFTP 目录列表与有上限的文本读取（上限 1 MiB，超出部分标记为已截断）（`commands/files.rs`、`crates/filesystem`、`crates/ssh`）。覆盖写入只作为 Agent 工具 `filesystem.write` 存在，界面没有写文件的入口。
 - 服务与日志：固定的只读探测命令，先试 `systemctl` 再退到 `docker ps`；日志先试 `journalctl` 再退到 `/var/log/syslog`、`/var/log/messages`，最多 120 行并做级别分类；探测不到时明确返回 `unavailable`，不会编造内容（`commands/services.rs`、`commands/logs.rs`）。
 - 活动记录：连接、配置变更、Agent 工具执行都会写入 `activities` 表并推 `activity.created` 事件（`commands/activity.rs`、`commands/host.rs`）。
 - Agent 对话历史：会话与消息持久化到 `chat_sessions` / `chat_messages`，支持归档与删除（`commands/chat.rs`）。
@@ -200,7 +200,7 @@ crates/
   collector/         7 个采集器与本地/SSH runner
   credentials/       OS 凭据库抽象（keychain 引用）
   database/          SQLite schema、迁移、model 与 repository
-  filesystem/        本地/远端文件能力的契约占位（尚无实现，未被引用）
+  filesystem/        远端文件策略与上限（凭据路径黑名单、有界读写），传输由桌面层注入
 docs/                文档入口与架构决策记录
 scripts/             校验、构建辅助、sidecar smoke、桌面窗口检查
 ```
@@ -308,7 +308,6 @@ pwsh -File scripts/check-desktop-window.ps1
 - **`filesystem.write` 是覆盖写**，没有「先读后改」或补丁语义。
 - **`delivery` 与 `resume` 字段**目前在协议里被接受，但只用于「同一条消息重试不会开出第二个运行」的去重，不具备完整的同步/恢复语义。
 - **`policyId`** 在运行请求里可以被传入，但当前运行路径只使用目标环境推导出的内建策略。
-- **`crates/filesystem` 是契约占位**，没有任何实现，也没有被其他 crate 引用。
 
 ## 文档
 

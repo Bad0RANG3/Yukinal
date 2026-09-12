@@ -3,6 +3,11 @@
 //! The sidecar can describe and request a tool, but it cannot open SSH sessions or
 //! resolve credentials. This module is the narrow, deny-by-default bridge from the
 //! sidecar request to Rust-owned state.
+//!
+//! The file tools (`filesystem.read` / `filesystem.write`) delegate to `yukinal-filesystem`:
+//! path policy, byte caps and bounded decoding live there, and this module only maps the
+//! capability's typed failures onto the host protocol's failure codes
+//! (see [`filesystem_failure`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,8 +17,10 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use yukinal_database::models::{ContainerInfo, Environment};
 use yukinal_database::DatabaseError;
+use yukinal_filesystem::{AgentReadRequest, AgentWriteRequest, Error as FilesystemError};
 use yukinal_ssh::SshBackend;
 
+use crate::commands::files::remote_file_service;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
@@ -33,20 +40,6 @@ const MAX_LOG_TAIL: usize = 500;
 const MAX_LOG_LINE_CHARS: usize = 4_000;
 const DEFAULT_RESTART_TIMEOUT: usize = 10;
 const MAX_RESTART_TIMEOUT: usize = 120;
-const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
-const MAX_FILE_READ_BYTES: usize = 1024 * 1024;
-const MAX_FILE_WRITE_BYTES: usize = 512 * 1024;
-const MAX_REMOTE_PATH_CHARS: usize = 4_096;
-const AGENT_BLOCKED_PATH_PREFIXES: &[&str] = &[
-    "/.aws/",
-    "/.azure/",
-    "/.config/gcloud/",
-    "/.kube/",
-    "/.ssh/",
-    "/proc/",
-    "/run/secrets/",
-    "/var/run/secrets/",
-];
 const DOCKER_PS_COMMAND: &str = "docker ps --format '{{json .}}' 2>/dev/null";
 const DOCKER_PS_ALL_COMMAND: &str = "docker ps -a --format '{{json .}}' 2>/dev/null";
 
@@ -409,6 +402,22 @@ fn transport_or_cancel(error: impl std::fmt::Display, cancel: &CancellationToken
     }
 }
 
+/// File-capability failure → the host tool result's failure code.
+///
+/// The codes themselves (`invalid_input` / `denied_by_policy`) belong to the sidecar's host
+/// protocol, not to the file capability, so the mapping stays here while the rules, the messages
+/// and the limits live in `yukinal-filesystem`. `retryable` follows the existing table: a bad
+/// argument can be fixed by the Agent, a policy denial cannot.
+fn filesystem_failure(error: FilesystemError, cancel: &CancellationToken) -> Value {
+    match error {
+        FilesystemError::InvalidInput(message) => failed("invalid_input", message, true, None),
+        FilesystemError::DeniedByPolicy(message) => {
+            failed("denied_by_policy", message, false, None)
+        }
+        FilesystemError::Transport(error) => transport_or_cancel(error, cancel),
+    }
+}
+
 fn cancelled_failure() -> Value {
     failed("cancelled", "Host operation cancelled", false, None)
 }
@@ -473,43 +482,30 @@ async fn filesystem_read(
             ))
         }
     };
-    if let Err(error) = validate_remote_path(&input.path) {
-        return Ok(failed("invalid_input", error, true, None));
-    }
-    if is_agent_blocked_path(&input.path) {
-        return Ok(failed(
-            "denied_by_policy",
-            "Agent file tools cannot access paths that commonly contain credentials or process secrets",
-            false,
-            None,
-        ));
-    }
-    let max_bytes = input.max_bytes.unwrap_or(DEFAULT_FILE_READ_BYTES);
-    if !(1..=MAX_FILE_READ_BYTES).contains(&max_bytes) {
-        return Ok(failed(
-            "invalid_input",
-            format!("maxBytes must be between 1 and {MAX_FILE_READ_BYTES}"),
-            true,
-            None,
-        ));
-    }
+    // Path policy and the byte cap are checked before anything else, cancellation included:
+    // an invalid argument reports `invalid_input` even after the user pressed Stop, and a
+    // blocked path never opens a session. The crate's request type carries that guarantee, so
+    // the rules are not repeated here.
+    let request = match AgentReadRequest::check(&input.path, input.max_bytes) {
+        Ok(request) => request,
+        Err(error) => return Ok(filesystem_failure(error, cancel)),
+    };
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let bytes = tokio::select! {
-        result = state.terminals.sftp_read_bounded(server_id, &input.path, max_bytes) => match result {
-            Ok(bytes) => bytes,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let service = remote_file_service(state);
+    let read = tokio::select! {
+        result = service.agent_read(server_id, &request) => match result {
+            Ok(read) => read,
+            Err(error) => return Ok(filesystem_failure(error, cancel)),
         },
         _ = cancel.cancelled() => return Ok(cancelled_failure()),
     };
-    let truncated = bytes.len() > max_bytes;
-    let content = String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned();
     Ok(success(
         serde_json::to_value(FilesystemReadResult {
-            path: input.path,
-            content,
-            truncated,
+            path: read.path,
+            content: read.content,
+            truncated: read.truncated,
         })
         .map_err(|error| error.to_string())?,
     ))
@@ -532,38 +528,25 @@ async fn filesystem_write(
             ))
         }
     };
-    if let Err(error) = validate_remote_path(&input.path) {
-        return Ok(failed("invalid_input", error, true, None));
-    }
-    if is_agent_blocked_path(&input.path) {
-        return Ok(failed(
-            "denied_by_policy",
-            "Agent file tools cannot access paths that commonly contain credentials or process secrets",
-            false,
-            None,
-        ));
-    }
-    if input.content.len() > MAX_FILE_WRITE_BYTES {
-        return Ok(failed(
-            "invalid_input",
-            format!("content must be at most {MAX_FILE_WRITE_BYTES} bytes"),
-            true,
-            None,
-        ));
-    }
+    let request = match AgentWriteRequest::check(&input.path, input.content) {
+        Ok(request) => request,
+        Err(error) => return Ok(filesystem_failure(error, cancel)),
+    };
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    tokio::select! {
-        result = state.terminals.sftp_write(server_id, &input.path, input.content.as_bytes()) => if let Err(error) = result {
-            return Ok(transport_or_cancel(error, cancel));
+    let service = remote_file_service(state);
+    let write = tokio::select! {
+        result = service.agent_write(server_id, &request) => match result {
+            Ok(write) => write,
+            Err(error) => return Ok(filesystem_failure(error, cancel)),
         },
         _ = cancel.cancelled() => return Ok(cancelled_failure()),
-    }
+    };
     Ok(success(
         serde_json::to_value(FilesystemWriteResult {
-            path: input.path,
-            bytes_written: input.content.len(),
+            path: write.path,
+            bytes_written: write.bytes_written,
         })
         .map_err(|error| error.to_string())?,
     ))
@@ -897,59 +880,6 @@ fn nonempty(value: Option<String>, field: &str) -> Result<String, String> {
         .ok_or_else(|| format!("docker inspect omitted {field}"))
 }
 
-fn validate_remote_path(value: &str) -> Result<(), String> {
-    if value.is_empty() || value.chars().count() > MAX_REMOTE_PATH_CHARS {
-        return Err(format!(
-            "remote path must be 1-{MAX_REMOTE_PATH_CHARS} characters"
-        ));
-    }
-    if !value.starts_with('/') {
-        return Err("remote path must be absolute".to_string());
-    }
-    if value
-        .bytes()
-        .any(|byte| byte == 0 || byte == b'\r' || byte == b'\n')
-    {
-        return Err("remote path contains a forbidden control character".to_string());
-    }
-    Ok(())
-}
-
-/// Agent file tools must not become a credential-reading or credential-overwriting
-/// primitive. This guard is host-side so a compromised sidecar cannot bypass it.
-fn is_agent_blocked_path(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    if AGENT_BLOCKED_PATH_PREFIXES
-        .iter()
-        .any(|prefix| normalized.contains(prefix))
-    {
-        return true;
-    }
-
-    let name = normalized.rsplit('/').next().unwrap_or_default();
-    if matches!(
-        name,
-        "shadow" | "gshadow" | "sudoers" | "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
-    ) {
-        return true;
-    }
-    if name.ends_with(".pem")
-        || name.ends_with(".key")
-        || name.ends_with(".p12")
-        || name.ends_with(".pfx")
-        || name.ends_with(".jks")
-    {
-        return true;
-    }
-    if name == ".env" || name.starts_with(".env.") {
-        return !matches!(name, ".env.example" | ".env.sample" | ".env.template");
-    }
-    matches!(
-        name,
-        "credentials" | "credentials.json" | "secrets" | "secrets.json"
-    )
-}
-
 fn is_safe_container_ref(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -1042,9 +972,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        bounded_log_lines, cancel_sidecar_request, docker_restart_command, is_agent_blocked_path,
-        is_safe_container_ref, parse_docker_inspect, parse_docker_ps, shell_quote,
-        validate_remote_path, HostCancellationRegistry,
+        bounded_log_lines, cancel_sidecar_request, docker_restart_command, is_safe_container_ref,
+        parse_docker_inspect, parse_docker_ps, shell_quote, HostCancellationRegistry,
     };
 
     #[test]
@@ -1122,30 +1051,6 @@ not-json
         assert!(is_safe_container_ref("api_1.2-3"));
         assert!(!is_safe_container_ref("api;rm -rf /"));
         assert_eq!(shell_quote("api_1"), "'api_1'");
-    }
-
-    #[test]
-    fn remote_file_paths_are_absolute_and_bounded() {
-        assert!(validate_remote_path("/etc/app.env").is_ok());
-        assert!(validate_remote_path("relative/app.env").is_err());
-        assert!(validate_remote_path("/etc/app\n.env").is_err());
-        assert!(validate_remote_path(&format!("/{}", "x".repeat(4_096))).is_err());
-    }
-
-    #[test]
-    fn agent_file_tools_reject_credential_and_process_secret_paths() {
-        for path in [
-            "/home/deploy/.ssh/id_ed25519",
-            "/srv/app/.env.production",
-            "/run/secrets/provider-token",
-            "/proc/123/environ",
-            "/etc/ssl/private/service.key",
-            "/home/deploy/.kube/config",
-        ] {
-            assert!(is_agent_blocked_path(path), "{path}");
-        }
-        assert!(!is_agent_blocked_path("/srv/app/.env.example"));
-        assert!(!is_agent_blocked_path("/etc/app/config.json"));
     }
 
     #[test]

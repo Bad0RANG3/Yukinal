@@ -6042,6 +6042,7 @@ dependencies = [
  "yukinal-core",
  "yukinal-credentials",
  "yukinal-database",
+ "yukinal-filesystem",
  "yukinal-ssh",
  "yukinal-terminal",
 ]
@@ -6049,11 +6050,16 @@ dependencies = [
 [[package]]
 name = "yukinal-filesystem"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "tokio",
+]
 
 [[package]]
 name = "yukinal-ssh"
 version = "0.1.0"
 dependencies = [
+ "rand",
  "russh",
  "russh-sftp",
  "serde",
