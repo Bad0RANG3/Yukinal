@@ -146,7 +146,7 @@ Rust 宿主在已解析的目标上执行受限操作（SSH 命令 / SFTP / Dock
 
 - **React 只用 `packages/shared` 里声明的东西。** `IPC_COMMANDS` 是命令白名单，`EVENT_NAMES` 是事件白名单；不在白名单里的原生能力对界面而言不存在。界面不启动进程、不访问 SSH、不读凭据。
 - **Rust 拥有原生资源。** SSH 会话、PTY、SQLite、操作系统凭据库和 sidecar 进程句柄都在 Rust 侧；`apps/desktop/src-tauri` 只做参数编组，真正的逻辑在 `crates/*`。
-- **`packages/shared` 是跨语言契约的唯一来源。** 类型、Zod schema、IPC 映射、事件名、sidecar 协议和工具命名规则都在这里；`packages/shared/fixtures/ipc/` 下的 JSON 同时被 Rust 测试（`include_str!`）和 TypeScript 测试解析，任何一侧序列化漂移都会让构建变红。
+- **`packages/shared` 是跨语言契约的唯一来源。** 类型、Zod schema、IPC 映射、事件名、sidecar 协议和工具命名规则都在这里；`packages/shared/fixtures/ipc/` 下的 JSON 逐个被 TypeScript 测试解析，**绝大多数**还被 Rust 测试用 `include_str!` 再比一次序列化结果，任何一侧漂移都会让构建变红。例外是 MCP 的五个 fixture：它们只有 TypeScript 一侧解析（Rust 侧缺一条同样形状的断言，见[当前限制](#当前限制)）。
 - **Agent 不直接执行远程操作。** sidecar 通过 `host.tool.execute` 向宿主提出请求，宿主会重新校验目标服务器 ID、环境、工作区归属和文件路径策略，然后才执行。
 - **Provider 差异被关在 Provider 边界内。** agent loop 只依赖 `LLMProvider` 与统一的 `StreamEvent`，不根据 Provider 身份分支；工具名的点号与双下划线转换也只发生在一个地方。
 
@@ -321,6 +321,7 @@ pwsh -File scripts/check-desktop-window.ps1
 - **取消 MCP 调用不撤回它的副作用。** 取消让宿主不再等待，但 MCP 的线上协议只有三个方法，没有「取消一次 `tools/call`」；服务进程那边的调用可能继续跑完。这是如实记录的缺陷，不是被忽略的细节。
 - **MCP 的 `trustLevel` 与 `allowedTools` 目前只被存储。** 还不存在「让用户看过工具描述再决定」的流程，所以 `trustLevel` 永远停在 `unreviewed`、`allowedTools` 永远是空表 —— 这正是每个 MCP 工具都保持 `critical` 的原因。注册一个工具**不是**一次授信。
 - **MCP 只在一个自带的 Node fixture 上验证过。** `crates/core/tests/fixtures/mcp-server.js` 是我们自己写的测试替身（9 种模式）；真实的第三方 MCP 服务器没有被跑过，本环境没有网络也没有 `npx`。
+- **MCP 的五个 IPC fixture 缺一条 Rust 侧的断言。** 其它每个命令的响应都有一份 `packages/shared/fixtures/ipc/` 里的 fixture 被 Rust 用 `include_str!` 编译进来，并和新序列化的值比一次；MCP 那五个只有 TypeScript 一侧解析。它们的形状确实取自真实 Rust 输出，但没有任何一条 Rust 断言钉住它 —— 也就是说 Rust 侧改了字段名，这个仓库里不会有任何检查变红。
 - **两套原生适配器从未对真实 API 调用过。** 翻译逻辑、流式状态、取消与错误路径都是照协议文档写的、用假响应测的 —— 写它们的环境没有网络。每个适配器的文档里列着只有真实端点才能确认的假设（版本头、token 计数口径、终止原因词汇、`alt=sse` 分帧、`thought: true`）。
 - **Anthropic 的 `anthropic-version` 不能配置。** `RuntimeProviderConfig` 里没有 `apiVersion` 字段，Rust 因此无法传一个进来，适配器用它自己的默认值；自定义请求头同样没有入口（目前恒为 `None`）。
 - **SSH 证书认证不能在界面里配置。** `crates/ssh` 支持它（证书按 OpenSSH 的 `<私钥>-cert.pub` 约定定位，并且必须真的认证所提供的那把私钥），也有测试；但桌面只映射密码、私钥（含口令）与 ssh-agent，遇到 `certificate` 会明确报「不支持的认证方式」而不是挑一个默认值 —— 证书要的是**文件路径**，而桌面把认证材料按引用存在系统凭据库里。
