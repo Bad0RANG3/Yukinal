@@ -14,7 +14,7 @@
  * 规则：不造假 transcript。没有运行中的 run 就没有消息；Stop 立刻掐断在途请求。
  */
 
-import type { ChatMessage, ChatSession } from "@yukinal/shared";
+import type { ChatMessage, ChatSession, RestartRecord } from "@yukinal/shared";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
@@ -44,6 +44,17 @@ import { useAgentRun } from "./useAgentRun.js";
 import { useChatSessions } from "./useChatSessions.js";
 import { useFeedFollow } from "./useFeedFollow.js";
 
+/**
+ * 把一次自动恢复压成一个可比较的字符串。
+ *
+ * `attempt` 与 `at` 都要参与：`at` 只精确到秒，同一秒内的两次崩溃会得到相同的
+ * 时间戳，只比时间就会漏掉第二次重启——而漏掉它意味着一个已经死掉的 run 继续显示
+ * 成「运行中」。
+ */
+function restartId(restart: RestartRecord | undefined): string | null {
+  return restart ? `${restart.attempt}:${restart.at}` : null;
+}
+
 export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => void; onCloseEnd?: () => void }) {
   const agentStatus = useAgentStatus();
   const spawnAgent = useSpawnAgent();
@@ -66,6 +77,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   // 「收到审批时把面板带到前景」是导航决策，所以由面板注入，而不是让运行模块去读 store。
   const run = useAgentRun({
     sidecarRunning: agentStatus.data?.running,
+    // 崩溃与自动重启之间的间隔可能短于一次轮询，所以「进程死过」这件事要由重启记录
+    // 提供，而不能只靠 `running === false`。
+    sidecarRestart: restartId(agentStatus.data?.restart),
     onAssistantMessage: (text) => void sessions.recordAssistantMessage(text),
     onApprovalRequested: () => setAgentOpen(true),
   });
@@ -258,6 +272,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
               agentRunning={agentRunning}
               providerReady={models.providerReady}
               agentExited={Boolean(agentStatus.data?.lastExit)}
+              restart={agentStatus.data?.restart}
               statusUnreadable={agentStatus.isError}
               spawning={spawnAgent.isPending}
               spawnError={spawnAgent.error?.message}

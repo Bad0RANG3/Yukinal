@@ -70,6 +70,21 @@ export function RuntimeSettings() {
         {status.isError || core.isError ? <div className="settings-error-row" role="alert"><span>{status.error?.message ?? core.error?.message}</span><button type="button" className="text-button" onClick={() => { void core.refetch(); void status.refetch(); }}>重试</button></div> : null}
         <RuntimeLogs open={showLogs} logs={logs} />
       </section>
+          {/*
+            自动恢复是一句事实，不能只靠一闪而过的通知：崩溃时用户可能正在别的页面，
+            回到设置里必须能查到「它自己起来过几次、还是已经放弃了」。
+          */}
+          <Row
+            label="自动恢复"
+            value={
+              status.data?.restart
+                ? status.data.restart.exhausted
+                  ? `已尝试 ${status.data.restart.attempt}/${status.data.restart.maxAttempts} 次仍未成功，不会再次自动尝试`
+                  : `崩溃后已自动重启 ${status.data.restart.attempt}/${status.data.restart.maxAttempts} 次`
+                : "无"
+            }
+            wide
+          />
 
       <AppearanceSettings />
       <ProviderSettings />

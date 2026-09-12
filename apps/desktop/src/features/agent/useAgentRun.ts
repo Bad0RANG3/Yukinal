@@ -35,6 +35,12 @@ import {
 } from "./transcript.js";
 
 const SIDECAR_EXIT_NOTICE = "Agent sidecar 已退出，本次运行已中断。";
+/**
+ * 崩溃后已被自动重启时的措辞。与上面那句分开，是因为用户的处境不同：这里进程已经
+ * 回来了（可以立刻重试），而上面那句需要用户自己按下启动——把两者说成一句话会让
+ * 用户在「已经恢复」和「还没恢复」之间猜。
+ */
+const SIDECAR_RESTART_NOTICE = "Agent sidecar 崩溃后已自动重启，本次运行已中断，可以重新提问。";
 
 export type StartOutcome =
   /** 运行已提交（或已生成 runId 并等待 started 事件）。 */
@@ -98,8 +104,17 @@ export function useAgentRun(options: {
   onApprovalRequested?: () => void;
   /** sidecar 存活信号；false 表示进程已经不在了。 */
   sidecarRunning?: boolean;
+  /**
+   * 最近一次自动恢复的标识（`restart.attempt:restart.at`，来自 `agent_status`）。
+   *
+   * 自动重启让「轮询到的 `running === false`」不再可靠：崩溃与重启之间可能短于一个
+   * 轮询间隔（运行中 1.5 秒一次），界面就会看到 `running` 一直是 true，而在途的 run
+   * 其实已经随进程一起消失了。重启记录是那条消息的可靠来源——它按崩溃递增，所以
+   * 「它变了」就等于「进程死过一次」。
+   */
+  sidecarRestart?: string | null;
 }): AgentRun {
-  const { sidecarRunning } = options;
+  const { sidecarRunning, sidecarRestart } = options;
   const onAssistantMessage = useRef(options.onAssistantMessage);
   onAssistantMessage.current = options.onAssistantMessage;
   const onApprovalRequested = useRef(options.onApprovalRequested);
@@ -243,6 +258,31 @@ export function useAgentRun(options: {
       return appendEntries(current, [{ kind: "error", text: SIDECAR_EXIT_NOTICE }]);
     });
   }, [sidecarRunning, running]);
+
+  // 自动重启把上面那条信号变得不可靠：崩溃后一两次尝试就恢复了，而运行中的轮询是
+  // 1.5 秒一次，界面完全可能只看到 `running === true`。那会让一个已经随进程消失的
+  // run 永远停在「运行中」，用户等一个不会到来的回答。
+  //
+  // 重启记录是权威的第二条信号，而且它只在**真的发生了一次重启**时变化（用户自己的
+  // 启动/停止会把记录清空，那种情况由上面那条覆盖，所以清空不在这里触发失败）。
+  const seenRestart = useRef<string | null>(sidecarRestart ?? null);
+  useEffect(() => {
+    const next = sidecarRestart ?? null;
+    if (next === null || next === seenRestart.current) return;
+    seenRestart.current = next;
+    if (!running) return;
+    lifecycle.current.fail();
+    setRunning(false);
+    setRunId(null);
+    setStopping(false);
+    setPendingApprovalIds([]);
+    setRunState("failed");
+    setEntries((current) => {
+      const last = current.at(-1);
+      if (last?.kind === "error" && last.text === SIDECAR_RESTART_NOTICE) return current;
+      return appendEntries(current, [{ kind: "error", text: SIDECAR_RESTART_NOTICE }]);
+    });
+  }, [sidecarRestart, running]);
 
   const start = useCallback(async (input: StartRunInput): Promise<StartOutcome> => {
     const expectedRunId = newId("run");

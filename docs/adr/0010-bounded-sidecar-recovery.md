@@ -1,6 +1,12 @@
 # ADR 0010 崩溃后的自动恢复有界，且只恢复能力、不复活状态
 
 Status: Accepted
+
+Status 注记（后续修订，原文保留）：上面「由下一次启动的 sidecar 收尾为中断」一句写错了前提，实现时查清了账本的真实形状。持久化的 `tool_executions` 只在 `agent.tool_result` 到达时写入一行，状态取自结果本身（`success` / `failed` / `cancelled`）；**没有任何代码会在调用开始时写一行「在途」记录**，所以进程崩溃留下的形态是「这一行不存在」，而不是「这一行停在 running」。于是「收尾」没有对象可收，真正需要守住的是相反的一条：别让在途状态被写进账本。这条已实现并钉住：
+
+- `apps/desktop/src-tauri/src/commands/mod.rs` 的 `is_terminal_result_status` 拒绝把 `pending` / `running` / `waiting_approval` 当作结果落库（`AgentToolResultEvent.status` 的类型是完整的六值枚举，而结果事件同时带着 `ended_at`，两者是矛盾的），测试 `only_terminal_statuses_may_be_persisted_as_a_result`。
+- 崩溃可见性因此来自另外三处，而不是来自账本收尾：`lastExit`（崩溃原因）、`restart` 记录（自动恢复的次数与是否已放弃）、以及带进程代次标记的 stderr 尾部（死掉的那个进程说了什么）。这三条即本文「重启只恢复能力」一节其余部分的实现。
+- 本次没有做的、而且是有意的：为「在途」的调用也写一行并在崩溃时标记为中断。它能让审计里看到「那次命令到底有没有跑完」，代价是账本重新出现需要收尾的行（应用自身被杀时同样会留下），而 `filesystem.edit` 那类有副作用的调用还需要额外判断「中断」是否等于「没发生」。在需要之前不引入。
 Date: 2026-09-12
 
 ## Context
@@ -31,7 +37,7 @@ Date: 2026-09-12
 **重启只恢复能力，不复活任何状态：**
 
 - 崩溃时在途的每一次运行与每一条审批都随进程一起消失，不会被恢复。界面已有的 `Agent sidecar 已退出，本次运行已中断。`（`apps/desktop/src/features/agent/useAgentRun.ts`）就是这条语义的用户可见面；重启后用户重新发起，就会得到一条新的运行。
-- 账本不允许留下一个看起来还活着的运行：进程死掉后仍在 `traces` 里处于 `running` 的记录，由下一次启动的 sidecar 收尾为中断。一条永远 `running` 的 trace 会让「正在跑」这个判断永久失真——这比丢掉一次运行的细节更糟。
+- 账本不允许留下一个看起来还活着的运行。**实现这条要求的方式与本文最初写下的不同**，见下方的 Status 注记：持久化账本里根本不存在「在途」的行，因此没有需要收尾的记录；真正要做的是别让这样一行出现。
 
 **事件转发器变成窗口级单例**（`apps/desktop/src-tauri/src/lib.rs` 的 setup 里创建一次）。它原来由每次 `start_sidecar` 创建，并依赖 `SidecarEvent::Exited` 来结束自己的任务，而 supervisor 当时刻意不转发该事件——于是崩溃后重启会挂上第二个转发器，每一帧被转发两次，而每一个 `host.*` 请求都会被**执行两次**（响应者是按事件派生出来的任务）。这不是自动重启引入的问题，是自动重启会把它从「偶发」变成「每次崩溃必现」。
 
