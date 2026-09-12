@@ -432,6 +432,7 @@ fn identity_attach_and_cascade() {
         label: "deploy key".into(),
         method: "privateKey".into(),
         credential_ref: "keychain://ssh/deploy".into(),
+        passphrase_ref: None,
         created_at: "2026-01-01T00:00:00.000Z".into(),
     })
     .expect("insert identity");
@@ -452,6 +453,129 @@ fn identity_attach_and_cascade() {
     // ...and deleting an unattached identity keeps no dangling SQLite rows.
     repo.delete("idn_1").expect("delete identity");
     assert!(matches!(repo.get("idn_1"), Err(DatabaseError::NotFound)));
+}
+
+// ---------------------------------------------------------------------------
+// identity passphrase references (encrypted private keys)
+
+fn passphrase_identity(id: &str, passphrase_ref: Option<&str>) -> Identity {
+    Identity {
+        id: id.into(),
+        label: "encrypted deploy key".into(),
+        method: "privateKey".into(),
+        credential_ref: "keychain://ssh/deploy-key".into(),
+        passphrase_ref: passphrase_ref.map(str::to_string),
+        created_at: "2026-01-01T00:00:00.000Z".into(),
+    }
+}
+
+/// 口令引用是**独立于私钥引用**的一列，且必须活过重开：进程重启后 `get` 拿不到它就是
+/// 「加密 key 连不上」的直接原因。
+#[test]
+fn identity_passphrase_ref_survives_reopen() {
+    let (path, db) = temp_db("idn-pass");
+    let repo = db.identities();
+    repo.insert(&passphrase_identity(
+        "idn_enc",
+        Some("keychain://ssh/deploy-key-passphrase"),
+    ))
+    .expect("insert encrypted identity");
+    repo.insert(&passphrase_identity("idn_plain", None))
+        .expect("insert plaintext identity");
+    drop(db);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let enc = reopened.identities().get("idn_enc").expect("get encrypted");
+    assert_eq!(
+        enc.passphrase_ref.as_deref(),
+        Some("keychain://ssh/deploy-key-passphrase")
+    );
+    assert_eq!(enc.credential_ref, "keychain://ssh/deploy-key");
+
+    // 明文 key / 密码 / agent 的身份是 NULL，不是空串 —— 「没有口令」只有一种表示。
+    assert_eq!(
+        reopened
+            .identities()
+            .get("idn_plain")
+            .expect("get plaintext")
+            .passphrase_ref,
+        None
+    );
+    // `list` 与 `get` 读同一份投影：两处列顺序不一致时这条会红。
+    let listed = reopened.identities().list().expect("list");
+    let listed_enc = listed
+        .iter()
+        .find(|identity| identity.id == "idn_enc")
+        .expect("listed encrypted identity");
+    assert_eq!(
+        listed_enc.passphrase_ref.as_deref(),
+        Some("keychain://ssh/deploy-key-passphrase")
+    );
+    cleanup(&path);
+}
+
+/// 升级路径：一个**已经存在**的数据库（`user_version = 4`，`identities` 表没有
+/// `passphrase_ref`）打开后要拿到新列，并且原有行一条不少、口令为空。
+///
+/// 这里手写迁移 1 的 `identities` 表 —— 就是升级前磁盘上的真实形状；用当前代码建库
+/// 再升级是测不出「旧库」的。
+#[test]
+fn migration_v5_adds_passphrase_ref_to_an_existing_database() {
+    let path = std::env::temp_dir().join(format!(
+        "yukinal-db-mig-passphrase-{}.sqlite",
+        std::process::id()
+    ));
+    cleanup(&path);
+    let legacy = Connection::open(&path).expect("open legacy database");
+    legacy
+        .execute_batch(
+            r#"
+            CREATE TABLE identities (
+                id            TEXT PRIMARY KEY,
+                label         TEXT NOT NULL,
+                method        TEXT NOT NULL CHECK (method IN ('password','privateKey','agent')),
+                credential_ref TEXT NOT NULL,
+                created_at    TEXT NOT NULL
+            );
+            INSERT INTO identities VALUES
+              ('idn_legacy', 'legacy deploy key', 'privateKey', 'keychain://ssh/legacy', '2026-01-01T00:00:00.000Z'),
+              ('idn_legacy_agent', 'legacy agent', 'agent', 'keychain://ssh/legacy-agent', '2026-01-01T00:00:00.000Z');
+            PRAGMA user_version = 4;
+            "#,
+        )
+        .expect("create the schema as it was before migration 5");
+    drop(legacy);
+
+    let db = Database::open(&path).expect("upgrade the legacy database");
+
+    // 旧行还在，且没有口令（NULL，而不是空串）。
+    let legacy_row = db.identities().get("idn_legacy").expect("read legacy row");
+    assert_eq!(legacy_row.credential_ref, "keychain://ssh/legacy");
+    assert_eq!(legacy_row.passphrase_ref, None);
+    assert_eq!(db.identities().list().expect("list legacy rows").len(), 2);
+
+    // 新列可写：升级后的库能存下加密 key 的身份。
+    db.identities()
+        .insert(&passphrase_identity(
+            "idn_after",
+            Some("keychain://ssh/after-passphrase"),
+        ))
+        .expect("insert an identity with a passphrase after the migration");
+    assert_eq!(
+        db.identities()
+            .get("idn_after")
+            .expect("read back")
+            .passphrase_ref
+            .as_deref(),
+        Some("keychain://ssh/after-passphrase"),
+    );
+
+    // 再开一次是空操作：迁移只应用一次。
+    drop(db);
+    let reopened = Database::open(&path).expect("reopen applies nothing");
+    assert_eq!(reopened.identities().list().expect("list").len(), 3);
+    drop(reopened);
+    cleanup(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +658,16 @@ fn migration_v3_preserves_legacy_execution_rows_and_allows_agent_source() {
             );
             CREATE INDEX idx_tool_executions_trace ON tool_executions (trace_id);
             CREATE INDEX idx_tool_executions_server ON tool_executions (server_id);
+            -- 迁移 1 就建好的表必须在场：真实的 v2 库里它当然存在，而迁移 5 会往
+            -- `identities` 上追加列（迁移 2/3/4 都不碰它，所以这个简陋的 fixture
+            -- 直到迁移 5 才暴露出来）。缺了它就是「用一个不存在的旧库测升级」。
+            CREATE TABLE identities (
+                id            TEXT PRIMARY KEY,
+                label         TEXT NOT NULL,
+                method        TEXT NOT NULL CHECK (method IN ('password','privateKey','agent')),
+                credential_ref TEXT NOT NULL,
+                created_at    TEXT NOT NULL
+            );
             INSERT INTO tool_executions VALUES
               ('trc_legacy', 'step_1', 'call_1', 'ssh.execute', 'srv_01abc', 'production', 'medium', 'auto', 'policy', 'success', '{}', NULL, NULL, '2026-01-01T00:00:00Z', NULL, 1);
             PRAGMA user_version = 2;

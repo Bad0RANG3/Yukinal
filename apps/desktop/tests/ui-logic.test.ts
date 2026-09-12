@@ -81,7 +81,7 @@ test("native string errors become visible Error messages", async () => {
 
 const formValues: ServerFormValues = {
   name: " staging ", host: "example.test", port: "2222", username: "deploy", environment: "staging",
-  authMethod: "password", password: "secret", privateKeyPem: "",
+  authMethod: "password", password: "secret", privateKeyPem: "", passphrase: "",
 };
 
 test("server form normalizes values and validates port and first-time credentials", () => {
@@ -425,4 +425,81 @@ test("file bodies never reach the transcript, and other tool output is bounded",
 test("tool targets prefer the server id and fall back to the host scope", () => {
   assert.equal(targetLabel({ host: "local", environment: "local" }), "local · 本地环境");
   assert.equal(targetLabel({ host: "remote", serverId: "srv_a", environment: "production" }), "srv_a · 生产环境");
+});
+
+// ---------------------------------------------------------------------------
+// server form: ssh-agent and encrypted private keys
+// (appended; the cases above are untouched)
+
+test("the ssh-agent option sends a bare agent method and no secret at all", () => {
+  const agent: ServerFormValues = { ...formValues, authMethod: "agent", password: "", privateKeyPem: "" };
+  assert.deepEqual(buildServerInput(agent), {
+    name: "staging", host: "example.test", port: 2222, username: "deploy", environment: "staging",
+    authentication: { method: "agent" },
+  });
+  // 编辑时同样**必须**送出 authentication：省略它等于「保留现有凭据」，
+  // 用户选了 agent 却还在用旧密码连服务器。
+  assert.deepEqual(buildServerInput(agent, "srv_existing"), {
+    name: "staging", host: "example.test", port: 2222, username: "deploy", environment: "staging",
+    serverId: "srv_existing", authentication: { method: "agent" },
+  });
+  // agent 没有 secret 可填，所以「没输入 secret 就报错」这条首次添加的校验不适用。
+  assert.doesNotThrow(() => buildServerInput(agent));
+});
+
+test("a passphrase rides along with the private key, and a blank one is omitted", () => {
+  const encrypted: ServerFormValues = {
+    ...formValues, authMethod: "privateKey", password: "",
+    privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----", passphrase: "hunter2",
+  };
+  assert.deepEqual(buildServerInput(encrypted), {
+    name: "staging", host: "example.test", port: 2222, username: "deploy", environment: "staging",
+    authentication: {
+      method: "privateKey",
+      privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      passphrase: "hunter2",
+    },
+  });
+
+  // 空 / 纯空白口令 = 「没有口令」：字段必须**省略**，而不是送一个 "" —— 契约里
+  // passphrase 是 min(1) 的可选字段，空串会被 schema 直接拒掉。
+  for (const blank of ["", "   ", "\n"]) {
+    const plaintext = buildServerInput({ ...encrypted, passphrase: blank });
+    assert.deepEqual(plaintext.authentication, {
+      method: "privateKey",
+      privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+    });
+  }
+
+  // 口令里的空格是口令的一部分：只在判断「是否填写」时忽略，材料原样送出。
+  assert.deepEqual(buildServerInput({ ...encrypted, passphrase: " p w " }).authentication, {
+    method: "privateKey",
+    privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+    passphrase: " p w ",
+  });
+
+  // 编辑时口令跟着新的私钥一起替换。
+  assert.deepEqual(buildServerInput(encrypted, "srv_existing").authentication, {
+    method: "privateKey",
+    privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+    passphrase: "hunter2",
+  });
+});
+
+test("an edit that types no secret still omits authentication, with or without a passphrase", () => {
+  const untouched: ServerFormValues = {
+    ...formValues, password: "", privateKeyPem: "", passphrase: "",
+  };
+  assert.deepEqual(buildServerInput(untouched, "srv_existing"), {
+    name: "staging", host: "example.test", port: 2222, username: "deploy", environment: "staging",
+    serverId: "srv_existing",
+  });
+  // 只填了口令、没填私钥：没有新凭据可存，仍然是「保留现有认证」。
+  assert.deepEqual(
+    buildServerInput({ ...untouched, authMethod: "privateKey", passphrase: "hunter2" }, "srv_existing"),
+    {
+      name: "staging", host: "example.test", port: 2222, username: "deploy", environment: "staging",
+      serverId: "srv_existing",
+    },
+  );
 });

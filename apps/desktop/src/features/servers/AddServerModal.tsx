@@ -23,9 +23,10 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
   // user who misses this field gets a mislabelled host *and* auto-approved writes
   // to it. "unknown" is honest and maps to the high risk floor.
   const [environment, setEnvironment] = useState<Environment>(server?.metadata.environment ?? "unknown");
-  const [authMethod, setAuthMethod] = useState<"password" | "privateKey">("password");
+  const [authMethod, setAuthMethod] = useState<"password" | "privateKey" | "agent">("password");
   const [password, setPassword] = useState("");
   const [privateKeyPem, setPrivateKeyPem] = useState("");
+  const [passphrase, setPassphrase] = useState("");
 
   useEffect(() => {
     if (!server) return;
@@ -49,7 +50,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
 
   const save = useMutation<{ server: { id: string } }, Error>({
     mutationFn: () => {
-      const values = { name, host, port, username, environment, authMethod, password, privateKeyPem };
+      const values = { name, host, port, username, environment, authMethod, password, privateKeyPem, passphrase };
       return server
         ? callDesktop(IPC_COMMANDS.serverUpdate, buildServerInput(values, server.id))
         : callDesktop(IPC_COMMANDS.serverAdd, buildServerInput(values));
@@ -110,6 +111,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
             <div className="form-radio-group">
               <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "password"} onChange={() => setAuthMethod("password")} />密码</label>
               <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "privateKey"} onChange={() => setAuthMethod("privateKey")} />SSH 私钥</label>
+              <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "agent"} onChange={() => setAuthMethod("agent")} />SSH Agent</label>
             </div>
           </fieldset>
 
@@ -118,11 +120,22 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
               <label className="field-label" htmlFor="server-password">密码{server ? "（留空保留现有认证）" : ""}</label>
               <input id="server-password" className="form-input" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required={!server} />
             </div>
+          ) : authMethod === "privateKey" ? (
+            <>
+              <div className="form-field">
+                <label className="field-label" htmlFor="server-private-key">私钥 PEM{server ? "（留空保留现有认证）" : ""}</label>
+                <textarea id="server-private-key" className="form-input form-textarea" value={privateKeyPem} onChange={(event) => setPrivateKeyPem(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" required={!server} spellCheck={false} />
+              </div>
+              <div className="form-field">
+                <label className="field-label" htmlFor="server-passphrase">口令（可选）</label>
+                <input id="server-passphrase" className="form-input" type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
+                <p className="form-hint">明文私钥留空即可；加密私钥请填写它的口令。口令单独保存在系统凭据库中。</p>
+              </div>
+              <p className="form-hint">私钥与口令都只保存到系统凭据库，不会写入数据库或上传。</p>
+            </>
           ) : (
             <div className="form-field">
-              <label className="field-label" htmlFor="server-private-key">私钥 PEM{server ? "（留空保留现有认证）" : ""}</label>
-              <textarea id="server-private-key" className="form-input form-textarea" value={privateKeyPem} onChange={(event) => setPrivateKeyPem(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" required={!server} spellCheck={false} />
-              <p className="form-hint">仅保存到系统凭据库。暂不支持加密私钥。</p>
+              <p className="form-hint">使用本机正在运行的 ssh-agent 中的身份，不保存任何密码或私钥。请先用 ssh-add 把密钥加载进 agent；agent 不可用时会明确报错，不会退回其他认证方式。</p>
             </div>
           )}
           </fieldset>

@@ -1,10 +1,17 @@
-//! `identities` + `server_identities`. Identities carry only a reference into the
-//! OS keychain (`credential_ref`); the secret itself never passes through here.
+//! `identities` + `server_identities`. Identities carry only references into the
+//! OS keychain (`credential_ref`, plus `passphrase_ref` for an encrypted private
+//! key); the secret material itself never passes through here.
 
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::models::Identity;
 use crate::{Database, DatabaseError, Result};
+
+/// The `identities` projection, in one place: insert, update, get, list and the row
+/// mapper all read the same column order, so adding a column cannot leave one of
+/// them behind (which is exactly how `passphrase_ref` would have gone missing from
+/// `list` while `get` returned it).
+const IDENTITY_COLUMNS: &str = "id, label, method, credential_ref, passphrase_ref, created_at";
 
 pub struct IdentitiesRepository<'a> {
     db: &'a Database,
@@ -18,13 +25,14 @@ impl<'a> IdentitiesRepository<'a> {
     pub fn insert(&self, identity: &Identity) -> Result<()> {
         self.db.with(|connection| {
             connection.execute(
-                "INSERT INTO identities (id, label, method, credential_ref, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO identities (id, label, method, credential_ref, passphrase_ref, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     identity.id,
                     identity.label,
                     identity.method,
                     identity.credential_ref,
+                    identity.passphrase_ref,
                     identity.created_at,
                 ],
             )?;
@@ -35,12 +43,15 @@ impl<'a> IdentitiesRepository<'a> {
     pub fn update(&self, identity: &Identity) -> Result<()> {
         self.db.with(|connection| {
             let changed = connection.execute(
-                "UPDATE identities SET label = ?2, method = ?3, credential_ref = ?4 WHERE id = ?1",
+                "UPDATE identities
+                    SET label = ?2, method = ?3, credential_ref = ?4, passphrase_ref = ?5
+                  WHERE id = ?1",
                 params![
                     identity.id,
                     identity.label,
                     identity.method,
-                    identity.credential_ref
+                    identity.credential_ref,
+                    identity.passphrase_ref,
                 ],
             )?;
             if changed == 0 {
@@ -54,8 +65,7 @@ impl<'a> IdentitiesRepository<'a> {
         self.db.with(|connection| {
             connection
                 .query_row(
-                    "SELECT id, label, method, credential_ref, created_at
-                     FROM identities WHERE id = ?1",
+                    &format!("SELECT {IDENTITY_COLUMNS} FROM identities WHERE id = ?1"),
                     params![id],
                     row_to_identity,
                 )
@@ -67,8 +77,9 @@ impl<'a> IdentitiesRepository<'a> {
 
     pub fn list(&self) -> Result<Vec<Identity>> {
         self.db.with(|connection| {
-            let mut statement = connection
-                .prepare("SELECT id, label, method, credential_ref, created_at FROM identities ORDER BY label")?;
+            let mut statement = connection.prepare(&format!(
+                "SELECT {IDENTITY_COLUMNS} FROM identities ORDER BY label"
+            ))?;
             let rows = statement.query_map([], row_to_identity)?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(DatabaseError::from)
@@ -144,6 +155,7 @@ fn row_to_identity(row: &Row<'_>) -> rusqlite::Result<Identity> {
         label: row.get(1)?,
         method: row.get(2)?,
         credential_ref: row.get(3)?,
-        created_at: row.get(4)?,
+        passphrase_ref: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }

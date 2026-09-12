@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AddServerInputSchema, ServerSchema } from "./server.js";
+import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema } from "./server.js";
 import { PermissionDecisionSchema } from "./permission.js";
 
 const validServer = {
@@ -53,6 +53,76 @@ test("an add-server payload can carry a secret without the schema leaking it int
     authentication: { method: "password", password: "hunter2" },
   });
   assert.equal(parsed.success, true);
+});
+
+const agentAdd = {
+  name: "db",
+  host: "10.0.0.5",
+  username: "root",
+  environment: "staging",
+  authentication: { method: "agent" },
+};
+
+test("the ssh-agent option carries no secret, and nothing else may ride along", () => {
+  assert.equal(AddServerInputSchema.safeParse(agentAdd).success, true);
+  assert.equal(
+    UpdateServerInputSchema.safeParse({ ...agentAdd, serverId: "srv_01abc" }).success,
+    true,
+  );
+  // `.strictObject`：agent 是「一个 secret 都不带」的形状，不是「可以顺便带一个」。
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      authentication: { method: "agent", password: "smuggled" },
+    }).success,
+    false,
+  );
+});
+
+test("an encrypted private key carries an optional passphrase with the same bounds as Rust", () => {
+  const withPassphrase = {
+    name: "db",
+    host: "10.0.0.5",
+    username: "root",
+    environment: "staging",
+    authentication: {
+      method: "privateKey",
+      privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      passphrase: "hunter2",
+    },
+  };
+  assert.equal(AddServerInputSchema.safeParse(withPassphrase).success, true);
+  // 省略 passphrase = 明文 key：这是合法形状，不是「填漏了」。
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...withPassphrase,
+      authentication: { method: "privateKey", privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----" },
+    }).success,
+    true,
+  );
+  // 空串不是「空口令」：没填就该省略字段（`min(1)` 与 Rust 侧一致）。
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...withPassphrase,
+      authentication: { ...withPassphrase.authentication, passphrase: "" },
+    }).success,
+    false,
+  );
+  // 与 Rust 的 `max(4_096)` 对齐：4_096 收，4_097 拒。
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...withPassphrase,
+      authentication: { ...withPassphrase.authentication, passphrase: "p".repeat(4_096) },
+    }).success,
+    true,
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...withPassphrase,
+      authentication: { ...withPassphrase.authentication, passphrase: "p".repeat(4_097) },
+    }).success,
+    false,
+  );
 });
 
 test("permission decisions always state which layer spoke", () => {

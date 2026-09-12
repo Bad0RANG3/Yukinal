@@ -225,6 +225,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_chat_sessions_updated ON chat_sessions (updated_at DESC);
     CREATE INDEX idx_chat_sessions_archived ON chat_sessions (archived_at, updated_at DESC);
     "#,
+    // 5 — 加密私钥的口令引用。
+    //
+    // 与 `credential_ref` 同一条规则：SQLite 里只放**引用**，口令材料在 OS
+    // keychain。之所以是独立的一列而不是把口令塞进 `credential_ref` 的条目里：
+    // 一条条目解析失败就会连私钥一起丢掉，而且私钥条目的 account 必须保持旧版本
+    // 代码读得懂。可空（`NULL` = 这个身份没有口令：明文 key / 密码 / ssh-agent），
+    // 写法沿用迁移 2 的 `ALTER TABLE … ADD COLUMN`（追加列，不改写既有行）。
+    r#"ALTER TABLE identities ADD COLUMN passphrase_ref TEXT;"#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

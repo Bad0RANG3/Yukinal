@@ -67,11 +67,17 @@ export interface AddServerInput {
   authentication:
     | { method: "password"; password: string }
     | { method: "privateKey"; privateKeyPem: string; passphrase?: string }
+    /** ssh-agent：**不携带任何 secret** —— 身份在 agent 手里，Yukinal 不落凭据。 */
+    | { method: "agent" }
     | { method: "identity"; identityId: string };
 }
 
 /** Editable server fields. Authentication is optional so an edit can retain
- * the current keychain credential without exposing it to the UI. */
+ * the current keychain credential without exposing it to the UI.
+ *
+ * `method: "agent"` is the exception: it never carries a secret, so "nothing was
+ * typed" cannot mean "keep the stored credential" — selecting the agent *is* the
+ * instruction, and it must be sent every time. */
 export interface UpdateServerInput {
   serverId: string;
   name: string;
@@ -83,6 +89,7 @@ export interface UpdateServerInput {
   authentication?:
     | { method: "password"; password: string }
     | { method: "privateKey"; privateKeyPem: string; passphrase?: string }
+    | { method: "agent" }
     | { method: "identity"; identityId: string };
 }
 
@@ -91,7 +98,12 @@ export interface Identity {
   id: string;
   label: string;
   method: "password" | "privateKey" | "agent";
+  /** `""` for `agent`: that identity has no credential entry at all. */
   credentialRef: string;
+  /** Reference to the passphrase entry of an encrypted private key. A reference,
+   * never the passphrase itself — and absent for a plaintext key, a password, or
+   * an agent identity. */
+  passphraseRef?: string;
   createdAt: string;
 }
 

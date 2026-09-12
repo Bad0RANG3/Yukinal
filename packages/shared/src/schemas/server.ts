@@ -106,11 +106,21 @@ export const AddServerInputSchema = z.strictObject({
   groupId: z.string().trim().max(256).optional(),
   authentication: z.discriminatedUnion("method", [
     z.strictObject({ method: z.literal("password"), password: z.string().min(1).max(4_096) }),
+    /**
+     * `passphrase` 是**可选**的，且 `min(1)`：空串不是「空口令」而是「没填」，
+     * 表单必须省略字段而不是送一个 `""`（Rust 侧 `min(1).max(4_096)` 与之对齐）。
+     * 无口令的明文 key 就是不带这个字段的形状。
+     */
     z.strictObject({
       method: z.literal("privateKey"),
       privateKeyPem: z.string().min(1).max(1_000_000),
       passphrase: z.string().min(1).max(4_096).optional(),
     }),
+    /**
+     * ssh-agent：**没有任何 secret 字段**（`.strictObject` 会拒绝多余的 key）。
+     * 身份由运行中的 agent 持有，Yukinal 这边连凭据条目都不建。
+     */
+    z.strictObject({ method: z.literal("agent") }),
     z.strictObject({ method: z.literal("identity"), identityId: z.string().trim().min(1).max(256) }),
   ]),
 });

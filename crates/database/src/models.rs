@@ -327,7 +327,14 @@ pub struct Identity {
     pub label: String,
     /// "password" | "privateKey" | "agent"
     pub method: String,
+    /// 凭据引用。agent 身份**没有**凭据条目，这里是空串 —— `identities.credential_ref`
+    /// 是 `NOT NULL`，空串表示「这个身份没有 secret」，而不是编一个指向不存在条目的
+    /// 假引用（那会让「引用存在」与「条目存在」这两件事对不上）。
     pub credential_ref: String,
+    /// 加密私钥口令的**引用**（口令材料在 OS keychain）。`None` = 这个身份没有口令：
+    /// 明文 key、密码认证、ssh-agent 都是这个形状。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passphrase_ref: Option<String>,
     pub created_at: String,
 }
 
@@ -404,16 +411,36 @@ pub struct McpServerConfig {
 // ---------------------------------------------------------------------------
 // add-server input（带 secret 的瞬时输入；secret 只进 keychain，不落 SQLite）
 
+/// add-server 的认证输入（带 secret 的瞬时输入；secret 只进 keychain，不落 SQLite）。
+///
+/// `rename_all_fields = "camelCase"` **不是装饰**：枚举上的 `rename_all` 只改**变体名**，
+/// 不变体里的字段名。少了它，`PrivateKey` 变体要的是 `private_key_pem`、`Identity`
+/// 变体要的是 `identity_id`，而共享契约（`packages/shared/src/schemas/server.ts`）发出
+/// 的一直是 `privateKeyPem` / `identityId` —— 于是「SSH 私钥」和「引用已有身份」两条路
+/// 在 `server_add`/`server_update` 上永远只会得到 `missing field`，只有密码认证能通。
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "method", rename_all = "camelCase")]
+#[serde(
+    tag = "method",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AuthenticationInput {
     Password {
         password: String,
     },
     PrivateKey {
         private_key_pem: String,
+        /// 加密私钥的口令。空 / 纯空白 = 「没有口令」，与 `crates/ssh` 的规则一致
+        /// （`load_private_key` 也把空口令过滤掉），由调用点决定是否落 keychain。
         passphrase: Option<String>,
     },
+    /// ssh-agent 认证：**不携带任何 secret**，也不写 keychain 条目。
+    ///
+    /// agent 持有的身份由远端 agent 自己保管，Yukinal 只转交签名请求；所以这个
+    /// 变体没有字段 —— 一个只描述「用哪条路径发现 agent」的 socket path 属于连接
+    /// 期决策（`Authentication::Agent { socket_path: None }` = 按平台约定发现），
+    /// 不该在新增服务器时被固化进数据库。
+    Agent,
     /// 引用已存在的身份（不改凭据）。
     Identity {
         identity_id: String,
@@ -687,5 +714,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn add_server(authentication: serde_json::Value) -> Result<AddServerInput, String> {
+        AddServerInput::from_value(&serde_json::json!({
+            "name": "db",
+            "host": "10.0.0.5",
+            "username": "root",
+            "environment": "staging",
+            "authentication": authentication,
+        }))
+    }
+
+    /// `authentication` 是 React ↔ Rust 的一处**联合类型契约**，而两端各自声明它
+    /// （`packages/shared/src/schemas/server.ts` 的 `discriminatedUnion` 与这里的
+    /// 内部标签枚举）。两边的拼写只能靠用例对上：TS 侧丢进来的就是下面这几个 JSON，
+    /// 任何一个变体名或字段名漂了，命令层会在运行时才报「invalid add-server input」。
+    ///
+    /// 左边的形状就是共享 schema 产出的形状（见 `schemas/server.test.ts`）。
+    #[test]
+    fn authentication_input_accepts_the_shared_wire_shapes() {
+        let parsed = add_server(serde_json::json!({ "method": "password", "password": "hunter2" }))
+            .expect("password");
+        assert!(matches!(
+            parsed.authentication,
+            AuthenticationInput::Password { password } if password == "hunter2"
+        ));
+
+        let parsed = add_server(serde_json::json!({
+            "method": "privateKey",
+            "privateKeyPem": "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "passphrase": "hunter2",
+        }))
+        .expect("encrypted private key");
+        assert!(matches!(
+            parsed.authentication,
+            AuthenticationInput::PrivateKey { passphrase: Some(passphrase), .. } if passphrase == "hunter2"
+        ));
+
+        // 明文 key：`passphrase` **缺席**，不是空串。
+        let parsed = add_server(serde_json::json!({
+            "method": "privateKey",
+            "privateKeyPem": "-----BEGIN OPENSSH PRIVATE KEY-----",
+        }))
+        .expect("plaintext private key");
+        assert!(matches!(
+            parsed.authentication,
+            AuthenticationInput::PrivateKey {
+                passphrase: None,
+                ..
+            }
+        ));
+
+        // ssh-agent：一个字段都没有的变体 —— 这正是 `z.strictObject({ method })` 的形状。
+        let parsed = add_server(serde_json::json!({ "method": "agent" })).expect("agent");
+        assert!(matches!(parsed.authentication, AuthenticationInput::Agent));
+
+        let parsed = add_server(serde_json::json!({ "method": "identity", "identityId": "idn_1" }))
+            .expect("identity");
+        assert!(matches!(
+            parsed.authentication,
+            AuthenticationInput::Identity { identity_id } if identity_id == "idn_1"
+        ));
+
+        // 未知 method 必须失败，而不是落到某个默认变体上。
+        assert!(add_server(serde_json::json!({ "method": "certificate" })).is_err());
+    }
+
+    /// `Identity` 的线形：`passphraseRef` 只在存在时出现，`agent` 身份的
+    /// `credentialRef` 是空串（它没有凭据条目）。
+    #[test]
+    fn identity_serialises_the_passphrase_reference_only_when_present() {
+        let encrypted = Identity {
+            id: "idn_1".into(),
+            label: "deploy key".into(),
+            method: "privateKey".into(),
+            credential_ref: "keychain://ssh/srv_1".into(),
+            passphrase_ref: Some("keychain://ssh/srv_1-passphrase".into()),
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&encrypted).unwrap()["passphraseRef"],
+            serde_json::json!("keychain://ssh/srv_1-passphrase"),
+        );
+
+        let agent = Identity {
+            passphrase_ref: None,
+            credential_ref: String::new(),
+            method: "agent".into(),
+            ..encrypted
+        };
+        let value = serde_json::to_value(&agent).unwrap();
+        assert!(value.get("passphraseRef").is_none());
+        assert_eq!(value["credentialRef"], serde_json::json!(""));
     }
 }
