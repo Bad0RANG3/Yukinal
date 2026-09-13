@@ -8,17 +8,12 @@
  * names are in that state, so the difference drifted invisibly instead of being a
  * decision someone makes.
  *
- * `agent.text` is what that cost. It sat in `EVENT_NAMES`, in the `YukinalEvent`
- * union, in the `AgentStreamEvent` union with a full zod schema, and in the Rust
- * forwarder's allow-list — while `apps/agent` never emits it (`agent-loop.ts` emits
- * started / thinking / tool_call / tool_result / waiting_approval /
- * approval_expired / completed / failed) and it was absent from `EVENT_SCHEMAS`, so
- * it could not be subscribed to either. A channel with a producer nowhere and a
- * consumer nowhere, spelled out in five files.
+ * The gap is now only Rust-only events (server.updated / terminal.opened). Every
+ * agent member has a producer, a channel, and a consumer; `agent.text` and
+ * `agent.usage` complete the provider-to-UI path.
  *
- * These tests do not resolve that (removing a name from the agent protocol is a
- * contract change, not a refactor). They make the sets visible, so adding or
- * removing a channel has to be deliberate.
+ * These tests make the sets visible, so adding or removing a channel has to be
+ * deliberate.
  */
 
 import assert from "node:assert/strict";
@@ -34,6 +29,8 @@ import { EVENT_SCHEMAS } from "./ipc.js";
 const SUBSCRIBABLE = [
   "agent.started",
   "agent.thinking",
+  "agent.text",
+  "agent.usage",
   "agent.tool_call",
   "agent.tool_result",
   "agent.waiting_approval",
@@ -56,15 +53,6 @@ const DECLARED_WITHOUT_A_SUBSCRIBER = [
   "terminal.opened",
 ] as const;
 
-/**
- * Declared, allow-listed by Rust, schema'd — and emitted by nobody.
- *
- * Kept in the list rather than deleted because removing it changes the agent
- * protocol contract, which is a feature decision. Flagged here so it stops looking
- * like a working channel.
- */
-const DECLARED_WITHOUT_A_PRODUCER = ["agent.text"] as const;
-
 test("the subscribable set is exactly the declared names that have a gate", () => {
   const gated = Object.keys(EVENT_SCHEMAS).sort();
   assert.deepEqual(gated, [...SUBSCRIBABLE].sort());
@@ -76,7 +64,6 @@ test("the three event sets partition EVENT_NAMES exactly", () => {
   const recorded = [
     ...SUBSCRIBABLE,
     ...DECLARED_WITHOUT_A_SUBSCRIBER,
-    ...DECLARED_WITHOUT_A_PRODUCER,
   ];
   assert.equal(new Set(recorded).size, recorded.length, "a channel is in two buckets");
   assert.deepEqual(
@@ -101,6 +88,8 @@ test("the agent channels the loop emits are all subscribable", () => {
   const emitted = [
     "agent.started",
     "agent.thinking",
+    "agent.text",
+    "agent.usage",
     "agent.tool_call",
     "agent.tool_result",
     "agent.waiting_approval",
@@ -114,12 +103,6 @@ test("the agent channels the loop emits are all subscribable", () => {
       `the agent loop emits ${name} but the UI cannot subscribe to it`,
     );
   }
-  // Deliberately not emitted by the loop; listing it here would hide the phantom.
-  assert.equal(
-    (emitted as readonly string[]).includes("agent.text"),
-    false,
-    "agent.text is now emitted: wire it into SUBSCRIBABLE and delete DECLARED_WITHOUT_A_PRODUCER",
-  );
 });
 
 /**
@@ -130,19 +113,14 @@ test("the agent channels the loop emits are all subscribable", () => {
  */
 const VALID_BUT_WRONG_MEMBER = { type: "agent.started", runId: "run_1", at: "2026-01-01T00:00:00Z" };
 
-/**
- * The members that also have a channel — every member except `agent.text`.
- *
- * Kept as a separate list so the tests below index `EVENT_SCHEMAS`, which does not have
- * an `agent.text` entry; using the full member list to index it is a type error, and
- * that error is the correct signal.
- */
+/* The agent members that also have a UI channel. Every member is expected here. */
+
 const AGENT_CHANNELS = AGENT_EVENT_TYPES.filter(
   (name): name is Extract<keyof typeof EVENT_SCHEMAS, `agent.${string}`> => name in EVENT_SCHEMAS,
 );
 
 test("every agent channel rejects a payload that is valid for a different channel", () => {
-  // This is the hole the per-channel schemas exist to close. All eight channels used to
+  // This is the hole the per-channel schemas exist to close. All ten channels used to
   // point at `AgentStreamEventSchema`, so the gate could only ask "is this *some* valid
   // agent event" — this payload answered yes to all eight, and `useAgentRun`'s
   // `as Extract<…>` cast then told the handler it held a `result` that was not there.
@@ -161,16 +139,6 @@ test("every agent channel rejects a payload that is valid for a different channe
         `${name} accepted an agent.started payload: the channel gate is not per-member`,
       );
     }
-  }
-});
-
-test("a member with no channel is rejected by every channel", () => {
-  // `agent.text` is a real union member with a full schema and no channel. It must not
-  // be acceptable anywhere, or dropping it from EVENT_SCHEMAS would be unobservable.
-  const text = { type: "agent.text", runId: "run_1", textDelta: "hi", at: "2026-01-01T00:00:00Z" };
-  assert.equal(AgentStreamEventSchema.safeParse(text).success, true, "agent.text is a valid stream member");
-  for (const name of AGENT_CHANNELS) {
-    assert.equal(EVENT_SCHEMAS[name].safeParse(text).success, false, `${name} accepted an agent.text payload`);
   }
 });
 
@@ -195,8 +163,8 @@ test("each channel uses its own member schema, and the union is built from the s
   );
   assert.equal(
     AGENT_EVENT_TYPES.length,
-    AGENT_CHANNELS.length + 1,
-    "the only member without a channel is expected to be agent.text",
+    AGENT_CHANNELS.length,
+    "every agent stream member must have a subscribable channel",
   );
 });
 

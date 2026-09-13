@@ -14,7 +14,7 @@
 
 import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
-import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
+import type { AgentPermissionMode, AgentRunMode, Environment } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
@@ -33,7 +33,7 @@ import {
   type Submission,
 } from "./composer-triggers.js";
 import { APPROVAL_OPTIONS, APPROVAL_ORDER, RUN_MODE_ORDER, RUN_MODE_SPECS, approvalOptionSpec, runModeSpec } from "./run-mode.js";
-import { RUN_POLICY_ORDER, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
+import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
 type Suggestion =
@@ -55,6 +55,7 @@ export function AgentComposer({
   onRunModeChange,
   runPolicy,
   onRunPolicyChange,
+  targetEnvironment,
   models,
   selectedModelKey,
   selectedModelLabel,
@@ -85,6 +86,8 @@ export function AgentComposer({
   /** 这次运行按哪套策略判定；`null` = 按环境自动（请求里不带 policyId）。 */
   runPolicy: RunPolicyChoice;
   onRunPolicyChange: (policy: RunPolicyChoice) => void;
+  /** Environment this prompt will target if it is sent now. */
+  targetEnvironment: Environment;
   models: ReadonlyArray<{ key: string; label: string; providerLabel?: string }>;
   selectedModelKey: string | null;
   /** 当前选中模型的完整名称，用于在输入框上方显示当前运行目标。 */
@@ -96,6 +99,8 @@ export function AgentComposer({
 }) {
   const modeSpec = runModeSpec(runMode);
   const approvalSpec = approvalOptionSpec(permissionMode);
+  const policySpec = runPolicySpec(runPolicy);
+  const policyWarning = policyEnvironmentWarning(runPolicy, targetEnvironment);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [trigger, setTrigger] = useState<ActiveTrigger | null>(null);
   const [highlight, setHighlight] = useState(0);
@@ -397,6 +402,7 @@ export function AgentComposer({
               <p className="agent-settings-note">
                 决定这次运行按哪套策略判定。选定的策略会取代「按环境自动」，即使目标环境与它不一致；而 high / critical 操作无论选哪套都必须由你批准。
               </p>
+              {policyWarning ? <p className="agent-settings-warning" role="status">{policyWarning}</p> : null}
               <ul className="agent-settings-options">
                 {RUN_POLICY_ORDER.map((key) => {
                   const spec = runPolicySpec(key);
@@ -451,6 +457,13 @@ export function AgentComposer({
             </span>
             <span className="agent-approval-summary" title={approvalSpec.summary}>
               {approvalSpec.label}
+            </span>
+            <span
+              className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`}
+              title={policyWarning ?? policySpec.summary}
+            >
+              {policyWarning ? <Icon name="warning" size="sm" /> : null}
+              {policySpec.label}
             </span>
           </div>
           <div className="agent-composer-toolbar-right">

@@ -16,6 +16,7 @@ import {
   IPC_COMMANDS,
   type AgentPermissionMode,
   type AgentRunMode,
+  type AgentTokenUsage,
   type ApprovalDecision,
   type ApprovalRequest,
 } from "@yukinal/shared";
@@ -26,6 +27,7 @@ import { RunLifecycle } from "./run-lifecycle.js";
 import {
   appendAssistantDelta,
   appendEntries,
+  appendReasoningDelta,
   appendToolCall,
   settleAssistantText,
   settleToolResult,
@@ -80,6 +82,7 @@ export type AgentRun = {
   listening: boolean;
   pendingApprovalIds: string[];
   approvalStatuses: Record<string, string>;
+  tokenUsage: AgentTokenUsage | null;
   start(input: StartRunInput): Promise<StartOutcome>;
   stop(): Promise<void>;
   respondApproval(approval: ApprovalRequest, decision: ApprovalDecision): Promise<void>;
@@ -132,6 +135,7 @@ export function useAgentRun(options: {
   const [listening, setListening] = useState(false);
   const [pendingApprovalIds, setPendingApprovalIds] = useState<string[]>([]);
   const [approvalStatuses, setApprovalStatuses] = useState<Record<string, string>>({});
+  const [tokenUsage, setTokenUsage] = useState<AgentTokenUsage | null>(null);
 
   useEffect(() => {
     if (!isDesktopShell()) return;
@@ -166,7 +170,15 @@ export function useAgentRun(options: {
     on("agent.thinking", (event) => {
       if (!isActive(event)) return;
       const delta = event.textDelta ?? "";
-      setEntries((current) => appendAssistantDelta(current, delta));
+      setEntries((current) => appendReasoningDelta(current, delta));
+    });
+    on("agent.text", (event) => {
+      if (!isActive(event)) return;
+      setEntries((current) => appendAssistantDelta(current, event.textDelta));
+    });
+    on("agent.usage", (event) => {
+      if (!isActive(event)) return;
+      setTokenUsage(event.usage);
     });
     on("agent.tool_call", (event) => {
       if (!isActive(event)) return;
@@ -292,6 +304,7 @@ export function useAgentRun(options: {
     setRunId(null);
     setApprovalStatuses({});
     setPendingApprovalIds([]);
+    setTokenUsage(null);
     approvalLocks.current.clear();
 
     const prompt = input.prompt;
@@ -391,6 +404,7 @@ export function useAgentRun(options: {
     setStopping(false);
     setPendingApprovalIds([]);
     setApprovalStatuses({});
+    setTokenUsage(null);
     approvalLocks.current.clear();
   }, []);
 
@@ -411,6 +425,7 @@ export function useAgentRun(options: {
     listening,
     pendingApprovalIds,
     approvalStatuses,
+    tokenUsage,
     start,
     stop,
     respondApproval,

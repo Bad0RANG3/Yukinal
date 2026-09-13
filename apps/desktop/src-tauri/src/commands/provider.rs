@@ -526,7 +526,7 @@ mod tests {
     /// 等于 TypeScript 那一半（`schemas/ipc.test.ts`）解析的文件。
     ///
     /// `provider_delete` 是新命令，所以顺手把它做成两侧都钉住的那一半：provider 这一族此前
-    /// 一份 Rust 断言都没有（README 的「当前限制」就是这么写的）。
+    /// 一份 Rust 断言都没有（`docs/limitations.md` 的「当前限制」就是这么写的）。
     #[test]
     fn the_delete_response_matches_the_shared_fixture() {
         let fixture: Value = serde_json::from_str(include_str!(

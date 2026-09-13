@@ -4,15 +4,15 @@
 //!
 //! - **名字规则**（[`normalize_segment`] / [`is_segment`] / [`internal_tool_name`]）：
 //!   远端拼写必须先变成合法的内部名段，才有资格拼进 `mcp.<server>.<tool>`
-//!   （ADR 0004、README.md 的「命名空间与名称冲突」）。这里挡的是「外来拼写进入注册表」
+//!   （ADR 0004、docs/boundaries/mcp.md 的「命名空间与名称冲突」）。这里挡的是「外来拼写进入注册表」
 //!   这条路，因为一旦进了注册表，审计里的名字就跟远端真正答应的名字对不上了。
 //! - **本地类型**（[`McpToolDescriptor`] / [`McpToolResult`]）：把远端 JSON 变成有字段、
 //!   有文档的形状，并在类型上写清哪一部分是**不可信内容**。
 //!
 //! 刻意不在这里做的事：不校验工具入参（本地 Zod schema 才是校验依据，
-//! README.md 的「输入、输出与超时由本地强制」）、不翻译 JSON Schema（那是适配器的事，
-//! README.md 的「外部工具必须先变成 Yukinal 的工具声明」）、不判断风险等级
-//! （README.md 的「风险等级由本地决定」）。
+//! docs/boundaries/mcp.md 的「输入、输出与超时由本地强制」）、不翻译 JSON Schema（那是适配器的事，
+//! docs/boundaries/mcp.md 的「外部工具必须先变成 Yukinal 的工具声明」）、不判断风险等级
+//! （docs/boundaries/mcp.md 的「风险等级由本地决定」）。
 
 use serde::Serialize;
 use serde_json::Value;
@@ -23,7 +23,7 @@ use super::truncated;
 /// `PROVIDER_TOOL_NAME_MAX_LENGTH` 和 ADR 0004 是同一个数。
 pub const PROVIDER_TOOL_NAME_MAX_LENGTH: usize = 64;
 
-/// 内部名里属于 MCP 来源的命名空间前缀（README.md 的「命名空间与名称冲突」：
+/// 内部名里属于 MCP 来源的命名空间前缀（docs/boundaries/mcp.md 的「命名空间与名称冲突」：
 /// `mcp.<serverId>.<tool>`）。
 pub const MCP_NAMESPACE: &str = "mcp";
 
@@ -54,7 +54,7 @@ const _: () = assert!(2 * SEGMENT_MAX_LENGTH <= SEGMENT_BUDGET);
 
 /// 一个工具描述的长度上限。
 ///
-/// 描述是给用户看的展示文本（README.md 的「描述文本一律视为不可信数据」），没有理由被远端
+/// 描述是给用户看的展示文本（docs/boundaries/mcp.md 的「描述文本一律视为不可信数据」），没有理由被远端
 /// 塞到几 MB：它将来还会进入工具声明与界面，而「一个远端能决定宿主记住多少字节」本身就是
 /// 一种资源控制权。4096 字符远超任何真实工具描述的长度。
 pub const TOOL_DESCRIPTION_MAX_CHARS: usize = 4096;
@@ -167,7 +167,7 @@ fn rejection_reason(raw: &str) -> String {
     format!("it does not match `{SEGMENT_PATTERN}`")
 }
 
-/// 内部工具名 `mcp.<server>.<tool>`（ADR 0004 / README.md 的「命名空间与名称冲突」）。
+/// 内部工具名 `mcp.<server>.<tool>`（ADR 0004 / docs/boundaries/mcp.md 的「命名空间与名称冲突」）。
 ///
 /// 合起来超限的组合在这里被拦住。在 `SEGMENT_MAX_LENGTH` 取 `SEGMENT_BUDGET / 2` 的今天，
 /// 两段各自合法就不可能超预算（编译期已断言），所以这一步**不会**触发；它留着，是因为
@@ -220,10 +220,10 @@ pub struct McpToolDescriptor {
     /// 记录的改名，就是 ADR 0004 拒绝的「无法审计的工具」。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_name: Option<String>,
-    /// 不可信展示文本（README.md 的「描述文本一律视为不可信数据」）：可以给用户看，
+    /// 不可信展示文本（docs/boundaries/mcp.md 的「描述文本一律视为不可信数据」）：可以给用户看，
     /// 绝不当作指令、绝不拼进系统提示词。
     pub description: String,
-    /// 远端声明的 JSON Schema，原样保留。**它不是校验依据**：README.md 的
+    /// 远端声明的 JSON Schema，原样保留。**它不是校验依据**：docs/boundaries/mcp.md 的
     /// 「输入、输出与超时由本地强制」要求一次调用接受什么由本地 schema 决定，
     /// 远端声明只提供翻译来源。这里保存它，只是因为翻译需要它。
     pub input_schema: Value,
@@ -261,7 +261,7 @@ impl McpToolDescriptor {
 #[serde(rename_all = "camelCase")]
 pub struct McpToolResult {
     pub is_error: bool,
-    /// 结果内容块，逐字保留。本模块不解释它（README.md 的「描述文本一律视为不可信数据」）。
+    /// 结果内容块，逐字保留。本模块不解释它（docs/boundaries/mcp.md 的「描述文本一律视为不可信数据」）。
     pub content: Vec<McpContentBlock>,
     /// 服务端给的 `structuredContent`，原样保留；没给时为空。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,7 +292,7 @@ pub enum McpContentBlock {
     },
     /// 其它块类型（image / audio / resource / resource_link……）原样保留：本模块不翻译
     /// 内容，只搬运内容，翻译是适配器的事
-    /// （README.md 的「外部工具必须先变成 Yukinal 的工具声明」）。
+    /// （docs/boundaries/mcp.md 的「外部工具必须先变成 Yukinal 的工具声明」）。
     Other {
         value: Value,
     },

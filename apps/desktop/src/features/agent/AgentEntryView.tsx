@@ -49,6 +49,13 @@ export function AgentEntryView({
           <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" />
         </div>
       );
+    case "reasoning":
+      return (
+        <details className="agent-reasoning">
+          <summary className="agent-reasoning-summary">思考过程</summary>
+          <pre className="agent-reasoning-text">{entry.text}</pre>
+        </details>
+      );
     case "tool":
       return <ToolCard entry={entry} />;
     /* 应用自己的话，不是模型输出 —— 因此用中性样式并标注来源，

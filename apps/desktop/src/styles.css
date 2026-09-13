@@ -1940,6 +1940,17 @@ select:focus-visible {
   gap: 8px;
 }
 
+.agent-token-usage {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .agent-toggle {
   width: 28px;
   height: 28px;
@@ -1971,6 +1982,36 @@ select:focus-visible {
 .approval-card,
 .agent-error {
   border-radius: 9px;
+}
+
+.agent-reasoning {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-2) 76%, transparent);
+  color: var(--muted);
+}
+
+.agent-reasoning-summary {
+  cursor: pointer;
+  padding: 7px 9px;
+  color: var(--faint);
+  font-size: 10px;
+  user-select: none;
+}
+
+.agent-reasoning[open] .agent-reasoning-summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-reasoning-text {
+  margin: 0;
+  padding: 9px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .agent-entry-user {
@@ -4316,7 +4357,8 @@ select.form-input {
 /* 当前运行状态的常驻摘要。不展开设置也能一眼看出这次运行会怎样 ——
    模式是随请求发出的，用户必须能在按下发送前确认它。 */
 .agent-mode-summary,
-.agent-approval-summary {
+.agent-approval-summary,
+.agent-policy-summary {
   overflow: hidden;
   color: #a5a6a8;
   font-size: 10px;
@@ -4328,6 +4370,31 @@ select.form-input {
   border: 1px solid var(--composer-line);
   border-radius: 999px;
   padding: 2px 7px;
+}
+
+.agent-policy-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-policy-summary.has-warning {
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-surface);
+  color: #e6e6e6;
+  padding: 2px 7px;
+}
+
+.agent-settings-warning {
+  margin: 0;
+  border: 1px solid var(--warn-line);
+  border-radius: 7px;
+  background: var(--warn-surface);
+  color: #e6e6e6;
+  padding: 7px 9px;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 /* 只读类模式给一个明确的视觉标记：它改变的是「能不能改东西」，

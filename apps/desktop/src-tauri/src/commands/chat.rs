@@ -285,7 +285,7 @@ mod tests {
     /// serde 的输出必须逐字节等于 TypeScript 那一半（`schemas/ipc.test.ts`）解析的文件。
     ///
     /// 对话记录这一族过去一份 Rust 断言都没有：Rust 侧改掉字段名时，仓库里不会有任何
-    /// 检查变红（README 的「当前限制」曾经就是这么写的）。记录视图现在依赖
+    /// 检查变红（`docs/limitations.md` 的「当前限制」曾经就是这么写的）。记录视图现在依赖
     /// `chat_session_list` 的 `counts` 与 `chat_session_rename`，所以这一族整体补上。
     mod fixtures {
         pub const LIST: &str =

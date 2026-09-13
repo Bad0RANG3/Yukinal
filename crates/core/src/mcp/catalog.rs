@@ -42,7 +42,7 @@ pub const CATALOG_START_BUDGET: Duration = Duration::from_secs(4);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpFailureCode {
-    /// `http` 传输：类型层面就不存在（README.md 的「进程生命周期仍然归 Rust」）。不仅仅是「没实现」，而是目前没有
+    /// `http` 传输：类型层面就不存在（docs/boundaries/mcp.md 的「进程生命周期仍然归 Rust」）。不仅仅是「没实现」，而是目前没有
     /// 任何出站网络策略可以让它成立。
     TransportNotImplemented,
     Disabled,
@@ -98,7 +98,7 @@ impl McpFailureCode {
 }
 
 /// 目录里的一个工具。字段来自 `McpToolDescriptor`，不是另造一套形状：`description` 与
-/// `input_schema` 是远端声明**原样**带出来的不可信内容（README.md 的「描述文本一律视为不可信数据」）。
+/// `input_schema` 是远端声明**原样**带出来的不可信内容（docs/boundaries/mcp.md 的「描述文本一律视为不可信数据」）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCatalogTool {

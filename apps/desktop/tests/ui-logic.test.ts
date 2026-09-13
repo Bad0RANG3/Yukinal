@@ -9,6 +9,7 @@ import { RunLifecycle } from "../src/features/agent/run-lifecycle.js";
 import {
   appendAssistantDelta,
   appendEntries,
+  appendReasoningDelta,
   appendToolCall,
   entriesFromMessages,
   MAX_TRANSCRIPT_ENTRIES,
@@ -130,6 +131,16 @@ test("transcript caps history without dropping the newest entries", () => {
   assert.equal(next.length, MAX_TRANSCRIPT_ENTRIES);
   assert.deepEqual(next.at(-1), { kind: "assistant", text: "latest" });
   assert.deepEqual(next[0], { kind: "user", text: "u1" });
+});
+
+test("reasoning deltas accumulate separately from the answer", () => {
+  const first = appendReasoningDelta([{ kind: "user", text: "hi" }], "think");
+  const second = appendReasoningDelta(first, " more");
+  assert.deepEqual(second, [
+    { kind: "user", text: "hi" },
+    { kind: "reasoning", text: "think more" },
+  ]);
+  assert.equal(appendReasoningDelta(second, ""), second);
 });
 
 test("streaming deltas accumulate into the trailing assistant line", () => {

@@ -736,7 +736,7 @@ test("delivery: sync answers with the run result, after the events have streamed
   // so the events of the run are delivered while the caller waits. This is the ordering
   // the router documents, and the one an async call deliberately does not have.
   assert.equal(observed.at(-1), "response", observed.join(", "));
-  assert.deepEqual(observed, ["event:agent.started", "event:agent.thinking", "event:agent.completed", "response"]);
+  assert.deepEqual(observed, ["event:agent.started", "event:agent.text", "event:agent.completed", "response"]);
   assert.equal(llm.bodies.length, 1);
 });
 

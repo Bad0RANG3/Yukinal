@@ -1,6 +1,6 @@
 {
   "name": "@yukinal/agent-sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Typed client for the agent sidecar over JSON-RPC and NDJSON",

@@ -1,6 +1,6 @@
 {
   "name": "@yukinal/shared",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Cross-layer API contracts: types, schemas, events, IPC and sidecar protocol",

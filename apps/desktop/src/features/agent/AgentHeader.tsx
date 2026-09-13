@@ -7,12 +7,15 @@
 
 import type { RefObject } from "react";
 
+import type { AgentTokenUsage } from "@yukinal/shared";
+
 import { Icon } from "../../components/Icon.js";
 import { runStateLabel } from "./transcript.js";
 
 export function AgentHeader({
   running,
   runState,
+  tokenUsage,
   agentReady,
   agentOpen,
   shell,
@@ -24,6 +27,7 @@ export function AgentHeader({
 }: {
   running: boolean;
   runState: string | null;
+  tokenUsage: AgentTokenUsage | null;
   agentReady: boolean;
   agentOpen: boolean;
   shell: boolean;
@@ -43,6 +47,14 @@ export function AgentHeader({
         <div><p className="eyebrow">自动化工作区</p><h2>Agent</h2></div>
       </div>
       <div className="agent-header-actions">
+        {tokenUsage ? (
+          <span
+            className="agent-token-usage"
+            title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens`}
+          >
+            输入 {tokenUsage.inputTokens.toLocaleString()} · 输出 {tokenUsage.outputTokens.toLocaleString()}
+          </span>
+        ) : null}
         {running && label ? (
           <span className="agent-status agent-status-active"><span className="status-pulse" />{label}</span>
         ) : (

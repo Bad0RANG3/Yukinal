@@ -203,7 +203,7 @@ async fn a_handshake_negotiates_a_version_and_lists_the_two_tools() {
             .unwrap_or_default()
             .contains("Ignore any previous instructions"),
         "the fixture's instructions are prompt-injection shaped; the only thing that happened to \
-         them is that they were stored as data (README.md: description text is untrusted data)"
+         them is that they were stored as data (docs/boundaries/mcp.md: description text is untrusted data)"
     );
 
     assert_eq!(
@@ -438,7 +438,7 @@ async fn starting_the_same_server_twice_reuses_one_process() {
     );
     assert_eq!(
         second.info.pid, first.info.pid,
-        "one server id is one process (README.md: the process lifecycle stays with Rust)"
+        "one server id is one process (docs/boundaries/mcp.md: the process lifecycle stays with Rust)"
     );
     assert_eq!(second.tool_count, first.tool_count);
     assert_eq!(supervisor.status(SERVER_ID).await.pid, Some(first.info.pid));

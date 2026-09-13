@@ -15,6 +15,7 @@ import {
   AUTO_RUN_POLICY,
   RUN_POLICY_ORDER,
   RUN_POLICY_SPECS,
+  policyEnvironmentWarning,
   requestPolicyId,
   runPolicySpec,
   type RunPolicyChoice,
@@ -96,4 +97,19 @@ test("every documented choice round-trips through the spec lookup", () => {
     assert.equal(spec.value, choice);
     assert.equal(runPolicySpec(spec.value), spec);
   }
+});
+
+test("an explicit policy warns only when it conflicts with the target environment", () => {
+  assert.equal(policyEnvironmentWarning(null, "production"), null);
+  assert.equal(policyEnvironmentWarning("policy.production", "production"), null);
+  assert.equal(policyEnvironmentWarning("policy.production", "unknown"), null);
+
+  assert.match(
+    policyEnvironmentWarning("policy.production", "staging") ?? "",
+    /预发布.*生产策略.*按所选策略判定/,
+  );
+  assert.match(
+    policyEnvironmentWarning("policy.development", "unknown") ?? "",
+    /未知（按生产处理）.*开发策略.*按所选策略判定/,
+  );
 });

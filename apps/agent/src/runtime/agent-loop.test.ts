@@ -36,6 +36,76 @@ test("without a provider the loop refuses to run instead of faking output", asyn
   );
 });
 
+test("provider text, reasoning and cumulative usage survive the loop", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "test.read",
+    description: "Read test data",
+    risk: "read",
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({}),
+    execute: async () => ({ ok: true }),
+  });
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "usage", inputTokens: 5, outputTokens: 2 };
+        yield { type: "tool_call", call: { id: "call_read", name: "test__read", arguments: {} } };
+        yield { type: "done", finishReason: "tool_calls" };
+        return;
+      }
+      yield { type: "reasoning_delta", text: "reasoning" };
+      yield { type: "text_delta", text: "answer" };
+      yield { type: "usage", inputTokens: 7, outputTokens: 3 };
+      yield { type: "done", finishReason: "stop" };
+    },
+  };
+
+  const events: AgentStreamEvent[] = [];
+  const result = await loop.start(
+    {
+      runId: "run_stream_contract",
+      sessionId: "ses_stream_contract",
+      prompt: "answer after reading",
+      target: { host: "local", environment: "local" },
+    },
+    { emit: (event) => events.push(event) },
+    provider,
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  const textEvents = events.filter(
+    (event): event is Extract<AgentStreamEvent, { type: "agent.text" }> => event.type === "agent.text",
+  );
+  const reasoningEvents = events.filter(
+    (event): event is Extract<AgentStreamEvent, { type: "agent.thinking" }> => event.type === "agent.thinking",
+  );
+  const usageEvents = events.filter(
+    (event): event is Extract<AgentStreamEvent, { type: "agent.usage" }> => event.type === "agent.usage",
+  );
+  assert.equal(textEvents.map((event) => event.textDelta).join(""), "answer");
+  assert.equal(reasoningEvents.map((event) => event.textDelta).join(""), "reasoning");
+  assert.deepEqual(
+    usageEvents.map((event) => event.usage),
+    [{ inputTokens: 5, outputTokens: 2 }, { inputTokens: 12, outputTokens: 5 }],
+  );
+});
+
 test("approval responses are bound to the run that displayed them", async () => {
   const registry = new ToolRegistry();
   registry.register({

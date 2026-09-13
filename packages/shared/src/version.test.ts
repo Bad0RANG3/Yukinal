@@ -66,9 +66,35 @@ test("the version-carrying IPC fixtures advertise APP_VERSION", () => {
     ["packages/shared/fixtures/ipc/core_ping.json", (payload) => payload.version],
     ["packages/shared/fixtures/ipc/agent_spawn.json", (payload) => payload.agentVersion],
     ["packages/shared/fixtures/ipc/agent_status.json", (payload) => payload.agentVersion],
+    ["packages/shared/fixtures/ipc/agent_status_restarted.json", (payload) => payload.agentVersion],
   ];
   for (const [path, pick] of fixtures) {
     const payload = JSON.parse(readRoot(path)) as Record<string, unknown>;
     assert.equal(pick(payload), APP_VERSION, `${path} must carry the released version`);
   }
+});
+
+test("release documentation advertises the current version", () => {
+  const readme = readRoot("README.md");
+  const changelog = readRoot("docs/changelog.md");
+  assert.ok(readme.includes("`" + APP_VERSION + "`"), "README.md must advertise APP_VERSION");
+  assert.ok(changelog.includes("## " + APP_VERSION + " "), "docs/changelog.md must contain a dated section for APP_VERSION");
+});
+
+test("formal project governance files are present", () => {
+  const required = [
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    ".github/pull_request_template.md",
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ".github/ISSUE_TEMPLATE/feature_request.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+  ];
+  for (const path of required) {
+    assert.doesNotThrow(() => readRoot(path), `${path} must exist for a formal release`);
+  }
+
+  const workflow = readRoot(".github/workflows/package.yml");
+  assert.match(workflow, /tags:\s*\["v\*"\]/, "the package workflow must run for v* release tags");
 });

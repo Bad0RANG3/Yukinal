@@ -534,6 +534,7 @@ fn forward_agent_frame(app: &AppHandle, frame: &Value) {
         "agent.started"
             | "agent.thinking"
             | "agent.text"
+            | "agent.usage"
             | "agent.tool_call"
             | "agent.tool_result"
             | "agent.waiting_approval"

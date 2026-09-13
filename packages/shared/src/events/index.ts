@@ -20,6 +20,7 @@ export const EVENT_NAMES = [
   "agent.started",
   "agent.thinking",
   "agent.text",
+  "agent.usage",
   "agent.tool_call",
   "agent.tool_result",
   "agent.waiting_approval",
@@ -91,4 +92,4 @@ export type YukinalEvent =
   | { name: "terminal.data"; payload: TerminalDataEvent }
   | { name: "terminal.closed"; payload: TerminalClosedEvent }
   | { name: "activity.created"; payload: Activity }
-  | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };
+  | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

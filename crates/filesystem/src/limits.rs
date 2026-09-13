@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn the_limits_are_pinned_to_their_published_values() {
-        // 这些数字是对外契约（`packages/shared` 的 schema、README 的说明），不是实现细节：
+        // 这些数字是对外契约（`packages/shared` 的 schema、`docs/security.md` 的说明），不是实现细节：
         // 改动它们等于改动 Agent 工具与 UI 看到的行为，所以在这里钉住而不是靠人记得。
         assert_eq!(MAX_REMOTE_PATH_CHARS, 4_096);
         assert_eq!(DEFAULT_AGENT_READ_BYTES, 131_072);

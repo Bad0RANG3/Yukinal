@@ -5981,7 +5981,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-collector"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "futures",
  "serde",
@@ -5994,7 +5994,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -6012,7 +6012,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-credentials"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "keyring",
  "serde",
@@ -6021,7 +6021,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-database"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -6031,7 +6031,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6049,7 +6049,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-filesystem"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -6057,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-ssh"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rand",
  "russh",
@@ -6071,7 +6071,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-terminal"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -6083,7 +6083,7 @@ dependencies = [
 
 [[package]]
 name = "yukinal-time"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "zerofrom"

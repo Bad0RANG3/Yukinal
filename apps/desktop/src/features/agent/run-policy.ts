@@ -18,7 +18,7 @@
  * 编译失败，而不是在界面上悄悄缺一行。
  */
 
-import { BUILTIN_POLICY_IDS, type BuiltinPolicyId } from "@yukinal/shared";
+import { BUILTIN_POLICY_IDS, defaultPolicyFor, type BuiltinPolicyId, type Environment } from "@yukinal/shared";
 
 /**
  * 用户的选择。`null` 是「按环境自动」：请求里**不带** `policyId`，由 sidecar 用目标
@@ -80,4 +80,21 @@ export function runPolicySpec(policy: RunPolicyChoice): RunPolicySpec {
  */
 export function requestPolicyId(policy: RunPolicyChoice): string | undefined {
   return policy ?? undefined;
+}
+
+const ENVIRONMENT_LABELS: Record<Environment, string> = {
+  local: "本机",
+  development: "开发",
+  staging: "预发布",
+  production: "生产",
+  unknown: "未知（按生产处理）",
+};
+
+/** Warn when an explicit policy conflicts with the environment's default policy. */
+export function policyEnvironmentWarning(
+  policy: RunPolicyChoice,
+  environment: Environment,
+): string | null {
+  if (policy === null || defaultPolicyFor(environment).id === policy) return null;
+  return `目标环境是${ENVIRONMENT_LABELS[environment]}，但选择了${runPolicySpec(policy).label}；本次运行会按所选策略判定。`;
 }

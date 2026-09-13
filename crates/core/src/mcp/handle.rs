@@ -215,7 +215,7 @@ impl McpServerHandle {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // 孤儿进程是不可接受的（README.md 的「进程生命周期仍然归 Rust」）：
+            // 孤儿进程是不可接受的（docs/boundaries/mcp.md 的「进程生命周期仍然归 Rust」）：
             // 句柄整体消失时，子进程必须跟着走。
             .kill_on_drop(true);
         #[cfg(windows)]
@@ -419,7 +419,7 @@ impl McpServerHandle {
         let params = json!({
             "protocolVersion": wire::PREFERRED_PROTOCOL_VERSION,
             // 客户端能力**如实**为空：本模块一个客户端能力都没实现，就一个都不声明
-            // （README.md 的「不要暗示已经可用」：能力报告必须是事实，不是意图）。
+            // （docs/boundaries/mcp.md 的「不要暗示已经可用」：能力报告必须是事实，不是意图）。
             "capabilities": {},
             "clientInfo": { "name": wire::CLIENT_NAME, "version": wire::CLIENT_VERSION },
         });
@@ -503,7 +503,7 @@ impl McpServerHandle {
     /// `tools/call`。
     ///
     /// 只能调用服务端**声明过**的工具，并且按它声明的拼写去调（`remote_name`）。返回的
-    /// 内容是不可信数据（README.md 的「描述文本一律视为不可信数据」）：本模块只搬运它。
+    /// 内容是不可信数据（docs/boundaries/mcp.md 的「描述文本一律视为不可信数据」）：本模块只搬运它。
     pub async fn call_tool(
         &self,
         tool: &str,
@@ -729,7 +729,7 @@ impl Inner {
             },
             wire::Incoming::ServerRequest { id, method } => {
                 // 我们声明了零客户端能力，合规的服务端不该发请求过来。替它编一个答案是
-                // README.md 的「不要暗示已经可用」禁止的「假装能用」，所以只记录。
+                // docs/boundaries/mcp.md 的「不要暗示已经可用」禁止的「假装能用」，所以只记录。
                 self.remember_diagnostic(format!(
                     "ignored a request from the server (id {id}, method \"{}\")",
                     truncated(&method)
@@ -737,7 +737,7 @@ impl Inner {
             }
             wire::Incoming::Notification { method } => {
                 // 包括 `notifications/tools/list_changed`：工具表变化意味着重新注册，而注册
-                // 属于适配器（README.md 的「外部工具必须先变成 Yukinal 的工具声明」）。
+                // 属于适配器（docs/boundaries/mcp.md 的「外部工具必须先变成 Yukinal 的工具声明」）。
                 // 这里只记录，缓存不刷新。
                 self.remember_diagnostic(format!(
                     "ignored a notification from the server (\"{}\")",

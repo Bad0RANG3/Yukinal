@@ -23,6 +23,9 @@ const hasCargo = spawnSync("cargo", ["--version"], { stdio: "ignore" }).status =
 const steps = [
   { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
   { name: "secret scan", command: process.execPath, args: ["scripts/check-secrets.mjs"], required: true },
+  // Documentation links are load-bearing now that the rules live in a tree: a
+  // section that moves takes its anchors with it, and only the renderer notices.
+  { name: "docs links", command: process.execPath, args: ["scripts/check-docs-links.mjs"], required: true },
   {
     name: "build contract libs",
     command: "pnpm",

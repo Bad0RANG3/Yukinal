@@ -439,6 +439,8 @@ export const IPC_SCHEMAS = {
 export const EVENT_SCHEMAS = {
   "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
   "agent.thinking": AGENT_EVENT_MEMBER_SCHEMAS["agent.thinking"],
+  "agent.text": AGENT_EVENT_MEMBER_SCHEMAS["agent.text"],
+  "agent.usage": AGENT_EVENT_MEMBER_SCHEMAS["agent.usage"],
   "agent.tool_call": AGENT_EVENT_MEMBER_SCHEMAS["agent.tool_call"],
   "agent.tool_result": AGENT_EVENT_MEMBER_SCHEMAS["agent.tool_result"],
   "agent.waiting_approval": AGENT_EVENT_MEMBER_SCHEMAS["agent.waiting_approval"],

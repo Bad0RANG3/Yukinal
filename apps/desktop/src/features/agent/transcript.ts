@@ -47,6 +47,7 @@ export type ToolOutcome = {
 export type Entry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
+  | { kind: "reasoning"; text: string }
   | { kind: "system"; text: string }
   | (ToolCallFacts & {
       kind: "tool";
@@ -70,6 +71,15 @@ export function appendEntries(current: Entry[], additions: Entry[]): Entry[] {
  * 流式文本按 run 累积。事件乱序也没关系：同一 run 的增量永远追加到
  * 末尾那条 assistant 行上，而不是新起一行。
  */
+export function appendReasoningDelta(current: Entry[], delta: string): Entry[] {
+  if (delta.length === 0) return current;
+  const last = current.at(-1);
+  if (last?.kind === "reasoning") {
+    return appendEntries(current.slice(0, -1), [{ kind: "reasoning", text: last.text + delta }]);
+  }
+  return appendEntries(current, [{ kind: "reasoning", text: delta }]);
+}
+
 export function appendAssistantDelta(current: Entry[], delta: string): Entry[] {
   if (delta.length === 0) return current;
   const last = current.at(-1);

@@ -14,7 +14,7 @@
  * 规则：不造假 transcript。没有运行中的 run 就没有消息；Stop 立刻掐断在途请求。
  */
 
-import type { ChatMessage, ChatSession, RestartRecord } from "@yukinal/shared";
+import type { ChatMessage, ChatSession, Environment, RestartRecord } from "@yukinal/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
@@ -129,6 +129,13 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     [servers.data],
   );
 
+  const policyTarget = useMemo(() => {
+    const mentioned = resolveMentionedServer(prompt, mentionCandidates);
+    const serverId = mentioned?.id ?? selectedServerId;
+    return servers.data?.find((server) => server.id === serverId);
+  }, [prompt, mentionCandidates, selectedServerId, servers.data]);
+  const targetEnvironment: Environment = policyTarget?.metadata.environment ?? "unknown";
+
   const send = async (raw: string): Promise<void> => {
     const text = raw.trim();
     if (!text || !canSend || run.running) return;
@@ -226,6 +233,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       <AgentHeader
         running={run.running}
         runState={run.runState}
+        tokenUsage={run.tokenUsage}
         agentReady={agentRunning}
         agentOpen={agentOpen}
         shell={shell}
@@ -302,6 +310,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
             onRunModeChange={(mode) => setPreferences({ agentRunMode: mode })}
             runPolicy={runPolicy}
             onRunPolicyChange={setRunPolicy}
+            targetEnvironment={targetEnvironment}
             models={models.modelChoices}
             selectedModelKey={models.selectedModelKey}
             selectedModelLabel={models.selectedModelLabel}

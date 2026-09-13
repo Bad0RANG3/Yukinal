@@ -2,7 +2,7 @@ name: package
 
 # Installer builds, deliberately NOT part of the three-OS gate in check.yml.
 #
-# Why separate (the short version; the repository README.md's 「打包与分发」 has the full
+# Why separate (the short version; the docs/packaging.md's 「打包与分发」 has the full
 # one): bundling is not a compiler check. It downloads platform toolchains it does not ship -- WiX and NSIS on
 # Windows, the appimage/dpkg tooling on Linux -- and it builds the whole Rust workspace in
 # release mode with `lto = "thin"` before it copies a single resource. That is minutes per

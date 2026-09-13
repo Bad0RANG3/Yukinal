@@ -13,4 +13,4 @@
  * them disagrees. Bumping a release means editing this file and the manifests that gate
  * names; it does not know about any prose, so a release note has to be updated by hand.
  */
-export const APP_VERSION = "0.1.0";
+export const APP_VERSION = "1.0.0";

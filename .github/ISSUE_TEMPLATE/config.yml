@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "安全漏洞私密报告"
+    url: "https://github.com/Bad0RANG3/Yukinal/security/advisories/new"
+    about: "不要公开披露凭据泄露、权限绕过或可利用的漏洞。"
+  - name: "文档与架构入口"
+    url: "https://github.com/Bad0RANG3/Yukinal/blob/main/docs/README.md"
+    about: "先阅读文档索引、当前限制和开发说明。"

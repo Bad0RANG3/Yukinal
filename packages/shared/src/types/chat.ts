@@ -149,6 +149,12 @@ export interface AgentRunStopParams {
   runId: string;
 }
 
+/** Cumulative token usage reported by a Provider for one Agent run. */
+export interface AgentTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface AgentRunResult {
   runId: string;
   state: AgentRunState;
@@ -213,6 +219,7 @@ export type AgentStreamEvent =
   | { type: "agent.started"; runId: string; at: string }
   | { type: "agent.thinking"; runId: string; textDelta?: string; at: string }
   | { type: "agent.text"; runId: string; textDelta: string; at: string }
+  | { type: "agent.usage"; runId: string; usage: AgentTokenUsage; at: string }
   | {
       type: "agent.tool_call";
       runId: string;

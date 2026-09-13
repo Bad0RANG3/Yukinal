@@ -21,6 +21,14 @@ const ApprovalRequestSchema = z.strictObject({
   expiresAt: TimestampSchema,
 });
 
+const TokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+/** Cumulative totals for one run, not just the latest Provider turn. */
+const AgentTokenUsageSchema = z.strictObject({
+  inputTokens: TokenCountSchema,
+  outputTokens: TokenCountSchema,
+});
+
 /**
  * The loop's outcome for one run.
  *
@@ -45,7 +53,7 @@ export const AgentRunResultSchema = z.strictObject({
  *
  * ## Why this exists instead of only the union
  *
- * These nine members used to be written inline inside `z.discriminatedUnion`, and every
+ * These ten members used to be written inline inside `z.discriminatedUnion`, and every
  * `EVENT_SCHEMAS` channel pointed at the whole union. The gate could therefore only ask
  * "is this *some* valid agent event", never "is this *the* event this channel promises".
  * `DesktopEventPayload<"agent.completed">` was consequently the full union, so the UI had
@@ -68,6 +76,12 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
   "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, at: TimestampSchema }),
   "agent.thinking": z.strictObject({ type: z.literal("agent.thinking"), runId: RunIdSchema, textDelta: z.string().max(20_000).optional(), at: TimestampSchema }),
   "agent.text": z.strictObject({ type: z.literal("agent.text"), runId: RunIdSchema, textDelta: z.string().max(20_000), at: TimestampSchema }),
+  "agent.usage": z.strictObject({
+    type: z.literal("agent.usage"),
+    runId: RunIdSchema,
+    usage: AgentTokenUsageSchema,
+    at: TimestampSchema,
+  }),
   "agent.tool_call": z.strictObject({
     type: z.literal("agent.tool_call"),
     runId: RunIdSchema,
@@ -126,9 +140,9 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
 /**
  * Every member of the stream union, in the map's declared order.
  *
- * Note this is the *vocabulary*, not the set of channels: it includes `agent.text`,
- * which is a valid member with a full schema but has no `EVENT_SCHEMAS` entry and no
- * producer (see `event-vocabulary.test.ts`). Callers that mean "channels" must filter.
+ * Every member now has an `EVENT_SCHEMAS` channel and an agent-loop producer. The
+ * vocabulary remains a separate view so consumers that need the union do not depend
+ * on the UI subscription table.
  */
 export const AGENT_EVENT_TYPES = Object.keys(AGENT_EVENT_MEMBER_SCHEMAS) as Array<
   keyof typeof AGENT_EVENT_MEMBER_SCHEMAS

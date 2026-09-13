@@ -153,6 +153,8 @@ export class AgentLoop {
     let toolCalls = 0;
     let finalText = "";
     let textTruncated = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
 
     // One trace per run, and it is the source of both ids every tool event carries:
     // `traceId` names the ledger the audit rows are written against, `stepId` names the
@@ -288,12 +290,30 @@ export class AgentLoop {
                 const remaining = MAX_RUN_TEXT_CHARS - finalText.length;
                 const delta = remaining > 0 ? safeText.slice(0, remaining) : "";
                 finalText += delta;
-                if (delta) emit({ type: "agent.thinking", runId, textDelta: delta, at: now() });
+                if (delta) emit({ type: "agent.text", runId, textDelta: delta, at: now() });
                 if (delta.length < safeText.length && !textTruncated) {
                   textTruncated = true;
-                  emit({ type: "agent.thinking", runId, textDelta: "\n\n[输出已截断]", at: now() });
+                  emit({ type: "agent.text", runId, textDelta: "\n\n[输出已截断]", at: now() });
                 }
               }
+              break;
+            case "reasoning_delta":
+              {
+                // Reasoning is display-only: it may inform the user, but it must never
+                // become part of the authoritative answer persisted to chat history.
+                const delta = redactSensitiveText(event.text).slice(0, 20_000);
+                if (delta) emit({ type: "agent.thinking", runId, textDelta: delta, at: now() });
+              }
+              break;
+            case "usage":
+              inputTokens += event.inputTokens;
+              outputTokens += event.outputTokens;
+              emit({
+                type: "agent.usage",
+                runId,
+                usage: { inputTokens, outputTokens },
+                at: now(),
+              });
               break;
             case "tool_call":
               events.push(event);
@@ -307,7 +327,7 @@ export class AgentLoop {
               }
               break;
             default:
-              break; // usage / reasoning_delta: 不推给 UI
+              break;
           }
         }
 
@@ -603,7 +623,7 @@ export class AgentLoop {
       toolCalls: info.toolCalls,
       traceId: trace.traceId,
     };
-    emit({ type: "agent.thinking", runId: info.runId, textDelta: "\n\n[已停止]", at: now() });
+    emit({ type: "agent.text", runId: info.runId, textDelta: "\n\n[已停止]", at: now() });
     emit({ type: "agent.completed", runId: info.runId, result, at: now() });
     trace.finish("cancelled");
     return result;
