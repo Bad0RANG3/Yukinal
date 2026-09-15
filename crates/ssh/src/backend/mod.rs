@@ -44,9 +44,17 @@ mod sftp;
 pub(crate) mod test_support;
 
 pub(crate) use hostkey::{establish, ConnHandler};
+/// SFTP 文件属性与有守卫替换的公开形状（[`crate::SftpFileStat`] 等）。
+pub use sftp::{
+    link_count_probe_command, parse_link_count, shell_single_quote, SftpEntryKind, SftpFileStat,
+    SftpReplaceError, SftpReplaceGuard, SftpReplacement,
+};
 
-/// 建连 + 认证整体超时（硬性兜底，不让 UI 卡在握手）。
+/// TCP/握手超时；认证另有普通或交互式上限，避免 MFA 等待被握手预算截断。
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+pub(super) const INTERACTIVE_AUTH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(150);
 
 pub struct RusshBackend {
     known_hosts: Arc<StdMutex<KnownHostsStore>>,
@@ -163,12 +171,7 @@ impl RusshBackend {
 impl SshBackend for RusshBackend {
     async fn connect(&self, config: SshConfig, secrets: ConnectionSecrets) -> Result<Session> {
         let session_id = self.next_session_id();
-        let conn = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            establish(&config, &secrets, &self.known_hosts),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+        let conn = establish(&config, &secrets, &self.known_hosts).await?;
 
         Ok(Session {
             session_id: session_id.clone(),

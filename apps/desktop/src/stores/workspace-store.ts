@@ -10,6 +10,8 @@
 
 import { create } from "zustand";
 
+import type { AgentPromptPart } from "@yukinal/shared";
+
 export const PRIMARY_NAV = ["servers", "projects", "activity", "settings"] as const;
 export type PrimaryNav = (typeof PRIMARY_NAV)[number];
 
@@ -25,8 +27,10 @@ export interface WorkspaceState {
   /** Right panel is session-scoped and opens automatically for approvals. */
   agentOpen: boolean;
   agentDraft: string;
+  agentAttachments: AgentPromptPart[];
   agentBusy: boolean;
   setAgentDraft(draft: string): void;
+  setAgentAttachments(attachments: AgentPromptPart[]): void;
   setAgentBusy(busy: boolean): void;
   setPrimary(primary: PrimaryNav): void;
   setServerPage(page: ServerPage): void;
@@ -46,8 +50,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedModel: null,
   agentOpen: true,
   agentDraft: "",
+  agentAttachments: [],
   agentBusy: false,
   setAgentDraft: (agentDraft) => set({ agentDraft }),
+  setAgentAttachments: (agentAttachments) => set({ agentAttachments }),
   setAgentBusy: (agentBusy) => set({ agentBusy }),
   setPrimary: (primary) => set({ primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers" }),

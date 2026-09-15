@@ -162,6 +162,48 @@ test("stream() sends generateContent: contents, systemInstruction, functionDecla
   assert.deepEqual(sent.body.generationConfig, { temperature: 0 });
 });
 
+test("user images become inlineData parts", async () => {
+  const request = chatRequest({
+    messages: [
+      {
+        role: "user",
+        content: "",
+        images: [{ mediaType: "image/gif", data: "aGVsbG8=", name: "state.gif" }],
+        documents: [
+          { mediaType: "application/pdf", data: "JVBERi0xLjcK", name: "guide.pdf" },
+        ],
+        // Gemini 用同一个 inlineData 形状装每一种附件，音频也不例外：没有第二套词汇表。
+        audios: [
+          { mediaType: "audio/ogg", data: "T2dnUwAA", name: "note.ogg" },
+          { mediaType: "audio/flac", data: "ZkxhQwAA" },
+        ],
+      },
+    ],
+  });
+
+  const { seen } = await collectStream(provider(), request, () =>
+    sseResponse([sseChunks([{ candidates: [] }])]),
+  );
+  const sent = seen[0];
+  assert(sent);
+  assert.deepEqual(sent.body.contents, [
+    {
+      role: "user",
+      parts: [
+        { inlineData: { mimeType: "image/gif", data: "aGVsbG8=" } },
+        {
+          inlineData: {
+            mimeType: "application/pdf",
+            data: "JVBERi0xLjcK",
+          },
+        },
+        { inlineData: { mimeType: "audio/ogg", data: "T2dnUwAA" } },
+        { inlineData: { mimeType: "audio/flac", data: "ZkxhQwAA" } },
+      ],
+    },
+  ]);
+});
+
 test("request-level model, temperature and maxOutputTokens reach generationConfig", async () => {
   const subject = provider({ model: "gemini-2.5-flash" });
   const request = chatRequest({ model: "gemini-2.5-pro", temperature: 0.3, maxOutputTokens: 2048 });
@@ -435,6 +477,30 @@ test("an HTTP failure is a retryable ProviderError that never echoes the respons
         assert.equal(error.status, 500);
         assert.match(error.message, /failed \(500\)/);
         assert.doesNotMatch(error.message, /g2z5/);
+        return true;
+      },
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("a 429 rate limit is retryable without echoing the response body", async () => {
+  const { restore } = installFetch(
+    () => new Response('{"error":{"message":"rate limit token ****g2z9"}}', { status: 429 }),
+  );
+
+  try {
+    await assert.rejects(
+      async () => {
+        for await (const event of provider().stream(chatRequest())) assert.fail(`unexpected event ${event.type}`);
+      },
+      (error: unknown) => {
+        assert(error instanceof ProviderError);
+        assert.equal(error.retryable, true, "429 is retryable");
+        assert.equal(error.status, 429);
+        assert.match(error.message, /failed \(429\)/);
+        assert.doesNotMatch(error.message, /g2z9/);
         return true;
       },
     );

@@ -103,7 +103,11 @@ export class AnthropicProvider implements LLMProvider {
       });
       if (!response.ok) {
         // 不读 body：上游的 401/500 正文经常把掩码后的密钥片段一起回显出来。
-        throw new ProviderError(`listModels failed (${response.status})`, response.status >= 500, response.status);
+        throw new ProviderError(
+          `listModels failed (${response.status})`,
+          response.status === 429 || response.status >= 500,
+          response.status,
+        );
       }
       const parsed = ModelsResponseSchema.safeParse(await response.json());
       if (!parsed.success) {
@@ -160,7 +164,11 @@ export class AnthropicProvider implements LLMProvider {
       });
 
       if (!response.ok || !response.body) {
-        throw new ProviderError(`${endpoint} failed (${response.status})`, response.status >= 500, response.status);
+        throw new ProviderError(
+          `${endpoint} failed (${response.status})`,
+          response.status === 429 || response.status >= 500,
+          response.status,
+        );
       }
 
       yield* this.#consumeSse(response.body);
@@ -380,9 +388,41 @@ function toAnthropicMessages(messages: readonly LlmMessage[]): AnthropicMessage[
     switch (message.role) {
       case "system":
         break;
-      case "user":
-        out.push({ role: "user", content: [{ type: "text", text: message.content }] });
+      case "user": {
+        const content: AnthropicBlock[] = [];
+        if (message.content) content.push({ type: "text", text: message.content });
+        for (const image of message.images ?? []) {
+          content.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: image.mediaType,
+              data: image.data,
+            },
+          });
+        }
+        for (const document of message.documents ?? []) {
+          content.push({
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: document.mediaType,
+              data: document.data,
+            },
+          });
+        }
+        // Messages API has no audio block. Failing here is the only honest option: the run
+        // would otherwise answer a question about a clip the model never received.
+        if (message.audios?.length) {
+          throw new ProviderError(
+            "Anthropic Messages has no audio input block, so an attached audio clip cannot " +
+              "be sent. Remove the clip or use a provider that accepts audio.",
+            false,
+          );
+        }
+        if (content.length > 0) out.push({ role: "user", content });
         break;
+      }
       case "assistant": {
         const content: AnthropicBlock[] = [];
         if (message.content) content.push({ type: "text", text: message.content });

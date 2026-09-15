@@ -1,16 +1,26 @@
 import { z } from "zod";
 
 import { MCP_CATALOG_FAILURE_CODES } from "../types/host.js";
-import type { McpServerConfig } from "../types/provider.js";
 import type {
+  McpHttpAuthHeaderConfig,
+  McpOAuthConfig,
+  McpServerConfig,
+} from "../types/provider.js";
+import type {
+  McpOAuthCancelResponse,
+  McpHttpAuthHeaderInput,
+  McpOAuthConnectResponse,
+  McpOAuthInput,
   McpServerDeleteResponse,
   McpServerListResponse,
+  McpServerReviewInput,
   McpServerSaveInput,
   McpServerStatus,
   McpServerStopResponse,
   McpServerView,
   McpToolDescriptor,
 } from "../types/mcp.js";
+import { RestartRecordSchema } from "./lifecycle.js";
 
 /**
  * `mcp_server_*` payloads, parsed at the IPC gate (`lib/ipc.ts`).
@@ -25,6 +35,52 @@ import type {
 const IdSchema = z.string().trim().min(1).max(160);
 const LabelSchema = z.string().max(200);
 
+const McpHttpAuthHeaderConfigSchema = z.strictObject({
+  name: z.string().max(128),
+  credentialRef: z.string().min(1).max(512),
+}) satisfies z.ZodType<McpHttpAuthHeaderConfig>;
+
+const McpHttpAuthHeaderInputSchema = z.strictObject({
+  name: z.string().max(128),
+  secret: z.string().min(1).max(8_192).optional(),
+}) satisfies z.ZodType<McpHttpAuthHeaderInput>;
+
+/**
+ * Client authentication methods. The same closed set as Rust's `McpOAuthClientAuth`: an
+ * unknown value would mean sending credentials a way the host cannot perform.
+ */
+const McpOAuthClientAuthSchema = z.enum(["none", "client_secret_post", "client_secret_basic"]);
+
+const McpOAuthConfigSchema = z.strictObject({
+  issuer: z.string().max(2_048),
+  clientId: z.string().max(512),
+  flow: z.enum(["authorization_code", "device_code"]),
+  clientAuth: McpOAuthClientAuthSchema,
+  clientSecretRef: z.string().min(1).max(512).optional(),
+  // Always present on the way out, like `flow`: the host defaults rows written before the
+  // setting existed to `false`, so a missing field here would be a contract that has
+  // drifted from what Rust actually sends.
+  dpop: z.boolean(),
+  dpopKeyRef: z.string().min(1).max(512).optional(),
+  scopes: z.array(z.string().min(1).max(128)).max(32),
+  tokenEndpoint: z.string().min(1).max(2_048).optional(),
+  credentialRef: z.string().min(1).max(512).optional(),
+}) satisfies z.ZodType<McpOAuthConfig>;
+
+const McpOAuthInputSchema = z.strictObject({
+  issuer: z.string().max(2_048),
+  clientId: z.string().max(512),
+  // Optional on the way in and always present on the way out: a client that omits it is
+  // asking for the browser redirect, which is what rows written before this field mean.
+  flow: z.enum(["authorization_code", "device_code"]).optional(),
+  clientAuth: McpOAuthClientAuthSchema.optional(),
+  // Write-only. Bounded like an HTTP auth secret, and never echoed back: the stored shape
+  // next to it carries only `clientSecretRef`.
+  clientSecret: z.string().min(1).max(8_192).optional(),
+  dpop: z.boolean().optional(),
+  scopes: z.array(z.string().min(1).max(128)).max(32),
+}) satisfies z.ZodType<McpOAuthInput>;
+
 /**
  * The **stored** row (`mcp_servers`), which is stricter than the save input on purpose:
  * `transport` is an enum here because a row can only hold what the Rust core accepted, while the
@@ -37,6 +93,8 @@ export const McpServerConfigSchema = z.strictObject({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   url: z.string().optional(),
+  httpAuthHeaders: z.array(McpHttpAuthHeaderConfigSchema).max(16),
+  oauth: McpOAuthConfigSchema.optional(),
   enabled: z.boolean(),
   allowedTools: z.array(z.string()),
   trustLevel: z.enum(["reviewed", "unreviewed"]),
@@ -60,6 +118,7 @@ export const McpServerStatusSchema = z.strictObject({
   serverVersion: z.string().nullable().optional(),
   toolCount: z.number().int().nonnegative(),
   lastExit: McpExitRecordSchema.nullable().optional(),
+  restart: RestartRecordSchema.optional(),
   stderrTail: z.array(z.string()),
   diagnostics: z.array(z.string()),
 }) satisfies z.ZodType<McpServerStatus>;
@@ -104,8 +163,27 @@ export const McpServerSaveInputSchema = z.strictObject({
   command: z.string().max(1_024).optional(),
   args: z.array(z.string().max(1_024)).max(64).optional(),
   url: z.string().max(2_048).optional(),
+  httpAuthHeaders: z.array(McpHttpAuthHeaderInputSchema).max(16).optional(),
+  oauth: McpOAuthInputSchema.optional(),
   enabled: z.boolean(),
 }) satisfies z.ZodType<McpServerSaveInput>;
+
+export const McpOAuthConnectResponseSchema = z.strictObject({
+  serverId: IdSchema,
+  issuer: z.string().min(1).max(2_048),
+  scopes: z.array(z.string().min(1).max(128)).max(32),
+  tokenEndpoint: z.string().min(1).max(2_048),
+}) satisfies z.ZodType<McpOAuthConnectResponse>;
+
+export const McpOAuthCancelResponseSchema = z.strictObject({
+  accepted: z.boolean(),
+}) satisfies z.ZodType<McpOAuthCancelResponse>;
+
+export const McpServerReviewInputSchema = z.strictObject({
+  serverId: IdSchema,
+  allowedTools: z.array(z.string().trim().min(1).max(256)).max(512),
+  trustLevel: z.enum(["reviewed", "unreviewed"]),
+}) satisfies z.ZodType<McpServerReviewInput>;
 
 export const McpServerDeleteResponseSchema = z.strictObject({
   deleted: z.boolean(),

@@ -4,20 +4,24 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError};
+use std::sync::{
+    Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError, Weak as StdWeak,
+};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio_util::sync::CancellationToken;
 
 use super::config::McpStdioConfig;
 use super::descriptor::{McpExitRecord, McpToolDescriptor, McpToolResult};
 use super::error::McpError;
 use super::wire::{self, McpInitialize};
 use super::{redacted, truncated, STDERR_TAIL_LINES};
+use crate::supervisor::RestartRecord;
 
 /// 诊断尾部（stdout 上的噪声、被忽略的通知与请求）保留多少行。
 ///
@@ -90,8 +94,10 @@ enum PendingFailure {
 #[serde(rename_all = "camelCase")]
 pub struct McpServerInfo {
     pub server_id: String,
-    pub pid: u32,
-    pub program: String,
+    /// `None` for transports that do not own a local process (Streamable HTTP).
+    pub pid: Option<u32>,
+    /// `None` for transports that do not launch a program.
+    pub program: Option<String>,
     pub started_at: String,
     /// 握手结果。`None` 表示进程起来了但 `initialize` 还没成功 —— 这个窗口真实存在，
     /// 所以类型里必须有它，而不是用「版本是空字符串」来暗示。
@@ -110,7 +116,7 @@ pub struct McpServerStart {
 
 /// 一个 MCP 服务器在某时刻的对外状态。状态查询永远有答案：没管过的 id 也是一个答案
 /// （「没在跑」），所以调用方不需要区分「没有这个服务器」和「查询失败」。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerStatus {
     pub server_id: String,
@@ -123,9 +129,12 @@ pub struct McpServerStatus {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub tool_count: usize,
-    /// 「怎么死的」留在状态里，直到下一次显式启动把它盖掉 —— 崩溃必须比崩溃后的安静更显眼。
+    /// 「怎么死的」留在 supervisor 状态里；自动恢复替换句柄时也会继续保留它。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<McpExitRecord>,
+    /// The bounded automatic-recovery attempt that followed `last_exit`, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartRecord>,
     /// 子进程 stderr 的有界尾部（[`STDERR_TAIL_LINES`] 行）。**已截断并脱敏**：见模块头
     /// 最后一条（它来自一个我们并不信任的进程，而尾部是要给用户看的）。
     pub stderr_tail: Vec<String>,
@@ -147,6 +156,7 @@ impl McpServerStatus {
             server_version: None,
             tool_count: 0,
             last_exit: None,
+            restart: None,
             stderr_tail: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -186,13 +196,37 @@ struct Inner {
     exited: AtomicBool,
 }
 
-/// 与一个服务进程对话的句柄。克隆很便宜：每个克隆都指向同一个进程。
+/// 与一个 stdio 服务进程对话的句柄。克隆很便宜：每个克隆都指向同一个进程。
 #[derive(Debug, Clone)]
-pub struct McpServerHandle {
+pub struct McpStdioHandle {
     inner: Arc<Inner>,
 }
 
-impl McpServerHandle {
+/// Weak exit subscription used by the supervisor's recovery task.
+///
+/// It deliberately does not keep the process handle alive: dropping the supervisor must
+/// still run `kill_on_drop` instead of leaving a recovery task as the hidden owner.
+pub(crate) struct McpExitWatch {
+    inner: StdWeak<Inner>,
+    pid: u32,
+}
+
+impl McpExitWatch {
+    /// `None` means the handle itself has been dropped, which is the terminal signal
+    /// for the recovery task.
+    pub(crate) async fn wait(&self) -> Option<(u32, McpExitRecord)> {
+        loop {
+            let inner = self.inner.upgrade()?;
+            if let Some(record) = lock_or_recover(&inner.exit).clone() {
+                return Some((self.pid, record));
+            }
+            drop(inner);
+            tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+        }
+    }
+}
+
+impl McpStdioHandle {
     /// 派生进程并接上三个 stdio。
     ///
     /// **不**握手：[`crate::mcp::McpSupervisor::start`] 决定握手失败时怎么收场（杀掉，而不是
@@ -362,7 +396,8 @@ impl McpServerHandle {
         self.inner.config.request_timeout
     }
 
-    /// 进程是否还在跑。崩溃或已关闭之后是 false，且**不会**自己变回 true。
+    /// 这个具体句柄是否还在跑。崩溃或已关闭之后是 false；有效恢复会安装一个新句柄，
+    /// 这个旧句柄本身不会复活。
     #[must_use]
     pub fn is_running(&self) -> bool {
         !self.inner.exited.load(Ordering::Relaxed)
@@ -372,8 +407,8 @@ impl McpServerHandle {
     pub fn info(&self) -> McpServerInfo {
         McpServerInfo {
             server_id: self.inner.config.server_id.clone(),
-            pid: self.inner.pid,
-            program: self.inner.config.program.display().to_string(),
+            pid: Some(self.inner.pid),
+            program: Some(self.inner.config.program.display().to_string()),
             started_at: self.inner.started_at.clone(),
             handshake: lock_or_recover(&self.inner.handshake).clone(),
         }
@@ -393,6 +428,13 @@ impl McpServerHandle {
     #[must_use]
     pub fn last_exit(&self) -> Option<McpExitRecord> {
         lock_or_recover(&self.inner.exit).clone()
+    }
+
+    pub(crate) fn exit_watch(&self) -> McpExitWatch {
+        McpExitWatch {
+            inner: Arc::downgrade(&self.inner),
+            pid: self.inner.pid,
+        }
     }
 
     #[must_use]
@@ -510,6 +552,23 @@ impl McpServerHandle {
         arguments: Value,
         timeout: Duration,
     ) -> Result<McpToolResult, McpError> {
+        self.call_tool_with_cancel(tool, arguments, timeout, &CancellationToken::new())
+            .await
+    }
+
+    /// `tools/call` with a caller-owned cancellation token.
+    ///
+    /// A cancelled in-flight call sends MCP's `notifications/cancelled` before the
+    /// pending response is forgotten. The protocol makes that notification
+    /// best-effort: a server may have completed already, so this still does not
+    /// promise that side effects are rolled back.
+    pub async fn call_tool_with_cancel(
+        &self,
+        tool: &str,
+        arguments: Value,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<McpToolResult, McpError> {
         let descriptor = self
             .tools()
             .into_iter()
@@ -527,7 +586,7 @@ impl McpServerHandle {
 
         let params = json!({ "name": descriptor.call_name(), "arguments": arguments });
         let result = self
-            .request(wire::METHOD_TOOLS_CALL, params, timeout)
+            .request_with_cancel(wire::METHOD_TOOLS_CALL, params, timeout, cancel)
             .await?;
         wire::parse_tools_call(self.server_id(), &result)
     }
@@ -539,12 +598,30 @@ impl McpServerHandle {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, McpError> {
+        self.request_with_cancel(method, params, timeout, &CancellationToken::new())
+            .await
+    }
+
+    /// 发一个请求并等回答；取消时向服务端发送 MCP 的标准取消通知。
+    pub async fn request_with_cancel(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Value, McpError> {
         // 先看退出记录：对一个已经死掉的服务端，「怎么死的」比「它没在跑」有用得多。
         if let Some(exit) = self.last_exit() {
             return Err(self.exited_error(exit));
         }
         if !self.is_running() {
             return Err(self.not_running_error());
+        }
+        if cancel.is_cancelled() {
+            return Err(McpError::Cancelled {
+                server_id: self.server_id().to_string(),
+                method: method.to_string(),
+            });
         }
 
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
@@ -559,7 +636,27 @@ impl McpServerHandle {
             return Err(error);
         }
 
-        match tokio::time::timeout(timeout, receiver).await {
+        let response = tokio::select! {
+            _ = cancel.cancelled() => {
+                self.forget(id);
+                let _ = self
+                    .notify(
+                        wire::METHOD_CANCELLED_NOTIFICATION,
+                        json!({
+                            "requestId": id,
+                            "reason": "cancelled by the Yukinal caller",
+                        }),
+                    )
+                    .await;
+                return Err(McpError::Cancelled {
+                    server_id: self.server_id().to_string(),
+                    method: method.to_string(),
+                });
+            }
+            response = tokio::time::timeout(timeout, receiver) => response,
+        };
+
+        match response {
             Err(_) => {
                 // 这次调用已经放弃了，但连接没坏：清掉待响应项，后面还能继续用。
                 self.forget(id);

@@ -40,6 +40,8 @@ function inlineText(nodes: Inline[]): string {
           return inlineText(node.children);
         case "image":
           return node.alt;
+        case "footnote":
+          return `[^${node.label}]`;
       }
     })
     .join("");
@@ -61,6 +63,8 @@ function flatten(blocks: Block[]): string {
           return flatten(candidate.blocks);
         case "table":
           return [candidate.head, ...candidate.rows].map((row) => row.map(inlineText).join(" ")).join("\n");
+        case "footnotes":
+          return candidate.items.map((item) => inlineText(item.content)).join("\n");
         case "rule":
           return "---";
       }
@@ -76,6 +80,20 @@ test("headings: level, closing hashes, and no-space is not a heading", () => {
   assert.equal(inlineText(block(blocks, "paragraph").content), "#没空格");
   assert.equal(blocks.length, 4);
   assert.equal(blocks[3]?.kind, "paragraph");
+});
+
+test("setext headings are recognized without swallowing a standalone rule", () => {
+  assert.deepEqual(parseMarkdown("一级\n===\n\n二级\n---"), [
+    { kind: "heading", level: 1, content: [{ kind: "text", text: "一级" }] },
+    { kind: "heading", level: 2, content: [{ kind: "text", text: "二级" }] },
+  ]);
+  assert.deepEqual(parseMarkdown("---"), [{ kind: "rule" }]);
+});
+
+test("four-space indented code is preserved as code", () => {
+  assert.deepEqual(parseMarkdown("    const x = 1;\n\n    console.log(x);"), [
+    { kind: "code", language: null, text: "const x = 1;\n\nconsole.log(x);" },
+  ]);
 });
 
 test("paragraphs join soft breaks with a space and keep trailing spaces as hard breaks", () => {
@@ -128,8 +146,9 @@ test("emphasis: strong, emphasis, strike, and the triple marker", () => {
   assert.deepEqual(parseInline("**粗**"), [{ kind: "strong", children: [{ kind: "text", text: "粗" }] }]);
   assert.deepEqual(parseInline("*斜*"), [{ kind: "emphasis", children: [{ kind: "text", text: "斜" }] }]);
   assert.deepEqual(parseInline("~~删~~"), [{ kind: "strike", children: [{ kind: "text", text: "删" }] }]);
+  // `***x***` 是「斜里套粗」而不是「粗里套斜」：规范第 14 条明说 `<em><strong>` 优先。
   assert.deepEqual(parseInline("***都有***"), [
-    { kind: "strong", children: [{ kind: "emphasis", children: [{ kind: "text", text: "都有" }] }] },
+    { kind: "emphasis", children: [{ kind: "strong", children: [{ kind: "text", text: "都有" }] }] },
   ]);
 });
 
@@ -141,6 +160,7 @@ test("underscores inside words are not emphasis, and a list star is not either",
       kind: "list",
       ordered: false,
       start: 1,
+      tight: true,
       items: [{ checked: null, blocks: [{ kind: "paragraph", content: [{ kind: "text", text: "项" }] }] }],
     },
   ]);
@@ -157,6 +177,7 @@ test("lists: ordered start, nesting, and task checkboxes", () => {
       kind: "list",
       ordered: false,
       start: 1,
+      tight: true,
       items: [
         { checked: null, blocks: [{ kind: "paragraph", content: [{ kind: "text", text: "甲" }] }] },
         { checked: null, blocks: [{ kind: "paragraph", content: [{ kind: "text", text: "乙" }] }] },
@@ -179,10 +200,32 @@ test("lists: ordered start, nesting, and task checkboxes", () => {
   assert.equal(tasks.items.map((item) => flatten(item.blocks)).join("\n"), "完成\n未完成");
 });
 
+test("lists use CommonMark tightness from item gaps and direct block gaps", () => {
+  assert.equal(block(parseMarkdown("- 甲\n- 乙"), "list").tight, true);
+
+  const betweenItems = block(parseMarkdown("- 甲\n\n- 乙"), "list");
+  assert.equal(betweenItems.tight, false);
+  assert.equal(betweenItems.items.length, 2);
+
+  const insideItem = block(parseMarkdown("- 甲\n\n  续段\n- 乙"), "list");
+  assert.equal(insideItem.tight, false);
+  assert.deepEqual(insideItem.items[0]?.blocks.map((candidate) => candidate.kind), ["paragraph", "paragraph"]);
+
+  const nestedSeparator = block(parseMarkdown("- 甲\n  - 甲一\n\n  - 甲二\n- 乙"), "list");
+  assert.equal(nestedSeparator.tight, true);
+  const nested = nestedSeparator.items[0]?.blocks.find((candidate) => candidate.kind === "list");
+  assert.equal(nested?.kind === "list" ? nested.tight : null, false);
+
+  const changedMarker = parseMarkdown("- 甲\n+ 乙");
+  assert.deepEqual(changedMarker.map((candidate) => candidate.kind), ["list", "list"]);
+});
+
 test("a blank line between items does not split the list", () => {
   const blocks = parseMarkdown("- 甲\n\n- 乙\n\n正文");
   assert.equal(blocks.length, 2);
-  assert.equal(block(blocks, "list").items.length, 2);
+  const list = block(blocks, "list");
+  assert.equal(list.items.length, 2);
+  assert.equal(list.tight, false);
   assert.equal(flatten(blocks.slice(1)), "正文");
 });
 
@@ -191,6 +234,21 @@ test("blockquotes keep their own structure", () => {
   assert.equal(blocks.length, 2);
   assert.equal(flatten([block(blocks, "quote")]), "引用第一行 引用第二行");
   assert.equal(flatten(blocks.slice(1)), "后记");
+});
+
+test("blockquotes accept paragraph lazy continuation but stop before new blocks", () => {
+  const lazy = parseMarkdown("> first line\ncontinued lazily\n\noutside");
+  assert.equal(lazy.length, 2);
+  assert.equal(flatten([block(lazy, "quote")]), "first line continued lazily");
+  assert.equal(flatten(lazy.slice(1)), "outside");
+
+  for (const source of ["> # title\noutside", "> - item\noutside"]) {
+    const blocks = parseMarkdown(source);
+    assert.equal(blocks.length, 2, source);
+    assert.equal(blocks[0]?.kind, "quote", source);
+    assert.equal(blocks[1]?.kind, "paragraph", source);
+    assert.equal(flatten(blocks.slice(1)), "outside");
+  }
 });
 
 test("tables: alignment row, header and body cells", () => {
@@ -236,12 +294,59 @@ test("links and images: only known schemes become nodes", () => {
   assert.equal(parseInline("xhttps://example.test").every((node) => node.kind === "text"), true);
 });
 
+test("reference links resolve case-insensitively, including collapsed and shortcut forms", () => {
+  const blocks = parseMarkdown(
+    "[docs]: https://example.test/guide\n\n见 [文档][DOCS]、[docs][] 和 [Docs]。",
+  );
+  const paragraph = block(blocks, "paragraph");
+  assert.equal(paragraph.content.filter((node) => node.kind === "link").length, 3);
+  assert.deepEqual(
+    paragraph.content
+      .filter((node): node is Extract<Inline, { kind: "link" }> => node.kind === "link")
+      .map((node) => node.href),
+    [
+      "https://example.test/guide",
+      "https://example.test/guide",
+      "https://example.test/guide",
+    ],
+  );
+
+  // A definition using a forbidden scheme is not a link definition. The source stays visible.
+  const unsafe = parseMarkdown("[x]: javascript:alert(1)\n\n[x]");
+  assert.equal(unsafe.every((candidate) => candidate.kind === "paragraph"), true);
+  assert.equal(flatten(unsafe).includes("javascript:alert(1)"), true);
+});
+
 test("HTML is text, never markup", () => {
   assert.deepEqual(parseMarkdown("<div>hi</div>"), [
     { kind: "paragraph", content: [{ kind: "text", text: "<div>hi</div>" }] },
   ]);
   assert.deepEqual(parseMarkdown("<script>alert(1)</script>"), [
     { kind: "paragraph", content: [{ kind: "text", text: "<script>alert(1)</script>" }] },
+  ]);
+});
+
+test("footnotes keep both the reference and the definition without generating HTML", () => {
+  assert.deepEqual(parseMarkdown("结论[^1]\n\n[^1]: [来源](https://example.test)"), [
+    {
+      kind: "paragraph",
+      content: [{ kind: "text", text: "结论" }, { kind: "footnote", label: "1" }],
+    },
+    {
+      kind: "footnotes",
+      items: [
+        {
+          label: "1",
+          content: [
+            {
+              kind: "link",
+              href: "https://example.test",
+              children: [{ kind: "text", text: "来源" }],
+            },
+          ],
+        },
+      ],
+    },
   ]);
 });
 
@@ -255,17 +360,144 @@ test("deep indentation stops at the depth limit instead of overflowing the stack
 
 test("every prefix of a streaming answer parses", () => {
   const answer =
-    "# 结论\n\n- 第一点，见 `config.yaml`\n- 第二点  \n  续行\n\n```sh\ndocker ps\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+    "# 结论\n\n- 第一点，见 `config.yaml`\n- 第二点  \n  续行\n\n```sh\ndocker ps\n```\n\n> 引用\n> 续行\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
   for (let length = 0; length <= answer.length; length += 1) {
     const blocks = parseMarkdown(answer.slice(0, length));
     assert.equal(Array.isArray(blocks), true);
   }
-  // 完整文本认得出来：两个列表项、一个代码块、一张表。
+  // 完整文本认得出来：两个列表项、一个代码块、一个引用、一张表。
   const full = parseMarkdown(answer);
-  assert.deepEqual(full.map((candidate) => candidate.kind), ["heading", "list", "code", "table"]);
+  assert.deepEqual(full.map((candidate) => candidate.kind), ["heading", "list", "code", "quote", "table"]);
+
+  // 流式最怕的是「半截语法把后面的字吃掉」：每个前缀里的文字字符都必须还在，
+  // 多出没配上的标记字符是允许的（那正是「不认识就按字面显示」的样子）。
+  const inline = "前置 *强调* 与 **加粗** 和 `代码` 结尾";
+  for (let length = 0; length <= inline.length; length += 1) {
+    const prefix = inline.slice(0, length);
+    const kept = flatten(parseMarkdown(prefix));
+    let cursor = 0;
+    for (const char of prefix) {
+      if (!/[\p{L}\p{N}]/u.test(char)) continue;
+      const found = kept.indexOf(char, cursor);
+      assert.notEqual(found, -1, `前缀 ${JSON.stringify(prefix)} 丢了 ${char}（输出 ${JSON.stringify(kept)}）`);
+      cursor = found + 1;
+    }
+  }
 });
 
 test("empty input produces no blocks", () => {
   assert.deepEqual(parseMarkdown(""), []);
   assert.deepEqual(parseMarkdown("\n\n  \n"), []);
+});
+
+/* ── 与 CommonMark 0.31.2 对齐的几处修正（corpus 是 opt-in，这几条离线钉住它们） ── */
+
+test("a code span closes only on a run of exactly the same length", () => {
+  // 规范例子：一个反引号开头、中间是两个反引号、一个反引号收尾 → 内容就是那两个反引号。
+  // 用 `indexOf` 找结束标记会把更长的 run 当成命中，于是这里会变成两个空代码段。
+  const nodes = parseInline("` `` `");
+  assert.deepEqual(nodes, [{ kind: "code", text: "``" }]);
+  assert.deepEqual(parseInline("`` ` ``"), [{ kind: "code", text: "`" }]);
+});
+
+test("an ordered list interrupts a paragraph only when it starts at one", () => {
+  // `14.` 是句子的一部分：这里必须是一段，而不是「段落 + 从 14 开始的列表」（那样 `14.` 会消失）。
+  const blocks = parseMarkdown("The number of windows in my house is\n14.  The number of doors is 6.");
+  assert.deepEqual(blocks.map((candidate) => candidate.kind), ["paragraph"]);
+  // 软换行渲染成一个空格，所以原样留下时是两个空格接 `The number…`（源文本里就是两个）。
+  assert.match(inlineText(block(blocks, "paragraph").content), /14\. {2}The number of doors is 6\./);
+
+  // 从 1 开始就是列表。
+  assert.deepEqual(
+    parseMarkdown("text\n1. item").map((candidate) => candidate.kind),
+    ["paragraph", "list"],
+  );
+  // 空列表项也打断不了段落。这里用 `*` 而不是 `-`：单独一行 `-` 是 setext 标题下划线，
+  // 那两条规则在规范里是分开的，用 `-` 测这件事只会测到另一条。
+  assert.deepEqual(parseMarkdown("text\n* ").map((candidate) => candidate.kind), ["paragraph"]);
+});
+
+test("emphasis needs left/right-flanking delimiters, and symbols count as punctuation", () => {
+  // 规范例子：`$`/`£`/`€` 属于 Unicode 符号（S），按规范也算标点，所以这些都不是斜体。
+  for (const source of ['a*"foo"*', "*$*alpha.", "*£*bravo.", "*€*charlie."]) {
+    const nodes = parseInline(source);
+    assert.deepEqual(
+      nodes.filter((node) => node.kind === "emphasis"),
+      [],
+      `${source} 不该被当成斜体`,
+    );
+    assert.equal(inlineText(nodes), source, "整段必须原样留下");
+  }
+  // 正常的强调仍然认得出来。
+  assert.deepEqual(parseInline("*foo*"), [
+    { kind: "emphasis", children: [{ kind: "text", text: "foo" }] },
+  ]);
+});
+
+test("an emphasis closer cannot come from inside a link label", () => {
+  // 规范例子：`*[foo*](/uri)` 里的第一个 `*` 是普通文本，链接必须完整保留。
+  // 这里用 https 目标，因为相对目标在本地策略下本来就成不了链接（那条偏差另有测试）。
+  const nodes = parseInline("*[foo*](https://example.test/)");
+  assert.deepEqual(
+    nodes.filter((node) => node.kind === "emphasis"),
+    [],
+    "标签里的 `*` 不能当作结束标记",
+  );
+  assert.equal(inlineText(nodes), "*foo*");
+  assert.equal(
+    nodes.filter((node) => node.kind === "link").length,
+   1,
+    "链接不能被斜体吞掉",
+  );
+});
+
+test("emphasis pairs runs the way the spec does", () => {
+  // 扫描时先看清整个 delimiter run 贴不贴边；只看单个字符的话，`**"foo"` 会被当成
+  // 「一个能开的 `*`」，规范里它一个都开不了（前面是字母、后面是标点）。
+  for (const source of ['a**"foo"**', 'a__"foo"__', "**foo bar **", "__foo bar __"]) {
+    assert.deepEqual(parseInline(source), [{ kind: "text", text: source }], `${source} 必须原样留下`);
+  }
+
+  // 词中间的 `_` 不配对，但两侧的标记是普通文字，不能消失。
+  assert.deepEqual(parseInline("foo__bar__"), [{ kind: "text", text: "foo__bar__" }]);
+  assert.deepEqual(parseInline("__foo__bar__baz__"), [
+    { kind: "strong", children: [{ kind: "text", text: "foo__bar__baz" }] },
+  ]);
+  // 「词字符」是「不是空白也不是标点」，不是 ASCII —— 西里尔字母同样算词。
+  for (const source of ["пристаням_стремятся_", "_пристаням_стремятся", "пристаням__стремятся__"]) {
+    assert.deepEqual(parseInline(source), [{ kind: "text", text: source }], `${source} 必须原样留下`);
+  }
+
+  // 「3 的倍数」规则：`*foo**bar*` 里的 `**` 两边都贴边，配不上，就是两个字面星号。
+  assert.deepEqual(parseInline("*foo**bar*"), [
+    { kind: "emphasis", children: [{ kind: "text", text: "foo**bar" }] },
+  ]);
+});
+
+test("numeric character references decode, and nothing else does", () => {
+  // 十进制、十六进制、以及控制码位换成替换字符。
+  assert.equal(inlineText(parseInline("&#35; &#1234; &#x22; &#X22;")), "# Ӓ \" \"");
+  assert.equal(inlineText(parseInline("&#0;")), "\uFFFD");
+
+  // 位数不对、缺分号、名字不是数字：都不是引用，原样留下。
+  for (const source of ["&#87654321;", "&#abcdef0;", "&#;", "&#x;", "&copy;", "&amp"]) {
+    assert.equal(inlineText(parseInline(source)), source, `${source} 必须原样留下`);
+  }
+
+  // `&#42;` 解出来的是**文字**，不能顶替强调标记（规范里专门有一条）。
+  assert.deepEqual(parseInline("&#42;foo&#42;"), [{ kind: "text", text: "*foo*" }]);
+});
+
+test("inline syntax spans a soft line break, and the last line keeps its backslash", () => {
+  // 段落是整段解析的：代码段跨行之后，行尾的反斜杠是**代码段里的字符**，不是硬换行。
+  // （规范例子 `` `code\ `` 换行 `` span` `` → `<code>code\ span</code>`。）
+  assert.deepEqual(parseMarkdown("`code\\\nspan`"), [
+    { kind: "paragraph", content: [{ kind: "code", text: "code\\ span" }] },
+  ]);
+  // 强调同样可以跨行。
+  assert.deepEqual(block(parseMarkdown("*foo\nbar*"), "paragraph").content, [
+    { kind: "emphasis", children: [{ kind: "text", text: "foo" }, { kind: "text", text: " " }, { kind: "text", text: "bar" }] },
+  ]);
+  // 段落最后一行结尾的反斜杠是普通文字（规范：`foo\` 单独一段显示 `foo\`）。
+  assert.equal(flatten(parseMarkdown("foo\\")), "foo\\");
 });

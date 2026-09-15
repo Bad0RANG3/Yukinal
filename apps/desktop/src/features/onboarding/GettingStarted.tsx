@@ -38,11 +38,17 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
   const prepare = useMutation({
     mutationFn: async () => {
       if (!tested || !provider || !connected || !server) throw new Error("请先测试模型并连接服务器。");
-      if (useWorkspaceStore.getState().agentBusy || useWorkspaceStore.getState().agentDraft.trim()) throw new Error("请先完成当前任务或清空 Agent 草稿。");
+      if (
+        useWorkspaceStore.getState().agentBusy ||
+        useWorkspaceStore.getState().agentDraft.trim() ||
+        useWorkspaceStore.getState().agentAttachments.length
+      ) throw new Error("请先完成当前任务或清空 Agent 草稿。");
       await callDesktop(IPC_COMMANDS.providerActivate, { providerId: provider.id });
       await client.invalidateQueries({ queryKey: PROVIDERS_QUERY_KEY });
       const current = useWorkspaceStore.getState();
-      if (current.agentBusy || current.agentDraft.trim()) throw new Error("请先完成当前任务或清空 Agent 草稿，再准备首次排查。");
+      if (current.agentBusy || current.agentDraft.trim() || current.agentAttachments.length) {
+        throw new Error("请先完成当前任务或清空 Agent 草稿，再准备首次排查。");
+      }
       current.selectProvider(provider.id, provider.model);
       current.selectServer(server.id);
       current.setAgentOpen(true);
@@ -117,7 +123,7 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
         <h3>准备一次只读巡检</h3><p>模型：{provider?.label} / {provider?.model}</p><p>服务器：{server?.name ?? "未选择"}</p>
         <p>Agent 将查看资源和容器状态，必要时读取容器日志，再给出异常依据和建议。任务会先填入右侧输入框，你可以修改后发送；操作权限设为“操作前询问”。</p>
         {!connected ? <p className="form-error" role="alert">服务器已断开，请返回上一步重新连接。</p> : null}
-        {workspace.agentBusy || workspace.agentDraft.trim() ? <p className="settings-notice">请先完成当前 Agent 任务或清空已有草稿，以免覆盖正在进行的工作。</p> : null}
+        {workspace.agentBusy || workspace.agentDraft.trim() || workspace.agentAttachments.length ? <p className="settings-notice">请先完成当前 Agent 任务或清空已有草稿，以免覆盖正在进行的工作。</p> : null}
         {prepare.isError ? <p className="form-error" role="alert">{prepare.error.message}</p> : null}
       </section> : null}
       <footer className="getting-started-footer">
@@ -125,7 +131,7 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
         <div className="settings-actions">
           {step > 0 ? <button className="button-secondary" disabled={prepare.isPending || busy} onClick={() => changeStep(step - 1)}>上一步</button> : null}
           {step < 2 ? <button className="button-primary" disabled={step === 0 ? !tested || editingProvider || test.isPending : !connected || busy} onClick={() => changeStep(step + 1)}>下一步</button>
-            : <button className="button-primary" disabled={!tested || !connected || prepare.isPending || workspace.agentBusy || Boolean(workspace.agentDraft.trim())} onClick={() => prepare.mutate()}>{prepare.isPending ? "准备中…" : "填入首次排查任务"}</button>}
+            : <button className="button-primary" disabled={!tested || !connected || prepare.isPending || workspace.agentBusy || Boolean(workspace.agentDraft.trim() || workspace.agentAttachments.length)} onClick={() => prepare.mutate()}>{prepare.isPending ? "准备中…" : "填入首次排查任务"}</button>}
         </div>
       </footer>
       {serverModal ? <AddServerModal server={serverModal === "edit" ? server : undefined} onClose={() => { setServerModal(null); action.reset(); }} /> : null}

@@ -69,6 +69,7 @@ mod execution;
 mod input;
 mod provider;
 mod server;
+mod settings;
 
 pub use activity::{Activity, ActivityOutcome, ActivitySource, ActivityType};
 pub use chat::{ChatMessage, ChatMessageRole, ChatSession, ChatSessionCounts};
@@ -76,13 +77,14 @@ pub use collector::{CollectorSample, ContainerInfo, ServerSnapshot};
 pub use execution::{PermissionMode, RiskLevel, ToolExecutionRecord, ToolExecutionStatus};
 pub use input::{AddServerInput, AuthenticationInput, UpdateServerInput};
 pub use provider::{
-    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpServerConfig,
-    ProviderModelOption,
+    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpHttpAuthHeaderConfig,
+    McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow, McpServerConfig, ProviderModelOption,
 };
 pub use server::{
-    Environment, HealthState, Identity, Server, ServerCapabilities, ServerConnection, ServerGroup,
-    ServerMetadata, ServerStatus, Workspace, WorkspaceRepository,
+    Environment, HealthState, HostCertificateAuthority, Identity, Server, ServerCapabilities,
+    ServerConnection, ServerGroup, ServerMetadata, ServerStatus, Workspace, WorkspaceRepository,
 };
+pub use settings::NetworkProxyConfig;
 
 #[cfg(test)]
 mod tests {
@@ -237,6 +239,22 @@ mod tests {
             }
         ));
 
+        let parsed = add_server(serde_json::json!({
+            "method": "certificate",
+            "privateKeyPem": "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "certificatePath": "/home/dev/.ssh/id_ed25519-cert.pub",
+            "privateKeyPath": "/home/dev/.ssh/id_ed25519",
+        }))
+        .expect("user certificate");
+        assert!(matches!(
+            parsed.authentication,
+            AuthenticationInput::Certificate {
+                certificate_path,
+                private_key_path: Some(private_key_path),
+                ..
+            } if certificate_path.ends_with("-cert.pub") && private_key_path.ends_with("id_ed25519")
+        ));
+
         // ssh-agent：一个字段都没有的变体 —— 这正是 `z.strictObject({ method })` 的形状。
         let parsed = add_server(serde_json::json!({ "method": "agent" })).expect("agent");
         assert!(matches!(parsed.authentication, AuthenticationInput::Agent));
@@ -249,7 +267,7 @@ mod tests {
         ));
 
         // 未知 method 必须失败，而不是落到某个默认变体上。
-        assert!(add_server(serde_json::json!({ "method": "certificate" })).is_err());
+        assert!(add_server(serde_json::json!({ "method": "kerberos" })).is_err());
     }
 
     /// `Identity` 的线形：`passphraseRef` 只在存在时出现，`agent` 身份的
@@ -262,6 +280,8 @@ mod tests {
             method: "privateKey".into(),
             credential_ref: "keychain://ssh/srv_1".into(),
             passphrase_ref: Some("keychain://ssh/srv_1-passphrase".into()),
+            private_key_path: None,
+            certificate_path: None,
             created_at: "2026-01-01T00:00:00.000Z".into(),
         };
         assert_eq!(

@@ -125,6 +125,126 @@ test("an encrypted private key carries an optional passphrase with the same boun
   );
 });
 
+test("certificate authentication requires a certificate path and keeps the key transient", () => {
+  const certificate = {
+    name: "db",
+    host: "10.0.0.5",
+    username: "root",
+    environment: "staging",
+    authentication: {
+      method: "certificate",
+      privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      certificatePath: "/home/dev/.ssh/id_ed25519-cert.pub",
+      privateKeyPath: "/home/dev/.ssh/id_ed25519",
+    },
+  };
+  const parsed = AddServerInputSchema.safeParse(certificate);
+  assert.equal(parsed.success, true);
+  if (parsed.success) {
+    const authentication = parsed.data.authentication;
+    assert.equal(authentication.method, "certificate");
+    if (authentication.method === "certificate") {
+      assert.equal(authentication.certificatePath, "/home/dev/.ssh/id_ed25519-cert.pub");
+      assert.equal("credentialRef" in authentication, false);
+    }
+  }
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...certificate,
+      authentication: {
+        method: "certificate",
+        privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      },
+    }).success,
+    false,
+    "a certificate identity needs an explicit public certificate path",
+  );
+});
+
+test("host certificate authority is explicit and clearable without accepting both states", () => {
+  const authority = {
+    caPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca",
+    principals: ["*.example.test", "api.internal"],
+    revocationListPath: "/etc/ssh/revoked_hosts.krl",
+    revocationListSigners: [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlOld krl-old",
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlNew krl-new",
+    ],
+  };
+  assert.equal(AddServerInputSchema.safeParse({ ...agentAdd, hostCertificateAuthority: authority }).success, true);
+  assert.equal(
+    UpdateServerInputSchema.safeParse({
+      ...agentAdd,
+      serverId: "srv_01abc",
+      hostCertificateAuthority: authority,
+    }).success,
+    true,
+  );
+  assert.equal(
+    UpdateServerInputSchema.safeParse({
+      ...agentAdd,
+      serverId: "srv_01abc",
+      clearHostCertificateAuthority: true,
+    }).success,
+    true,
+  );
+  assert.equal(
+    UpdateServerInputSchema.safeParse({
+      ...agentAdd,
+      serverId: "srv_01abc",
+      hostCertificateAuthority: authority,
+      clearHostCertificateAuthority: true,
+    }).success,
+    false,
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      hostCertificateAuthority: { ...authority, principals: [] },
+    }).success,
+    false,
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      hostCertificateAuthority: { ...authority, revocationListPath: " " },
+    }).success,
+    false,
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      hostCertificateAuthority: {
+        ...authority,
+        revocationListSigners: Array.from({ length: 9 }, (_, index) => `key-${index}`),
+      },
+    }).success,
+    false,
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      hostCertificateAuthority: {
+        ...authority,
+        revocationListPath: undefined,
+        revocationListUrl: "https://ca.example.test/revoked.krl",
+      },
+    }).success,
+    true,
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      hostCertificateAuthority: {
+        ...authority,
+        revocationListUrl: "https://ca.example.test/revoked.krl",
+      },
+    }).success,
+    false,
+    "local and online KRL sources are mutually exclusive",
+  );
+});
+
 test("permission decisions always state which layer spoke", () => {
   const parsed = PermissionDecisionSchema.safeParse({
     outcome: "ask",

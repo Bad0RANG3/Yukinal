@@ -6,7 +6,12 @@
  * 事件流逻辑跟着变复杂，反之亦然。
  */
 
-import { IPC_COMMANDS, type ChatMessage, type ChatSession } from "@yukinal/shared";
+import {
+  IPC_COMMANDS,
+  type AgentPromptPart,
+  type ChatMessage,
+  type ChatSession,
+} from "@yukinal/shared";
 import { useCallback, useRef, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
@@ -27,7 +32,12 @@ export type ChatSessions = {
   /** 打开一段已存在的对话；调用方负责把 messages 灌进动态。 */
   openStoredSession(session: ChatSession): void;
   /** 确保会话存在并写入这条用户消息，返回真正落库的 sessionId。 */
-  recordUserMessage(prompt: string, messageId: string, serverId?: string | null): Promise<string>;
+  recordUserMessage(
+    prompt: string,
+    messageId: string,
+    serverId?: string | null,
+    parts?: AgentPromptPart[],
+  ): Promise<string>;
   /** 追加一条 Agent 回复；会话不存在时静默跳过。 */
   recordAssistantMessage(content: string): Promise<void>;
   /** 归档状态变化只会影响当前会话。 */
@@ -58,10 +68,17 @@ export function useChatSessions(): ChatSessions {
       role: ChatMessage["role"],
       content: string,
       messageId?: string,
+      parts?: AgentPromptPart[],
     ): Promise<void> => {
-      if (!shell || !sessionId || !content.trim()) return;
+      if (!shell || !sessionId || (!content.trim() && !parts?.length)) return;
       try {
-        await callDesktop(IPC_COMMANDS.chatMessageAppend, { sessionId, messageId, role, content });
+        await callDesktop(IPC_COMMANDS.chatMessageAppend, {
+          sessionId,
+          messageId,
+          role,
+          content,
+          ...(parts?.length ? { parts } : {}),
+        });
       } catch (cause) {
         setError(`对话记录保存失败：${errorMessage(cause)}`);
       }
@@ -70,13 +87,24 @@ export function useChatSessions(): ChatSessions {
   );
 
   const recordUserMessage = useCallback(
-    async (prompt: string, messageId: string, serverId?: string | null): Promise<string> => {
+    async (
+      prompt: string,
+      messageId: string,
+      serverId?: string | null,
+      parts?: AgentPromptPart[],
+    ): Promise<string> => {
       if (!shell) return EPHEMERAL_SESSION_ID;
       let sessionId = activeSessionIdRef.current;
       if (!sessionId) {
         try {
+          const image = parts?.find(
+            (part) =>
+              part.type === "image" ||
+              part.type === "file" ||
+              part.type === "document",
+          );
           const created = await callDesktop(IPC_COMMANDS.chatSessionCreate, {
-            title: sessionTitleFromPrompt(prompt),
+            title: sessionTitleFromPrompt(prompt || image?.name || "图片输入"),
             serverId: serverId ?? undefined,
           });
           sessionId = created.session.id;
@@ -86,7 +114,7 @@ export function useChatSessions(): ChatSessions {
           return EPHEMERAL_SESSION_ID;
         }
       }
-      await recordMessage(sessionId, "user", prompt, messageId);
+      await recordMessage(sessionId, "user", prompt, messageId, parts);
       return sessionId;
     },
     [activate, recordMessage, shell],

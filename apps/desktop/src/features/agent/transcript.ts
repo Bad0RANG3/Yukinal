@@ -7,6 +7,7 @@
  */
 
 import type {
+  AgentPromptPart,
   ApprovalRequest,
   ChatMessage,
   PermissionApprovalSource,
@@ -45,7 +46,7 @@ export type ToolOutcome = {
  * 它必须与 assistant 分开：把应用的话冒充成 Agent 说的，就是在伪造记录。
  */
 export type Entry =
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; attachments?: AgentPromptPart[] }
   | { kind: "assistant"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "system"; text: string }
@@ -90,14 +91,21 @@ export function appendAssistantDelta(current: Entry[], delta: string): Entry[] {
 }
 
 /**
- * 运行的终态文本是权威版本：它覆盖已流式显示的最后一行，
- * 而不是在其后再追加一条重复内容。
+ * Reconcile the streamed prefix with the terminal snapshot.
+ *
+ * The common case is exactly equal, or the final text extends the streamed prefix, so
+ * replacing with the longer value loses nothing. If the two genuinely diverged, keep the
+ * streamed record and append the final snapshot instead of silently deleting content that
+ * the user already saw.
  */
 export function settleAssistantText(current: Entry[], text: string): Entry[] {
   const last = current.at(-1);
-  return last?.kind === "assistant"
-    ? [...current.slice(0, -1), { kind: "assistant", text }]
-    : appendEntries(current, [{ kind: "assistant", text }]);
+  if (last?.kind !== "assistant") return appendEntries(current, [{ kind: "assistant", text }]);
+  if (last.text === text || text.startsWith(last.text)) {
+    return [...current.slice(0, -1), { kind: "assistant", text }];
+  }
+  if (last.text.startsWith(text)) return current;
+  return appendEntries(current, [{ kind: "assistant", text }]);
 }
 
 /**
@@ -128,7 +136,17 @@ export function settleToolResult(current: Entry[], call: ToolCallFacts, result: 
 export function entriesFromMessages(messages: ChatMessage[]): Entry[] {
   return messages
     .flatMap((message): Entry[] => {
-      if (message.role === "user") return [{ kind: "user", text: message.content }];
+      if (message.role === "user") {
+        const attachments = message.parts?.filter(
+          (part): part is AgentPromptPart =>
+            part.type === "image" || part.type === "file" || part.type === "document",
+        );
+        return [{
+          kind: "user",
+          text: message.content,
+          ...(attachments?.length ? { attachments } : {}),
+        }];
+      }
       if (message.role === "assistant") return [{ kind: "assistant", text: message.content }];
       return [];
     })
@@ -146,6 +164,14 @@ export function sessionTitleFromPrompt(prompt: string): string {
 
 export function lastUserPrompt(entries: Entry[]): string | undefined {
   return [...entries].reverse().find((entry): entry is Extract<Entry, { kind: "user" }> => entry.kind === "user")?.text;
+}
+
+export function lastUserEntry(
+  entries: Entry[],
+): Extract<Entry, { kind: "user" }> | undefined {
+  return [...entries].reverse().find(
+    (entry): entry is Extract<Entry, { kind: "user" }> => entry.kind === "user",
+  );
 }
 
 /**

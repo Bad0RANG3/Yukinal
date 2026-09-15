@@ -13,9 +13,11 @@ import test from "node:test";
 import type { IpcCommandName } from "../ipc/index.js";
 import { DockerRestartInputSchema, DockerRestartResultSchema } from "./docker.js";
 import { FilesystemReadInputSchema, FilesystemWriteInputSchema } from "./file.js";
+import { McpServerSaveInputSchema } from "./mcp.js";
 import {
   AgentStatusSchema,
   EMPTY_PAYLOAD,
+  EVENT_SCHEMAS,
   IpcServerIdSchema,
   IPC_SCHEMAS,
 } from "./ipc.js";
@@ -74,6 +76,22 @@ test("a sync run.start response carries the run's result", () => {
   assert.equal(response.result?.steps, 3);
 });
 
+test("run.start admission flags reach the IPC consumer", () => {
+  const duplicate = IPC_SCHEMAS.agent_run_start.response.safeParse({
+    runId: "run_existing",
+    started: false,
+    duplicate: true,
+  });
+  assert.equal(duplicate.success, true);
+
+  const resumed = IPC_SCHEMAS.agent_run_start.response.safeParse({
+    runId: "run_admitted",
+    started: true,
+    resumed: true,
+  });
+  assert.equal(resumed.success, true);
+});
+
 test("a result on a sync response is validated, not passed through", () => {
   // The result object reaches the UI through a response frame, so it does not pass the
   // event gate. If a sidecar ever sends a malformed one, this is where it has to fail.
@@ -93,6 +111,215 @@ test("responses are strict: a serde drift (extra field) must fail, not be stripp
 test("empty payloads reject unknown keys", () => {
   assert.equal(EMPTY_PAYLOAD.safeParse({}).success, true);
   assert.equal(EMPTY_PAYLOAD.safeParse({ anything: 1 }).success, false);
+});
+
+test("MCP authentication keeps the secret write-only", () => {
+  const input = McpServerSaveInputSchema.safeParse({
+    id: "mcp_http",
+    label: "Remote MCP",
+    transport: "http",
+    url: "https://mcp.example.com/mcp",
+    httpAuthHeaders: [
+      { name: "Authorization", secret: "Bearer test-secret" },
+      { name: "X-Gateway-Key", secret: "gateway-secret" },
+    ],
+    enabled: true,
+  });
+  assert.equal(input.success, true);
+
+  const response = IPC_SCHEMAS.mcp_server_list.response.safeParse(fixture("mcp_server_list"));
+  assert.equal(response.success, true);
+  if (!response.success) return;
+  const remote = response.data.servers.find((server) => server.config.id === "mcp_remote");
+  assert.deepEqual(remote?.config.httpAuthHeaders, [
+    {
+      name: "Authorization",
+      credentialRef: "keychain://mcp/mcp_remote-cred",
+    },
+  ]);
+  assert.equal(
+    "secret" in (remote?.config.httpAuthHeaders[0] ?? {}),
+    false,
+    "the settings response must never carry the secret value",
+  );
+});
+
+test("MCP OAuth config crosses IPC without carrying tokens", () => {
+  const input = McpServerSaveInputSchema.safeParse({
+    id: "mcp_oauth",
+    label: "OAuth MCP",
+    transport: "http",
+    url: "https://mcp.example.com/mcp",
+    oauth: {
+      issuer: "https://auth.example.com",
+      clientId: "desktop-client",
+      scopes: ["mcp.read"],
+    },
+    enabled: true,
+  });
+  assert.equal(input.success, true);
+  // A hand-entered secret rides along on the save input and nowhere else: the stored shape
+  // has only a reference, so there is no field for it to come back in.
+  const confidential = McpServerSaveInputSchema.safeParse({
+    id: "mcp_oauth_confidential",
+    label: "OAuth MCP with a secret",
+    transport: "http",
+    url: "https://mcp.example.com/mcp",
+    oauth: {
+      issuer: "https://auth.example.com",
+      clientId: "confidential-client",
+      clientAuth: "client_secret_basic",
+      clientSecret: "s3cret",
+      scopes: ["mcp.read"],
+    },
+    enabled: true,
+  });
+  assert.equal(confidential.success, true);
+  assert.equal(
+    McpServerSaveInputSchema.safeParse({
+      id: "mcp_oauth_oversized",
+      label: "OAuth MCP with an oversized secret",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+      oauth: {
+        issuer: "https://auth.example.com",
+        clientId: "confidential-client",
+        clientAuth: "client_secret_post",
+        clientSecret: "x".repeat(8_193),
+        scopes: ["mcp.read"],
+      },
+      enabled: true,
+    }).success,
+    false,
+    "a secret larger than the documented bound must not reach the host",
+  );
+  assert.equal(
+    McpServerSaveInputSchema.safeParse({
+      id: "mcp_oauth_unknown_method",
+      label: "OAuth MCP with an invented method",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+      oauth: {
+        issuer: "https://auth.example.com",
+        clientId: "confidential-client",
+        clientAuth: "client_secret_jwt",
+        scopes: ["mcp.read"],
+      },
+      enabled: true,
+    }).success,
+    false,
+    "an authentication method the host cannot perform must be refused here",
+  );
+  assert.equal(
+    McpServerSaveInputSchema.safeParse({
+      id: "mcp_oauth_auto",
+      label: "OAuth auto discovery",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+      oauth: {
+        issuer: "",
+        clientId: "",
+        scopes: ["mcp.read"],
+      },
+      enabled: true,
+    }).success,
+    true,
+  );
+
+  const remote = IPC_SCHEMAS.mcp_server_list.response.safeParse({
+    servers: [
+      {
+        config: {
+          id: "mcp_oauth",
+          label: "OAuth MCP",
+          transport: "http",
+          url: "https://mcp.example.com/mcp",
+          httpAuthHeaders: [],
+          oauth: {
+            issuer: "https://auth.example.com",
+            clientId: "desktop-client",
+            // Rust always serialises the flow: rows written before it existed default to
+            // `authorization_code`, so the wire shape never has to guess.
+            flow: "device_code",
+            // Same for the client authentication: rows written before it existed are public.
+            clientAuth: "client_secret_post",
+            clientSecretRef: "keychain://mcp/oauth-secret",
+            // And the same for sender-constrained tokens: absent means off, and a stored
+            // key reference never carries the key itself.
+            dpop: true,
+            dpopKeyRef: "keychain://mcp/oauth-dpop",
+            scopes: ["mcp.read"],
+            tokenEndpoint: "https://auth.example.com/token",
+            credentialRef: "keychain://mcp/oauth",
+          },
+          enabled: true,
+          allowedTools: [],
+          trustLevel: "unreviewed",
+        },
+        status: {
+          serverId: "mcp_oauth",
+          running: false,
+          toolCount: 0,
+          stderrTail: [],
+          diagnostics: [],
+        },
+        tools: [],
+      },
+    ],
+  });
+  assert.equal(remote.success, true);
+  if (!remote.success) return;
+  assert.equal(remote.data.servers[0]?.config.oauth?.flow, "device_code");
+  assert.equal(remote.data.servers[0]?.config.oauth?.clientAuth, "client_secret_post");
+  assert.equal(
+    remote.data.servers[0]?.config.oauth?.clientSecretRef,
+    "keychain://mcp/oauth-secret",
+    "the settings response may say *that* a secret is stored, never what it is",
+  );
+  assert.equal("accessToken" in (remote.data.servers[0]?.config.oauth ?? {}), false);
+  assert.equal("refreshToken" in (remote.data.servers[0]?.config.oauth ?? {}), false);
+  assert.equal("clientSecret" in (remote.data.servers[0]?.config.oauth ?? {}), false);
+
+  // The flow is a closed vocabulary, and an omitted one is refused on a *stored* row:
+  // there is no "unspecified flow" the UI would have to interpret.
+  const withoutFlow = (
+    remote.data.servers[0] as { config: { oauth?: Record<string, unknown> } }
+  ).config.oauth;
+  const { flow: _ignored, ...noFlow } = withoutFlow ?? {};
+  const parsed = IPC_SCHEMAS.mcp_server_list.response.safeParse({
+    servers: [{ ...remote.data.servers[0], config: { ...remote.data.servers[0]?.config, oauth: noFlow } }],
+  });
+  assert.equal(parsed.success, false, "a stored OAuth config must always carry its flow");
+  assert.equal(
+    IPC_SCHEMAS.mcp_server_list.response.safeParse({
+      servers: [
+        {
+          ...remote.data.servers[0],
+          config: {
+            ...remote.data.servers[0]?.config,
+            oauth: { ...withoutFlow, flow: "implicit" },
+          },
+        },
+      ],
+    }).success,
+    false,
+    "an unknown flow must be refused rather than defaulted",
+  );
+  assert.equal(
+    IPC_SCHEMAS.mcp_server_list.response.safeParse({
+      servers: [
+        {
+          ...remote.data.servers[0],
+          config: {
+            ...remote.data.servers[0]?.config,
+            oauth: { ...withoutFlow, flow: "authorization_code", clientAuth: "client_secret_jwt" },
+          },
+        },
+      ],
+    }).success,
+    false,
+    "an authentication method the host cannot perform must be refused on the way out too",
+  );
 });
 
 test("server ids on the wire must be opaque srv_ ids", () => {
@@ -211,6 +438,49 @@ test("terminal param shapes match the contract", () => {
   assert.equal(write.success, true);
 });
 
+test("SSH keyboard-interactive response commands and challenge events stay bounded", () => {
+  assert.equal(
+    IPC_SCHEMAS.server_auth_respond.params.safeParse({
+      authId: "auth_1",
+      responses: ["654321"],
+    }).success,
+    true,
+  );
+  assert.equal(
+    IPC_SCHEMAS.server_auth_respond.params.safeParse({
+      authId: "auth_1",
+      responses: Array.from({ length: 17 }, () => ""),
+    }).success,
+    false,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.auth_challenge"].safeParse({
+      authId: "auth_1",
+      serverId: "srv_01abc",
+      username: "deploy",
+      host: "api.example.test",
+      name: "Two-factor authentication",
+      instructions: "Enter the code",
+      prompts: [{ prompt: "Verification code", echo: false }],
+      expiresAt: "2026-01-01T00:02:00Z",
+    }).success,
+    true,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.auth_challenge"].safeParse({
+      authId: "auth_1",
+      serverId: "srv_01abc",
+      username: "deploy",
+      host: "api.example.test",
+      name: "Two-factor authentication",
+      instructions: "Enter the code",
+      prompts: [{ prompt: "Verification code", echo: "no" }],
+      expiresAt: "2026-01-01T00:02:00Z",
+    }).success,
+    false,
+  );
+});
+
 test("add-server params are validated by the shared input schema", () => {
   const parsed = IPC_SCHEMAS.server_add.params.safeParse({
     name: "db",
@@ -234,6 +504,172 @@ test("Agent run params carry the explicit permission delegation", () => {
     prompt: "restart the service",
     permissionMode: "policy",
   }).success, false);
+});
+
+test("Agent run params accept bounded inline images and reject unbounded or mislabeled data", () => {
+  const run = IPC_SCHEMAS.agent_run_start.params;
+  const image = {
+    type: "image",
+    mediaType: "image/png",
+    data: "aGVsbG8=",
+    name: "screen.png",
+  };
+  assert.equal(run.safeParse({ sessionId: "ses_1", prompt: "", parts: [image] }).success, true);
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [{ ...image, data: "data:image/png;base64,aGVsbG8=" }] }).success,
+    false,
+  );
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [{ ...image, mediaType: "image/svg+xml" }] }).success,
+    false,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: [
+        { type: "text", text: "x".repeat(50_001) },
+        { type: "text", text: "y".repeat(50_001) },
+      ],
+    }).success,
+    false,
+  );
+  assert.equal(run.safeParse({ sessionId: "ses_1", prompt: "" }).success, false);
+
+  // 音频：四种格式都在词汇表里，但每一种的字节数、段数、名字与 base64 形状都各自受约束。
+  const clip = { type: "audio", mediaType: "audio/wav", data: "aGVsbG8=", name: "note.wav" };
+  assert.equal(run.safeParse({ sessionId: "ses_1", prompt: "", parts: [clip] }).success, true);
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [{ ...clip, name: undefined }] }).success,
+    true,
+    "a clip needs no visible name, the same way an image does not",
+  );
+  for (const invalid of [
+    { ...clip, mediaType: "audio/aac" },
+    { ...clip, data: "data:audio/wav;base64,aGVsbG8=" },
+    { ...clip, name: "../note.wav" },
+    { ...clip, data: "aGVsbG8" },
+  ]) {
+    assert.equal(
+      run.safeParse({ sessionId: "ses_1", prompt: "", parts: [invalid] }).success,
+      false,
+      `audio part must be refused: ${JSON.stringify(invalid)}`,
+    );
+  }
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [clip, clip, clip] }).success,
+    false,
+    "a third clip exceeds the per-message count",
+  );
+  // 与图片、PDF **共用**同一个 5 MiB 原始字节预算：一张 4 MiB 上限的图片再加一段 1.2 MiB
+  // 的音频就已经超过了，而两者各自都还在自己的上限内。
+  const biggestImage = {
+    type: "image",
+    mediaType: "image/png",
+    // 5_592_404 base64 字符 = 4_194_303 解码字节，刚好在单图上限之内。
+    data: "A".repeat(5_592_404),
+  };
+  const bigClip = { ...clip, data: "A".repeat(1_677_216) };
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [biggestImage] }).success,
+    true,
+  );
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [clip, bigClip] }).success,
+    true,
+  );
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [biggestImage, bigClip] }).success,
+    false,
+    "the inline budget is shared, so a big image plus a big clip must be refused",
+  );
+
+  const file = {
+    type: "file",
+    mediaType: "text/plain",
+    data: "# Notes\nhello",
+    name: "notes.md",
+  };
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [file] }).success,
+    true,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: [{ ...file, mediaType: "application/pdf" }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: [file, file, file, file, file],
+    }).success,
+    false,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: [{ ...file, data: "hello\u0000world" }],
+    }).success,
+    false,
+  );
+
+  const chat = IPC_SCHEMAS.chat_message_append.params;
+  assert.equal(
+    chat.safeParse({ sessionId: "ses_1", role: "user", content: "", parts: [image] }).success,
+    true,
+  );
+  assert.equal(
+    chat.safeParse({ sessionId: "ses_1", role: "user", content: "", parts: [file] }).success,
+    true,
+  );
+  assert.equal(chat.safeParse({ sessionId: "ses_1", role: "user", content: "" }).success, false);
+});
+
+test("Agent run params accept bounded PDF documents and reject mislabeled or excessive input", () => {
+  const run = IPC_SCHEMAS.agent_run_start.params;
+  const document = {
+    type: "document",
+    mediaType: "application/pdf",
+    data: "JVBERi0xLjQ=",
+    name: "guide.pdf",
+  };
+  assert.equal(
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [document] }).success,
+    true,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: [{ ...document, data: "data:application/pdf;base64,JVBERi0xLjQ=" }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: [{ ...document, mediaType: "application/octet-stream" }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    run.safeParse({
+      sessionId: "ses_1",
+      prompt: "",
+      parts: Array.from({ length: 3 }, (_, index) => ({
+        ...document,
+        name: `guide-${index}.pdf`,
+      })),
+    }).success,
+    false,
+  );
 });
 
 test("activity_list accepts an optional server filter and bounded limit", () => {

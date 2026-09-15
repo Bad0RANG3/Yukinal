@@ -16,6 +16,7 @@ export type Inline =
   | { kind: "strike"; children: Inline[] }
   | { kind: "link"; href: string; children: Inline[] }
   | { kind: "image"; href: string; alt: string }
+  | { kind: "footnote"; label: string }
   /** 行尾两个空格或一个反斜杠 —— 段落内唯一的强制换行。 */
   | { kind: "break" };
 
@@ -29,7 +30,15 @@ export type Block =
   | { kind: "heading"; level: number; content: Inline[] }
   | { kind: "paragraph"; content: Inline[] }
   | { kind: "code"; language: string | null; text: string }
-  | { kind: "list"; ordered: boolean; start: number; items: ListItem[] }
+  | {
+      kind: "list";
+      ordered: boolean;
+      start: number;
+      /** 紧凑列表的直接段落不生成 `<p>`；列表项之间存在空行时为宽松列表。 */
+      tight: boolean;
+      items: ListItem[];
+    }
   | { kind: "quote"; blocks: Block[] }
   | { kind: "table"; align: ColumnAlign[]; head: Inline[][]; rows: Inline[][][] }
+  | { kind: "footnotes"; items: Array<{ label: string; content: Inline[] }> }
   | { kind: "rule" };

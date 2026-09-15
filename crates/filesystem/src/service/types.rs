@@ -2,6 +2,58 @@
 
 use super::error::TransportResult;
 
+/// 一个路径的属性，`lstat` 语义：symlink 不会被跟随。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteStat {
+    pub kind: RemoteEntryKind,
+    pub size: u64,
+    /// 远端给出的修改时间（Unix 秒）。SFTP 的粒度是秒，守卫的粒度也就是秒。
+    pub modified: Option<u32>,
+}
+
+/// `File` 是默认值：假传输与「还不知道是什么」的调用方都从这里出发，而它恰好也是最常见的答案。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoteEntryKind {
+    #[default]
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// 替换前记下来的守卫：读取**之后**测到的大小与 mtime。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplaceGuard {
+    pub size: u64,
+    pub modified: Option<u32>,
+}
+
+/// 替换发布之后实测到的属性。调用方要拿它复核「发布出来的就是我们写进去的那一份」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacedFile {
+    pub size: u64,
+    pub modified: Option<u32>,
+}
+
+/// 替换失败：调用方必须能区分「有人改了」与「远端做不到」。
+///
+/// 这三件事的下一步完全不同：并发修改要重读再试，能力缺失重试多少次都一样，metadata
+/// 保不住则要用户决定是接受另一种写法还是别改这个文件。合成一句话就会把这些区别丢掉。
+#[derive(Debug)]
+pub enum ReplaceError {
+    /// 文件在读取之后被改过，或发布之后发现不是我们写进去的那一份。
+    ConcurrentChange(String),
+    /// 远端不具备安全替换的能力（symlink、rename 被拒、staging 建不出来、无法确认硬链接）。
+    Unsupported(String),
+    /// metadata 保不住；`missing` 逐项点名。
+    MetadataNotPreserved {
+        message: String,
+        missing: Vec<String>,
+    },
+    /// 传输失败；文案原样来自传输实现。
+    Transport(super::error::TransportError),
+}
+
 /// 传输层交出的原始目录项：名字、类型（`file` / `dir` / …）、字节数。
 ///
 /// 路径拼接等归一化不在传输上做：不同传输给出的名字形式不一样，而「父路径 + 名字」的规则
@@ -44,6 +96,40 @@ pub trait RemoteFileTransport: Send + Sync {
         path: &str,
         data: &[u8],
     ) -> impl std::future::Future<Output = TransportResult<()>> + Send;
+
+    /// One path's attributes (`lstat` semantics: a symlink is not followed).
+    ///
+    /// The edit guard needs this twice: once to learn what kind of thing the path is, and once
+    /// to record the `size`/`mtime` that the replacement must still match.
+    fn stat(
+        &self,
+        server_id: &str,
+        path: &str,
+    ) -> impl std::future::Future<Output = TransportResult<RemoteStat>> + Send;
+
+    /// How many names point at this file, or `None` when the remote cannot say.
+    ///
+    /// SFTP has no link count in its attributes, so implementations ask a remote helper. `None`
+    /// is a real answer — "unknown" — and the caller treats it as unsafe rather than as "one".
+    fn link_count(
+        &self,
+        server_id: &str,
+        path: &str,
+    ) -> impl std::future::Future<Output = TransportResult<Option<u64>>> + Send;
+
+    /// Replace a regular file through a same-directory staging file and a rename (ADR 0017).
+    ///
+    /// There is deliberately **no** fallback to an in-place write: a transport that cannot
+    /// stage, verify metadata, or rename reports [`ReplaceError::Unsupported`]. The `guard` is
+    /// the metadata recorded right after the read; implementations must re-check it immediately
+    /// before the rename and report [`ReplaceError::ConcurrentChange`] instead of overwriting.
+    fn replace_guarded(
+        &self,
+        server_id: &str,
+        path: &str,
+        guard: &ReplaceGuard,
+        data: &[u8],
+    ) -> impl std::future::Future<Output = Result<ReplacedFile, ReplaceError>> + Send;
 }
 
 /// 目录列表结果：请求的路径加上已归一化为绝对路径的条目。

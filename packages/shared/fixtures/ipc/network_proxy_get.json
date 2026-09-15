@@ -1,0 +1,10 @@
+{
+  "mode": "system",
+  "hasCredential": true,
+  "resolution": {
+    "kind": "proxy",
+    "url": "http://proxy.corp.example:3128",
+    "source": "环境变量",
+    "hasNoProxy": true
+  }
+}

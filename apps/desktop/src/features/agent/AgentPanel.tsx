@@ -14,7 +14,13 @@
  * 规则：不造假 transcript。没有运行中的 run 就没有消息；Stop 立刻掐断在途请求。
  */
 
-import type { ChatMessage, ChatSession, Environment, RestartRecord } from "@yukinal/shared";
+import type {
+  AgentPromptPart,
+  ChatMessage,
+  ChatSession,
+  Environment,
+  RestartRecord,
+} from "@yukinal/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
@@ -36,7 +42,8 @@ import {
   type MentionCandidate,
   type Submission,
 } from "./composer-triggers.js";
-import { entriesFromMessages, lastUserPrompt } from "./transcript.js";
+import { promptPartsWithAttachments } from "./image-attachments.js";
+import { entriesFromMessages, lastUserEntry } from "./transcript.js";
 import { requestPolicyId, type RunPolicyChoice } from "./run-policy.js";
 import { useAgentModels } from "./useAgentModels.js";
 import { useAgentPanelShell } from "./useAgentPanelShell.js";
@@ -65,6 +72,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   const permissionMode = usePreferencesStore((state) => state.agentPermissionMode);
   const runMode = usePreferencesStore((state) => state.agentRunMode);
+  const delivery = usePreferencesStore((state) => state.agentDelivery);
   const setPreferences = usePreferencesStore((state) => state.setPreferences);
 
   const shell = isDesktopShell();
@@ -88,6 +96,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   // 输入框、并避免覆盖正在进行的任务 —— 两者都是跨面板的事实，不只是本组件状态。
   const prompt = useWorkspaceStore((state) => state.agentDraft);
   const setPrompt = useWorkspaceStore((state) => state.setAgentDraft);
+  const attachments = useWorkspaceStore((state) => state.agentAttachments);
+  const setAttachments = useWorkspaceStore((state) => state.setAgentAttachments);
   const setAgentBusy = useWorkspaceStore((state) => state.setAgentBusy);
   useEffect(() => {
     setAgentBusy(run.running);
@@ -136,18 +146,28 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   }, [prompt, mentionCandidates, selectedServerId, servers.data]);
   const targetEnvironment: Environment = policyTarget?.metadata.environment ?? "unknown";
 
-  const send = async (raw: string): Promise<void> => {
+  const send = async (
+    raw: string,
+    sendAttachments: readonly AgentPromptPart[] = attachments,
+    consumeDraft = true,
+  ): Promise<void> => {
     const text = raw.trim();
-    if (!text || !canSend || run.running) return;
+    const parts = promptPartsWithAttachments(text, sendAttachments);
+    if (!parts.length || !canSend || run.running) return;
     // 提示词里的 @服务器 决定这次运行的目标；没提及时才回落到当前选中的服务器。
     const mentioned = resolveMentionedServer(text, mentionCandidates);
     const focusServerId = mentioned?.id ?? selectedServerId;
     setRunContext(mentioned?.label ?? focusServer?.name ?? "全局工作区");
     follow.pinToBottom();
-    setPrompt("");
+    if (consumeDraft) {
+      setPrompt("");
+      setAttachments([]);
+    }
     const outcome = await run.start({
       prompt: text,
-      persistUserMessage: (messageId) => sessions.recordUserMessage(text, messageId, focusServerId),
+      parts,
+      persistUserMessage: (messageId, promptParts) =>
+        sessions.recordUserMessage(text, messageId, focusServerId, promptParts),
       providerId: models.selectedProviderId,
       model: models.selectedModel,
       focusServerId,
@@ -155,9 +175,13 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       mode: runMode,
       // 「按环境自动」在这里就是「不带这个字段」，由 requestPolicyId 保证。
       policyId: requestPolicyId(runPolicy),
+      delivery,
     });
     // 没跑起来就把输入还给用户，别让他重新打一遍。
-    if (outcome !== "started") setPrompt(text);
+    if (outcome !== "started" && consumeDraft) {
+      setPrompt(text);
+      setAttachments([...sendAttachments]);
+    }
   };
 
   /**
@@ -210,6 +234,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     setHistoryOpen(false);
     setRunContext(null);
     setPrompt("");
+    setAttachments([]);
     run.clearTranscript();
   };
 
@@ -219,6 +244,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     run.loadTranscript(entriesFromMessages(messages));
     setRunContext(session.serverId ?? "全局工作区");
     setPrompt("");
+    setAttachments([]);
     setHistoryOpen(false);
   };
 
@@ -271,9 +297,10 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
             entries={run.entries}
             running={run.running}
             runState={run.runState}
-            lastUserPrompt={lastUserPrompt(run.entries)}
+            lastUserEntry={lastUserEntry(run.entries)}
             canSend={canSend}
-            onRetry={(text) => void send(text)}            onApproval={run.respondApproval}
+            onRetry={(entry) => void send(entry.text, entry.attachments ?? [], false)}
+            onApproval={run.respondApproval}
             pendingApprovalIds={run.pendingApprovalIds}
             approvalStatuses={run.approvalStatuses}
             feedRef={follow.feedRef}
@@ -298,6 +325,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
           <AgentComposer
             prompt={prompt}
             onPromptChange={setPrompt}
+            attachments={attachments}
+            onAttachmentsChange={setAttachments}
             onSubmit={handleSubmit}
             onStop={() => void run.stop()}
             running={run.running}
@@ -308,6 +337,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
             onPermissionModeChange={(mode) => setPreferences({ agentPermissionMode: mode })}
             runMode={runMode}
             onRunModeChange={(mode) => setPreferences({ agentRunMode: mode })}
+            delivery={delivery}
+            onDeliveryChange={(value) => setPreferences({ agentDelivery: value })}
             runPolicy={runPolicy}
             onRunPolicyChange={setRunPolicy}
             targetEnvironment={targetEnvironment}

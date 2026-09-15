@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// How the supervisor reacts to an exit **it did not ask for**.
 ///
@@ -48,7 +48,7 @@ pub fn restart_delay(policy: &RestartPolicy, attempt: u32) -> Duration {
         .min(policy.max_delay)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitRecord {
     pub code: Option<i32>,
@@ -58,7 +58,7 @@ pub struct ExitRecord {
 
 /// The supervisor's own account of an automatic restart, for the UI to render instead of
 /// leaving a crash and a restart looking like nothing happened.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestartRecord {
     /// The attempt this record describes: 1 for the first retry.
@@ -72,23 +72,23 @@ pub struct RestartRecord {
 /// What the supervisor decided about one unexpected exit. Pure data so the backoff and the
 /// budget can be tested without spawning a process.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum RestartDecision {
+pub(crate) enum RestartDecision {
     Retry { attempt: u32, delay: Duration },
     Exhausted { attempts: u32 },
 }
 
 #[derive(Debug, Default)]
-pub(super) struct RestartState {
+pub(crate) struct RestartState {
     /// Attempts spent since the last healthy start.
     attempts: u32,
     /// When the current process started; `None` while nothing is running. Cleared on exit
     /// so a second decision inside the same outage cannot reset the budget a second time.
     pub(super) started_at: Option<Instant>,
-    pub(super) record: Option<RestartRecord>,
+    pub(crate) record: Option<RestartRecord>,
 }
 
 impl RestartState {
-    pub(super) fn decide(
+    pub(crate) fn decide(
         &mut self,
         policy: &RestartPolicy,
         now: Instant,
@@ -128,10 +128,15 @@ impl RestartState {
         }
     }
 
-    pub(super) fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.attempts = 0;
         self.started_at = None;
         self.record = None;
+    }
+
+    /// Start the "was the process healthy?" clock for a newly installed child.
+    pub(crate) fn mark_started(&mut self) {
+        self.started_at = Some(Instant::now());
     }
 }
 

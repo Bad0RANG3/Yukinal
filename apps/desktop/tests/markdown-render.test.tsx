@@ -4,9 +4,8 @@
  * 这三条都不是「好看不好看」的问题，而是安全与可用性的边界：
  *   - 正文里的 HTML 必须是**文字**（没有 `dangerouslySetInnerHTML`，也没有过滤规则
  *     需要维护对错）；
- *   - 链接不能生成可导航的 `<a href>` —— 窗口没有 opener 能力，点一下就会把 webview
- *     导航走，整个界面没了；
- *   - 图片不会变成 `<img>`，因此一条消息不会替用户向陌生主机发请求。
+ *   - 链接不能生成可导航的 `<a href>`；点击必须经过受限 opener 交给系统浏览器；
+ *   - 图片使用 `<img>` 但不发送 referrer。
  */
 
 import assert from "node:assert/strict";
@@ -45,12 +44,12 @@ test("HTML in the answer is escaped text, never markup", () => {
   assert.equal(markup.includes("<script"), false);
 });
 
-test("links never become navigable anchors", () => {
+test("links use the external opener path, never an in-WebView anchor", () => {
   const markup = render("见 [文档](https://example.test/a) 与 https://example.test/b");
   assert.equal(markup.includes("md-link"), true);
   assert.equal(markup.includes("<a "), false);
   assert.equal(markup.includes("href"), false);
-  // 地址仍要看得见：窗口里打不开，至少能复制出去。
+  assert.equal(markup.includes("<button"), true);
   assert.equal(markup.includes('title="https://example.test/a"'), true);
 });
 
@@ -60,17 +59,36 @@ test("an unknown scheme stays plain text", () => {
   assert.equal(markup.includes("javascript:alert(1)"), true);
 });
 
-test("images show their alt text and are never fetched", () => {
+test("images render with alt text, lazy loading and no referrer", () => {
   const markup = render("![拓扑图](https://example.test/a.png)");
-  assert.equal(markup.includes("<img"), false);
+  assert.equal(markup.includes("<img"), true);
+  assert.equal(markup.includes('src="https://example.test/a.png"'), true);
+  assert.equal(markup.includes('alt="拓扑图"'), true);
+  assert.equal(markup.includes('loading="lazy"'), true);
+  assert.equal(markup.includes('referrerPolicy="no-referrer"') || markup.includes('referrerpolicy="no-referrer"'), true);
   assert.equal(markup.includes("拓扑图"), true);
-  assert.equal(markup.includes('title="https://example.test/a.png"'), true);
 });
 
 test("task lists show a box instead of a bullet", () => {
   const markup = render("- [x] 完成\n- [ ] 未完成");
   assert.equal(markup.includes("☑"), true);
   assert.equal(markup.includes("☐"), true);
+});
+
+test("tight lists omit direct paragraph wrappers and loose lists keep them", () => {
+  const tight = render("- 甲\n- 乙");
+  assert.equal(tight.includes("<p class=\"md-paragraph\">"), false);
+
+  const loose = render("- 甲\n\n- 乙");
+  assert.equal((loose.match(/<p class="md-paragraph">/g) ?? []).length, 2);
+});
+
+test("footnotes render as structured text, never as HTML", () => {
+  const markup = render("结论[^1]\n\n[^1]: 来源说明");
+  assert.equal(markup.includes("md-footnote-ref"), true);
+  assert.equal(markup.includes("md-footnotes"), true);
+  assert.equal(markup.includes("[1]"), true);
+  assert.equal(markup.includes("来源说明"), true);
 });
 
 test("the body stays a single selectable block, and labels stay outside it", () => {

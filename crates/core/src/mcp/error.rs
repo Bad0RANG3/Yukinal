@@ -7,19 +7,12 @@ use std::time::Duration;
 /// 每一个变体都对应一件调用方**能分别处理**的事：换传输方式、补配置、换服务器、重试、
 /// 还是就此罢手。这就是为什么「超时」和「进程死了」是两个变体，而不是一个带消息的
 /// `Failed`。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum McpError {
     #[error(
-        "mcp server \"{server_id}\" is configured with transport \"{transport}\", which is not \
-         implemented: an http server means outbound network requests, and no outbound network \
-         policy exists yet (docs/boundaries/mcp.md: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
+        "mcp server \"{server_id}\" has an unsupported transport \"{transport}\"; supported \
+         transports are \"stdio\" and \"http\""
     )]
-    TransportNotImplemented {
-        server_id: String,
-        transport: String,
-    },
-
-    #[error("mcp server \"{server_id}\" has an unsupported transport \"{transport}\"; only \"stdio\" exists")]
     UnsupportedTransport {
         server_id: String,
         transport: String,
@@ -35,6 +28,14 @@ pub enum McpError {
          there is nothing to launch"
     )]
     MissingCommand { server_id: String },
+
+    #[error(
+        "mcp server \"{server_id}\" is configured for the http transport but has no endpoint URL"
+    )]
+    MissingUrl { server_id: String },
+
+    #[error("mcp server \"{server_id}\" has an invalid HTTP endpoint: {reason}")]
+    InvalidUrl { server_id: String, reason: String },
 
     #[error("mcp configuration for \"{server_id}\" is invalid: {reason}")]
     InvalidConfig { server_id: String, reason: String },
@@ -78,6 +79,9 @@ pub enum McpError {
     #[error("mcp server \"{server_id}\" is not running")]
     NotRunning { server_id: String },
 
+    #[error("{method} on mcp server \"{server_id}\" was cancelled by the caller")]
+    Cancelled { server_id: String, method: String },
+
     #[error("{method} on mcp server \"{server_id}\" did not answer within {timeout:?}")]
     Timeout {
         server_id: String,
@@ -106,6 +110,16 @@ pub enum McpError {
 
     #[error("could not write to mcp server \"{server_id}\": {reason}")]
     Write { server_id: String, reason: String },
+
+    #[error("HTTP request to mcp server \"{server_id}\" failed during {method}: {reason}")]
+    Http {
+        server_id: String,
+        method: String,
+        reason: String,
+    },
+
+    #[error("OAuth authentication for mcp server \"{server_id}\" failed: {reason}")]
+    OAuth { server_id: String, reason: String },
 
     #[error("mcp server \"{server_id}\" never advertised a tool named \"{tool}\"")]
     UnknownTool { server_id: String, tool: String },

@@ -18,7 +18,7 @@ export function AgentFeed({
   entries,
   running,
   runState,
-  lastUserPrompt,
+  lastUserEntry,
   canSend,
   onRetry,
   onApproval,
@@ -31,9 +31,9 @@ export function AgentFeed({
   entries: Entry[];
   running: boolean;
   runState: string | null;
-  lastUserPrompt?: string;
+  lastUserEntry?: Extract<Entry, { kind: "user" }>;
   canSend: boolean;
-  onRetry: (prompt: string) => void;
+  onRetry: (entry: Extract<Entry, { kind: "user" }>) => void;
   onApproval: (approval: ApprovalRequest, decision: ApprovalDecision) => Promise<void>;
   pendingApprovalIds: string[];
   approvalStatuses: Record<string, string>;
@@ -69,10 +69,10 @@ export function AgentFeed({
           />
         ))
       )}
-      {!running && runState === "failed" && lastUserPrompt ? (
+      {!running && runState === "failed" && lastUserEntry ? (
         <div className="agent-retry">
           <span>这次运行未完成。</span>
-          <button type="button" className="text-button" disabled={!canSend} onClick={() => onRetry(lastUserPrompt)}>重试上一条</button>
+          <button type="button" className="text-button" disabled={!canSend} onClick={() => onRetry(lastUserEntry)}>重试上一条</button>
         </div>
       ) : null}
       {children}

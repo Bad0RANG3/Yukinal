@@ -17,6 +17,8 @@ export const EVENT_NAMES = [
   "server.connected",
   "server.disconnected",
   "server.updated",
+  "server.auth_challenge",
+  "mcp.oauth_device_code",
   "agent.started",
   "agent.thinking",
   "agent.text",
@@ -65,6 +67,46 @@ export interface ServerUpdatedEvent {
   at: string;
 }
 
+export interface ServerAuthPrompt {
+  prompt: string;
+  /** `false` requests a non-echoed secret; the UI must mask this input. */
+  echo: boolean;
+}
+
+/** A server-issued second-factor challenge awaiting one bounded UI response. */
+export interface ServerAuthChallengeEvent {
+  authId: string;
+  serverId: string;
+  username: string;
+  host: string;
+  name: string;
+  instructions: string;
+  prompts: ServerAuthPrompt[];
+  expiresAt: string;
+}
+
+/**
+ * One in-flight RFC 8628 device authorization, announced so the UI can show the
+ * `user_code` and the verification link while the host polls.
+ *
+ * This is a *display* event, not a prompt: there is nothing for the user to answer
+ * here. The terminal state arrives as the result of the `mcp_oauth_connect` call that
+ * is already waiting, and the flow is stopped with `mcp_oauth_cancel`.
+ *
+ * `userCode` and the verification URLs are remote text from the authorization server.
+ * The UI may show them and hand the URL to the OS opener; it must not parse them into
+ * anything else.
+ */
+export interface McpOAuthDeviceCodeEvent {
+  serverId: string;
+  userCode: string;
+  /** Where the user types the code. Never contains the code itself. */
+  verificationUri: string;
+  /** Same URL with the code already embedded; preferred when the server sends it. */
+  verificationUriComplete?: string;
+  expiresAt: string;
+}
+
 export interface TerminalOpenedEvent {
   terminalSessionId: string;
   serverId: string;
@@ -88,6 +130,8 @@ export type YukinalEvent =
   | { name: "server.connected"; payload: ServerConnectedEvent }
   | { name: "server.disconnected"; payload: ServerDisconnectedEvent }
   | { name: "server.updated"; payload: ServerUpdatedEvent }
+  | { name: "server.auth_challenge"; payload: ServerAuthChallengeEvent }
+  | { name: "mcp.oauth_device_code"; payload: McpOAuthDeviceCodeEvent }
   | { name: "terminal.opened"; payload: TerminalOpenedEvent }
   | { name: "terminal.data"; payload: TerminalDataEvent }
   | { name: "terminal.closed"; payload: TerminalClosedEvent }

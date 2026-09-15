@@ -8,8 +8,8 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use super::decode::decode_error;
 use crate::models::{
-    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpServerConfig,
-    ProviderModelOption,
+    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpHttpAuthHeaderConfig,
+    McpServerConfig, ProviderModelOption,
 };
 use crate::{optional_json, Database, DatabaseError, Result};
 
@@ -27,11 +27,13 @@ impl<'a> ProviderConfigsRepository<'a> {
             connection.execute(
                 "INSERT INTO provider_configs (
                     id, family, kind, label, base_url, model, api_key_credential_ref,
-                    enabled, custom_headers, max_input_tokens, settings, wire_api, created_at, updated_at
-                 ) VALUES (?1, 'ai', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    enabled, custom_headers, max_input_tokens, settings, wire_api, api_version,
+                    created_at, updated_at
+                 ) VALUES (?1, 'ai', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET
                     kind = ?2, label = ?3, base_url = ?4, api_key_credential_ref = ?6,
-                    enabled = ?7, custom_headers = ?8, max_input_tokens = ?9, settings = ?10, wire_api = ?11, updated_at = ?13",
+                    enabled = ?7, custom_headers = ?8, max_input_tokens = ?9, settings = ?10,
+                    wire_api = ?11, api_version = ?12, updated_at = ?14",
                 params![
                     config.id,
                     // `kind` 是**写出来的**，而不是写死的 `'openai-compatible'`：写死的那一版
@@ -47,12 +49,15 @@ impl<'a> ProviderConfigsRepository<'a> {
                     config
                         .models
                         .as_ref()
-                        .map(|models| serde_json::to_string(&serde_json::json!({ "models": models })))
+                        .map(|models| serde_json::to_string(
+                            &serde_json::json!({ "models": models })
+                        ))
                         .transpose()
                         .map_err(DatabaseError::from)?,
                     // `wire_api` 是 `NOT NULL DEFAULT 'chat'` 的列，写不进 NULL：`None`（原生
                     // kind 没有方言轴）落成空串，读回来时按 kind 决定它是不是 `None`。
                     config.wire_api.as_deref().unwrap_or(""),
+                    config.api_version,
                     config.created_at,
                     config.updated_at,
                 ],
@@ -105,7 +110,8 @@ impl<'a> ProviderConfigsRepository<'a> {
             connection
                 .query_row(
                     "SELECT id, kind, label, base_url, model, api_key_credential_ref, enabled,
-                            custom_headers, max_input_tokens, credential_ref, settings, created_at, updated_at, family, wire_api
+                            custom_headers, max_input_tokens, credential_ref, settings, created_at,
+                            updated_at, family, wire_api, api_version
                      FROM provider_configs WHERE id = ?1 AND family = 'ai'",
                     params![id],
                     row_to_ai,
@@ -162,7 +168,8 @@ impl<'a> ProviderConfigsRepository<'a> {
         self.db.with(|connection| {
             let sql = format!(
                 "SELECT id, kind, label, base_url, model, api_key_credential_ref, enabled,
-                        custom_headers, max_input_tokens, credential_ref, settings, created_at, updated_at, family, wire_api
+                        custom_headers, max_input_tokens, credential_ref, settings, created_at,
+                        updated_at, family, wire_api, api_version
                  FROM provider_configs WHERE {filter} ORDER BY label"
             );
             let mut statement = connection.prepare(&sql)?;
@@ -213,6 +220,11 @@ fn row_to_ai(row: &Row<'_>) -> rusqlite::Result<AiProviderConfig> {
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         wire_api: wire_api_for_kind(kind, row.get::<_, Option<String>>(14)?),
+        api_version: (kind == AiProviderKind::Anthropic)
+            .then(|| row.get::<_, Option<String>>(15))
+            .transpose()?
+            .flatten()
+            .filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -282,10 +294,37 @@ fn optional_json_string(
 
 /// One statement, so `list` and `get` cannot drift apart in column order.
 const SELECT_ALL: &str =
-    "SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level
+    "SELECT id, label, transport, command, args, url, http_auth_header, http_credential_ref,
+            enabled, allowed_tools, trust_level, http_auth_headers, oauth
      FROM mcp_servers ORDER BY label";
 
 fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServerConfig> {
+    let http_auth_headers = match row.get::<_, Option<String>>(11)? {
+        Some(encoded) => serde_json::from_str::<Vec<McpHttpAuthHeaderConfig>>(&encoded)
+            .map_err(|error| decode_error(11, error))?,
+        None => match (
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ) {
+            (None, None) => Vec::new(),
+            (Some(name), Some(credential_ref)) => vec![McpHttpAuthHeaderConfig {
+                name,
+                credential_ref,
+            }],
+            (Some(_), None) => {
+                return Err(decode_error(
+                    7,
+                    "legacy HTTP authentication header has no credential reference",
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(decode_error(
+                    6,
+                    "legacy HTTP credential reference has no header name",
+                ))
+            }
+        },
+    };
     Ok(McpServerConfig {
         id: row.get(0)?,
         label: row.get(1)?,
@@ -294,10 +333,13 @@ fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServerConfig> {
         args: optional_json(row.get::<_, Option<String>>(4)?)
             .map_err(|error| decode_error(4, error))?,
         url: row.get(5)?,
-        enabled: row.get::<_, i64>(6)? != 0,
-        allowed_tools: serde_json::from_str(&row.get::<_, String>(7)?)
-            .map_err(|error| decode_error(7, error))?,
-        trust_level: row.get(8)?,
+        http_auth_headers,
+        oauth: optional_json(row.get::<_, Option<String>>(12)?)
+            .map_err(|error| decode_error(12, error))?,
+        enabled: row.get::<_, i64>(8)? != 0,
+        allowed_tools: serde_json::from_str(&row.get::<_, String>(9)?)
+            .map_err(|error| decode_error(9, error))?,
+        trust_level: row.get(10)?,
     })
 }
 
@@ -311,13 +353,25 @@ impl<'a> McpServersRepository<'a> {
     }
 
     pub fn upsert(&self, config: &McpServerConfig) -> Result<()> {
+        let legacy_header = config
+            .http_auth_headers
+            .first()
+            .map(|header| header.name.as_str());
+        let legacy_reference = config
+            .http_auth_headers
+            .first()
+            .map(|header| header.credential_ref.as_str());
         self.db.with(|connection| {
             connection.execute(
-                "INSERT INTO mcp_servers (id, label, transport, command, args, url, enabled, allowed_tools, trust_level)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO mcp_servers (id, label, transport, command, args, url,
+                                         http_auth_header, http_credential_ref, enabled,
+                                         allowed_tools, trust_level, http_auth_headers, oauth)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                     label = ?2, transport = ?3, command = ?4, args = ?5, url = ?6,
-                    enabled = ?7, allowed_tools = ?8, trust_level = ?9",
+                    http_auth_header = ?7, http_credential_ref = ?8, enabled = ?9,
+                    allowed_tools = ?10, trust_level = ?11, http_auth_headers = ?12,
+                    oauth = ?13",
                 params![
                     config.id,
                     config.label,
@@ -330,9 +384,17 @@ impl<'a> McpServersRepository<'a> {
                         .transpose()?
                         .unwrap_or_default(),
                     config.url,
+                    legacy_header,
+                    legacy_reference,
                     config.enabled,
                     serde_json::to_string(&config.allowed_tools)?,
                     config.trust_level,
+                    serde_json::to_string(&config.http_auth_headers)?,
+                    config
+                        .oauth
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
                 ],
             )?;
             Ok(())
@@ -361,7 +423,9 @@ impl<'a> McpServersRepository<'a> {
         self.db.with(|connection| {
             connection
                 .query_row(
-                    "SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level
+                    "SELECT id, label, transport, command, args, url, http_auth_header,
+                            http_credential_ref, enabled, allowed_tools, trust_level,
+                            http_auth_headers, oauth
                      FROM mcp_servers WHERE id = ?1",
                     params![id],
                     row_to_mcp,

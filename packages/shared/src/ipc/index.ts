@@ -21,6 +21,7 @@ import type {
   ChatSessionRenameInput,
 } from "../types/chat.js";
 import type { AgentPermissionMode, AgentRunMode } from "../types/risk.js";
+import type { NetworkProxySaveInput, NetworkProxyView } from "../types/network.js";
 import type {
   ActivityListInput,
   ActivityListResponse,
@@ -40,12 +41,16 @@ import type {
 } from "../types/host-key.js";
 import type { AiProviderConfig, ProviderDeleteResponse, ProviderModelOption, ProviderSaveInput } from "../types/provider.js";
 import type {
+  McpOAuthCancelResponse,
+  McpOAuthConnectResponse,
   McpServerDeleteResponse,
   McpServerListResponse,
+  McpServerReviewInput,
   McpServerSaveInput,
   McpServerStopResponse,
   McpServerView,
 } from "../types/mcp.js";
+import type { RestartRecord } from "../types/lifecycle.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -59,6 +64,9 @@ export const IPC_COMMANDS = {
   /** SSH connect / disconnect. */
   serverConnect: "server_connect",
   serverDisconnect: "server_disconnect",
+  /** One-shot responses for a server-issued keyboard-interactive challenge. */
+  serverAuthRespond: "server_auth_respond",
+  serverAuthCancel: "server_auth_cancel",
   /**
    * Host-key trust (ADR 0012): status / probe / trust / forget, keyed by `host:port`.
    *
@@ -142,6 +150,18 @@ export const IPC_COMMANDS = {
   mcpServerDelete: "mcp_server_delete",
   mcpServerStart: "mcp_server_start",
   mcpServerStop: "mcp_server_stop",
+  mcpServerReview: "mcp_server_review",
+  mcpOAuthConnect: "mcp_oauth_connect",
+  /**
+   * Stops an in-flight authorization flow for one server: a browser redirect that will
+   * never come back, or a device-code poll loop that would otherwise keep asking.
+   *
+   * Separate from `mcp_oauth_connect` because the connect call is *blocked* waiting for
+   * the user — a single command cannot both wait and be the thing that stops the wait.
+   */
+  mcpOAuthCancel: "mcp_oauth_cancel",
+  networkProxyGet: "network_proxy_get",
+  networkProxySave: "network_proxy_save",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
@@ -156,6 +176,14 @@ export interface IpcCommandMap {
   server_delete: { params: { serverId: string }; response: { deleted: boolean } };
   server_connect: { params: { serverId: string }; response: { status: "connected" } };
   server_disconnect: { params: { serverId: string }; response: Record<string, never> };
+  server_auth_respond: {
+    params: { authId: string; responses: string[] };
+    response: { accepted: boolean };
+  };
+  server_auth_cancel: {
+    params: { authId: string };
+    response: { accepted: boolean };
+  };
   /**
    * Host-key trust (ADR 0012). The params carry the **server row's** id, not a
    * `host:port`: the pin is keyed by `host:port` (point 7), but resolving the row is
@@ -225,7 +253,15 @@ export interface IpcCommandMap {
      * `async` the same information arrives as the `agent.completed` / `agent.failed`
      * notification instead.
      */
-    response: { runId: string; started: boolean; result?: AgentRunResult };
+    response: {
+      runId: string;
+      started: boolean;
+      /** Already admitted with the same messageId; no second run was opened. */
+      duplicate?: boolean;
+      /** This call executed a run admitted by an earlier `resume: false`. */
+      resumed?: boolean;
+      result?: AgentRunResult;
+    };
   };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
   agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };
@@ -258,6 +294,11 @@ export interface IpcCommandMap {
   mcp_server_delete: { params: { serverId: string }; response: McpServerDeleteResponse };
   mcp_server_start: { params: { serverId: string }; response: McpServerView };
   mcp_server_stop: { params: { serverId: string }; response: McpServerStopResponse };
+  mcp_server_review: { params: McpServerReviewInput; response: McpServerView };
+  mcp_oauth_connect: { params: { serverId: string }; response: McpOAuthConnectResponse };
+  mcp_oauth_cancel: { params: { serverId: string }; response: McpOAuthCancelResponse };
+  network_proxy_get: { params: Record<string, never>; response: NetworkProxyView };
+  network_proxy_save: { params: { input: NetworkProxySaveInput }; response: NetworkProxyView };
 }
 
 /**
@@ -293,20 +334,6 @@ export interface AgentStatus {
   restart?: RestartRecord;
 }
 
-/**
- * A bounded restart attempt, reported so recovery is *visible* rather than inferred.
- *
- * `exhausted` says the budget is gone: the supervisor has stopped trying, and only a
- * user action starts the sidecar again. The UI must not present an exhausted record as
- * "recovering".
- */
-export interface RestartRecord {
-  attempt: number;
-  maxAttempts: number;
-  exhausted: boolean;
-  at: string;
-}
-
 export interface SidecarExit {
   /** null when killed by signal / on platforms without exit codes. */
   code: number | null;
@@ -322,3 +349,4 @@ export interface AgentLogs {
 
 /** Re-exported so the UI can validate payloads it sends into the sidecar. */
 export type { AgentRunRequest, ApprovalResponse };
+export type { NetworkProxyMode, NetworkProxyResolution, NetworkProxySaveInput, NetworkProxyView } from "../types/network.js";

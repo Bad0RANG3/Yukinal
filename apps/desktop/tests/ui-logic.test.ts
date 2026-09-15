@@ -7,6 +7,16 @@ import { useWorkspaceStore } from "../src/stores/workspace-store.js";
 import { buildServerInput, type ServerFormValues } from "../src/features/servers/server-form.js";
 import { RunLifecycle } from "../src/features/agent/run-lifecycle.js";
 import {
+  AUDIO_ATTACHMENT_ACCEPT,
+  audioAttachmentUrl,
+  FILE_ATTACHMENT_ACCEPT,
+  promptPartsWithAttachments,
+  readAudioAttachment,
+  readDocumentAttachment,
+  readImageAttachment,
+  readTextFileAttachment,
+} from "../src/features/agent/image-attachments.js";
+import {
   appendAssistantDelta,
   appendEntries,
   appendReasoningDelta,
@@ -83,6 +93,9 @@ test("native string errors become visible Error messages", async () => {
 const formValues: ServerFormValues = {
   name: " staging ", host: "example.test", port: "2222", username: "deploy", environment: "staging",
   authMethod: "password", password: "secret", privateKeyPem: "", passphrase: "",
+  certificatePath: "", privateKeyPath: "",
+  hostCertificateEnabled: false, hostCertificateConfigured: false, hostCaPublicKey: "", hostPrincipals: "",
+  hostRevocationListPath: "", hostRevocationListUrl: "", hostRevocationListSigners: "",
 };
 
 test("server form normalizes values and validates port and first-time credentials", () => {
@@ -109,6 +122,98 @@ test("server form validation uses the UTF-8 Chinese messages shown in the deskto
   });
   assert.throws(() => buildServerInput({ ...formValues, authMethod: "privateKey", password: "", privateKeyPem: "" }), {
     message: "请填写 SSH 私钥。",
+  });
+});
+
+test("certificate authentication persists paths and keeps the key transient", () => {
+  const input = buildServerInput({
+    ...formValues,
+    authMethod: "certificate",
+    password: "",
+    privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n",
+    passphrase: "secret",
+    certificatePath: " ~/.ssh/id_ed25519-cert.pub ",
+    privateKeyPath: " ~/.ssh/id_ed25519 ",
+  });
+  assert.deepEqual(input.authentication, {
+    method: "certificate",
+    privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----\nkey",
+    passphrase: "secret",
+    certificatePath: "~/.ssh/id_ed25519-cert.pub",
+    privateKeyPath: "~/.ssh/id_ed25519",
+  });
+  assert.throws(
+    () => buildServerInput({
+      ...formValues,
+      authMethod: "certificate",
+      privateKeyPem: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      certificatePath: "",
+    }),
+    /证书路径/,
+  );
+});
+
+test("host certificate authority is explicit, bounded and clearable on edit", () => {
+  const enabled = buildServerInput({
+    ...formValues,
+    hostCertificateEnabled: true,
+    hostCaPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca",
+    hostPrincipals: "*.example.test, api.internal\nedge.example.test",
+    hostRevocationListPath: " /etc/ssh/revoked_hosts.krl ",
+    hostRevocationListSigners:
+      " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlOld old\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlNew new ",
+  });
+  assert.deepEqual(enabled.hostCertificateAuthority, {
+    caPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca",
+    principals: ["*.example.test", "api.internal", "edge.example.test"],
+    revocationListPath: "/etc/ssh/revoked_hosts.krl",
+    revocationListSigners: [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlOld old",
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlNew new",
+    ],
+  });
+
+  const online = buildServerInput({
+    ...formValues,
+    hostCertificateEnabled: true,
+    hostCaPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca",
+    hostPrincipals: "*.example.test",
+    hostRevocationListUrl: " https://ca.example.test/revoked.krl ",
+  });
+  assert.deepEqual(online.hostCertificateAuthority, {
+    caPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca",
+    principals: ["*.example.test"],
+    revocationListUrl: "https://ca.example.test/revoked.krl",
+  });
+  assert.throws(
+    () =>
+      buildServerInput({
+        ...formValues,
+        hostCertificateEnabled: true,
+        hostCaPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca",
+        hostPrincipals: "*.example.test",
+        hostRevocationListPath: "/etc/ssh/revoked_hosts.krl",
+        hostRevocationListUrl: "https://ca.example.test/revoked.krl",
+      }),
+    /mutually exclusive/,
+  );
+
+  assert.throws(
+    () => buildServerInput({ ...formValues, hostCertificateEnabled: true, hostCaPublicKey: "" }),
+    /CA 公钥/,
+  );
+  assert.throws(
+    () => buildServerInput({ ...formValues, hostCertificateEnabled: true, hostCaPublicKey: "key", hostPrincipals: "" }),
+    /principal/,
+  );
+  assert.deepEqual(buildServerInput({ ...formValues, password: "", hostCertificateConfigured: true }, "srv_existing"), {
+    name: "staging",
+    host: "example.test",
+    port: 2222,
+    username: "deploy",
+    environment: "staging",
+    serverId: "srv_existing",
+    clearHostCertificateAuthority: true,
   });
 });
 
@@ -391,11 +496,16 @@ test("a result without its call is never dropped", () => {
   ]);
 });
 
-test("the final assistant text replaces the streamed line instead of duplicating it", () => {
+test("final assistant text extends the stream or preserves a divergent streamed prefix", () => {
   const streamed: Entry[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "部分" }];
-  assert.deepEqual(settleAssistantText(streamed, "完整回答"), [
+  assert.deepEqual(settleAssistantText(streamed, "部分回答"), [
     { kind: "user", text: "hi" },
-    { kind: "assistant", text: "完整回答" },
+    { kind: "assistant", text: "部分回答" },
+  ]);
+  assert.deepEqual(settleAssistantText(streamed, "完全不同的最终文本"), [
+    { kind: "user", text: "hi" },
+    { kind: "assistant", text: "部分" },
+    { kind: "assistant", text: "完全不同的最终文本" },
   ]);
 
   // With no trailing assistant line, the final text is appended once.
@@ -416,6 +526,222 @@ test("restoring a stored conversation keeps only the user and assistant turns", 
     { kind: "user", text: "部署一下" },
     { kind: "assistant", text: "好的" },
   ]);
+});
+
+test("stored attachment prompt parts survive transcript restoration", () => {
+  const image = {
+    type: "image" as const,
+    mediaType: "image/png" as const,
+    data: "aGVsbG8=",
+    name: "screen.png",
+  };
+  const file = {
+    type: "file" as const,
+    mediaType: "text/plain" as const,
+    data: "PORT=8080\n",
+    name: "app.env",
+  };
+  const document = {
+    type: "document" as const,
+    mediaType: "application/pdf" as const,
+    data: "JVBERi0xLjcK",
+    name: "guide.pdf",
+  };
+  const entries = entriesFromMessages([
+    {
+      id: "m1",
+      sessionId: "s1",
+      role: "user",
+      content: "",
+      parts: [image, file, document],
+      createdAt: "2026-01-01T00:00:00Z",
+    },
+  ]);
+  assert.deepEqual(entries, [
+    { kind: "user", text: "", attachments: [image, file, document] },
+  ]);
+});
+
+test("PDF attachments are sniffed, normalized and bounded", async () => {
+  const pdf = await readDocumentAttachment(
+    new File([new TextEncoder().encode("%PDF-1.7\n")], " Guide.PDF ", {
+      type: "application/octet-stream",
+    }),
+    [],
+  );
+  assert.deepEqual(pdf, {
+    type: "document",
+    mediaType: "application/pdf",
+    data: "JVBERi0xLjcK",
+    name: "Guide.PDF",
+  });
+  assert.deepEqual(promptPartsWithAttachments("", [pdf]), [pdf]);
+
+  await assert.rejects(
+    readDocumentAttachment(
+      new File([new TextEncoder().encode("not a pdf")], "fake.pdf", {
+        type: "application/pdf",
+      }),
+      [],
+    ),
+    /有效的 PDF/,
+  );
+  await assert.rejects(
+    readDocumentAttachment(
+      new File([new Uint8Array(3 * 1024 * 1024 + 1)], "large.pdf", {
+        type: "application/pdf",
+      }),
+      [],
+    ),
+    /MiB/,
+  );
+});
+
+test("image attachments are sniffed, bounded and converted to provider-neutral parts", async () => {
+  const png = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x00,
+  ]);
+  const image = await readImageAttachment(
+    new File([png], "screen.png", { type: "application/octet-stream" }),
+    [],
+  );
+  assert.equal(image.mediaType, "image/png");
+  assert.equal(image.name, "screen.png");
+  assert.equal(image.data, "iVBORw0KGgoAAAAA");
+  assert.deepEqual(promptPartsWithAttachments(" inspect this ", [image]), [
+    { type: "text", text: "inspect this" },
+    image,
+  ]);
+
+  await assert.rejects(
+    readImageAttachment(new File([new Uint8Array([1, 2, 3])], "fake.png", { type: "image/png" }), []),
+    /文件内容/,
+  );
+});
+
+test("audio attachments are sniffed by magic bytes and bounded", async () => {
+  const wav = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45, 0x00,
+  ]);
+  const audio = await readAudioAttachment(
+    new File([wav], " Note.wav ", { type: "application/octet-stream" }),
+    [],
+  );
+  assert.deepEqual(audio, {
+    type: "audio",
+    mediaType: "audio/wav",
+    data: "UklGRgAAAABXQVZFAA==",
+    name: "Note.wav",
+  });
+  assert.deepEqual(promptPartsWithAttachments("", [audio]), [audio]);
+  // 预览用的就是同一份内联字节，没有第二条取数据的路。
+  assert.equal(
+    audioAttachmentUrl(audio),
+    "data:audio/wav;base64,UklGRgAAAABXQVZFAA==",
+  );
+
+  // 四种格式各按自己的魔数识别；文件扩展名和浏览器给的 MIME 都不参与判断。
+  const byMagic: Array<[number[], string]> = [
+    [[0x49, 0x44, 0x33, 0x03, 0x00], "audio/mpeg"],
+    [[0xff, 0xfb, 0x90, 0x00], "audio/mpeg"],
+    [[0x4f, 0x67, 0x67, 0x53, 0x00], "audio/ogg"],
+    [[0x66, 0x4c, 0x61, 0x43, 0x00], "audio/flac"],
+  ];
+  for (const [bytes, mediaType] of byMagic) {
+    const detected = await readAudioAttachment(
+      new File([new Uint8Array(bytes)], "clip.bin", { type: "application/octet-stream" }),
+      [],
+    );
+    assert.equal(detected.mediaType, mediaType, `bytes ${bytes.join(",")}`);
+  }
+
+  await assert.rejects(
+    readAudioAttachment(
+      new File([new Uint8Array([1, 2, 3, 4])], "fake.wav", { type: "audio/wav" }),
+      [],
+    ),
+    /文件内容/,
+    "an extension and a MIME type are not evidence",
+  );
+  await assert.rejects(
+    readAudioAttachment(
+      new File([new Uint8Array(4 * 1024 * 1024 + 1)], "large.wav", { type: "audio/wav" }),
+      [],
+    ),
+    /MiB/,
+  );
+  await assert.rejects(
+    readAudioAttachment(
+      new File([wav], "third.wav", { type: "audio/wav" }),
+      [audio, audio],
+    ),
+    /最多/,
+  );
+  // 总预算与图片、PDF 共用：一份贴着单图上限的图片再加一段 1.2 MiB 的音频就超了
+  // （两者各自都还在自己的上限之内，所以拒绝的理由只能是那个共享预算）。
+  const biggestImage = {
+    type: "image" as const,
+    mediaType: "image/png" as const,
+    data: "A".repeat(5_592_404),
+  };
+  const bulkyClip = {
+    type: "audio" as const,
+    mediaType: "audio/ogg" as const,
+    data: "A".repeat(1_677_216),
+  };
+  await assert.rejects(
+    readAudioAttachment(new File([wav], "note.wav", { type: "audio/wav" }), [
+      biggestImage,
+      bulkyClip,
+    ]),
+    /总大小/,
+  );
+
+  // 附件入口必须真的收音频：那个「其他文件」选择框的 accept 串里要有音频，
+  // 否则 addFiles 能处理它、而用户根本选不到它。
+  assert.ok(
+    FILE_ATTACHMENT_ACCEPT.includes(AUDIO_ATTACHMENT_ACCEPT),
+    "the file picker must offer audio, not only sniff it on drop",
+  );
+});
+
+test("text files are decoded as bounded UTF-8 attachments", async () => {
+  const textFile = await readTextFileAttachment(
+    new File(["# Notes\nhello"], "notes.md", { type: "text/markdown" }),
+    [],
+  );
+  assert.deepEqual(textFile, {
+    type: "file",
+    mediaType: "text/plain",
+    data: "# Notes\nhello",
+    name: "notes.md",
+  });
+  assert.deepEqual(promptPartsWithAttachments("", [textFile]), [textFile]);
+
+  await assert.rejects(
+    readTextFileAttachment(
+      new File([new Uint8Array([0xff, 0xfe])], "binary.txt", { type: "text/plain" }),
+      [],
+    ),
+    /UTF-8/,
+  );
+  await assert.rejects(
+    readTextFileAttachment(
+      new File([new Uint8Array([0x61, 0x00, 0x62])], "binary.txt", {
+        type: "text/plain",
+      }),
+      [],
+    ),
+    /控制字符/,
+  );
+  await assert.rejects(
+    readTextFileAttachment(
+      new File([new Uint8Array(256 * 1024 + 1)], "large.txt", { type: "text/plain" }),
+      [],
+    ),
+    /KiB/,
+  );
 });
 
 test("session titles come from the prompt with leading markdown headings removed", () => {

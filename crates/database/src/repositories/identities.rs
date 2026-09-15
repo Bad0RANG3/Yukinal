@@ -11,7 +11,8 @@ use crate::{Database, DatabaseError, Result};
 /// mapper all read the same column order, so adding a column cannot leave one of
 /// them behind (which is exactly how `passphrase_ref` would have gone missing from
 /// `list` while `get` returned it).
-const IDENTITY_COLUMNS: &str = "id, label, method, credential_ref, passphrase_ref, created_at";
+const IDENTITY_COLUMNS: &str =
+    "id, label, method, credential_ref, passphrase_ref, private_key_path, certificate_path, created_at";
 
 pub struct IdentitiesRepository<'a> {
     db: &'a Database,
@@ -25,14 +26,18 @@ impl<'a> IdentitiesRepository<'a> {
     pub fn insert(&self, identity: &Identity) -> Result<()> {
         self.db.with(|connection| {
             connection.execute(
-                "INSERT INTO identities (id, label, method, credential_ref, passphrase_ref, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO identities (
+                    id, label, method, credential_ref, passphrase_ref, private_key_path,
+                    certificate_path, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     identity.id,
                     identity.label,
                     identity.method,
                     identity.credential_ref,
                     identity.passphrase_ref,
+                    identity.private_key_path,
+                    identity.certificate_path,
                     identity.created_at,
                 ],
             )?;
@@ -44,7 +49,8 @@ impl<'a> IdentitiesRepository<'a> {
         self.db.with(|connection| {
             let changed = connection.execute(
                 "UPDATE identities
-                    SET label = ?2, method = ?3, credential_ref = ?4, passphrase_ref = ?5
+                    SET label = ?2, method = ?3, credential_ref = ?4, passphrase_ref = ?5,
+                        private_key_path = ?6, certificate_path = ?7
                   WHERE id = ?1",
                 params![
                     identity.id,
@@ -52,6 +58,8 @@ impl<'a> IdentitiesRepository<'a> {
                     identity.method,
                     identity.credential_ref,
                     identity.passphrase_ref,
+                    identity.private_key_path,
+                    identity.certificate_path,
                 ],
             )?;
             if changed == 0 {
@@ -156,6 +164,8 @@ fn row_to_identity(row: &Row<'_>) -> rusqlite::Result<Identity> {
         method: row.get(2)?,
         credential_ref: row.get(3)?,
         passphrase_ref: row.get(4)?,
-        created_at: row.get(5)?,
+        private_key_path: row.get(5)?,
+        certificate_path: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }

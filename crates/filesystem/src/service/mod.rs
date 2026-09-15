@@ -27,6 +27,6 @@ pub use error::{Error, Result, TransportError, TransportResult};
 pub use remote_file_service::RemoteFileService;
 pub use request::{AgentEditRequest, AgentReadRequest, AgentWriteRequest};
 pub use types::{
-    ListedEntry, RemoteEdit, RemoteEntry, RemoteFileTransport, RemoteListing, RemoteRead,
-    RemoteWrite,
+    ListedEntry, RemoteEdit, RemoteEntry, RemoteEntryKind, RemoteFileTransport, RemoteListing,
+    RemoteRead, RemoteStat, RemoteWrite, ReplaceError, ReplaceGuard, ReplacedFile,
 };

@@ -7,6 +7,7 @@ members = [
   "crates/credentials",
   "crates/database",
   "crates/filesystem",
+  "crates/net",
   "crates/ssh",
   "crates/terminal",
   "crates/time",
@@ -27,6 +28,8 @@ repository = "https://github.com/Bad0RANG3/Yukinal"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
+sha1 = "0.10"
 thiserror = "2.0"
 tracing = "0.1"
 
@@ -36,9 +39,22 @@ tracing = "0.1"
 # (audited per the ADR's crypto note; revisit if a server needs aws-lc-only ciphers)
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.0"
+# Direct access to the same ssh-key version russh uses, for certificate/key encoding
+# needed by KRL revocation matching.
+ssh-key = { version = "0.7.0-rc.11", default-features = false, features = ["alloc", "std"] }
+# Raw SSH signature verification for signed OpenSSH KRL sections. This is the
+# trait crate already used by ssh-key; it is declared directly so the KRL
+# verifier can call `Verifier` without depending on an indirect import path.
+signature = { version = "3", default-features = false }
 
 # Cancellation primitive for tool execution (shareable stop signal).
 tokio-util = "0.7"
+
+# MCP Streamable HTTP. The desktop already builds reqwest through Tauri, so using
+# the same version here does not add a second HTTP stack. TLS uses ring rather than
+# reqwest's aws-lc default, matching the SSH backend's no-C-toolchain constraint.
+reqwest = { version = "0.13", default-features = false, features = ["stream", "http2", "rustls-no-provider", "form"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # Test-only randomness: generating throwaway SSH key material (and passphrase-encrypting
 # it) in `yukinal-ssh` tests. Same version the russh stack already pulls in, so it adds
@@ -48,12 +64,22 @@ rand = "0.10"
 # OS credential store: keyring over Keychain / Credential Manager / Secret Service.
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+# Windows 的系统代理读的是当前用户的 Internet 设置（ADR 0022）。`winreg` 已经在
+# 构建图里（构建脚本用到了它），所以这里只是把它提升成直接依赖。
+winreg = { version = "0.55", default-features = false }
+
+# Ed25519 for DPoP proofs (ADR 0018). Same crate and major version rustls already uses for
+# TLS, so this adds no crate to the build graph; `ring` ships prebuilt asm, unlike a
+# C-toolchain-dependent alternative.
+ring = "0.17"
+
 # Local database.
 rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Desktop shell.
 tauri = "2.11"
 tauri-build = "2.5"
+tauri-plugin-opener = "2.5.5"
 
 # Internal crates are referenced through the workspace so paths exist in one place.
 yukinal-core = { path = "crates/core" }
@@ -61,6 +87,7 @@ yukinal-collector = { path = "crates/collector" }
 yukinal-credentials = { path = "crates/credentials" }
 yukinal-database = { path = "crates/database" }
 yukinal-filesystem = { path = "crates/filesystem" }
+yukinal-net = { path = "crates/net" }
 yukinal-ssh = { path = "crates/ssh" }
 yukinal-terminal = { path = "crates/terminal" }
 yukinal-time = { path = "crates/time" }

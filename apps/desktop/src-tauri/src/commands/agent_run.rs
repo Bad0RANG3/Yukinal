@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::State;
 
@@ -16,15 +16,283 @@ use crate::state::AppState;
 use yukinal_core::provider::runtime_provider_config;
 use yukinal_database::models::AiProviderConfig;
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptPart {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub text: String,
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PromptPart {
+    Text {
+        text: String,
+    },
+    Image {
+        #[serde(rename = "mediaType")]
+        media_type: String,
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    File {
+        #[serde(rename = "mediaType")]
+        media_type: String,
+        data: String,
+        name: String,
+    },
+    Document {
+        #[serde(rename = "mediaType")]
+        media_type: String,
+        data: String,
+        name: String,
+    },
+    /// 一段有界的内联音频。与图片、PDF 共用同一个总预算：真正受约束的是那一帧。
+    Audio {
+        #[serde(rename = "mediaType")]
+        media_type: String,
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
-#[derive(Debug, Serialize)]
+const MAX_PROMPT_PARTS: usize = 10;
+const MAX_PROMPT_IMAGES: usize = 4;
+const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TOTAL_INLINE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PROMPT_TEXT_CHARS: usize = 100_000;
+const MAX_IMAGE_NAME_CHARS: usize = 128;
+const MAX_PROMPT_FILES: usize = 4;
+const MAX_FILE_BYTES: usize = 256 * 1024;
+const MAX_TOTAL_FILE_BYTES: usize = 512 * 1024;
+const MAX_FILE_NAME_CHARS: usize = 128;
+const MAX_PROMPT_DOCUMENTS: usize = 2;
+const MAX_DOCUMENT_BYTES: usize = 3 * 1024 * 1024;
+const MAX_DOCUMENT_NAME_CHARS: usize = 128;
+const MAX_PROMPT_AUDIOS: usize = 2;
+const MAX_AUDIO_BYTES: usize = 4 * 1024 * 1024;
+const MAX_AUDIO_NAME_CHARS: usize = 128;
+
+pub(crate) fn validate_prompt_parts(parts: &[PromptPart]) -> Result<(), String> {
+    if parts.is_empty() || parts.len() > MAX_PROMPT_PARTS {
+        return Err(format!(
+            "prompt parts must contain between 1 and {MAX_PROMPT_PARTS} entries"
+        ));
+    }
+    let mut image_count = 0usize;
+    let mut inline_bytes = 0usize;
+    let mut document_count = 0usize;
+    let mut audio_count = 0usize;
+    let mut file_count = 0usize;
+    let mut file_bytes = 0usize;
+    let mut text_chars = 0usize;
+    for part in parts {
+        match part {
+            PromptPart::Text { text } => {
+                text_chars = text_chars.saturating_add(text.chars().count());
+                if text_chars > MAX_PROMPT_TEXT_CHARS {
+                    return Err(format!(
+                        "prompt text must be at most {MAX_PROMPT_TEXT_CHARS} characters"
+                    ));
+                }
+            }
+            PromptPart::Image {
+                media_type,
+                data,
+                name,
+            } => {
+                image_count += 1;
+                if image_count > MAX_PROMPT_IMAGES {
+                    return Err(format!(
+                        "a message may contain at most {MAX_PROMPT_IMAGES} images"
+                    ));
+                }
+                if !matches!(
+                    media_type.as_str(),
+                    "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                ) {
+                    return Err(
+                        "image mediaType must be image/png, image/jpeg, image/webp or image/gif"
+                            .into(),
+                    );
+                }
+                if let Some(name) = name {
+                    let name = name.trim();
+                    if name.is_empty()
+                        || name.chars().count() > MAX_IMAGE_NAME_CHARS
+                        || name.chars().any(char::is_control)
+                    {
+                        return Err(format!(
+                            "image name must be between 1 and {MAX_IMAGE_NAME_CHARS} visible characters"
+                        ));
+                    }
+                }
+                let decoded = decoded_base64_bytes(data)?;
+                if decoded > MAX_IMAGE_BYTES {
+                    return Err(format!(
+                        "each image must be at most {MAX_IMAGE_BYTES} decoded bytes"
+                    ));
+                }
+                inline_bytes = inline_bytes.saturating_add(decoded);
+                if inline_bytes > MAX_TOTAL_INLINE_BYTES {
+                    return Err(format!(
+                        "images, PDF documents and audio clips may total at most {MAX_TOTAL_INLINE_BYTES} decoded bytes"
+                    ));
+                }
+            }
+            PromptPart::Audio {
+                media_type,
+                data,
+                name,
+            } => {
+                audio_count += 1;
+                if audio_count > MAX_PROMPT_AUDIOS {
+                    return Err(format!(
+                        "a message may contain at most {MAX_PROMPT_AUDIOS} audio clips"
+                    ));
+                }
+                if !matches!(
+                    media_type.as_str(),
+                    "audio/wav" | "audio/mpeg" | "audio/ogg" | "audio/flac"
+                ) {
+                    return Err(
+                        "audio mediaType must be audio/wav, audio/mpeg, audio/ogg or audio/flac"
+                            .into(),
+                    );
+                }
+                let decoded = decoded_base64_bytes(data)?;
+                if decoded > MAX_AUDIO_BYTES {
+                    return Err(format!(
+                        "each audio clip must be at most {MAX_AUDIO_BYTES} decoded bytes"
+                    ));
+                }
+                inline_bytes = inline_bytes.saturating_add(decoded);
+                if inline_bytes > MAX_TOTAL_INLINE_BYTES {
+                    return Err(format!(
+                        "images, PDF documents and audio clips may total at most {MAX_TOTAL_INLINE_BYTES} decoded bytes"
+                    ));
+                }
+                if let Some(name) = name {
+                    let name = name.trim();
+                    if name.is_empty()
+                        || name.chars().count() > MAX_AUDIO_NAME_CHARS
+                        || name.chars().any(|character| {
+                            character.is_control() || matches!(character, '/' | '\\')
+                        })
+                    {
+                        return Err(format!(
+                            "audio name must be between 1 and {MAX_AUDIO_NAME_CHARS} visible characters"
+                        ));
+                    }
+                }
+            }
+            PromptPart::File {
+                media_type,
+                data,
+                name,
+            } => {
+                file_count += 1;
+                if file_count > MAX_PROMPT_FILES {
+                    return Err(format!(
+                        "a message may contain at most {MAX_PROMPT_FILES} text files"
+                    ));
+                }
+                if media_type != "text/plain" {
+                    return Err("text file mediaType must be text/plain".into());
+                }
+                if data.is_empty()
+                    || data.chars().any(|character| {
+                        character == '\0'
+                            || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+                    })
+                {
+                    return Err("text file must be non-empty UTF-8 text".into());
+                }
+                if data.len() > MAX_FILE_BYTES {
+                    return Err(format!(
+                        "each text file must be at most {MAX_FILE_BYTES} UTF-8 bytes"
+                    ));
+                }
+                file_bytes = file_bytes.saturating_add(data.len());
+                if file_bytes > MAX_TOTAL_FILE_BYTES {
+                    return Err(format!(
+                        "text files may total at most {MAX_TOTAL_FILE_BYTES} UTF-8 bytes"
+                    ));
+                }
+                let name = name.trim();
+                if name.is_empty()
+                    || name.chars().count() > MAX_FILE_NAME_CHARS
+                    || name
+                        .chars()
+                        .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+                {
+                    return Err(format!(
+                        "text file name must be between 1 and {MAX_FILE_NAME_CHARS} visible characters"
+                    ));
+                }
+            }
+            PromptPart::Document {
+                media_type,
+                data,
+                name,
+            } => {
+                document_count += 1;
+                if document_count > MAX_PROMPT_DOCUMENTS {
+                    return Err(format!(
+                        "a message may contain at most {MAX_PROMPT_DOCUMENTS} PDF documents"
+                    ));
+                }
+                if media_type != "application/pdf" {
+                    return Err("document mediaType must be application/pdf".into());
+                }
+                let decoded = decoded_base64_bytes(data)?;
+                if decoded > MAX_DOCUMENT_BYTES {
+                    return Err(format!(
+                        "each PDF document must be at most {MAX_DOCUMENT_BYTES} decoded bytes"
+                    ));
+                }
+                inline_bytes = inline_bytes.saturating_add(decoded);
+                if inline_bytes > MAX_TOTAL_INLINE_BYTES {
+                    return Err(format!(
+                        "images and PDF documents may total at most {MAX_TOTAL_INLINE_BYTES} decoded bytes"
+                    ));
+                }
+                let name = name.trim();
+                if name.is_empty()
+                    || name.chars().count() > MAX_DOCUMENT_NAME_CHARS
+                    || name
+                        .chars()
+                        .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+                {
+                    return Err(format!(
+                        "PDF name must be between 1 and {MAX_DOCUMENT_NAME_CHARS} visible characters"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decoded_base64_bytes(value: &str) -> Result<usize, String> {
+    if value.is_empty() || !value.len().is_multiple_of(4) {
+        return Err("inline data must be base64 with a length divisible by four".into());
+    }
+    let bytes = value.as_bytes();
+    let padding = if bytes.ends_with(b"==") {
+        2
+    } else if bytes.ends_with(b"=") {
+        1
+    } else {
+        0
+    };
+    let content_len = bytes.len() - padding;
+    if bytes[..content_len]
+        .iter()
+        .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'/'))
+        || bytes[content_len..].iter().any(|byte| *byte != b'=')
+    {
+        return Err("inline data must be canonical base64 without a data-URL prefix".into());
+    }
+    Ok(value.len() / 4 * 3 - padding)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStartResponse {
     pub run_id: String,
@@ -33,6 +301,12 @@ pub struct RunStartResponse {
     /// (`resume: false`) or that a retry hit a run that already exists — in both cases
     /// no `agent.*` event for this call may be expected.
     pub started: bool,
+    /// The message was already admitted, so this call opened no second run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<bool>,
+    /// This call executed a run that an earlier `resume: false` admitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumed: Option<bool>,
     /// The run's outcome, present exactly when the request asked for `delivery: "sync"`.
     ///
     /// Forwarded as opaque JSON on purpose: this layer does not interpret a run result —
@@ -44,13 +318,13 @@ pub struct RunStartResponse {
     pub result: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStopResponse {
     pub stopped: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRespondResponse {
     pub accepted: bool,
@@ -139,6 +413,11 @@ pub async fn agent_run_start(
     let selected_model = model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| provider.model.clone());
+    if prompt.chars().count() > MAX_PROMPT_TEXT_CHARS {
+        return Err(format!(
+            "prompt must be at most {MAX_PROMPT_TEXT_CHARS} characters"
+        ));
+    }
 
     // Millisecond timestamps can collide when two submissions arrive in the
     // same tick; use the process-wide opaque id generator instead.
@@ -147,11 +426,22 @@ pub async fn agent_run_start(
         .unwrap_or_else(|| crate::commands::server::next_id("run"));
     let message_id = message_id.unwrap_or_else(|| format!("msg_{run_id}"));
     let parts = parts.filter(|items| !items.is_empty()).unwrap_or_else(|| {
-        vec![PromptPart {
-            kind: "text".into(),
+        vec![PromptPart::Text {
             text: prompt.clone(),
         }]
     });
+    validate_prompt_parts(&parts)?;
+    let has_attachment = parts
+        .iter()
+        .any(|part| matches!(part, PromptPart::Image { .. } | PromptPart::File { .. }));
+    if prompt.trim().is_empty() && !has_attachment {
+        return Err("prompt must contain text, an image, or a text file".into());
+    }
+    let parts_json = parts
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to encode prompt parts: {error}"))?;
     let provider_config = runtime_provider_config(&provider, &selected_model, api_key, 120_000);
 
     // Chosen before `params` is built, because building it moves `delivery` into the
@@ -163,10 +453,7 @@ pub async fn agent_run_start(
         "sessionId": session_id,
         "prompt": prompt,
         "messageId": message_id,
-        "parts": parts
-            .into_iter()
-            .map(|part| json!({ "type": part.kind, "text": part.text }))
-            .collect::<Vec<_>>(),
+        "parts": parts_json,
         "delivery": delivery.unwrap_or_else(|| "async".into()),
         "resume": resume.unwrap_or(true),
         "providerConfig": provider_config,
@@ -219,6 +506,10 @@ pub async fn agent_run_start(
         .get("started")
         .and_then(serde_json::Value::as_bool)
         .ok_or_else(|| "agent sidecar returned an invalid run.start response".to_string())?;
+    let duplicate = response
+        .get("duplicate")
+        .and_then(serde_json::Value::as_bool);
+    let resumed = response.get("resumed").and_then(serde_json::Value::as_bool);
     // Only a `sync` request gets a result, and only a `sync` request waited for one. The
     // previous code discarded this field, which made the 16-minute wait above pointless:
     // the caller asked for the outcome and was handed an identity instead.
@@ -226,6 +517,8 @@ pub async fn agent_run_start(
     Ok(RunStartResponse {
         run_id,
         started,
+        duplicate,
+        resumed,
         result,
     })
 }
@@ -283,7 +576,10 @@ pub async fn agent_approval_respond(
 
 #[cfg(test)]
 mod tests {
-    use super::{run_start_timeout, RunStartResponse};
+    use super::{
+        run_start_timeout, validate_prompt_parts, PromptPart, RunStartResponse, MAX_AUDIO_BYTES,
+        MAX_FILE_BYTES, MAX_IMAGE_BYTES,
+    };
     use std::time::Duration;
 
     /// The sidecar's own wall-clock bound for one run (`maxRunMs`, 15 minutes by default
@@ -331,6 +627,8 @@ mod tests {
         let actual = serde_json::to_value(RunStartResponse {
             run_id: "run_20260101".into(),
             started: true,
+            duplicate: None,
+            resumed: None,
             result: None,
         })
         .expect("serialize");
@@ -344,6 +642,8 @@ mod tests {
         let actual = serde_json::to_value(RunStartResponse {
             run_id: "run_20260101".into(),
             started: true,
+            duplicate: None,
+            resumed: None,
             result: expected.get("result").cloned(),
         })
         .expect("serialize");
@@ -352,5 +652,183 @@ mod tests {
             actual.get("result").is_some(),
             "a sync response without its result is an identity, not an outcome"
         );
+    }
+
+    #[test]
+    fn admission_flags_survive_the_ipc_boundary() {
+        let duplicate = serde_json::to_value(RunStartResponse {
+            run_id: "run_existing".into(),
+            started: false,
+            duplicate: Some(true),
+            resumed: None,
+            result: None,
+        })
+        .expect("serialize duplicate");
+        assert_eq!(duplicate["duplicate"], serde_json::json!(true));
+        assert!(duplicate.get("resumed").is_none());
+
+        let resumed = serde_json::to_value(RunStartResponse {
+            run_id: "run_admitted".into(),
+            started: true,
+            duplicate: None,
+            resumed: Some(true),
+            result: None,
+        })
+        .expect("serialize resumed");
+        assert_eq!(resumed["resumed"], serde_json::json!(true));
+        assert!(resumed.get("duplicate").is_none());
+    }
+
+    #[test]
+    fn prompt_validation_rejects_bad_media_and_unbounded_inline_data() {
+        assert!(validate_prompt_parts(&[PromptPart::Image {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+            name: Some("screen.png".into()),
+        }])
+        .is_ok());
+        assert!(validate_prompt_parts(&[PromptPart::Image {
+            media_type: "image/svg+xml".into(),
+            data: "aGVsbG8=".into(),
+            name: None,
+        }])
+        .is_err());
+        assert!(validate_prompt_parts(&[PromptPart::Image {
+            media_type: "image/png".into(),
+            data: "not base64".into(),
+            name: None,
+        }])
+        .is_err());
+        assert!(validate_prompt_parts(&[PromptPart::Text {
+            text: "x".repeat(100_001)
+        }])
+        .is_err());
+
+        assert!(validate_prompt_parts(&[PromptPart::File {
+            media_type: "text/plain".into(),
+            data: "PORT=8080\n".into(),
+            name: "app.env".into(),
+        }])
+        .is_ok());
+        assert!(validate_prompt_parts(&[PromptPart::File {
+            media_type: "application/pdf".into(),
+            data: "%PDF".into(),
+            name: "manual.pdf".into(),
+        }])
+        .is_err());
+        assert!(validate_prompt_parts(&[PromptPart::File {
+            media_type: "text/plain".into(),
+            data: "hello\0world".into(),
+            name: "binary.txt".into(),
+        }])
+        .is_err());
+        assert!(validate_prompt_parts(&[PromptPart::File {
+            media_type: "text/plain".into(),
+            data: "x".repeat(MAX_FILE_BYTES + 1),
+            name: "large.txt".into(),
+        }])
+        .is_err());
+
+        assert!(validate_prompt_parts(&[PromptPart::Document {
+            media_type: "application/pdf".into(),
+            data: "JVBERi0xLjcK".into(),
+            name: "manual.pdf".into(),
+        }])
+        .is_ok());
+        assert!(validate_prompt_parts(&[PromptPart::Document {
+            media_type: "application/octet-stream".into(),
+            data: "JVBERi0xLjcK".into(),
+            name: "manual.pdf".into(),
+        }])
+        .is_err());
+        assert!(validate_prompt_parts(&[PromptPart::Document {
+            media_type: "application/pdf".into(),
+            data: "not base64".into(),
+            name: "manual.pdf".into(),
+        }])
+        .is_err());
+
+        // 音频：四种格式、可选名字、与图片/PDF 共用的总预算。
+        assert!(validate_prompt_parts(&[PromptPart::Audio {
+            media_type: "audio/wav".into(),
+            data: "UklGRgAAAABXQVZFAA==".into(),
+            name: Some("note.wav".into()),
+        }])
+        .is_ok());
+        assert!(
+            validate_prompt_parts(&[PromptPart::Audio {
+                media_type: "audio/ogg".into(),
+                data: "T2dnUwAA".into(),
+                name: None,
+            }])
+            .is_ok(),
+            "a clip needs no visible name, the same way an image does not"
+        );
+        for (media_type, data, name) in [
+            ("audio/aac", "UklGRgAAAABXQVZFAA==", Some("note.aac")),
+            ("audio/wav", "not base64", Some("note.wav")),
+            ("audio/wav", "UklGRgAAAABXQVZFAA==", Some("../note.wav")),
+        ] {
+            assert!(
+                validate_prompt_parts(&[PromptPart::Audio {
+                    media_type: media_type.into(),
+                    data: data.into(),
+                    name: name.map(str::to_string),
+                }])
+                .is_err(),
+                "{media_type} / {data} / {name:?} must be refused"
+            );
+        }
+        assert!(validate_prompt_parts(&[
+            PromptPart::Audio {
+                media_type: "audio/wav".into(),
+                data: "UklGRgAAAABXQVZFAA==".into(),
+                name: None,
+            },
+            PromptPart::Audio {
+                media_type: "audio/wav".into(),
+                data: "UklGRgAAAABXQVZFAA==".into(),
+                name: None,
+            },
+            PromptPart::Audio {
+                media_type: "audio/wav".into(),
+                data: "UklGRgAAAABXQVZFAA==".into(),
+                name: None,
+            },
+        ])
+        .is_err());
+        // 单段上限是换算后的字节数，而不是 base64 字符数：这份 ~4.05 MiB 的字节必须被拒绝。
+        let oversize = "A".repeat((MAX_AUDIO_BYTES / 3 + 1) * 4);
+        assert!(validate_prompt_parts(&[PromptPart::Audio {
+            media_type: "audio/flac".into(),
+            data: oversize.clone(),
+            name: None,
+        }])
+        .is_err());
+        // 与图片共用一个总预算：一张贴着单图上限的图片再加一段超过 1 MiB 的音频就超了，
+        // 而两者各自都还在自己的上限之内。
+        // `(MAX_IMAGE_BYTES / 3) * 4` 个 base64 字符解码出 4_194_303 字节：刚好在单图上限
+        // 之内，而且长度天然是 4 的倍数（base64 的形状要求）。
+        let biggest_image = "A".repeat((MAX_IMAGE_BYTES / 3) * 4);
+        let bulky_clip = "A".repeat((1_200_000 / 3 + 1) * 4);
+        assert!(validate_prompt_parts(&[PromptPart::Image {
+            media_type: "image/png".into(),
+            data: biggest_image.clone(),
+            name: None,
+        }])
+        .is_ok());
+        assert!(validate_prompt_parts(&[
+            PromptPart::Image {
+                media_type: "image/png".into(),
+                data: biggest_image,
+                name: None,
+            },
+            PromptPart::Audio {
+                media_type: "audio/wav".into(),
+                data: bulky_clip,
+                name: None,
+            }
+        ])
+        .is_err());
     }
 }

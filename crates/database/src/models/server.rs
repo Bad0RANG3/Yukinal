@@ -34,6 +34,22 @@ pub enum HealthState {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCertificateAuthority {
+    /// OpenSSH public-key line for the CA that signs host certificates.
+    pub ca_public_key: String,
+    /// Host principals accepted from otherwise-valid certificates.
+    pub principals: Vec<String>,
+    /// Optional local OpenSSH KRL checked after CA, time and principal validation.
+    pub revocation_list_path: Option<String>,
+    /// Optional HTTPS OpenSSH KRL URL; mutually exclusive with the local path.
+    pub revocation_list_url: Option<String>,
+    /// Public keys trusted to sign the KRL independently of the host CA.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocation_list_signers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConnection {
@@ -42,6 +58,8 @@ pub struct ServerConnection {
     pub username: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_certificate_authority: Option<HostCertificateAuthority>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -163,5 +181,11 @@ pub struct Identity {
     /// 明文 key、密码认证、ssh-agent 都是这个形状。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passphrase_ref: Option<String>,
+    /// Path to the OpenSSH user certificate (`*-cert.pub`). Public material.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_path: Option<String>,
+    /// Path of the private-key file. This is metadata, never the key bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_path: Option<String>,
     pub created_at: String,
 }

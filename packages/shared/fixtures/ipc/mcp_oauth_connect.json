@@ -1,0 +1,6 @@
+{
+  "serverId": "mcp_remote",
+  "issuer": "https://auth.example.com",
+  "scopes": ["mcp.read", "mcp.tools"],
+  "tokenEndpoint": "https://auth.example.com/oauth/token"
+}

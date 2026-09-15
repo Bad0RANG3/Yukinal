@@ -212,7 +212,7 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
     if method == HOST_MCP_CATALOG {
         // 目录是 sidecar 唯一能知道 MCP 存在的地方，所以它也就是 `capabilities.mcp`
         // 的唯一依据（ADR 0014）。
-        let catalog = mcp::catalog(&state.database, &state.mcp).await?;
+        let catalog = mcp::catalog(&state.database, &state.mcp, state.credentials.clone()).await?;
         return serde_json::to_value(catalog).map_err(|error| error.to_string());
     }
     if method != HOST_TOOL_EXECUTE {
@@ -412,6 +412,17 @@ fn filesystem_failure(error: FilesystemError, cancel: &CancellationToken) -> Val
             message,
             false,
             Some(json!({ "maxEditableBytes": limit })),
+        ),
+        // 「远端做不到安全替换」：重试多少次都一样（要变的是服务器或这个文件），所以它有一个
+        // 自己的码 —— 把它报成 invalid_input 会让模型把「换条路重试」当成正确反应。
+        FilesystemError::UnsafeRemoteWrite(_) => failed("unsupported", message, false, None),
+        // 并发修改：与过期的 revision 同一类，下一步都是「重新读，再带着新 revision 重试」。
+        FilesystemError::ConcurrentChange(_) => failed("invalid_input", message, true, None),
+        FilesystemError::MetadataNotPreserved { missing, .. } => failed(
+            "unsupported",
+            message,
+            false,
+            Some(json!({ "missingMetadata": missing })),
         ),
         FilesystemError::Transport(error) => transport_or_cancel(error, cancel),
     }
@@ -963,6 +974,52 @@ mod tests {
         assert!(message.contains("524288"), "{message}");
         assert!(message.contains("truncate"), "{message}");
         assert!(message.contains("filesystem.write"), "{message}");
+
+        // 「远端做不到安全替换」有自己的码：把它塞进 invalid_input 会让模型把「换条路重试」
+        // 当成正确反应，而这里要变的是服务器或这个文件。
+        let unsafe_write = filesystem_failure(
+            FilesystemError::UnsafeRemoteWrite(
+                "/etc/app.env has 3 hard links; replacing it would leave the other names \
+                 pointing at the old content"
+                    .to_string(),
+            ),
+            &cancel,
+        );
+        assert_eq!(unsafe_write["error"]["code"], json!("unsupported"));
+        assert_eq!(unsafe_write["error"]["retryable"], json!(false));
+
+        // 并发修改与过期的 revision 是同一类：重读之后带着新 revision 重试是对的。
+        let concurrent = filesystem_failure(
+            FilesystemError::ConcurrentChange(
+                "/etc/app.env changed between the read and the metadata check (12 bytes → 15 \
+                 bytes); re-read it and retry"
+                    .to_string(),
+            ),
+            &cancel,
+        );
+        assert_eq!(concurrent["error"]["code"], json!("invalid_input"));
+        assert_eq!(concurrent["error"]["retryable"], json!(true));
+        assert!(concurrent["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("re-read"));
+
+        // metadata 保不住：点名是哪几项，同一份清单也进 detail。
+        let metadata = filesystem_failure(
+            FilesystemError::MetadataNotPreserved {
+                message: "the remote would not keep the file's owner, group; the edit was not \
+                          published"
+                    .to_string(),
+                missing: vec!["owner".to_string(), "group".to_string()],
+            },
+            &cancel,
+        );
+        assert_eq!(metadata["error"]["code"], json!("unsupported"));
+        assert_eq!(metadata["error"]["retryable"], json!(false));
+        assert_eq!(
+            metadata["error"]["detail"]["missingMetadata"],
+            json!(["owner", "group"])
+        );
 
         // 已有的两类映射不变：入参问题可重试，策略拒绝不可重试。
         let invalid = filesystem_failure(FilesystemError::InvalidInput("bad".to_string()), &cancel);

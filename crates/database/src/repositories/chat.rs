@@ -4,7 +4,7 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use super::decode::decode_error;
 use crate::models::{ChatMessage, ChatMessageRole, ChatSession, ChatSessionCounts};
-use crate::{Database, DatabaseError, Result};
+use crate::{optional_json, Database, DatabaseError, Result};
 
 pub struct ChatRepository<'a> {
     db: &'a Database,
@@ -121,7 +121,7 @@ impl<'a> ChatRepository<'a> {
     pub fn messages(&self, session_id: &str) -> Result<Vec<ChatMessage>> {
         self.db.with(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, session_id, role, content, trace_id, created_at
+                "SELECT id, session_id, role, content, parts_json, trace_id, created_at
                    FROM chat_messages
                   WHERE session_id = ?1
                   ORDER BY created_at ASC, id ASC",
@@ -136,13 +136,18 @@ impl<'a> ChatRepository<'a> {
         self.db.with(|connection| {
             let changed = connection.execute(
                 "INSERT INTO chat_messages (
-                    id, session_id, role, content, trace_id, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    id, session_id, role, content, parts_json, trace_id, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     message.id,
                     message.session_id,
                     message.role.as_str(),
                     message.content,
+                    message
+                        .parts
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
                     message.trace_id,
                     message.created_at,
                 ],
@@ -260,8 +265,9 @@ fn row_to_message(row: &Row<'_>) -> rusqlite::Result<ChatMessage> {
         role: ChatMessageRole::from_db(&role)
             .ok_or_else(|| decode_error(2, "unknown chat message role"))?,
         content: row.get(3)?,
-        trace_id: row.get(4)?,
-        created_at: row.get(5)?,
+        parts: optional_json(row.get(4)?).map_err(|error| decode_error(4, error.to_string()))?,
+        trace_id: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 

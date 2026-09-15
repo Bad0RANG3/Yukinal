@@ -5,6 +5,7 @@
     "transport": "stdio",
     "command": "node",
     "args": ["crates/core/tests/fixtures/mcp-server.js", "ok"],
+    "httpAuthHeaders": [],
     "enabled": true,
     "allowedTools": [],
     "trustLevel": "unreviewed"

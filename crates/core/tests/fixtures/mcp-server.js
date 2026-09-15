@@ -143,6 +143,11 @@ function handle(frame) {
     case "notifications/initialized":
       // A notification: no reply exists by definition.
       return;
+    case "notifications/cancelled":
+      // Record the request id so the integration test can prove the client sent
+      // the protocol-level cancellation rather than merely dropping its future.
+      log(`cancelled request ${frame.params?.requestId ?? "unknown"}`);
+      return;
     case "tools/list":
       reply(frame.id, { tools: declaredTools() });
       return;

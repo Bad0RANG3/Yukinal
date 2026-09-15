@@ -15,7 +15,10 @@ import {
   PROVIDER_KIND_ORDER,
   PROVIDER_KIND_LABEL,
   providerKindBaseUrlHint,
+  providerKindUsesApiVersion,
   providerKindUsesWireApi,
+  providerHeadersText,
+  parseProviderHeaders,
   providerSavePayload,
 } from "../src/lib/providers.js";
 
@@ -33,6 +36,43 @@ test("wireApi is offered for openai-compatible only", () => {
   assert.equal(providerKindUsesWireApi("gemini"), false);
 });
 
+test("apiVersion is offered for Anthropic only and never leaks into another kind", () => {
+  assert.equal(providerKindUsesApiVersion("anthropic"), true);
+  assert.equal(providerKindUsesApiVersion("openai-compatible"), false);
+  assert.equal(providerKindUsesApiVersion("gemini"), false);
+
+  const anthropic = providerSavePayload({
+    kind: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-sonnet-4-5",
+    apiVersion: " 2026-01-01 ",
+  });
+  assert.equal(anthropic.apiVersion, "2026-01-01");
+
+  const gemini = providerSavePayload({
+    kind: "gemini",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    model: "gemini-2.5-flash",
+    apiVersion: "2026-01-01",
+  });
+  assert.equal(Object.hasOwn(gemini, "apiVersion"), true);
+  assert.equal(gemini.apiVersion, undefined);
+});
+
+test("custom headers round-trip through the text editor without losing values", () => {
+  const text = providerHeadersText({
+    "X-Title": "Yukinal",
+    "HTTP-Referer": "https://desktop.example",
+  });
+  assert.equal(text, "HTTP-Referer: https://desktop.example\nX-Title: Yukinal");
+  assert.deepEqual(parseProviderHeaders(text), {
+    "HTTP-Referer": "https://desktop.example",
+    "X-Title": "Yukinal",
+  });
+  assert.throws(() => parseProviderHeaders("missing colon"), /第 1 行/);
+  assert.throws(() => parseProviderHeaders("X-Title: one\nx-title: two"), /重复/);
+});
+
 /** openai-compatible 没有默认端点：那个 kind 覆盖的端点不是我们的，编一个等于替用户选了服务商。 */
 test("only the native protocols have a default base URL", () => {
   assert.equal(PROVIDER_KIND_DEFAULT_BASE_URL["openai-compatible"], null);
@@ -48,12 +88,14 @@ test("a saved draft always carries the kind, and never a wireApi the kind cannot
     baseUrl: " https://api.anthropic.com ",
     model: " claude-sonnet-4-5 ",
     apiKey: "sk-secret",
+    customHeaders: { "anthropic-beta": "feature-2026-01-01" },
     // 界面在原生 kind 下根本不渲染这一格，但即使有值也不该被发出去。
     wireApi: "responses",
   });
   assert.equal(saved.kind, "anthropic");
   assert.equal(saved.baseUrl, "https://api.anthropic.com");
   assert.equal(saved.model, "claude-sonnet-4-5");
+  assert.deepEqual(saved.customHeaders, { "anthropic-beta": "feature-2026-01-01" });
   assert.equal(Object.hasOwn(saved, "wireApi"), false, "a native kind must not carry wireApi");
 
   const compatible = providerSavePayload({

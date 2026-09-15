@@ -9,10 +9,10 @@
  *
  * 1. **没有 `dangerouslySetInnerHTML`。** 正文是不可信文本，它只会变成我们自己创建的
  *    元素里的文字节点。解析器不认 HTML，这里也不把它当 HTML。
- * 2. **链接不可点。** 窗口没有 opener 能力（`capabilities/default.json` 只给了
- *    `core:default`），`<a href>` 只会让 webview 自己导航走 —— 点一下链接就没了整个
- *    界面。所以链接渲染成带样式的文字，真正的地址放在 `title` 里，需要时手动复制。
- * 3. **图片不去下载。** 只显示替代文字：渲染一条消息不该替用户向陌生主机发请求。
+ * 2. **链接只在外部浏览器打开。** 渲染层使用 opener 能力允许的 `http(s)` / `mailto`
+ *    URL，不让 WebView 导航离开应用。未知 scheme 在解析阶段已经是普通文字。
+ * 3. **图片不携带来源信息。** 只有解析器认可的 `http(s)` URL 会进入 `<img>`，
+ *    并使用 `no-referrer`；HTML 仍然永远只是文字。
  *
  * 关键词着色（`KeywordText`）在正文里全量保留 —— Markdown 只负责结构，哪些词是
  * 错误、路径还是标识符，与原来一样由 token 规则决定。
@@ -20,6 +20,7 @@
 
 import type { ReactNode } from "react";
 
+import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
 import { KeywordText } from "./KeywordText.js";
 
@@ -71,7 +72,7 @@ function BlockView({ block }: { block: Block }) {
               {item.checked ? "☑" : "☐"}
             </span>
           )}
-          <BlockList blocks={item.blocks} />
+          <ListItemBlocks blocks={item.blocks} tight={block.tight} />
         </li>
       ));
       return block.ordered ? (
@@ -117,7 +118,37 @@ function BlockView({ block }: { block: Block }) {
       );
     case "rule":
       return <hr className="md-rule" />;
+    case "footnotes":
+      return (
+        <section className="md-footnotes">
+          <ol>
+            {block.items.map((item) => (
+              <li key={item.label}>
+                <InlineView nodes={item.content} />
+              </li>
+            ))}
+          </ol>
+        </section>
+      );
   }
+}
+
+/**
+ * CommonMark 的 tight 只省略列表项**直接子段落**的 `<p>`；引用、嵌套列表等容器里
+ * 的段落仍走普通块渲染，并由那些容器自己的 tight 状态决定。
+ */
+function ListItemBlocks({ blocks, tight }: { blocks: Block[]; tight: boolean }) {
+  return (
+    <>
+      {blocks.map((block, index) =>
+        tight && block.kind === "paragraph" ? (
+          <InlineView nodes={block.content} key={index} />
+        ) : (
+          <BlockView block={block} key={index} />
+        ),
+      )}
+    </>
+  );
 }
 
 function BlockList({ blocks }: { blocks: Block[] }) {
@@ -163,15 +194,33 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
             );
           case "link":
             return (
-              <span className="md-link" key={index} title={node.href}>
+              <button
+                type="button"
+                className="md-link"
+                key={index}
+                title={node.href}
+                onClick={() => void openExternalUrl(node.href)}
+              >
                 <InlineView nodes={node.children} />
-              </span>
+              </button>
             );
           case "image":
             return (
-              <span className="md-image" key={index} title={node.href}>
-                [图片]{node.alt ? ` ${node.alt}` : ""}
-              </span>
+              <img
+                className="md-image"
+                key={index}
+                src={node.href}
+                alt={node.alt}
+                loading="lazy"
+                decoding="async"
+                referrerPolicy="no-referrer"
+              />
+            );
+          case "footnote":
+            return (
+              <sup className="md-footnote-ref" key={index}>
+                [{node.label}]
+              </sup>
             );
           case "break":
             return <br key={index} />;

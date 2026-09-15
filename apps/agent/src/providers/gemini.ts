@@ -81,7 +81,11 @@ export class GeminiProvider implements LLMProvider {
       });
       if (!response.ok) {
         // 不读 body：上游的错误正文经常把掩码后的密钥片段一起回显出来。
-        throw new ProviderError(`listModels failed (${response.status})`, response.status >= 500, response.status);
+        throw new ProviderError(
+          `listModels failed (${response.status})`,
+          response.status === 429 || response.status >= 500,
+          response.status,
+        );
       }
       const parsed = ModelsResponseSchema.safeParse(await response.json());
       if (!parsed.success) {
@@ -152,7 +156,11 @@ export class GeminiProvider implements LLMProvider {
       });
 
       if (!response.ok || !response.body) {
-        throw new ProviderError(`${endpoint} failed (${response.status})`, response.status >= 500, response.status);
+        throw new ProviderError(
+          `${endpoint} failed (${response.status})`,
+          response.status === 429 || response.status >= 500,
+          response.status,
+        );
       }
 
       yield* this.#consumeSse(response.body);
@@ -349,9 +357,38 @@ function toGeminiContents(messages: readonly LlmMessage[]): GeminiContent[] {
     switch (message.role) {
       case "system":
         break;
-      case "user":
-        contents.push({ role: "user", parts: [{ text: message.content }] });
+      case "user": {
+        const parts: GeminiPart[] = [];
+        if (message.content) parts.push({ text: message.content });
+        for (const image of message.images ?? []) {
+          parts.push({
+            inlineData: {
+              mimeType: image.mediaType,
+              data: image.data,
+            },
+          });
+        }
+        for (const document of message.documents ?? []) {
+          parts.push({
+            inlineData: {
+              mimeType: document.mediaType,
+              data: document.data,
+            },
+          });
+        }
+        // Gemini carries every attachment kind through the same `inlineData` part, so audio
+        // needs no vocabulary of its own here — the media type is passed through as it is.
+        for (const audio of message.audios ?? []) {
+          parts.push({
+            inlineData: {
+              mimeType: audio.mediaType,
+              data: audio.data,
+            },
+          });
+        }
+        if (parts.length > 0) contents.push({ role: "user", parts });
         break;
+      }
       case "assistant": {
         const parts: GeminiPart[] = [];
         if (message.content) parts.push({ text: message.content });

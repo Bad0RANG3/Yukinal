@@ -106,6 +106,164 @@ test("provider text, reasoning and cumulative usage survive the loop", async () 
   );
 });
 
+test("image-only prompt parts reach the provider as structured image input", async () => {
+  const loop = new AgentLoop({
+    registry: new ToolRegistry(),
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+  let seenMessages: Parameters<LLMProvider["stream"]>[0]["messages"] = [];
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "vision-model",
+    async listModels() {
+      return [];
+    },
+    async *stream(request) {
+      seenMessages = request.messages;
+      yield { type: "text_delta", text: "a screenshot" };
+      yield { type: "done", finishReason: "stop" };
+    },
+  };
+
+  const result = await loop.start(
+    {
+      runId: "run_image_only",
+      sessionId: "ses_image_only",
+      prompt: "",
+      parts: [
+        {
+          type: "image",
+          mediaType: "image/png",
+          data: "aGVsbG8=",
+          name: "screen.png",
+        },
+      ],
+      target: { host: "local", environment: "local" },
+    },
+    { emit: noop },
+    provider,
+  );
+
+  assert.equal(result.state, "completed");
+  assert.equal(seenMessages[0]?.role, "system");
+  assert.match(
+    seenMessages[0]?.role === "system" ? seenMessages[0].content : "",
+    /Image attachment/,
+  );
+  assert.deepEqual(seenMessages.slice(1), [
+    {
+      role: "user",
+      content: "",
+      images: [{ mediaType: "image/png", data: "aGVsbG8=", name: "screen.png" }],
+    },
+  ]);
+});
+
+test("PDF-only prompt parts reach the provider as structured document input", async () => {
+  const loop = new AgentLoop({
+    registry: new ToolRegistry(),
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+  let seenMessages: Parameters<LLMProvider["stream"]>[0]["messages"] = [];
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "document-model",
+    async listModels() {
+      return [];
+    },
+    async *stream(request) {
+      seenMessages = request.messages;
+      yield { type: "text_delta", text: "read the document" };
+      yield { type: "done", finishReason: "stop" };
+    },
+  };
+
+  const result = await loop.start(
+    {
+      runId: "run_document_only",
+      sessionId: "ses_document_only",
+      prompt: "",
+      parts: [
+        {
+          type: "document",
+          mediaType: "application/pdf",
+          data: "JVBERi0xLjcK",
+          name: "guide.pdf",
+        },
+      ],
+      target: { host: "local", environment: "local" },
+    },
+    { emit: noop },
+    provider,
+  );
+
+  assert.equal(result.state, "completed");
+  assert.deepEqual(seenMessages.slice(1), [
+    {
+      role: "user",
+      content: "",
+      documents: [
+        {
+          mediaType: "application/pdf",
+          data: "JVBERi0xLjcK",
+          name: "guide.pdf",
+        },
+      ],
+    },
+  ]);
+});
+
+test("text-file-only prompt parts reach the provider as a delimited text block", async () => {
+  const loop = new AgentLoop({
+    registry: new ToolRegistry(),
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+  let seenMessages: Parameters<LLMProvider["stream"]>[0]["messages"] = [];
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "text-model",
+    async listModels() {
+      return [];
+    },
+    async *stream(request) {
+      seenMessages = request.messages;
+      yield { type: "text_delta", text: "read it" };
+      yield { type: "done", finishReason: "stop" };
+    },
+  };
+
+  const result = await loop.start(
+    {
+      runId: "run_file_only",
+      sessionId: "ses_file_only",
+      prompt: "",
+      parts: [
+        {
+          type: "file",
+          mediaType: "text/plain",
+          data: "PORT=8080\n",
+          name: "app.env",
+        },
+      ],
+      target: { host: "local", environment: "local" },
+    },
+    { emit: noop },
+    provider,
+  );
+
+  assert.equal(result.state, "completed");
+  assert.deepEqual(seenMessages.slice(1), [
+    {
+      role: "user",
+      content:
+        "--- BEGIN ATTACHED TEXT FILE: app.env ---\nPORT=8080\n\n--- END ATTACHED TEXT FILE ---",
+    },
+  ]);
+});
+
 test("approval responses are bound to the run that displayed them", async () => {
   const registry = new ToolRegistry();
   registry.register({

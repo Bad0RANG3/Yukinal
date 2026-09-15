@@ -24,10 +24,21 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
   // user who misses this field gets a mislabelled host *and* auto-approved writes
   // to it. "unknown" is honest and maps to the high risk floor.
   const [environment, setEnvironment] = useState<Environment>(server?.metadata.environment ?? "unknown");
-  const [authMethod, setAuthMethod] = useState<"password" | "privateKey" | "agent">("password");
+  const [authMethod, setAuthMethod] = useState<"password" | "privateKey" | "certificate" | "agent">("password");
   const [password, setPassword] = useState("");
   const [privateKeyPem, setPrivateKeyPem] = useState("");
   const [passphrase, setPassphrase] = useState("");
+  const [certificatePath, setCertificatePath] = useState("");
+  const [privateKeyPath, setPrivateKeyPath] = useState("");
+  const [hostCertificateEnabled, setHostCertificateEnabled] = useState(Boolean(server?.connection.hostCertificateAuthority));
+  const [hostCertificateConfigured, setHostCertificateConfigured] = useState(Boolean(server?.connection.hostCertificateAuthority));
+  const [hostCaPublicKey, setHostCaPublicKey] = useState(server?.connection.hostCertificateAuthority?.caPublicKey ?? "");
+  const [hostPrincipals, setHostPrincipals] = useState(server?.connection.hostCertificateAuthority?.principals.join("\n") ?? "");
+  const [hostRevocationListPath, setHostRevocationListPath] = useState(server?.connection.hostCertificateAuthority?.revocationListPath ?? "");
+  const [hostRevocationListUrl, setHostRevocationListUrl] = useState(server?.connection.hostCertificateAuthority?.revocationListUrl ?? "");
+  const [hostRevocationListSigners, setHostRevocationListSigners] = useState(
+    server?.connection.hostCertificateAuthority?.revocationListSigners?.join("\n") ?? "",
+  );
 
   useEffect(() => {
     if (!server) return;
@@ -36,6 +47,15 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
     setPort(String(server.connection.port));
     setUsername(server.connection.username);
     setEnvironment(server.metadata.environment);
+    setHostCertificateEnabled(Boolean(server.connection.hostCertificateAuthority));
+    setHostCertificateConfigured(Boolean(server.connection.hostCertificateAuthority));
+    setHostCaPublicKey(server.connection.hostCertificateAuthority?.caPublicKey ?? "");
+    setHostPrincipals(server.connection.hostCertificateAuthority?.principals.join("\n") ?? "");
+    setHostRevocationListPath(server.connection.hostCertificateAuthority?.revocationListPath ?? "");
+    setHostRevocationListUrl(server.connection.hostCertificateAuthority?.revocationListUrl ?? "");
+    setHostRevocationListSigners(
+      server.connection.hostCertificateAuthority?.revocationListSigners?.join("\n") ?? "",
+    );
   }, [server]);
 
   useEffect(() => {
@@ -51,7 +71,26 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
 
   const save = useMutation<{ server: { id: string } }, Error>({
     mutationFn: () => {
-      const values = { name, host, port, username, environment, authMethod, password, privateKeyPem, passphrase };
+      const values = {
+        name,
+        host,
+        port,
+        username,
+        environment,
+        authMethod,
+        password,
+        privateKeyPem,
+        passphrase,
+        certificatePath,
+        privateKeyPath,
+        hostCertificateEnabled,
+        hostCertificateConfigured,
+        hostCaPublicKey,
+        hostPrincipals,
+        hostRevocationListPath,
+        hostRevocationListUrl,
+        hostRevocationListSigners,
+      };
       return server
         ? callDesktop(IPC_COMMANDS.serverUpdate, buildServerInput(values, server.id))
         : callDesktop(IPC_COMMANDS.serverAdd, buildServerInput(values));
@@ -107,11 +146,12 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
             </div>
           </div>
 
-          <fieldset className="form-fieldset">
+          <fieldset className="form-fieldset" disabled={save.isPending}>
             <legend className="field-label">认证方式</legend>
             <div className="form-radio-group">
               <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "password"} onChange={() => setAuthMethod("password")} />密码</label>
               <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "privateKey"} onChange={() => setAuthMethod("privateKey")} />SSH 私钥</label>
+              <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "certificate"} onChange={() => setAuthMethod("certificate")} />SSH 证书</label>
               <label className="form-radio-option"><input type="radio" name="server-authentication" checked={authMethod === "agent"} onChange={() => setAuthMethod("agent")} />SSH Agent</label>
             </div>
           </fieldset>
@@ -134,11 +174,115 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
               </div>
               <p className="form-hint">私钥与口令都只保存到系统凭据库，不会写入数据库或上传。</p>
             </>
+          ) : authMethod === "certificate" ? (
+            <>
+              <div className="form-field">
+                <label className="field-label" htmlFor="server-certificate-key">私钥 PEM</label>
+                <textarea id="server-certificate-key" className="form-input form-textarea" value={privateKeyPem} onChange={(event) => setPrivateKeyPem(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" required spellCheck={false} />
+              </div>
+              <div className="form-field">
+                <label className="field-label" htmlFor="server-certificate-path">证书路径</label>
+                <input id="server-certificate-path" className="form-input form-input-mono" value={certificatePath} onChange={(event) => setCertificatePath(event.target.value)} placeholder="~/.ssh/id_ed25519-cert.pub" required spellCheck={false} />
+              </div>
+              <div className="form-field">
+                <label className="field-label" htmlFor="server-private-key-path">私钥路径（可选）</label>
+                <input id="server-private-key-path" className="form-input form-input-mono" value={privateKeyPath} onChange={(event) => setPrivateKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519" spellCheck={false} />
+              </div>
+              <div className="form-field">
+                <label className="field-label" htmlFor="server-certificate-passphrase">口令（可选）</label>
+                <input id="server-certificate-passphrase" className="form-input" type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
+                <p className="form-hint">证书是公开文件，按路径读取；私钥与口令只保存在系统凭据库。证书必须认证当前提供的这把私钥。</p>
+              </div>
+            </>
           ) : (
             <div className="form-field">
               <p className="form-hint">使用本机正在运行的 ssh-agent 中的身份，不保存任何密码或私钥。请先用 ssh-add 把密钥加载进 agent；agent 不可用时会明确报错，不会退回其他认证方式。</p>
             </div>
           )}
+          </fieldset>
+
+          <fieldset className="form-fieldset" disabled={save.isPending}>
+            <legend className="field-label">Host 证书信任（可选）</legend>
+            <label className="form-check-option">
+              <input
+                type="checkbox"
+                checked={hostCertificateEnabled}
+                onChange={(event) => setHostCertificateEnabled(event.target.checked)}
+              />
+              要求服务器出示由指定 CA 签发的 host 证书
+            </label>
+            {hostCertificateEnabled ? (
+              <>
+                <div className="form-field">
+                  <label className="field-label" htmlFor="server-host-ca">CA 公钥</label>
+                  <textarea
+                    id="server-host-ca"
+                    className="form-input form-textarea form-textarea-compact"
+                    value={hostCaPublicKey}
+                    onChange={(event) => setHostCaPublicKey(event.target.value)}
+                    placeholder="ssh-ed25519 AAAA... host-ca"
+                    spellCheck={false}
+                    required
+                  />
+                </div>
+                <div className="form-field">
+                  <label className="field-label" htmlFor="server-host-principals">允许的 principals</label>
+                  <textarea
+                    id="server-host-principals"
+                    className="form-input form-textarea form-textarea-compact"
+                    value={hostPrincipals}
+                    onChange={(event) => setHostPrincipals(event.target.value)}
+                    placeholder={"*.example.com\napi.internal"}
+                    spellCheck={false}
+                    required
+                  />
+                  <p className="form-hint">逗号或换行分隔；支持 `*` 与 `?`。启用后普通 host key 会被拒绝。</p>
+                </div>
+                <div className="form-field">
+                  <label className="field-label" htmlFor="server-host-krl">KRL 路径（可选）</label>
+                  <input
+                    id="server-host-krl"
+                    className="form-input form-input-mono"
+                    value={hostRevocationListPath}
+                    onChange={(event) => setHostRevocationListPath(event.target.value)}
+                    placeholder="/etc/ssh/revoked_hosts.krl"
+                    spellCheck={false}
+                    disabled={hostRevocationListUrl.trim().length > 0}
+                  />
+                  <p className="form-hint">连接时读取本机 OpenSSH KRL；证书序列号、key ID、CA 或公钥撤销都会拒绝连接。</p>
+                </div>
+                <div className="form-field">
+                  <label className="field-label" htmlFor="server-host-krl-url">KRL HTTPS URL（可选）</label>
+                  <input
+                    id="server-host-krl-url"
+                    className="form-input form-input-mono"
+                    value={hostRevocationListUrl}
+                    onChange={(event) => setHostRevocationListUrl(event.target.value)}
+                    placeholder="https://ca.example.com/revoked_hosts.krl"
+                    spellCheck={false}
+                    disabled={hostRevocationListPath.trim().length > 0}
+                  />
+                  <p className="form-hint">只接受 HTTPS，且 URL 不能内嵌凭据、query 或 fragment；下载失败时拒绝连接，不会退回旧列表。</p>
+                </div>
+                <div className="form-field field-wide">
+                  <label className="field-label" htmlFor="server-host-krl-signers">
+                    KRL 独立签名公钥（可选，一行一个）
+                  </label>
+                  <textarea
+                    id="server-host-krl-signers"
+                    className="form-input form-textarea form-textarea-compact form-input-mono"
+                    value={hostRevocationListSigners}
+                    onChange={(event) => setHostRevocationListSigners(event.target.value)}
+                    placeholder={"ssh-ed25519 AAAA... krl-signer-2026-a\nssh-ed25519 AAAA... krl-signer-2026-b"}
+                    spellCheck={false}
+                  />
+                  <p className="form-hint">
+                    最多 8 把 OpenSSH 公钥。Host CA 始终受信；KRL 含有有效签名时，必须至少由 CA
+                    或其中一把签名。轮换期间可同时列出旧、新密钥。
+                  </p>
+                </div>
+              </>
+            ) : null}
           </fieldset>
 
           {save.isError ? <p className="form-error" role="alert">{save.error.message}</p> : null}
@@ -151,7 +295,10 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
             // 描述的仍是旧主机。面板自己把那台主机:端口 显示在标题旁边，并写明「指纹按
             // 主机:端口 记录，不按服务器条目记录」，所以看到的那一刻就能对上号 —— 这也
             // 正是它不能把端点藏起来的理由。
-            <HostKeySection serverId={server.id} />
+            <HostKeySection
+              serverId={server.id}
+              caPolicyEnabled={Boolean(server.connection.hostCertificateAuthority)}
+            />
           ) : null}
 
           <div className="modal-actions">

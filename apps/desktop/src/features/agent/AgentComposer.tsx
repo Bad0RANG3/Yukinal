@@ -12,14 +12,40 @@
  * 不留「看起来能点、点了没反应」的假入口。
  */
 
-import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from "react";
 
-import type { AgentPermissionMode, AgentRunMode, Environment } from "@yukinal/shared";
+import {
+  AGENT_PROMPT_LIMITS,
+  type AgentAudioPromptPart,
+  type AgentDocumentPromptPart,
+  type AgentImagePromptPart,
+  type AgentPermissionMode,
+  type AgentPromptPart,
+  type AgentRunMode,
+  type Environment,
+} from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { ModelPicker } from "./ModelPicker.js";
+import {
+  audioAttachmentUrl,
+  FILE_ATTACHMENT_ACCEPT,
+  IMAGE_ATTACHMENT_ACCEPT,
+  imageAttachmentUrl,
+  readAudioAttachment,
+  readDocumentAttachment,
+  readImageAttachment,
+  readTextFileAttachment,
+} from "./image-attachments.js";
 import {
   findActiveTrigger,
   matchCommands,
@@ -43,6 +69,8 @@ type Suggestion =
 export function AgentComposer({
   prompt,
   onPromptChange,
+  attachments,
+  onAttachmentsChange,
   onSubmit,
   onStop,
   running,
@@ -53,6 +81,8 @@ export function AgentComposer({
   onPermissionModeChange,
   runMode,
   onRunModeChange,
+  delivery,
+  onDeliveryChange,
   runPolicy,
   onRunPolicyChange,
   targetEnvironment,
@@ -65,6 +95,8 @@ export function AgentComposer({
 }: {
   prompt: string;
   onPromptChange: (value: string) => void;
+  attachments: readonly AgentPromptPart[];
+  onAttachmentsChange: (attachments: AgentPromptPart[]) => void;
   /**
    * 提交一段输入。这里已经把文本解析成「命令 / 未知命令 / 普通提问」，
    * 但**是否可用以及如何反馈由面板决定** —— 因为那取决于 sidecar、归档状态
@@ -83,6 +115,8 @@ export function AgentComposer({
   /** 这次运行允许做到什么程度；由 sidecar 权限引擎强制，不只是提示。 */
   runMode: AgentRunMode;
   onRunModeChange: (mode: AgentRunMode) => void;
+  delivery: "async" | "sync";
+  onDeliveryChange: (delivery: "async" | "sync") => void;
   /** 这次运行按哪套策略判定；`null` = 按环境自动（请求里不带 policyId）。 */
   runPolicy: RunPolicyChoice;
   onRunPolicyChange: (policy: RunPolicyChoice) => void;
@@ -102,14 +136,32 @@ export function AgentComposer({
   const policySpec = runPolicySpec(runPolicy);
   const policyWarning = policyEnvironmentWarning(runPolicy, targetEnvironment);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const otherFileInputRef = useRef<HTMLInputElement>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [draggingAttachment, setDraggingAttachment] = useState(false);
   const [trigger, setTrigger] = useState<ActiveTrigger | null>(null);
   const [highlight, setHighlight] = useState(0);
   /** Escape 之后本次触发词不再弹窗，直到内容变化。 */
   const [dismissed, setDismissed] = useState(false);
   /** 「+」展开的设置面板：运行模式与批准方式都在这里。 */
   const [menuOpen, setMenuOpen] = useState(false);
+  const imageAttachments = attachments.filter(
+    (attachment): attachment is AgentImagePromptPart => attachment.type === "image",
+  );
+  const fileAttachments = attachments.filter(
+    (attachment): attachment is Extract<AgentPromptPart, { type: "file" }> =>
+      attachment.type === "file",
+  );
+  const documentAttachments = attachments.filter(
+    (attachment): attachment is AgentDocumentPromptPart => attachment.type === "document",
+  );
+  const audioAttachments = attachments.filter(
+    (attachment): attachment is AgentAudioPromptPart => attachment.type === "audio",
+  );
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
+  const hasContent = Boolean(prompt.trim() || attachments.length);
 
   /**
    * 输入框随内容长高，封顶由 CSS 的 max-height 决定。
@@ -149,7 +201,7 @@ export function AgentComposer({
      唯一的事实来源）。 */
   const suggestionsPresence = usePresence(open, { exitAnimation: "popover-exit" });
   const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
-  const sendPresence = usePresence(Boolean(prompt.trim()) && !running, { exitAnimation: "pop-exit" });
+  const sendPresence = usePresence(hasContent && !running, { exitAnimation: "pop-exit" });
   const runningPresence = usePresence(running, { exitAnimation: "expand-exit" });
 
   /* 面板打开时把焦点送进去。
@@ -231,9 +283,61 @@ export function AgentComposer({
   };
 
   const submit = (): void => {
+    if (!hasContent) return;
     setTrigger(null);
     setDismissed(false);
+    setAttachmentError(null);
     onSubmit(resolveSubmission(prompt));
+  };
+
+  const addFiles = async (files: readonly File[]): Promise<void> => {
+    if (!canSend || running || files.length === 0) return;
+    let next: AgentPromptPart[] = [...attachments];
+    let error: string | null = null;
+    for (const file of files) {
+      try {
+        const looksLikeImage =
+          file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+        const looksLikePdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+        const looksLikeAudio =
+          file.type.startsWith("audio/") || /\.(wav|mp3|ogg|flac)$/i.test(file.name);
+        next = [
+          ...next,
+          looksLikeImage
+            ? await readImageAttachment(
+                file,
+                next.filter(
+                  (attachment): attachment is AgentImagePromptPart =>
+                    attachment.type === "image",
+                ),
+              )
+            : looksLikeAudio
+              ? await readAudioAttachment(file, next)
+              : looksLikePdf
+                ? await readDocumentAttachment(file, next)
+                : await readTextFileAttachment(file, next),
+        ];
+      } catch (cause) {
+        error = cause instanceof Error ? cause.message : String(cause);
+      }
+    }
+    if (next.length !== attachments.length) onAttachmentsChange(next);
+    setAttachmentError(error);
+  };
+
+  const removeAttachment = (attachment: AgentPromptPart): void => {
+    onAttachmentsChange(attachments.filter((item) => item !== attachment));
+    setAttachmentError(null);
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const files = [...event.clipboardData.items]
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (!files.length) return;
+    event.preventDefault();
+    void addFiles(files);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -272,7 +376,121 @@ export function AgentComposer({
 
   return (
     <footer className="agent-composer" onKeyDown={handleComposerKeyDown}>
-      <div className="agent-composer-shell">
+      <div
+        className={`agent-composer-shell${draggingAttachment ? " is-dragging-attachment" : ""}`}
+        onDragEnter={(event) => {
+          if (running || !canSend) return;
+          event.preventDefault();
+          setDraggingAttachment(true);
+        }}
+        onDragOver={(event) => {
+          if (running || !canSend) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setDraggingAttachment(false);
+          }
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDraggingAttachment(false);
+          void addFiles([...event.dataTransfer.files]);
+        }}
+      >
+        {imageAttachments.length > 0 ? (
+          <ul className="agent-composer-attachments" aria-label="待发送图片">
+            {imageAttachments.map((image, index) => (
+              <li key={`${image.name ?? "image"}-${index}`} className="agent-composer-attachment">
+                <img
+                  src={imageAttachmentUrl(image)}
+                  alt={image.name ?? `图片 ${index + 1}`}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+                <span title={image.name}>{image.name ?? `图片 ${index + 1}`}</span>
+                <button
+                  type="button"
+                  aria-label={`移除${image.name ?? `图片 ${index + 1}`}`}
+                  title="移除图片"
+                  disabled={running}
+                  onClick={() => removeAttachment(image)}
+                >
+                  <Icon name="close" size="xs" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {fileAttachments.length > 0 ? (
+          <ul className="agent-composer-file-attachments" aria-label="待发送文本文件">
+            {fileAttachments.map((attachment, index) => (
+                <li
+                  key={`${attachment.name}-${index}`}
+                  className="agent-composer-file-attachment"
+                >
+                  <Icon name="file" size="sm" />
+                  <span title={attachment.name}>{attachment.name}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除${attachment.name}`}
+                    title="移除文本文件"
+                    disabled={running}
+                    onClick={() => removeAttachment(attachment)}
+                  >
+                    <Icon name="close" size="xs" />
+                  </button>
+                </li>
+              ))}
+          </ul>
+        ) : null}
+        {documentAttachments.length > 0 ? (
+          <ul className="agent-composer-file-attachments" aria-label="待发送 PDF">
+            {documentAttachments.map((document, index) => (
+              <li
+                key={`${document.name}-${index}`}
+                className="agent-composer-file-attachment"
+              >
+                <Icon name="file" size="sm" />
+                <span title={document.name}>{document.name}</span>
+                <button
+                  type="button"
+                  aria-label={`移除${document.name}`}
+                  title="移除 PDF"
+                  disabled={running}
+                  onClick={() => removeAttachment(document)}
+                >
+                  <Icon name="close" size="xs" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {audioAttachments.length > 0 ? (
+          <ul className="agent-composer-attachments" aria-label="待发送音频">
+            {audioAttachments.map((audio, index) => (
+              <li
+                key={`${audio.name ?? "audio"}-${index}`}
+                className="agent-composer-attachment agent-composer-audio-attachment"
+              >
+                {/* 用浏览器自带的播放器预览：它是本地 data URL，不经过任何远端请求。 */}
+                <audio controls preload="metadata" src={audioAttachmentUrl(audio)} />
+                <span title={audio.name}>{audio.name ?? `音频 ${index + 1}`}</span>
+                <button
+                  type="button"
+                  aria-label={`移除${audio.name ?? `音频 ${index + 1}`}`}
+                  title="移除音频"
+                  disabled={running}
+                  onClick={() => removeAttachment(audio)}
+                >
+                  <Icon name="close" size="xs" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {attachmentError ? <p className="agent-composer-attachment-error" role="status">{attachmentError}</p> : null}
         <textarea
           ref={inputRef}
           rows={1}
@@ -285,6 +503,7 @@ export function AgentComposer({
             syncTrigger(value, event.target.selectionStart);
           }}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           onClick={(event) => syncTrigger(prompt, event.currentTarget.selectionStart)}
           onBlur={() => setTrigger(null)}
           /* 这里原本有一句占位提示（"随心输入，/ 命令，@ 提及服务器"）。
@@ -295,6 +514,30 @@ export function AgentComposer({
                 「运行中」+ 状态点 + 停止按钮，状态不缺这一处表达。
              输入框没有可见标签，所以 aria-label 必须保留。 */
           className="agent-composer-input"
+        />
+        <input
+          ref={fileInputRef}
+          className="agent-composer-file-input"
+          type="file"
+          accept={IMAGE_ATTACHMENT_ACCEPT}
+          multiple
+          tabIndex={-1}
+          onChange={(event) => {
+            void addFiles(Array.from(event.target.files ?? []));
+            event.target.value = "";
+          }}
+        />
+        <input
+          ref={otherFileInputRef}
+          className="agent-composer-file-input"
+          type="file"
+          accept={FILE_ATTACHMENT_ACCEPT}
+          multiple
+          tabIndex={-1}
+          onChange={(event) => {
+            void addFiles(Array.from(event.target.files ?? []));
+            event.target.value = "";
+          }}
         />
 
         {suggestionsPresence.mounted ? (
@@ -396,6 +639,30 @@ export function AgentComposer({
             </section>
 
             <section className="agent-settings-group">
+              <p className="agent-settings-title">投递方式</p>
+              <p className="agent-settings-note">流式投递立即返回；等待完成会保留同一事件流，并等终态结果返回。</p>
+              <ul className="agent-settings-options">
+                {([
+                  ["async", "流式投递", "发送后立即返回，回答继续通过事件流到达。"],
+                  ["sync", "等待完成", "发送调用等到运行结束后再返回，期间仍会显示流式事件。"],
+                ] as const).map(([value, label, note]) => (
+                  <li key={value}>
+                    <button
+                      type="button"
+                      className={`agent-settings-option ${value === delivery ? "is-selected" : ""}`}
+                      aria-pressed={value === delivery}
+                      disabled={running}
+                      onClick={() => onDeliveryChange(value)}
+                    >
+                      <span className="agent-settings-option-label">{label}</span>
+                      <span className="agent-settings-option-note">{note}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+
+            <section className="agent-settings-group">
               <p className="agent-settings-title">目标策略</p>
               {/* 这两句是这一组存在的理由，不能省：选定的策略**取代**按环境自动的那套，
                   即使用户选的和目标环境对不上；而高危操作换不来自动批准。 */}
@@ -450,6 +717,40 @@ export function AgentComposer({
                   between the two states instead of swapping one drawing for
                   another. Keep rendering `plus`: the rotation is the state. */}
               <Icon name="plus" size="lg" />
+            </button>
+            <button
+              type="button"
+              className="agent-composer-tool"
+              aria-label="添加图片"
+              title={
+                imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages
+                  ? `每条消息最多 ${AGENT_PROMPT_LIMITS.maxImages} 张图片`
+                  : "添加图片"
+              }
+              disabled={!canSend || running || imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Icon name="image" size="lg" />
+            </button>
+            <button
+              type="button"
+              className="agent-composer-tool"
+              aria-label="添加文本文件或 PDF"
+              title={
+                fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
+                documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments
+                  ? "文本文件与 PDF 数量都已达到上限"
+                  : "添加文本文件或 PDF"
+              }
+              disabled={
+                !canSend ||
+                running ||
+                (fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
+                  documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments)
+              }
+              onClick={() => otherFileInputRef.current?.click()}
+            >
+              <Icon name="file" size="lg" />
             </button>
             {/* 当前状态的常驻摘要：不展开菜单也能看出这次运行会怎样。 */}
             <span className={`agent-mode-summary ${modeSpec.readOnly ? "is-readonly" : ""}`}>

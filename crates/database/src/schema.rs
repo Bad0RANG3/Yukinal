@@ -233,6 +233,84 @@ const MIGRATIONS: &[&str] = &[
     // 代码读得懂。可空（`NULL` = 这个身份没有口令：明文 key / 密码 / ssh-agent），
     // 写法沿用迁移 2 的 `ALTER TABLE … ADD COLUMN`（追加列，不改写既有行）。
     r#"ALTER TABLE identities ADD COLUMN passphrase_ref TEXT;"#,
+    // 6 — Anthropic's dated protocol header is user-configurable.
+    r#"ALTER TABLE provider_configs ADD COLUMN api_version TEXT;"#,
+    // 7 — OpenSSH user-certificate identities. SQLite cannot widen a CHECK constraint
+    // in place, so both identity tables are rebuilt while preserving all rows.
+    r#"
+    ALTER TABLE server_identities RENAME TO server_identities_legacy;
+    ALTER TABLE identities RENAME TO identities_legacy;
+
+    CREATE TABLE identities (
+        id            TEXT PRIMARY KEY,
+        label         TEXT NOT NULL,
+        method        TEXT NOT NULL CHECK (method IN ('password','privateKey','certificate','agent')),
+        credential_ref TEXT NOT NULL,
+        passphrase_ref TEXT,
+        private_key_path TEXT,
+        certificate_path TEXT,
+        created_at    TEXT NOT NULL
+    );
+
+    INSERT INTO identities (
+        id, label, method, credential_ref, passphrase_ref, private_key_path,
+        certificate_path, created_at
+    )
+    SELECT
+        id, label, method, credential_ref, passphrase_ref, NULL, NULL, created_at
+      FROM identities_legacy;
+
+    CREATE TABLE server_identities (
+        server_id  TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        identity_id TEXT NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+        PRIMARY KEY (server_id, identity_id)
+    );
+
+    INSERT INTO server_identities (server_id, identity_id)
+    SELECT server_id, identity_id FROM server_identities_legacy;
+
+    DROP TABLE server_identities_legacy;
+    DROP TABLE identities_legacy;
+    "#,
+    // 8 鈥?durable multimodal prompt parts for a user message. Keeping the
+    // already-validated JSON intact avoids a second, lossy schema for image data.
+    r#"ALTER TABLE chat_messages ADD COLUMN parts_json TEXT;"#,
+    // 9 鈥?optional explicit OpenSSH host-certificate trust root. Both values are
+    // public: the CA public key and the allowed host-principal patterns.
+    r#"
+    ALTER TABLE servers ADD COLUMN host_ca_public_key TEXT;
+    ALTER TABLE servers ADD COLUMN host_principals TEXT;
+    "#,
+    // 10 — optional local OpenSSH KRL for host-certificate revocation.
+    r#"ALTER TABLE servers ADD COLUMN host_krl_path TEXT;"#,
+    // 11 — optional static HTTP authentication for MCP. The value stays in keychain.
+    r#"
+    ALTER TABLE mcp_servers ADD COLUMN http_auth_header TEXT;
+    ALTER TABLE mcp_servers ADD COLUMN http_credential_ref TEXT;
+    "#,
+    // 12 — optional online OpenSSH KRL source for host certificate revocation.
+    r#"ALTER TABLE servers ADD COLUMN host_krl_url TEXT;"#,
+    // 13 — ordered multiple static HTTP authentication headers for MCP.
+    // Names are public; credential references stay opaque and point at the OS
+    // credential store. The legacy single-header columns remain readable.
+    r#"ALTER TABLE mcp_servers ADD COLUMN http_auth_headers TEXT;"#,
+    // 14 — OAuth discovery/client metadata and the opaque credential-store
+    // reference for the refreshable token bundle. Access/refresh tokens never
+    // enter SQLite.
+    r#"ALTER TABLE mcp_servers ADD COLUMN oauth TEXT;"#,
+    // 15 — public signing keys trusted for host-certificate KRLs, independent
+    // of the host CA. Multiple keys support rotation without a flag day.
+    r#"ALTER TABLE servers ADD COLUMN host_krl_signers TEXT;"#,
+    // 16 — application-level network settings (ADR 0022): one row per setting, JSON
+    // value. The proxy credential itself stays in the OS credential store; this table
+    // only ever holds its reference.
+    r#"
+    CREATE TABLE app_settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,   -- JSON
+        updated_at TEXT NOT NULL
+    );
+    "#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

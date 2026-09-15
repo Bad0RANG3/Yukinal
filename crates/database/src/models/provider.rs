@@ -73,6 +73,10 @@ pub struct AiProviderConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_headers: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Anthropic 的日期版本头。只有 native Anthropic 协议使用它，其他 kind 必须是
+    /// `None`；共享 schema 与保存命令都会拒绝越界组合。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<u32>,
     /// Cached model catalog. Stored under the existing `settings` column to
@@ -109,8 +113,106 @@ pub struct McpServerConfig {
     pub args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default)]
+    pub http_auth_headers: Vec<McpHttpAuthHeaderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
     pub enabled: bool,
     pub allowed_tools: Vec<String>,
     /// "reviewed" | "unreviewed"
     pub trust_level: String,
+}
+
+/// One ordered static HTTP authentication header. The name is public; the
+/// credential reference resolves through the OS credential store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpHttpAuthHeaderConfig {
+    pub name: String,
+    pub credential_ref: String,
+}
+
+/// Non-secret OAuth configuration plus an opaque reference to the token bundle.
+/// The token endpoint is cached after discovery so request-time refresh does not
+/// need to fetch metadata again.
+///
+/// `flow` is part of the stored identity: switching between the browser redirect and
+/// the device-code flow changes which requests the authorization server saw, so it
+/// invalidates a stored token exactly like changing the client id does
+/// (`commands/mcp.rs::resolve_oauth_config`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthConfig {
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub flow: McpOAuthFlow,
+    /// How this client authenticates at the token endpoint.
+    ///
+    /// A dynamically registered client is always `none`: the server may hand back a
+    /// secret in its registration response, and using it would silently turn a public
+    /// client into one that only works while that extra value survives.
+    #[serde(default)]
+    pub client_auth: McpOAuthClientAuth,
+    /// Credential-store reference for the hand-entered client secret. The secret itself
+    /// never enters SQLite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_ref: Option<String>,
+    /// Whether access tokens must be sender-constrained (RFC 9449 DPoP).
+    ///
+    /// Off by default: only a server that actually validates proofs benefits, and a client
+    /// that sends them to one that does not has only added a header. When it is on, the
+    /// token response must say `token_type: DPoP` — see ADR 0018.
+    #[serde(default)]
+    pub dpop: bool,
+    /// Credential-store reference for the DPoP private key. The key itself never enters
+    /// SQLite, and losing it costs a re-authorization rather than a silent downgrade.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpop_key_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
+}
+
+/// How the desktop obtains the first token bundle.
+///
+/// Both flows end in the same refreshable bundle and the same credential-store entry;
+/// they differ only in how the user proves they are present. Kept as a closed enum so
+/// an unknown value in a stored row or an IPC payload is refused instead of silently
+/// falling back to one of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthFlow {
+    /// Redirect to the authorization endpoint and listen on a loopback callback.
+    #[default]
+    AuthorizationCode,
+    /// RFC 8628: show a `user_code`, then poll the token endpoint.
+    DeviceCode,
+}
+
+/// Client authentication at the token endpoint (RFC 6749 §2.3).
+///
+/// `none` is a public client: it sends only its `client_id`. The two secret methods are
+/// the ones a server can actually distinguish, and the choice has to be explicit because
+/// sending a secret the server did not ask for is a credential leak with no upside.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthClientAuth {
+    /// Public client: `client_id` in the form, no secret anywhere.
+    #[default]
+    None,
+    /// `client_id` and `client_secret` as form parameters.
+    ClientSecretPost,
+    /// `client_id:client_secret` in the `Authorization` header, and nothing in the form.
+    ClientSecretBasic,
+}
+
+impl McpOAuthClientAuth {
+    /// Does this method require a stored secret?
+    pub fn needs_secret(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }

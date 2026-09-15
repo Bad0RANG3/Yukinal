@@ -39,7 +39,7 @@ pnpm run package           # 契约库 -> agent 单文件 -> 打包契约 -> tau
 
 | 需要 | 从哪来 | 缺了会怎样 |
 | --- | --- | --- |
-| Node.js >= 24（与根 `package.json` 的 `engines.node`、CI 的 `node-version`、esbuild 的 `--target=node24` 是**同一个数**） | 用户自己装，`node`（Windows 上是 `node.exe`）出现在 `PATH` 上 | 表现为「启动 sidecar 失败」 |
+| Node.js >= 24（与根 `package.json` 的 `engines.node`、CI 的 `node-version`、esbuild 的 `--target=node24` 是**同一个数**） | 用户自己装，`node`（Windows 上是 `node.exe`）出现在 `PATH` 上 | 启动前执行有 5 秒上限的 `node --version`；缺失、过旧或输出不可解析时给出 `nodejs.org` 与可选的 `YUKINAL_NODE` 路径 |
 | WebView2 运行时（Windows） | Windows 10/11 一般自带；安装程序默认 `downloadBootstrapper`，即安装时联网下载引导程序 | 窗口起不来 |
 | webkit2gtk-4.1 / GTK3（Linux） | 见下面的已知缺口 | 窗口起不来 |
 
@@ -49,7 +49,7 @@ pnpm run package           # 契约库 -> agent 单文件 -> 打包契约 -> tau
 no agent bundle to launch (searched <它找过的每一个路径>); run `pnpm --filter @yukinal/agent build`
 ```
 
-`searched` 里包含打包路径，所以用户和排查的人都能看见它到底去哪儿找过 —— 有一条测试专门钉住这一点。**没做到的**：`node` 本身不存在或版本过旧时**没有**版本探测。这是 ADR 0013 的知情决定（每一次启动都多起一个进程做 `node --version`，而且仍然抓不到「装了但太旧」，那种情况表现为 stderr 上的一行解析错误加退出码），代价是缺 Node 时用户看到的是系统那句启动失败，而不是一条指名 `nodejs.org` 与 `YUKINAL_NODE` 的消息。
+`searched` 里包含打包路径，所以用户和排查的人都能看见它到底去哪儿找过 —— 有一条测试专门钉住这一点。`node` 本身完全不存在时，启动错误会直接点名最低版本、`nodejs.org` 与 `YUKINAL_NODE`。仍然**不做** `node --version` 预检，这是 ADR 0013 的知情决定（每次启动都多起一个进程，而且仍抓不到“装了但太旧”）；因此已安装的错误版本可能表现为 stderr 上的一行解析错误加退出码。
 
 ## 运行时会用到的路径与开关
 
@@ -97,4 +97,4 @@ pnpm --filter @yukinal/desktop icon     # 即 tauri icon design/app-icon.png
 - 所有产物**未签名**：没有 macOS 签名身份与公证，没有 Windows 代码签名证书。macOS 上首次打开需要右键「打开」，Windows 上 SmartScreen 会提示「未知发布者」。没有更新器，升级靠重新下载安装包。
 - **已核对**：`tauri.conf.json` 通过 Tauri CLI 自带的 `config.schema.json` 校验；`bundle.icon` 列的图标都在；`tauri icon` 能重现提交的图标（`icon.icns` 例外见上）；agent 单文件能在没有 `node_modules` 的目录里按协议应答；门禁每次复查资源映射、目标平台、图标与构建顺序；Windows 上的 `pnpm package` 已完整跑通并产出上述两份安装程序。
 - **没跑过**：**装完之后应用能否真的拉起 sidecar** —— 安装包产出过，但没有真的安装并启动验证过。macOS 的 `.app`/`.dmg`、Linux 的 `.deb`/`.rpm`/`.AppImage` 连构建都没有在本仓库执行过（本机是 Windows）。
-- **`.deb` / `.rpm` 的 `Depends:` 是空的。** 打包器不会自动补 `libwebkit2gtk-4.1-0` / `libgtk-3-0`，依赖由发行版自己满足。包名逐发行版不同，在没装过的环境里无法核实，所以这一项是**记下来**，不是填一个猜的名字——写错了会让安装直接失败，比现在这种「装得上但起不来」更难查。
+- **`.deb` / `.rpm` 已声明依赖基线，但没有在干净发行版中安装验证。** Debian 配置声明 `libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37` 与 `libgtk-3-0 | libgtk-3-0t64`；RPM 配置声明 `webkit2gtk4.1` 与 `gtk3`。打包契约会拒绝空的依赖表，但跨发行版包名和版本仍只能在对应环境安装后确认。

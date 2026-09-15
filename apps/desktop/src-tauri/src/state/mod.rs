@@ -15,6 +15,12 @@ use yukinal_credentials::os::OsCredentialStore;
 use yukinal_database::Database;
 use yukinal_ssh::RusshBackend;
 
+mod auth;
+mod oauth;
+
+pub use auth::AuthChallengeBroker;
+pub use oauth::OAuthFlowBroker;
+
 pub struct AppState {
     pub supervisor: Supervisor,
     /// SQLite（servers / identities / provider_configs / tool_executions …）。
@@ -24,6 +30,10 @@ pub struct AppState {
     pub ssh: Arc<RusshBackend>,
     /// PTY Manager（terminal_open/write/resize/close + 事件广播）。
     pub terminals: TerminalService,
+    /// One-shot SSH keyboard-interactive challenges and responses.
+    pub auth: AuthChallengeBroker,
+    /// In-flight MCP OAuth authorizations, so the UI can stop one it started.
+    pub oauth: OAuthFlowBroker,
     /// MCP 服务进程（ADR 0014）。与 sidecar 的 `Supervisor` 并列：sidecar 管**一个**进程，
     /// MCP 管**多个**，两者由同一个 crate 负责，谁派生进程这件事仍然只有 Rust。
     pub mcp: McpSupervisor,
@@ -45,6 +55,9 @@ impl AppState {
             credentials: Arc::new(OsCredentialStore),
             ssh,
             terminals,
+            auth: AuthChallengeBroker::new(),
+            // 空的：授权流程只在用户按下「连接 OAuth」时存在，装配阶段不派生轮询。
+            oauth: OAuthFlowBroker::new(),
             // 空 supervisor：**不在这里**启动任何 MCP 服务器。启动第三方进程是用户按下的
             // 动作（`mcp_server_start`），或者第一次要目录时（`mcp::catalog`，只对从未启动
             // 过的服务器）。装配阶段派生进程会让「打开应用」变成一次副作用。

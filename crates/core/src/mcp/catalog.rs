@@ -15,20 +15,59 @@
 //!   **不被重启**（重启可能把上一次的副作用再执行一遍，ADR 0014）；
 //! - 总等待时间不超过 [`CATALOG_START_BUDGET`]。
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use yukinal_database::models::McpServerConfig;
 use yukinal_database::Database;
+use yukinal_net::OutboundProxy;
 
-use super::config::{McpStdioConfig, DEFAULT_REQUEST_TIMEOUT};
+use crate::supervisor::RestartRecord;
+
+use super::config::{McpTransportConfig, DEFAULT_REQUEST_TIMEOUT};
 use super::descriptor::{
     internal_tool_name, is_segment, McpExitRecord, McpToolDescriptor, MCP_NAMESPACE,
 };
 use super::error::McpError;
+use super::oauth::{McpOAuthSourceConfig, McpOAuthTokenSource};
 use super::supervisor::McpSupervisor;
+use super::truncated;
+
+/// Resolves a stored credential reference without making the MCP core own the
+/// operating-system credential backend.
+pub trait McpCredentialResolver: Send + Sync {
+    fn resolve(&self, reference: &str) -> Result<String, String>;
+
+    /// Build the host-owned OAuth token source. Core never reads or writes the
+    /// credential store itself; deployments without OAuth reject this path.
+    fn oauth_source(
+        &self,
+        _config: &McpOAuthSourceConfig,
+    ) -> Result<Arc<dyn McpOAuthTokenSource>, String> {
+        Err("OAuth token sources are unavailable on this path".to_string())
+    }
+
+    /// 出站代理（ADR 0022）。
+    ///
+    /// 这是**应用级**设置，不是每台服务器一份；默认直连，所以没有这一项的部署（测试、
+    /// 嵌入式用法）行为一字不变。宿主实现它时会同时把凭据从系统凭据库取出来。
+    fn outbound_proxy(&self) -> Result<OutboundProxy, String> {
+        Ok(OutboundProxy::default())
+    }
+}
+
+struct NoCredentialResolver;
+
+impl McpCredentialResolver for NoCredentialResolver {
+    fn resolve(&self, reference: &str) -> Result<String, String> {
+        Err(format!(
+            "MCP credential `{reference}` cannot be resolved on this path"
+        ))
+    }
+}
 
 /// 目录请求最多为「启动一个从未启动过的服务器」等多久（总量，不是每个服务器）。
 ///
@@ -39,16 +78,13 @@ use super::supervisor::McpSupervisor;
 pub const CATALOG_START_BUDGET: Duration = Duration::from_secs(4);
 
 /// 一个 MCP 服务器「为什么不能用」。码是给分支用的，消息是给人看的。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpFailureCode {
-    /// `http` 传输：类型层面就不存在（docs/boundaries/mcp.md 的「进程生命周期仍然归 Rust」）。不仅仅是「没实现」，而是目前没有
-    /// 任何出站网络策略可以让它成立。
-    TransportNotImplemented,
     Disabled,
     InvalidConfig,
     LaunchFailed,
-    /// 进程死了。**不会被自动重启**。
+    /// The process exited. Bounded automatic recovery may be pending or exhausted.
     Exited,
     Timeout,
     RequestFailed,
@@ -62,8 +98,7 @@ impl McpFailureCode {
     /// 只按名字用单个取值，从不遍历。不加 `cfg(test)` 的话 lib target 会（正确地）报它
     /// 从未被使用。
     #[cfg(test)]
-    pub const ALL: [Self; 7] = [
-        Self::TransportNotImplemented,
+    pub const ALL: [Self; 6] = [
         Self::Disabled,
         Self::InvalidConfig,
         Self::LaunchFailed,
@@ -77,11 +112,11 @@ impl McpFailureCode {
     #[must_use]
     pub fn of(error: &McpError) -> Self {
         match error {
-            McpError::TransportNotImplemented { .. } | McpError::UnsupportedTransport { .. } => {
-                Self::TransportNotImplemented
-            }
+            McpError::UnsupportedTransport { .. } => Self::InvalidConfig,
             McpError::Disabled { .. } => Self::Disabled,
             McpError::MissingCommand { .. }
+            | McpError::MissingUrl { .. }
+            | McpError::InvalidUrl { .. }
             | McpError::InvalidConfig { .. }
             | McpError::InvalidToolName { .. }
             | McpError::ToolNameCollision { .. }
@@ -91,8 +126,12 @@ impl McpFailureCode {
             | McpError::Protocol { .. } => Self::InvalidConfig,
             McpError::Launch { .. } => Self::LaunchFailed,
             McpError::Exited { .. } | McpError::NotRunning { .. } => Self::Exited,
+            McpError::Cancelled { .. } => Self::RequestFailed,
             McpError::Timeout { .. } => Self::Timeout,
-            McpError::Remote { .. } | McpError::Write { .. } => Self::RequestFailed,
+            McpError::Remote { .. } | McpError::Write { .. } | McpError::Http { .. } => {
+                Self::RequestFailed
+            }
+            McpError::OAuth { .. } => Self::RequestFailed,
         }
     }
 }
@@ -153,16 +192,32 @@ pub async fn catalog(
     database: &Database,
     supervisor: &McpSupervisor,
 ) -> Result<McpCatalogResponse, String> {
+    catalog_with_credentials(database, supervisor, &NoCredentialResolver).await
+}
+
+/// Same catalog with an explicit credential resolver used only for HTTP auth.
+pub async fn catalog_with_credentials(
+    database: &Database,
+    supervisor: &McpSupervisor,
+    credentials: &dyn McpCredentialResolver,
+) -> Result<McpCatalogResponse, String> {
     let rows = database
         .mcp_servers()
         .list()
         .map_err(|error| format!("读取 MCP 服务器列表失败：{error}"))?;
 
     let mut failures = Vec::new();
-    let mut candidates: Vec<(McpServerConfig, McpStdioConfig)> = Vec::new();
+    let mut candidates: Vec<(McpServerConfig, McpTransportConfig)> = Vec::new();
     for row in rows.into_iter().filter(|row| row.enabled) {
-        match McpStdioConfig::from_server_config(&row, DEFAULT_REQUEST_TIMEOUT) {
-            Ok(config) => candidates.push((row, config)),
+        match McpTransportConfig::from_server_config(&row, DEFAULT_REQUEST_TIMEOUT) {
+            Ok(mut config) => match attach_http_auth(&row, &mut config, credentials) {
+                Ok(()) => candidates.push((row, config)),
+                Err(error) => failures.push(McpCatalogFailure {
+                    server_id: row.id.clone(),
+                    code: McpFailureCode::of(&error),
+                    message: error.to_string(),
+                }),
+            },
             Err(error) => failures.push(McpCatalogFailure {
                 server_id: row.id.clone(),
                 code: McpFailureCode::of(&error),
@@ -179,7 +234,7 @@ pub async fn catalog(
     candidates.retain(|(row, config)| {
         if let Some((_, first)) = seen_segments
             .iter()
-            .find(|(segment, _)| segment == &config.segment)
+            .find(|(segment, _)| segment == config.segment())
         {
             failures.push(McpCatalogFailure {
                 server_id: row.id.clone(),
@@ -188,12 +243,14 @@ pub async fn catalog(
                     "mcp server \"{}\" normalizes to the same internal name segment \"{}\" as \
                      \"{first}\"; only one of them can be addressed as \
                      \"{MCP_NAMESPACE}.{}.<tool>\" (ADR 0004). Rename one of them.",
-                    row.id, config.segment, config.segment
+                    row.id,
+                    config.segment(),
+                    config.segment()
                 ),
             });
             return false;
         }
-        seen_segments.push((config.segment.clone(), row.id.clone()));
+        seen_segments.push((config.segment().to_string(), row.id.clone()));
         true
     });
 
@@ -204,19 +261,23 @@ pub async fn catalog(
             Some(handle) if handle.is_running() => {
                 servers.push(catalog_server(&row, &config, handle.tools(), &mut failures));
             }
-            // 管过但没在跑：崩了。**不重启**，把退出记录交出去（ADR 0014）。
-            Some(handle) => failures.push(McpCatalogFailure {
-                server_id: row.id.clone(),
-                code: McpFailureCode::Exited,
-                message: describe_dead(&row.id, handle.last_exit()),
-            }),
+            // 管过但没在跑：崩溃记录与当前恢复尝试一起交出去。后台恢复会按有界
+            // 退避重建进程；这里不等待它，也不把「正在恢复」说成已经可用。
+            Some(handle) => {
+                let status = supervisor.status(&row.id).await;
+                failures.push(McpCatalogFailure {
+                    server_id: row.id.clone(),
+                    code: McpFailureCode::Exited,
+                    message: describe_dead(&row.id, handle.last_exit(), status.restart),
+                });
+            }
             None => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     failures.push(budget_exhausted(&row.id));
                     continue;
                 }
-                match tokio::time::timeout(remaining, supervisor.start(&config)).await {
+                match tokio::time::timeout(remaining, supervisor.start_transport(&config)).await {
                     Ok(Ok(_)) => {
                         let tools = supervisor.tools(&row.id).await;
                         servers.push(catalog_server(&row, &config, tools, &mut failures));
@@ -235,6 +296,117 @@ pub async fn catalog(
     Ok(McpCatalogResponse { servers, failures })
 }
 
+fn attach_http_auth(
+    row: &McpServerConfig,
+    config: &mut McpTransportConfig,
+    credentials: &dyn McpCredentialResolver,
+) -> Result<(), McpError> {
+    match config {
+        McpTransportConfig::Stdio(_) if !row.http_auth_headers.is_empty() => {
+            Err(McpError::InvalidConfig {
+                server_id: truncated(&row.id),
+                reason: "stdio transport cannot carry HTTP authentication settings".to_string(),
+            })
+        }
+        McpTransportConfig::Stdio(_) if row.oauth.is_some() => Err(McpError::InvalidConfig {
+            server_id: truncated(&row.id),
+            reason: "stdio transport cannot carry OAuth authentication settings".to_string(),
+        }),
+        McpTransportConfig::Stdio(_) => Ok(()),
+        McpTransportConfig::Http(http) => {
+            // 代理先落地：它在 URL 校验之后、任何请求之前，而且「读到了却用不了」的代理
+            // 配置必须在这里失败（`McpHttpHandle::new` 会把它变成启动错误）。
+            let outbound =
+                credentials
+                    .outbound_proxy()
+                    .map_err(|reason| McpError::InvalidConfig {
+                        server_id: truncated(&row.id),
+                        reason,
+                    })?;
+            let mut next = http
+                .clone()
+                .with_proxy(outbound.proxy.clone(), outbound.credential.clone());
+            for header in &row.http_auth_headers {
+                if header.name.trim().is_empty() || header.credential_ref.trim().is_empty() {
+                    return Err(McpError::InvalidConfig {
+                        server_id: truncated(&row.id),
+                        reason:
+                            "HTTP authentication headers require a name and credential reference"
+                                .to_string(),
+                    });
+                }
+                let secret = credentials
+                    .resolve(&header.credential_ref)
+                    .map_err(|reason| McpError::InvalidConfig {
+                        server_id: truncated(&row.id),
+                        reason: format!(
+                            "could not resolve HTTP authentication credential: {reason}"
+                        ),
+                    })?;
+                next = next.with_auth_header(&header.name, &secret)?;
+            }
+            if let Some(oauth) = &row.oauth {
+                // A secret method without a stored secret cannot authenticate at all, so it
+                // is refused here rather than failing later with a token request that the
+                // server reads as an empty credential.
+                if oauth.client_auth.needs_secret() && oauth.client_secret_ref.is_none() {
+                    return Err(McpError::InvalidConfig {
+                        server_id: truncated(&row.id),
+                        reason: "OAuth uses client secret authentication but no secret is stored"
+                            .to_string(),
+                    });
+                }
+                if oauth.client_auth.needs_secret() && oauth.client_id.trim().is_empty() {
+                    return Err(McpError::InvalidConfig {
+                        server_id: truncated(&row.id),
+                        reason: "client secret authentication needs a hand-filled client id"
+                            .to_string(),
+                    });
+                }
+                let token_endpoint =
+                    oauth
+                        .token_endpoint
+                        .as_deref()
+                        .ok_or_else(|| McpError::InvalidConfig {
+                            server_id: truncated(&row.id),
+                            reason: "OAuth is not connected: no token endpoint is stored"
+                                .to_string(),
+                        })?;
+                let credential_ref =
+                    oauth
+                        .credential_ref
+                        .as_deref()
+                        .ok_or_else(|| McpError::InvalidConfig {
+                            server_id: truncated(&row.id),
+                            reason: "OAuth is not connected: no token credential is stored"
+                                .to_string(),
+                        })?;
+                let source = credentials
+                    .oauth_source(&McpOAuthSourceConfig {
+                        server_id: row.id.clone(),
+                        resource: next.url.clone(),
+                        token_endpoint: token_endpoint.to_string(),
+                        client_id: oauth.client_id.clone(),
+                        client_auth: oauth.client_auth,
+                        client_secret_ref: oauth.client_secret_ref.clone(),
+                        dpop_key_ref: oauth.dpop_key_ref.clone(),
+                        // token 请求与资源请求走同一条路：同一份解析结果，不各查一次环境变量。
+                        proxy: outbound.clone(),
+                        scopes: oauth.scopes.clone(),
+                        credential_ref: credential_ref.to_string(),
+                    })
+                    .map_err(|reason| McpError::OAuth {
+                        server_id: truncated(&row.id),
+                        reason,
+                    })?;
+                next = next.with_oauth_source(source)?;
+            }
+            *http = next;
+            Ok(())
+        }
+    }
+}
+
 fn budget_exhausted(server_id: &str) -> McpCatalogFailure {
     McpCatalogFailure {
         server_id: server_id.to_string(),
@@ -248,13 +420,22 @@ fn budget_exhausted(server_id: &str) -> McpCatalogFailure {
 
 fn catalog_server(
     row: &McpServerConfig,
-    config: &McpStdioConfig,
+    config: &McpTransportConfig,
     descriptors: Vec<McpToolDescriptor>,
     failures: &mut Vec<McpCatalogFailure>,
 ) -> McpCatalogServer {
     let mut tools = Vec::with_capacity(descriptors.len());
     for descriptor in descriptors {
-        match internal_tool_name(&config.segment, &descriptor.name) {
+        // Registration is not trust. Only a deliberate review decision can expose a
+        // third-party tool to the model; the permission engine still asks per call.
+        if !row
+            .allowed_tools
+            .iter()
+            .any(|allowed| allowed == &descriptor.name)
+        {
+            continue;
+        }
+        match internal_tool_name(config.segment(), &descriptor.name) {
             Ok(name) => tools.push(McpCatalogTool {
                 name,
                 server_id: row.id.clone(),
@@ -275,7 +456,7 @@ fn catalog_server(
     }
     McpCatalogServer {
         server_id: row.id.clone(),
-        segment: config.segment.clone(),
+        segment: config.segment().to_string(),
         label: row.label.clone(),
         tools,
     }
@@ -304,17 +485,32 @@ pub fn split_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 
 /// 崩掉的服务器要说的那一句：退出记录 + 「不会自己回来」+ 下一步。
 #[must_use]
-pub fn describe_dead(server_id: &str, exit: Option<McpExitRecord>) -> String {
+pub fn describe_dead(
+    server_id: &str,
+    exit: Option<McpExitRecord>,
+    restart: Option<RestartRecord>,
+) -> String {
+    let recovery = match restart {
+        Some(record) if record.exhausted => format!(
+            "automatic recovery stopped after {}/{} attempts",
+            record.attempt, record.max_attempts
+        ),
+        Some(record) => format!(
+            "automatic recovery attempt {}/{} is pending",
+            record.attempt, record.max_attempts
+        ),
+        None => "automatic recovery has not started".to_string(),
+    };
     match exit {
         Some(record) => format!(
-            "mcp server \"{server_id}\" exited ({}) at {} and is deliberately not restarted: a \
-             restart can re-execute side effects. Start it explicitly if you want it back.",
+            "mcp server \"{server_id}\" exited ({}) at {}; {recovery}. Recovery only rebuilds \
+             the process and tool catalog; it never replays the interrupted call.",
             record.reason(),
             record.at
         ),
         None => format!(
-            "mcp server \"{server_id}\" is not running and will not be restarted automatically; \
-             start it explicitly if you want it back"
+            "mcp server \"{server_id}\" is not running; {recovery}. Recovery only rebuilds the \
+             process and tool catalog; it never replays the interrupted call"
         ),
     }
 }
@@ -327,6 +523,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::mcp::McpOAuthFuture;
 
     /* ── 测试脚手架 ───────────────────────────────────────────────────────── */
 
@@ -397,7 +594,9 @@ mod tests {
 
     /// fixture 行：把已提交的 Node MCP 服务进程真的跑起来。
     fn fixture_row(id: &str, mode: &str, enabled: bool) -> McpServerConfig {
-        let node = node_path().expect("the caller asked for the node path first");
+        // Disabled/collision tests never launch this row, so they must not require
+        // a Node installation merely to construct a stored fixture.
+        let node = node_path().unwrap_or_else(|| PathBuf::from("node"));
         McpServerConfig {
             id: id.to_string(),
             label: format!("fixture {mode}"),
@@ -408,8 +607,10 @@ mod tests {
                 mode.to_string(),
             ]),
             url: None,
+            http_auth_headers: Vec::new(),
+            oauth: None,
             enabled,
-            allowed_tools: Vec::new(),
+            allowed_tools: vec!["echo".to_string(), "explode".to_string()],
             trust_level: "unreviewed".to_string(),
         }
     }
@@ -437,10 +638,6 @@ mod tests {
     #[test]
     fn every_failure_code_is_in_the_published_list() {
         let errors = [
-            McpError::TransportNotImplemented {
-                server_id: "s".into(),
-                transport: "http".into(),
-            },
             McpError::UnsupportedTransport {
                 server_id: "s".into(),
                 transport: "sse".into(),
@@ -526,7 +723,6 @@ mod tests {
         assert_eq!(
             words,
             vec![
-                "transport_not_implemented",
                 "disabled",
                 "invalid_config",
                 "launch_failed",
@@ -606,6 +802,145 @@ mod tests {
         cleanup(&path);
     }
 
+    #[test]
+    fn catalog_resolves_http_auth_at_the_start_boundary() {
+        struct Resolver;
+
+        impl McpCredentialResolver for Resolver {
+            fn resolve(&self, reference: &str) -> Result<String, String> {
+                match reference {
+                    "keychain://mcp/test-1" => Ok("Bearer first-secret".to_string()),
+                    "keychain://mcp/test-2" => Ok("gateway-secret".to_string()),
+                    other => panic!("unexpected credential reference {other}"),
+                }
+            }
+        }
+
+        let mut row = fixture_row("mcp_http", "ok", true);
+        row.transport = "http".to_string();
+        row.command = None;
+        row.args = None;
+        row.url = Some("https://example.invalid/mcp".to_string());
+        row.http_auth_headers = vec![
+            yukinal_database::models::McpHttpAuthHeaderConfig {
+                name: "Authorization".to_string(),
+                credential_ref: "keychain://mcp/test-1".to_string(),
+            },
+            yukinal_database::models::McpHttpAuthHeaderConfig {
+                name: "X-Gateway-Key".to_string(),
+                credential_ref: "keychain://mcp/test-2".to_string(),
+            },
+        ];
+
+        let mut config =
+            McpTransportConfig::from_server_config(&row, DEFAULT_REQUEST_TIMEOUT).expect("HTTP");
+        attach_http_auth(&row, &mut config, &Resolver).expect("resolved credential");
+        let McpTransportConfig::Http(http) = config else {
+            panic!("the dispatcher must retain the HTTP transport");
+        };
+        assert_eq!(http.auth_headers.len(), 2);
+        assert_eq!(http.auth_headers[0].name(), "Authorization");
+        assert_eq!(http.auth_headers[0].value(), "Bearer first-secret");
+        assert_eq!(http.auth_headers[1].name(), "X-Gateway-Key");
+        assert_eq!(http.auth_headers[1].value(), "gateway-secret");
+        assert!(!format!("{http:?}").contains("gateway-secret"));
+    }
+
+    #[test]
+    fn catalog_reports_a_missing_http_credential_without_starting() {
+        struct Resolver;
+
+        impl McpCredentialResolver for Resolver {
+            fn resolve(&self, _reference: &str) -> Result<String, String> {
+                Err("not found".to_string())
+            }
+        }
+
+        let mut row = fixture_row("mcp_http", "ok", true);
+        row.transport = "http".to_string();
+        row.command = None;
+        row.args = None;
+        row.url = Some("https://example.invalid/mcp".to_string());
+        row.http_auth_headers = vec![yukinal_database::models::McpHttpAuthHeaderConfig {
+            name: "Authorization".to_string(),
+            credential_ref: "keychain://mcp/missing".to_string(),
+        }];
+
+        let mut config =
+            McpTransportConfig::from_server_config(&row, DEFAULT_REQUEST_TIMEOUT).expect("HTTP");
+        let error = attach_http_auth(&row, &mut config, &Resolver)
+            .expect_err("an unresolved credential must fail closed");
+        assert!(matches!(error, McpError::InvalidConfig { .. }), "{error:?}");
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn catalog_builds_oauth_sources_at_the_start_boundary() {
+        struct Source;
+
+        impl McpOAuthTokenSource for Source {
+            fn authorization<'a>(
+                &'a self,
+                _request: crate::mcp::McpAuthorizationRequest,
+            ) -> McpOAuthFuture<'a, crate::mcp::McpAuthorization> {
+                Box::pin(async {
+                    Ok(crate::mcp::McpAuthorization {
+                        scheme: crate::mcp::McpAuthScheme::Bearer,
+                        token: "oauth-token".to_string(),
+                        proof: None,
+                    })
+                })
+            }
+        }
+
+        struct Resolver;
+
+        impl McpCredentialResolver for Resolver {
+            fn resolve(&self, _reference: &str) -> Result<String, String> {
+                Err("not used".to_string())
+            }
+
+            fn oauth_source(
+                &self,
+                config: &McpOAuthSourceConfig,
+            ) -> Result<Arc<dyn McpOAuthTokenSource>, String> {
+                assert_eq!(config.server_id, "mcp_oauth");
+                assert_eq!(config.resource, "https://example.invalid/mcp");
+                assert_eq!(config.token_endpoint, "https://auth.example.invalid/token");
+                assert_eq!(config.client_id, "desktop-client");
+                assert_eq!(config.scopes, vec!["mcp.read"]);
+                assert_eq!(config.credential_ref, "keychain://mcp/oauth");
+                Ok(Arc::new(Source))
+            }
+        }
+
+        let mut row = fixture_row("mcp_oauth", "ok", true);
+        row.transport = "http".to_string();
+        row.command = None;
+        row.args = None;
+        row.url = Some("https://example.invalid/mcp".to_string());
+        row.oauth = Some(yukinal_database::models::McpOAuthConfig {
+            issuer: "https://auth.example.invalid".to_string(),
+            client_id: "desktop-client".to_string(),
+            flow: yukinal_database::models::McpOAuthFlow::AuthorizationCode,
+            client_auth: yukinal_database::models::McpOAuthClientAuth::None,
+            client_secret_ref: None,
+            dpop: false,
+            dpop_key_ref: None,
+            scopes: vec!["mcp.read".to_string()],
+            token_endpoint: Some("https://auth.example.invalid/token".to_string()),
+            credential_ref: Some("keychain://mcp/oauth".to_string()),
+        });
+
+        let mut config =
+            McpTransportConfig::from_server_config(&row, DEFAULT_REQUEST_TIMEOUT).expect("HTTP");
+        attach_http_auth(&row, &mut config, &Resolver).expect("OAuth source");
+        let McpTransportConfig::Http(http) = config else {
+            panic!("the dispatcher must retain the HTTP transport");
+        };
+        assert!(http.oauth.is_some());
+    }
+
     /* ── 真进程：目录会启动一个从未启动过的服务器 ─────────────────────────── */
 
     /// 目录会启动一个**从未启动过**的服务器，并把 `McpToolDescriptor` 变成
@@ -645,6 +980,31 @@ mod tests {
         cleanup(&path);
     }
 
+    #[tokio::test]
+    async fn only_explicitly_reviewed_tools_enter_the_agent_catalog() {
+        let Some((path, db, supervisor)) = fixture_setup("allow-list", "ok", "mcp_1") else {
+            return;
+        };
+        let mut row = db.mcp_servers().get("mcp_1").expect("fixture row");
+        row.allowed_tools = vec!["echo".to_string()];
+        row.trust_level = "reviewed".to_string();
+        insert(&db, &row);
+
+        let response = catalog(&db, &supervisor).await.expect("catalog");
+        assert_eq!(response.servers.len(), 1);
+        assert_eq!(
+            response.servers[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mcp.mcp-1.echo"],
+            "the unreviewed explode tool must not be exposed to the model"
+        );
+        supervisor.shutdown("mcp_1").await;
+        cleanup(&path);
+    }
+
     /// 目录的预算：一个什么都不答、最后自己退 9 的服务进程不能让目录请求挂住（它是 sidecar
     /// 握手期间唯一会问的东西）。
     #[tokio::test]
@@ -665,6 +1025,8 @@ mod tests {
                     "silent-exit".to_string(),
                 ]),
                 url: None,
+                http_auth_headers: Vec::new(),
+                oauth: None,
                 enabled: true,
                 allowed_tools: Vec::new(),
                 trust_level: "unreviewed".to_string(),

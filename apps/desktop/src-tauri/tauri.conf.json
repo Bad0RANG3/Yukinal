@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: http: https:"
     }
   },
   "bundle": {
@@ -42,6 +42,20 @@
       "resources/agent-package.json": "agent/package.json"
     },
     "category": "DeveloperTool",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
+          "libgtk-3-0 | libgtk-3-0t64"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3"
+        ]
+      }
+    },
     "shortDescription": "AI-native remote development workspace",
     "publisher": "Yukinal contributors",
     "copyright": "MIT licensed"

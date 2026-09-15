@@ -4,6 +4,7 @@ import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { McpSettings } from "./McpSettings.js";
+import { NetworkSettings } from "./NetworkSettings.js";
 import { NEW_PROVIDER_VALUE, ProviderPicker } from "./ProviderPicker.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
@@ -13,8 +14,11 @@ import {
   PROVIDER_KIND_LABEL,
   PROVIDER_KIND_ORDER,
   providerDeleteNotice,
+  providerHeadersText,
   providerKindBaseUrlHint,
+  providerKindUsesApiVersion,
   providerKindUsesWireApi,
+  parseProviderHeaders,
   providerSavePayload,
   useProviders,
 } from "../../lib/providers.js";
@@ -98,6 +102,7 @@ export function RuntimeSettings() {
       </section>
 
       <AppearanceSettings />
+      <NetworkSettings />
       <ProviderSettings />
       {/*
         MCP 放在 Provider 之后：它和 Provider 一样是「把外部能力接进来」，但方向相反 ——
@@ -321,6 +326,8 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
   const [model, setModel] = useState(provider?.model ?? "");
   const [apiKey, setApiKey] = useState("");
   const [wireApi, setWireApi] = useState<"chat" | "responses">(provider?.wireApi ?? "chat");
+  const [apiVersion, setApiVersion] = useState(provider?.apiVersion ?? "");
+  const [customHeadersText, setCustomHeadersText] = useState(providerHeadersText(provider?.customHeaders));
   const [saved, setSaved] = useState(false);
   const modelsId = useId();
   /**
@@ -360,10 +367,12 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       if (!HttpBaseUrlSchema.safeParse(baseUrl).success) {
         throw new Error("Base URL 必须是 http(s) 地址，且不能内嵌账号密码。");
       }
+      const customHeaders = parseProviderHeaders(customHeadersText);
       // payload 形状（kind 必带、wireApi 只在 openai-compatible 出现）由那一个纯函数决定，
       // 而不是在这里写第二遍 —— 它同时被用例钉住。
       return callDesktop(IPC_COMMANDS.providerSave, providerSavePayload({
-        providerId: nextProviderId, kind, label, baseUrl, model, apiKey, wireApi, models,
+        providerId: nextProviderId, kind, label, baseUrl, model, apiKey, wireApi, apiVersion,
+        customHeaders, models,
       }));
     },
     onSuccess: (response) => {
@@ -373,6 +382,8 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       setBaseUrl(response.provider.baseUrl);
       setModel(response.provider.model);
       setApiKey("");
+      setApiVersion(response.provider.apiVersion ?? "");
+      setCustomHeadersText(providerHeadersText(response.provider.customHeaders));
       setSaved(true);
       onSaved(response);
     },
@@ -397,6 +408,8 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
               显示一个没有作用的控件比不显示更糟（它会让人以为这可以配）。
             */}
             {providerKindUsesWireApi(kind) ? <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
+            {providerKindUsesApiVersion(kind) ? <Field label="Anthropic Version"><input className="form-input" value={apiVersion} onChange={(event) => setApiVersion(event.target.value)} placeholder="2023-06-01（留空使用适配器默认值）" spellCheck={false} /></Field> : null}
+            <Field label="自定义请求头" className="field-wide"><textarea className="form-input" rows={3} value={customHeadersText} onChange={(event) => setCustomHeadersText(event.target.value)} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
             <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
           </div>
         </fieldset>

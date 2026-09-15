@@ -73,8 +73,6 @@ export type HostContextResponse =
  * `HOST_CONTEXT_KINDS`: `z.enum` needs a value at runtime.
  */
 export const MCP_CATALOG_FAILURE_CODES = [
-  /** An `http` server. Refused at the type level in Rust: there is no outbound network policy. */
-  "transport_not_implemented",
   "disabled",
   "invalid_config",
   "launch_failed",

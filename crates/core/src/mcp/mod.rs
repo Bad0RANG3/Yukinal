@@ -9,11 +9,12 @@
 //!
 //! # 它是什么
 //!
-//! - [`McpStdioConfig`]：**启动什么**（[`config`]），以及 `http` 被拒绝的那条路。
+//! - [`McpTransportConfig`]：**连接什么**（[`config`]），在 stdio 进程与 Streamable HTTP
+//!   会话之间明确分流。
 //! - [`descriptor`]：名字规则与本地类型 —— 远端拼写必须先变成合法段，才准进注册表。
 //! - [`wire`]：线协议（一行一帧的 JSON-RPC 2.0）、版本协商、三个方法的形状。
-//! - `handle`：[`McpServerHandle`] —— **一个**服务进程：握手、`tools/list`、`tools/call`、
-//!   每次请求的超时、退出记录、有界的 stderr 尾部。
+//! - `handle`：[`McpServerHandle`] —— **一个** stdio 进程或 HTTP 会话：握手、`tools/list`、
+//!   `tools/call`、每次请求的超时、退出记录与有界诊断。
 //! - `supervisor`：[`McpSupervisor`] —— 按 serverId 记账：一个 serverId 一个进程、启动串行化、
 //!   状态与关闭。
 //! - `error`：[`McpError`] —— 每一个变体对应一件调用方能**分别处理**的事。
@@ -25,19 +26,18 @@
 //!   （`kill_on_drop`）。关闭时先关 stdin（MCP stdio 的体面退出就是 EOF），等一个有界的
 //!   宽限期；服务端不理会，就升级到强杀，再等一个有界的宽限期，然后如实上报「没能确认它
 //!   消失」，而不是无限等下去。孤儿进程不可接受，卡死也不可接受，这两件事都要有预算。
-//! - **崩了不自愈**：进程死了就是死了。工具随之不可用，失败如实上报（退出码/信号留在
-//!   [`McpServerStatus::last_exit`]），并且**不会自动重启**。sidecar 有重启预算
-//!   （[`crate::supervisor`]），MCP 服务没有：一个第三方进程崩溃后，宿主替它重新拉起来
-//!   等于把一个未知状态的进程放回工具表里；要不要再来一次是用户/上层显式按下的动作。
+//! - **崩溃有界自愈**：意外退出会留下退出记录（[`McpServerStatus::last_exit`]），并由
+//!   [`McpSupervisor`] 按 sidecar 同样的退避预算重建进程与工具目录。恢复**不重放**中断的
+//!   调用，预算耗尽后停在可见的 `restart.exhausted` 状态，等待用户显式启动。
 //! - **超时**：`initialize` / `tools/list` / `tools/call` 每一次调用都带超时。超时是一个
 //!   **独立于「进程死了」的错误**（[`McpError::Timeout`] vs [`McpError::Exited`]）：
 //!   前者可以换服务器或重试，后者不能。
 //!
 //! # 它刻意不做什么
 //!
-//! - **不做 `http` 传输**（docs/boundaries/mcp.md 的「进程生命周期仍然归 Rust」）：出站网络策略还不存在，
-//!   所以 [`McpStdioConfig`] 根本无法表示 http —— 拒绝发生在 `from_server_config`，
-//!   类型本身就是那道闸门。
+//! - **HTTP 只使用显式 URL，凭据不进入 URL**：远程端点必须 HTTPS，明文 HTTP 仅限回环地址；
+//!   URL 不接受内嵌凭据、查询参数或 fragment，redirect 被关闭。可配置一条静态认证头，
+//!   secret 由宿主凭据库解析；OAuth、token 刷新、多认证头与动态签名不在当前配置契约内。
 //! - **不注册工具**：把 MCP 工具变成 `ToolDeclaration`、定风险等级、跑 Provider 名称冲突
 //!   检查，都是适配器与 ToolRegistry 的事；这里只交出经校验的描述符
 //!   （docs/boundaries/mcp.md 的「外部工具必须先变成 Yukinal 的工具声明」「命名空间与名称冲突」
@@ -57,8 +57,8 @@
 //! - **不处理 `notifications/tools/list_changed`**：工具表变化意味着重新注册，属于适配器
 //!   （docs/boundaries/mcp.md 的「外部工具必须先变成 Yukinal 的工具声明」）；本模块只把它记进诊断尾部，
 //!   缓存不刷新。
-//! - **不假装能自动重启**：崩掉的服务端就是崩了，退出记录与诊断尾部说明怎么死的；重启
-//!   一次可能把上一次的副作用再执行一遍。恢复由用户决定。
+//! - **不重放已中断调用**：自动恢复只会重新启动进程并读取工具目录；已经发给旧进程的调用
+//!   不会再次发送。
 //! - **脱敏之后才能出门**：stderr 尾部、诊断尾部与远端错误文本都是给排障用的子进程输出，
 //!   但它们来自一个我们并不信任的进程，所以一律先截断、再经 [`crate::redact`] 过滤
 //!   （与 sidecar 转发日志用的是同一份实现）。工具**描述**是例外：那是要交给模型的输入，
@@ -69,15 +69,20 @@ mod config;
 mod descriptor;
 mod error;
 mod handle;
+mod http;
+mod oauth;
 mod supervisor;
+mod transport;
 mod wire;
 
 pub use catalog::{
-    catalog, describe_dead, is_mcp_tool_name, split_mcp_tool_name, McpCatalogFailure,
-    McpCatalogResponse, McpCatalogServer, McpCatalogTool, McpFailureCode, CATALOG_START_BUDGET,
+    catalog, catalog_with_credentials, describe_dead, is_mcp_tool_name, split_mcp_tool_name,
+    McpCatalogFailure, McpCatalogResponse, McpCatalogServer, McpCatalogTool, McpCredentialResolver,
+    McpFailureCode, CATALOG_START_BUDGET,
 };
 pub use config::{
-    McpStdioConfig, DEFAULT_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT,
+    validate_oauth_url, McpHttpAuthHeader, McpHttpConfig, McpStdioConfig, McpTransportConfig,
+    DEFAULT_REQUEST_TIMEOUT, MAX_HTTP_AUTH_HEADERS, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT,
 };
 pub use descriptor::{
     internal_tool_name, is_segment, McpContentBlock, McpExitRecord, McpToolDescriptor,
@@ -85,9 +90,19 @@ pub use descriptor::{
     SEGMENT_PATTERN, TOOL_DESCRIPTION_MAX_CHARS,
 };
 pub use error::McpError;
-pub use handle::{McpServerHandle, McpServerInfo, McpServerStart, McpServerStatus, ShutdownReport};
+pub use handle::{McpServerInfo, McpServerStart, McpServerStatus, McpStdioHandle, ShutdownReport};
+pub use oauth::{
+    McpAuthScheme, McpAuthorization, McpAuthorizationRequest, McpOAuthFuture, McpOAuthSourceConfig,
+    McpOAuthTokenSource,
+};
 pub use supervisor::McpSupervisor;
+// 出站代理解析在 `yukinal-net`（`yukinal-ssh` 与桌面宿主用的是同一个值），这里转发一次，
+// 让依赖 core 的地方不必再多认一个 crate。
+pub use transport::McpServerHandle;
 pub use wire::{McpInitialize, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
+pub use yukinal_net::{
+    NetworkProxy, NetworkProxyMode, OutboundProxy, ProxyCredential, ProxySource,
+};
 
 /// 一行不可信文本可以有多长才被记为诊断。
 ///

@@ -21,6 +21,8 @@
  *    的全部意义（第 5 条）。
  * 4. **「遗忘」的后果写在按钮旁边**：下一次连接会回到 TOFU，也就是不核验就自动接受。
  *    它不是一个无害的「清理」动作（ADR 0012 的 Consequences）。
+ * 5. **显式 CA 策略优先于叶子 pin。** CA 模式连接只接受有效 host certificate，不会再查
+ *    `known_hosts`。这时面板必须说清叶子 pin 不参与校验，并禁用只会造成误解的信任/遗忘。
  */
 
 import { useId, useState } from "react";
@@ -39,7 +41,14 @@ const COMPARISON_NOTE: Record<ServerHostKeyProbeResult["comparison"], string> = 
   mismatch: "服务器出示的指纹与已钉住的不一致。",
 };
 
-export function HostKeySection({ serverId }: { serverId: string }) {
+export function HostKeySection({
+  serverId,
+  caPolicyEnabled = false,
+}: {
+  serverId: string;
+  /** 已保存的服务器连接是否启用 CA/principal 校验（未保存的表单草稿不算）。 */
+  caPolicyEnabled?: boolean;
+}) {
   const statusQuery = useHostKeyStatus(serverId);
   const actions = useHostKeyActions(serverId);
   // 「这一次会话里探到的指纹」是界面状态，不是服务端状态：它就是「刚才我真的问过这台
@@ -67,6 +76,7 @@ export function HostKeySection({ serverId }: { serverId: string }) {
       probe={probe}
       busy={actions.busy}
       probing={actions.probe.isPending}
+      caPolicyEnabled={caPolicyEnabled}
       onProbe={() => {
         actions.probe.mutate(undefined, {
           onSuccess: (result) => {
@@ -118,6 +128,8 @@ export interface HostKeyPanelProps {
   busy?: boolean;
   /** 正在探针 —— 与 `busy` 分开：按钮上的「探针中…」不能靠猜是哪一个动作在跑。 */
   probing?: boolean;
+  /** 已保存的服务器连接启用了 CA/principal 校验；叶子指纹不再是信任依据。 */
+  caPolicyEnabled?: boolean;
   onProbe: () => void;
   onTrust: () => void;
   onForget: () => void;
@@ -132,6 +144,7 @@ export function HostKeyPanel({
   probe = null,
   busy = false,
   probing = false,
+  caPolicyEnabled = false,
   onProbe,
   onTrust,
   onForget,
@@ -145,6 +158,12 @@ export function HostKeyPanel({
   const trustBlockedBecause = eligibility.trustable ? null : eligibility.reason;
   const mismatch = probe?.comparison === "mismatch";
   const endpoint = status ? `${status.host}:${status.port}` : "";
+  const trustDisabled = busy || caPolicyEnabled || !eligibility.trustable;
+  const trustDisabledHint = caPolicyEnabled
+    ? CA_POLICY_TRUST_HINT
+    : trustBlockedBecause
+      ? TRUST_DISABLED_HINT[trustBlockedBecause]
+      : undefined;
 
   return (
     <section className="host-key-section" aria-labelledby={titleId}>
@@ -156,33 +175,65 @@ export function HostKeyPanel({
         {status ? <code className="host-key-endpoint">{endpoint}</code> : null}
       </header>
 
+      {caPolicyEnabled ? (
+        <div className="host-key-policy-note" role="note">
+          <Icon name="shield" size="md" />
+          <div>
+            <strong>CA 策略已启用</strong>
+            <p>
+              此服务器连接只接受由已配置 CA 签发、且 principal 匹配的 host certificate。
+              本机保存的叶子 host key 指纹及下面的比较结果不参与校验。
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       {loading ? <p className="form-hint">正在读取本机记录的指纹…</p> : null}
 
       {status ? (
         <div className="host-key-current">
-          <span className="host-key-label">本机钉住的指纹</span>
+          <span className="host-key-label">
+            {caPolicyEnabled ? "本机保存的叶子指纹" : "本机钉住的指纹"}
+          </span>
           {pinned ? (
             <code className="host-key-fingerprint">{pinned}</code>
           ) : (
-            <span className="host-key-unpinned">{UNPINNED_LABEL}</span>
+            <span className="host-key-unpinned">
+              {caPolicyEnabled ? NO_SAVED_LEAF_LABEL : UNPINNED_LABEL}
+            </span>
           )}
           <p className="form-hint">
-            指纹按 <strong>主机:端口</strong> 记录，不按服务器条目记录：同一台机器的另一个
-            条目共用这条钉子。连接时以它为准，不一致即中断。
+            {caPolicyEnabled ? (
+              <>
+                这条 known_hosts 记录只是历史叶子指纹，当前不会影响连接。关闭并保存此服务器的
+                CA 策略后，它才会重新成为 TOFU/匹配校验的钉子。
+              </>
+            ) : (
+              <>
+                指纹按 <strong>主机:端口</strong> 记录，不按服务器条目记录：同一台机器的另一个
+                条目共用这条钉子。连接时以它为准，不一致即中断。
+              </>
+            )}
           </p>
         </div>
       ) : null}
 
       {probe ? (
-        <div className={mismatch ? "host-key-compare host-key-compare-mismatch" : "host-key-compare"}>
+        <div className={mismatch && !caPolicyEnabled ? "host-key-compare host-key-compare-mismatch" : "host-key-compare"}>
           <div className="host-key-fingerprint-item">
-            <span className="host-key-label">服务器出示的指纹</span>
+            <span className="host-key-label">
+              {caPolicyEnabled ? "服务器出示的叶子指纹" : "服务器出示的指纹"}
+            </span>
             <code className="host-key-fingerprint">{probe.presentedFingerprint}</code>
             {/* 这一行永远不会说「已验证」：出示不等于可信（ADR 0012 第 4 条）。 */}
-            <p className="form-hint">这是它自己说的，尚未被核验。</p>
+            <p className="form-hint">
+              {caPolicyEnabled
+                ? "仅供查看；当前 CA 策略不使用它与本机叶子记录做信任判断。"
+                : "这是它自己说的，尚未被核验。"}
+            </p>
           </div>
 
-          {probe.pinnedFingerprint ? (
+          {!caPolicyEnabled && probe.pinnedFingerprint ? (
             <div className="host-key-fingerprint-item">
               <span className="host-key-label">本机钉住的指纹</span>
               <code className="host-key-fingerprint">{probe.pinnedFingerprint}</code>
@@ -191,11 +242,13 @@ export function HostKeyPanel({
 
           {/* 这一块本身就叫「不一致」，所以不再单独加 `role="alert"`：下面那段黄色警告
               已经是一次完整播报，两处都 alert 会让读屏用户听到两遍。 */}
-          <p className={mismatch ? "form-error" : "form-hint"}>
-            {COMPARISON_NOTE[probe.comparison]}
-          </p>
+          {!caPolicyEnabled ? (
+            <p className={mismatch ? "form-error" : "form-hint"}>
+              {COMPARISON_NOTE[probe.comparison]}
+            </p>
+          ) : null}
 
-          {mismatch ? (
+          {mismatch && !caPolicyEnabled ? (
             <div className="host-key-warning" role="alert">
               <Icon name="warning" size="md" />
               <p>
@@ -222,39 +275,53 @@ export function HostKeyPanel({
           type="button"
           className="button-primary"
           onClick={onTrust}
-          disabled={busy || !eligibility.trustable}
-          title={trustBlockedBecause ? TRUST_DISABLED_HINT[trustBlockedBecause] : undefined}
+          disabled={trustDisabled}
+          title={trustDisabledHint}
         >
           信任此指纹
         </button>
         {pinned ? (
-          <button type="button" className="button-secondary host-key-forget" onClick={onForget} disabled={busy}>
+          <button
+            type="button"
+            className="button-secondary host-key-forget"
+            onClick={onForget}
+            disabled={busy || caPolicyEnabled}
+            title={caPolicyEnabled ? CA_POLICY_FORGET_HINT : undefined}
+          >
             <Icon name="trash" size="sm" /> 遗忘
           </button>
         ) : null}
       </div>
 
-      <p className="form-hint">
-        「探针」会真的连接一次 {endpoint || "这台服务器"}：只读取它出示的指纹，不发送任何凭据、
-        也不记录任何东西。核对指纹这一步必须由你完成 —— 在服务器上执行
-        <code> ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub </code>
-        （路径随发行版与密钥类型而变，通常是 <code>/etc/ssh/ssh_host_*_key.pub</code>），
-        输出里 <code>SHA256:</code> 开头的那一串应当与上面完全一致。
-      </p>
+      {caPolicyEnabled ? (
+        <p className="form-hint">
+          「探针」仍可查看服务器这次出示的叶子 host key，但连接是否可信由已配置的 CA 公钥、
+          host certificate 有效期与 principal 决定。叶子指纹的信任或遗忘要等关闭并保存 CA
+          策略后才能操作。
+        </p>
+      ) : (
+        <p className="form-hint">
+          「探针」会真的连接一次 {endpoint || "这台服务器"}：只读取它出示的指纹，不发送任何凭据、
+          也不记录任何东西。核对指纹这一步必须由你完成 —— 在服务器上执行
+          <code> ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub </code>
+          （路径随发行版与密钥类型而变，通常是 <code>/etc/ssh/ssh_host_*_key.pub</code>），
+          输出里 <code>SHA256:</code> 开头的那一串应当与上面完全一致。
+        </p>
+      )}
 
-      {eligibility.trustable ? (
+      {!caPolicyEnabled && eligibility.trustable ? (
         <p className="form-hint form-hint-warning">
           确认无误后再点「信任此指纹」。一旦钉住，今后这台主机出示别的指纹都会被拒绝。
         </p>
       ) : null}
 
-      {trustBlockedBecause === "mismatch" ? (
+      {!caPolicyEnabled && trustBlockedBecause === "mismatch" ? (
         <p className="form-hint form-hint-warning">
           不一致时不能直接信任新指纹：请先「遗忘」旧钉子，再重新探针确认。
         </p>
       ) : null}
 
-      {pinned ? (
+      {!caPolicyEnabled && pinned ? (
         <p className="form-hint form-hint-warning">
           「遗忘」会删除这条钉子。<strong>下一次连接这台主机将不再核验</strong>，直接按首次连接
           信任并记录（TOFU）；已经建立的连接不受影响。要改钉子只能走这条路：遗忘 → 探针 → 信任。
@@ -269,3 +336,7 @@ const TRUST_DISABLED_HINT: Record<"no-probe" | "mismatch" | "already-pinned", st
   mismatch: "出示的指纹与已钉住的不同：先「遗忘」旧钉子，再重新探针确认。",
   "already-pinned": "这个指纹已经钉住了，无需重复。",
 };
+
+const NO_SAVED_LEAF_LABEL = "未保存叶子指纹";
+const CA_POLICY_TRUST_HINT = "CA 策略启用时，叶子指纹不参与连接校验。";
+const CA_POLICY_FORGET_HINT = "先关闭并保存 CA 策略，才能修改叶子指纹钉子。";

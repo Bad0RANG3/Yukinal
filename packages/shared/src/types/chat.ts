@@ -31,6 +31,8 @@ export interface ChatMessage {
   sessionId: string;
   role: "user" | "assistant" | "tool" | "system";
   content: string;
+  /** User prompt parts persisted with the message, including bounded images, PDFs and text files. */
+  parts?: AgentPromptPart[];
   /** Set for role === "tool": links the bubble to its trace card. */
   traceId?: string;
   createdAt: string;
@@ -85,19 +87,131 @@ export interface ChatMessageAppendInput {
   messageId?: string;
   role: ChatMessage["role"];
   content: string;
+  parts?: AgentPromptPart[];
   traceId?: string;
   createdAt?: string;
 }
 
+export const AGENT_IMAGE_MEDIA_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+] as const;
+
+export type AgentImageMediaType = (typeof AGENT_IMAGE_MEDIA_TYPES)[number];
+
+export const AGENT_DOCUMENT_MEDIA_TYPES = ["application/pdf"] as const;
+
+export type AgentDocumentMediaType = (typeof AGENT_DOCUMENT_MEDIA_TYPES)[number];
+
 /**
- * OpenCode-style prompt parts. Keeping the text in a part gives the transport a
- * stable place to add file/image/context parts later without changing the run
- * envelope or making the UI concatenate provider-specific payloads.
+ * Audio the composer can attach. Every one of these is identified by **magic bytes**, not by
+ * the file extension or the browser's MIME guess: the same discipline the images and PDFs use.
+ *
+ * The set is wider than any single provider accepts — WAV and MP3 are what the OpenAI audio
+ * parts take, OGG and FLAC are Gemini's — so a provider that cannot carry one of them says so
+ * instead of quietly dropping it.
  */
-export interface AgentPromptPart {
+export const AGENT_AUDIO_MEDIA_TYPES = [
+  "audio/wav",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/flac",
+] as const;
+
+export type AgentAudioMediaType = (typeof AGENT_AUDIO_MEDIA_TYPES)[number];
+
+export const AGENT_PROMPT_LIMITS = {
+  maxParts: 10,
+  maxTextChars: 100_000,
+  maxImages: 4,
+  /** Raw decoded image bytes, before base64 expansion. */
+  maxImageBytes: 4 * 1024 * 1024,
+  /**
+   * Raw bytes across every image, PDF **and audio clip** in one message. Base64 expands
+   * this to about 6.7 MiB, leaving room under the sidecar's 8 MiB frame bound for text
+   * and JSON syntax. One shared budget rather than three: the bound that matters is the
+   * frame, and per-kind budgets that could sum past it would be a bound in name only.
+   */
+  maxTotalInlineBytes: 5 * 1024 * 1024,
+  maxImageNameChars: 128,
+  maxDocuments: 2,
+  /** Raw PDF bytes before base64 expansion. */
+  maxDocumentBytes: 3 * 1024 * 1024,
+  maxDocumentNameChars: 128,
+  maxAudios: 2,
+  /** Raw audio bytes before base64 expansion. */
+  maxAudioBytes: 4 * 1024 * 1024,
+  maxAudioNameChars: 128,
+  maxFiles: 4,
+  /** Raw UTF-8 bytes in one attached text file. */
+  maxFileBytes: 256 * 1024,
+  /** Raw UTF-8 bytes across every attached text file in one message. */
+  maxTotalFileBytes: 512 * 1024,
+  maxFileNameChars: 128,
+} as const;
+
+export interface AgentTextPromptPart {
   type: "text";
   text: string;
 }
+
+/**
+ * A bounded inline image. `data` is canonical base64 without a data-URL prefix;
+ * provider adapters add their own envelope. Keeping the bytes in the part means a
+ * retry or a durable transcript can reconstruct the exact model input without a
+ * provider-specific URL or a second file-resolution step.
+ */
+export interface AgentImagePromptPart {
+  type: "image";
+  mediaType: AgentImageMediaType;
+  data: string;
+  name?: string;
+}
+
+/**
+ * A bounded UTF-8 text file selected by the user. The contents stay inline so a
+ * retry or restored conversation reconstructs the same model input; provider
+ * adapters render it as a clearly delimited text block.
+ */
+export interface AgentTextFilePromptPart {
+  type: "file";
+  mediaType: "text/plain";
+  data: string;
+  name: string;
+}
+
+/**
+ * A bounded inline PDF. The bytes stay in the prompt part so retries and restored
+ * conversations reproduce the exact model input; each provider adapts it to its
+ * own document block.
+ */
+export interface AgentDocumentPromptPart {
+  type: "document";
+  mediaType: "application/pdf";
+  data: string;
+  name: string;
+}
+
+/**
+ * A bounded inline audio clip. The bytes stay in the prompt part for the same reason the
+ * images do: a retry and a restored conversation reproduce the exact model input, and no
+ * provider-specific upload state has to survive.
+ */
+export interface AgentAudioPromptPart {
+  type: "audio";
+  mediaType: AgentAudioMediaType;
+  data: string;
+  name?: string;
+}
+
+export type AgentPromptPart =
+  | AgentTextPromptPart
+  | AgentImagePromptPart
+  | AgentTextFilePromptPart
+  | AgentDocumentPromptPart
+  | AgentAudioPromptPart;
 
 /** What UI sends to start a run.: targets are ids, not prose. */
 export interface AgentRunRequest {

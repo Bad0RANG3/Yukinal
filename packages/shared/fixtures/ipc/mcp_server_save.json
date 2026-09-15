@@ -5,6 +5,7 @@
     "transport": "stdio",
     "command": "uvx",
     "args": ["mcp-server-time"],
+    "httpAuthHeaders": [],
     "enabled": true,
     "allowedTools": [],
     "trustLevel": "unreviewed"

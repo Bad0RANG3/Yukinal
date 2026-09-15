@@ -3,15 +3,23 @@
 //! 这里是「验证失败必须可见」的落点：不匹配在 [`ConnHandler::check_server_key`] 里
 //! 当场变成一条带**两个**指纹的 [`super::error::HandshakeError`]，而不是一个 `false`。
 
+use std::borrow::Cow;
+use std::io::Read as _;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use russh::client::{self, Handle};
-use russh::keys::{HashAlg, PublicKeyOrCertificate};
+use russh::keys::{ssh_key, Algorithm, HashAlg, PublicKeyOrCertificate};
 
 use super::auth::authenticate;
 use super::error::{map_handshake_err, map_send_err, HandshakeError};
 use crate::known_hosts::KnownHostsStore;
-use crate::{ConnectionSecrets, Error, HostKeyProbe, Result, SshConfig};
+use crate::krl::RevocationList;
+use crate::{
+    ConnectionSecrets, Error, HostCertificateAuthority, HostKeyProbe, OutboundProxy, Result,
+    SshConfig,
+};
 
 /// 一次完整建连：预检 host key → TCP+握手 → 认证 → （TOFU）记录指纹。
 pub(crate) async fn establish(
@@ -22,6 +30,11 @@ pub(crate) async fn establish(
     if config.port == 0 {
         return Err(Error::Configuration("port must be 1..=65535".into()));
     }
+    let trusted_host_ca = parse_trusted_host_ca(
+        config.host_certificate_authority.as_ref(),
+        &config.outbound_proxy,
+    )
+    .await?;
 
     let pinned = known_hosts
         .lock()
@@ -29,6 +42,7 @@ pub(crate) async fn establish(
         .pinned(&config.host, config.port);
     let (expected, accept_unknown) = match pinned {
         Some(pinned_fp) => (Some(pinned_fp), false),
+        None if trusted_host_ca.is_some() => (None, false),
         None => match config.known_hosts_policy {
             // 拒绝发生在 **TCP 之前**，这一点是有意的、也是被测试钉住的：
             // 「没有钉子」是本地就能回答的问题，为它去连一台我们本来就打算拒绝的主机，
@@ -44,32 +58,47 @@ pub(crate) async fn establish(
         },
     };
 
+    let require_certificate_host_key = trusted_host_ca.is_some();
     let presented = Arc::new(StdMutex::new(None::<PresentedKey>));
     let handler = ConnHandler {
         host: config.host.clone(),
-        port: config.port,
         expected,
         accept_unknown,
+        trusted_host_ca,
         presented: Arc::clone(&presented),
     };
-    let ssh_config = client::Config {
+    let mut ssh_config = client::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(60)),
         ..<_>::default()
     };
+    if require_certificate_host_key {
+        ssh_config.preferred.host_key_certificates = host_certificate_algorithms(&ssh_config);
+    }
 
-    let mut handle = client::connect(
-        Arc::new(ssh_config),
-        (config.host.as_str(), config.port),
-        handler,
+    let mut handle = tokio::time::timeout(
+        super::CONNECT_TIMEOUT,
+        client::connect(
+            Arc::new(ssh_config),
+            (config.host.as_str(), config.port),
+            handler,
+        ),
     )
     .await
+    .map_err(|_| Error::Timeout)?
     .map_err(map_handshake_err)?;
 
-    authenticate(&mut handle, config, secrets).await?;
+    let auth_timeout = if secrets.keyboard_interactive.is_some() {
+        super::INTERACTIVE_AUTH_TIMEOUT
+    } else {
+        super::AUTH_TIMEOUT
+    };
+    tokio::time::timeout(auth_timeout, authenticate(&mut handle, config, secrets))
+        .await
+        .map_err(|_| Error::Timeout)??;
 
     // TOFU：认证通过后再钉指纹，认证失败不留下记录。
     if accept_unknown {
-        if let Some(PresentedKey::Fingerprint(fingerprint)) = presented
+        if let Some(presented) = presented
             .lock()
             .map_err(|_| Error::Transport("lock poisoned".into()))?
             .clone()
@@ -77,12 +106,16 @@ pub(crate) async fn establish(
             known_hosts
                 .lock()
                 .map_err(|_| Error::Transport("known_hosts lock poisoned".into()))?
-                .register(&config.host, config.port, &fingerprint)
+                .register(&config.host, config.port, presented.fingerprint())
                 .map_err(|error| Error::Transport(error.to_string()))?;
         }
     }
 
     Ok(Arc::new(handle))
+}
+
+fn host_certificate_algorithms(config: &client::Config) -> Cow<'static, [Algorithm]> {
+    Cow::Owned(config.preferred.key.iter().cloned().collect())
 }
 
 /// 只做一次握手，返回服务器出示的指纹。见 [`crate::SshBackend::probe_host_key`] 的契约。
@@ -118,21 +151,15 @@ pub(super) async fn probe_server_key(host: &str, port: u16) -> Result<HostKeyPro
         .await;
 
     match seen {
-        Some(PresentedKey::Fingerprint(fingerprint)) => Ok(HostKeyProbe {
+        Some(
+            PresentedKey::Fingerprint(fingerprint) | PresentedKey::Certificate { fingerprint, .. },
+        ) => Ok(HostKeyProbe {
             host: host.to_string(),
             port,
             fingerprint,
         }),
-        // 服务器把 host key 作为**证书**出示。本 crate 没有 host CA 信任库，所以既无法
-        // 验证它、也无法把它钉住（见 `ConnHandler::check_server_key`）。这里给一个编造的
-        // 指纹比给一个错误更糟：用户会拿着一个永远不可能被接受的字符串去核对。
-        Some(PresentedKey::HostCertificate) => Err(Error::HostKeyUnsupported {
-            host: host.to_string(),
-            port,
-            detail: "the server presented a host certificate, and this build has no host CA \
-                     trust store to verify or pin certificates with"
-                .into(),
-        }),
+        // 探针只报告服务器出示了什么，不套用 per-server CA 策略，也不写 known_hosts。
+        // 这里给一个编造的指纹比给一个错误更糟：用户会拿着一个不可能被接受的字符串去核对。
         // 握手成功却什么都没看到，只可能意味着 russh 换了「什么时候问客户端」的时机。
         // 那时候探针必须响亮失败，而不是返回一个空指纹。
         None => Err(Error::Transport(
@@ -141,16 +168,249 @@ pub(super) async fn probe_server_key(host: &str, port: u16) -> Result<HostKeyPro
     }
 }
 
-/// 服务器在握手时出示的 host key，收敛成两种本 crate 能处理的情形。
+/// 服务器在握手时出示的 host key，收敛成一个可显式核验、可钉住的公钥指纹。
 ///
-/// 分开的理由：host 证书**没有**可钉的指纹（没有 host CA 信任库），把它编造成一个
-/// `SHA256:…` 会让用户去核对一个永远不会被接受的字符串。
+#[derive(Debug, Clone)]
+struct TrustedHostCa {
+    key: ssh_key::PublicKey,
+    principals: Vec<String>,
+    revocations: Option<RevocationList>,
+}
+
+const MAX_KRL_BYTES: u64 = 16 * 1024 * 1024;
+
+async fn parse_trusted_host_ca(
+    authority: Option<&HostCertificateAuthority>,
+    proxy: &OutboundProxy,
+) -> Result<Option<TrustedHostCa>> {
+    let Some(authority) = authority else {
+        return Ok(None);
+    };
+    let key = ssh_key::PublicKey::from_openssh(authority.ca_public_key.trim())
+        .map_err(|error| Error::Configuration(format!("invalid host CA public key: {error}")))?;
+    if authority.principals.is_empty() {
+        return Err(Error::Configuration(
+            "host certificate authority requires at least one principal".into(),
+        ));
+    }
+    if authority
+        .principals
+        .iter()
+        .any(|principal| principal.trim().is_empty() || principal.chars().count() > 253)
+    {
+        return Err(Error::Configuration(
+            "host certificate principals must be non-empty and at most 253 characters".into(),
+        ));
+    }
+    if authority.revocation_list_signers.len() > 8 {
+        return Err(Error::Configuration(
+            "host certificate KRL may trust at most 8 independent signing keys".into(),
+        ));
+    }
+    let mut revocation_signers = vec![key.clone()];
+    for signer in &authority.revocation_list_signers {
+        let signer = ssh_key::PublicKey::from_openssh(signer.trim()).map_err(|error| {
+            Error::Configuration(format!("invalid trusted KRL signer public key: {error}"))
+        })?;
+        if revocation_signers
+            .iter()
+            .any(|existing| existing.key_data() == signer.key_data())
+        {
+            return Err(Error::Configuration(
+                "trusted KRL signer public keys must be distinct from the host CA and each other"
+                    .into(),
+            ));
+        }
+        revocation_signers.push(signer);
+    }
+    let path = authority
+        .revocation_list_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let url = authority
+        .revocation_list_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    if path.is_some() && url.is_some() {
+        return Err(Error::Configuration(
+            "host certificate KRL path and URL are mutually exclusive".into(),
+        ));
+    }
+    let revocations = match (path, url) {
+        (Some(path), None) => Some(read_revocation_list(path, &revocation_signers)?),
+        (None, Some(url)) => Some(download_revocation_list(url, &revocation_signers, proxy).await?),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("the exclusive check above returned"),
+    };
+    Ok(Some(TrustedHostCa {
+        key,
+        principals: authority.principals.clone(),
+        revocations,
+    }))
+}
+
+async fn download_revocation_list(
+    raw_url: &str,
+    trusted_signers: &[ssh_key::PublicKey],
+    proxy: &OutboundProxy,
+) -> Result<RevocationList> {
+    static CRYPTO_PROVIDER: std::sync::Once = std::sync::Once::new();
+
+    let url = reqwest::Url::parse(raw_url).map_err(|error| {
+        Error::Configuration(format!(
+            "host certificate KRL URL `{raw_url}` is invalid: {error}"
+        ))
+    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| Error::Configuration("host certificate KRL URL has no host".to_string()))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::Configuration(
+            "host certificate KRL URL must not contain credentials".into(),
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(Error::Configuration(
+            "host certificate KRL URL must not contain query parameters or a fragment".into(),
+        ));
+    }
+    match url.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => {
+            return Err(Error::Configuration(
+                "host certificate KRL URL must use HTTPS; plain HTTP is only allowed on loopback"
+                    .into(),
+            ))
+        }
+        scheme => {
+            return Err(Error::Configuration(format!(
+                "host certificate KRL URL scheme `{scheme}` is unsupported; use HTTPS"
+            )))
+        }
+    }
+
+    CRYPTO_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10));
+    // 与 MCP 的同一条规则（ADR 0022）：直连是显式的；读到了却用不了的代理配置在这里失败，
+    // 而不是静默直连。
+    let client = yukinal_net::apply(builder, &proxy.proxy, proxy.credential.as_ref())
+        .and_then(|builder| {
+            builder
+                .build()
+                .map_err(|error| format!("could not create KRL HTTP client: {error}"))
+        })
+        .map_err(Error::Configuration)?;
+    let request = client.get(url).timeout(Duration::from_secs(15)).send();
+    let mut response = tokio::time::timeout(Duration::from_secs(15), request)
+        .await
+        .map_err(|_| {
+            Error::Transport(yukinal_net::route_context(
+                &proxy.proxy,
+                "host certificate KRL download timed out",
+            ))
+        })?
+        .map_err(|error| {
+            let reason = error.without_url().to_string();
+            Error::Transport(format!(
+                "could not download host certificate KRL `{raw_url}`: {}",
+                yukinal_net::route_context(&proxy.proxy, &reason)
+            ))
+        })?;
+    if !response.status().is_success() {
+        return Err(Error::Transport(format!(
+            "{}: host certificate KRL `{raw_url}` returned HTTP {}",
+            yukinal_net::route_context(&proxy.proxy, "KRL request completed"),
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_KRL_BYTES)
+    {
+        return Err(Error::Configuration(format!(
+            "host certificate KRL `{raw_url}` exceeds the {MAX_KRL_BYTES}-byte limit"
+        )));
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        let reason = error.without_url().to_string();
+        Error::Transport(format!(
+            "could not read host certificate KRL `{raw_url}`: {}",
+            yukinal_net::route_context(&proxy.proxy, &reason)
+        ))
+    })? {
+        if bytes.len().saturating_add(chunk.len()) as u64 > MAX_KRL_BYTES {
+            return Err(Error::Configuration(format!(
+                "host certificate KRL `{raw_url}` exceeds the {MAX_KRL_BYTES}-byte limit"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    RevocationList::parse(&bytes, trusted_signers).map_err(|reason| {
+        Error::Configuration(format!(
+            "invalid host certificate KRL downloaded from `{raw_url}`: {reason}"
+        ))
+    })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn read_revocation_list(
+    path: &str,
+    trusted_signers: &[ssh_key::PublicKey],
+) -> Result<RevocationList> {
+    if !std::path::Path::new(path).is_absolute() {
+        return Err(Error::Configuration(format!(
+            "host certificate KRL path `{path}` must be absolute"
+        )));
+    }
+    let file = std::fs::File::open(path).map_err(|error| {
+        Error::Configuration(format!(
+            "could not open host certificate KRL `{path}`: {error}"
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_KRL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::Configuration(format!(
+                "could not read host certificate KRL `{path}`: {error}"
+            ))
+        })?;
+    if bytes.len() as u64 > MAX_KRL_BYTES {
+        return Err(Error::Configuration(format!(
+            "host certificate KRL `{path}` exceeds the {MAX_KRL_BYTES}-byte limit"
+        )));
+    }
+    RevocationList::parse(&bytes, trusted_signers).map_err(|reason| {
+        Error::Configuration(format!("invalid host certificate KRL `{path}`: {reason}"))
+    })
+}
+
+/// The host key or certificate presented during the handshake.
 #[derive(Debug, Clone)]
 pub(crate) enum PresentedKey {
-    /// `SHA256:<base64 无填充>`，可以钉。
+    /// `SHA256:<base64 无填充>`.
     Fingerprint(String),
-    /// 服务器把 host key 作为证书出示。
-    HostCertificate,
+    Certificate {
+        fingerprint: String,
+        certificate: Box<ssh_key::Certificate>,
+    },
 }
 
 /// 从 russh 交过来的 host key 取出本 crate 的表示。
@@ -159,7 +419,13 @@ fn presented_key(server_public_key: &PublicKeyOrCertificate) -> PresentedKey {
         PublicKeyOrCertificate::PublicKey { key, .. } => {
             PresentedKey::Fingerprint(key.fingerprint(HashAlg::Sha256).to_string())
         }
-        PublicKeyOrCertificate::Certificate(_) => PresentedKey::HostCertificate,
+        PublicKeyOrCertificate::Certificate(certificate) => PresentedKey::Certificate {
+            fingerprint: certificate
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string(),
+            certificate: Box::new(certificate.clone()),
+        },
     }
 }
 
@@ -168,10 +434,19 @@ pub(crate) struct ConnHandler {
     /// 出错时要点名是哪台主机 —— 一条「指纹不一致」的错误如果不说是谁，用户
     /// 面对多台服务器时没法处置。
     host: String,
-    port: u16,
     expected: Option<String>,
     accept_unknown: bool,
+    trusted_host_ca: Option<TrustedHostCa>,
     presented: Arc<StdMutex<Option<PresentedKey>>>,
+}
+
+impl PresentedKey {
+    fn fingerprint(&self) -> &str {
+        match self {
+            Self::Fingerprint(fingerprint) => fingerprint,
+            Self::Certificate { fingerprint, .. } => fingerprint,
+        }
+    }
 }
 
 impl client::Handler for ConnHandler {
@@ -181,44 +456,112 @@ impl client::Handler for ConnHandler {
         &mut self,
         server_public_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        let presented = match presented_key(server_public_key) {
-            PresentedKey::Fingerprint(fingerprint) => fingerprint,
-            // 这是**服务器**把 host key 作为证书出示（host certificate），和用户
-            // 证书认证（`authenticate` 里的 `Authentication::Certificate`）是两件
-            // 不同的事：后者已经支持。
-            //
-            // 这里仍然拒绝，因为本 crate 没有 host CA 信任库。要接受一张 host
-            // 证书，得先知道「哪把 CA key 被信任、签名是否出自它、主机名是否在
-            // principals 里」；而我们能做的只有「记住它」—— 那正是这里禁止的
-            // 「先信再查」，known_hosts 的钉子会因此变成一句空话。
-            //
-            // 但拒绝要**说得出来由**：返回 `Ok(false)` 只会变成 russh 的
-            // `UnknownKey`，界面上一句「握手失败」既不解释也不可操作。
-            PresentedKey::HostCertificate => {
-                return Err(HandshakeError::Unsupported {
-                    host: self.host.clone(),
-                    port: self.port,
-                    detail: "the server presented a host certificate, and this build has no \
-                             host CA trust store to verify or pin certificates with"
-                        .into(),
-                });
-            }
-        };
+        let presented = presented_key(server_public_key);
+        let fingerprint = presented.fingerprint().to_string();
         if let Ok(mut slot) = self.presented.lock() {
-            *slot = Some(PresentedKey::Fingerprint(presented.clone()));
+            *slot = Some(presented.clone());
+        }
+
+        if let Some(authority) = &self.trusted_host_ca {
+            return match &presented {
+                PresentedKey::Certificate { certificate, .. } => {
+                    validate_host_certificate(&self.host, authority, certificate).map_err(
+                        |reason| HandshakeError::Certificate {
+                            host: self.host.clone(),
+                            reason,
+                        },
+                    )?;
+                    Ok(true)
+                }
+                PresentedKey::Fingerprint(_) => Err(HandshakeError::Certificate {
+                    host: self.host.clone(),
+                    reason: "a host CA is configured, but the server presented a plain host key"
+                        .into(),
+                }),
+            };
         }
 
         match &self.expected {
-            Some(pinned) if *pinned == presented => Ok(true),
+            Some(pinned) if *pinned == fingerprint => Ok(true),
             // 不匹配在这里就变成一条带**两个**指纹的错误，而不是一个 `false`。
             Some(pinned) => Err(HandshakeError::Mismatch {
                 host: self.host.clone(),
                 pinned: pinned.clone(),
-                presented,
+                presented: fingerprint,
             }),
             None => Ok(self.accept_unknown),
         }
     }
+}
+
+fn validate_host_certificate(
+    host: &str,
+    authority: &TrustedHostCa,
+    certificate: &ssh_key::Certificate,
+) -> std::result::Result<(), String> {
+    if certificate.cert_type() != ssh_key::certificate::CertType::Host {
+        return Err("certificate is not a host certificate".into());
+    }
+    certificate
+        .verify_signature()
+        .map_err(|error| format!("certificate signature is invalid: {error}"))?;
+    if certificate.signature_key() != authority.key.key_data() {
+        return Err("certificate is signed by a different CA".into());
+    }
+    if let Some(list) = &authority.revocations {
+        if let Some(reason) = list
+            .revoked_reason(certificate)
+            .map_err(|error| format!("could not evaluate host certificate KRL: {error}"))?
+        {
+            return Err(reason.to_string());
+        }
+    }
+    if !certificate.critical_options().is_empty() {
+        return Err("certificate carries unsupported critical options".into());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?
+        .as_secs();
+    if now < certificate.valid_after() {
+        return Err("certificate is not valid yet".into());
+    }
+    if now > certificate.valid_before() {
+        return Err("certificate has expired".into());
+    }
+    if !certificate.valid_principals().iter().any(|principal| {
+        authority
+            .principals
+            .iter()
+            .any(|allowed| principal_matches(allowed, principal))
+    }) {
+        return Err(format!(
+            "certificate principal does not match the configured host patterns for {host}"
+        ));
+    }
+    Ok(())
+}
+
+fn principal_matches(pattern: &str, principal: &str) -> bool {
+    fn matches(pattern: &[u8], value: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => value.is_empty(),
+            Some((b'*', rest)) => {
+                matches(rest, value)
+                    || value
+                        .split_first()
+                        .is_some_and(|(_, tail)| matches(pattern, tail))
+            }
+            Some((b'?', rest)) => value
+                .split_first()
+                .is_some_and(|(_, tail)| matches(rest, tail)),
+            Some((expected, rest)) => value.split_first().is_some_and(|(actual, tail)| {
+                expected.eq_ignore_ascii_case(actual) && matches(rest, tail)
+            }),
+        }
+    }
+
+    matches(pattern.trim().as_bytes(), principal.trim().as_bytes())
 }
 
 /// 探针的 handler：接受任何出示的 key，**只**把看到的记下来。
@@ -261,8 +604,10 @@ impl KnownHostsStore {
 
 #[cfg(test)]
 mod tests {
+    use russh::client::Handler as _;
+
     use super::*;
-    use crate::backend::test_support::{generated_key, test_certificate};
+    use crate::backend::test_support::{generated_key, test_certificate, test_host_certificate};
     use crate::backend::RusshBackend;
     use crate::{Authentication, KnownHostsPolicy, SshBackend};
 
@@ -270,6 +615,111 @@ mod tests {
     fn pinned_reports_unknown_for_new_hosts() {
         let store = KnownHostsStore::in_memory();
         assert_eq!(store.pinned("example.com", 22), None);
+    }
+
+    #[tokio::test]
+    async fn online_krl_urls_are_https_credential_free_and_unambiguous() {
+        let ca = generated_key();
+        let ca_public_key = ca.public_key().to_openssh().expect("encode CA");
+        for (url, expected) in [
+            ("http://example.com/revoked.krl", "HTTPS"),
+            (
+                "https://user:secret@example.com/revoked.krl",
+                "must not contain credentials",
+            ),
+            (
+                "https://example.com/revoked.krl?token=secret",
+                "query parameters",
+            ),
+            ("https://example.com/revoked.krl#fragment", "fragment"),
+        ] {
+            let authority = HostCertificateAuthority {
+                ca_public_key: ca_public_key.clone(),
+                principals: vec!["*.example.com".into()],
+                revocation_list_path: None,
+                revocation_list_url: Some(url.into()),
+                revocation_list_signers: Vec::new(),
+            };
+            let error = parse_trusted_host_ca(Some(&authority), &OutboundProxy::default())
+                .await
+                .expect_err(url);
+            assert!(
+                error.to_string().contains(expected),
+                "{url}: expected `{expected}`, got {error}"
+            );
+        }
+
+        let authority = HostCertificateAuthority {
+            ca_public_key,
+            principals: vec!["*.example.com".into()],
+            revocation_list_path: Some("/etc/ssh/revoked.krl".into()),
+            revocation_list_url: Some("https://example.com/revoked.krl".into()),
+            revocation_list_signers: Vec::new(),
+        };
+        let error = parse_trusted_host_ca(Some(&authority), &OutboundProxy::default())
+            .await
+            .expect_err("two KRL sources must be refused");
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[tokio::test]
+    async fn krl_signer_keys_are_valid_bounded_and_distinct() {
+        let ca = generated_key();
+        let signer = generated_key();
+        let ca_public_key = ca.public_key().to_openssh().expect("encode CA");
+        let signer_public_key = signer.public_key().to_openssh().expect("encode KRL signer");
+        let authority = |signers: Vec<String>| HostCertificateAuthority {
+            ca_public_key: ca_public_key.clone(),
+            principals: vec!["*.example.com".into()],
+            revocation_list_path: None,
+            revocation_list_url: None,
+            revocation_list_signers: signers,
+        };
+
+        parse_trusted_host_ca(
+            Some(&authority(vec![signer_public_key.clone()])),
+            &OutboundProxy::default(),
+        )
+        .await
+        .expect("an independent signer is valid");
+
+        let error = parse_trusted_host_ca(
+            Some(&authority(vec![ca_public_key.clone()])),
+            &OutboundProxy::default(),
+        )
+        .await
+        .expect_err("the host CA must not be duplicated as an independent signer");
+        assert!(error.to_string().contains("distinct"), "{error}");
+
+        let error = parse_trusted_host_ca(
+            Some(&authority(vec![
+                signer_public_key.clone(),
+                signer_public_key.clone(),
+            ])),
+            &OutboundProxy::default(),
+        )
+        .await
+        .expect_err("the same independent signer must not be duplicated");
+        assert!(error.to_string().contains("distinct"), "{error}");
+
+        let error = parse_trusted_host_ca(
+            Some(&authority(vec!["not a public key".into()])),
+            &OutboundProxy::default(),
+        )
+        .await
+        .expect_err("invalid signer keys must be refused");
+        assert!(
+            error.to_string().contains("invalid trusted KRL signer"),
+            "{error}"
+        );
+
+        let error = parse_trusted_host_ca(
+            Some(&authority(vec![signer_public_key; 9])),
+            &OutboundProxy::default(),
+        )
+        .await
+        .expect_err("the signer list must be bounded");
+        assert!(error.to_string().contains("at most 8"), "{error}");
     }
 
     /// `RequireMatch` 下未钉过的主机：拒绝，而且是**在 TCP 之前**拒绝。
@@ -294,6 +744,8 @@ mod tests {
             authentication: Authentication::Password {
                 credential_ref: "keychain://ssh/t".into(),
             },
+            host_certificate_authority: None,
+            outbound_proxy: OutboundProxy::default(),
             known_hosts_policy: KnownHostsPolicy::RequireMatch,
             keepalive_interval_secs: 0,
         };
@@ -307,28 +759,95 @@ mod tests {
         );
     }
 
-    /// host key 有两种出示形状，本 crate 只认其中一种。
+    /// Host certificates expose the certified public key as the pin identity.
     ///
-    /// 公钥 → 可钉的指纹；host 证书 → `HostCertificate`（没有可钉的指纹，因为它需要
-    /// host CA 信任库，而本 crate 没有）。这条区分是纯函数，所以不需要服务器就能测。
+    /// This does not claim CA validation: it keeps the explicit probe -> trust flow
+    /// usable instead of rejecting every certificate at the handshake.
     #[test]
-    fn a_presented_key_is_either_a_pinnable_fingerprint_or_a_certificate() {
+    fn a_presented_key_always_becomes_a_pinnable_fingerprint() {
         let key = generated_key();
         let public = key.public_key().clone();
         let expected = public.fingerprint(HashAlg::Sha256).to_string();
-        match presented_key(&PublicKeyOrCertificate::from(public.clone())) {
-            PresentedKey::Fingerprint(fingerprint) => assert_eq!(fingerprint, expected),
-            other => panic!("a public key must yield a fingerprint, got {other:?}"),
-        }
+        assert_eq!(
+            presented_key(&PublicKeyOrCertificate::from(public.clone()))
+                .fingerprint()
+                .to_string(),
+            expected
+        );
 
         let ca = generated_key();
         let certificate = test_certificate(&ca, &key);
+        let certified = key.public_key().fingerprint(HashAlg::Sha256).to_string();
+        assert_eq!(
+            presented_key(&PublicKeyOrCertificate::from(certificate))
+                .fingerprint()
+                .to_string(),
+            certified
+        );
+    }
+
+    #[test]
+    fn a_trusted_ca_validates_signature_type_time_and_principal() {
+        let ca = generated_key();
+        let host_key = generated_key();
+        let certificate = test_host_certificate(&ca, &host_key, &["api.example.test"]);
+        let authority = TrustedHostCa {
+            key: ca.public_key().clone(),
+            principals: vec!["*.example.test".into()],
+            revocations: None,
+        };
+        assert!(validate_host_certificate("api.example.test", &authority, &certificate).is_ok());
+
+        let wrong_principal = TrustedHostCa {
+            principals: vec!["db.example.test".into()],
+            ..authority.clone()
+        };
         assert!(
-            matches!(
-                presented_key(&PublicKeyOrCertificate::from(certificate)),
-                PresentedKey::HostCertificate
-            ),
-            "host 证书没有可钉的指纹，不能编一个出来",
+            validate_host_certificate("api.example.test", &wrong_principal, &certificate).is_err()
+        );
+
+        let wrong_ca = generated_key();
+        let wrong_authority = TrustedHostCa {
+            key: wrong_ca.public_key().clone(),
+            principals: vec!["*".into()],
+            revocations: None,
+        };
+        assert!(
+            validate_host_certificate("api.example.test", &wrong_authority, &certificate).is_err()
+        );
+    }
+
+    #[test]
+    fn configured_principals_match_hostname_patterns_case_insensitively() {
+        assert!(principal_matches("*.example.test", "API.EXAMPLE.TEST"));
+        assert!(principal_matches(
+            "api-??.example.test",
+            "api-01.example.test"
+        ));
+        assert!(!principal_matches("api.example.test", "other.example.test"));
+        assert!(!principal_matches("*.example.test", "example.test"));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_certificate_key_pin_is_accepted() {
+        let key = generated_key();
+        let ca = generated_key();
+        let certificate = test_certificate(&ca, &key);
+        let expected = key.public_key().fingerprint(HashAlg::Sha256).to_string();
+        let presented = Arc::new(StdMutex::new(None));
+        let mut handler = ConnHandler {
+            host: "cert.example.test".into(),
+            expected: Some(expected),
+            accept_unknown: false,
+            trusted_host_ca: None,
+            presented,
+        };
+        assert!(
+            handler
+                .check_server_key(&PublicKeyOrCertificate::from(certificate))
+                .await
+                .expect("a matching certificate pin is valid"),
+            "the certified public-key fingerprint is the explicit trust identity"
         );
     }
 
@@ -343,6 +862,8 @@ mod tests {
             authentication: Authentication::Password {
                 credential_ref: "keychain://ssh/t".into(),
             },
+            host_certificate_authority: None,
+            outbound_proxy: OutboundProxy::default(),
             known_hosts_policy: KnownHostsPolicy::TrustOnFirstUse,
             keepalive_interval_secs: 0,
         };

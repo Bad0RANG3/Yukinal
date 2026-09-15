@@ -1,35 +1,24 @@
 # 当前限制
 
-这一节是**全部**已知缺口的唯一来源：每条都写明现在做不到什么、以及为什么（其中一部分是环境限制，比如「从未对真实 API 调用过」，那不是代码问题而是这台机器没有网络）。已经做完的部分见 [版本与发布历史](./changelog.md#版本与发布历史)；有意为之、不会被「补完」的安全边界在下一节。
+这一节是**全部**已知缺口的唯一来源：每条都写明现在做不到什么、以及为什么。已经做完的能力见 [版本与发布历史](./changelog.md#版本与发布历史)；有意为之、不会被“补完”的安全边界在下一节。
 
-- **安装包只在 Windows 上构建过。** `pnpm package` 在本机产出了 NSIS 安装程序与 WiX `.msi`（见 [打包与分发](./packaging.md#打包与分发)），但**没有真的安装并启动验证过**；macOS 的 `.app`/`.dmg` 与 Linux 的 `.deb`/`.rpm`/`.AppImage` 连构建都没有执行过。所以这件事的状态是「配置被复核过、Windows 路径跑通并产出成品」，不是「三个平台都验证过」。
-- **没有代码签名、公证与自动更新。** 未签名的 Windows/macOS 包会触发系统自己的警告；没有更新通道，升级靠用户自己重新下载。
-- **需要用户自己准备 Node.js ≥ 24。** 安装包不内含、不下载、不缓存任何运行时；缺 Node 时给出的是「启动 sidecar 失败」，而不是一条指名 `nodejs.org` 与 `YUKINAL_NODE` 的错误——版本探测是 ADR 0013 明确决定不做的事，代价如上。
-- **`.deb` / `.rpm` 的 `Depends:` 是空的。** 打包器不会自动补 `libwebkit2gtk-4.1-0` / `libgtk-3-0`，依赖由发行版自己满足。包名逐发行版不同，在没装过的环境里无法核实，所以这一项是**记下来**，不是填一个猜的名字。
-- **MCP 只支持 stdio 传输。** `http` 在类型层面就不存在，界面里也没有这个选项。
-- **崩掉的 MCP 服务器不会被自动重启。** 唯一的重启路径是显式的启动命令；目录只会报告它已经死了。理由见 [外部工具（MCP）](./boundaries/mcp.md#边界外部工具mcp)。
+- **安装包只在 Windows 上构建过，也没有做过安装后启动验收。** `pnpm package` 在本机产出了 NSIS 安装程序与 WiX `.msi`（见 [打包与分发](./packaging.md#打包与分发)），但尚未真的安装并启动；macOS 的 `.app`/`.dmg` 与 Linux 的 `.deb`/`.rpm`/`.AppImage` 仍未在对应平台构建。CI 已有三平台打包作业，这只证明配置存在，不替代真实产物验证。
+- **没有代码签名、公证与自动更新。** 未签名的 Windows/macOS 包会触发系统警告；没有更新通道，升级靠用户重新下载。
+- **仍需用户自己准备 Node.js ≥ 24。** 安装包不内含、不下载、不缓存运行时。正常启动与 `YUKINAL_NODE` 路径会在 sidecar 启动前执行有 5 秒上限的 `node --version` 预检，缺失与过旧都会给出可操作错误；`YUKINAL_AGENT_COMMAND` 被明确视为自定义程序，拥有自己的运行时契约，因此刻意不做 Node 版本探测。
+- **`.deb` / `.rpm` 已声明基线运行时依赖，但尚未在干净发行版中安装验证。** 配置包含 WebKitGTK 与 GTK 的常见备选包名；不同发行版的真实包名和版本仍可能不同，因此不能把“打包器接受配置”说成“各发行版都装得上”。
+- **MCP Streamable HTTP 支持静态头、两种 OAuth 流程与客户端密钥，但还不是完整的动态认证矩阵。** HTTP 会完成 `Mcp-Session-Id` 会话、JSON/SSE 回包、GET 事件流、取消通知与 DELETE 终止；设置页可为 endpoint 配置最多 16 条有序静态认证头。OAuth 支持手填 issuer，也会从 `WWW-Authenticate` 或 RFC 9728 protected-resource metadata 自动发现授权服务器，然后使用 RFC 8414 discovery、`resource` 参数与 refresh token；每个 endpoint 可选一条流程：authorization code + PKCE S256（随机 loopback callback），或 RFC 8628 device code —— 后者不需要本地回调，界面会显示授权服务器给的 `user_code`、优先打开 `verification_uri_complete`，并按服务器给的 `interval` 轮询，`authorization_pending` 与 `slow_down`（间隔 +5 秒）都只是继续等待，`access_denied`、`expired_token`、`expires_in` 到期与用户取消各自结束并给出各自的原因。轮询就在那个等待中的请求里，没有后台任务：取消或 `expires_in` 到期都会结束它，轮询次数另有硬上限，所以即使等待它的窗口已经不在了，它也不会活得比 `expires_in` 更久。客户端认证三选一：`none`（公共客户端，只发送 client id）、`client_secret_post`（密钥作为表单参数）或 `client_secret_basic`（`Authorization: Basic`，且请求体里不再重复凭据）；密钥只进系统凭据库，配置里只有引用，设置响应、错误与 Debug 输出里都没有它，留空表示保留、重填表示轮换、换认证方式或删除服务器会回收它，且换方式后必须重新填写。client id 可手填，留空时使用 RFC 7591 dynamic client registration 注册 `token_endpoint_auth_method: none` 的公共客户端（device code 流程注册 device grant，不带 `redirect_uris`）；服务端若在注册响应里返回 secret，连接会明确拒绝而不是改用它。token bundle 只进系统凭据库，过期前自动刷新，401 会强制刷新并仅重试一次；改动 issuer、client id、scopes、流程或客户端认证方式都会让已存令牌失效并要求重新授权 —— 这些都是身份，不是显示偏好。发送方约束令牌（DPoP，RFC 9449）已经是**可选项**：开启后每台服务器一把 Ed25519 私钥（只进系统凭据库），每个请求带一个绑定方法与 URL 的 proof（`ath` 绑定令牌、`jti` 每次重随机），服务器可以用 `DPoP-Nonce` 挑战，`token_type` 必须是 `DPoP`，密钥丢失只能重新授权。它默认关闭，而且只有服务器真的验证 proof 时才有意义 —— 不验证的服务器只是多收一个头。仍然没有的是**自定义的按请求动态签名**（协议未定，见 P1-2）。应用级出站网络设置默认直连，也可以显式选择系统代理；它按 `HTTPS_PROXY` → `HTTP_PROXY` → `ALL_PROXY`（大小写都认）以及 Windows 当前用户 Internet Settings、macOS `scutil --proxy` 读取静态代理，Linux 只认环境变量，不执行 PAC；`NO_PROXY`/`ProxyOverride` 交给 HTTP 客户端匹配，代理凭据只存在系统凭据库且只支持 Basic。改动在下一次连接生效，代理错误会标明来源。远程 endpoint 必须使用 HTTPS，明文 HTTP 只允许回环地址，URL 不接受内嵌凭据、查询参数或 fragment，重定向也不会被跟随。
 - **MCP 工具一律按 `critical` 处理。** 服务器自己的风险注解不被采信，所以每个 MCP 工具在任何运行模式下都要逐项批准，会话授权也不能记住它。代价很直接：一个只读的外部工具也要点一次。
-- **MCP 的 `trustLevel` 与 `allowedTools` 目前只被存储。** 还不存在「让用户看过工具描述再决定」的流程，所以 `trustLevel` 永远停在 `unreviewed`、`allowedTools` 永远是空表 —— 这正是每个 MCP 工具都保持 `critical` 的原因。
-- **取消 MCP 调用不撤回它的副作用。** 取消让宿主不再等待，但 MCP 线上协议没有「取消一次 `tools/call`」，服务进程那边的调用可能继续跑完。
-- **MCP 只在一个自带的 Node fixture 上验证过。** 真实的第三方 MCP 服务器没有被跑过，本环境没有网络也没有 `npx`。
-- **55 份 IPC fixture 里有 27 份只有 TypeScript 一侧解析。** 只有 28 份被 Rust 用 `include_str!` 编译进来、并和新序列化的值比一次；剩下 27 份（`provider_*` 里除 `provider_delete` 之外的几份、`server_list` / `server_add` / `server_update` / `server_connect` / `server_disconnect` / `server_delete` / `server_snapshot`、`terminal_*`、`remote_file_*`、`agent_approval_respond`、`agent_run_stop` 与 MCP 那五份）没有任何 Rust 断言钉住 —— Rust 侧改了字段名，这个仓库里不会有任何检查变红。MCP 是其中之一，不是唯一的例外。
-- **两套原生适配器从未对真实 API 调用过。** 翻译逻辑、流式状态、取消与错误路径都是照协议文档写的、用假响应测的 —— 写它们的环境没有网络。每个适配器的假设列在 [模型 Provider](./boundaries/provider.md#边界模型-provider) 里。
-- **`openai-compatible` 在 chat 方言下的网络层异常没有过脱敏。** 其余所有 Provider 错误路径都经过 `safeProviderMessage()`，这一个是特例。
-- **Anthropic 的 `anthropic-version` 不能配置。** 运行配置里没有 `apiVersion` 字段，Rust 因此无法传一个进来，适配器用它自己的默认值；自定义请求头同样没有入口。
-- **SSH 证书认证不能在界面里配置。** `crates/ssh` 支持它（证书按 OpenSSH 的 `<私钥>-cert.pub` 约定定位，并且必须真的认证所提供的那把私钥），也有测试；但桌面只映射密码、私钥（含口令）与 ssh-agent，遇到证书会明确报「不支持的认证方式」而不是挑一个默认值 —— 证书要的是**文件路径**，而桌面把认证材料按引用存在系统凭据库里。
-- **服务器出示 host 证书时会被拒绝。** 这个构建没有 host CA 信任存储——那是另一件事，不是用户证书认证。
-- **ssh-agent 的失败无法再细分。** russh 0.63 没有公开 agent 的错误类型，所以「agent 拒绝签名」与「签名中途连接断开」在我们这一侧是同一个错误，也不会被当成可重试的传输失败。
-- **没有多因素认证。** 服务器如果接受了公钥还要第二个因素，我们如实报告「被接受但未完成」，不会接着往下走。
-- **`filesystem.edit` 的检查与写入之间仍有窗口。** 它比对读取时返回的内容摘要，并要求 `oldString` 恰好出现一次，否则拒绝；但 SFTP 没有事务 —— 摘要一致之后、写入之前，文件仍可能被别的进程改掉。
-- **`delivery` / `resume` 的完整语义只在 sidecar 层可用。** `resume: false` 会登记这次请求而不执行、之后用同一个 `messageId` 才真正启动并沿用同一个 `runId`；`delivery: "sync"` 会等到终态并把结果放进响应。但 `duplicate` / `resumed` / `result` 三个字段没有过 IPC（没有消费方），面板从不发 `resume: false`，同步路径只在 router 层被测过。
-- **多模态输入没有实现。** 消息内容的 part 形状为文件/图片/上下文预留了位置，但今天只有文本。
-- **Agent 回复里的链接点不开，图片不加载。** 窗口只申请了 `core:default` 能力，没有 opener / shell。要让它可点，得先给桌面端加一个受限于 `http(s)` 的 opener 能力。
-- **Markdown 支持的是子集，而且不是一个 CommonMark 实现。** HTML、setext 标题、缩进代码块、引用式链接与脚注都不认，遇到时按纯文本显示；解析器的用例钉住的是「没认出来的东西一个字都不能丢」，而不是规范一致性。
-- **Agent 的流式文本与最终文本二选一。** 界面拿到最终 assistant 文本时会替换掉已流式累积的那一行，所以两处不一致时以最终文本为准。
+- **MCP 取消是标准通知，不是回滚。** 宿主会发送 `notifications/cancelled` 并停止等待，但协议允许服务器忽略通知；已经发生或仍在进行的副作用无法撤回。
+- **真实 MCP 互操作验证仍只是抽样。** 2026-09-15 已实际跑过官方 `@modelcontextprotocol/server-everything` 的 Streamable HTTP、官方 TypeScript SDK 的 JSON 回包模式，以及独立 DuckDuckGo / Fetch server 的 stdio；握手、工具目录、echo 调用、JSON/SSE、GET stream 与 DELETE 都有记录，但独立 server 的上游反爬/SSRF 错误也会如实保留。验证需要网络、通过环境变量显式启用，不能替代对所有第三方实现的兼容保证。
+- **两套原生 Provider 适配器从未对真实 API 调用过。** 翻译逻辑、流式状态、取消与错误路径都是照协议文档写的、用假响应测的。每个适配器的假设列在 [模型 Provider](./boundaries/provider.md#边界模型-provider) 里。
+- **Host certificate KRL 支持签名，但信任集合仍是本地静态配置。** 可配置受信 CA、有效期、principal、本地路径或 HTTPS URL，以及最多 8 把独立 KRL 签名公钥；客户端会拒绝被序列号、key ID、CA/公钥或 SHA-1/SHA-256 指纹撤销的 host certificate。`KRL_SECTION_SIGNATURE` 必须位于末尾，每一条签名都要有效，且至少一条要由 host CA 或配置的独立 signer 验证通过；同时列出旧、新 signer 即可完成轮换。在线 URL 禁止内嵌凭据、query、fragment 与重定向，下载上限 16 MiB，按应用级网络设置连接（默认直连），失败时拒绝连接。未知关键扩展仍失败关闭；下载源不使用认证头、不执行 PAC，是否走代理由应用网络设置决定，签名者列表也不会远程自动更新。
+- **`filesystem.edit` 有守卫，但仍不是 compare-and-swap**（[ADR 0017](./adr.md#adr-0017filesystemedit-的替换阶段有守卫但仍不是-compare-and-swap)）。普通文件走同目录 staging → 守卫复核 → rename → 发布复核，读者不会看到半写状态；没有 SFTP compare-and-swap，所以检查与 rename 之间仍有一个窗口，只是它被缩到「读取后的 `stat` → rename」这一段，并且这一段里的改动会变成一条**并发修改错误**而不是静默覆盖。**同一秒内、同样大小的改写仍然无法区分**（SFTP 的 mtime 粒度是秒）。symlink、`nlink > 1` 的硬链接、以及远端不报告链接数（没有可用的 `stat`，例如 Windows 上的 OpenSSH）都会明确拒绝，而不是换成原位写；服务器拒绝 rename、staging 建不出来、或 `mode`/`mtime`/`owner`/`group` 有一项保不住时同样拒绝，错误里点名是哪一项。ACL 与 xattr 既不能保留也无法通过 SFTP v3 检测，所以不在这条工具的承诺范围内；需要保住它们的文件不该用它。
+- **多模态输入支持图片、PDF、UTF-8 文本文件与音频，尚不支持任意二进制文件。** 图片可输入 PNG、JPEG、WebP 与 GIF，单张原图最多 4 MiB，且最多 4 张；PDF 可输入有效 `%PDF-` 文件，单文件最多 3 MiB，最多 2 个；音频可输入 WAV、MP3、OGG 与 FLAC（同样按**魔数**校验，不看扩展名），单段最多 4 MiB，最多 2 段；图片、PDF 与音频的原始字节**共用**一个 5 MiB 总预算，base64 展开后仍须留在 sidecar 的 8 MiB 单帧上限内。文本文件必须是有效 UTF-8、无二进制控制字符，单文件最多 256 KiB、总计最多 512 KiB、最多 4 个；它们会作为明确分隔的文本块发送。图片与 PDF 分别映射到三家 Provider 各自的原生内容块，音频映射为 OpenAI 的 `input_audio`（只接受 WAV/MP3，其它格式会明确失败而不是被丢掉）与 Gemini 的 `inlineData`；**Anthropic Messages 没有音频内容块，因此带音频的请求会直接失败并说明原因**，而不是静默省略。**这两条 Provider 映射都还没有对真实 API 验证过**（与两个原生适配器整体一样），模型是否接受某种输入仍由上游决定，当前模型目录不声明视觉、PDF 或音频能力。
+- **Markdown 仍不是 CommonMark，而且实测数字已经写下来了。** 对照的规范版本固定为 **CommonMark 0.31.2**；官方 652 个例子里有 189 个被显式排除（它们是三条有意偏差的领域：HTML 按纯文本、链接只认 `http(s)`/`mailto`/页内锚点、图片不下载），剩下的 **463 个里 434 个与规范文本完全一致、461 个没有丢字**（测量方法、排除规则、逐节表格与运行方式见 [Markdown 渲染](./boundaries/markdown.md#与-commonmark-0312-的差距实测2026-09-15)）。还丢字的只剩 **2 个例子，而且是有意的偏差**：`&copy;`、`&quot;` 这类**命名**实体引用按字面显示。数字引用（`&#35;`、`&#x22;`）已经实现，命名引用要一张 2231 条的 HTML5 名字表，与「不为小功能引大依赖」冲突，所以不从。其余语法缺口（强调的 delimiter run 规则、列表项缩进、跨行代码 span、容器里的 lazy continuation）已经按规范补齐。未知语法按纯文本保留（这会显示多余的标记字符，但不允许丢内容），门禁用 `apps/desktop/tests/markdown-spec.test.ts` 的逐节下限挡住回归：数字只能变好，范围（每节例子数）要改必须重新基线。
 
 ### 有意为之的边界（不是待办）
 
-下面两条看起来像限制，其实是安全模型的形状。它们不会被「补完」，改动它们等于改动授权模型本身（[ADR 0005](./adr.md#adr-0005permission-engine-是唯一的执行授权决策者)、[ADR 0009](./adr.md#adr-0009agent-权限采用显式的运行级委托)）。
+下面两条看起来像限制，其实是安全模型的形状。它们不会被“补完”，改动它们等于改动授权模型本身（[ADR 0005](./adr.md#adr-0005permission-engine-是唯一的执行授权决策者)、[ADR 0009](./adr.md#adr-0009agent-权限采用显式的运行级委托)）。
 
-- **危险动作必须逐项批准，且无法被「记住」。** `docker.restart` 声明为 `high` 风险，因此在任何环境下都不会被自动批准，也不会被会话授权覆盖；会话授权只覆盖非危险操作（[权限档位：dangerous](./risk-tiers/dangerous.md)）。这不是还没做「总是允许」，而是**拒绝把它做出来**：模型文本不能成为授权的来源，一次「以后都别问了」的委托正是把危险动作交回给模型。代价很具体：一次长任务里若需要重启容器，用户一定会被打断，也必须在看到具体命令之后再点一次。
+- **危险动作必须逐项批准，且无法被“记住”。** `docker.restart` 声明为 `high` 风险，因此在任何环境下都不会被自动批准，也不会被会话授权覆盖；会话授权只覆盖非危险操作（[权限档位：dangerous](./risk-tiers/dangerous.md)）。这不是还没做“总是允许”，而是**拒绝把它做出来**：模型文本不能成为授权的来源，一次“以后都别问了”的委托正是把危险动作交回给模型。代价很具体：一次长任务里若需要重启容器，用户一定会被打断，也必须在看到具体命令之后再点一次。
 - **浏览器预览里没有原生能力。** 在浏览器里打开 Web 前端只能看到界面骨架：终端、远程文件、日志、服务、活动、对话历史和本地数据库都需要 Tauri 桌面应用，因为它们全都走 Tauri 命令与原生侧（SSH、PTY、keychain、SQLite）。这是有意的：WebView 不该持有进程句柄，也不该在它的生命周期里决定一个进程的生死（[ADR 0001](./adr.md#adr-0001agent-runtime-作为独立-nodejs-sidecar由-rust-拥有其生命周期)、[ADR 0008](./adr.md#adr-0008rust-负责-sidecar-的启动握手监督与回收)）。代价是：预览只能用来调样式与布局，任何真实操作——包括所有手工验收——都必须在 Tauri 窗口里做。

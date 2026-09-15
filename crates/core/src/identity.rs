@@ -113,6 +113,8 @@ mod tests {
                 method: "password".into(),
                 credential_ref: "keychain://ssh/test".into(),
                 passphrase_ref: None,
+                private_key_path: None,
+                certificate_path: None,
                 created_at: "2026-01-01T00:00:00.000Z".into(),
             })
             .expect("insert identity");
@@ -124,6 +126,7 @@ mod tests {
                 port: 22,
                 username: "test".into(),
                 identity_id: Some("idn_order".into()),
+                host_certificate_authority: None,
             },
             group_id: None,
             capabilities: ServerCapabilities::default(),

@@ -283,7 +283,7 @@ test("a server the host reported as unavailable is logged verbatim and registers
       servers: [],
       failures: [
         { serverId: "mcp_1", code: "exited", message: "mcp server \"mcp_1\" exited (exit code 7)" },
-        { serverId: "mcp_http", code: "transport_not_implemented", message: "outbound network policy" },
+        { serverId: "mcp_http", code: "invalid_config", message: "remote endpoints must use HTTPS" },
       ],
     },
     { executeOnHost: host.executeOnHost, log: (message) => messages.push(message) },
@@ -292,7 +292,7 @@ test("a server the host reported as unavailable is logged verbatim and registers
   assert.deepEqual(registration.registered, []);
   assert.equal(registration.failures.length, 2);
   assert.ok(messages.some((message) => message.includes("exit code 7")));
-  assert.ok(messages.some((message) => message.includes("transport_not_implemented")));
+  assert.ok(messages.some((message) => message.includes("invalid_config")));
 });
 
 /* ── 从宿主取目录 ───────────────────────────────────────────────────────── */

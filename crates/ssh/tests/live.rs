@@ -32,7 +32,8 @@
 //! 届时再加 feature 才是对的时机。
 
 use yukinal_ssh::{
-    Authentication, ConnectionSecrets, Error, KnownHostsPolicy, RusshBackend, SshBackend, SshConfig,
+    Authentication, ConnectionSecrets, Error, KnownHostsPolicy, OutboundProxy, RusshBackend,
+    SshBackend, SshConfig,
 };
 
 fn env(key: &str) -> Option<String> {
@@ -56,6 +57,8 @@ fn test_config(server_id: &str, policy: KnownHostsPolicy) -> SshConfig {
         authentication: Authentication::Password {
             credential_ref: "keychain://ssh-test/plain".into(),
         },
+        host_certificate_authority: None,
+        outbound_proxy: OutboundProxy::default(),
         known_hosts_policy: policy,
         keepalive_interval_secs: 0,
     }
@@ -68,6 +71,7 @@ fn secrets() -> ConnectionSecrets {
         password: env("YUKINAL_SSH_TEST_PASSWORD"),
         private_key_pem: key_pem,
         private_key_passphrase: env("YUKINAL_SSH_TEST_KEY_PASSPHRASE"),
+        keyboard_interactive: None,
     }
 }
 

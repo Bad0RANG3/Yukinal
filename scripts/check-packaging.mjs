@@ -172,6 +172,29 @@ for (const token of order) {
   cursor = index;
 }
 
+// Linux packages must declare their runtime libraries. Tauri's schema permits an
+// empty/missing `depends` list, but that produces an installable package that cannot
+// start on a clean machine.
+const debDepends = bundle.linux?.deb?.depends;
+if (!Array.isArray(debDepends) || debDepends.length === 0) {
+  fail("bundle.linux.deb.depends is empty — .deb installs must pull webkit and GTK");
+}
+for (const required of ["libwebkit2gtk", "libgtk-3"]) {
+  if (!debDepends.some((dependency) => String(dependency).includes(required))) {
+    fail(`bundle.linux.deb.depends does not include ${required}`);
+  }
+}
+
+const rpmDepends = bundle.linux?.rpm?.depends;
+if (!Array.isArray(rpmDepends) || rpmDepends.length === 0) {
+  fail("bundle.linux.rpm.depends is empty — .rpm installs must pull webkit and GTK");
+}
+for (const required of ["webkit2gtk", "gtk3"]) {
+  if (!rpmDepends.some((dependency) => String(dependency).includes(required))) {
+    fail(`bundle.linux.rpm.depends does not include ${required}`);
+  }
+}
+
 // ─────────────────────────────────────────── 2. the Rust side of the same contract
 const configRs = join(root, "crates", "core", "src", "sidecar", "config.rs");
 const configSource = read(configRs);

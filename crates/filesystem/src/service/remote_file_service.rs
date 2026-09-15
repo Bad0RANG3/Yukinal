@@ -7,7 +7,8 @@ use super::error::{Error, Result};
 use super::helpers::{byte_match_offsets, count_lines, join_remote_path, read_result};
 use super::request::{AgentEditRequest, AgentReadRequest, AgentWriteRequest};
 use super::types::{
-    RemoteEdit, RemoteEntry, RemoteFileTransport, RemoteListing, RemoteRead, RemoteWrite,
+    RemoteEdit, RemoteEntry, RemoteEntryKind, RemoteFileTransport, RemoteListing, RemoteRead,
+    RemoteWrite, ReplaceError, ReplaceGuard,
 };
 
 /// 远端文件服务：策略 + 上限 + 有界解码，套在一个 [`RemoteFileTransport`] 外面。
@@ -97,10 +98,12 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
     ///   一份非 UTF-8 文件不会被编辑悄悄改写成替换字符。
     ///
     /// # 它不保证什么（必须说清楚）
-    /// **这不是原子操作，也不是比较并交换。** SFTP 没有 compare-and-swap，所以这里的顺序
-    /// 只能是「检查、然后写」，两次网络往返之间有一个窗口：另一个写入者在这段窗口里改了文件，
-    /// 它会被这次写回覆盖，谁都不会知道。窗口被收窄到「读回来的那一份内容必须是刚刚读过的
-    /// 那一份」，但没有被关上。真正需要互斥的场景不该靠这个工具来兜底。
+    /// **替换阶段是原子的，但整条守卫仍不是比较并交换**（ADR 0017）。SFTP 没有 CAS，所以：
+    /// - 检查与 rename 之间仍有一个窗口，它被缩到「读取后的 stat → rename」这一段，并且窗口
+    ///   里的改动会变成 [`Error::ConcurrentChange`]；但同一秒内、同样大小的改写无法区分；
+    /// - metadata 必须逐项保留，保不住就整次失败并点名（[`Error::MetadataNotPreserved`]）；
+    /// - symlink、硬链接、以及**无法确认硬链接**的远端一律拒绝（[`Error::UnsafeRemoteWrite`]），
+    ///   而不是换一种更弱的写法继续。
     pub async fn agent_edit(
         &self,
         server_id: &str,
@@ -156,9 +159,71 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
             )));
         }
 
-        self.transport
-            .write(server_id, &request.path, &updated)
-            .await?;
+        // 读取之后才取守卫：这之前的改动已经由 revision 检查覆盖，之后的改动由守卫覆盖。
+        let target = self.transport.stat(server_id, &request.path).await?;
+        match target.kind {
+            RemoteEntryKind::File => {}
+            RemoteEntryKind::Symlink => {
+                return Err(Error::UnsafeRemoteWrite(format!(
+                    "{} is a symlink; replacing the path would replace the link itself, so this tool refuses. Read the target path directly if that is what you meant",
+                    request.path
+                )))
+            }
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "{} is not a regular file, so there is nothing to edit",
+                    request.path
+                )))
+            }
+        }
+        if target.size != bytes.len() as u64 {
+            return Err(Error::ConcurrentChange(format!(
+                "{} changed between the read ({} bytes) and the metadata check ({} bytes); re-read it and retry",
+                request.path,
+                bytes.len(),
+                target.size
+            )));
+        }
+        // 硬链接：rename 会让其他名字留在旧内容上，所以要么拒绝、要么原位写。这里拒绝，
+        // 因为原位写会丢掉这个工具承诺的原子发布；`filesystem.write` 才是明确要求覆盖写的工具。
+        match self.transport.link_count(server_id, &request.path).await? {
+            Some(1) => {}
+            Some(count) => {
+                return Err(Error::UnsafeRemoteWrite(format!(
+                    "{} has {count} hard links; replacing it would leave the other names pointing at the old content. Edit a path with a single name, or use filesystem.write if overwriting in place is what you mean",
+                    request.path
+                )))
+            }
+            None => {
+                return Err(Error::UnsafeRemoteWrite(format!(
+                    "the server does not report how many names point at {}, so a hard link cannot be ruled out and this tool refuses to replace it. filesystem.write is the deliberate in-place overwrite",
+                    request.path
+                )))
+            }
+        }
+
+        let replaced = self
+            .transport
+            .replace_guarded(
+                server_id,
+                &request.path,
+                &ReplaceGuard {
+                    size: target.size,
+                    modified: target.modified,
+                },
+                &updated,
+            )
+            .await
+            .map_err(map_replace_error)?;
+        // 发布复核：rename 之后目标必须就是我们写进去的那一份。
+        if replaced.size != updated.len() as u64 {
+            return Err(Error::ConcurrentChange(format!(
+                "{} is {} bytes after the replacement instead of the {} bytes that were written; another writer replaced it during the edit, so its content is not the one this call produced",
+                request.path,
+                replaced.size,
+                updated.len()
+            )));
+        }
         Ok(RemoteEdit {
             path: request.path.clone(),
             revision: content_revision(&updated),
@@ -166,6 +231,18 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
             bytes_after: updated.len(),
             line_delta: count_lines(&updated) - count_lines(&bytes),
         })
+    }
+}
+
+/// [`ReplaceError`] → 服务层的失败分类。三类分开传，不合并成一句话。
+fn map_replace_error(error: ReplaceError) -> Error {
+    match error {
+        ReplaceError::ConcurrentChange(message) => Error::ConcurrentChange(message),
+        ReplaceError::Unsupported(message) => Error::UnsafeRemoteWrite(message),
+        ReplaceError::MetadataNotPreserved { message, missing } => {
+            Error::MetadataNotPreserved { message, missing }
+        }
+        ReplaceError::Transport(error) => Error::Transport(error),
     }
 }
 
@@ -180,8 +257,9 @@ mod tests {
     use crate::policy::AGENT_PATH_POLICY_MESSAGE;
     use crate::revision::content_revision;
     use crate::service::{
-        AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error, ListedEntry,
-        RemoteFileService, RemoteFileTransport, TransportError, TransportResult,
+        AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error, ListedEntry, RemoteEntryKind,
+        RemoteFileService, RemoteFileTransport, RemoteStat, ReplaceError, ReplaceGuard,
+        ReplacedFile, TransportError, TransportResult,
     };
 
     /// 传输调用记录。用 `Arc` 是因为传输移交给服务之后，测试还要能读到它 ——
@@ -205,9 +283,24 @@ mod tests {
         fn writes(&self) -> usize {
             self.snapshot()
                 .iter()
-                .filter(|call| call.starts_with("write "))
+                .filter(|call| call.starts_with("write ") || call.starts_with("replace "))
                 .count()
         }
+    }
+
+    /// 替换阶段要怎么表现。默认是正常发布；其余几种各自对应一条必须被区分出来的失败。
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum ReplaceBehaviour {
+        #[default]
+        Publish,
+        /// 另一个写入者在检查与 rename 之间改了文件。
+        Concurrent,
+        /// 远端做不到安全替换（symlink、rename 被拒……）。
+        Unsupported,
+        /// metadata 保不住。
+        MetadataNotPreserved,
+        /// rename 之后目标不是我们写进去的那一份。
+        PublishedElsewhere,
     }
 
     /// 内存假传输：一个假文件、一次调用记录，可选地失败。
@@ -220,12 +313,23 @@ mod tests {
         entries: Vec<ListedEntry>,
         file: Arc<Mutex<Vec<u8>>>,
         failure: Option<&'static str>,
+        kind: RemoteEntryKind,
+        /// `None` = 远端不报告链接数（Windows 上的 OpenSSH 就是这样）。
+        links: Option<u64>,
+        modified: Option<u32>,
+        replace: ReplaceBehaviour,
+        /// `Some(n)` = `stat` 报出的大小与假文件内容不同（模拟「读与 stat 之间有人改了」）。
+        stat_size_override: Option<u64>,
     }
 
     impl FakeTransport {
         fn with_content(content: &[u8]) -> Self {
             Self {
                 file: Arc::new(Mutex::new(content.to_vec())),
+                // 普通文件的默认形状：一个名字、有 mtime、可以被替换。
+                kind: RemoteEntryKind::File,
+                links: Some(1),
+                modified: Some(1_700_000_000),
                 ..Self::default()
             }
         }
@@ -274,6 +378,65 @@ mod tests {
             }
             *self.file.lock().expect("file lock") = data.to_vec();
             Ok(())
+        }
+
+        async fn stat(&self, server_id: &str, path: &str) -> TransportResult<RemoteStat> {
+            self.log.record(format!("stat {server_id} {path}"));
+            if let Some(message) = self.failure {
+                return Err(TransportError::new(message));
+            }
+            Ok(RemoteStat {
+                kind: self.kind,
+                size: self
+                    .stat_size_override
+                    .unwrap_or_else(|| self.file().len() as u64),
+                modified: self.modified,
+            })
+        }
+
+        async fn link_count(&self, server_id: &str, path: &str) -> TransportResult<Option<u64>> {
+            self.log.record(format!("link-count {server_id} {path}"));
+            if let Some(message) = self.failure {
+                return Err(TransportError::new(message));
+            }
+            Ok(self.links)
+        }
+
+        async fn replace_guarded(
+            &self,
+            server_id: &str,
+            path: &str,
+            _guard: &ReplaceGuard,
+            data: &[u8],
+        ) -> std::result::Result<ReplacedFile, ReplaceError> {
+            self.log
+                .record(format!("replace {server_id} {path} {}b", data.len()));
+            match self.replace {
+                ReplaceBehaviour::Publish => {
+                    *self.file.lock().expect("file lock") = data.to_vec();
+                    Ok(ReplacedFile {
+                        size: data.len() as u64,
+                        modified: self.modified,
+                    })
+                }
+                ReplaceBehaviour::Concurrent => Err(ReplaceError::ConcurrentChange(
+                    "the file changed while the edit was being staged".to_string(),
+                )),
+                ReplaceBehaviour::Unsupported => Err(ReplaceError::Unsupported(
+                    "the server refused to replace the file through a rename".to_string(),
+                )),
+                ReplaceBehaviour::MetadataNotPreserved => {
+                    Err(ReplaceError::MetadataNotPreserved {
+                        message: "the remote would not keep the file's owner, group; the edit was not published"
+                            .to_string(),
+                        missing: vec!["owner".to_string(), "group".to_string()],
+                    })
+                }
+                ReplaceBehaviour::PublishedElsewhere => Ok(ReplacedFile {
+                    size: data.len() as u64 + 7,
+                    modified: self.modified,
+                }),
+            }
         }
     }
 
@@ -482,15 +645,272 @@ mod tests {
             );
         });
 
-        // 恰好一次读 + 一次写，读取用的是编辑上限（传输自己会多给一个字节示意「还有更多」）。
+        // 每次编辑是：读（用编辑上限）→ stat → 链接数 → 有守卫替换。读取用的是编辑上限，
+        // 传输自己会多给一个字节示意「还有更多」。顺序本身是契约的一部分：守卫必须在读取
+        // **之后**取，硬链接与文件类型必须在替换之前问清。
         assert_eq!(
             log.snapshot(),
             vec![
                 format!("read srv_1 /etc/app.env @{MAX_AGENT_EDIT_BYTES}"),
-                format!("write srv_1 /etc/app.env {}b", AFTER_FIRST.len()),
+                "stat srv_1 /etc/app.env".to_string(),
+                "link-count srv_1 /etc/app.env".to_string(),
+                format!("replace srv_1 /etc/app.env {}b", AFTER_FIRST.len()),
                 format!("read srv_1 /etc/app.env @{MAX_AGENT_EDIT_BYTES}"),
-                format!("write srv_1 /etc/app.env {}b", AFTER_SECOND.len()),
+                "stat srv_1 /etc/app.env".to_string(),
+                "link-count srv_1 /etc/app.env".to_string(),
+                format!("replace srv_1 /etc/app.env {}b", AFTER_SECOND.len()),
             ]
+        );
+    }
+
+    /* ── P0-3：守卫、并发与 metadata（ADR 0017） ─────────────────────────────── */
+
+    /// 一个合法的编辑请求：revision 就是**当前**内容的摘要。
+    fn edit_request(path: &str, content: &[u8], old: &str, new: &str) -> AgentEditRequest {
+        AgentEditRequest::check(
+            path,
+            &content_revision(content),
+            old.to_string(),
+            new.to_string(),
+        )
+        .expect("request")
+    }
+
+    #[test]
+    fn a_concurrent_writer_makes_the_edit_fail_instead_of_being_overwritten() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            replace: ReplaceBehaviour::Concurrent,
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let log = transport.log();
+        let file = transport.file.clone();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("a file that changed under the edit must not be overwritten");
+            match error {
+                Error::ConcurrentChange(message) => {
+                    assert!(message.contains("changed"), "{message}");
+                }
+                other => panic!("a concurrent change must be reported as one, not as {other:?}"),
+            }
+            assert_eq!(
+                file.lock().expect("file lock").clone(),
+                BEFORE.to_vec(),
+                "the other writer's content must survive a refused edit"
+            );
+        });
+        assert_eq!(log.writes(), 1, "the replacement was attempted");
+    }
+
+    #[test]
+    fn a_published_file_that_is_not_ours_is_reported_as_a_conflict() {
+        // rename 之后目标不是我们写进去的那一份：另一个写入者在我们之后发布了别的内容。
+        // 这一次调用不能把它说成一次成功的编辑。
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            replace: ReplaceBehaviour::PublishedElsewhere,
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("a file that is no longer ours is not a completed edit");
+            match error {
+                Error::ConcurrentChange(message) => {
+                    assert!(message.contains("another writer"), "{message}");
+                }
+                other => panic!("expected a conflict, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn a_file_that_changed_between_the_read_and_the_metadata_check_is_a_conflict() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            // stat 报出的大小与读到的不一致：读与 stat 之间有人写过了。
+            stat_size_override: Some(BEFORE.len() as u64 + 5),
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let log = transport.log();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("a size that disagrees with the read is a conflict");
+            match error {
+                Error::ConcurrentChange(message) => {
+                    assert!(message.contains("metadata check"), "{message}");
+                    assert!(message.contains("re-read"), "{message}");
+                }
+                other => panic!("expected a conflict, got {other:?}"),
+            }
+        });
+        assert_eq!(log.writes(), 0, "nothing may be replaced on that path");
+    }
+
+    #[test]
+    fn a_symlink_is_refused_before_anything_is_replaced() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            kind: RemoteEntryKind::Symlink,
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let log = transport.log();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("a symlink must be refused");
+            match error {
+                Error::UnsafeRemoteWrite(message) => {
+                    assert!(message.contains("symlink"), "{message}");
+                    assert!(message.contains("link itself"), "{message}");
+                }
+                other => panic!("expected an unsafe-write refusal, got {other:?}"),
+            }
+        });
+        assert_eq!(log.writes(), 0);
+    }
+
+    #[test]
+    fn a_file_with_other_names_is_refused() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            links: Some(3),
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let log = transport.log();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("a hard-linked file must not silently lose its other names");
+            match error {
+                Error::UnsafeRemoteWrite(message) => {
+                    assert!(message.contains("3 hard links"), "{message}");
+                    assert!(
+                        message.contains("filesystem.write"),
+                        "the refusal must name the deliberate alternative: {message}"
+                    );
+                }
+                other => panic!("expected an unsafe-write refusal, got {other:?}"),
+            }
+        });
+        assert_eq!(log.writes(), 0);
+    }
+
+    #[test]
+    fn a_server_that_cannot_count_names_is_refused_rather_than_guessed() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            links: None,
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let log = transport.log();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("an unknown link count is not a safe file");
+            match error {
+                Error::UnsafeRemoteWrite(message) => {
+                    assert!(message.contains("cannot be ruled out"), "{message}");
+                }
+                other => panic!("expected an unsafe-write refusal, got {other:?}"),
+            }
+        });
+        assert_eq!(
+            log.writes(),
+            0,
+            "«we do not know» must not become «try anyway»"
+        );
+    }
+
+    #[test]
+    fn metadata_that_cannot_be_kept_names_the_attributes_and_changes_nothing() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            replace: ReplaceBehaviour::MetadataNotPreserved,
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let file = transport.file.clone();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("an edit that would drop metadata must not be published");
+            match error {
+                Error::MetadataNotPreserved { message, missing } => {
+                    assert_eq!(missing, vec!["owner".to_string(), "group".to_string()]);
+                    assert!(message.contains("owner, group"), "{message}");
+                    assert!(message.contains("not published"), "{message}");
+                }
+                other => panic!("expected a metadata refusal, got {other:?}"),
+            }
+            assert_eq!(file.lock().expect("file lock").clone(), BEFORE.to_vec());
+        });
+    }
+
+    #[test]
+    fn an_unsupported_remote_refuses_instead_of_writing_in_place() {
+        const BEFORE: &[u8] = b"PORT=8080\n";
+        let transport = FakeTransport {
+            replace: ReplaceBehaviour::Unsupported,
+            ..FakeTransport::with_content(BEFORE)
+        };
+        let log = transport.log();
+        let file = transport.file.clone();
+        let service = RemoteFileService::new(transport);
+
+        runtime().block_on(async {
+            let request = edit_request("/etc/app.env", BEFORE, "PORT=8080", "PORT=9090");
+            let error = service
+                .agent_edit("srv_1", &request)
+                .await
+                .expect_err("a server that cannot publish atomically must be refused");
+            match error {
+                Error::UnsafeRemoteWrite(message) => {
+                    assert!(message.contains("refused to replace"), "{message}");
+                }
+                other => panic!("expected an unsafe-write refusal, got {other:?}"),
+            }
+            assert_eq!(
+                file.lock().expect("file lock").clone(),
+                BEFORE.to_vec(),
+                "there is no in-place fallback left to fall into"
+            );
+        });
+        assert!(
+            log.snapshot()
+                .iter()
+                .all(|call| !call.starts_with("write ")),
+            "filesystem.write is a different tool: the edit must not reach for it"
         );
     }
 

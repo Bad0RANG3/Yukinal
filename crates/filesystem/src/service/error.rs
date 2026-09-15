@@ -55,6 +55,20 @@ pub enum Error {
         "the file is larger than the {limit}-byte cap this tool can read in full, so an edit would write back only the part that fits and truncate the file; filesystem.write must be used deliberately instead"
     )]
     FileTooLargeToEdit { limit: usize },
+    /// 远端做不到安全替换：symlink、硬链接、无法确认硬链接、或 rename 被拒（ADR 0017）。
+    ///
+    /// 与 [`Error::ConcurrentChange`] 分开，因为下一步完全不同：这里重试多少次都一样。
+    #[error("{0}")]
+    UnsafeRemoteWrite(String),
+    /// 替换期间的并发修改：守卫不一致，或发布出来的不是我们写进去的那一份。
+    #[error("{0}")]
+    ConcurrentChange(String),
+    /// metadata 保不住。错误里点名是哪几项（`missing` 同时进入宿主侧的 detail）。
+    #[error("{message}")]
+    MetadataNotPreserved {
+        message: String,
+        missing: Vec<String>,
+    },
     /// 传输失败；文案原样来自传输实现。
     #[error("{0}")]
     Transport(#[from] TransportError),

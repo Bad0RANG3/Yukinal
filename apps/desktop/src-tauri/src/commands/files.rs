@@ -6,16 +6,17 @@
 //! because this file is the file capability's command surface, and the Agent's host tools reach
 //! the same adapter through [`remote_file_service`] — one transport implementation, two callers.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use yukinal_filesystem::{
-    ListedEntry, RemoteFileService, RemoteFileTransport, TransportError, TransportResult,
+    ListedEntry, RemoteEntryKind, RemoteFileService, RemoteFileTransport, RemoteStat, ReplaceError,
+    ReplaceGuard, ReplacedFile, TransportError, TransportResult,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteFileEntry {
     pub name: String,
@@ -24,14 +25,14 @@ pub struct RemoteFileEntry {
     pub size: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteFileListResponse {
     pub path: String,
     pub entries: Vec<RemoteFileEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteFileReadResponse {
     pub path: String,
@@ -102,6 +103,83 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
             .sftp_write(server_id, path, data)
             .await
             .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn stat(&self, server_id: &str, path: &str) -> TransportResult<RemoteStat> {
+        ensure_session(self.state, server_id)
+            .await
+            .map_err(TransportError::new)?;
+        let stat = self
+            .state
+            .terminals
+            .sftp_stat(server_id, path)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))?;
+        Ok(RemoteStat {
+            kind: match stat.kind {
+                yukinal_ssh::SftpEntryKind::File => RemoteEntryKind::File,
+                yukinal_ssh::SftpEntryKind::Directory => RemoteEntryKind::Directory,
+                yukinal_ssh::SftpEntryKind::Symlink => RemoteEntryKind::Symlink,
+                yukinal_ssh::SftpEntryKind::Other => RemoteEntryKind::Other,
+            },
+            size: stat.size,
+            modified: stat.modified,
+        })
+    }
+
+    async fn link_count(&self, server_id: &str, path: &str) -> TransportResult<Option<u64>> {
+        ensure_session(self.state, server_id)
+            .await
+            .map_err(TransportError::new)?;
+        self.state
+            .terminals
+            .sftp_link_count(server_id, path)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn replace_guarded(
+        &self,
+        server_id: &str,
+        path: &str,
+        guard: &ReplaceGuard,
+        data: &[u8],
+    ) -> Result<ReplacedFile, ReplaceError> {
+        ensure_session(self.state, server_id)
+            .await
+            .map_err(|error| ReplaceError::Transport(TransportError::new(error)))?;
+        let outcome = self
+            .state
+            .terminals
+            .sftp_replace_guarded(
+                server_id,
+                path,
+                yukinal_ssh::SftpReplaceGuard {
+                    size: guard.size,
+                    modified: guard.modified,
+                },
+                data,
+            )
+            .await;
+        match outcome {
+            Ok(replacement) => Ok(ReplacedFile {
+                size: replacement.size,
+                modified: replacement.modified,
+            }),
+            Err(yukinal_core::terminal::SftpReplaceFailure::ConcurrentChange(detail)) => {
+                Err(ReplaceError::ConcurrentChange(detail))
+            }
+            Err(yukinal_core::terminal::SftpReplaceFailure::Unsupported(detail)) => {
+                Err(ReplaceError::Unsupported(detail))
+            }
+            Err(yukinal_core::terminal::SftpReplaceFailure::MetadataNotPreserved {
+                message,
+                missing,
+            }) => Err(ReplaceError::MetadataNotPreserved { message, missing }),
+            Err(yukinal_core::terminal::SftpReplaceFailure::Failed(detail)) => {
+                Err(ReplaceError::Transport(TransportError::new(detail)))
+            }
+        }
     }
 }
 

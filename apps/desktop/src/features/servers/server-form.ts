@@ -7,11 +7,21 @@ export interface ServerFormValues {
   username: string;
   environment: Environment;
   /** `agent` 不需要任何输入：它是对「用本机 ssh-agent 里的身份认证」的一次选择。 */
-  authMethod: "password" | "privateKey" | "agent";
+  authMethod: "password" | "privateKey" | "certificate" | "agent";
   password: string;
   privateKeyPem: string;
+  certificatePath: string;
+  privateKeyPath: string;
   /** 加密私钥的口令。可选 —— 明文 key 留空即可。 */
   passphrase: string;
+  /** Explicit OpenSSH host-certificate CA/principal policy. */
+  hostCertificateEnabled: boolean;
+  hostCertificateConfigured: boolean;
+  hostCaPublicKey: string;
+  hostPrincipals: string;
+  hostRevocationListPath: string;
+  hostRevocationListUrl: string;
+  hostRevocationListSigners: string;
 }
 
 export const SERVER_FORM_VALIDATION_MESSAGES = {
@@ -19,6 +29,9 @@ export const SERVER_FORM_VALIDATION_MESSAGES = {
   missingConnectionFields: "请填写名称、主机和用户名。",
   missingPassword: "请填写 SSH 密码。",
   missingPrivateKey: "请填写 SSH 私钥。",
+  missingCertificatePath: "请填写 OpenSSH 证书路径（通常是 *-cert.pub）。",
+  missingHostCaPublicKey: "请填写 host certificate CA 公钥。",
+  missingHostPrincipals: "请至少填写一个 host principal（逗号或换行分隔）。",
 } as const;
 
 /**
@@ -38,7 +51,56 @@ export function buildServerInput(values: ServerFormValues, serverId: string): Up
 export function buildServerInput(values: ServerFormValues, serverId?: string): AddServerInput | UpdateServerInput {
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(SERVER_FORM_VALIDATION_MESSAGES.invalidPort);
-  const base = { name: values.name.trim(), host: values.host.trim(), port, username: values.username.trim(), environment: values.environment };
+  const hostCertificateAuthority = values.hostCertificateEnabled
+    ? {
+        caPublicKey: values.hostCaPublicKey.trim(),
+        principals: values.hostPrincipals
+          .split(/[,\n]/)
+          .map((principal) => principal.trim())
+          .filter(Boolean),
+        ...(values.hostRevocationListPath.trim()
+          ? { revocationListPath: values.hostRevocationListPath.trim() }
+          : {}),
+        ...(values.hostRevocationListUrl.trim()
+          ? { revocationListUrl: values.hostRevocationListUrl.trim() }
+          : {}),
+        ...(values.hostRevocationListSigners
+          .split("\n")
+          .map((signer) => signer.trim())
+          .filter(Boolean).length
+          ? {
+              revocationListSigners: values.hostRevocationListSigners
+                .split("\n")
+                .map((signer) => signer.trim())
+                .filter(Boolean),
+            }
+          : {}),
+      }
+    : undefined;
+  if (values.hostCertificateEnabled) {
+    if (values.hostRevocationListPath.trim() && values.hostRevocationListUrl.trim()) {
+      throw new Error("KRL path and URL are mutually exclusive");
+    }
+    if (!hostCertificateAuthority?.caPublicKey) {
+      throw new Error(SERVER_FORM_VALIDATION_MESSAGES.missingHostCaPublicKey);
+    }
+    if (!hostCertificateAuthority.principals.length) {
+      throw new Error(SERVER_FORM_VALIDATION_MESSAGES.missingHostPrincipals);
+    }
+  }
+  const hostCertificateFields = hostCertificateAuthority
+    ? { hostCertificateAuthority }
+    : serverId && values.hostCertificateConfigured
+      ? { clearHostCertificateAuthority: true }
+      : {};
+  const base = {
+    name: values.name.trim(),
+    host: values.host.trim(),
+    port,
+    username: values.username.trim(),
+    environment: values.environment,
+    ...hostCertificateFields,
+  };
   if (!base.name || !base.host || !base.username) throw new Error(SERVER_FORM_VALIDATION_MESSAGES.missingConnectionFields);
 
   // ssh-agent 不带任何 secret，所以「没输入 secret 就省略 authentication」这条规则
@@ -46,6 +108,24 @@ export function buildServerInput(values: ServerFormValues, serverId?: string): A
   // 「保留现有凭据」，那等于用户选了 agent、实际还在用旧密码连。
   if (values.authMethod === "agent") {
     const authentication = { method: "agent" as const };
+    return serverId
+      ? UpdateServerInputSchema.parse({ ...base, serverId, authentication })
+      : AddServerInputSchema.parse({ ...base, authentication });
+  }
+
+  if (values.authMethod === "certificate") {
+    const privateKeyPem = values.privateKeyPem.trim();
+    if (!privateKeyPem) throw new Error(SERVER_FORM_VALIDATION_MESSAGES.missingPrivateKey);
+    const certificatePath = values.certificatePath.trim();
+    if (!certificatePath) throw new Error(SERVER_FORM_VALIDATION_MESSAGES.missingCertificatePath);
+    const submittedPassphrase = passphraseForSubmission(values.passphrase);
+    const authentication = {
+      method: "certificate" as const,
+      privateKeyPem,
+      certificatePath,
+      ...(values.privateKeyPath.trim() ? { privateKeyPath: values.privateKeyPath.trim() } : {}),
+      ...(submittedPassphrase === undefined ? {} : { passphrase: submittedPassphrase }),
+    };
     return serverId
       ? UpdateServerInputSchema.parse({ ...base, serverId, authentication })
       : AddServerInputSchema.parse({ ...base, authentication });

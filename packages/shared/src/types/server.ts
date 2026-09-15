@@ -22,12 +22,27 @@ export interface ServerCapabilities {
 }
 
 /** — `identityId` points at an *identity row*, which points at a credential_ref. */
+export interface HostCertificateAuthority {
+  /** OpenSSH public-key line for the CA that signs host certificates. */
+  caPublicKey: string;
+  /** Allowed certificate principals; `*` and `?` wildcards are supported. */
+  principals: string[];
+  /** Optional local OpenSSH KRL whose revoked certificates/keys are rejected. */
+  revocationListPath?: string;
+  /** Optional HTTPS OpenSSH KRL URL; mutually exclusive with the local path. */
+  revocationListUrl?: string;
+  /** Public keys trusted to sign the KRL independently of the host CA. */
+  revocationListSigners?: string[];
+}
+
 export interface ServerConnection {
   host: string;
   port: number;
   username: string;
   /** Reference to `identities` in SQLite. Secret material stays in the OS store. */
   identityId?: string;
+  /** Optional explicit OpenSSH host-certificate trust root. */
+  hostCertificateAuthority?: HostCertificateAuthority;
 }
 
 export interface ServerMetadata {
@@ -64,9 +79,19 @@ export interface AddServerInput {
   username: string;
   environment: Environment;
   groupId?: string;
+  hostCertificateAuthority?: HostCertificateAuthority;
   authentication:
     | { method: "password"; password: string }
     | { method: "privateKey"; privateKeyPem: string; passphrase?: string }
+    | {
+        method: "certificate";
+        privateKeyPem: string;
+        passphrase?: string;
+        /** Explicit certificate path. Public material; safe to persist. */
+        certificatePath: string;
+        /** Optional origin path of the private key, for diagnostics or sibling conventions. */
+        privateKeyPath?: string;
+      }
     /** ssh-agent：**不携带任何 secret** —— 身份在 agent 手里，Yukinal 不落凭据。 */
     | { method: "agent" }
     | { method: "identity"; identityId: string };
@@ -86,9 +111,18 @@ export interface UpdateServerInput {
   username: string;
   environment: Environment;
   groupId?: string;
+  hostCertificateAuthority?: HostCertificateAuthority;
+  clearHostCertificateAuthority?: boolean;
   authentication?:
     | { method: "password"; password: string }
     | { method: "privateKey"; privateKeyPem: string; passphrase?: string }
+    | {
+        method: "certificate";
+        privateKeyPem: string;
+        passphrase?: string;
+        certificatePath: string;
+        privateKeyPath?: string;
+      }
     | { method: "agent" }
     | { method: "identity"; identityId: string };
 }
@@ -97,13 +131,17 @@ export interface UpdateServerInput {
 export interface Identity {
   id: string;
   label: string;
-  method: "password" | "privateKey" | "agent";
+  method: "password" | "privateKey" | "certificate" | "agent";
   /** `""` for `agent`: that identity has no credential entry at all. */
   credentialRef: string;
   /** Reference to the passphrase entry of an encrypted private key. A reference,
    * never the passphrase itself — and absent for a plaintext key, a password, or
    * an agent identity. */
   passphraseRef?: string;
+  /** OpenSSH public certificate path for certificate identities. */
+  certificatePath?: string;
+  /** Original private-key path, used only for diagnostics and sibling conventions. */
+  privateKeyPath?: string;
   createdAt: string;
 }
 

@@ -110,6 +110,8 @@ export type _IpcParamsContracts = {
   server_delete: Expect<Assignable<ParamsOf<"server_delete">, IpcCommandMap["server_delete"]["params"]>>;
   server_connect: Expect<Assignable<ParamsOf<"server_connect">, IpcCommandMap["server_connect"]["params"]>>;
   server_disconnect: Expect<Assignable<ParamsOf<"server_disconnect">, IpcCommandMap["server_disconnect"]["params"]>>;
+  server_auth_respond: Expect<Assignable<ParamsOf<"server_auth_respond">, IpcCommandMap["server_auth_respond"]["params"]>>;
+  server_auth_cancel: Expect<Assignable<ParamsOf<"server_auth_cancel">, IpcCommandMap["server_auth_cancel"]["params"]>>;
   server_snapshot: Expect<Assignable<ParamsOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["params"]>>;
   server_services: Expect<Assignable<ParamsOf<"server_services">, IpcCommandMap["server_services"]["params"]>>;
   server_logs: Expect<Assignable<ParamsOf<"server_logs">, IpcCommandMap["server_logs"]["params"]>>;
@@ -150,6 +152,11 @@ export type _IpcParamsContracts = {
   mcp_server_delete: Expect<Assignable<ParamsOf<"mcp_server_delete">, IpcCommandMap["mcp_server_delete"]["params"]>>;
   mcp_server_start: Expect<Assignable<ParamsOf<"mcp_server_start">, IpcCommandMap["mcp_server_start"]["params"]>>;
   mcp_server_stop: Expect<Assignable<ParamsOf<"mcp_server_stop">, IpcCommandMap["mcp_server_stop"]["params"]>>;
+  mcp_server_review: Expect<Assignable<ParamsOf<"mcp_server_review">, IpcCommandMap["mcp_server_review"]["params"]>>;
+  mcp_oauth_connect: Expect<Assignable<ParamsOf<"mcp_oauth_connect">, IpcCommandMap["mcp_oauth_connect"]["params"]>>;
+  mcp_oauth_cancel: Expect<Assignable<ParamsOf<"mcp_oauth_cancel">, IpcCommandMap["mcp_oauth_cancel"]["params"]>>;
+  network_proxy_get: Expect<Assignable<ParamsOf<"network_proxy_get">, IpcCommandMap["network_proxy_get"]["params"]>>;
+  network_proxy_save: Expect<Assignable<ParamsOf<"network_proxy_save">, IpcCommandMap["network_proxy_save"]["params"]>>;
 };
 
 export type _IpcResponseContracts = {
@@ -161,6 +168,8 @@ export type _IpcResponseContracts = {
   server_delete: Expect<Assignable<ResponseOf<"server_delete">, IpcCommandMap["server_delete"]["response"]>>;
   server_connect: Expect<Assignable<ResponseOf<"server_connect">, IpcCommandMap["server_connect"]["response"]>>;
   server_disconnect: Expect<Assignable<ResponseOf<"server_disconnect">, IpcCommandMap["server_disconnect"]["response"]>>;
+  server_auth_respond: Expect<Assignable<ResponseOf<"server_auth_respond">, IpcCommandMap["server_auth_respond"]["response"]>>;
+  server_auth_cancel: Expect<Assignable<ResponseOf<"server_auth_cancel">, IpcCommandMap["server_auth_cancel"]["response"]>>;
   server_snapshot: Expect<Assignable<ResponseOf<"server_snapshot">, IpcCommandMap["server_snapshot"]["response"]>>;
   server_services: Expect<Assignable<ResponseOf<"server_services">, IpcCommandMap["server_services"]["response"]>>;
   server_logs: Expect<Assignable<ResponseOf<"server_logs">, IpcCommandMap["server_logs"]["response"]>>;
@@ -209,6 +218,11 @@ export type _IpcResponseContracts = {
   mcp_server_delete: Expect<Assignable<ResponseOf<"mcp_server_delete">, IpcCommandMap["mcp_server_delete"]["response"]>>;
   mcp_server_start: Expect<Assignable<ResponseOf<"mcp_server_start">, IpcCommandMap["mcp_server_start"]["response"]>>;
   mcp_server_stop: Expect<Assignable<ResponseOf<"mcp_server_stop">, IpcCommandMap["mcp_server_stop"]["response"]>>;
+  mcp_server_review: Expect<Assignable<ResponseOf<"mcp_server_review">, IpcCommandMap["mcp_server_review"]["response"]>>;
+  mcp_oauth_connect: Expect<Assignable<ResponseOf<"mcp_oauth_connect">, IpcCommandMap["mcp_oauth_connect"]["response"]>>;
+  mcp_oauth_cancel: Expect<Assignable<ResponseOf<"mcp_oauth_cancel">, IpcCommandMap["mcp_oauth_cancel"]["response"]>>;
+  network_proxy_get: Expect<Assignable<ResponseOf<"network_proxy_get">, IpcCommandMap["network_proxy_get"]["response"]>>;
+  network_proxy_save: Expect<Assignable<ResponseOf<"network_proxy_save">, IpcCommandMap["network_proxy_save"]["response"]>>;
 };
 
 /**

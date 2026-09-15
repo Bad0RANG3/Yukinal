@@ -1,22 +1,41 @@
-//! 按 serverId 记账的 MCP 服务器管理器。
+//! Server-id keyed MCP process supervision.
+//!
+//! A crash is reported and then recovered with the same bounded backoff used by the
+//! sidecar. Recovery only starts a fresh process and rebuilds its tool catalog; it never
+//! replays the call that was in flight when the old process exited.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 
-use super::config::McpStdioConfig;
-use super::descriptor::{McpToolDescriptor, McpToolResult};
+use crate::supervisor::{RestartDecision, RestartPolicy, RestartState};
+
+use super::config::{McpStdioConfig, McpTransportConfig};
+use super::descriptor::{McpExitRecord, McpToolDescriptor, McpToolResult};
 use super::error::McpError;
-use super::handle::{McpServerHandle, McpServerStart, McpServerStatus, ShutdownReport};
+use super::handle::{McpServerStart, McpServerStatus, McpStdioHandle, ShutdownReport};
+use super::http::McpHttpHandle;
+use super::transport::McpServerHandle;
 use super::truncated;
 
-/// 谁来派生、谁来回收（docs/boundaries/mcp.md 的「进程生命周期仍然归 Rust」：
-/// 本架构里唯一派生进程的地方是 Rust 宿主）。
-///
-/// sidecar 的 `Supervisor` 管**一个**进程；MCP 的服务器是**多个**，所以这里按 serverId
-/// 记账。除此之外两者是同一套东西：串行化的启动、被监督的句柄、能解释崩溃的状态。
+/// One managed server. The handle can be replaced after a crash while the exit and
+/// restart records remain on this entry, so a recovered process cannot erase the reason
+/// it had to recover.
+#[derive(Debug)]
+struct ManagedServer {
+    handle: McpServerHandle,
+    config: McpTransportConfig,
+    generation: u64,
+    manual_stop: bool,
+    last_exit: Option<McpExitRecord>,
+    restart: RestartState,
+}
+
+/// Process ownership for every configured MCP server.
 #[derive(Debug, Clone, Default)]
 pub struct McpSupervisor {
     inner: Arc<SupervisorInner>,
@@ -24,71 +43,107 @@ pub struct McpSupervisor {
 
 #[derive(Debug, Default)]
 struct SupervisorInner {
-    /// 把「查表 → 派生 → 握手 → 登记」串起来。没有这道门，两次同时的启动都会看到空位，
-    /// 于是同一个 serverId 起来两个进程 —— 单实例就从这里漏掉。
+    /// Serializes check -> spawn -> handshake -> publish for all server ids.
     start_lock: AsyncMutex<()>,
-    servers: AsyncMutex<HashMap<String, McpServerHandle>>,
+    servers: AsyncMutex<HashMap<String, ManagedServer>>,
+    restart_policy: RestartPolicy,
 }
 
 impl McpSupervisor {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_restart_policy(RestartPolicy::default())
     }
 
-    /// 启动一个服务器：已经跑着就复用，否则派生 + `initialize` + `tools/list`。
-    ///
-    /// 握手或工具表失败时不会留下半个活着的进程。
+    #[must_use]
+    pub fn with_restart_policy(restart_policy: RestartPolicy) -> Self {
+        Self {
+            inner: Arc::new(SupervisorInner {
+                start_lock: AsyncMutex::new(()),
+                servers: AsyncMutex::new(HashMap::new()),
+                restart_policy,
+            }),
+        }
+    }
+
+    /// Start a server explicitly, reuse it when already running, or replace a dead
+    /// handle when the user has asked for a fresh start.
     pub async fn start(&self, config: &McpStdioConfig) -> Result<McpServerStart, McpError> {
+        self.start_transport(&McpTransportConfig::Stdio(config.clone()))
+            .await
+    }
+
+    pub async fn start_transport(
+        &self,
+        config: &McpTransportConfig,
+    ) -> Result<McpServerStart, McpError> {
         let _start = self.inner.start_lock.lock().await;
 
-        if let Some(handle) = self.handle(&config.server_id).await {
-            if handle.is_running() {
-                return Ok(McpServerStart {
-                    info: handle.info(),
-                    tool_count: handle.tools().len(),
-                    already_running: true,
-                });
+        {
+            let servers = self.inner.servers.lock().await;
+            if let Some(managed) = servers.get(config.server_id()) {
+                if managed.handle.is_running() {
+                    return Ok(McpServerStart {
+                        info: managed.handle.info(),
+                        tool_count: managed.handle.tools().len(),
+                        already_running: true,
+                    });
+                }
             }
-            // 一个已经死掉的句柄还留在表里是正常的（崩溃要被记住）。显式启动是唯一能让它
-            // 变成「跑着的」的动作，所以这里继续往下走，用新进程盖掉它。
         }
 
-        let handle = McpServerHandle::spawn(config).await?;
-        if let Err(error) = handle.initialize(config.request_timeout).await {
-            handle.shutdown().await;
-            return Err(error);
-        }
-        if let Err(error) = handle.list_tools(config.request_timeout).await {
-            handle.shutdown().await;
-            return Err(error);
-        }
-
+        let handle = launch_ready(config).await?;
         let start = McpServerStart {
             info: handle.info(),
             tool_count: handle.tools().len(),
             already_running: false,
         };
-        self.inner
-            .servers
-            .lock()
-            .await
-            .insert(config.server_id.clone(), handle);
+
+        let generation = {
+            let mut servers = self.inner.servers.lock().await;
+            let generation = servers
+                .get(config.server_id())
+                .map_or(1, |managed| managed.generation.wrapping_add(1));
+            let mut restart = servers
+                .remove(config.server_id())
+                .map(|managed| managed.restart)
+                .unwrap_or_default();
+            restart.reset();
+            restart.mark_started();
+            servers.insert(
+                config.server_id().to_string(),
+                ManagedServer {
+                    handle: handle.clone(),
+                    config: config.clone(),
+                    generation,
+                    manual_stop: false,
+                    last_exit: None,
+                    restart,
+                },
+            );
+            generation
+        };
+        self.watch_for_exit(config.server_id(), generation, handle);
         Ok(start)
     }
 
     pub async fn handle(&self, server_id: &str) -> Option<McpServerHandle> {
-        self.inner.servers.lock().await.get(server_id).cloned()
+        self.inner
+            .servers
+            .lock()
+            .await
+            .get(server_id)
+            .map(|managed| managed.handle.clone())
     }
 
-    /// 这个 supervisor 正在记账的 serverId（含已经死掉、但记录还留着的）。
+    /// This supervisor's server ids, including entries whose current child is dead.
     pub async fn servers(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.inner.servers.lock().await.keys().cloned().collect();
         ids.sort();
         ids
     }
 
-    /// 一个服务器的工具表（缓存）。没管过、或者还没 `tools/list` 成功时是空表。
+    /// Cached tool descriptors for one server.
     pub async fn tools(&self, server_id: &str) -> Vec<McpToolDescriptor> {
         match self.handle(server_id).await {
             Some(handle) => handle.tools(),
@@ -96,13 +151,23 @@ impl McpSupervisor {
         }
     }
 
-    /// 调一个工具。超时用这个服务器自己的配置：超时是**每个服务器**的策略，不是每次调用的
-    /// 参数（需要更短的等待时，拿 [`McpSupervisor::handle`] 上的 `call_tool` 自己指定）。
     pub async fn call(
         &self,
         server_id: &str,
         tool: &str,
         arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
+        self.call_with_cancel(server_id, tool, arguments, &CancellationToken::new())
+            .await
+    }
+
+    /// Call a tool with a cancellation token owned by the host request.
+    pub async fn call_with_cancel(
+        &self,
+        server_id: &str,
+        tool: &str,
+        arguments: Value,
+        cancel: &CancellationToken,
     ) -> Result<McpToolResult, McpError> {
         let handle = self
             .handle(server_id)
@@ -111,54 +176,184 @@ impl McpSupervisor {
                 server_id: truncated(server_id),
             })?;
         let timeout = handle.request_timeout();
-        handle.call_tool(tool, arguments, timeout).await
+        handle
+            .call_tool_with_cancel(tool, arguments, timeout, cancel)
+            .await
     }
 
     pub async fn status(&self, server_id: &str) -> McpServerStatus {
-        let Some(handle) = self.handle(server_id).await else {
+        let servers = self.inner.servers.lock().await;
+        let Some(managed) = servers.get(server_id) else {
             return McpServerStatus::untracked(server_id);
         };
+        let handle = &managed.handle;
         let info = handle.info();
         let running = handle.is_running();
         let handshake = info.handshake;
         McpServerStatus {
             server_id: info.server_id,
             running,
-            pid: running.then_some(info.pid),
-            program: Some(info.program),
+            pid: running.then_some(info.pid).flatten(),
+            program: info.program,
             started_at: Some(info.started_at),
             protocol_version: handshake.as_ref().map(|it| it.protocol_version.clone()),
             server_name: handshake.as_ref().map(|it| it.server_name.clone()),
             server_version: handshake.as_ref().map(|it| it.server_version.clone()),
             tool_count: handle.tools().len(),
-            last_exit: handle.last_exit(),
+            last_exit: handle.last_exit().or_else(|| managed.last_exit.clone()),
+            restart: managed.restart.record.clone(),
             stderr_tail: handle.stderr_tail(),
             diagnostics: handle.diagnostics(),
         }
     }
 
-    /// 关掉一个服务器。`None` 表示这个 supervisor 从没管过这个 id。
+    /// Stop a server explicitly. The generation changes before shutdown so an exit
+    /// watcher can never mistake this requested stop for a crash.
     pub async fn shutdown(&self, server_id: &str) -> Option<ShutdownReport> {
-        let handle = self.handle(server_id).await?;
+        let handle = {
+            let mut servers = self.inner.servers.lock().await;
+            let managed = servers.get_mut(server_id)?;
+            managed.manual_stop = true;
+            managed.generation = managed.generation.wrapping_add(1);
+            managed.handle.clone()
+        };
         Some(handle.shutdown().await)
     }
 
-    /// 关掉全部服务器，返回每个 id 的关闭结果。
     pub async fn shutdown_all(&self) -> Vec<(String, ShutdownReport)> {
-        let handles: Vec<(String, McpServerHandle)> = self
-            .inner
-            .servers
-            .lock()
-            .await
-            .iter()
-            .map(|(id, handle)| (id.clone(), handle.clone()))
-            .collect();
+        let handles: Vec<(String, McpServerHandle)> = {
+            let mut servers = self.inner.servers.lock().await;
+            servers
+                .iter_mut()
+                .map(|(id, managed)| {
+                    managed.manual_stop = true;
+                    managed.generation = managed.generation.wrapping_add(1);
+                    (id.clone(), managed.handle.clone())
+                })
+                .collect()
+        };
         let mut reports = Vec::with_capacity(handles.len());
         for (server_id, handle) in handles {
             reports.push((server_id, handle.shutdown().await));
         }
         reports
     }
+
+    fn watch_for_exit(&self, server_id: &str, generation: u64, handle: McpServerHandle) {
+        let weak = Arc::downgrade(&self.inner);
+        let Some(watch) = handle.exit_watch() else {
+            return;
+        };
+        drop(handle);
+        let server_id = server_id.to_string();
+        tokio::spawn(async move {
+            let Some((_pid, exit)) = watch.wait().await else {
+                return;
+            };
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            McpSupervisor { inner }
+                .handle_unexpected_exit(&server_id, generation, exit)
+                .await;
+        });
+    }
+
+    async fn handle_unexpected_exit(&self, server_id: &str, generation: u64, exit: McpExitRecord) {
+        let restart = {
+            let mut servers = self.inner.servers.lock().await;
+            let Some(managed) = servers.get_mut(server_id) else {
+                return;
+            };
+            if managed.manual_stop || managed.generation != generation {
+                return;
+            }
+            managed.last_exit = Some(exit);
+            managed.config.clone()
+        };
+        self.automatic_restart(server_id, generation, restart).await;
+    }
+
+    async fn automatic_restart(
+        &self,
+        server_id: &str,
+        generation: u64,
+        config: McpTransportConfig,
+    ) {
+        loop {
+            let delay = {
+                let mut servers = self.inner.servers.lock().await;
+                let Some(managed) = servers.get_mut(server_id) else {
+                    return;
+                };
+                if managed.manual_stop || managed.generation != generation {
+                    return;
+                }
+                match managed.restart.decide(
+                    &self.inner.restart_policy,
+                    Instant::now(),
+                    crate::sidecar::iso8601_now(),
+                ) {
+                    RestartDecision::Exhausted { .. } => return,
+                    RestartDecision::Retry { delay, .. } => delay,
+                }
+            };
+
+            tokio::time::sleep(delay).await;
+
+            let _start = self.inner.start_lock.lock().await;
+            {
+                let servers = self.inner.servers.lock().await;
+                match servers.get(server_id) {
+                    Some(managed) if !managed.manual_stop && managed.generation == generation => {}
+                    _ => return,
+                }
+            }
+
+            let handle = match launch_ready(&config).await {
+                Ok(handle) => handle,
+                Err(_) => continue,
+            };
+
+            let installed = {
+                let mut servers = self.inner.servers.lock().await;
+                match servers.get_mut(server_id) {
+                    Some(managed) if !managed.manual_stop && managed.generation == generation => {
+                        managed.handle = handle.clone();
+                        managed.restart.mark_started();
+                        true
+                    }
+                    _ => false,
+                }
+            };
+
+            if installed {
+                self.watch_for_exit(server_id, generation, handle);
+                return;
+            }
+
+            handle.shutdown().await;
+            return;
+        }
+    }
+}
+
+async fn launch_ready(config: &McpTransportConfig) -> Result<McpServerHandle, McpError> {
+    let handle = match config {
+        McpTransportConfig::Stdio(config) => {
+            McpServerHandle::Stdio(McpStdioHandle::spawn(config).await?)
+        }
+        McpTransportConfig::Http(config) => McpServerHandle::Http(McpHttpHandle::new(config)?),
+    };
+    if let Err(error) = handle.initialize(config.request_timeout()).await {
+        handle.shutdown().await;
+        return Err(error);
+    }
+    if let Err(error) = handle.list_tools(config.request_timeout()).await {
+        handle.shutdown().await;
+        return Err(error);
+    }
+    Ok(handle)
 }
 
 #[cfg(test)]
@@ -177,12 +372,9 @@ mod tests {
         assert_eq!(status.server_id, "mcp-1");
         assert!(!status.running);
         assert!(status.pid.is_none());
-        assert!(
-            status.last_exit.is_none(),
-            "a server we never ran has no exit to explain"
-        );
+        assert!(status.last_exit.is_none());
+        assert!(status.restart.is_none());
 
-        // 「调用一个没在跑的服务器」必须是一个说得清的失败，而不是挂住或者 panic。
         let error = supervisor
             .call("mcp-1", "echo", serde_json::json!({}))
             .await
@@ -191,12 +383,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_status_payload_omits_the_exit_record_while_nothing_went_wrong() {
-        // 状态结构会被接线那一步直接序列化给界面，所以这里钉住「没事发生时不出现空字段」，
-        // 与 `SupervisorStatus::restart` 用的是同一条理由。
+    async fn the_status_payload_omits_recovery_detail_while_nothing_went_wrong() {
         let status = McpSupervisor::new().status("mcp-1").await;
         let payload = serde_json::to_value(&status).expect("serialize");
         assert!(payload.get("lastExit").is_none());
+        assert!(payload.get("restart").is_none());
         assert_eq!(payload["running"], serde_json::json!(false));
         assert_eq!(payload["toolCount"], serde_json::json!(0));
     }

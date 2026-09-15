@@ -616,6 +616,119 @@ test("agent.run.start rejects a duplicate run id while the first run is active",
   );
 });
 
+test("an admitted image message cannot be resumed with different bytes", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const params = {
+    runId: "run_image_admission",
+    sessionId: "ses_image_admission",
+    messageId: "msg_image_admission",
+    prompt: "",
+    parts: [{ type: "image" as const, mediaType: "image/png" as const, data: "aGVsbG8=" }],
+  };
+
+  await runtime.router.handle(
+    request(AGENT_METHODS.runStart, { ...params, resume: false }, 1),
+  );
+  await assert.rejects(
+    runtime.router.handle(
+      request(
+        AGENT_METHODS.runStart,
+        {
+          ...params,
+          parts: [{ type: "image", mediaType: "image/png", data: "d29ybGQ=" }],
+          resume: true,
+        },
+        2,
+      ),
+    ),
+    (error: unknown) =>
+      error instanceof RpcFailure &&
+      error.code === RPC_ERROR.INVALID_PARAMS &&
+      /different content/.test(error.message),
+  );
+});
+
+test("an admitted text file cannot be resumed with different contents", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const params = {
+    runId: "run_file_admission",
+    sessionId: "ses_file_admission",
+    messageId: "msg_file_admission",
+    prompt: "",
+    parts: [
+      {
+        type: "file" as const,
+        mediaType: "text/plain" as const,
+        data: "PORT=8080\n",
+        name: "app.env",
+      },
+    ],
+  };
+
+  await runtime.router.handle(
+    request(AGENT_METHODS.runStart, { ...params, resume: false }, 1),
+  );
+  await assert.rejects(
+    runtime.router.handle(
+      request(
+        AGENT_METHODS.runStart,
+        {
+          ...params,
+          parts: [{ ...params.parts[0], data: "PORT=9090\n" }],
+          resume: true,
+        },
+        2,
+      ),
+    ),
+    (error: unknown) =>
+      error instanceof RpcFailure &&
+      error.code === RPC_ERROR.INVALID_PARAMS &&
+      /different content/.test(error.message),
+  );
+});
+
+test("an admitted PDF document cannot be resumed with different bytes", async () => {
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const params = {
+    runId: "run_document_admission",
+    sessionId: "ses_document_admission",
+    messageId: "msg_document_admission",
+    prompt: "",
+    parts: [
+      {
+        type: "document" as const,
+        mediaType: "application/pdf" as const,
+        data: "JVBERi0xLjcK",
+        name: "guide.pdf",
+      },
+    ],
+  };
+
+  await runtime.router.handle(
+    request(AGENT_METHODS.runStart, { ...params, resume: false }, 1),
+  );
+  await assert.rejects(
+    runtime.router.handle(
+      request(
+        AGENT_METHODS.runStart,
+        {
+          ...params,
+          parts: [{ ...params.parts[0], data: "JVBERi0xLjQK" }],
+          resume: true,
+        },
+        2,
+      ),
+    ),
+    (error: unknown) =>
+      error instanceof RpcFailure &&
+      error.code === RPC_ERROR.INVALID_PARAMS &&
+      /different content/.test(error.message),
+  );
+});
+
 test("resume: false admits the message without running it", async (t) => {
   const llm = await mockLlm("this answer must never be produced");
   t.after(() => llm.close());
@@ -738,6 +851,40 @@ test("delivery: sync answers with the run result, after the events have streamed
   assert.equal(observed.at(-1), "response", observed.join(", "));
   assert.deepEqual(observed, ["event:agent.started", "event:agent.text", "event:agent.completed", "response"]);
   assert.equal(llm.bodies.length, 1);
+});
+
+test("a sync resume keeps the resumed marker and returns the admitted run result", async (t) => {
+  const llm = await mockLlm("同步恢复结果");
+  t.after(() => llm.close());
+  const { runtime, initialize } = await withRuntime();
+  await initialize();
+  const params = {
+    sessionId: "ses_sync_resume",
+    messageId: "msg_sync_resume",
+    prompt: "继续执行",
+    providerConfig: { kind: "openai-compatible" as const, baseUrl: llm.baseUrl, model: "m" },
+  };
+  await runtime.router.handle(
+    request(AGENT_METHODS.runStart, { ...params, runId: "run_sync_resume", resume: false }, 1),
+  );
+
+  const response = (await runtime.router.handle(
+    request(
+      AGENT_METHODS.runStart,
+      { ...params, runId: "run_sync_resume_retry", resume: true, delivery: "sync" },
+      2,
+    ),
+  )) as {
+    runId: string;
+    started: boolean;
+    resumed?: boolean;
+    result?: AgentRunResult;
+  };
+  assert.equal(response.runId, "run_sync_resume");
+  assert.equal(response.started, true);
+  assert.equal(response.resumed, true);
+  assert.equal(response.result?.state, "completed");
+  assert.match(response.result?.text ?? "", /同步恢复结果/);
 });
 
 test("an unknown policyId is refused and starts nothing", async (t) => {

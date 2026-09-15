@@ -167,6 +167,69 @@ test("stream() sends the Messages API shape: top-level system, content blocks, i
   assert.equal(translated.some((message) => message.role === "system"), false, "no system role may leak into messages");
 });
 
+test("user images become base64 content blocks alongside text", async () => {
+  const request = chatRequest({
+    messages: [
+      {
+        role: "user",
+        content: "read the screenshot",
+        images: [{ mediaType: "image/webp", data: "aGVsbG8=", name: "screen.webp" }],
+        documents: [
+          { mediaType: "application/pdf", data: "JVBERi0xLjcK", name: "guide.pdf" },
+        ],
+      },
+    ],
+  });
+
+  const { seen } = await collectStream(provider(), request, () =>
+    sseResponse([sseFrames([{ type: "message_stop" }])]),
+  );
+  const sent = seen[0];
+  assert(sent);
+  assert.deepEqual(sent.body.messages, [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "read the screenshot" },
+        {
+          type: "image",
+          source: { type: "base64", media_type: "image/webp", data: "aGVsbG8=" },
+        },
+        {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: "JVBERi0xLjcK",
+          },
+        },
+      ],
+    },
+  ]);
+});
+
+test("an audio clip is refused explicitly: Messages has no block for it", async () => {
+  const request = chatRequest({
+    messages: [
+      {
+        role: "user",
+        content: "transcribe this",
+        audios: [{ mediaType: "audio/wav", data: "UklGRgAAAABXQVZFAA==" }],
+      },
+    ],
+  });
+
+  // 静默丢掉附件会让模型回答一个它根本没听到的问题，所以这里必须是硬失败。
+  await assert.rejects(
+    async () => {
+      for await (const _event of provider().stream(request)) {
+        // Drain: the request body is only built on the first pull.
+      }
+    },
+    /no audio input block/,
+  );
+});
+
 test("request-level model, max_tokens, temperature and apiVersion override the defaults", async () => {
   const subject = provider({ model: "claude-sonnet-4-5", apiVersion: "2026-01-01" });
   const request = chatRequest({ model: "claude-haiku-4-5", maxOutputTokens: 8192, temperature: 0.7 });
@@ -423,6 +486,30 @@ test("an HTTP failure is a retryable ProviderError that never echoes the respons
         assert.equal(error.status, 500);
         assert.match(error.message, /failed \(500\)/);
         assert.doesNotMatch(error.message, /g2z5/);
+        return true;
+      },
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("a 429 rate limit is retryable without echoing the response body", async () => {
+  const { restore } = installFetch(
+    () => new Response('{"error":{"message":"rate limit token ****g2z9"}}', { status: 429 }),
+  );
+
+  try {
+    await assert.rejects(
+      async () => {
+        for await (const event of provider().stream(chatRequest())) assert.fail(`unexpected event ${event.type}`);
+      },
+      (error: unknown) => {
+        assert(error instanceof ProviderError);
+        assert.equal(error.retryable, true, "429 is retryable");
+        assert.equal(error.status, 429);
+        assert.match(error.message, /failed \(429\)/);
+        assert.doesNotMatch(error.message, /g2z9/);
         return true;
       },
     );

@@ -10,6 +10,7 @@ mod executions;
 mod identities;
 mod providers;
 mod servers;
+mod settings;
 mod snapshots;
 mod workspaces;
 
@@ -19,5 +20,6 @@ pub use executions::ToolExecutionsRepository;
 pub use identities::IdentitiesRepository;
 pub use providers::{McpServersRepository, ProviderConfigsRepository};
 pub use servers::ServersRepository;
+pub use settings::AppSettingsRepository;
 pub use snapshots::SnapshotsRepository;
 pub use workspaces::WorkspacesRepository;

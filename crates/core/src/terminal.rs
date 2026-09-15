@@ -7,11 +7,38 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use yukinal_ssh::{ConnectionSecrets, PtyEvent, RusshBackend, Session, SshBackend, SshConfig};
+use tokio_util::sync::CancellationToken;
+use yukinal_ssh::{
+    link_count_probe_command, parse_link_count, ConnectionSecrets, PtyEvent, RusshBackend, Session,
+    SftpFileStat, SftpReplaceError, SftpReplaceGuard, SftpReplacement, SshBackend, SshConfig,
+};
 use yukinal_terminal::{TerminalAppEvent, TerminalManager, TerminalPty};
 
 pub type Result<T> = std::result::Result<T, TerminalServiceError>;
+
+/// 硬链接探针的超时。它只是一次只读 `stat`；卡住不该拖住一次编辑。
+const LINK_COUNT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 一次有守卫替换的失败分类。
+///
+/// 分类而不是一句话：`ConcurrentChange` 该重读后重试，`Unsupported` 与
+/// `MetadataNotPreserved` 重试多少次都一样（要变的是远端或这份文件），`Failed` 是传输问题。
+#[derive(Debug)]
+pub enum SftpReplaceFailure {
+    /// 文件在读取之后被改过，或发布之后发现不是我们写进去的那一份。
+    ConcurrentChange(String),
+    /// 远端不能安全替换：symlink、rename 被拒、staging 建不出来。
+    Unsupported(String),
+    /// metadata 保不住；`missing` 逐项点名（`mode` / `mtime` / `owner` / `group`）。
+    MetadataNotPreserved {
+        message: String,
+        missing: Vec<String>,
+    },
+    /// 会话或传输失败；文案已经处理好。
+    Failed(String),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalServiceError {
@@ -154,6 +181,74 @@ impl TerminalService {
         let session = self.cached_session(server_id)?;
         let client = self.ssh.sftp(&session).await?;
         Ok(self.ssh.sftp_write_file(&client, path, data).await?)
+    }
+
+    /// 一个远端路径的属性（`lstat` 语义：symlink 不会被跟随）。
+    pub async fn sftp_stat(&self, server_id: &str, path: &str) -> Result<SftpFileStat> {
+        let session = self.cached_session(server_id)?;
+        let client = self.ssh.sftp(&session).await?;
+        Ok(self.ssh.sftp_stat(&client, path).await?)
+    }
+
+    /// 文件有几个名字（硬链接数）。SFTP 属性里没有这一项，所以它是一次远端 `stat` 探针；
+    /// `Ok(None)` 表示**不知道**（没有可用的 `stat`、输出看不懂、或者探针本身失败）。
+    ///
+    /// 探针失败在这里刻意**不**变成错误：调用方要区分的是「确认只有一个名字」与「无法确认」，
+    /// 而这两种都不是一次传输失败。
+    pub async fn sftp_link_count(&self, server_id: &str, path: &str) -> Result<Option<u64>> {
+        let Some(command) = link_count_probe_command(path) else {
+            return Ok(None);
+        };
+        let session = self.cached_session(server_id)?;
+        let cancel = CancellationToken::new();
+        match self
+            .ssh
+            .execute_once(&session, &command, Some(LINK_COUNT_PROBE_TIMEOUT), &cancel)
+            .await
+        {
+            Ok(result) => Ok(parse_link_count(&result.stdout, result.exit_code)),
+            Err(error) => {
+                tracing::warn!(path, "link-count probe failed: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// 有守卫的原子替换（ADR 0017）。失败分三类：有人改了、远端做不到、传输失败。
+    pub async fn sftp_replace_guarded(
+        &self,
+        server_id: &str,
+        path: &str,
+        guard: SftpReplaceGuard,
+        data: &[u8],
+    ) -> std::result::Result<SftpReplacement, SftpReplaceFailure> {
+        let session = self
+            .cached_session(server_id)
+            .map_err(|error| SftpReplaceFailure::Failed(error.to_string()))?;
+        let client = self
+            .ssh
+            .sftp(&session)
+            .await
+            .map_err(|error| SftpReplaceFailure::Failed(error.to_string()))?;
+        match self
+            .ssh
+            .sftp_replace_file_guarded(&client, path, guard, data)
+            .await
+        {
+            Ok(replacement) => Ok(replacement),
+            Err(SftpReplaceError::ConcurrentChange(detail)) => {
+                Err(SftpReplaceFailure::ConcurrentChange(detail))
+            }
+            Err(SftpReplaceError::Unsupported(detail)) => {
+                Err(SftpReplaceFailure::Unsupported(detail))
+            }
+            Err(SftpReplaceError::MetadataNotPreserved { message, missing }) => {
+                Err(SftpReplaceFailure::MetadataNotPreserved { message, missing })
+            }
+            Err(SftpReplaceError::Transport(error)) => {
+                Err(SftpReplaceFailure::Failed(error.to_string()))
+            }
+        }
     }
 
     #[must_use]

@@ -63,6 +63,7 @@ pub(super) const METHOD_INITIALIZE: &str = "initialize";
 pub(super) const METHOD_INITIALIZED_NOTIFICATION: &str = "notifications/initialized";
 pub(super) const METHOD_TOOLS_LIST: &str = "tools/list";
 pub(super) const METHOD_TOOLS_CALL: &str = "tools/call";
+pub(super) const METHOD_CANCELLED_NOTIFICATION: &str = "notifications/cancelled";
 
 /// 一行读取的结果。
 #[derive(Debug)]

@@ -26,11 +26,9 @@ pub(crate) enum HandshakeError {
         pinned: String,
         presented: String,
     },
-    /// 出示的东西本 crate 钉不了（host 证书）。
-    Unsupported {
+    Certificate {
         host: String,
-        port: u16,
-        detail: String,
+        reason: String,
     },
     /// 握手本身的传输层失败。
     Transport(russh::Error),
@@ -53,8 +51,11 @@ impl std::fmt::Display for HandshakeError {
                 f,
                 "host key verification failed for {host}: pinned {pinned}, presented {presented}"
             ),
-            Self::Unsupported { host, port, detail } => {
-                write!(f, "host key of {host}:{port} cannot be pinned: {detail}")
+            Self::Certificate { host, reason } => {
+                write!(
+                    f,
+                    "host certificate verification failed for {host}: {reason}"
+                )
             }
             Self::Transport(error) => write!(f, "ssh transport error: {error}"),
         }
@@ -76,9 +77,7 @@ pub(super) fn map_handshake_err(error: HandshakeError) -> Error {
             pinned,
             presented,
         },
-        HandshakeError::Unsupported { host, port, detail } => {
-            Error::HostKeyUnsupported { host, port, detail }
-        }
+        HandshakeError::Certificate { host, reason } => Error::HostCertificate { host, reason },
         HandshakeError::Transport(error) => Error::Transport(error.to_string()),
     }
 }

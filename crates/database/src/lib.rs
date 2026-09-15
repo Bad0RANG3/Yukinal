@@ -139,6 +139,10 @@ impl Database {
         repositories::McpServersRepository::new(self)
     }
 
+    pub fn app_settings(&self) -> repositories::AppSettingsRepository<'_> {
+        repositories::AppSettingsRepository::new(self)
+    }
+
     pub fn snapshots(&self) -> repositories::SnapshotsRepository<'_> {
         repositories::SnapshotsRepository::new(self)
     }

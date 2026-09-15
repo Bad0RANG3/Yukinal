@@ -1,8 +1,8 @@
 //! AI provider 配置命令：设置页写入 provider_configs 行；apiKey 只进 OS keychain，
 //! SQLite 只存 credentialRef（不落盘、不进日志）。
 
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tauri::State;
 
 use crate::commands::activity::record_user_activity;
@@ -15,13 +15,13 @@ use yukinal_database::models::{
     ActivityOutcome, ActivityType, AiProviderConfig, AiProviderKind, ProviderModelOption,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderListResponse {
     pub providers: Vec<AiProviderConfig>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSaveResponse {
     pub provider: AiProviderConfig,
@@ -57,6 +57,8 @@ pub async fn provider_save(
     api_key: Option<String>,
     provider_id: Option<String>,
     wire_api: Option<String>,
+    custom_headers: Option<Map<String, Value>>,
+    api_version: Option<String>,
     models: Option<Vec<ProviderModelOption>>,
 ) -> Result<ProviderSaveResponse, String> {
     // `from_db`（严格拼写）而不是 `from_db_column`：旧拼写只该被**读**进来，写出的一律是
@@ -134,6 +136,44 @@ pub async fn provider_save(
         None
     };
 
+    // Anthropic versions its protocol header by date. Other kinds must not persist
+    // a value that their adapter would ignore.
+    let api_version = api_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(value) = api_version.as_deref() {
+        if kind != AiProviderKind::Anthropic {
+            return Err(format!(
+                "kind `{}` 没有 apiVersion：只有 Anthropic Messages API 使用这个日期版本头。",
+                kind.as_str()
+            ));
+        }
+        if !is_iso_date(value) {
+            return Err(format!(
+                "apiVersion `{value}` 无效：必须使用 YYYY-MM-DD 格式。"
+            ));
+        }
+    }
+
+    // The shared schema is the first gate, but this command is also a direct Tauri
+    // entry point. Reject anything the sanitizer would have to drop instead of
+    // silently saving a different header set than the caller supplied.
+    let custom_headers = match custom_headers {
+        Some(headers) => {
+            let sanitized = sanitize_custom_headers(Some(&headers));
+            if sanitized.as_ref().map_or(0, Map::len) != headers.len() {
+                return Err(
+                    "自定义请求头包含未批准或可能携带凭据的名称或值；请只填写非敏感网关元数据。"
+                        .into(),
+                );
+            }
+            sanitized
+        }
+        None => None,
+    };
+
     let id = existing
         .as_ref()
         .map(|provider| provider.id.clone())
@@ -163,7 +203,8 @@ pub async fn provider_save(
         model: model.trim().to_string(),
         api_key_credential_ref,
         enabled: true,
-        custom_headers: None,
+        custom_headers,
+        api_version,
         max_input_tokens: None,
         wire_api,
         models: models.or_else(|| {
@@ -195,11 +236,46 @@ pub async fn provider_save(
     Ok(ProviderSaveResponse { provider })
 }
 
+/// `YYYY-MM-DD`，且年月日字段范围正确。只按位数判断会把 `2026-99-99` 存进库，
+/// 然后在真实请求里变成一个难解释的 400。
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let Some(year) = value[0..4].parse::<u16>().ok() else {
+        return false;
+    };
+    let Some(month) = value[5..7].parse::<u8>().ok() else {
+        return false;
+    };
+    let Some(day) = value[8..10].parse::<u8>().ok() else {
+        return false;
+    };
+    if year < 1970 || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=max_day).contains(&day)
+}
+
 // ---------------------------------------------------------------------------
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelsResponse {
     pub models: Vec<ProviderModelOption>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestResponse {
+    pub ok: bool,
 }
 
 #[tauri::command]
@@ -257,7 +333,7 @@ pub async fn provider_models(
 pub async fn provider_test(
     state: State<'_, AppState>,
     provider_id: String,
-) -> Result<Value, String> {
+) -> Result<ProviderTestResponse, String> {
     let provider = state
         .database
         .providers()
@@ -265,7 +341,7 @@ pub async fn provider_test(
         .map_err(|error| error.to_string())?;
     let api_key = resolve_api_key(&state, &provider)?;
     let provider_config = runtime_provider_config(&provider, &provider.model, api_key, 30_000);
-    state
+    let response = state
         .supervisor
         .request(
             "provider.test",
@@ -273,7 +349,12 @@ pub async fn provider_test(
             std::time::Duration::from_secs(35),
         )
         .await
-        .map_err(|error| format!("模型测试失败：{error}"))
+        .map_err(|error| format!("模型测试失败：{error}"))?;
+    let ok = response
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "agent sidecar returned an invalid provider.test response".to_string())?;
+    Ok(ProviderTestResponse { ok })
 }
 
 /// 解析 provider 的 apiKey：SQLite 里只有 credentialRef，材料在 OS keychain。
@@ -301,13 +382,13 @@ pub(crate) fn resolve_api_key(
         .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderActivateResponse {
     pub provider: AiProviderConfig,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDeleteResponse {
     pub deleted: bool,
@@ -500,6 +581,7 @@ fn provider_is_usable(state: &AppState, provider: &AiProviderConfig) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::is_iso_date;
     use super::ProviderDeleteResponse;
     use serde_json::{json, Value};
     use yukinal_database::models::AiProviderKind;
@@ -547,5 +629,22 @@ mod tests {
             actual.get("credentialReclaimed").is_some(),
             "the caller cannot tell whether the key is gone without this field"
         );
+    }
+
+    #[test]
+    fn anthropic_api_version_validation_rejects_plausible_looking_dates() {
+        for valid in ["2023-06-01", "2024-02-29", "2026-12-31"] {
+            assert!(is_iso_date(valid), "{valid} must be accepted");
+        }
+        for invalid in [
+            "",
+            "2023-6-1",
+            "2023-13-01",
+            "2023-02-29",
+            "2023-04-31",
+            "not-a-date",
+        ] {
+            assert!(!is_iso_date(invalid), "{invalid} must be rejected");
+        }
     }
 }

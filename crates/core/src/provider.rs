@@ -30,6 +30,10 @@ const SAFE_METADATA_HEADER_NAMES: &[&str] = &[
     "x-client-name",
     "x-client-version",
     "x-title",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+    "x-goog-user-project",
 ];
 
 /// 原生协议各自的公开端点，用于 provider 行里没有（或只有一个空白）base URL 的情况。
@@ -75,6 +79,16 @@ pub fn runtime_provider_config(
     }
     if let Some(custom_headers) = sanitize_custom_headers(provider.custom_headers.as_ref()) {
         config["customHeaders"] = serde_json::json!(custom_headers);
+    }
+    if kind == AiProviderKind::Anthropic {
+        if let Some(api_version) = provider
+            .api_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            config["apiVersion"] = serde_json::json!(api_version);
+        }
     }
     config
 }
@@ -232,6 +246,7 @@ mod tests {
             api_key_credential_ref: None,
             enabled,
             custom_headers: None,
+            api_version: None,
             max_input_tokens: None,
             models: None,
             created_at: "2026-01-01T00:00:00Z".into(),
@@ -305,6 +320,7 @@ mod tests {
         assert_eq!(anthropic["baseUrl"], json!("https://api.anthropic.com"));
         // 原生协议没有方言轴：这个键不该出现，否则共享 schema 会拒绝整份配置。
         assert!(anthropic.get("wireApi").is_none());
+        assert!(anthropic.get("apiVersion").is_none());
 
         let gemini = runtime_provider_config(
             &provider_of_kind(
@@ -321,6 +337,26 @@ mod tests {
             json!("https://generativelanguage.googleapis.com")
         );
         assert!(gemini.get("wireApi").is_none());
+    }
+
+    #[test]
+    fn anthropic_api_version_is_forwarded_but_never_leaks_to_other_kinds() {
+        let mut anthropic =
+            provider_of_kind(AiProviderKind::Anthropic, "https://api.anthropic.com");
+        anthropic.api_version = Some("2026-01-01".into());
+        let config = runtime_provider_config(&anthropic, "claude-sonnet-4-5", None, 30_000);
+        assert_eq!(config["apiVersion"], json!("2026-01-01"));
+
+        let mut gemini = provider_of_kind(
+            AiProviderKind::Gemini,
+            "https://generativelanguage.googleapis.com",
+        );
+        gemini.api_version = Some("2026-01-01".into());
+        let config = runtime_provider_config(&gemini, "gemini-2.5-flash", None, 30_000);
+        assert!(
+            config.get("apiVersion").is_none(),
+            "a stored value must not make another protocol carry Anthropic's header"
+        );
     }
 
     /// 没有 base URL 时，原生协议退到**自己**的公开端点，而不是一个 OpenAI 形状的地址；

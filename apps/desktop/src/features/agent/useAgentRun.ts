@@ -14,6 +14,7 @@
 
 import {
   IPC_COMMANDS,
+  type AgentPromptPart,
   type AgentPermissionMode,
   type AgentRunMode,
   type AgentTokenUsage,
@@ -54,11 +55,13 @@ export type StartOutcome =
 
 export type StartRunInput = {
   prompt: string;
+  /** Exact prompt parts, including bounded images, PDFs and text files. Omitted means text-only fallback. */
+  parts?: AgentPromptPart[];
   /**
    * 持久化这条用户消息并返回它所属的 sessionId。
    * 动态本身不落库，所以这一步由调用方提供，而不是由本模块猜测。
    */
-  persistUserMessage: (messageId: string) => Promise<string>;
+  persistUserMessage: (messageId: string, parts: AgentPromptPart[]) => Promise<string>;
   providerId?: string | null;
   model?: string | null;
   focusServerId?: string | null;
@@ -70,6 +73,8 @@ export type StartRunInput = {
    * 传了就必须是 sidecar 认得的内建策略 id，否则整次调用被拒。
    */
   policyId?: string;
+  /** `sync` waits for the terminal result before the start call resolves. */
+  delivery?: "async" | "sync";
 };
 
 export type AgentRun = {
@@ -126,6 +131,19 @@ export function useAgentRun(options: {
   // 流式文本按 run 累积（事件乱序也没关系，同 run 追加）。
   const lifecycle = useRef(new RunLifecycle());
   const approvalLocks = useRef(new Set<string>());
+  /**
+   * A message admitted with `resume: false` but not yet executed.
+   *
+   * This is the UI half of the durable admission contract: a retry reuses the same
+   * `messageId` and `runId` instead of inserting another user message or forking a run.
+   */
+  const pendingAdmission = useRef<{
+    runId: string;
+    messageId: string;
+    sessionId: string;
+    prompt: string;
+    parts: AgentPromptPart[];
+  } | null>(null);
 
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
@@ -228,6 +246,7 @@ export function useAgentRun(options: {
     });
     on("agent.completed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
+      if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState(event.result.state);
       if (!event.result.text) return;
@@ -236,6 +255,7 @@ export function useAgentRun(options: {
     });
     on("agent.failed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
+      if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState("failed");
       setEntries((current) => appendEntries(current, [{ kind: "error", text: event.error }]));
@@ -297,7 +317,24 @@ export function useAgentRun(options: {
   }, [sidecarRestart, running]);
 
   const start = useCallback(async (input: StartRunInput): Promise<StartOutcome> => {
-    const expectedRunId = newId("run");
+    const prompt = input.prompt;
+    const parts =
+      input.parts?.length
+        ? input.parts
+        : prompt.trim()
+          ? [{ type: "text" as const, text: prompt }]
+          : [];
+    if (!parts.length) {
+      setEntries([{ kind: "error", text: "消息必须包含文字或图片。" }]);
+      return "failed";
+    }
+    const contentKey = JSON.stringify(parts);
+    const previous = pendingAdmission.current;
+    const reusable =
+      previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey
+        ? previous
+        : null;
+    const expectedRunId = reusable?.runId ?? newId("run");
     if (!lifecycle.current.begin(expectedRunId)) return "busy";
     setRunning(true);
     setRunState("starting");
@@ -307,18 +344,53 @@ export function useAgentRun(options: {
     setTokenUsage(null);
     approvalLocks.current.clear();
 
-    const prompt = input.prompt;
-    const messageId = newId("msg");
     try {
-      setEntries([{ kind: "user", text: prompt }]);
-      const sessionId = await input.persistUserMessage(messageId);
-      const { runId: started } = await callDesktop(IPC_COMMANDS.agentRunStart, {
-        runId: expectedRunId,
-        sessionId,
+      const attachments = parts.filter(
+        (part): part is Extract<AgentPromptPart, { type: "image" | "file" | "document" }> =>
+          part.type === "image" || part.type === "file" || part.type === "document",
+      );
+      setEntries([
+        {
+          kind: "user",
+          text: prompt,
+          ...(attachments.length ? { attachments } : {}),
+        },
+      ]);
+      // The first call records the message without executing it. The second call is
+      // the resume; keeping these separate is what makes retrying the second call
+      // idempotent rather than producing a second user message or run.
+      if (!reusable) {
+        const messageId = newId("msg");
+        const sessionId = await input.persistUserMessage(messageId, parts);
+        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts };
+      }
+      const admitted = pendingAdmission.current;
+      if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
+      const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
+        runId: admitted.runId,
+        sessionId: admitted.sessionId,
         prompt,
-        messageId,
-        parts: [{ type: "text", text: prompt }],
+        messageId: admitted.messageId,
+        parts,
         delivery: "async",
+        resume: false,
+        providerId: input.providerId ?? undefined,
+        model: input.model ?? undefined,
+        focusServerId: input.focusServerId ?? undefined,
+        permissionMode: input.permissionMode,
+        mode: input.mode,
+        policyId: input.policyId ?? undefined,
+      });
+      if (admissionResponse.runId !== admitted.runId) {
+        throw new Error("sidecar 为已受理消息返回了不同的 runId。");
+      }
+      const response = await callDesktop(IPC_COMMANDS.agentRunStart, {
+        runId: admitted.runId,
+        sessionId: admitted.sessionId,
+        prompt,
+        messageId: admitted.messageId,
+        parts,
+        delivery: input.delivery ?? "async",
         resume: true,
         providerId: input.providerId ?? undefined,
         model: input.model ?? undefined,
@@ -329,6 +401,11 @@ export function useAgentRun(options: {
         // 猜错就是让这次运行受另一套策略约束，而界面显示的却是「按环境自动」。
         policyId: input.policyId ?? undefined,
       });
+      if (response.duplicate || !response.started || !response.resumed) {
+        throw new Error("这条消息已经由另一个调用启动，当前界面不能重复接管它。");
+      }
+      pendingAdmission.current = null;
+      const started = response.runId;
       if (lifecycle.current.acknowledge(started)) {
         setRunId(started);
         setRunState("thinking");
@@ -338,7 +415,18 @@ export function useAgentRun(options: {
       lifecycle.current.fail();
       setRunning(false);
       setRunState("failed");
-      setEntries([{ kind: "user", text: prompt }, { kind: "error", text: String(error) }]);
+      const attachments = parts.filter(
+        (part): part is Extract<AgentPromptPart, { type: "image" | "file" | "document" }> =>
+          part.type === "image" || part.type === "file" || part.type === "document",
+      );
+      setEntries([
+        {
+          kind: "user",
+          text: prompt,
+          ...(attachments.length ? { attachments } : {}),
+        },
+        { kind: "error", text: String(error) },
+      ]);
       return "failed";
     }
   }, []);
@@ -398,6 +486,7 @@ export function useAgentRun(options: {
   );
 
   const loadTranscript = useCallback((next: Entry[]): void => {
+    pendingAdmission.current = null;
     setEntries(next);
     setRunState(null);
     setRunId(null);
@@ -409,6 +498,7 @@ export function useAgentRun(options: {
   }, []);
 
   const clearTranscript = useCallback((): void => {
+    pendingAdmission.current = null;
     loadTranscript([]);
   }, [loadTranscript]);
 

@@ -17,17 +17,23 @@
 //! 这里测的是**握手与指纹**，不测真实服务器会怎么装配（那是 `tests/live.rs`）。
 //! 每台测试服务器只监听回环地址的一个临时端口，跑完就随进程结束。
 
+use std::borrow::Cow;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use russh::keys::{ssh_key, HashAlg};
-use russh::server::{Auth, RunningServerHandle, Server as _};
+use russh::server::{Auth, Response, RunningServerHandle, Server as _};
+use russh::{MethodKind, MethodSet};
 use tokio::net::TcpListener;
 
 use yukinal_ssh::known_hosts::{ForgetOutcome, TrustDecision};
 use yukinal_ssh::{
-    Authentication, ConnectionSecrets, Error, KnownHostsPolicy, RusshBackend, SshBackend, SshConfig,
+    Authentication, ConnectionSecrets, Error, HostCertificateAuthority,
+    KeyboardInteractiveChallenge, KeyboardInteractiveHandler, KnownHostsPolicy, OutboundProxy,
+    Result as SshResult, RusshBackend, SshBackend, SshConfig,
 };
 
 /* ── 测试服务器 ─────────────────────────────────────────────────────────────── */
@@ -40,12 +46,15 @@ struct Observed {
     connections: Arc<AtomicUsize>,
     /// 认证回调被调用的用户。探针**不该**出现在这里。
     auth_attempts: Arc<Mutex<Vec<String>>>,
+    interactive_rounds: Arc<AtomicUsize>,
 }
 
 struct TestServer {
     addr: SocketAddr,
     /// 服务器自己的 host key 指纹，由测试独立算出 —— 客户端报出来的必须与它一致。
     fingerprint: String,
+    certificate_authority: Option<ssh_key::PublicKey>,
+    certificate_authority_private: Option<ssh_key::PrivateKey>,
     observed: Observed,
     shutdown: RunningServerHandle,
 }
@@ -58,6 +67,22 @@ impl Drop for TestServer {
 
 /// 起一台真的 SSH 服务器：`accept_auth` 决定它是否接受密码认证。
 async fn start_server(accept_auth: bool) -> TestServer {
+    start_server_with_mode(accept_auth, false, false).await
+}
+
+async fn start_mfa_server() -> TestServer {
+    start_server_with_mode(true, true, false).await
+}
+
+async fn start_certificate_server() -> TestServer {
+    start_server_with_mode(true, false, true).await
+}
+
+async fn start_server_with_mode(
+    accept_auth: bool,
+    require_mfa: bool,
+    issue_host_certificate: bool,
+) -> TestServer {
     let host_key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
         .expect("host key");
     let fingerprint = host_key
@@ -66,6 +91,17 @@ async fn start_server(accept_auth: bool) -> TestServer {
         .to_string();
 
     let mut config = russh::server::Config::default();
+    let certificate_authority_private = issue_host_certificate.then(|| {
+        let ca = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
+            .expect("CA key");
+        config
+            .certificates
+            .push(host_certificate(&ca, &host_key, &["127.0.0.1"]));
+        ca
+    });
+    let certificate_authority = certificate_authority_private
+        .as_ref()
+        .map(|ca| ca.public_key().clone());
     config.keys.push(host_key);
     // 一台只服务本测试的服务器：不做无谓的拒绝延迟，也不要因为空闲而被回收。
     config.auth_rejection_time = std::time::Duration::from_millis(10);
@@ -84,6 +120,7 @@ async fn start_server(accept_auth: bool) -> TestServer {
         let mut server = TestSshServer {
             observed: server_observed,
             accept_auth,
+            require_mfa,
         };
         let running = server.run_on_socket(config, &listener);
         ready_tx.send(running.handle()).ok();
@@ -94,14 +131,127 @@ async fn start_server(accept_auth: bool) -> TestServer {
     TestServer {
         addr,
         fingerprint,
+        certificate_authority,
+        certificate_authority_private,
         observed,
         shutdown,
     }
 }
 
+fn host_certificate(
+    ca: &ssh_key::PrivateKey,
+    host: &ssh_key::PrivateKey,
+    principals: &[&str],
+) -> ssh_key::Certificate {
+    use ssh_key::certificate::{Builder, CertType};
+    let mut builder =
+        Builder::new_with_random_nonce(&mut rand::rng(), host.public_key(), 0, u64::MAX)
+            .expect("certificate builder");
+    builder.serial(1).expect("serial");
+    builder.key_id("yukinal-host-test").expect("key id");
+    builder.cert_type(CertType::Host).expect("cert type");
+    for principal in principals {
+        builder.valid_principal(*principal).expect("principal");
+    }
+    builder.sign(ca).expect("sign certificate")
+}
+
+fn krl_revoking_host_serial(ca: &ssh_key::PublicKey, serial: u64) -> Vec<u8> {
+    fn string(bytes: &[u8]) -> Vec<u8> {
+        let mut encoded = (bytes.len() as u32).to_be_bytes().to_vec();
+        encoded.extend_from_slice(bytes);
+        encoded
+    }
+
+    let mut section = string(&ca.to_bytes().expect("CA blob"));
+    section.extend_from_slice(&string(b""));
+    section.push(0x20);
+    section.extend_from_slice(&string(&serial.to_be_bytes()));
+
+    let mut krl = b"SSHKRL\n\0".to_vec();
+    krl.extend_from_slice(&1_u32.to_be_bytes());
+    krl.extend_from_slice(&1_u64.to_be_bytes());
+    krl.extend_from_slice(&0_u64.to_be_bytes());
+    krl.extend_from_slice(&0_u64.to_be_bytes());
+    krl.extend_from_slice(&string(b""));
+    krl.extend_from_slice(&string(b"test"));
+    krl.push(1);
+    krl.extend_from_slice(&string(&section));
+    krl
+}
+
+fn signed_krl_revoking_host_serial(
+    certificate_ca: &ssh_key::PublicKey,
+    signer: &ssh_key::PrivateKey,
+    serial: u64,
+) -> Vec<u8> {
+    use signature::Signer as _;
+
+    fn string(bytes: &[u8]) -> Vec<u8> {
+        let mut encoded = (bytes.len() as u32).to_be_bytes().to_vec();
+        encoded.extend_from_slice(bytes);
+        encoded
+    }
+
+    let mut krl = krl_revoking_host_serial(certificate_ca, serial);
+    krl.push(4);
+    krl.extend_from_slice(&string(
+        &signer
+            .public_key()
+            .to_bytes()
+            .expect("signature public key"),
+    ));
+    let signed_len = krl.len();
+    let signature: ssh_key::Signature = signer
+        .try_sign(&krl[..signed_len])
+        .expect("sign KRL fixture");
+    let encoded = Vec::<u8>::try_from(signature).expect("encode signature");
+    krl.extend_from_slice(&string(&encoded));
+    krl
+}
+
+fn serve_krl_once(bytes: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind KRL server");
+    let address = listener.local_addr().expect("KRL server address");
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept KRL request");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("KRL request timeout");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1_024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).expect("read KRL request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let request_line = String::from_utf8_lossy(&request)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .expect("write KRL response headers");
+        stream.write_all(&bytes).expect("write KRL response body");
+        stream.flush().expect("flush KRL response");
+        request_line
+    });
+    (format!("http://{address}/revoked.krl"), handle)
+}
+
 struct TestSshServer {
     observed: Observed,
     accept_auth: bool,
+    require_mfa: bool,
 }
 
 impl russh::server::Server for TestSshServer {
@@ -112,6 +262,7 @@ impl russh::server::Server for TestSshServer {
         TestSshHandler {
             observed: self.observed.clone(),
             accept_auth: self.accept_auth,
+            require_mfa: self.require_mfa,
         }
     }
 }
@@ -119,6 +270,7 @@ impl russh::server::Server for TestSshServer {
 struct TestSshHandler {
     observed: Observed,
     accept_auth: bool,
+    require_mfa: bool,
 }
 
 impl russh::server::Handler for TestSshHandler {
@@ -135,9 +287,65 @@ impl russh::server::Handler for TestSshHandler {
             .expect("auth attempts")
             .push(user.to_string());
         Ok(if self.accept_auth {
+            if self.require_mfa {
+                Auth::Reject {
+                    proceed_with_methods: Some(MethodSet::from(
+                        &[MethodKind::KeyboardInteractive][..],
+                    )),
+                    partial_success: true,
+                }
+            } else {
+                Auth::Accept
+            }
+        } else {
+            Auth::reject()
+        })
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        _user: &str,
+        _submethods: &str,
+        response: Option<Response<'a>>,
+    ) -> std::result::Result<Auth, Self::Error> {
+        self.observed
+            .interactive_rounds
+            .fetch_add(1, Ordering::SeqCst);
+        let Some(mut response) = response else {
+            return Ok(Auth::Partial {
+                name: Cow::Borrowed("Two-factor authentication"),
+                instructions: Cow::Borrowed("Enter the test verification code."),
+                prompts: Cow::Borrowed(&[(Cow::Borrowed("Verification code"), false)]),
+            });
+        };
+        let answer = response
+            .next()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        Ok(if answer == "654321" {
             Auth::Accept
         } else {
             Auth::reject()
+        })
+    }
+}
+
+struct TestKeyboardInteractiveHandler;
+
+impl KeyboardInteractiveHandler for TestKeyboardInteractiveHandler {
+    fn respond<'a>(
+        &'a self,
+        challenge: &'a KeyboardInteractiveChallenge,
+    ) -> Pin<Box<dyn Future<Output = SshResult<Vec<String>>> + Send + 'a>> {
+        Box::pin(async move {
+            assert_eq!(challenge.name, "Two-factor authentication");
+            assert_eq!(challenge.prompts.len(), 1);
+            assert!(!challenge.prompts[0].echo);
+            Ok(challenge
+                .prompts
+                .iter()
+                .map(|_| "654321".to_string())
+                .collect())
         })
     }
 }
@@ -157,6 +365,10 @@ impl TempDir {
         ));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
     }
 
     fn backend(&self) -> RusshBackend {
@@ -183,6 +395,8 @@ fn config(server: &TestServer, policy: KnownHostsPolicy) -> SshConfig {
         authentication: Authentication::Password {
             credential_ref: "keychain://ssh/handshake".into(),
         },
+        host_certificate_authority: None,
+        outbound_proxy: OutboundProxy::default(),
         known_hosts_policy: policy,
         keepalive_interval_secs: 0,
     }
@@ -193,6 +407,7 @@ fn secrets() -> ConnectionSecrets {
         password: Some("hunter2".into()),
         private_key_pem: None,
         private_key_passphrase: None,
+        keyboard_interactive: None,
     }
 }
 
@@ -372,6 +587,287 @@ async fn a_matching_pin_lets_the_connection_authenticate() {
 /// 「TCP 之前」这句话以前只能靠一个不可路由的地址间接说明（连了会超时，所以得到
 /// `HostKeyNotPinned` 说明没连）。这里直接问服务器：它一次 `new_client` 都没有发生过，
 /// 所以客户端确实没有发起连接。
+#[tokio::test]
+async fn a_partial_password_login_completes_with_keyboard_interactive_mfa() {
+    let server = start_mfa_server().await;
+    let dir = TempDir::new("mfa");
+    let backend = dir.backend();
+    let mut secrets = secrets();
+    secrets.keyboard_interactive = Some(Arc::new(TestKeyboardInteractiveHandler));
+
+    let session = backend
+        .connect(config(&server, KnownHostsPolicy::TrustOnFirstUse), secrets)
+        .await
+        .expect("the second factor must complete the login");
+    backend.close(&session).await.expect("close");
+
+    assert_eq!(
+        server.observed.interactive_rounds.load(Ordering::SeqCst),
+        2,
+        "one InfoRequest and one response round are expected"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_host_ca_accepts_a_matching_certificate_without_a_leaf_pin() {
+    let server = start_certificate_server().await;
+    let dir = TempDir::new("host-ca");
+    let backend = dir.backend();
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority")
+            .to_openssh()
+            .expect("encode CA"),
+        principals: vec!["127.0.0.1".into()],
+        revocation_list_path: None,
+        revocation_list_url: None,
+        revocation_list_signers: Vec::new(),
+    });
+
+    let session = backend
+        .connect(config, secrets())
+        .await
+        .expect("a certificate signed by the configured CA must connect");
+    backend.close(&session).await.expect("close");
+}
+
+#[tokio::test]
+async fn an_explicit_host_ca_refuses_a_certificate_for_the_wrong_principal() {
+    let server = start_certificate_server().await;
+    let dir = TempDir::new("host-ca-wrong-principal");
+    let backend = dir.backend();
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority")
+            .to_openssh()
+            .expect("encode CA"),
+        principals: vec!["other.example.test".into()],
+        revocation_list_path: None,
+        revocation_list_url: None,
+        revocation_list_signers: Vec::new(),
+    });
+
+    let error = backend
+        .connect(config, secrets())
+        .await
+        .expect_err("a non-matching principal must be refused");
+    assert!(
+        matches!(error, Error::HostCertificate { ref host, .. } if host == "127.0.0.1"),
+        "expected a host-certificate error, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_host_ca_refuses_a_plain_host_key_downgrade() {
+    let server = start_server(true).await;
+    let dir = TempDir::new("host-ca-downgrade");
+    let backend = dir.backend();
+    let ca =
+        ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).expect("CA key");
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: ca.public_key().to_openssh().expect("encode CA"),
+        principals: vec!["127.0.0.1".into()],
+        revocation_list_path: None,
+        revocation_list_url: None,
+        revocation_list_signers: Vec::new(),
+    });
+
+    let error = backend
+        .connect(config, secrets())
+        .await
+        .expect_err("a plain host key must not downgrade CA policy");
+    assert!(
+        matches!(error, Error::HostCertificate { ref host, .. } if host == "127.0.0.1"),
+        "expected a host-certificate error, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_host_ca_refuses_a_certificate_revoked_by_krl() {
+    let server = start_certificate_server().await;
+    let dir = TempDir::new("host-ca-krl");
+    let backend = dir.backend();
+    let krl_path = dir.path().join("revoked_hosts.krl");
+    std::fs::write(
+        &krl_path,
+        krl_revoking_host_serial(
+            server
+                .certificate_authority
+                .as_ref()
+                .expect("certificate authority"),
+            1,
+        ),
+    )
+    .expect("write KRL");
+
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority")
+            .to_openssh()
+            .expect("encode CA"),
+        principals: vec!["127.0.0.1".into()],
+        revocation_list_path: Some(krl_path.to_string_lossy().into_owned()),
+        revocation_list_url: None,
+        revocation_list_signers: Vec::new(),
+    });
+
+    let error = backend
+        .connect(config, secrets())
+        .await
+        .expect_err("a revoked host certificate must be refused");
+    assert!(
+        matches!(error, Error::HostCertificate { ref reason, .. } if reason.contains("revoked")),
+        "expected a KRL revocation error, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_host_ca_verifies_a_signed_krl_before_revoking_a_certificate() {
+    let server = start_certificate_server().await;
+    let dir = TempDir::new("host-ca-signed-krl");
+    let backend = dir.backend();
+    let krl_path = dir.path().join("signed_revoked_hosts.krl");
+    let ca = server
+        .certificate_authority_private
+        .as_ref()
+        .expect("certificate authority");
+    std::fs::write(
+        &krl_path,
+        signed_krl_revoking_host_serial(
+            server
+                .certificate_authority
+                .as_ref()
+                .expect("certificate authority"),
+            ca,
+            1,
+        ),
+    )
+    .expect("write signed KRL");
+
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority")
+            .to_openssh()
+            .expect("encode CA"),
+        principals: vec!["127.0.0.1".into()],
+        revocation_list_path: Some(krl_path.to_string_lossy().into_owned()),
+        revocation_list_url: None,
+        revocation_list_signers: Vec::new(),
+    });
+
+    let error = backend
+        .connect(config, secrets())
+        .await
+        .expect_err("a valid signature must be verified before applying the revocation");
+    assert!(
+        matches!(error, Error::HostCertificate { ref reason, .. } if reason.contains("revoked")),
+        "expected a signed-KRL revocation error, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_independent_krl_signer_can_revoke_a_host_certificate() {
+    let server = start_certificate_server().await;
+    let dir = TempDir::new("host-ca-independent-krl-signer");
+    let backend = dir.backend();
+    let krl_path = dir.path().join("independently_signed_revoked_hosts.krl");
+    let signer = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
+        .expect("KRL key");
+    std::fs::write(
+        &krl_path,
+        signed_krl_revoking_host_serial(
+            server
+                .certificate_authority
+                .as_ref()
+                .expect("certificate authority"),
+            &signer,
+            1,
+        ),
+    )
+    .expect("write independently signed KRL");
+
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority")
+            .to_openssh()
+            .expect("encode CA"),
+        principals: vec!["127.0.0.1".into()],
+        revocation_list_path: Some(krl_path.to_string_lossy().into_owned()),
+        revocation_list_url: None,
+        revocation_list_signers: vec![signer
+            .public_key()
+            .to_openssh()
+            .expect("encode independent KRL signer")],
+    });
+
+    let error = backend
+        .connect(config, secrets())
+        .await
+        .expect_err("the independent signature must authorize the revocation");
+    assert!(
+        matches!(error, Error::HostCertificate { ref reason, .. } if reason.contains("revoked")),
+        "expected an independently signed KRL revocation error, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_host_ca_downloads_a_krl_over_loopback_http() {
+    let server = start_certificate_server().await;
+    let dir = TempDir::new("host-ca-krl-url");
+    let backend = dir.backend();
+    let krl = krl_revoking_host_serial(
+        server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority"),
+        1,
+    );
+    let (url, krl_server) = serve_krl_once(krl);
+
+    let mut config = config(&server, KnownHostsPolicy::RequireMatch);
+    config.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: server
+            .certificate_authority
+            .as_ref()
+            .expect("certificate authority")
+            .to_openssh()
+            .expect("encode CA"),
+        principals: vec!["127.0.0.1".into()],
+        revocation_list_path: None,
+        revocation_list_url: Some(url),
+        revocation_list_signers: Vec::new(),
+    });
+
+    let error = backend
+        .connect(config, secrets())
+        .await
+        .expect_err("a certificate revoked by the downloaded KRL must be refused");
+    assert!(
+        matches!(error, Error::HostCertificate { ref reason, .. } if reason.contains("revoked")),
+        "expected a downloaded-KRL revocation error, got {error:?}"
+    );
+    assert_eq!(
+        krl_server.join().expect("KRL server"),
+        "GET /revoked.krl HTTP/1.1"
+    );
+}
+
 #[tokio::test]
 async fn an_unpinned_host_is_refused_before_any_connection_is_made() {
     let server = start_server(true).await;

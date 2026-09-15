@@ -185,15 +185,46 @@ test("a file over the edit cap is reported as unfixable, not as something to ret
   );
 });
 
-test("filesystem.edit's description states the guard, the cap and the non-atomic window", () => {
+test("filesystem.edit's description states the guard, the cap and the remaining race", () => {
   const tool = filesystemEditTool(fakeHost({ status: "success", output: {} }));
-  // The description is user-facing prose and the model's only briefing. Losing any of these three
-  // facts from it is a behaviour change, so they are pinned here.
+  // The description is user-facing prose and the model's only briefing. Losing any of these facts
+  // from it is a behaviour change, so they are pinned here — including what the edit now refuses
+  // (ADR 0017): a hard link, a symlink, metadata it cannot carry, and a server that cannot publish
+  // atomically are all "do something else", not "try again".
   assert.match(tool.description, /expectedRevision/);
   assert.match(tool.description, /exactly once/);
   assert.match(tool.description, /512 KiB/);
+  assert.match(tool.description, /rename/);
+  assert.match(tool.description, /hard links/);
+  assert.match(tool.description, /mode, mtime, owner and group/);
+  assert.match(tool.description, /unsupported/);
   assert.match(tool.description, /compare-and-swap/);
   assert.match(tool.description, /filesystem\.write/);
+});
+
+test("a host refusal that cannot be retried keeps its own code", async () => {
+  // `unsupported` is the code for "this remote cannot do it, and retrying changes nothing".
+  // Collapsing it into invalid_input would tell the model to re-read and try again forever.
+  const tool = filesystemEditTool(
+    fakeHost({
+      status: "failed",
+      error: {
+        code: "unsupported",
+        message: "/etc/app.env has 3 hard links; replacing it would leave the other names pointing at the old content",
+        retryable: false,
+      },
+    }),
+  );
+
+  await assert.rejects(
+    () =>
+      tool.execute(
+        { path: "/etc/app.env", expectedRevision: "a".repeat(64), oldString: "a", newString: "b" },
+        context,
+      ),
+    (error: unknown) =>
+      error instanceof ToolFailure && error.code === "unsupported" && !error.retryable,
+  );
 });
 
 test("docker restart is exposed as a high-risk host action", async () => {

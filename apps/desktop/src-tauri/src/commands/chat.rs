@@ -7,6 +7,8 @@ use crate::state::AppState;
 use yukinal_core::ids::is_stable_server_id;
 use yukinal_database::models::{ChatMessage, ChatMessageRole, ChatSession, ChatSessionCounts};
 
+use super::agent_run::{validate_prompt_parts, PromptPart};
+
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 100;
 /// Matches the `offset` bound in `packages/shared/src/schemas/ipc.ts`. Beyond this the
@@ -132,12 +134,14 @@ pub fn chat_session_create(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn chat_message_append(
     state: State<'_, AppState>,
     session_id: String,
     message_id: Option<String>,
     role: String,
     content: String,
+    parts: Option<Vec<PromptPart>>,
     trace_id: Option<String>,
     created_at: Option<String>,
 ) -> Result<ChatMessageResponse, String> {
@@ -148,7 +152,27 @@ pub fn chat_message_append(
         .unwrap_or_else(|| crate::commands::server::next_id("msg"));
     let role = ChatMessageRole::from_db(role.trim())
         .ok_or_else(|| "role must be user, assistant, tool or system".to_string())?;
-    let content = validate_text(&content, MAX_CONTENT_CHARS, "content")?;
+    let parts = parts.filter(|items| !items.is_empty());
+    if let Some(parts) = parts.as_deref() {
+        validate_prompt_parts(parts)?;
+    }
+    let content = if content.trim().is_empty() {
+        if parts.is_none() {
+            return Err("content must not be empty without prompt parts".into());
+        }
+        String::new()
+    } else {
+        validate_text(&content, MAX_CONTENT_CHARS, "content")?
+    };
+    let parts = parts
+        .map(|parts| {
+            parts
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(|error| format!("failed to encode prompt parts: {error}"))?;
     let trace_id = normalized_optional(trace_id, MAX_ID_CHARS, "trace id")?;
     let created_at = created_at
         .map(|value| validate_text(&value, 80, "created at"))
@@ -159,6 +183,7 @@ pub fn chat_message_append(
         session_id,
         role,
         content,
+        parts,
         trace_id,
         created_at,
     };
@@ -440,6 +465,7 @@ mod tests {
                 session_id: "ses_01".into(),
                 role: ChatMessageRole::User,
                 content: "检查 API 错误".into(),
+                parts: None,
                 trace_id: None,
                 created_at: "2026-01-01T00:01:00Z".into(),
             },

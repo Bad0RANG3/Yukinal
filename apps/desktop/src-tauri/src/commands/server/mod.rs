@@ -1,7 +1,9 @@
 //! Server commands: list/add（持久化到 SQLite，凭据进 OS keychain）与 overview 的
 //! 实时快照（真实采集，不做假数据）。
 
-use serde::Serialize;
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::commands::activity::record_user_activity;
@@ -10,42 +12,49 @@ use crate::commands::EmptyResponse;
 use crate::state::AppState;
 use yukinal_core::identity::{insert_server_and_attach_identity, IdentityWrite};
 use yukinal_database::models::{
-    ActivityOutcome, ActivityType, Server, ServerCapabilities, ServerConnection, ServerMetadata,
-    ServerStatus,
+    ActivityOutcome, ActivityType, HostCertificateAuthority, Server, ServerCapabilities,
+    ServerConnection, ServerMetadata, ServerStatus,
 };
 use yukinal_database::UpdateServerInput;
 use yukinal_database::{AddServerInput, AuthenticationInput};
+use yukinal_ssh::validate_host_ca_public_key;
 
 /// 身份写入与回收的 keychain 侧（需要 `CredentialStore` 句柄，所以住不进 `crates/core`）。
 mod identity;
 
 use identity::{reclaim_identity, store_identity};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerListResponse {
     pub servers: Vec<Server>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerAddResponse {
     pub server: Server,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConnectResponse {
-    pub status: &'static str,
+    pub status: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerAuthResponse {
+    pub accepted: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerDeleteResponse {
     pub deleted: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerSnapshotResponse {
     pub snapshot: yukinal_database::models::ServerSnapshot,
@@ -119,7 +128,7 @@ pub async fn server_connect(
                 ActivityOutcome::Success,
             )?;
             Ok(ServerConnectResponse {
-                status: "connected",
+                status: "connected".into(),
             })
         }
         Err(error) => {
@@ -173,6 +182,42 @@ pub async fn server_disconnect(
     Ok(EmptyResponse {})
 }
 
+/// Supply one bounded response round for an active keyboard-interactive challenge.
+#[tauri::command]
+pub async fn server_auth_respond(
+    state: State<'_, AppState>,
+    auth_id: String,
+    responses: Vec<String>,
+) -> Result<ServerAuthResponse, String> {
+    let auth_id = validate_auth_id(&auth_id)?;
+    if responses.len() > 16 || responses.iter().any(|response| response.len() > 4_096) {
+        return Err("authentication responses exceed the bounded challenge shape".into());
+    }
+    Ok(ServerAuthResponse {
+        accepted: state.auth.respond(&auth_id, responses).await,
+    })
+}
+
+/// Cancel an active keyboard-interactive challenge and fail its SSH login in progress.
+#[tauri::command]
+pub async fn server_auth_cancel(
+    state: State<'_, AppState>,
+    auth_id: String,
+) -> Result<ServerAuthResponse, String> {
+    let auth_id = validate_auth_id(&auth_id)?;
+    Ok(ServerAuthResponse {
+        accepted: state.auth.cancel(&auth_id).await,
+    })
+}
+
+fn validate_auth_id(auth_id: &str) -> Result<String, String> {
+    let auth_id = auth_id.trim();
+    if auth_id.is_empty() || auth_id.chars().count() > 256 {
+        return Err("authentication challenge id must be between 1 and 256 characters".into());
+    }
+    Ok(auth_id.to_string())
+}
+
 #[tauri::command]
 pub async fn server_update(
     state: State<'_, AppState>,
@@ -186,6 +231,13 @@ pub async fn server_update(
         .get(&input.server_id)
         .map_err(|error| error.to_string())?;
     let old_identity_id = server.connection.identity_id.clone();
+    let host_certificate_authority = if input.clear_host_certificate_authority {
+        None
+    } else if let Some(authority) = input.host_certificate_authority.as_ref() {
+        Some(validate_host_certificate_authority(authority)?)
+    } else {
+        server.connection.host_certificate_authority.clone()
+    };
 
     // Validate and stage the replacement identity before disconnecting the old
     // session. A bad identity reference or keychain failure must not destroy a
@@ -234,6 +286,7 @@ pub async fn server_update(
     server.connection.port = input.port.unwrap_or(22);
     server.connection.username = input.username;
     server.connection.identity_id = new_identity_id;
+    server.connection.host_certificate_authority = host_certificate_authority;
     server.group_id = input.group_id;
     server.metadata.environment = input.environment;
     server.status = ServerStatus::Disconnected;
@@ -307,6 +360,11 @@ pub async fn server_add(
 
     let now = yukinal_core::sidecar::iso8601_now();
     let id = next_id("srv");
+    let host_certificate_authority = input
+        .host_certificate_authority
+        .as_ref()
+        .map(validate_host_certificate_authority)
+        .transpose()?;
 
     // 身份：secret 进 OS keychain，SQLite 只存 credentialRef / passphraseRef。
     let identity_id = store_identity(
@@ -318,7 +376,6 @@ pub async fn server_add(
         &now,
     )
     .await?;
-
     let server = Server {
         id: id.clone(),
         name: input.name.clone(),
@@ -327,6 +384,7 @@ pub async fn server_add(
             port: input.port.unwrap_or(22),
             username: input.username.clone(),
             identity_id: Some(identity_id.clone()),
+            host_certificate_authority,
         },
         group_id: input.group_id.clone(),
         capabilities: ServerCapabilities::default(),
@@ -354,6 +412,46 @@ pub async fn server_add(
     )?;
 
     Ok(ServerAddResponse { server })
+}
+
+fn validate_host_certificate_authority(
+    authority: &HostCertificateAuthority,
+) -> Result<HostCertificateAuthority, String> {
+    validate_host_ca_public_key(&authority.ca_public_key).map_err(|error| error.to_string())?;
+    if authority.principals.is_empty() || authority.principals.len() > 32 {
+        return Err("host certificate authority requires 1 to 32 principals".into());
+    }
+    if authority
+        .principals
+        .iter()
+        .any(|principal| principal.trim().is_empty() || principal.chars().count() > 253)
+    {
+        return Err(
+            "host certificate principals must be non-empty and at most 253 characters".into(),
+        );
+    }
+    if authority.revocation_list_signers.len() > 8 {
+        return Err("host certificate KRL may trust at most 8 independent signing keys".into());
+    }
+    let mut signers = HashSet::new();
+    for signer in &authority.revocation_list_signers {
+        let signer = signer.trim();
+        validate_host_ca_public_key(signer)
+            .map_err(|error| format!("invalid trusted KRL signer public key: {error}"))?;
+        if !signers.insert(signer.to_string()) {
+            return Err("trusted KRL signer public keys must be distinct".into());
+        }
+    }
+    if let Some(path) = authority.revocation_list_path.as_deref() {
+        let path = path.trim();
+        if path.is_empty() || path.chars().count() > 4_096 || path.chars().any(char::is_control) {
+            return Err("host certificate KRL path must be 1 to 4096 visible characters".into());
+        }
+        if !std::path::Path::new(path).is_absolute() {
+            return Err("host certificate KRL path must be absolute".into());
+        }
+    }
+    Ok(authority.clone())
 }
 
 /// `srv_`/`idn_` 前缀 + 时间戳/millis + 进程内计数器：稳定、非 host 派生。

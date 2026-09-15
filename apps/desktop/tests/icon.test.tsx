@@ -32,7 +32,7 @@ test("the size scale is the documented one, in ascending order", () => {
 test("every icon renders on one shared viewBox", () => {
   const names: IconName[] = [
     "activity", "agent", "archive", "arrowUp", "chevronDown", "chevronRight", "chevronUp", "close",
-    "connect", "disconnect", "edit", "file", "folder", "logs", "plus", "projects",
+    "connect", "copy", "disconnect", "edit", "externalLink", "file", "folder", "logs", "plus", "projects",
     "refresh", "search", "servers", "services", "settings", "shield", "sparkle", "stop",
     "terminal", "trash", "warning",
   ];

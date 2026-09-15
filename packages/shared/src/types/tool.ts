@@ -63,8 +63,8 @@ export interface ToolCallRequest {
 
 /**
  * The tool-error vocabulary, as a tuple so `schemas/host.ts` can write
- * `z.enum(TOOL_ERROR_CODES)` instead of a second hand-copied list of the same ten
- * strings. At ten members it was the largest of the unpinned lists: a new code added
+ * `z.enum(TOOL_ERROR_CODES)` instead of a second hand-copied list of the same
+ * strings. It was the largest of the unpinned lists: a new code added
  * to the union only would compile and then be rejected by the host schema at runtime.
  *
  * `apps/agent` returns these as plain literals (`tools/registry.ts`), which the compiler
@@ -79,6 +79,14 @@ export const TOOL_ERROR_CODES = [
   "cancelled",
   "not_found",
   "transport",
+  /**
+   * The remote cannot do what the tool promises, and retrying changes nothing.
+   *
+   * Distinct from `invalid_input` on purpose: an agent that hears "your input was stale" should
+   * re-read and retry, while "this server cannot publish an edit atomically" means stop and tell
+   * the user (or use a different tool). `filesystem.edit` is where this first shows up.
+   */
+  "unsupported",
   "execution_failed",
   "internal",
 ] as const;

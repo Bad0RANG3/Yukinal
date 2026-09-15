@@ -7,7 +7,7 @@ use russh::client::{AuthResult, Handle};
 use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::agent::AgentIdentity;
 
-use super::auth::best_supported_rsa_hash;
+use super::auth::{best_supported_rsa_hash, PrimaryOutcome};
 use super::hostkey::ConnHandler;
 use crate::{AgentError, Error, Result};
 
@@ -39,7 +39,7 @@ pub(super) async fn authenticate_with_agent(
     handle: &mut Handle<ConnHandler>,
     user: &str,
     socket_path: Option<&str>,
-) -> Result<()> {
+) -> Result<PrimaryOutcome> {
     let mut agent = connect_agent(socket_path).await?;
     let identities = agent
         .request_identities()
@@ -52,6 +52,7 @@ pub(super) async fn authenticate_with_agent(
     let hash = best_supported_rsa_hash(handle).await?;
     let mut identities_tried = 0usize;
     let mut partial_success = false;
+    let mut keyboard_interactive_available = false;
     for identity in &identities {
         identities_tried += 1;
         let result = match identity {
@@ -65,17 +66,25 @@ pub(super) async fn authenticate_with_agent(
                 .map_err(map_agent_sign_error)?,
         };
         match result {
-            AuthResult::Success => return Ok(()),
+            AuthResult::Success => return Ok(PrimaryOutcome::Success),
             AuthResult::Failure {
                 partial_success: partial,
+                remaining_methods,
                 ..
-            } => partial_success |= partial,
+            } => {
+                partial_success |= partial;
+                keyboard_interactive_available |=
+                    remaining_methods.contains(&russh::MethodKind::KeyboardInteractive);
+            }
         }
     }
-    Err(Error::Agent(AgentError::Rejected {
-        identities_tried,
-        partial_success,
-    }))
+    Ok(PrimaryOutcome::Failure {
+        keyboard_interactive_available,
+        error: Error::Agent(AgentError::Rejected {
+            identities_tried,
+            partial_success,
+        }),
+    })
 }
 
 /// 连接 agent（平台差异收在这一层），并给整次连接加超时。
@@ -181,18 +190,28 @@ fn classify_agent_error(error: &russh::keys::Error) -> AgentError {
     }
 }
 
-/// agent 在签名阶段失败时的映射。
-///
-/// 这里只拿得到 `Display`：russh 0.63 的 `AgentAuthError` 定义在**私有**模块
-/// `russh::auth` 里，类型不可命名、`Send` / `Key` 两个分支也不可匹配（它的
-/// `source()` 因为 `#[error(transparent)]` 直接透传到更底层，所以 downcast 也拿不到
-/// 真正的 `keys::Error`）。于是「agent 拒绝签名」与「签名途中这条 SSH 连接断了」在
-/// 类型上合成 [`AgentError::SigningFailed`] 一条，底层措辞留在 `detail` 里 —— 这比
-/// 按消息文本猜类型诚实。
-fn map_agent_sign_error<E: std::fmt::Display>(error: E) -> Error {
-    Error::Agent(AgentError::SigningFailed {
-        detail: error.to_string(),
-    })
+/// Preserve the two failure owners russh exposes while signing through an agent.
+fn map_agent_sign_error(error: russh::AgentAuthError) -> Error {
+    match error {
+        // The SSH side could not carry the sign request/reply; this is not evidence
+        // that the agent itself rejected the identity.
+        russh::AgentAuthError::Send(error) => Error::Transport(format!(
+            "SSH channel closed while exchanging an ssh-agent signature: {error}"
+        )),
+        russh::AgentAuthError::Key(russh::keys::Error::AgentFailure) => {
+            Error::Agent(AgentError::SigningRejected {
+                detail: "the agent answered with a failure message".into(),
+            })
+        }
+        russh::AgentAuthError::Key(russh::keys::Error::AgentProtocolError) => {
+            Error::Agent(AgentError::Protocol {
+                detail: "unexpected reply frame while signing".into(),
+            })
+        }
+        russh::AgentAuthError::Key(error) => Error::Agent(AgentError::ExchangeFailed {
+            detail: error.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -254,13 +273,37 @@ mod tests {
         ));
     }
 
-    /// 签名阶段的失败统一映射成 `SigningFailed`，并保留底层措辞
-    /// （russh 的 `AgentAuthError` 在私有模块里，类型上细分不了 —— 见实现处的注释）。
+    /// Agent refusal, protocol failure, and SSH transport failure stay distinct.
     #[test]
-    fn agent_signing_failures_keep_their_detail() {
-        match map_agent_sign_error("the agent is locked") {
-            Error::Agent(AgentError::SigningFailed { detail }) => {
-                assert_eq!(detail, "the agent is locked");
+    fn agent_signing_failures_keep_their_owner() {
+        match map_agent_sign_error(russh::AgentAuthError::Key(russh::keys::Error::AgentFailure)) {
+            Error::Agent(AgentError::SigningRejected { detail }) => {
+                assert!(detail.contains("failure"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        match map_agent_sign_error(russh::AgentAuthError::Key(
+            russh::keys::Error::AgentProtocolError,
+        )) {
+            Error::Agent(AgentError::Protocol { detail }) => {
+                assert!(detail.contains("reply frame"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        match map_agent_sign_error(russh::AgentAuthError::Key(russh::keys::Error::IO(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent vanished"),
+        ))) {
+            Error::Agent(AgentError::ExchangeFailed { detail }) => {
+                assert!(detail.contains("agent vanished"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        match map_agent_sign_error(russh::AgentAuthError::Send(russh::SendError {})) {
+            Error::Transport(message) => {
+                assert!(message.contains("SSH channel closed"), "{message}");
             }
             other => panic!("{other:?}"),
         }

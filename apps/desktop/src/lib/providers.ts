@@ -58,6 +58,11 @@ export function providerKindUsesWireApi(kind: AiProviderKind): boolean {
   return kind === "openai-compatible";
 }
 
+/** Anthropic is the only protocol in the current vocabulary with a dated version header. */
+export function providerKindUsesApiVersion(kind: AiProviderKind): boolean {
+  return kind === "anthropic";
+}
+
 /** base URL 该填到哪一层由适配器决定：它会自己接上协议路径。 */
 export function providerKindBaseUrlHint(kind: AiProviderKind): string {
   switch (kind) {
@@ -153,6 +158,8 @@ export interface ProviderDraft {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  customHeaders?: Record<string, string>;
+  apiVersion?: string;
   wireApi?: "chat" | "responses";
   models?: ProviderModelOption[];
 }
@@ -173,10 +180,50 @@ export function providerSavePayload(draft: ProviderDraft): ProviderSaveInput {
     baseUrl: draft.baseUrl.trim(),
     model: draft.model.trim(),
     apiKey: draft.apiKey?.trim() || undefined,
+    customHeaders: draft.customHeaders && Object.keys(draft.customHeaders).length > 0
+      ? draft.customHeaders
+      : undefined,
+    apiVersion: providerKindUsesApiVersion(draft.kind) ? draft.apiVersion?.trim() || undefined : undefined,
     models: draft.models?.length ? draft.models : undefined,
   };
   // 原生 kind 带上 `wireApi` 不是「被忽略的字段」而是非法输入：保存会以 INVALID_PARAMS 失败。
   // 所以这里不发送它，而不是发送一个空值。
   if (providerKindUsesWireApi(draft.kind) && draft.wireApi) payload.wireApi = draft.wireApi;
   return payload;
+}
+
+/**
+ * Convert the stored, schema-approved headers to the one-line-per-header editor shape.
+ * Sorting makes the form stable across query refreshes and avoids incidental diff noise.
+ */
+export function providerHeadersText(headers: Record<string, string> | undefined): string {
+  return Object.entries(headers ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}: ${value}`)
+    .join("\n");
+}
+
+/**
+ * Parse the settings textarea without guessing or inventing a header.
+ *
+ * The shared schema remains the security authority. This parser only turns the
+ * editor's line syntax into an object and gives actionable line errors before IPC.
+ */
+export function parseProviderHeaders(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const seen = new Set<string>();
+  text.split(/\r?\n/).forEach((rawLine, index) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    const separator = line.indexOf(":");
+    if (separator <= 0) throw new Error(`第 ${index + 1} 行请求头必须是「名称: 值」。`);
+    const name = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!name || !value) throw new Error(`第 ${index + 1} 行请求头的名称和值都不能为空。`);
+    const normalized = name.toLowerCase();
+    if (seen.has(normalized)) throw new Error(`第 ${index + 1} 行重复定义了请求头「${name}」。`);
+    seen.add(normalized);
+    headers[name] = value;
+  });
+  return headers;
 }

@@ -9,6 +9,7 @@ mod state;
 use std::path::PathBuf;
 
 use tauri::{Emitter, Manager};
+use tokio::sync::broadcast;
 
 use state::AppState;
 use yukinal_terminal::TerminalAppEvent;
@@ -16,6 +17,7 @@ use yukinal_terminal::TerminalAppEvent;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 数据目录：SQLite、known_hosts、终端服务都挂在这里（全部由 Rust 侧装配）。
             // Keep native state and the sidecar's YUKINAL_DATA_DIR aligned for
@@ -25,6 +27,7 @@ pub fn run() {
             app.manage(app_state);
 
             forward_terminal_events(app.handle().clone());
+            forward_auth_challenges(app.handle().clone());
             // Once per window, before anything can start the agent: the forwarder has to
             // outlive an agent crash so the restarted process is still reported, and it must
             // never be duplicated (two forwarders execute every `host.*` request twice).
@@ -80,6 +83,8 @@ pub fn run() {
             commands::server::server_delete,
             commands::server::server_connect,
             commands::server::server_disconnect,
+            commands::server::server_auth_respond,
+            commands::server::server_auth_cancel,
             commands::host_key::server_host_key_status,
             commands::host_key::server_host_key_probe,
             commands::host_key::server_host_key_trust,
@@ -97,6 +102,11 @@ pub fn run() {
             commands::mcp::mcp_server_delete,
             commands::mcp::mcp_server_start,
             commands::mcp::mcp_server_stop,
+            commands::mcp::mcp_server_review,
+            commands::mcp::mcp_oauth_connect,
+            commands::mcp::mcp_oauth_cancel,
+            commands::network::network_proxy_get,
+            commands::network::network_proxy_save,
             commands::server::server_snapshot,
             commands::services::server_services,
             commands::logs::server_logs,
@@ -176,6 +186,28 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                     );
                 }
                 Err(_) => break,
+            }
+        }
+    });
+}
+
+/// SSH keyboard-interactive challenges are emitted as a bounded UI event. Responses
+/// return through commands, never through this channel.
+fn forward_auth_challenges(app: tauri::AppHandle) {
+    let broker = app.state::<AppState>().auth.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut receiver = broker.subscribe();
+        loop {
+            match receiver.recv().await {
+                Ok(challenge) => {
+                    let payload = serde_json::to_value(challenge).unwrap_or_default();
+                    let _ = app.emit(
+                        &commands::tauri_event_name("server.auth_challenge"),
+                        payload,
+                    );
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });

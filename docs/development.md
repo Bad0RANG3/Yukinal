@@ -44,7 +44,7 @@ pnpm agent:dev
 pnpm clean
 ```
 
-首次使用的顺序：在「设置 ▸ Provider」里选协议（OpenAI-compatible / Anthropic / Gemini）、填写端点、模型和 API key（本地端点可以留空 key），再到「服务器」里添加一台服务器（需要用户名，以及密码、私钥（带口令的私钥请一并填口令）或 ssh-agent），首次连接会按指纹策略处理服务器身份，连接后即可使用概览、终端、文件、服务与日志。
+首次使用的顺序：在「设置 ▸ Provider」里选协议（OpenAI-compatible / Anthropic / Gemini）、填写端点、模型和 API key（本地端点可以留空 key），再到「服务器」里添加一台服务器（需要用户名，以及密码、私钥（带口令的私钥请一并填口令）、OpenSSH 用户证书或 ssh-agent），首次连接会按指纹策略处理服务器身份，连接后即可使用概览、终端、文件、服务与日志。
 
 ### 首次使用引导
 

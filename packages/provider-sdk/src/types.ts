@@ -6,7 +6,13 @@
  * (ADR 0004) — lives behind this interface.
  */
 
-import type { JsonSchema, ModelInfo } from "@yukinal/shared";
+import type {
+  AgentDocumentMediaType,
+  AgentAudioMediaType,
+  AgentImageMediaType,
+  JsonSchema,
+  ModelInfo,
+} from "@yukinal/shared";
 
 /**
  * `ModelInfo` 由 `@yukinal/shared` 定义，这里只做转发。
@@ -30,9 +36,52 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
 }
 
+/**
+ * One inline image attached to a user turn.
+ *
+ * The neutral layer deliberately carries bytes rather than a provider URL. Each
+ * adapter owns its wire envelope (data URL, content block, or inlineData), and the
+ * agent loop never learns which Provider is on the other side.
+ */
+export interface LlmImagePart {
+  mediaType: AgentImageMediaType;
+  /** Canonical base64 without a data-URL prefix. */
+  data: string;
+  name?: string;
+}
+
+/** One inline document attached to a user turn. Providers own their wire envelope. */
+export interface LlmDocumentPart {
+  mediaType: AgentDocumentMediaType;
+  /** Canonical base64 without a data-URL prefix. */
+  data: string;
+  name: string;
+}
+
+/**
+ * One inline audio clip attached to a user turn.
+ *
+ * The media type is the attachment's own (`audio/wav`, `audio/mpeg`, `audio/ogg`,
+ * `audio/flac`); each adapter maps what its protocol can carry and **fails** on the rest,
+ * because dropping an attachment silently would leave the model answering a question it
+ * never heard.
+ */
+export interface LlmAudioPart {
+  mediaType: AgentAudioMediaType;
+  /** Canonical base64 without a data-URL prefix. */
+  data: string;
+  name?: string;
+}
+
 export type LlmMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | {
+      role: "user";
+      content: string;
+      images?: LlmImagePart[];
+      documents?: LlmDocumentPart[];
+      audios?: LlmAudioPart[];
+    }
   | { role: "assistant"; content: string; toolCalls?: ToolCall[] }
   | { role: "tool"; toolCallId: string; content: string };
 

@@ -57,6 +57,7 @@ fn config() -> Option<SidecarConfig> {
         entry_label: String::from("integration test bundle"),
         client_version: String::from("test"),
         data_dir: std::env::temp_dir().display().to_string(),
+        requires_node: true,
     })
 }
 
@@ -165,6 +166,7 @@ async fn a_bad_entry_reports_the_build_step_instead_of_hanging() {
         entry_label: String::from("missing bundle"),
         client_version: String::from("test"),
         data_dir: String::new(),
+        requires_node: true,
     };
 
     // node exits non-zero without answering: launch must fail fast, not wait forever.

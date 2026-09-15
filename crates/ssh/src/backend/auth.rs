@@ -6,15 +6,45 @@
 
 use std::sync::Arc;
 
-use russh::client::Handle;
+use russh::client::{AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{ssh_key, HashAlg};
 
 use super::agent::authenticate_with_agent;
 use super::error::map_send_err;
 use super::hostkey::ConnHandler;
 use crate::{
-    Authentication, CertificateError, ConnectionSecrets, Error, PrivateKeyError, Result, SshConfig,
+    Authentication, CertificateError, ConnectionSecrets, Error, KeyboardInteractiveChallenge,
+    KeyboardInteractiveHandler, KeyboardInteractivePrompt, PrivateKeyError, Result, SshConfig,
 };
+
+const MAX_INTERACTIVE_ROUNDS: usize = 8;
+const MAX_INTERACTIVE_PROMPTS: usize = 16;
+const MAX_INTERACTIVE_NAME_CHARS: usize = 256;
+const MAX_INTERACTIVE_INSTRUCTIONS_CHARS: usize = 4_096;
+const MAX_INTERACTIVE_PROMPT_CHARS: usize = 1_024;
+
+pub(super) enum PrimaryOutcome {
+    Success,
+    Failure {
+        keyboard_interactive_available: bool,
+        error: Error,
+    },
+}
+
+impl PrimaryOutcome {
+    fn from_auth_result(result: AuthResult, rejected: Error) -> Self {
+        match result {
+            AuthResult::Success => Self::Success,
+            AuthResult::Failure {
+                remaining_methods, ..
+            } => Self::Failure {
+                keyboard_interactive_available: remaining_methods
+                    .contains(&russh::MethodKind::KeyboardInteractive),
+                error: rejected,
+            },
+        }
+    }
+}
 
 /// OpenSSH 的证书配对约定：私钥 `/path/id_ed25519` 的证书是同目录的
 /// `/path/id_ed25519-cert.pub`。
@@ -32,7 +62,7 @@ pub(super) async fn authenticate(
     secrets: &ConnectionSecrets,
 ) -> Result<()> {
     let user = config.username.as_str();
-    match &config.authentication {
+    let outcome = match &config.authentication {
         Authentication::Password { .. } => {
             let password = secrets.password.as_deref().ok_or_else(|| {
                 Error::Authentication("no password resolved at the call site".into())
@@ -41,13 +71,14 @@ pub(super) async fn authenticate(
                 .authenticate_password(user, password)
                 .await
                 .map_err(map_send_err)?;
-            if !result.success() {
-                return Err(Error::Authentication("server rejected the password".into()));
-            }
+            PrimaryOutcome::from_auth_result(
+                result,
+                Error::Authentication("server rejected the password".into()),
+            )
         }
         Authentication::PrivateKey { .. } => {
             let key = load_private_key(secrets)?;
-            authenticate_with_key(handle, user, key).await?;
+            authenticate_with_key(handle, user, key).await?
         }
         Authentication::Certificate {
             certificate_path,
@@ -62,17 +93,16 @@ pub(super) async fn authenticate(
                 .authenticate_openssh_cert(user, Arc::new(key), certificate)
                 .await
                 .map_err(map_send_err)?;
-            if !result.success() {
-                return Err(Error::Authentication(
-                    "server rejected the certificate".into(),
-                ));
-            }
+            PrimaryOutcome::from_auth_result(
+                result,
+                Error::Authentication("server rejected the certificate".into()),
+            )
         }
         Authentication::Agent { socket_path } => {
-            authenticate_with_agent(handle, user, socket_path.as_deref()).await?;
+            authenticate_with_agent(handle, user, socket_path.as_deref()).await?
         }
-    }
-    Ok(())
+    };
+    finish_primary(handle, user, outcome, secrets).await
 }
 
 /// 单次 publickey 认证。
@@ -84,7 +114,7 @@ async fn authenticate_with_key(
     handle: &mut Handle<ConnHandler>,
     user: &str,
     key: ssh_key::PrivateKey,
-) -> Result<()> {
+) -> Result<PrimaryOutcome> {
     let hash = best_supported_rsa_hash(handle).await?;
     let result = handle
         .authenticate_publickey(
@@ -93,12 +123,126 @@ async fn authenticate_with_key(
         )
         .await
         .map_err(map_send_err)?;
-    if !result.success() {
+    Ok(PrimaryOutcome::from_auth_result(
+        result,
+        Error::Authentication("server rejected the public key".into()),
+    ))
+}
+
+async fn finish_primary(
+    handle: &mut Handle<ConnHandler>,
+    user: &str,
+    outcome: PrimaryOutcome,
+    secrets: &ConnectionSecrets,
+) -> Result<()> {
+    let PrimaryOutcome::Failure {
+        keyboard_interactive_available,
+        error,
+    } = outcome
+    else {
+        return Ok(());
+    };
+    if !keyboard_interactive_available {
+        return Err(error);
+    }
+    let Some(handler) = secrets.keyboard_interactive.as_deref() else {
+        return Err(error);
+    };
+    authenticate_keyboard_interactive(handle, user, handler).await
+}
+
+/// Complete a partially accepted login with bounded keyboard-interactive rounds.
+///
+/// The server controls both prompt count and text, so all three are validated before
+/// crossing into the UI. Responses never enter errors or logs.
+async fn authenticate_keyboard_interactive(
+    handle: &mut Handle<ConnHandler>,
+    user: &str,
+    handler: &dyn KeyboardInteractiveHandler,
+) -> Result<()> {
+    let mut reply = handle
+        .authenticate_keyboard_interactive_start(user, None)
+        .await
+        .map_err(map_send_err)?;
+    for _round in 0..MAX_INTERACTIVE_ROUNDS {
+        match reply {
+            KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            KeyboardInteractiveAuthResponse::Failure {
+                partial_success, ..
+            } => {
+                return Err(Error::Authentication(if partial_success {
+                    "server accepted one keyboard-interactive round but still requires another method"
+                        .into()
+                } else {
+                    "server rejected keyboard-interactive authentication".into()
+                }));
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                let challenge = bounded_challenge(name, instructions, prompts)?;
+                let response_count = challenge.prompts.len();
+                let responses = handler.respond(&challenge).await?;
+                if responses.len() != response_count {
+                    return Err(Error::Authentication(format!(
+                        "keyboard-interactive response count mismatch: server asked for \
+                         {response_count}, caller returned {}",
+                        responses.len()
+                    )));
+                }
+                reply = handle
+                    .authenticate_keyboard_interactive_respond(responses)
+                    .await
+                    .map_err(map_send_err)?;
+            }
+        }
+    }
+    Err(Error::Authentication(format!(
+        "server exceeded the {MAX_INTERACTIVE_ROUNDS}-round keyboard-interactive limit"
+    )))
+}
+
+fn bounded_challenge(
+    name: String,
+    instructions: String,
+    prompts: Vec<russh::client::Prompt>,
+) -> Result<KeyboardInteractiveChallenge> {
+    if name.chars().count() > MAX_INTERACTIVE_NAME_CHARS {
         return Err(Error::Authentication(
-            "server rejected the public key".into(),
+            "keyboard-interactive challenge name is too long".into(),
         ));
     }
-    Ok(())
+    if instructions.chars().count() > MAX_INTERACTIVE_INSTRUCTIONS_CHARS {
+        return Err(Error::Authentication(
+            "keyboard-interactive instructions are too long".into(),
+        ));
+    }
+    if prompts.len() > MAX_INTERACTIVE_PROMPTS {
+        return Err(Error::Authentication(format!(
+            "keyboard-interactive challenge has more than {MAX_INTERACTIVE_PROMPTS} prompts"
+        )));
+    }
+    let prompts = prompts
+        .into_iter()
+        .map(|prompt| {
+            if prompt.prompt.chars().count() > MAX_INTERACTIVE_PROMPT_CHARS {
+                return Err(Error::Authentication(
+                    "keyboard-interactive prompt text is too long".into(),
+                ));
+            }
+            Ok(KeyboardInteractivePrompt {
+                prompt: prompt.prompt,
+                echo: prompt.echo,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(KeyboardInteractiveChallenge {
+        name,
+        instructions,
+        prompts,
+    })
 }
 
 /// RSA 的签名哈希由**服务器**的 `server-sig-algs` 决定（`ssh-rsa` / `rsa-sha2-*`
@@ -406,6 +550,37 @@ mod tests {
         assert!(matches!(
             load_certificate(&garbage, &key),
             Err(Error::Certificate(CertificateError::Parse { .. }))
+        ));
+    }
+
+    #[test]
+    fn keyboard_interactive_challenges_are_bounded_before_reaching_the_ui() {
+        let oversized_prompt = bounded_challenge(
+            "name".into(),
+            "instructions".into(),
+            vec![russh::client::Prompt {
+                prompt: "x".repeat(MAX_INTERACTIVE_PROMPT_CHARS + 1),
+                echo: false,
+            }],
+        );
+        assert!(matches!(
+            oversized_prompt,
+            Err(Error::Authentication(message)) if message.contains("prompt text is too long")
+        ));
+
+        let too_many = bounded_challenge(
+            "name".into(),
+            "instructions".into(),
+            (0..=MAX_INTERACTIVE_PROMPTS)
+                .map(|_| russh::client::Prompt {
+                    prompt: "code".into(),
+                    echo: false,
+                })
+                .collect(),
+        );
+        assert!(matches!(
+            too_many,
+            Err(Error::Authentication(message)) if message.contains("more than")
         ));
     }
 }

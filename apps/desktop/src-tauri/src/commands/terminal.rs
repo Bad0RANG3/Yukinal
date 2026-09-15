@@ -4,16 +4,19 @@
 //! ssh connect (cached per server) → PTY → TerminalManager. React never holds an
 //! ssh `Session`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::commands::EmptyResponse;
 use crate::state::AppState;
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{Identity, Server};
-use yukinal_ssh::{Authentication, ConnectionSecrets, KnownHostsPolicy, SshBackend, SshConfig};
+use yukinal_ssh::{
+    Authentication, ConnectionSecrets, HostCertificateAuthority as SshHostCertificateAuthority,
+    KnownHostsPolicy, SshBackend, SshConfig,
+};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOpenResponse {
     pub terminal_session_id: String,
@@ -68,8 +71,19 @@ fn resolve_capabilities(
         .get(identity_id)
         .map_err(|error| error.to_string())?;
 
-    let (authentication, secrets) =
+    let (authentication, mut secrets) =
         resolve_identity_authentication(&identity, state.credentials.as_ref())?;
+    secrets.keyboard_interactive = Some(state.auth.handler(
+        server.id.clone(),
+        server.connection.username.clone(),
+        server.connection.host.clone(),
+    ));
+
+    // 远端 KRL 下载与 OAuth、MCP 走同一份应用级代理设置（ADR 0022）。
+    let proxy = crate::commands::network::resolve_outbound_proxy(
+        &state.database,
+        state.credentials.as_ref(),
+    )?;
 
     let config = SshConfig {
         server_id: server.id.clone(),
@@ -77,7 +91,17 @@ fn resolve_capabilities(
         port: server.connection.port,
         username: server.connection.username.clone(),
         authentication,
+        host_certificate_authority: server.connection.host_certificate_authority.as_ref().map(
+            |authority| SshHostCertificateAuthority {
+                ca_public_key: authority.ca_public_key.clone(),
+                principals: authority.principals.clone(),
+                revocation_list_path: authority.revocation_list_path.clone(),
+                revocation_list_url: authority.revocation_list_url.clone(),
+                revocation_list_signers: authority.revocation_list_signers.clone(),
+            },
+        ),
         // MVP：终端首连自动信任并记录；host key 之后的严格匹配由 known_hosts 保证。
+        outbound_proxy: proxy,
         known_hosts_policy: KnownHostsPolicy::TrustOnFirstUse,
         keepalive_interval_secs: 30,
     };
@@ -113,26 +137,38 @@ fn resolve_identity_authentication(
                 password: Some(read(&identity.credential_ref)?),
                 private_key_pem: None,
                 private_key_passphrase: None,
+                keyboard_interactive: None,
             },
         )),
-        "privateKey" => {
+        "privateKey" | "certificate" => {
             // 口令按引用取，取不到就**报错**：静默降级成「没有口令」会把一个
             // keychain 故障变成认证期的 PassphraseRequired，根因更难查。
             let passphrase = match identity.passphrase_ref.as_deref() {
                 Some(reference) => Some(read(reference)?),
                 None => None,
             };
-            Ok((
+            let authentication = if identity.method == "certificate" {
+                Authentication::Certificate {
+                    credential_ref: identity.credential_ref.clone(),
+                    passphrase_ref: identity.passphrase_ref.clone(),
+                    private_key_path: identity.private_key_path.clone(),
+                    certificate_path: identity.certificate_path.clone(),
+                }
+            } else {
                 Authentication::PrivateKey {
                     credential_ref: identity.credential_ref.clone(),
                     // 引用随身份给出：它是「这把 key 该配哪个口令条目」的记录，
                     // 不是口令材料本身。
                     passphrase_ref: identity.passphrase_ref.clone(),
-                },
+                }
+            };
+            Ok((
+                authentication,
                 ConnectionSecrets {
                     password: None,
                     private_key_pem: Some(read(&identity.credential_ref)?),
                     private_key_passphrase: passphrase,
+                    keyboard_interactive: None,
                 },
             ))
         }
@@ -238,6 +274,8 @@ mod tests {
             method: method.into(),
             credential_ref: credential_ref.into(),
             passphrase_ref: passphrase_ref.map(str::to_string),
+            private_key_path: None,
+            certificate_path: None,
             created_at: NOW.into(),
         }
     }
@@ -304,6 +342,30 @@ mod tests {
         assert_eq!(secrets.password, None);
     }
 
+    #[test]
+    fn a_certificate_identity_resolves_with_paths_and_private_key_material() {
+        let store = MemoryCredentialStore::new();
+        let key_ref = store
+            .set("ssh", "srv_cert", &Secret::from_utf8("private key"))
+            .expect("set key");
+        let mut identity = identity("certificate", &key_ref.to_string_ref(), None);
+        identity.certificate_path = Some("C:/keys/id_ed25519-cert.pub".into());
+        identity.private_key_path = Some("C:/keys/id_ed25519".into());
+
+        let (authentication, secrets) =
+            resolve_identity_authentication(&identity, &store).expect("resolve certificate");
+        assert_eq!(
+            authentication,
+            Authentication::Certificate {
+                credential_ref: key_ref.to_string_ref(),
+                passphrase_ref: None,
+                certificate_path: Some("C:/keys/id_ed25519-cert.pub".into()),
+                private_key_path: Some("C:/keys/id_ed25519".into()),
+            }
+        );
+        assert_eq!(secrets.private_key_pem.as_deref(), Some("private key"));
+    }
+
     /// 明文 key：没有 `passphrase_ref`，`private_key_passphrase` 必须是 `None`
     /// （空口令与「不给口令」在 ssh 后端是同一件事，见 `load_private_key`）。
     #[test]
@@ -355,11 +417,11 @@ mod tests {
     fn an_unknown_method_still_fails_loudly() {
         let store = MemoryCredentialStore::new();
         let error = resolve_identity_authentication(
-            &identity("certificate", "keychain://ssh/x", None),
+            &identity("kerberos", "keychain://ssh/x", None),
             &store,
         )
         .expect_err("an unknown method must not pick a default");
-        assert_eq!(error, "unsupported identity method `certificate`");
+        assert_eq!(error, "unsupported identity method `kerberos`");
     }
 
     /// 密码认证的老路径没有被这次改动碰坏。
@@ -409,6 +471,8 @@ mod tests {
                 // agent 身份没有凭据条目：这一列是 NOT NULL，空串就是「没有」。
                 credential_ref: String::new(),
                 passphrase_ref: None,
+                private_key_path: None,
+                certificate_path: None,
                 created_at: NOW.into(),
             })
             .expect("insert the agent identity");
@@ -423,6 +487,7 @@ mod tests {
                     port: 2222,
                     username: "deploy".into(),
                     identity_id: Some("idn_agent_wire".into()),
+                    host_certificate_authority: None,
                 },
                 group_id: None,
                 capabilities: ServerCapabilities::default(),

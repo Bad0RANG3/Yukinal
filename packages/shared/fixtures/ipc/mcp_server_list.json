@@ -7,6 +7,7 @@
         "transport": "stdio",
         "command": "node",
         "args": ["crates/core/tests/fixtures/mcp-server.js", "ok"],
+        "httpAuthHeaders": [],
         "enabled": true,
         "allowedTools": [],
         "trustLevel": "unreviewed"
@@ -44,6 +45,7 @@
         "transport": "stdio",
         "command": "uvx",
         "args": ["mcp-server-time"],
+        "httpAuthHeaders": [],
         "enabled": true,
         "allowedTools": [],
         "trustLevel": "unreviewed"
@@ -69,28 +71,36 @@
         "label": "Remote MCP",
         "transport": "http",
         "url": "https://mcp.example.com/mcp",
-        "enabled": false,
+        "httpAuthHeaders": [
+          {
+            "name": "Authorization",
+            "credentialRef": "keychain://mcp/mcp_remote-cred"
+          }
+        ],
+        "enabled": true,
         "allowedTools": [],
         "trustLevel": "unreviewed"
       },
       "status": {
         "serverId": "mcp_remote",
-        "running": false,
+        "running": true,
         "pid": null,
         "program": null,
-        "startedAt": null,
-        "protocolVersion": null,
-        "serverName": null,
-        "serverVersion": null,
-        "toolCount": 0,
+        "startedAt": "2026-01-01T00:00:00.000Z",
+        "protocolVersion": "2025-11-25",
+        "serverName": "remote-fixture",
+        "serverVersion": "1.0.0",
+        "toolCount": 1,
         "stderrTail": [],
         "diagnostics": []
       },
-      "tools": [],
-      "unavailable": {
-        "code": "transport_not_implemented",
-        "message": "mcp server \"mcp_remote\" is configured with transport \"http\", which is not implemented: an http server means outbound network requests, and no outbound network policy exists yet (docs/boundaries/mcp.md: 传输方式只有 stdio，http 要等出站网络策略先定下来)"
-      }
+      "tools": [
+        {
+          "name": "echo",
+          "description": "Echo over Streamable HTTP. Fixture tool.",
+          "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+        }
+      ]
     }
   ]
 }

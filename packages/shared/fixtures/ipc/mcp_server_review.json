@@ -1,0 +1,33 @@
+{
+  "config": {
+    "id": "mcp_1",
+    "label": "fixture ok",
+    "transport": "stdio",
+    "command": "node",
+    "args": ["crates/core/tests/fixtures/mcp-server.js", "ok"],
+    "httpAuthHeaders": [],
+    "enabled": true,
+    "allowedTools": ["echo"],
+    "trustLevel": "reviewed"
+  },
+  "status": {
+    "serverId": "mcp_1",
+    "running": true,
+    "pid": 4242,
+    "program": "node",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "protocolVersion": "2025-11-25",
+    "serverName": "yukinal-mcp-fixture",
+    "serverVersion": "0.1.0",
+    "toolCount": 2,
+    "stderrTail": [],
+    "diagnostics": []
+  },
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo the text back. Fixture tool.",
+      "inputSchema": { "type": "object" }
+    }
+  ]
+}

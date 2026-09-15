@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use super::server::Environment;
+use super::server::{Environment, HostCertificateAuthority};
 
 /// add-server 的认证输入（带 secret 的瞬时输入；secret 只进 keychain，不落 SQLite）。
 ///
@@ -27,6 +27,14 @@ pub enum AuthenticationInput {
         /// （`load_private_key` 也把空口令过滤掉），由调用点决定是否落 keychain。
         passphrase: Option<String>,
     },
+    /// OpenSSH user certificate authentication. The private key is still secret
+    /// transient input; the certificate and key paths are public metadata.
+    Certificate {
+        private_key_pem: String,
+        passphrase: Option<String>,
+        certificate_path: String,
+        private_key_path: Option<String>,
+    },
     /// ssh-agent 认证：**不携带任何 secret**，也不写 keychain 条目。
     ///
     /// agent 持有的身份由远端 agent 自己保管，Yukinal 只转交签名请求；所以这个
@@ -50,6 +58,8 @@ pub struct AddServerInput {
     pub environment: Environment,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_certificate_authority: Option<HostCertificateAuthority>,
     pub authentication: AuthenticationInput,
 }
 
@@ -64,6 +74,10 @@ pub struct UpdateServerInput {
     pub environment: Environment,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_certificate_authority: Option<HostCertificateAuthority>,
+    #[serde(default)]
+    pub clear_host_certificate_authority: bool,
     pub authentication: Option<AuthenticationInput>,
 }
 

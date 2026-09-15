@@ -10,6 +10,7 @@ export type TerminalFont = "jetbrains-mono-nl" | "jetbrains-mono" | "jetbrains-n
 export type UiFontSize = 12 | 13 | 14;
 export type TerminalFontSize = 12 | 13 | 14 | 15 | 16;
 export type TerminalLineHeight = 1.2 | 1.35 | 1.5;
+export type AgentDelivery = "async" | "sync";
 
 export interface UiPreferences {
   uiFontSize: UiFontSize;
@@ -26,6 +27,8 @@ export interface UiPreferences {
    * enforced by the sidecar's permission engine, not by the prompt.
    */
   agentRunMode: AgentRunMode;
+  /** Whether Send returns immediately or waits for the terminal run result. */
+  agentDelivery: AgentDelivery;
 }
 
 export interface PreferencesState extends UiPreferences {
@@ -43,6 +46,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   reduceMotion: false,
   agentPermissionMode: "ask",
   agentRunMode: "goal",
+  agentDelivery: "async",
 };
 
 function isUiFontSize(value: unknown): value is UiFontSize {
@@ -78,6 +82,7 @@ function sanitizePreferences(value: unknown): UiPreferences {
     reduceMotion: typeof candidate.reduceMotion === "boolean" ? candidate.reduceMotion : DEFAULT_UI_PREFERENCES.reduceMotion,
     agentPermissionMode: candidate.agentPermissionMode === "auto" || candidate.agentPermissionMode === "ask" ? candidate.agentPermissionMode : DEFAULT_UI_PREFERENCES.agentPermissionMode,
     agentRunMode: isAgentRunMode(candidate.agentRunMode) ? candidate.agentRunMode : DEFAULT_UI_PREFERENCES.agentRunMode,
+    agentDelivery: candidate.agentDelivery === "sync" ? "sync" : "async",
   };
 }
 
@@ -101,6 +106,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         reduceMotion: state.reduceMotion,
         agentPermissionMode: state.agentPermissionMode,
         agentRunMode: state.agentRunMode,
+        agentDelivery: state.agentDelivery,
       }),
       merge: (persisted, current) => ({ ...current, ...sanitizePreferences(persisted) }),
     },

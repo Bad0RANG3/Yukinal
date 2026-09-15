@@ -24,12 +24,45 @@ export const ServerCapabilitiesSchema = z.strictObject({
   kubernetes: z.boolean().optional(),
 });
 
+export const HostCertificateAuthoritySchema = z.strictObject({
+  caPublicKey: z.string().trim().min(1).max(16_384),
+  principals: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(253)
+        .refine(
+          (value) => !/[\u0000-\u001f\u007f]/.test(value),
+          "principal must not contain control characters",
+        ),
+    )
+    .min(1)
+    .max(32),
+  revocationListPath: z.string().trim().min(1).max(4_096).optional(),
+  revocationListUrl: z.string().trim().min(1).max(2_048).optional(),
+  revocationListSigners: z
+    .array(z.string().trim().min(1).max(16_384))
+    .max(8)
+    .optional(),
+}).superRefine((authority, context) => {
+  if (authority.revocationListPath && authority.revocationListUrl) {
+    context.addIssue({
+      code: "custom",
+      message: "revocationListPath and revocationListUrl are mutually exclusive",
+      path: ["revocationListUrl"],
+    });
+  }
+});
+
 export const ServerConnectionSchema = z.strictObject({
   host: z.string().trim().min(1).max(256),
   /** 0 is not a port. Empty port defaults are a classic config bug. */
   port: z.number().int().min(1).max(65535),
   username: z.string().trim().min(1).max(256),
   identityId: z.string().trim().min(1).max(256).optional(),
+  hostCertificateAuthority: HostCertificateAuthoritySchema.optional(),
 });
 
 export const ServerMetadataSchema = z.strictObject({
@@ -104,6 +137,7 @@ export const AddServerInputSchema = z.strictObject({
   username: z.string().trim().min(1).max(256),
   environment: EnvironmentSchema,
   groupId: z.string().trim().max(256).optional(),
+  hostCertificateAuthority: HostCertificateAuthoritySchema.optional(),
   authentication: z.discriminatedUnion("method", [
     z.strictObject({ method: z.literal("password"), password: z.string().min(1).max(4_096) }),
     /**
@@ -116,6 +150,13 @@ export const AddServerInputSchema = z.strictObject({
       privateKeyPem: z.string().min(1).max(1_000_000),
       passphrase: z.string().min(1).max(4_096).optional(),
     }),
+    z.strictObject({
+      method: z.literal("certificate"),
+      privateKeyPem: z.string().min(1).max(1_000_000),
+      passphrase: z.string().min(1).max(4_096).optional(),
+      certificatePath: z.string().trim().min(1).max(4_096),
+      privateKeyPath: z.string().trim().min(1).max(4_096).optional(),
+    }),
     /**
      * ssh-agent：**没有任何 secret 字段**（`.strictObject` 会拒绝多余的 key）。
      * 身份由运行中的 agent 持有，Yukinal 这边连凭据条目都不建。
@@ -125,16 +166,26 @@ export const AddServerInputSchema = z.strictObject({
   ]),
 });
 
-export const UpdateServerInputSchema = z.strictObject({
-  serverId: SERVER_ID_SCHEMA,
-  name: z.string().trim().min(1).max(256),
-  host: z.string().trim().min(1).max(256),
-  port: z.number().int().min(1).max(65535).optional(),
-  username: z.string().trim().min(1).max(256),
-  environment: EnvironmentSchema,
-  groupId: z.string().trim().max(256).optional(),
-  authentication: AddServerInputSchema.shape.authentication.optional(),
-});
+export const UpdateServerInputSchema = z
+  .strictObject({
+    serverId: SERVER_ID_SCHEMA,
+    name: z.string().trim().min(1).max(256),
+    host: z.string().trim().min(1).max(256),
+    port: z.number().int().min(1).max(65535).optional(),
+    username: z.string().trim().min(1).max(256),
+    environment: EnvironmentSchema,
+    groupId: z.string().trim().max(256).optional(),
+    hostCertificateAuthority: HostCertificateAuthoritySchema.optional(),
+    clearHostCertificateAuthority: z.boolean().optional(),
+    authentication: AddServerInputSchema.shape.authentication.optional(),
+  })
+  .refine(
+    (input) => !(input.hostCertificateAuthority && input.clearHostCertificateAuthority),
+    {
+      message: "hostCertificateAuthority and clearHostCertificateAuthority are mutually exclusive",
+      path: ["hostCertificateAuthority"],
+    },
+  );
 
 export const ToolTargetSchema = z.strictObject({
   host: z.enum(["local", "remote"]),

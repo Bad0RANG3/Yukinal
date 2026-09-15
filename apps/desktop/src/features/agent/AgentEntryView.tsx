@@ -9,12 +9,19 @@
  * `#` 或 `-` 时，它是你要说的话，不是要渲染的标记。
  */
 
-import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
+import type {
+  AgentDocumentPromptPart,
+  AgentImagePromptPart,
+  AgentTextFilePromptPart,
+  ApprovalDecision,
+  ApprovalRequest,
+} from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { MarkdownText } from "../../components/MarkdownText.js";
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
+import { imageAttachmentUrl } from "./image-attachments.js";
 import { targetLabel, type Entry } from "./transcript.js";
 
 export function AgentEntryView({
@@ -39,7 +46,64 @@ export function AgentEntryView({
       return (
         <div className="agent-entry agent-entry-user">
           <span className="entry-label">你</span>
-          <div className="agent-entry-body">{entry.text}</div>
+          <div className="agent-entry-body">
+            {entry.attachments?.some((attachment) => attachment.type === "image") ? (
+              <ul className="agent-user-attachments" aria-label="消息图片">
+                {entry.attachments
+                  ?.filter(
+                    (attachment): attachment is AgentImagePromptPart =>
+                      attachment.type === "image",
+                  )
+                  .map((image, index) => (
+                  <li key={`${image.name ?? "image"}-${index}`}>
+                    <img
+                      src={imageAttachmentUrl(image)}
+                      alt={image.name ?? `图片 ${index + 1}`}
+                      loading="lazy"
+                      referrerPolicy="no-referrer"
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {entry.attachments?.some((attachment) => attachment.type === "file") ? (
+              <ul className="agent-user-file-attachments" aria-label="消息文本文件">
+                {entry.attachments
+                  ?.filter(
+                    (attachment): attachment is AgentTextFilePromptPart =>
+                      attachment.type === "file",
+                  )
+                  .map((file, index) => (
+                    <li
+                      key={`${file.name}-${index}`}
+                      className="agent-user-file-attachment"
+                    >
+                      <Icon name="file" size="sm" />
+                      <span>{file.name}</span>
+                    </li>
+                  ))}
+              </ul>
+            ) : null}
+            {entry.attachments?.some((attachment) => attachment.type === "document") ? (
+              <ul className="agent-user-file-attachments" aria-label="消息 PDF">
+                {entry.attachments
+                  ?.filter(
+                    (attachment): attachment is AgentDocumentPromptPart =>
+                      attachment.type === "document",
+                  )
+                  .map((document, index) => (
+                    <li
+                      key={`${document.name}-${index}`}
+                      className="agent-user-file-attachment"
+                    >
+                      <Icon name="file" size="sm" />
+                      <span>{document.name}</span>
+                    </li>
+                  ))}
+              </ul>
+            ) : null}
+            {entry.text ? <span>{entry.text}</span> : null}
+          </div>
         </div>
       );
     case "assistant":

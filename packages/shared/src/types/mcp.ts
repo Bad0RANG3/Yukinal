@@ -18,8 +18,15 @@
  * will reject the payload at the IPC gate rather than letting a half-read object into the UI.
  */
 
-import type { McpServerConfig } from "./provider.js";
+import type {
+  McpHttpAuthHeaderConfig,
+  McpOAuthClientAuth,
+  McpOAuthConfig,
+  McpOAuthFlow,
+  McpServerConfig,
+} from "./provider.js";
 import type { McpCatalogFailureCode } from "./host.js";
+import type { RestartRecord } from "./lifecycle.js";
 
 /**
  * One MCP tool as the server declared it (mirrors `McpToolDescriptor`).
@@ -56,9 +63,8 @@ export interface McpExitRecord {
 /**
  * Live status of one server (mirrors `McpServerStatus`).
  *
- * `lastExit` is the field that makes a crash *visible*: this repo never restarts a crashed MCP
- * server (ADR 0014), so the exit record is the only thing standing between a user and "it just
- * doesn't work".
+ * `lastExit` is the field that makes a stdio crash *visible*. Bounded recovery may replace the
+ * process while keeping this record, so a recovered server still explains why it restarted.
  */
 export interface McpServerStatus {
   serverId: string;
@@ -71,6 +77,8 @@ export interface McpServerStatus {
   serverVersion?: string | null;
   toolCount: number;
   lastExit?: McpExitRecord | null;
+  /** Bounded automatic recovery after `lastExit`; absent when none was attempted. */
+  restart?: RestartRecord;
   /** Bounded, redacted tail of the server's stderr. */
   stderrTail: string[];
   diagnostics: string[];
@@ -98,8 +106,8 @@ export interface McpServerListResponse {
 
 /**
  * What the form sends. Deliberately **not** `McpServerConfig`: `allowedTools` and `trustLevel`
- * are stored-but-unread today (no UI writes them), and a save that carried them would overwrite
- * whatever a future review flow had recorded with whatever this form happened to hold.
+ * belong to the separate review command; a connection edit must not overwrite the reviewed tool
+ * surface with whatever the ordinary form happened to hold.
  */
 export interface McpServerSaveInput {
   id: string;
@@ -108,7 +116,68 @@ export interface McpServerSaveInput {
   command?: string;
   args?: string[];
   url?: string;
+  /** Ordered headers. A missing secret preserves the matching stored header. */
+  httpAuthHeaders?: McpHttpAuthHeaderInput[];
+  oauth?: McpOAuthInput;
   enabled: boolean;
+}
+
+/** One write-only static header entry from the settings form. */
+export interface McpHttpAuthHeaderInput {
+  name: string;
+  /** Write-only; absent preserves the matching existing credential. */
+  secret?: string;
+}
+
+/** Write-only OAuth configuration from the settings form. */
+export interface McpOAuthInput {
+  issuer: string;
+  /** Empty means registration_endpoint from discovery will provision a public client. */
+  clientId: string;
+  /** Absent means `authorization_code`, the stored default for rows written before it. */
+  flow?: McpOAuthFlow;
+  /** Absent means `none`: a public client that sends only its client id. */
+  clientAuth?: McpOAuthClientAuth;
+  /**
+   * Write-only, like an HTTP auth header secret: absent preserves the stored secret, and
+   * switching `clientAuth` to `none` deletes it.
+   */
+  clientSecret?: string;
+  /**
+   * Ask for sender-constrained tokens (RFC 9449 DPoP). Absent means off, which is what
+   * rows written before the setting mean; turning it on makes the host generate a key and
+   * require `token_type: DPoP` from the server (ADR 0018).
+   */
+  dpop?: boolean;
+  scopes: string[];
+}
+
+/** Result of a completed browser authorization flow. */
+export interface McpOAuthConnectResponse {
+  serverId: string;
+  issuer: string;
+  scopes: string[];
+  tokenEndpoint: string;
+}
+
+/**
+ * `mcp_oauth_cancel`: whether an in-flight flow was actually stopped.
+ *
+ * `false` is a real answer, not an error: by the time the user clicks cancel the flow may
+ * have already finished, timed out, or never belonged to this window.
+ */
+export interface McpOAuthCancelResponse {
+  accepted: boolean;
+}
+
+/**
+ * Review is separate from save so changing a label can never silently widen the tool
+ * surface. The caller must name tools that the running server actually advertised.
+ */
+export interface McpServerReviewInput {
+  serverId: string;
+  allowedTools: string[];
+  trustLevel: "reviewed" | "unreviewed";
 }
 
 export interface McpServerDeleteResponse {
@@ -130,3 +199,5 @@ export interface McpServerStopResponse {
   /** Absent when this server was never started, so there was nothing to stop. */
   shutdown?: McpShutdownOutcome;
 }
+
+export type { McpHttpAuthHeaderConfig, McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow };

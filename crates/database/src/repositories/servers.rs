@@ -4,7 +4,7 @@
 use rusqlite::{params, OptionalExtension, Row};
 
 use super::decode::decode_error;
-use crate::models::{Environment, ServerStatus};
+use crate::models::{Environment, HostCertificateAuthority, ServerStatus};
 use crate::{optional_json, Database, DatabaseError, Result, Server};
 
 /// `None` maps to a real SQL NULL, never to the JSON literal `"null"`.
@@ -26,13 +26,42 @@ impl<'a> ServersRepository<'a> {
     }
 
     pub fn insert(&self, server: &Server) -> Result<()> {
+        let host_ca = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .map(|authority| authority.ca_public_key.as_str());
+        let host_principals = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .map(|authority| serde_json::to_string(&authority.principals))
+            .transpose()?;
+        let host_krl_path = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .and_then(|authority| authority.revocation_list_path.as_deref());
+        let host_krl_url = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .and_then(|authority| authority.revocation_list_url.as_deref());
+        let host_krl_signers = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .filter(|authority| !authority.revocation_list_signers.is_empty())
+            .map(|authority| serde_json::to_string(&authority.revocation_list_signers))
+            .transpose()?;
         self.db.with(|connection| {
             connection.execute(
                 "INSERT INTO servers (
                     id, name, host, port, username, identity_id, group_id, capabilities,
                     status, environment, region, hostname, os, tags, workspace_ids,
-                    created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    host_ca_public_key, host_principals, host_krl_path, host_krl_url,
+                    host_krl_signers, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     server.id,
                     server.name,
@@ -49,6 +78,11 @@ impl<'a> ServersRepository<'a> {
                     server.metadata.os,
                     json_or_null(&server.metadata.tags)?,
                     json_or_null(&server.metadata.workspace_ids)?,
+                    host_ca,
+                    host_principals,
+                    host_krl_path,
+                    host_krl_url,
+                    host_krl_signers,
                     server.created_at,
                     server.updated_at,
                 ],
@@ -59,13 +93,42 @@ impl<'a> ServersRepository<'a> {
 
     /// Full-row overwrite; the caller supplies the new `updated_at`.
     pub fn update(&self, server: &Server) -> Result<()> {
+        let host_ca = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .map(|authority| authority.ca_public_key.as_str());
+        let host_principals = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .map(|authority| serde_json::to_string(&authority.principals))
+            .transpose()?;
+        let host_krl_path = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .and_then(|authority| authority.revocation_list_path.as_deref());
+        let host_krl_url = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .and_then(|authority| authority.revocation_list_url.as_deref());
+        let host_krl_signers = server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .filter(|authority| !authority.revocation_list_signers.is_empty())
+            .map(|authority| serde_json::to_string(&authority.revocation_list_signers))
+            .transpose()?;
         self.db.with(|connection| {
             let changed = connection.execute(
                 "UPDATE servers SET
                     name = ?2, host = ?3, port = ?4, username = ?5, identity_id = ?6,
                     group_id = ?7, capabilities = ?8, status = ?9, environment = ?10,
                     region = ?11, hostname = ?12, os = ?13, tags = ?14, workspace_ids = ?15,
-                    updated_at = ?16
+                    host_ca_public_key = ?16, host_principals = ?17, host_krl_path = ?18,
+                    host_krl_url = ?19, host_krl_signers = ?20, updated_at = ?21
                  WHERE id = ?1",
                 params![
                     server.id,
@@ -83,6 +146,11 @@ impl<'a> ServersRepository<'a> {
                     server.metadata.os,
                     json_or_null(&server.metadata.tags)?,
                     json_or_null(&server.metadata.workspace_ids)?,
+                    host_ca,
+                    host_principals,
+                    host_krl_path,
+                    host_krl_url,
+                    host_krl_signers,
                     server.updated_at,
                 ],
             )?;
@@ -125,7 +193,8 @@ impl<'a> ServersRepository<'a> {
                 .query_row(
                     "SELECT id, name, host, port, username, identity_id, group_id, capabilities,
                             status, environment, region, hostname, os, tags, workspace_ids,
-                            created_at, updated_at
+                            host_ca_public_key, host_principals, host_krl_path, host_krl_url,
+                            host_krl_signers, created_at, updated_at
                      FROM servers WHERE id = ?1",
                     params![id],
                     row_to_server,
@@ -141,7 +210,8 @@ impl<'a> ServersRepository<'a> {
             let mut statement = connection.prepare(
                 "SELECT id, name, host, port, username, identity_id, group_id, capabilities,
                         status, environment, region, hostname, os, tags, workspace_ids,
-                        created_at, updated_at
+                        host_ca_public_key, host_principals, host_krl_path, host_krl_url,
+                        host_krl_signers, created_at, updated_at
                  FROM servers ORDER BY name",
             )?;
             let rows = statement.query_map([], row_to_server)?;
@@ -157,6 +227,36 @@ fn row_to_server(row: &Row<'_>) -> rusqlite::Result<Server> {
     let environment = row.get::<_, String>(9)?;
     let tags = optional_json(row.get::<_, Option<String>>(13)?);
     let workspace_ids = optional_json(row.get::<_, Option<String>>(14)?);
+    let host_ca_public_key = row.get::<_, Option<String>>(15)?;
+    let host_principals = optional_json(row.get::<_, Option<String>>(16)?)
+        .map_err(|error| decode_error(16, error))?;
+    let host_krl_path = row.get::<_, Option<String>>(17)?;
+    let host_krl_url = row.get::<_, Option<String>>(18)?;
+    let host_krl_signers = optional_json(row.get::<_, Option<String>>(19)?)
+        .map_err(|error| decode_error(19, error))?;
+    let host_certificate_authority = match (
+        host_ca_public_key,
+        host_principals,
+        host_krl_path,
+        host_krl_url,
+        host_krl_signers,
+    ) {
+        (None, None, None, None, None) => None,
+        (
+            Some(ca_public_key),
+            Some(principals),
+            revocation_list_path,
+            revocation_list_url,
+            revocation_list_signers,
+        ) if !ca_public_key.trim().is_empty() => Some(HostCertificateAuthority {
+            ca_public_key,
+            principals,
+            revocation_list_path,
+            revocation_list_url,
+            revocation_list_signers: revocation_list_signers.unwrap_or_default(),
+        }),
+        _ => return Err(decode_error(15, "incomplete host certificate authority")),
+    };
 
     Ok(Server {
         id: row.get(0)?,
@@ -169,6 +269,7 @@ fn row_to_server(row: &Row<'_>) -> rusqlite::Result<Server> {
                 .map_err(|_| decode_error(3, "port out of u16 range"))?,
             username: row.get(4)?,
             identity_id: row.get(5)?,
+            host_certificate_authority,
         },
         group_id: row.get(6)?,
         capabilities: decode_json(&capabilities, 7)?,
@@ -183,8 +284,8 @@ fn row_to_server(row: &Row<'_>) -> rusqlite::Result<Server> {
             tags: tags.map_err(|error| decode_error(13, error))?,
             workspace_ids: workspace_ids.map_err(|error| decode_error(14, error))?,
         },
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 

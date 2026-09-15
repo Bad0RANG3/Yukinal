@@ -15,6 +15,38 @@ test("provider custom headers accept metadata but reject credential channels", (
   });
   assert.equal(SafeCustomHeadersSchema.safeParse({ Authorization: "Bearer not-for-storage" }).success, false);
   assert.equal(SafeCustomHeadersSchema.safeParse({ "X-Api-Key": "not-for-storage" }).success, false);
+  assert.equal(SafeCustomHeadersSchema.safeParse({ "anthropic-beta": "feature-2026-01-01" }).success, true);
+  assert.equal(SafeCustomHeadersSchema.safeParse({ "x-goog-user-project": "billing-project" }).success, true);
+});
+
+test("apiVersion is a date and belongs only to Anthropic", () => {
+  const base = {
+    kind: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-sonnet-4-5",
+  };
+  assert.equal(ProviderSaveInputSchema.safeParse({ ...base, apiVersion: "2026-01-01" }).success, true);
+  assert.equal(ProviderSaveInputSchema.safeParse({ ...base, apiVersion: "2026-1-1" }).success, false);
+  assert.equal(ProviderSaveInputSchema.safeParse({
+    ...base,
+    kind: "openai-compatible",
+    apiVersion: "2026-01-01",
+  }).success, false);
+  assert.equal(ProviderSaveInputSchema.safeParse({
+    ...base,
+    kind: "gemini",
+    apiVersion: "2026-01-01",
+  }).success, false);
+
+  assert.equal(RuntimeProviderConfigSchema.safeParse({
+    ...base,
+    apiVersion: "2026-01-01",
+  }).success, true);
+  assert.equal(RuntimeProviderConfigSchema.safeParse({
+    ...base,
+    kind: "gemini",
+    apiVersion: "2026-01-01",
+  }).success, false);
 });
 
 test("custom provider IDs follow OpenCode's lowercase identifier format", () => {

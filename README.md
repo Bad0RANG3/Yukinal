@@ -16,7 +16,7 @@ Yukinal 当前版本为 `1.0.0`，这是首个稳定接口基线。版本号唯�
 
 - **安装包已经在本机构建出来了，但没有签名。** `pnpm package` 在 Windows 上产出了 NSIS 安装程序与 WiX `.msi`（见 [打包与分发](./docs/packaging.md#打包与分发)），两者都在 `target/release/bundle/` 下。未签名意味着 Windows SmartScreen 与 macOS Gatekeeper 会对首次启动发出警告；也没有公证与自动更新。**macOS 与 Linux 的安装包从未构建过**（各自只能在各自平台上打）。
 - **接口已进入 1.0 兼容基线。** Tauri IPC 命令、sidecar JSON-RPC 方法和跨层类型从 `1.0.0` 起按语义化版本维护；破坏性变更只在下一个主版本发布。
-- **仍然有明确的能力空缺。** 多模态输入没有实现；SSH 证书认证在后端可用但界面不能配置；两套原生 Provider 适配器从未对真实 API 调用过（写它们的环境没有网络）。详见[当前限制](./docs/limitations.md#当前限制)。
+- **仍然有明确的能力空缺。** Agent 输入支持图片、PDF、UTF-8 文本文件与音频（WAV/MP3/OGG/FLAC，按魔数校验；Anthropic 没有音频块，带音频的请求会明确失败），不支持任意二进制文件；两套原生 Provider 适配器尚未对真实 API 调用过。详见[当前限制](./docs/limitations.md#当前限制)。
 
 ## 今天真正可用的能力
 
@@ -24,7 +24,7 @@ Yukinal 当前版本为 `1.0.0`，这是首个稳定接口基线。版本号唯�
 
 **桌面工作区（需要 Tauri 窗口）**
 
-- 服务器条目的增删改查，落本地 SQLite；SSH 密码与私钥只进操作系统凭据库（I/O 在 `apps/desktop/src-tauri/src/commands/server/`，命名与挂载规则在 `crates/core/src/identity.rs`）。
+- 服务器条目的增删改查，落本地 SQLite；SSH 密码、私钥与加密口令只进操作系统凭据库，OpenSSH 用户证书按路径读取，证书与私钥路径作为非敏感元数据保存。密码、私钥、证书或 agent 的第一因素部分成功后，服务器声明的 keyboard-interactive 二次认证会以一次性内存挑战显示在桌面端；host 证书还可配置受信 CA 公钥、主机 principal 模式、本地路径或 HTTPS URL 形式的 OpenSSH KRL，以及最多 8 把独立 KRL 签名公钥，启用后普通 host key 会被拒绝（I/O 在 `apps/desktop/src-tauri/src/commands/server/`，命名与挂载规则在 `crates/core/src/identity.rs`）。
 - 连接管理：连接、断开、连接状态与最近错误；同一服务器的连接会被缓存复用（`commands/terminal.rs` 的 `ensure_session`）。
 - 概览页的真实健康快照：7 个采集器（OS、CPU、内存、运行时长、磁盘、网络、Docker）各带 5 秒命令超时，采集结果入库并可回看（`crates/collector`）。
 - 终端：基于 russh 的 PTY（`xterm-256color`），支持多会话、写入、改尺寸和关闭，数据通过 `terminal:data` 等事件流回界面（`crates/terminal`）。
@@ -32,8 +32,8 @@ Yukinal 当前版本为 `1.0.0`，这是首个稳定接口基线。版本号唯�
 - 服务与日志：固定的只读探测命令，先试 `systemctl` 再退到 `docker ps`；日志先试 `journalctl` 再退到 `/var/log/syslog`、`/var/log/messages`，最多 120 行并做级别分类；探测不到时明确返回 `unavailable`，不会编造内容（`commands/services.rs`、`commands/logs.rs`）。
 - 活动记录：连接、配置变更、Agent 工具执行都会写入 `activities` 表并推 `activity.created` 事件（`commands/activity.rs`、`commands/host.rs`）。
 - Agent 对话记录：会话与消息持久化到 `chat_sessions` / `chat_messages`，面板里的记录视图按日期分组（今天 / 昨天 / 最近 7 天 / 更早），可搜标题与消息正文、按进行中 / 已归档 / 全部筛选、每页 50 条往下翻、就地重命名，并归档或删除（`commands/chat.rs`、`apps/desktop/src/features/agent/AgentHistoryPane.tsx`）。
-- Agent 面板：流式文本、工具调用卡片、审批按钮、停止运行、模型选择、运行模式、批准方式与目标策略切换。Agent 的回复按 Markdown 渲染（标题、列表、代码块、表格、行内代码），解析器是仓库自己的、不注入 HTML，链接与图片因此不可点也不下载（`apps/desktop/src/lib/markdown/`、[Markdown 渲染](./docs/boundaries/markdown.md#agent-回复的-markdown-渲染)）。窗口里只有「你与 Agent 的对话正文」可以拖动选中，其余界面不参与选择。
-- MCP 服务器：配置、启动、停止与删除（命令在 `commands/mcp.rs`，目录与工具名解析在 `crates/core/src/mcp/catalog.rs`，进程归宿主），工具目录由宿主把服务器起起来问出来，再经既有的 `host.mcp.catalog` 交给 sidecar —— 没有第二条执行通道。见 [外部工具（MCP）](./docs/boundaries/mcp.md#边界外部工具mcp)。
+- Agent 面板：流式文本、图片、PDF、UTF-8 文本文件与音频附件、工具调用卡片、审批按钮、停止运行、模型选择、运行模式、批准方式与目标策略切换。图片可通过选择、粘贴或拖放加入消息；文本文件、PDF 与音频在选择、拖放或粘贴后会先按**内容**（魔数）与上限校验，PDF 与音频共用与图片相同的总预算；音频在待发送区用播放器预览，可逐项移除；附件随会话持久化。Agent 的回复按 Markdown 渲染（标题、列表、代码块、表格、行内代码、引用式链接），解析器是仓库自己的、不注入 HTML。`http(s)` 链接经受限 opener 交给系统浏览器，图片使用 no-referrer 加载（`apps/desktop/src/lib/markdown/`、[Markdown 渲染](./docs/boundaries/markdown.md#agent-回复的-markdown-渲染)）。窗口里只有「你与 Agent 的对话正文」可以拖动选中，其余界面不参与选择。
+- MCP 服务器：配置、启动、停止与删除，支持 stdio 与 Streamable HTTP（命令在 `commands/mcp.rs`，连接与目录解析在 `crates/core/src/mcp/`，网络与进程归宿主）；HTTP 可配最多 16 条有序静态认证头，或使用可自动发现 issuer、支持动态客户端注册的 OAuth 并自动刷新 token —— 流程可选 authorization code + PKCE（浏览器回调）或 device code（显示 `user_code`、打开验证页面、按服务器给的间隔轮询，随时可取消），客户端认证可选公共客户端、`client_secret_post` 或 `client_secret_basic`（手填密钥可保留、轮换与回收，界面从不回填），所有 secret 均由系统凭据库持有；stdio 崩溃后按有界退避重建，不重放中断的调用；工具目录经既有 `host.mcp.catalog` 交给 sidecar —— 没有第二条执行通道。见 [外部工具（MCP）](./docs/boundaries/mcp.md#边界外部工具mcp)。
 
 **Agent 运行时（Node.js sidecar）**
 

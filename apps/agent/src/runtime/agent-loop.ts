@@ -22,9 +22,14 @@ import { randomUUID } from "node:crypto";
 
 import {
   RPC_ERROR,
+  type AgentImagePromptPart,
+  type AgentDocumentPromptPart,
+  type AgentAudioPromptPart,
   type AgentRunRequest,
   type AgentRunResult,
   type AgentStreamEvent,
+  type AgentTextFilePromptPart,
+  type AgentTextPromptPart,
   type ApprovalRequest,
   type ApprovalResponse,
   type PermissionApprovalSource,
@@ -160,8 +165,18 @@ export class AgentLoop {
     // `traceId` names the ledger the audit rows are written against, `stepId` names the
     // card the UI opened. Built here, before the first provider call, because
     // `#finishInterrupted` closes it from every exit path.
-    const prompt = request.parts?.map((part) => part.text).join("\n").trim() || request.prompt.trim();
-    const title = runTitle(prompt);
+    const prompt = agentPromptText(request.parts) || request.prompt.trim();
+    const images = agentPromptImages(request.parts);
+    const documents = agentPromptDocuments(request.parts);
+    const audios = agentPromptAudios(request.parts);
+    const files = agentPromptFiles(request.parts);
+    const title = runTitle(
+      prompt ||
+        files[0]?.name ||
+        documents[0]?.name ||
+        audios[0]?.name ||
+        (images.length ? "Image input" : ""),
+    );
     const trace = this.deps.createTrace
       ? this.deps.createTrace({ runId, title })
       : new TraceRecorder(runId, title);
@@ -253,12 +268,36 @@ export class AgentLoop {
     try {
       emit({ type: "agent.started", runId, at: now() });
 
-      const bundle = await this.deps.context.build(request);
-      if (!prompt) throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "prompt must not be blank");
+      const bundle = await this.deps.context.build(
+        prompt
+          ? request
+          : {
+              ...request,
+              prompt: files.length
+                ? "[Text file attachment]"
+                : documents.length
+                  ? "[PDF document attachment]"
+                  : audios.length
+                    ? "[Audio attachment]"
+                    : "[Image attachment]",
+            },
+      );
+      if (
+        !prompt &&
+        images.length === 0 &&
+        documents.length === 0 &&
+        audios.length === 0 &&
+        files.length === 0
+      ) {
+        throw new RpcFailure(
+          RPC_ERROR.INVALID_PARAMS,
+          "prompt must contain text, an image, a PDF document, a text file, or an audio clip",
+        );
+      }
       const permissionGuidance = renderPermissionGuidance(request.permissionMode);
       const modeGuidance = renderRunModeGuidance(request.mode);
       const safeContext = redactSensitiveText(bundle.rendered);
-      const safePrompt = redactSensitiveText(prompt);
+      const safePrompt = redactSensitiveText(promptWithTextFiles(prompt, files));
       const messages: LlmMessage[] = [
         {
           role: "system",
@@ -266,7 +305,13 @@ export class AgentLoop {
             ? `${SYSTEM_PROMPT}\n\n${modeGuidance}\n\n${permissionGuidance}\n\n# 上下文\n${safeContext}`
             : `${SYSTEM_PROMPT}\n\n${modeGuidance}\n\n${permissionGuidance}`,
         },
-        { role: "user", content: safePrompt },
+        {
+          role: "user",
+          content: safePrompt,
+          ...(images.length > 0 ? { images } : {}),
+          ...(documents.length > 0 ? { documents } : {}),
+          ...(audios.length > 0 ? { audios } : {}),
+        },
       ];
 
       const nameIndex = createProviderNameIndex(this.deps.registry.list());
@@ -689,4 +734,77 @@ function summarize(output: unknown): string {
   if (output === undefined || output === null) return "(no output)";
   const text = redactSensitiveText(typeof output === "string" ? output : JSON.stringify(output));
   return text.length > 400 ? `${text.slice(0, 400)}…` : text;
+}
+
+function agentPromptText(parts: AgentRunRequest["parts"]): string {
+  return (
+    parts
+      ?.filter((part): part is AgentTextPromptPart => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim() ?? ""
+  );
+}
+
+function agentPromptImages(parts: AgentRunRequest["parts"]): Array<{
+  mediaType: AgentImagePromptPart["mediaType"];
+  data: string;
+  name?: string;
+}> {
+  return (
+    parts
+      ?.filter((part): part is AgentImagePromptPart => part.type === "image")
+      .map(({ mediaType, data, name }) => ({ mediaType, data, ...(name ? { name } : {}) })) ?? []
+  );
+}
+
+function agentPromptFiles(parts: AgentRunRequest["parts"]): AgentTextFilePromptPart[] {
+  return (
+    parts?.filter(
+      (part): part is AgentTextFilePromptPart => part.type === "file",
+    ) ?? []
+  );
+}
+
+function agentPromptDocuments(
+  parts: AgentRunRequest["parts"],
+): Array<{
+  mediaType: AgentDocumentPromptPart["mediaType"];
+  data: string;
+  name: string;
+}> {
+  return (
+    parts
+      ?.filter(
+        (part): part is AgentDocumentPromptPart => part.type === "document",
+      )
+      .map(({ mediaType, data, name }) => ({ mediaType, data, name })) ?? []
+  );
+}
+
+function agentPromptAudios(
+  parts: AgentRunRequest["parts"],
+): Array<{
+  mediaType: AgentAudioPromptPart["mediaType"];
+  data: string;
+  name?: string;
+}> {
+  return (
+    parts
+      ?.filter((part): part is AgentAudioPromptPart => part.type === "audio")
+      .map(({ mediaType, data, name }) => ({
+        mediaType,
+        data,
+        ...(name ? { name } : {}),
+      })) ?? []
+  );
+}
+
+function promptWithTextFiles(prompt: string, files: readonly AgentTextFilePromptPart[]): string {
+  if (files.length === 0) return prompt;
+  const blocks = files.map(
+    (file) =>
+      `--- BEGIN ATTACHED TEXT FILE: ${file.name} ---\n${file.data}\n--- END ATTACHED TEXT FILE ---`,
+  );
+  return [prompt, ...blocks].filter((block) => block.trim().length > 0).join("\n\n");
 }

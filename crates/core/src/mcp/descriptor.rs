@@ -14,8 +14,9 @@
 //! docs/boundaries/mcp.md 的「外部工具必须先变成 Yukinal 的工具声明」）、不判断风险等级
 //! （docs/boundaries/mcp.md 的「风险等级由本地决定」）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::truncated;
 
@@ -47,6 +48,12 @@ const SEGMENT_BUDGET: usize = PROVIDER_TOOL_NAME_MAX_LENGTH - MCP_NAMESPACE.len(
 /// 组合（28 + 28 = 56 ≤ 57）仍然能映射成合法的 Provider 名称，失败发生在导入时，而不是
 /// 某次真实调用时 `toProviderToolName()` 抛错。
 pub const SEGMENT_MAX_LENGTH: usize = SEGMENT_BUDGET / 2;
+
+/// Long remote names keep a readable prefix plus a fixed SHA-256 suffix.
+///
+/// 12 hex characters provide 48 bits of collision resistance while leaving 15 bytes of
+/// the original spelling visible in logs and tool names.
+const LONG_SEGMENT_PREFIX_LENGTH: usize = SEGMENT_MAX_LENGTH - 1 - 12;
 
 /// 两个上限之和仍在预算里 —— 这条不变量就是「为什么取一半」的全部内容，所以让它由编译器
 /// 守着，而不是只写在上面那段注释里。
@@ -85,7 +92,11 @@ impl NameRejection {
 /// （非 ASCII 一定落到 `_ => false`），长度也可以用字节数。
 #[must_use]
 pub fn is_segment(value: &str) -> bool {
-    if value.is_empty() || value.len() > SEGMENT_MAX_LENGTH {
+    value.len() <= SEGMENT_MAX_LENGTH && matches_segment_pattern(value)
+}
+
+fn matches_segment_pattern(value: &str) -> bool {
+    if value.is_empty() {
         return false;
     }
     let mut bytes = value.bytes();
@@ -125,19 +136,6 @@ pub fn normalize_segment(raw: &str) -> Result<String, NameRejection> {
     if raw.is_empty() {
         return Err(NameRejection::new(raw, "the name is empty"));
     }
-    if raw.len() > SEGMENT_MAX_LENGTH {
-        return Err(NameRejection::new(
-            raw,
-            format!(
-                "the name is {} bytes; an internal name segment may use at most {SEGMENT_MAX_LENGTH} \
-                 (the limit is in bytes, and only ASCII can be a legal segment anyway)",
-                raw.len()
-            ),
-        ));
-    }
-    if is_segment(raw) {
-        return Ok(raw.to_string());
-    }
     if raw.contains(PROVIDER_SEPARATOR) {
         return Err(NameRejection::new(
             raw,
@@ -151,7 +149,19 @@ pub fn normalize_segment(raw: &str) -> Result<String, NameRejection> {
     if is_segment(&candidate) {
         return Ok(candidate);
     }
+    if candidate.len() > SEGMENT_MAX_LENGTH && matches_segment_pattern(&candidate) {
+        return Ok(shorten_segment(&candidate));
+    }
     Err(NameRejection::new(raw, rejection_reason(raw)))
+}
+
+fn shorten_segment(candidate: &str) -> String {
+    let mut prefix: String = candidate.chars().take(LONG_SEGMENT_PREFIX_LENGTH).collect();
+    while prefix.ends_with('-') {
+        prefix.pop();
+    }
+    let digest = format!("{:x}", Sha256::digest(candidate.as_bytes()));
+    format!("{prefix}-{}", &digest[..12])
 }
 
 /// 为什么这个名字连单下划线翻译之后也不合法。
@@ -208,7 +218,7 @@ pub fn internal_tool_name(
 }
 
 /// 一个工具的本地声明：远端说了什么，以及它对应哪个内部名字。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolDescriptor {
     /// 已校验的内部名段。只有它能进入 `mcp.<server>.<name>`。
@@ -257,7 +267,7 @@ impl McpToolDescriptor {
 /// 表示「工具跑了，但它自己报了错」（文件不存在、命令返回非零……）。传输层出问题一律是
 /// `Err(McpError::…)`。两者必须可区分，否则「工具说没有这个文件」和「服务进程崩了」在
 /// 界面与审计里会长得一模一样。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolResult {
     pub is_error: bool,
@@ -284,7 +294,7 @@ impl McpToolResult {
 }
 
 /// 一个结果内容块。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpContentBlock {
     Text {
@@ -311,7 +321,7 @@ impl McpContentBlock {
 /// 一次进程退出：怎么死的，什么时候。
 ///
 /// `code` 与 `signal` 分开保留，因为「它死了」不是可行动的信息，而「退出码 7」是。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpExitRecord {
     pub code: Option<i32>,
@@ -404,10 +414,26 @@ mod tests {
     }
 
     #[test]
-    fn a_segment_longer_than_the_provider_budget_is_refused() {
-        let too_long = "a".repeat(SEGMENT_MAX_LENGTH + 1);
+    fn a_long_remote_name_becomes_a_stable_readable_segment() {
+        let too_long = format!(
+            "trigger-long-running-operation-{}",
+            "x".repeat(SEGMENT_MAX_LENGTH)
+        );
         assert!(!is_segment(&too_long));
-        assert!(rejected(&too_long).reason.contains("at most 28"));
+        let shortened = normalize_segment(&too_long).expect("long valid names are shortened");
+        assert!(is_segment(&shortened));
+        assert_eq!(shortened.len(), SEGMENT_MAX_LENGTH);
+        assert!(shortened.starts_with("trigger-long-ru"));
+        assert_eq!(
+            shorten_segment(&too_long),
+            shortened,
+            "the mapping must be deterministic across processes"
+        );
+        assert_ne!(
+            shorten_segment(&too_long),
+            shorten_segment(&format!("{too_long}-different")),
+            "the digest must distinguish names sharing the same readable prefix"
+        );
         // 边界本身是合法的：28 个字符的段仍然能进入 Provider 名称。
         assert!(is_segment(&"a".repeat(SEGMENT_MAX_LENGTH)));
     }

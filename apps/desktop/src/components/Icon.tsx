@@ -88,10 +88,13 @@ export type IconName =
   | "chevronUp"
   | "close"
   | "connect"
+  | "copy"
   | "disconnect"
   | "edit"
+  | "externalLink"
   | "file"
   | "folder"
+  | "image"
   | "logs"
   | "plus"
   | "projects"
@@ -134,10 +137,14 @@ function iconBody(name: IconName): ReactNode {
       return <><path d="m6 6 12 12M18 6 6 18" /></>;
     case "connect":
       return <><path d="M7 17 17 7" /><path d="M9 7h8v8" /></>;
+    case "copy":
+      return <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></>;
     case "disconnect":
       return <><path d="M8 16 16 8" /><path d="M5 12h5M14 12h5" /></>;
     case "edit":
       return <><path d="m4 16-.8 4.8L8 20l11-11a2.1 2.1 0 0 0-3-3L5 17Z" /><path d="m14.5 7.5 2 2" /></>;
+    case "externalLink":
+      return <><path d="M15 4h5v5" /><path d="m20 4-9 9" /><path d="M18 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" /></>;
     case "trash":
       return <><path d="M5 7h14M10 11v5M14 11v5" /><path d="M8 7l.7-2h6.6l.7 2M7 7l.8 13h8.4L17 7" /></>;
     case "arrowUp":
@@ -158,6 +165,8 @@ function iconBody(name: IconName): ReactNode {
       return <path d="M3.5 7.5h6l1.7 2H20.5v8.8a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7V7.5Z" />;
     case "file":
       return <><path d="M7 3.8h6l4 4v12.4H7z" /><path d="M13 3.8v4h4M9.5 12h5M9.5 15h5" /></>;
+    case "image":
+      return <><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" /></>;
     case "logs":
       return <><path d="M5 5h14M5 10h14M5 15h9M5 20h7" /></>;
     /* `mic` 和 `waveform` 曾在这里，是给一个语音输入按钮画的。

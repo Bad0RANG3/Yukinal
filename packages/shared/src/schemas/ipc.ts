@@ -18,7 +18,14 @@ import { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
 import { ServerLogsResponseSchema } from "./log.js";
-import { AgentPermissionModeSchema, AgentRunModeSchema, ApprovalResponseSchema } from "./permission.js";
+import {
+  agentPromptCarriesContent,
+  AgentPermissionModeSchema,
+  AgentPromptPartsSchema,
+  AgentRunModeSchema,
+  ApprovalResponseSchema,
+  EMPTY_PROMPT_MESSAGE,
+} from "./permission.js";
 import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema } from "./agent.js";
 import {
   ChatMessageAppendResponseSchema,
@@ -38,12 +45,17 @@ import {
   McpServerDeleteResponseSchema,
   McpServerIdSchema,
   McpServerListResponseSchema,
+  McpOAuthCancelResponseSchema,
+  McpOAuthConnectResponseSchema,
+  McpServerReviewInputSchema,
   McpServerSaveInputSchema,
   McpServerStopResponseSchema,
   McpServerViewSchema,
 } from "./mcp.js";
 import { HOST_KEY_COMPARISONS } from "../types/host-key.js";
 import { REMOTE_FILE_TYPES } from "../types/file.js";
+import { RestartRecordSchema } from "./lifecycle.js";
+import { NetworkProxySaveInputSchema, NetworkProxyViewSchema } from "./network.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -87,20 +99,6 @@ export const AgentSpawnResponseSchema = z.strictObject({
   entry: z.string().min(1),
   toolCount: z.number().int().nonnegative(),
   alreadyRunning: z.boolean(),
-});
-
-/**
- * One entry of the bounded automatic-recovery budget (ADR 0010), present only while a
- * restart is in progress — `None` whenever the supervisor is idle, running normally, or
- * has spent its budget. `exhausted` is the field that matters to a reader: at that point
- * no further restart will happen without a user action, and the UI has to say so instead
- * of leaving the user waiting for a recovery that is not coming.
- */
-export const RestartRecordSchema = z.strictObject({
-  attempt: z.number().int().positive(),
-  maxAttempts: z.number().int().positive(),
-  exhausted: z.boolean(),
-  at: z.string().min(1),
 });
 
 export const AgentStatusSchema = z.strictObject({
@@ -195,14 +193,25 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
     response: z.strictObject({ deleted: z.boolean() }),
   },
-  server_connect: {
-    params: z.strictObject({ serverId: IpcServerIdSchema }),
-    response: ServerConnectResponseSchema,
-  },
-  server_disconnect: {
-    params: z.strictObject({ serverId: IpcServerIdSchema }),
-    response: EMPTY_PAYLOAD,
-  },
+    server_connect: {
+      params: z.strictObject({ serverId: IpcServerIdSchema }),
+      response: ServerConnectResponseSchema,
+    },
+    server_disconnect: {
+      params: z.strictObject({ serverId: IpcServerIdSchema }),
+      response: EMPTY_PAYLOAD,
+    },
+    server_auth_respond: {
+      params: z.strictObject({
+        authId: z.string().trim().min(1).max(256),
+        responses: z.array(z.string().max(4_096)).max(16),
+      }),
+      response: z.strictObject({ accepted: z.boolean() }),
+    },
+    server_auth_cancel: {
+      params: z.strictObject({ authId: z.string().trim().min(1).max(256) }),
+      response: z.strictObject({ accepted: z.boolean() }),
+    },
   server_host_key_status: {
     params: z.strictObject({ serverId: IpcServerIdSchema }),
     response: ServerHostKeyStatusResponseSchema,
@@ -283,24 +292,34 @@ export const IPC_SCHEMAS = {
   agent_status: { params: EMPTY_PAYLOAD, response: AgentStatusSchema },
   agent_logs: { params: EMPTY_PAYLOAD, response: AgentLogsResponseSchema },
   agent_run_start: {
-    params: z.strictObject({
-      runId: z.string().trim().min(1).max(256).optional(),
-      sessionId: z.string().trim().min(1).max(256),
-      prompt: z.string().trim().min(1).max(100_000),
-      messageId: z.string().trim().min(1).max(256).optional(),
-      parts: z.array(z.strictObject({ type: z.literal("text"), text: z.string().trim().min(1).max(100_000) })).min(1).max(128).optional(),
-      delivery: z.enum(["async", "sync"]).optional(),
-      resume: z.boolean().optional(),
-      providerId: z.string().trim().min(1).max(256).optional(),
-      model: z.string().trim().min(1).max(256).optional(),
-      workspaceId: z.string().trim().min(1).max(256).optional(),
-      focusServerId: IpcServerIdSchema.optional(),
-      permissionMode: AgentPermissionModeSchema.optional(),
-      /** Bounds what the run may accomplish; enforced by the permission engine. */
-      mode: AgentRunModeSchema.optional(),
-      /** Forwarded verbatim to the sidecar, which owns what a policy id means. */
-      policyId: z.string().trim().min(1).max(256).optional(),
-    }),
+    params: z
+      .strictObject({
+        runId: z.string().trim().min(1).max(256).optional(),
+        sessionId: z.string().trim().min(1).max(256),
+        prompt: z.string().max(100_000),
+        messageId: z.string().trim().min(1).max(256).optional(),
+        parts: AgentPromptPartsSchema.optional(),
+        delivery: z.enum(["async", "sync"]).optional(),
+        resume: z.boolean().optional(),
+        providerId: z.string().trim().min(1).max(256).optional(),
+        model: z.string().trim().min(1).max(256).optional(),
+        workspaceId: z.string().trim().min(1).max(256).optional(),
+        focusServerId: IpcServerIdSchema.optional(),
+        permissionMode: AgentPermissionModeSchema.optional(),
+        /** Bounds what the run may accomplish; enforced by the permission engine. */
+        mode: AgentRunModeSchema.optional(),
+        /** Forwarded verbatim to the sidecar, which owns what a policy id means. */
+        policyId: z.string().trim().min(1).max(256).optional(),
+      })
+      /*
+       * The rule itself lives next to the part vocabulary (`agentPromptCarriesContent`), not
+       * here: this gate and the run schema ask the same question, and when the answer was
+       * written out twice, adding the audio kind left one copy refusing an audio-only prompt.
+       */
+      .refine(agentPromptCarriesContent, {
+        message: EMPTY_PROMPT_MESSAGE,
+        path: ["prompt"],
+      }),
     /**
      * `result` is present only for `delivery: "sync"`; it is the run's outcome, and the
      * same object the `agent.completed` notification carries. Validated here as well as
@@ -310,6 +329,8 @@ export const IPC_SCHEMAS = {
     response: z.strictObject({
       runId: z.string().min(1),
       started: z.boolean(),
+      duplicate: z.boolean().optional(),
+      resumed: z.boolean().optional(),
       result: AgentRunResultSchema.optional(),
     }),
   },
@@ -346,14 +367,20 @@ export const IPC_SCHEMAS = {
     response: ChatSessionResponseSchema,
   },
   chat_message_append: {
-    params: z.strictObject({
-      sessionId: z.string().trim().min(1).max(256),
-      messageId: z.string().trim().min(1).max(256).optional(),
-      role: ChatMessageRoleSchema,
-      content: z.string().trim().min(1).max(100_000),
-      traceId: z.string().trim().min(1).max(256).optional(),
-      createdAt: z.string().min(1).max(80).optional(),
-    }),
+    params: z
+      .strictObject({
+        sessionId: z.string().trim().min(1).max(256),
+        messageId: z.string().trim().min(1).max(256).optional(),
+        role: ChatMessageRoleSchema,
+        content: z.string().max(100_000),
+        parts: AgentPromptPartsSchema.optional(),
+        traceId: z.string().trim().min(1).max(256).optional(),
+        createdAt: z.string().min(1).max(80).optional(),
+      })
+      .refine(
+        (message) => message.content.trim().length > 0 || Boolean(message.parts?.length),
+        { message: "content must contain text or prompt parts", path: ["content"] },
+      ),
     response: ChatMessageAppendResponseSchema,
   },
   chat_session_archive: {
@@ -404,6 +431,26 @@ export const IPC_SCHEMAS = {
   mcp_server_stop: {
     params: z.strictObject({ serverId: McpServerIdSchema }),
     response: McpServerStopResponseSchema,
+  },
+  mcp_server_review: {
+    params: McpServerReviewInputSchema,
+    response: McpServerViewSchema,
+  },
+  mcp_oauth_connect: {
+    params: z.strictObject({ serverId: McpServerIdSchema }),
+    response: McpOAuthConnectResponseSchema,
+  },
+  mcp_oauth_cancel: {
+    params: z.strictObject({ serverId: McpServerIdSchema }),
+    response: McpOAuthCancelResponseSchema,
+  },
+  network_proxy_get: {
+    params: EMPTY_PAYLOAD,
+    response: NetworkProxyViewSchema,
+  },
+  network_proxy_save: {
+    params: z.strictObject({ input: NetworkProxySaveInputSchema }),
+    response: NetworkProxyViewSchema,
   },
   provider_test: {
     params: z.strictObject({ providerId: z.string().min(1) }),
@@ -461,6 +508,35 @@ export const EVENT_SCHEMAS = {
     terminalSessionId: IpcTerminalSessionIdSchema,
     // Rust sends `Option<u32>`, so a negative or fractional code is drift.
     exitCode: z.number().int().nonnegative().nullable(),
+  }),
+  "server.auth_challenge": z.strictObject({
+    authId: z.string().trim().min(1).max(256),
+    serverId: IpcServerIdSchema,
+    username: z.string().trim().min(1).max(256),
+    host: z.string().trim().min(1).max(4_096),
+    name: z.string().max(256),
+    instructions: z.string().max(4_096),
+    prompts: z
+      .array(
+        z.strictObject({
+          prompt: z.string().max(1_024),
+          echo: z.boolean(),
+        }),
+      )
+      .max(16),
+    expiresAt: z.string().min(1).max(80),
+  }),
+  /**
+   * The device-code prompt. `userCode` and the verification URLs are remote text: the
+   * gate bounds their length and nothing else, because rejecting a server's spelling
+   * would leave the user without the one string they need to type.
+   */
+  "mcp.oauth_device_code": z.strictObject({
+    serverId: IpcServerIdSchema,
+    userCode: z.string().min(1).max(256),
+    verificationUri: z.string().min(1).max(2_048),
+    verificationUriComplete: z.string().min(1).max(2_048).optional(),
+    expiresAt: z.string().min(1).max(80),
   }),
   "activity.created": ActivitySchema,
 } as const;

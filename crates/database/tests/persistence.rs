@@ -7,10 +7,11 @@ use rusqlite::Connection;
 use serde_json::json;
 use yukinal_database::models::{
     Activity, ActivitySource, ActivityType, AiProviderConfig, AiProviderKind, ChatMessage,
-    ChatMessageRole, ChatSession, ChatSessionCounts, Environment, Identity,
-    InfrastructureProviderConfig, McpServerConfig, PermissionMode, RiskLevel, Server,
-    ServerCapabilities, ServerConnection, ServerMetadata, ServerSnapshot, ServerStatus,
-    ToolExecutionRecord, ToolExecutionStatus, Workspace, WorkspaceRepository,
+    ChatMessageRole, ChatSession, ChatSessionCounts, Environment, HostCertificateAuthority,
+    Identity, InfrastructureProviderConfig, McpHttpAuthHeaderConfig, McpServerConfig,
+    PermissionMode, RiskLevel, Server, ServerCapabilities, ServerConnection, ServerMetadata,
+    ServerSnapshot, ServerStatus, ToolExecutionRecord, ToolExecutionStatus, Workspace,
+    WorkspaceRepository,
 };
 use yukinal_database::{Database, DatabaseError};
 
@@ -23,6 +24,7 @@ fn sample_server(id: &str) -> Server {
             port: 22,
             username: "deploy".into(),
             identity_id: None,
+            host_certificate_authority: None,
         },
         group_id: None,
         capabilities: ServerCapabilities {
@@ -145,6 +147,67 @@ fn server_round_trip_update_delete() {
 }
 
 #[test]
+fn host_certificate_authority_round_trips_and_persists() {
+    let (path, db) = temp_db("host-ca");
+    let mut server = sample_server("srv_host_ca");
+    server.connection.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca".into(),
+        principals: vec!["*.example.test".into(), "api.internal".into()],
+        revocation_list_path: Some("/etc/ssh/revoked_hosts.krl".into()),
+        revocation_list_url: None,
+        revocation_list_signers: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrlSigner".into()],
+    });
+    db.servers().insert(&server).expect("insert");
+    drop(db);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let loaded = reopened.servers().get("srv_host_ca").expect("get");
+    assert_eq!(
+        loaded.connection.host_certificate_authority,
+        server.connection.host_certificate_authority
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn online_host_certificate_krl_survives_reopen_without_storing_contents() {
+    let (path, db) = temp_db("host-ca-krl-url");
+    let mut server = sample_server("srv_host_ca_url");
+    server.connection.host_certificate_authority = Some(HostCertificateAuthority {
+        ca_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest host-ca".into(),
+        principals: vec!["*.example.test".into()],
+        revocation_list_path: None,
+        revocation_list_url: Some("https://ca.example.test/revoked.krl".into()),
+        revocation_list_signers: Vec::new(),
+    });
+    db.servers().insert(&server).expect("insert");
+    drop(db);
+
+    let reopened = Database::open(&path).expect("reopen");
+    assert_eq!(
+        reopened
+            .servers()
+            .get("srv_host_ca_url")
+            .expect("get")
+            .connection
+            .host_certificate_authority,
+        server.connection.host_certificate_authority
+    );
+    drop(reopened);
+
+    let raw = Connection::open(&path).expect("open raw");
+    let stored: String = raw
+        .query_row(
+            "SELECT host_krl_url FROM servers WHERE id = 'srv_host_ca_url'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stored URL");
+    assert_eq!(stored, "https://ca.example.test/revoked.krl");
+    cleanup(&path);
+}
+
+#[test]
 fn server_survives_reopen() {
     let (path, db) = temp_db("srv-persist");
     db.servers()
@@ -227,6 +290,12 @@ fn chat_history_can_search_archive_restore_and_delete() {
         session_id: "ses_chat".into(),
         role: ChatMessageRole::User,
         content: "请检查 api-server 的 5xx 日志".into(),
+        parts: Some(vec![json!({
+            "type": "image",
+            "mediaType": "image/png",
+            "data": "aGVsbG8=",
+            "name": "screen.png"
+        })]),
         trace_id: None,
         created_at: "2026-01-01T00:01:00.000Z".into(),
     })
@@ -241,7 +310,17 @@ fn chat_history_can_search_archive_restore_and_delete() {
         active[0].last_message_preview.as_deref(),
         Some("请检查 api-server 的 5xx 日志")
     );
-    assert_eq!(repo.messages("ses_chat").expect("load messages").len(), 1);
+    let messages = repo.messages("ses_chat").expect("load messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].parts.as_ref().and_then(|parts| parts.first()),
+        Some(&json!({
+            "type": "image",
+            "mediaType": "image/png",
+            "data": "aGVsbG8=",
+            "name": "screen.png"
+        }))
+    );
 
     let archived = repo
         .set_archived("ses_chat", Some("2026-01-01T00:02:00.000Z"))
@@ -340,6 +419,7 @@ fn chat_history_counts_page_and_rename_without_reordering() {
         session_id: "ses_a".into(),
         role: ChatMessageRole::Assistant,
         content: "upstream timed out".into(),
+        parts: None,
         trace_id: None,
         created_at: "2026-01-01T00:01:30.000Z".into(),
     })
@@ -400,6 +480,7 @@ fn sample_ai_provider(id: &str) -> AiProviderConfig {
         api_key_credential_ref: Some("keychain://openrouter".into()),
         enabled: true,
         custom_headers: None,
+        api_version: None,
         max_input_tokens: Some(200_000),
         wire_api: Some("chat".into()),
         models: None,
@@ -620,6 +701,8 @@ fn identity_attach_and_cascade() {
         method: "privateKey".into(),
         credential_ref: "keychain://ssh/deploy".into(),
         passphrase_ref: None,
+        private_key_path: None,
+        certificate_path: None,
         created_at: "2026-01-01T00:00:00.000Z".into(),
     })
     .expect("insert identity");
@@ -652,6 +735,8 @@ fn passphrase_identity(id: &str, passphrase_ref: Option<&str>) -> Identity {
         method: "privateKey".into(),
         credential_ref: "keychain://ssh/deploy-key".into(),
         passphrase_ref: passphrase_ref.map(str::to_string),
+        private_key_path: None,
+        certificate_path: None,
         created_at: "2026-01-01T00:00:00.000Z".into(),
     }
 }
@@ -701,6 +786,39 @@ fn identity_passphrase_ref_survives_reopen() {
     cleanup(&path);
 }
 
+#[test]
+fn certificate_paths_survive_reopen_without_storing_private_key_bytes() {
+    let (path, db) = temp_db("idn-cert");
+    let mut identity = passphrase_identity("idn_cert", None);
+    identity.method = "certificate".into();
+    identity.certificate_path = Some("/home/dev/.ssh/id_ed25519-cert.pub".into());
+    identity.private_key_path = Some("/home/dev/.ssh/id_ed25519".into());
+    db.identities()
+        .insert(&identity)
+        .expect("insert certificate identity");
+    drop(db);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let stored = reopened
+        .identities()
+        .get("idn_cert")
+        .expect("get certificate identity");
+    assert_eq!(stored.method, "certificate");
+    assert_eq!(
+        stored.certificate_path.as_deref(),
+        Some("/home/dev/.ssh/id_ed25519-cert.pub")
+    );
+    assert_eq!(
+        stored.private_key_path.as_deref(),
+        Some("/home/dev/.ssh/id_ed25519")
+    );
+    assert_eq!(
+        stored.credential_ref, "keychain://ssh/deploy-key",
+        "the row keeps only a reference; PEM bytes never enter SQLite"
+    );
+    cleanup(&path);
+}
+
 /// 升级路径：一个**已经存在**的数据库（`user_version = 4`，`identities` 表没有
 /// `passphrase_ref`）打开后要拿到新列，并且原有行一条不少、口令为空。
 ///
@@ -723,6 +841,39 @@ fn migration_v5_adds_passphrase_ref_to_an_existing_database() {
                 method        TEXT NOT NULL CHECK (method IN ('password','privateKey','agent')),
                 credential_ref TEXT NOT NULL,
                 created_at    TEXT NOT NULL
+            );
+            -- Migration 6 adds Anthropic's optional version column. Real v4
+            -- databases already have this migration-1 table; the fixture must
+            -- model the actual disk shape or the upgrade test misses that step.
+            CREATE TABLE provider_configs (
+                id TEXT PRIMARY KEY
+            );
+            CREATE TABLE server_identities (
+                server_id TEXT NOT NULL,
+                identity_id TEXT NOT NULL,
+                PRIMARY KEY (server_id, identity_id)
+            );
+            CREATE TABLE servers (
+                id TEXT PRIMARY KEY
+            );
+            CREATE TABLE mcp_servers (
+                id           TEXT PRIMARY KEY,
+                label        TEXT NOT NULL,
+                transport    TEXT NOT NULL CHECK (transport IN ('stdio','http')),
+                command      TEXT,
+                args         TEXT,
+                url          TEXT,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                allowed_tools TEXT NOT NULL DEFAULT '[]',
+                trust_level  TEXT NOT NULL CHECK (trust_level IN ('reviewed','unreviewed'))
+            );
+            CREATE TABLE chat_messages (
+                id         TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role       TEXT NOT NULL CHECK (role IN ('user','assistant','tool','system')),
+                content    TEXT NOT NULL,
+                trace_id   TEXT,
+                created_at TEXT NOT NULL
             );
             INSERT INTO identities VALUES
               ('idn_legacy', 'legacy deploy key', 'privateKey', 'keychain://ssh/legacy', '2026-01-01T00:00:00.000Z'),
@@ -855,6 +1006,30 @@ fn migration_v3_preserves_legacy_execution_rows_and_allows_agent_source() {
                 credential_ref TEXT NOT NULL,
                 created_at    TEXT NOT NULL
             );
+            -- Migration 6 targets this migration-1 table, as it does on a real
+            -- v2 database; only the column being altered matters to this fixture.
+            CREATE TABLE provider_configs (
+                id TEXT PRIMARY KEY
+            );
+            CREATE TABLE server_identities (
+                server_id TEXT NOT NULL,
+                identity_id TEXT NOT NULL,
+                PRIMARY KEY (server_id, identity_id)
+            );
+            CREATE TABLE servers (
+                id TEXT PRIMARY KEY
+            );
+            CREATE TABLE mcp_servers (
+                id           TEXT PRIMARY KEY,
+                label        TEXT NOT NULL,
+                transport    TEXT NOT NULL CHECK (transport IN ('stdio','http')),
+                command      TEXT,
+                args         TEXT,
+                url          TEXT,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                allowed_tools TEXT NOT NULL DEFAULT '[]',
+                trust_level  TEXT NOT NULL CHECK (trust_level IN ('reviewed','unreviewed'))
+            );
             INSERT INTO tool_executions VALUES
               ('trc_legacy', 'step_1', 'call_1', 'ssh.execute', 'srv_01abc', 'production', 'medium', 'auto', 'policy', 'success', '{}', NULL, NULL, '2026-01-01T00:00:00Z', NULL, 1);
             PRAGMA user_version = 2;
@@ -956,6 +1131,8 @@ fn mcp_server_round_trip() {
             "@modelcontextprotocol/server-filesystem".into(),
         ]),
         url: None,
+        http_auth_headers: Vec::new(),
+        oauth: None,
         enabled: false,
         allowed_tools: vec![],
         trust_level: "unreviewed".into(),
@@ -966,6 +1143,104 @@ fn mcp_server_round_trip() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].args.as_ref().expect("args").len(), 2);
     assert!(!list[0].enabled);
+}
+
+#[test]
+fn mcp_http_auth_headers_round_trip_and_read_the_legacy_single_header() {
+    let (path, db) = temp_db("mcp-auth-headers");
+    db.mcp_servers()
+        .upsert(&McpServerConfig {
+            id: "mcp_http".into(),
+            label: "Remote MCP".into(),
+            transport: "http".into(),
+            command: None,
+            args: None,
+            url: Some("https://mcp.example.com/mcp".into()),
+            http_auth_headers: vec![
+                McpHttpAuthHeaderConfig {
+                    name: "Authorization".into(),
+                    credential_ref: "keychain://mcp/auth".into(),
+                },
+                McpHttpAuthHeaderConfig {
+                    name: "X-Gateway-Key".into(),
+                    credential_ref: "keychain://mcp/gateway".into(),
+                },
+            ],
+            oauth: Some(yukinal_database::models::McpOAuthConfig {
+                issuer: "https://auth.example.com".into(),
+                client_id: "desktop-client".into(),
+                flow: yukinal_database::models::McpOAuthFlow::AuthorizationCode,
+                client_auth: yukinal_database::models::McpOAuthClientAuth::None,
+                client_secret_ref: None,
+                dpop: false,
+                dpop_key_ref: None,
+                scopes: vec!["mcp.read".into()],
+                token_endpoint: Some("https://auth.example.com/token".into()),
+                credential_ref: Some("keychain://mcp/oauth".into()),
+            }),
+            enabled: true,
+            allowed_tools: Vec::new(),
+            trust_level: "unreviewed".into(),
+        })
+        .expect("upsert HTTP authentication headers");
+    drop(db);
+
+    let reopened = Database::open(&path).expect("reopen");
+    let row = reopened.mcp_servers().get("mcp_http").expect("stored row");
+    assert_eq!(
+        row.http_auth_headers,
+        vec![
+            McpHttpAuthHeaderConfig {
+                name: "Authorization".into(),
+                credential_ref: "keychain://mcp/auth".into(),
+            },
+            McpHttpAuthHeaderConfig {
+                name: "X-Gateway-Key".into(),
+                credential_ref: "keychain://mcp/gateway".into(),
+            },
+        ]
+    );
+    let oauth = row.oauth.expect("OAuth config");
+    assert_eq!(oauth.issuer, "https://auth.example.com");
+    assert_eq!(oauth.client_id, "desktop-client");
+    assert_eq!(oauth.scopes, vec!["mcp.read"]);
+    assert_eq!(
+        oauth.token_endpoint.as_deref(),
+        Some("https://auth.example.com/token")
+    );
+    assert_eq!(
+        oauth.credential_ref.as_deref(),
+        Some("keychain://mcp/oauth")
+    );
+    drop(reopened);
+
+    let legacy = Connection::open(&path).expect("open raw");
+    legacy
+        .execute(
+            "UPDATE mcp_servers
+                SET http_auth_headers = NULL,
+                    http_auth_header = ?1,
+                    http_credential_ref = ?2
+              WHERE id = 'mcp_http'",
+            rusqlite::params!["Authorization", "keychain://mcp/legacy"],
+        )
+        .expect("write legacy columns");
+    drop(legacy);
+
+    let fallback = Database::open(&path).expect("reopen legacy");
+    assert_eq!(
+        fallback
+            .mcp_servers()
+            .get("mcp_http")
+            .expect("legacy row")
+            .http_auth_headers,
+        vec![McpHttpAuthHeaderConfig {
+            name: "Authorization".into(),
+            credential_ref: "keychain://mcp/legacy".into(),
+        }]
+    );
+    drop(fallback);
+    cleanup(&path);
 }
 
 /// 旧的 `rename_all = "lowercase"` 曾经把 kind 落成 `openaicompatible`，而 `kind` 是

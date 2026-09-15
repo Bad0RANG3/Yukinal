@@ -45,6 +45,24 @@ export const AiProviderKindSchema = z.enum(AI_PROVIDER_KINDS);
 export const WireApiSchema = z.enum(["chat", "responses"]);
 
 /**
+ * Anthropic versions the wire header by date (`YYYY-MM-DD`). Keep the shape
+ * explicit so a typo is rejected before it becomes an opaque protocol error.
+ */
+export const ApiVersionSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "apiVersion must be a YYYY-MM-DD date");
+
+export function apiVersionAppliesTo(value: {
+  kind: AiProviderKind;
+  apiVersion?: string;
+}): boolean {
+  return value.apiVersion === undefined || value.kind === "anthropic";
+}
+
+const API_VERSION_IS_ANTHROPIC_ONLY = {
+  message: 'apiVersion only applies to kind "anthropic"; other protocols do not use the Anthropic version header',
+  path: ["apiVersion"],
+};
+
+/**
  * `kind` 与 `wireApi` 是正交的两轴（ADR 0011 第 2 点），因此它们的组合里有一半是非法的：
  * `wireApi` 只在 `openai-compatible` 里选方言，另外两种 kind 的协议本身就是方言。
  *
@@ -85,6 +103,12 @@ const SafeCustomHeaderNameSchema = z.string().trim().min(1).max(128).refine(
     "x-client-name",
     "x-client-version",
     "x-title",
+    // Protocol feature switches that are not credentials and are commonly needed
+    // when reaching a vendor behind a gateway.
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+    "x-goog-user-project",
   ].includes(name.toLowerCase()),
   "custom header is not approved for non-secret metadata",
 );
@@ -108,13 +132,15 @@ export const ProviderConfigSchema = z
     apiKeyCredentialRef: z.string().trim().min(1).max(512).optional(),
     enabled: z.boolean(),
     customHeaders: SafeCustomHeadersSchema.optional(),
+    apiVersion: ApiVersionSchema.optional(),
     maxInputTokens: z.number().int().positive().max(10_000_000).optional(),
     wireApi: WireApiSchema.optional(),
     models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
     createdAt: z.string().min(1).max(80),
     updatedAt: z.string().min(1).max(80),
   })
-  .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY);
+  .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY)
+  .refine(apiVersionAppliesTo, API_VERSION_IS_ANTHROPIC_ONLY);
 
 export const ProviderSaveInputSchema = z
   .strictObject({
@@ -128,10 +154,13 @@ export const ProviderSaveInputSchema = z
     baseUrl: ProviderBaseUrlSchema,
     model: z.string().trim().min(1).max(256),
     apiKey: z.string().min(1).max(4_096).optional(),
+    customHeaders: SafeCustomHeadersSchema.optional(),
+    apiVersion: ApiVersionSchema.optional(),
     wireApi: WireApiSchema.optional(),
     models: z.array(ProviderModelOptionSchema).max(1_000).optional(),
   })
-  .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY);
+  .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY)
+  .refine(apiVersionAppliesTo, API_VERSION_IS_ANTHROPIC_ONLY);
 
 /**
  * 删除一个 Provider 的结果。

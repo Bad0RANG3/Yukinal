@@ -22,6 +22,9 @@ pub struct SidecarConfig {
     /// Handed to the sidecar so it can find its local spool. Never a secret and never
     /// a credential.
     pub data_dir: String,
+    /// Whether `program` is the Node.js executable selected by this app. A custom
+    /// `YUKINAL_AGENT_COMMAND` owns its own runtime contract and is not probed.
+    pub requires_node: bool,
 }
 
 impl SidecarConfig {
@@ -81,6 +84,7 @@ impl SidecarConfig {
                 entry_label: String::from("custom command"),
                 client_version: default_client_version(),
                 data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
+                requires_node: false,
             });
         }
 
@@ -101,6 +105,7 @@ impl SidecarConfig {
                 entry_label: entry.display().to_string(),
                 client_version: default_client_version(),
                 data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
+                requires_node: true,
             });
         }
 
@@ -129,6 +134,7 @@ impl SidecarConfig {
                     entry_label: entry.display().to_string(),
                     client_version: default_client_version(),
                     data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
+                    requires_node: true,
                 })
             }
             None => {
@@ -172,9 +178,6 @@ impl SidecarConfig {
     /// other spawn failure keeps the plain `program: error` form, because inventing advice
     /// for a permissions error or a bad interpreter would be worse than saying nothing.
     ///
-    /// Deliberately *not* a pre-flight `node --version` check: that would spawn a second
-    /// process on every start, and it still cannot catch a Node that exists but is too old
-    /// (which fails as a parse error on stderr — visible in the retained log tail).
     #[must_use]
     pub fn launch_error(&self, error: &std::io::Error) -> SidecarError {
         if error.kind() == std::io::ErrorKind::NotFound && self.resolved_through_path() {
@@ -187,6 +190,38 @@ impl SidecarConfig {
             ));
         }
         SidecarError::Launch(format!("{}: {error}", self.program.display()))
+    }
+
+    /// Parse and enforce the version answer from `node --version`.
+    ///
+    /// This is a small, pure check; [`super::spawn`] owns the bounded process probe. A
+    /// custom command returns `Ok` without probing because it may not even be Node.
+    pub(super) fn validate_node_version(&self, reported: &str) -> Result<u32, SidecarError> {
+        if !self.requires_node {
+            return Ok(REQUIRED_NODE_MAJOR);
+        }
+        let raw = reported.trim();
+        let major = raw
+            .strip_prefix('v')
+            .unwrap_or(raw)
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u32>().ok())
+            .ok_or_else(|| {
+                SidecarError::Launch(format!(
+                    "could not determine the Node.js version from `{} --version` (output: {raw:?})",
+                    self.program.display()
+                ))
+            })?;
+        if major < REQUIRED_NODE_MAJOR {
+            return Err(SidecarError::Launch(format!(
+                "Node.js {REQUIRED_NODE_MAJOR} or newer is required, but `{}` reports {raw}. \
+                 Install a newer Node.js (https://nodejs.org) or set YUKINAL_NODE to an \
+                 absolute path to a supported executable",
+                self.program.display()
+            )));
+        }
+        Ok(major)
     }
 }
 
@@ -501,6 +536,7 @@ mod tests {
             entry_label: String::from("/opt/agent/index.js"),
             client_version: default_client_version(),
             data_dir: String::new(),
+            requires_node: true,
         }
     }
 
@@ -550,6 +586,37 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("nodejs.org"), "{message}");
         assert!(message.contains("access is denied"), "{message}");
+    }
+
+    #[test]
+    fn node_version_probe_rejects_an_old_runtime_with_an_actionable_message() {
+        let config = path_resolved_config();
+        assert_eq!(config.validate_node_version("v24.4.1\n").unwrap(), 24);
+        assert_eq!(config.validate_node_version("24.0.0").unwrap(), 24);
+
+        let error = config
+            .validate_node_version("v22.14.0")
+            .expect_err("an old Node must be refused before loading the bundle");
+        let message = error.to_string();
+        assert!(message.contains("Node.js 24 or newer"), "{message}");
+        assert!(message.contains("v22.14.0"), "{message}");
+        assert!(message.contains("YUKINAL_NODE"), "{message}");
+
+        let malformed = config
+            .validate_node_version("not node")
+            .expect_err("unparseable output must not be guessed");
+        assert!(malformed.to_string().contains("could not determine"));
+    }
+
+    #[test]
+    fn a_custom_command_owns_its_runtime_contract() {
+        let mut config = path_resolved_config();
+        config.program = PathBuf::from("/usr/bin/false");
+        config.requires_node = false;
+        assert_eq!(
+            config.validate_node_version("not node").unwrap(),
+            REQUIRED_NODE_MAJOR
+        );
     }
 
     /// The Node floor is stated in four places that cannot import each other: this constant,

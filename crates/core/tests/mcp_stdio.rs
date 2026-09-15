@@ -23,9 +23,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use yukinal_core::mcp::{
-    McpError, McpStdioConfig, McpSupervisor, PREFERRED_PROTOCOL_VERSION, STDERR_TAIL_LINES,
-    SUPPORTED_PROTOCOL_VERSIONS,
+    McpError, McpStdioConfig, McpSupervisor, McpTransportConfig, PREFERRED_PROTOCOL_VERSION,
+    STDERR_TAIL_LINES, SUPPORTED_PROTOCOL_VERSIONS,
 };
+use yukinal_core::supervisor::RestartPolicy;
 use yukinal_database::models::McpServerConfig as StoredMcpServer;
 
 /// Deliberately an id that needs normalizing (`mcp_1` → `mcp-1`): the database round-trip in
@@ -39,6 +40,16 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Only used for the "never answers" call, through the handle's explicit per-call timeout.
 const SHORT_TIMEOUT: Duration = Duration::from_millis(600);
+
+fn fast_restart_policy() -> RestartPolicy {
+    RestartPolicy {
+        enabled: true,
+        max_attempts: 3,
+        base_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(100),
+        healthy_after: Duration::from_secs(60),
+    }
+}
 
 fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var(key)
@@ -181,7 +192,7 @@ async fn a_handshake_negotiates_a_version_and_lists_the_two_tools() {
         .await
         .expect("initialize + tools/list must succeed against a well-behaved server");
     assert!(!start.already_running);
-    assert!(start.info.pid > 0);
+    assert!(start.info.pid.is_some_and(|pid| pid > 0));
     assert_eq!(start.info.server_id, SERVER_ID);
     assert_eq!(
         config.segment, "mcp-1",
@@ -230,7 +241,7 @@ async fn a_handshake_negotiates_a_version_and_lists_the_two_tools() {
 
     let status = supervisor.status(SERVER_ID).await;
     assert!(status.running);
-    assert_eq!(status.pid, Some(start.info.pid));
+    assert_eq!(status.pid, start.info.pid);
     assert_eq!(status.tool_count, 2);
     assert_eq!(
         status.protocol_version.as_deref(),
@@ -243,6 +254,53 @@ async fn a_handshake_negotiates_a_version_and_lists_the_two_tools() {
 
     let report = supervisor.shutdown(SERVER_ID).await.expect("still tracked");
     assert!(report.was_running);
+}
+
+/// Explicit interoperability smoke against the official TypeScript MCP server.
+///
+/// It is opt-in because it downloads a package and needs the network; ordinary CI still
+/// runs the hermetic fixture above. Set `YUKINAL_TEST_MCP_EVERYTHING` to the `npx`
+/// executable to run it.
+#[tokio::test]
+async fn the_official_mcp_everything_server_interoperates() {
+    let Some(npx) = env_path("YUKINAL_TEST_MCP_EVERYTHING") else {
+        eprintln!("skipped: YUKINAL_TEST_MCP_EVERYTHING is not set");
+        return;
+    };
+    let config = McpStdioConfig::new(
+        "mcp_everything",
+        "official everything server",
+        npx,
+        Duration::from_secs(60),
+    )
+    .expect("legal config")
+    .with_args([
+        OsString::from("-y"),
+        OsString::from("@modelcontextprotocol/server-everything"),
+        OsString::from("stdio"),
+    ]);
+    let supervisor = McpSupervisor::new();
+    let start = supervisor
+        .start(&config)
+        .await
+        .expect("official server handshake");
+    assert!(
+        start.info.handshake.is_some(),
+        "a real server must negotiate initialize"
+    );
+    assert!(
+        start.tool_count > 0,
+        "the official everything server advertises tools"
+    );
+    assert!(
+        supervisor
+            .tools("mcp_everything")
+            .await
+            .iter()
+            .any(|tool| tool.name == "echo"),
+        "expected the official echo tool"
+    );
+    supervisor.shutdown("mcp_everything").await;
 }
 
 #[tokio::test]
@@ -346,11 +404,50 @@ async fn a_server_that_never_answers_times_out_instead_of_hanging() {
 }
 
 #[tokio::test]
-async fn a_server_that_dies_mid_session_reports_the_exit_and_is_not_restarted() {
+async fn cancelling_an_in_flight_call_sends_the_mcp_cancellation_notification() {
     let Some(config) = config("misbehave") else {
         return;
     };
     let supervisor = McpSupervisor::new();
+    supervisor.start(&config).await.expect("start");
+
+    let handle = supervisor.handle(SERVER_ID).await.expect("tracked");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_after = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        }
+    });
+
+    let error = handle
+        .call_tool_with_cancel("never-answer", json!({}), TEST_TIMEOUT, &cancel)
+        .await
+        .expect_err("the fixture deliberately never answers");
+    cancel_after.await.expect("cancellation task");
+    assert!(
+        matches!(error, McpError::Cancelled { ref method, .. } if method == "tools/call"),
+        "{error:?}"
+    );
+
+    // The child writes only after it receives `notifications/cancelled`; seeing
+    // this line proves the client did not merely stop waiting locally.
+    let stderr = wait_for_stderr(&supervisor, "cancelled request", Duration::from_secs(5)).await;
+    assert!(
+        stderr.iter().any(|line| line.contains("cancelled request")),
+        "the protocol cancellation must reach the server: {stderr:?}"
+    );
+
+    supervisor.shutdown(SERVER_ID).await;
+}
+
+#[tokio::test]
+async fn a_server_that_dies_mid_session_is_restarted_and_keeps_the_exit_visible() {
+    let Some(config) = config("misbehave") else {
+        return;
+    };
+    let supervisor = McpSupervisor::with_restart_policy(fast_restart_policy());
     let start = supervisor.start(&config).await.expect("start");
     let pid = start.info.pid;
 
@@ -376,51 +473,111 @@ async fn a_server_that_dies_mid_session_reports_the_exit_and_is_not_restarted() 
     }
 
     wait_for_exit(&supervisor, Duration::from_secs(5)).await;
-    let status = supervisor.status(SERVER_ID).await;
-    assert!(!status.running);
-    assert!(status.pid.is_none());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut recovered = None;
+    while Instant::now() < deadline {
+        let status = supervisor.status(SERVER_ID).await;
+        if status.running && status.pid != pid {
+            recovered = Some(status);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let status = recovered.expect("a crashed server must be recovered within the budget");
+    assert_ne!(status.pid, pid, "recovery must use a fresh process");
     assert_eq!(
         status.last_exit.as_ref().and_then(|exit| exit.code),
         Some(7),
-        "a crash must stay visible in the status, not just in one error value"
+        "recovery must not erase why the previous process died"
     );
-    assert!(
-        status
-            .diagnostics
-            .iter()
-            .any(|line| line.contains("exited")),
-        "the diagnostics tail must explain the exit: {:?}",
-        status.diagnostics
-    );
+    let restart = status
+        .restart
+        .expect("the recovery attempt must be reported");
+    assert_eq!(restart.attempt, 1);
+    assert!(!restart.exhausted);
 
-    // No auto-restart: wait longer than any plausible retry, then confirm nothing happened.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let status = supervisor.status(SERVER_ID).await;
-    assert!(
-        !status.running,
-        "a crashed MCP server is not restarted automatically; the caller decides"
-    );
-    assert!(
-        status.pid.is_none(),
-        "no process may appear behind the caller's back"
-    );
+    // Recovery rebuilds the process; it does not replay the interrupted call.
     assert_eq!(
         supervisor
-            .handle(SERVER_ID)
+            .call(SERVER_ID, "echo", json!({ "text": "after restart" }))
             .await
-            .expect("still tracked")
-            .pid(),
-        pid,
-        "the tracked handle must still be the process that died"
+            .expect("the recovered server is usable")
+            .text(),
+        "echo: after restart"
     );
 
-    // Recovery is an explicit action, and it is a new process.
-    let restarted = supervisor
-        .start(&config)
-        .await
-        .expect("an explicit start recovers");
-    assert!(!restarted.already_running);
-    assert_ne!(restarted.info.pid, pid);
+    supervisor.shutdown(SERVER_ID).await;
+}
+
+#[tokio::test]
+async fn mcp_restart_budget_is_spent_and_an_explicit_start_resets_it() {
+    let Some(config) = config("misbehave") else {
+        return;
+    };
+    let supervisor = McpSupervisor::with_restart_policy(RestartPolicy {
+        max_attempts: 2,
+        base_delay: Duration::from_millis(25),
+        max_delay: Duration::from_millis(25),
+        ..fast_restart_policy()
+    });
+    let mut pid = supervisor.start(&config).await.expect("start").info.pid;
+
+    for expected_attempt in 1..=2 {
+        let _ = supervisor.call(SERVER_ID, "quit", json!({})).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            let status = supervisor.status(SERVER_ID).await;
+            if status.running
+                && status.pid != pid
+                && status.restart.as_ref().map(|record| record.attempt) == Some(expected_attempt)
+            {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "restart {expected_attempt} did not complete"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        pid = status.pid;
+    }
+
+    // One more crash spends the budget. The supervisor stops, and the exhausted record
+    // is the status a user/UI must be able to see.
+    let _ = supervisor.call(SERVER_ID, "quit", json!({})).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exhausted = loop {
+        let status = supervisor.status(SERVER_ID).await;
+        if !status.running
+            && status
+                .restart
+                .as_ref()
+                .is_some_and(|record| record.exhausted)
+        {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the exhausted budget was never reported"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        exhausted.restart.as_ref().map(|record| record.attempt),
+        Some(2)
+    );
+    assert_eq!(
+        exhausted.restart.as_ref().map(|record| record.max_attempts),
+        Some(2)
+    );
+
+    // An explicit user start is a fresh baseline, not attempt 3.
+    let fresh = supervisor.start(&config).await.expect("explicit restart");
+    assert!(!fresh.already_running);
+    assert_ne!(fresh.info.pid, pid);
+    let status = supervisor.status(SERVER_ID).await;
+    assert!(status.running);
+    assert!(status.restart.is_none(), "explicit start clears the outage");
     supervisor.shutdown(SERVER_ID).await;
 }
 
@@ -441,10 +598,10 @@ async fn starting_the_same_server_twice_reuses_one_process() {
         "one server id is one process (docs/boundaries/mcp.md: the process lifecycle stays with Rust)"
     );
     assert_eq!(second.tool_count, first.tool_count);
-    assert_eq!(supervisor.status(SERVER_ID).await.pid, Some(first.info.pid));
+    assert_eq!(supervisor.status(SERVER_ID).await.pid, first.info.pid);
     assert_eq!(supervisor.servers().await, vec![SERVER_ID.to_string()]);
     assert!(
-        pid_is_alive(first.info.pid),
+        pid_is_alive(first.info.pid.expect("stdio pid")),
         "the pid the supervisor reports must be a process that is actually running"
     );
 
@@ -459,7 +616,7 @@ async fn shutdown_all_kills_every_server_it_manages() {
     let handle = supervisor.start(&config).await.expect("start");
     let pid = handle.info.pid;
     assert!(
-        pid_is_alive(pid),
+        pid_is_alive(pid.expect("stdio pid")),
         "the fixture must be running before we ask it to stop"
     );
 
@@ -483,7 +640,7 @@ async fn shutdown_all_kills_every_server_it_manages() {
         !report.unreaped,
         "a killed child must be reaped, not left as a zombie"
     );
-    wait_until_pid_is_gone(pid, Duration::from_secs(5)).await;
+    wait_until_pid_is_gone(pid.expect("stdio pid"), Duration::from_secs(5)).await;
 
     // The handle stays on purpose: a shutdown is still an exit, and the exit record is what
     // lets the settings page explain why a server is gone. What must change is the *state*,
@@ -504,7 +661,7 @@ async fn shutdown_all_kills_every_server_it_manages() {
 }
 
 #[tokio::test]
-async fn an_http_server_is_refused_with_the_reason_and_nothing_is_spawned() {
+async fn an_http_row_is_dispatched_to_the_http_transport_not_stdio() {
     let row = StoredMcpServer {
         id: SERVER_ID.to_string(),
         label: "remote".to_string(),
@@ -513,31 +670,23 @@ async fn an_http_server_is_refused_with_the_reason_and_nothing_is_spawned() {
         command: Some("definitely-not-a-program".to_string()),
         args: None,
         url: Some("https://example.invalid/mcp".to_string()),
+        http_auth_headers: Vec::new(),
+        oauth: None,
         enabled: true,
         allowed_tools: Vec::new(),
         trust_level: "unreviewed".to_string(),
     };
 
     let error = McpStdioConfig::from_server_config(&row, TEST_TIMEOUT)
-        .expect_err("http must be refused, never silently ignored");
+        .expect_err("the stdio parser must never accept an HTTP row");
     assert!(
-        matches!(error, McpError::TransportNotImplemented { .. }),
+        matches!(error, McpError::UnsupportedTransport { .. }),
         "{error:?}"
     );
-    let message = error.to_string();
-    assert!(message.contains("http"), "{message}");
-    assert!(
-        message.contains("not implemented"),
-        "the error must say the transport is missing, not that the row is odd: {message}"
-    );
-    assert!(
-        message.contains("outbound network policy"),
-        "the error must name the reason it is refused (no outbound network policy), \
-         not the subject of some other section: {message}"
-    );
+    let config = McpTransportConfig::from_server_config(&row, TEST_TIMEOUT)
+        .expect("the transport dispatcher recognizes HTTP");
+    assert!(matches!(config, McpTransportConfig::Http(_)));
 
-    // `McpStdioConfig` cannot represent an http server at all, so no later code path can start
-    // one by forgetting a check — the type is the enforcement.
     let supervisor = McpSupervisor::new();
     assert!(supervisor.servers().await.is_empty());
 }
@@ -798,7 +947,7 @@ async fn shutdown_closes_the_server_within_its_budget_and_leaves_nothing_running
     assert!(!second.was_running);
     assert!(!second.killed);
 
-    wait_until_pid_is_gone(pid, Duration::from_secs(5)).await;
+    wait_until_pid_is_gone(pid.expect("stdio pid"), Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -824,7 +973,7 @@ async fn a_server_that_ignores_eof_is_killed_rather_than_waited_on() {
         "shutdown must stay bounded even when the child ignores the polite exit, took {elapsed:?}"
     );
 
-    wait_until_pid_is_gone(start.info.pid, Duration::from_secs(5)).await;
+    wait_until_pid_is_gone(start.info.pid.expect("stdio pid"), Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -834,7 +983,10 @@ async fn dropping_the_supervisor_kills_the_process_it_owns() {
     let pid = {
         let supervisor = McpSupervisor::new();
         let start = supervisor.start(&config).await.expect("start");
-        assert!(pid_is_alive(start.info.pid), "the server must be running");
+        assert!(
+            pid_is_alive(start.info.pid.expect("stdio pid")),
+            "the server must be running"
+        );
         start.info.pid
         // The supervisor is dropped here: `kill_on_drop` is the last line of defence against an
         // orphan, and this test is what makes it a behaviour instead of a comment. The pumps and
@@ -842,5 +994,5 @@ async fn dropping_the_supervisor_kills_the_process_it_owns() {
         // child process.
     };
 
-    wait_until_pid_is_gone(pid, Duration::from_secs(5)).await;
+    wait_until_pid_is_gone(pid.expect("stdio pid"), Duration::from_secs(5)).await;
 }

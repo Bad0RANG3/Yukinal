@@ -60,6 +60,7 @@ pub(crate) fn secrets_with(key_pem: String, passphrase: Option<&str>) -> Connect
         password: None,
         private_key_pem: Some(key_pem),
         private_key_passphrase: passphrase.map(str::to_owned),
+        keyboard_interactive: None,
     }
 }
 
@@ -84,5 +85,32 @@ pub(crate) fn test_certificate(
     builder.key_id("yukinal-test").expect("key id");
     builder.cert_type(CertType::User).expect("cert type");
     builder.valid_principal("testuser").expect("principal");
+    builder.sign(ca).expect("sign certificate")
+}
+
+/// Sign a host certificate with explicit principals for host-CA tests.
+pub(crate) fn test_host_certificate(
+    ca: &ssh_key::PrivateKey,
+    host: &ssh_key::PrivateKey,
+    principals: &[&str],
+) -> ssh_key::Certificate {
+    use ssh_key::certificate::{Builder, CertType};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after the epoch")
+        .as_secs();
+    let mut builder = Builder::new_with_random_nonce(
+        &mut rand::rng(),
+        host.public_key(),
+        now.saturating_sub(3600),
+        now.saturating_add(86_400),
+    )
+    .expect("certificate builder");
+    builder.serial(2).expect("serial");
+    builder.key_id("yukinal-host-test").expect("key id");
+    builder.cert_type(CertType::Host).expect("cert type");
+    for principal in principals {
+        builder.valid_principal(*principal).expect("principal");
+    }
     builder.sign(ca).expect("sign certificate")
 }

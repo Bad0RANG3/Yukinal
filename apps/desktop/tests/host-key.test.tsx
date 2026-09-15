@@ -195,6 +195,55 @@ test("a matching probe says so and leaves nothing to trust", () => {
   assert.match(html, /TOFU/);
 });
 
+/* ── CA 策略 ───────────────────────────────────────────────────────────────── */
+
+test("CA policy makes leaf pins visibly informational and disables pin actions", () => {
+  const html = renderToStaticMarkup(
+    <HostKeyPanel
+      caPolicyEnabled
+      status={status(PINNED)}
+      probe={{
+        host: "api.example.com",
+        port: 22,
+        presentedFingerprint: PRESENTED,
+        comparison: "mismatch",
+        pinnedFingerprint: PINNED,
+      }}
+      onProbe={noop}
+      onTrust={noop}
+      onForget={noop}
+    />,
+  );
+
+  assert.match(html, /CA 策略已启用/);
+  assert.match(html, /不参与校验/);
+  assert.match(html, /本机保存的叶子指纹/);
+  assert.equal(buttonNamed(html, "探针").disabled, false, "仍可查看服务器出示的叶子指纹");
+  assert.equal(buttonNamed(html, "信任此指纹").disabled, true, "CA 模式下不能钉叶子指纹");
+  assert.equal(buttonNamed(html, "遗忘").disabled, true, "CA 模式下不能遗忘叶子钉子");
+
+  // 叶子 pin 被忽略时，mismatch 不能继续宣称连接会因此被拒绝。
+  assert.doesNotMatch(html, /不是同一把/);
+  assert.doesNotMatch(html, /任何连接都会继续被拒绝/);
+  assert.doesNotMatch(html, /role="alert"/);
+  assert.doesNotMatch(html, /连接时以它为准/);
+});
+
+test("CA policy without a saved leaf says so without calling the host unverified", () => {
+  const html = renderToStaticMarkup(
+    <HostKeyPanel
+      caPolicyEnabled
+      status={status()}
+      onProbe={noop}
+      onTrust={noop}
+      onForget={noop}
+    />,
+  );
+
+  assert.match(html, /未保存叶子指纹/);
+  assert.doesNotMatch(html, /未核验/);
+});
+
 /* ── 规则本身 ──────────────────────────────────────────────────────────────── */
 
 test("hostKeyTrustEligibility refuses every path that is not 'just probed'", () => {

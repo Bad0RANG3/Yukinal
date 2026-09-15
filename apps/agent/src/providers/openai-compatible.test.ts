@@ -75,3 +75,172 @@ test("an unclassified stream failure is redacted and not retried", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("chat/completions maps images and tool traffic to the OpenAI wire shape", async () => {
+  const provider = new OpenAiCompatibleProvider({ baseUrl: "https://example.test/v1", model: "vision" });
+  const originalFetch = globalThis.fetch;
+  let body: Record<string, unknown> = {};
+  globalThis.fetch = async (_input, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response("data: [DONE]\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  try {
+    const request: ChatRequest = {
+      model: "vision",
+      messages: [
+        {
+          role: "user",
+          content: "what is shown?",
+          images: [{ mediaType: "image/png", data: "aGVsbG8=", name: "screen.png" }],
+          documents: [
+            { mediaType: "application/pdf", data: "JVBERi0xLjcK", name: "guide.pdf" },
+          ],
+          audios: [{ mediaType: "audio/mpeg", data: "aGVsbG8=", name: "note.mp3" }],
+        },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "docker__ps", arguments: { all: true } }],
+        },
+        { role: "tool", toolCallId: "call_1", content: "[]" },
+      ],
+    };
+    for await (const _event of provider.stream(request)) {
+      // Drain the stream so the request body is observed.
+    }
+    assert.deepEqual(body.messages, [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is shown?" },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "auto" },
+          },
+          {
+            type: "file",
+            file: {
+              filename: "guide.pdf",
+              file_data: "data:application/pdf;base64,JVBERi0xLjcK",
+            },
+          },
+          // OpenAI's audio part carries the bytes inline and names the container, not the MIME.
+          { type: "input_audio", input_audio: { data: "aGVsbG8=", format: "mp3" } },
+        ],
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "docker__ps", arguments: '{"all":true}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "[]" },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the responses dialect uses input_image blocks", async () => {
+  const provider = new OpenAiCompatibleProvider({
+    baseUrl: "https://example.test/v1",
+    model: "vision",
+    wireApi: "responses",
+  });
+  const originalFetch = globalThis.fetch;
+  let body: Record<string, unknown> = {};
+  globalThis.fetch = async (_input, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response("data: [DONE]\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  try {
+    const request: ChatRequest = {
+      model: "vision",
+      messages: [
+        {
+          role: "user",
+          content: "",
+          images: [{ mediaType: "image/jpeg", data: "aGVsbG8=" }],
+          documents: [
+            { mediaType: "application/pdf", data: "JVBERi0xLjcK", name: "guide.pdf" },
+          ],
+          audios: [{ mediaType: "audio/wav", data: "aGVsbG8=" }],
+        },
+      ],
+    };
+    for await (const _event of provider.stream(request)) {
+      // Drain the stream so the request body is observed.
+    }
+    assert.deepEqual(body.input, [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: "data:image/jpeg;base64,aGVsbG8=",
+            detail: "auto",
+          },
+          {
+            type: "input_file",
+            filename: "guide.pdf",
+            file_data: "data:application/pdf;base64,JVBERi0xLjcK",
+          },
+          { type: "input_audio", input_audio: { data: "aGVsbG8=", format: "wav" } },
+        ],
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAI's audio parts take WAV and MP3 only, so other formats fail loudly", async () => {
+  const provider = new OpenAiCompatibleProvider({
+    baseUrl: "https://example.test/v1",
+    model: "audio",
+  });
+  const originalFetch = globalThis.fetch;
+  let sent = false;
+  globalThis.fetch = async () => {
+    sent = true;
+    return new Response("data: [DONE]\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  try {
+    const request: ChatRequest = {
+      model: "audio",
+      messages: [
+        {
+          role: "user",
+          content: "transcribe this",
+          audios: [{ mediaType: "audio/ogg", data: "T2dnUwAA" }],
+        },
+      ],
+    };
+    await assert.rejects(
+      async () => {
+        for await (const _event of provider.stream(request)) {
+          // Drain: the request body is only built on the first pull.
+        }
+      },
+      /WAV and MP3/,
+      "a format OpenAI cannot carry must be reported, not dropped",
+    );
+    assert.equal(sent, false, "nothing may leave when the attachment cannot be carried");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

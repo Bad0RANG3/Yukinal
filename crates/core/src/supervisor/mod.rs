@@ -23,7 +23,7 @@ mod restart;
 
 pub use restart::{restart_delay, ExitRecord, RestartPolicy, RestartRecord};
 
-use restart::{RestartDecision, RestartState};
+pub(crate) use restart::{RestartDecision, RestartState};
 
 /// Bounded tail of sidecar stderr, newest last. A crash must be explainable from the
 /// desktop's own memory, not by re-running with a debugger.

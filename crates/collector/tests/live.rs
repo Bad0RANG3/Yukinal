@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use yukinal_collector::{CollectedData, CollectorContext, CollectorEngine};
 use yukinal_ssh::{
-    Authentication, ConnectionSecrets, KnownHostsPolicy, RusshBackend, SshBackend, SshConfig,
+    Authentication, ConnectionSecrets, KnownHostsPolicy, OutboundProxy, RusshBackend, SshBackend,
+    SshConfig,
 };
 
 fn env(key: &str) -> Option<String> {
@@ -46,6 +47,8 @@ async fn connect() -> Option<(Arc<RusshBackend>, yukinal_ssh::Session)> {
         authentication: Authentication::Password {
             credential_ref: "keychain://ssh-test/plain".into(),
         },
+        host_certificate_authority: None,
+        outbound_proxy: OutboundProxy::default(),
         known_hosts_policy: KnownHostsPolicy::TrustOnFirstUse,
         keepalive_interval_secs: 0,
     };
@@ -53,6 +56,7 @@ async fn connect() -> Option<(Arc<RusshBackend>, yukinal_ssh::Session)> {
         password: env("YUKINAL_SSH_TEST_PASSWORD"),
         private_key_pem: None,
         private_key_passphrase: None,
+        keyboard_interactive: None,
     };
     let session = backend.connect(config, secrets).await.expect("connect");
     Some((backend, session))

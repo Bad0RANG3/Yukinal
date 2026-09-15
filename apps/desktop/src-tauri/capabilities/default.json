@@ -1,7 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the Yukinal main window. Core only: the UI may not shell out, read arbitrary files, or spawn the sidecar itself (-R9).",
+  "description": "Permissions for the Yukinal main window. The UI may open default browser URLs but may not open arbitrary files, shell out, or spawn the sidecar itself (-R9).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
+  ]
 }

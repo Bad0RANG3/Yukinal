@@ -50,6 +50,10 @@ pub struct ChatMessage {
     pub session_id: String,
     pub role: ChatMessageRole,
     pub content: String,
+    /// Opaque shared-contract prompt parts. The command boundary validates their
+    /// shape and bounds before this repository stores them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
     pub created_at: String,

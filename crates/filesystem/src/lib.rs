@@ -29,9 +29,9 @@
 //!
 //! # 编辑的保证边界（诚实版本）
 //! `edit` 的前置条件是「文件的内容还是我读过的那一份」，它拦得住的是：读完之后别人改过、
-//! 模型拿着过期内容写回、`oldString` 指不到唯一一处。它**拦不住**的是：检查与写回之间那个
-//! 窗口里的并发写入 —— SFTP 没有 compare-and-swap，所以这是一次 check-then-write，窗口被
-//! 收窄但**没有关闭**。两份内容大于读上限的文件根本不允许编辑（
+//! 模型拿着过期内容写回、`oldString` 指不到唯一一处。普通文件的替换阶段会先写同目录临时
+//! 文件再 rename，因此读者不会看到半写状态；但整条守卫仍是 check-then-replace，不是
+//! compare-and-swap，检查与替换之间的并发写入仍可能被覆盖。两份内容大于读上限的文件根本不允许编辑（
 //! [`MAX_AGENT_EDIT_BYTES`]），因为截断读取的 revision 只描述前缀，而写回前缀就是截断用户的
 //! 文件：那条规则是数据丢失的防线，不是可调参数。
 //!
@@ -66,6 +66,7 @@ pub use policy::{is_agent_blocked_path, validate_remote_path, AGENT_PATH_POLICY_
 pub use revision::{content_revision, is_content_revision};
 pub use service::{
     AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error, ListedEntry, RemoteEdit,
-    RemoteEntry, RemoteFileService, RemoteFileTransport, RemoteListing, RemoteRead, RemoteWrite,
-    Result, TransportError, TransportResult,
+    RemoteEntry, RemoteEntryKind, RemoteFileService, RemoteFileTransport, RemoteListing,
+    RemoteRead, RemoteStat, RemoteWrite, ReplaceError, ReplaceGuard, ReplacedFile, Result,
+    TransportError, TransportResult,
 };

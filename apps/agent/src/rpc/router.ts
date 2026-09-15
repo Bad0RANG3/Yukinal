@@ -5,6 +5,8 @@
  * built answers RPC_NOT_IMPLEMENTED instead of returning invented data.
  */
 
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import {
@@ -25,6 +27,7 @@ import {
 import {
   AGENT_NOTIFICATIONS,
   type AgentRunRequest,
+  type AgentPromptPart,
   type AgentRunResult,
   type AgentStreamEvent,
   type ApprovalResponse,
@@ -83,7 +86,7 @@ export class RpcRouter {
    */
   #admissions = new Map<
     string,
-    { sessionId: string; prompt: string; runId: string; started: boolean; completed: boolean }
+    { sessionId: string; fingerprint: string; runId: string; started: boolean; completed: boolean }
   >();
 
   #notificationSink: ((method: string, params: unknown) => void) | undefined;
@@ -191,11 +194,11 @@ export class RpcRouter {
       policyId: requestedPolicy?.id ?? "(environment default)",
     });
 
-    const prompt = requestPrompt(parsed);
+    const fingerprint = requestFingerprint(parsed);
     const admission = parsed.messageId ? this.#admissions.get(parsed.messageId) : undefined;
 
     if (admission) {
-      if (admission.sessionId !== parsed.sessionId || admission.prompt !== prompt) {
+      if (admission.sessionId !== parsed.sessionId || admission.fingerprint !== fingerprint) {
         throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, `messageId "${parsed.messageId}" was already admitted with different content`);
       }
       // Already executing, or finished: this call may not open a second run for a
@@ -226,7 +229,7 @@ export class RpcRouter {
       }
       this.#admissions.set(parsed.messageId, {
         sessionId: parsed.sessionId,
-        prompt,
+        fingerprint,
         runId: parsed.runId,
         started: false,
         completed: false,
@@ -259,7 +262,7 @@ export class RpcRouter {
     if (parsed.messageId && !admission) {
       this.#admissions.set(parsed.messageId, {
         sessionId: parsed.sessionId,
-        prompt: requestPrompt(parsed),
+        fingerprint: requestFingerprint(parsed),
         runId: parsed.runId,
         started: true,
         completed: false,
@@ -278,7 +281,9 @@ export class RpcRouter {
     // arriving after other frames is matched, not mis-assigned.
     if (parsed.delivery === "sync") {
       const result = await this.#spinRun(parsed, provider);
-      return { runId: parsed.runId, started: true, result };
+      return resumed
+        ? { runId: parsed.runId, started: true, resumed: true, result }
+        : { runId: parsed.runId, started: true, result };
     }
     // The crash is already visible as `agent.failed` on the event stream, and this
     // call's response has long been written, so there is nothing left to reject.
@@ -400,8 +405,53 @@ export class RpcRouter {
   }
 }
 
-function requestPrompt(request: AgentRunRequest): string {
-  return request.parts?.map((part) => part.text).join("\n").trim() || request.prompt.trim();
+/**
+ * Bind an admission to the complete prompt, not only its display text.
+ *
+ * Hashing keeps image bytes out of the long-lived receipt map while still making a
+ * retry with different attachments fail instead of silently resuming under content
+ * the runner never admitted.
+ */
+function requestFingerprint(request: AgentRunRequest): string {
+  const parts = request.parts ?? [{ type: "text" as const, text: request.prompt }];
+  const canonical = JSON.stringify({
+    prompt: request.prompt,
+    parts: parts.map(canonicalPart),
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/**
+ * The per-part shape that goes into the admission fingerprint.
+ *
+ * Every attachment kind is included **with its bytes**, which is the whole point: admitting a
+ * `messageId` twice with different media is the defect this prevents, so a kind that could be
+ * left out would be a hole. A `switch` rather than a chain of ternaries so that adding a kind
+ * is a compile error here instead of a silently identical fingerprint.
+ */
+function canonicalPart(part: AgentPromptPart): unknown {
+  switch (part.type) {
+    case "text":
+      return { type: "text", text: part.text };
+    case "image":
+      return {
+        type: "image",
+        mediaType: part.mediaType,
+        data: part.data,
+        name: part.name ?? null,
+      };
+    case "file":
+      return { type: "file", mediaType: part.mediaType, data: part.data, name: part.name };
+    case "document":
+      return { type: "document", mediaType: part.mediaType, data: part.data, name: part.name };
+    case "audio":
+      return {
+        type: "audio",
+        mediaType: part.mediaType,
+        data: part.data,
+        name: part.name ?? null,
+      };
+  }
 }
 
 /**
@@ -452,12 +502,12 @@ function buildProvider(config: RuntimeProviderConfig | undefined): LLMProvider {
   if (!config) {
     throw new RpcFailure(RPC_ERROR.INVALID_PARAMS, "run.start requires providerConfig (resolved by the core)");
   }
-  const { baseUrl, model, apiKey, customHeaders, timeoutMs } = config;
+  const { baseUrl, model, apiKey, customHeaders, apiVersion, timeoutMs } = config;
   switch (config.kind) {
     case "openai-compatible":
       return new OpenAiCompatibleProvider({ baseUrl, model, apiKey, customHeaders, timeoutMs, wireApi: config.wireApi });
     case "anthropic":
-      return new AnthropicProvider({ baseUrl, model, apiKey, customHeaders, timeoutMs });
+      return new AnthropicProvider({ baseUrl, model, apiKey, customHeaders, apiVersion, timeoutMs });
     case "gemini":
       return new GeminiProvider({ baseUrl, model, apiKey, customHeaders, timeoutMs });
   }

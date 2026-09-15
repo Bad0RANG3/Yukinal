@@ -25,6 +25,8 @@ struct StagedSecrets {
     method: &'static str,
     credential_ref: Option<CredentialRef>,
     passphrase_ref: Option<CredentialRef>,
+    private_key_path: Option<String>,
+    certificate_path: Option<String>,
 }
 
 impl StagedSecrets {
@@ -52,6 +54,8 @@ impl StagedSecrets {
             method: self.method.to_string(),
             credential_ref: self.credential_ref_string(),
             passphrase_ref: self.passphrase_ref_string(),
+            private_key_path: self.private_key_path.clone(),
+            certificate_path: self.certificate_path.clone(),
             created_at: now.to_string(),
         }
     }
@@ -103,49 +107,90 @@ impl<'a> IdentitySecrets<'a> {
                         .map_err(|error| error.to_string())?,
                 ),
                 passphrase_ref: None,
+                private_key_path: None,
+                certificate_path: None,
             }),
             AuthenticationInput::PrivateKey {
                 private_key_pem,
                 passphrase,
-            } => {
-                let key_ref = self
-                    .credentials
-                    .set("ssh", account, &Secret::from_utf8(private_key_pem.clone()))
-                    .map_err(|error| error.to_string())?;
-                // 空 / 纯空白口令：不写第二条条目，身份就是「明文 key」。
-                let Some(passphrase) = passphrase_for_storage(passphrase.as_deref()) else {
-                    return Ok(StagedSecrets {
-                        method: "privateKey",
-                        credential_ref: Some(key_ref),
-                        passphrase_ref: None,
-                    });
-                };
-                match self.credentials.set(
-                    "ssh",
-                    &format!("{account}{PASSPHRASE_ACCOUNT_SUFFIX}"),
-                    &Secret::from_utf8(passphrase),
-                ) {
-                    Ok(passphrase_ref) => Ok(StagedSecrets {
-                        method: "privateKey",
-                        credential_ref: Some(key_ref),
-                        passphrase_ref: Some(passphrase_ref),
-                    }),
-                    Err(error) => {
-                        // 不能留下「有 key、没口令」的身份：加密 key 要等到认证那一刻
-                        // 才报 PassphraseRequired，用户根本不知道是保存失败。当场回滚私钥。
-                        let _ = self.credentials.delete(&key_ref);
-                        Err(error.to_string())
-                    }
-                }
-            }
+            } => self.stage_private_key(
+                "privateKey",
+                private_key_pem,
+                passphrase.as_deref(),
+                None,
+                None,
+                account,
+            ),
+            AuthenticationInput::Certificate {
+                private_key_pem,
+                passphrase,
+                certificate_path,
+                private_key_path,
+            } => self.stage_private_key(
+                "certificate",
+                private_key_pem,
+                passphrase.as_deref(),
+                private_key_path.clone(),
+                Some(certificate_path.clone()),
+                account,
+            ),
             AuthenticationInput::Agent => Ok(StagedSecrets {
                 method: "agent",
                 credential_ref: None,
                 passphrase_ref: None,
+                private_key_path: None,
+                certificate_path: None,
             }),
             // 「引用已存在的身份」的全部语义就是不改凭据，调用点必须先处理掉它。
             AuthenticationInput::Identity { .. } => {
                 Err("an identity reference stages no secrets".to_string())
+            }
+        }
+    }
+
+    fn stage_private_key(
+        &self,
+        method: &'static str,
+        private_key_pem: &str,
+        passphrase: Option<&str>,
+        private_key_path: Option<String>,
+        certificate_path: Option<String>,
+        account: &str,
+    ) -> Result<StagedSecrets, String> {
+        let key_ref = self
+            .credentials
+            .set(
+                "ssh",
+                account,
+                &Secret::from_utf8(private_key_pem.to_string()),
+            )
+            .map_err(|error| error.to_string())?;
+        let Some(passphrase) = passphrase_for_storage(passphrase) else {
+            return Ok(StagedSecrets {
+                method,
+                credential_ref: Some(key_ref),
+                passphrase_ref: None,
+                private_key_path,
+                certificate_path,
+            });
+        };
+        match self.credentials.set(
+            "ssh",
+            &format!("{account}{PASSPHRASE_ACCOUNT_SUFFIX}"),
+            &Secret::from_utf8(passphrase),
+        ) {
+            Ok(passphrase_ref) => Ok(StagedSecrets {
+                method,
+                credential_ref: Some(key_ref),
+                passphrase_ref: Some(passphrase_ref),
+                private_key_path,
+                certificate_path,
+            }),
+            Err(error) => {
+                // Never leave a key whose passphrase failed to persist: the failure
+                // would otherwise appear later as `PassphraseRequired`.
+                let _ = self.credentials.delete(&key_ref);
+                Err(error.to_string())
             }
         }
     }
@@ -401,6 +446,43 @@ mod tests {
         assert!(database.identities().get("idn_agent").is_err());
     }
 
+    #[test]
+    fn a_certificate_identity_stores_key_secret_and_public_paths_separately() {
+        let (_path, database) = temp_database("certificate");
+        let store = MemoryCredentialStore::new();
+        let secrets = IdentitySecrets {
+            database: &database,
+            credentials: &store,
+        };
+        let staged = secrets
+            .stage(
+                &AuthenticationInput::Certificate {
+                    private_key_pem: "private key".into(),
+                    passphrase: Some("passphrase".into()),
+                    certificate_path: "/home/dev/.ssh/id_ed25519-cert.pub".into(),
+                    private_key_path: Some("/home/dev/.ssh/id_ed25519".into()),
+                },
+                "srv_certificate",
+            )
+            .expect("stage certificate");
+        let identity = staged.to_identity("idn_certificate".into(), "prod".into(), NOW);
+
+        assert_eq!(identity.method, "certificate");
+        assert_eq!(
+            identity.certificate_path.as_deref(),
+            Some("/home/dev/.ssh/id_ed25519-cert.pub")
+        );
+        assert_eq!(
+            identity.private_key_path.as_deref(),
+            Some("/home/dev/.ssh/id_ed25519")
+        );
+        assert_eq!(identity.credential_ref, "keychain://ssh/srv_certificate");
+        assert_eq!(
+            identity.passphrase_ref.as_deref(),
+            Some("keychain://ssh/srv_certificate-passphrase")
+        );
+    }
+
     /// 更新路径的 account 约定（`{serverId}-{cred…}`）同样必须支持口令 —— 这条用例
     /// 防止「新增支持口令、更新拒绝口令」再次出现。
     #[test]
@@ -466,6 +548,8 @@ mod tests {
                 method: "privateKey".into(),
                 credential_ref: key_ref.to_string_ref(),
                 passphrase_ref: Some(pass_ref.to_string_ref()),
+                private_key_path: None,
+                certificate_path: None,
                 created_at: NOW.into(),
             })
             .expect("insert identity");
@@ -510,6 +594,7 @@ mod tests {
                 port: 22,
                 username: "test".into(),
                 identity_id: Some("idn_shared".into()),
+                host_certificate_authority: None,
             },
             group_id: None,
             capabilities: ServerCapabilities::default(),

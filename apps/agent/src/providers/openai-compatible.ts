@@ -95,7 +95,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
               }
             : {
                 model: request.model,
-                messages: request.messages,
+                messages: toChatMessages(request.messages),
                 tools: request.tools,
                 stream: true,
                 temperature: request.temperature ?? 0,
@@ -369,9 +369,140 @@ function toResponsesInput(messages: LlmMessage[]): Array<Record<string, unknown>
       continue;
     }
     const contentType = message.role === "assistant" ? "output_text" : "input_text";
-    input.push({ role: message.role, content: [{ type: contentType, text: message.content }] });
+    const content: Array<Record<string, unknown>> = [];
+    if (message.content) content.push({ type: contentType, text: message.content });
+    if (message.role === "user") {
+      for (const image of message.images ?? []) {
+        content.push({
+          type: "input_image",
+          image_url: imageDataUrl(image.mediaType, image.data),
+          detail: "auto",
+        });
+      }
+      for (const document of message.documents ?? []) {
+        content.push({
+          type: "input_file",
+          filename: document.name,
+          file_data: dataUrl(document.mediaType, document.data),
+        });
+      }
+      for (const audio of message.audios ?? []) {
+        content.push({
+          type: "input_audio",
+          input_audio: { data: audio.data, format: openAiAudioFormat(audio.mediaType) },
+        });
+      }
+    }
+    input.push({ role: message.role, content });
   }
   return input;
+}
+
+/**
+ * Chat Completions uses a different message vocabulary from the neutral SDK:
+ * tool calls are nested `function` objects, results use `tool_call_id`, and a
+ * multimodal user turn uses typed content blocks.
+ */
+function toChatMessages(messages: LlmMessage[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const message of messages) {
+    switch (message.role) {
+      case "system":
+        out.push({ role: "system", content: message.content });
+        break;
+      case "user": {
+        if (!message.images?.length && !message.documents?.length && !message.audios?.length) {
+          out.push({ role: "user", content: message.content });
+          break;
+        }
+        const content: Array<Record<string, unknown>> = [];
+        if (message.content) content.push({ type: "text", text: message.content });
+        for (const image of message.images ?? []) {
+          content.push({
+            type: "image_url",
+            image_url: {
+              url: imageDataUrl(image.mediaType, image.data),
+              detail: "auto",
+            },
+          });
+        }
+        for (const document of message.documents ?? []) {
+          content.push({
+            type: "file",
+            file: {
+              filename: document.name,
+              file_data: dataUrl(document.mediaType, document.data),
+            },
+          });
+        }
+        for (const audio of message.audios ?? []) {
+          content.push({
+            type: "input_audio",
+            input_audio: { data: audio.data, format: openAiAudioFormat(audio.mediaType) },
+          });
+        }
+        out.push({ role: "user", content });
+        break;
+      }
+      case "assistant": {
+        const wire: Record<string, unknown> = {
+          role: "assistant",
+          content: message.content || null,
+        };
+        if (message.toolCalls?.length) {
+          wire.tool_calls = message.toolCalls.map((call) => ({
+            id: call.id,
+            type: "function",
+            function: {
+              name: call.name,
+              arguments: JSON.stringify(call.arguments),
+            },
+          }));
+        }
+        out.push(wire);
+        break;
+      }
+      case "tool":
+        out.push({
+          role: "tool",
+          tool_call_id: message.toolCallId,
+          content: message.content,
+        });
+        break;
+    }
+  }
+  return out;
+}
+
+function imageDataUrl(mediaType: string, data: string): string {
+  return dataUrl(mediaType, data);
+}
+
+/**
+ * The format name OpenAI's `input_audio` parts take.
+ *
+ * Only WAV and MP3 exist in that vocabulary. OGG and FLAC are accepted by the attachment
+ * layer because other protocols carry them, so this is where they have to stop: sending an
+ * unsupported format would be a 400, and dropping the clip would leave the model answering
+ * a question it never heard.
+ */
+function openAiAudioFormat(mediaType: string): "wav" | "mp3" {
+  switch (mediaType) {
+    case "audio/wav":
+      return "wav";
+    case "audio/mpeg":
+      return "mp3";
+    default:
+      throw new ProviderError(
+        `${mediaType} cannot be sent to OpenAI: its audio parts accept WAV and MP3 only. ` +
+          "Attach a WAV or MP3 file, or use a provider that takes this format.",
+        false,
+      );
+  }
+}
+
+function dataUrl(mediaType: string, data: string): string {
+  return `data:${mediaType};base64,${data}`;
 }
 
 function finishReasonFor(reason: string | null): FinishReason {

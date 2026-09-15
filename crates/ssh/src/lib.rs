@@ -31,14 +31,23 @@
 pub mod backend;
 mod conn;
 pub mod known_hosts;
+mod krl;
 
-pub use backend::RusshBackend;
+pub use backend::{
+    link_count_probe_command, parse_link_count, shell_single_quote, RusshBackend, SftpEntryKind,
+    SftpFileStat, SftpReplaceError, SftpReplaceGuard, SftpReplacement,
+};
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use russh::keys::ssh_key;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+/// 出站代理（远端 KRL 下载用它）。定义在 `yukinal-net`，因为 MCP 与 OAuth 用的是同一个值。
+pub use yukinal_net::OutboundProxy;
 
 use crate::conn::SessionHandle;
 
@@ -85,16 +94,8 @@ pub enum Error {
         /// 服务器这次出示的那个。
         presented: String,
     },
-    /// 服务器出示的 host key 形状本 crate 无法钉住（目前只有 host 证书一种）。
-    ///
-    /// 同样是为了不让失败变成一句「握手失败」：本 crate 没有 host CA 信任库，
-    /// 所以既不能验证也不能钉住一张 host 证书（见 `ConnHandler::check_server_key`），
-    /// 而用户需要知道的是这件事本身，不是「连接断了」。
-    HostKeyUnsupported {
-        host: String,
-        port: u16,
-        detail: String,
-    },
+    /// A configured host-certificate CA refused the certificate presented by the server.
+    HostCertificate { host: String, reason: String },
     /// Channel / session 层失败。
     Channel(String),
     /// 命令或连接超时。
@@ -124,6 +125,12 @@ impl fmt::Display for Error {
                      {pinned}, but the server presented {presented}"
                 )
             }
+            Error::HostCertificate { host, reason } => {
+                write!(
+                    f,
+                    "host certificate verification failed for {host}: {reason}"
+                )
+            }
             // 措辞刻意不像一条指纹错误：这是一次**策略/前置条件**失败，不是
             // 「钥匙变了」。用户要做的动作是「先核验并钉住」，不是「去查是不是中间人」。
             Error::HostKeyNotPinned { host, port } => {
@@ -133,9 +140,6 @@ impl fmt::Display for Error {
                      host key (trust the fingerprint explicitly before connecting; this is a \
                      policy precondition failure, not a key mismatch)"
                 )
-            }
-            Error::HostKeyUnsupported { host, port, detail } => {
-                write!(f, "host key of {host}:{port} cannot be pinned: {detail}")
             }
             Error::Channel(message) => write!(f, "ssh channel error: {message}"),
             Error::Timeout => write!(f, "ssh operation timed out"),
@@ -188,10 +192,9 @@ pub enum AgentError {
     /// 带确认约束）。
     #[error("the ssh-agent refused to sign: {detail}")]
     SigningRejected { detail: String },
-    /// agent 交换在签名阶段失败，且底层原因无法在类型上细分（见 `backend.rs` 的
-    /// `map_agent_sign_error`：`AgentAuthError` 在 russh 的私有模块里）。
-    #[error("the ssh-agent exchange failed while signing: {detail}")]
-    SigningFailed { detail: String },
+    /// Agent 通讯本身失败，但没有证据表明它拒绝了这个身份。
+    #[error("the ssh-agent exchange failed: {detail}")]
+    ExchangeFailed { detail: String },
     /// agent 的应答不符合 agent 协议。
     #[error("the ssh-agent reply is not valid agent protocol: {detail}")]
     Protocol { detail: String },
@@ -227,6 +230,33 @@ pub enum CertificateError {
     /// 而这里能直接告诉调用点「你把 A 的证书和 B 的私钥配在一起了」。
     #[error("the certificate does not certify the private key it was offered with")]
     KeyMismatch,
+}
+
+/// One server-issued keyboard-interactive prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardInteractivePrompt {
+    pub prompt: String,
+    /// `false` is the server's request for a non-echoed response (normally a secret).
+    pub echo: bool,
+}
+
+/// A bounded challenge shown to the user after the first factor succeeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardInteractiveChallenge {
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<KeyboardInteractivePrompt>,
+}
+
+/// The caller-owned bridge that asks the user for keyboard-interactive responses.
+///
+/// Implementations must not persist responses or include them in errors/logs. The SSH
+/// backend only keeps them for the duration of one protocol reply.
+pub trait KeyboardInteractiveHandler: Send + Sync {
+    fn respond<'a>(
+        &'a self,
+        challenge: &'a KeyboardInteractiveChallenge,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>>;
 }
 
 /// 认证方式。秘密只以引用出现（材料由调用点解析后经 [`ConnectionSecrets`] 传入）。
@@ -275,6 +305,9 @@ pub struct ConnectionSecrets {
     pub password: Option<String>,
     pub private_key_pem: Option<String>,
     pub private_key_passphrase: Option<String>,
+    /// Optional second-factor interaction bridge. This is not secret material itself;
+    /// responses exist only in the oneshot used for one protocol round.
+    pub keyboard_interactive: Option<Arc<dyn KeyboardInteractiveHandler>>,
 }
 
 impl fmt::Debug for ConnectionSecrets {
@@ -290,6 +323,7 @@ impl ConnectionSecrets {
             password: None,
             private_key_pem: None,
             private_key_passphrase: None,
+            keyboard_interactive: None,
         }
     }
 }
@@ -306,6 +340,24 @@ pub enum KnownHostsPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostCertificateAuthority {
+    /// OpenSSH public-key line for the CA that signs host certificates.
+    pub ca_public_key: String,
+    /// Host principal patterns accepted from a valid certificate.
+    pub principals: Vec<String>,
+    /// Optional local OpenSSH KRL used to reject revoked host certificates/keys.
+    pub revocation_list_path: Option<String>,
+    /// Optional HTTPS OpenSSH KRL source; mutually exclusive with the local path.
+    pub revocation_list_url: Option<String>,
+    /// Optional public keys trusted to sign the KRL independently of the host CA.
+    ///
+    /// Keeping multiple entries configured at once supports signer rotation: a KRL
+    /// signed by any configured signer is valid, while every signature it contains
+    /// must still verify.
+    pub revocation_list_signers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshConfig {
     /// 稳定 serverId：任何一次连接都必须绑定它，
     /// 不允许用自然语言（"production"）定位目标。
@@ -314,9 +366,21 @@ pub struct SshConfig {
     pub port: u16,
     pub username: String,
     pub authentication: Authentication,
+    /// Optional CA/principal policy. When present, a plain host key is refused and a
+    /// host certificate must validate against this authority.
+    pub host_certificate_authority: Option<HostCertificateAuthority>,
     pub known_hosts_policy: KnownHostsPolicy,
+    /// 出站代理：远端 KRL 下载用它（ADR 0022）。默认直连。
+    pub outbound_proxy: OutboundProxy,
     /// 0 = 关闭 keepalive。
     pub keepalive_interval_secs: u16,
+}
+
+/// Reject an unusable host CA at the configuration boundary.
+pub fn validate_host_ca_public_key(value: &str) -> Result<()> {
+    ssh_key::PublicKey::from_openssh(value.trim())
+        .map(|_| ())
+        .map_err(|error| Error::Configuration(format!("invalid host CA public key: {error}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -40,6 +40,13 @@ export interface AiProviderConfig {
   enabled: boolean;
   /** Extra headers for corporate gateways. */
   customHeaders?: Record<string, string>;
+  /**
+   * Anthropic's dated `anthropic-version` protocol header.
+   *
+   * Only the native Anthropic adapter has this version axis. Other kinds must omit
+   * it rather than store a value their protocol would silently ignore.
+   */
+  apiVersion?: string;
   maxInputTokens?: number;
   /**
    * Endpoint dialect (codex `responses` vs chat completions). **Only meaningful for
@@ -86,6 +93,11 @@ export interface RuntimeProviderConfig {
   /** Resolved at the point of use; absent for local endpoints (Ollama…). */
   apiKey?: string;
   customHeaders?: Record<string, string>;
+  /**
+   * Anthropic `anthropic-version` override. Only the native Anthropic kind may
+   * carry it; see `AiProviderConfig.apiVersion`.
+   */
+  apiVersion?: string;
   timeoutMs?: number;
   /**
    * Endpoint dialect: chat completions (default) or the codex `responses` API.
@@ -108,6 +120,10 @@ export interface ProviderSaveInput {
   model: string;
   /** Present only when the user enters a new key; absent keeps the existing ref. */
   apiKey?: string;
+  /** Non-secret gateway/protocol headers approved by the shared schema. */
+  customHeaders?: Record<string, string>;
+  /** Anthropic-only dated protocol version; see `AiProviderConfig.apiVersion`. */
+  apiVersion?: string;
   /** Rejected for the two native kinds; see `AiProviderConfig.wireApi`. */
   wireApi?: "chat" | "responses";
   models?: ProviderModelOption[];
@@ -159,6 +175,10 @@ export interface McpServerConfig {
   command?: string;
   args?: string[];
   url?: string;
+  /** Ordered static HTTP authentication headers; names are public, references stay opaque. */
+  httpAuthHeaders: McpHttpAuthHeaderConfig[];
+  /** OAuth discovery/client metadata and an opaque token-bundle reference. */
+  oauth?: McpOAuthConfig;
   enabled: boolean;
   /**
    * Tools this server is allowed to register. Empty = nothing is auto-trusted;
@@ -167,4 +187,64 @@ export interface McpServerConfig {
   allowedTools: string[];
   /** Every MCP tool starts at >= "medium" until reviewed. */
   trustLevel: "reviewed" | "unreviewed";
+}
+
+/** One stored static HTTP authentication header. */
+export interface McpHttpAuthHeaderConfig {
+  name: string;
+  /** Opaque credential-store reference; the secret itself never reaches this contract. */
+  credentialRef: string;
+}
+
+/**
+ * How the desktop obtains the first token bundle (mirrors `McpOAuthFlow`).
+ *
+ * `authorization_code` is the browser redirect with a loopback callback; `device_code`
+ * is RFC 8628, for servers that cannot reach a local callback at all.
+ */
+export type McpOAuthFlow = "authorization_code" | "device_code";
+
+/**
+ * Client authentication at the token endpoint (mirrors `McpOAuthClientAuth`).
+ *
+ * `none` is a public client. A client id provisioned by dynamic registration is always
+ * `none`: a secret the server volunteers during registration is not a reason to start
+ * sending one.
+ */
+export type McpOAuthClientAuth = "none" | "client_secret_post" | "client_secret_basic";
+
+/** Stored OAuth configuration. Access and refresh tokens never enter this shape. */
+export interface McpOAuthConfig {
+  issuer: string;
+  clientId: string;
+  /**
+   * Always present: Rust defaults rows written before the field existed to
+   * `authorization_code`, and a flow change is part of the stored identity, so
+   * switching it discards the stored token rather than reusing it.
+   */
+  flow: McpOAuthFlow;
+  /** Always present: rows written before this setting existed are public clients. */
+  clientAuth: McpOAuthClientAuth;
+  /**
+   * Opaque credential-store reference for the hand-entered client secret. The secret
+   * itself never reaches this contract, a settings response, an error or a log.
+   */
+  clientSecretRef?: string;
+  /**
+   * Whether access tokens must be sender-constrained (RFC 9449 DPoP, ADR 0018).
+   *
+   * Always present: rows written before the setting existed are plain bearer clients, and
+   * turning it on or off is part of the stored identity — it discards the stored token
+   * exactly like changing the issuer does.
+   */
+  dpop: boolean;
+  /**
+   * Opaque credential-store reference for the DPoP private key. The key is generated on
+   * the host and never leaves the credential store, so losing it costs a re-authorization
+   * instead of silently downgrading the connection to bearer.
+   */
+  dpopKeyRef?: string;
+  scopes: string[];
+  tokenEndpoint?: string;
+  credentialRef?: string;
 }

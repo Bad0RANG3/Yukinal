@@ -52,6 +52,7 @@ pub const PROTOCOL_VERSION: &str = "1.0";
 /// JSON-RPC request ids are local to this supervisor; the agent never allocates ids.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const NODE_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// CREATE_NO_WINDOW, so the sidecar never flashes a console on Windows.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -255,6 +256,7 @@ impl SidecarHandle {
 /// Launch the sidecar. The returned handle has *not* been initialized -- callers that
 /// need a handshake should call `initialize` explicitly (see `crate::commands`).
 pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError> {
+    ensure_node_prerequisite(config).await?;
     let mut command = Command::new(&config.program);
     command
         .args(&config.args)
@@ -362,6 +364,50 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     });
 
     Ok(handle)
+}
+
+/// Refuse an unsupported Node before loading the ESM bundle.
+///
+/// The check is deliberately skipped for `YUKINAL_AGENT_COMMAND`: that path may point to
+/// a wrapper or another runtime, so this crate cannot infer that `--version` has Node
+/// semantics. Missing and non-executable normal Node paths still use the same actionable
+/// launch error as a failed spawn.
+async fn ensure_node_prerequisite(config: &SidecarConfig) -> Result<(), SidecarError> {
+    if !config.requires_node {
+        return Ok(());
+    }
+    let mut command = Command::new(&config.program);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = match tokio::time::timeout(NODE_VERSION_TIMEOUT, command.output()).await {
+        Err(_) => {
+            return Err(SidecarError::Launch(format!(
+                "timed out while checking the Node.js version from `{} --version`",
+                config.program.display()
+            )));
+        }
+        Ok(Err(error)) => return Err(config.launch_error(&error)),
+        Ok(Ok(output)) => output,
+    };
+    if !output.status.success() {
+        return Err(SidecarError::Launch(format!(
+            "`{} --version` exited with {}; Node.js {} or newer is required",
+            config.program.display(),
+            output
+                .status
+                .code()
+                .map_or_else(|| "a signal".to_string(), |code| format!("code {code}")),
+            config::REQUIRED_NODE_MAJOR
+        )));
+    }
+    config.validate_node_version(&String::from_utf8_lossy(&output.stdout))?;
+    Ok(())
 }
 
 impl SidecarHandle {

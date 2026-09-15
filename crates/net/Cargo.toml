@@ -1,0 +1,17 @@
+[package]
+name = "yukinal-net"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+reqwest = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

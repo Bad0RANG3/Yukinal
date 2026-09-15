@@ -3,6 +3,7 @@ import { GettingStarted } from "../features/onboarding/GettingStarted.js";
 import { useOnboardingStore } from "../features/onboarding/onboarding-store.js";
 import { RuntimeSettings } from "../features/settings/RuntimeSettings.js";
 import { ServerList } from "../features/servers/ServerList.js";
+import { ServerAuthChallengeModal } from "../features/servers/ServerAuthChallengeModal.js";
 import { TerminalPane } from "../features/terminal/TerminalPane.js";
 import { ServerOverview } from "../features/overview/ServerOverview.js";
 import { RemoteFilesPane } from "../features/files/RemoteFilesPane.js";
@@ -216,6 +217,7 @@ export function AppShell() {
 
       {agentOpen ? <button type="button" className="agent-scrim" aria-label="关闭 Agent 面板" onClick={() => setAgentOpen(false)} /> : null}
       <AgentPanel onCloseStart={onAgentCloseStart} onCloseEnd={onAgentCloseEnd} />
+      <ServerAuthChallengeModal />
     </div>
   );
 }
