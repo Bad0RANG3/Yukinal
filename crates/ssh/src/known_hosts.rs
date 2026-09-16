@@ -48,7 +48,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostKeyEntry {
@@ -180,7 +182,6 @@ pub enum KnownHostsError {
 pub struct KnownHostsStore {
     path: Option<String>,
     entries: HashMap<(String, u16), String>,
-    persisted: bool,
 }
 
 impl Default for KnownHostsStore {
@@ -196,7 +197,6 @@ impl KnownHostsStore {
         Self {
             path: None,
             entries: HashMap::new(),
-            persisted: false,
         }
     }
 
@@ -267,11 +267,20 @@ impl KnownHostsStore {
         port: u16,
         fingerprint: &str,
     ) -> Result<(), KnownHostsError> {
-        self.entries
-            .insert((host.to_string(), port), fingerprint.to_string());
-        self.persisted = true;
+        let key = (host.to_string(), port);
+        let previous = self.entries.insert(key.clone(), fingerprint.to_string());
         if let Some(path) = &self.path {
-            self.save(path)?;
+            if let Err(error) = self.save(path) {
+                match previous {
+                    Some(previous) => {
+                        self.entries.insert(key, previous);
+                    }
+                    None => {
+                        self.entries.remove(&key);
+                    }
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -341,15 +350,63 @@ impl KnownHostsStore {
                 entry.host, entry.port, entry.fingerprint
             ));
         }
-        std::fs::write(path, out)
-            .map_err(|error| KnownHostsError::Io(path.display().to_string(), error))?;
-        Ok(())
+        write_atomic(path, out.as_bytes())
+            .map_err(|error| KnownHostsError::Io(path.display().to_string(), error))
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    persist_with_retry(temporary, path)?;
+
+    // Persist is atomic for the file itself. Syncing the directory makes the rename
+    // durable across a crash on platforms that expose directory fsync.
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        // The rename already committed. Reporting this as a failed save would make the
+        // caller roll its in-memory pin back while the file contains the new value.
+        tracing::warn!(
+            path = %parent.display(),
+            "known_hosts was replaced, but syncing its directory failed: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+fn persist_with_retry(mut temporary: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    let mut delay = Duration::from_millis(1);
+    for attempt in 0..8 {
+        match temporary.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if error.error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 7 =>
+            {
+                // Windows can return ERROR_ACCESS_DENIED while another process is
+                // replacing the same destination. Retrying the rename preserves the
+                // atomic protocol instead of falling back to an in-place truncation.
+                temporary = error.file;
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(error) => return Err(error.error),
+        }
+    }
+    unreachable!("the loop either returns or retries while attempt < 7")
 }
 
 fn parse_line(line: &str) -> Result<HostKeyEntry, KnownHostsError> {

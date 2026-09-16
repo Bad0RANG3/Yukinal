@@ -11,7 +11,7 @@ use crate::{CredentialError, CredentialRef, CredentialStore, Secret};
 
 #[derive(Debug, Default)]
 pub struct MemoryCredentialStore {
-    inner: Mutex<HashMap<(String, String), Vec<u8>>>,
+    inner: Mutex<HashMap<(String, String), Secret>>,
 }
 
 impl MemoryCredentialStore {
@@ -38,10 +38,7 @@ impl CredentialStore for MemoryCredentialStore {
         self.inner
             .lock()
             .map_err(|_| CredentialError::Backend("memory store poisoned".into()))?
-            .insert(
-                (service.to_string(), account.to_string()),
-                secret.as_bytes().to_vec(),
-            );
+            .insert((service.to_string(), account.to_string()), secret.clone());
         Ok(reference)
     }
 
@@ -55,7 +52,6 @@ impl CredentialStore for MemoryCredentialStore {
             reference.account().to_string(),
         ))
         .cloned()
-        .map(Secret)
         .ok_or_else(|| CredentialError::NotFound {
             reference: reference.to_string_ref(),
         })

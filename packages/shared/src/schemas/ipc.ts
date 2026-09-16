@@ -152,6 +152,7 @@ export const ServerHostKeyStatusResponseSchema = z.strictObject({
 export const ServerHostKeyProbeResponseSchema = z.strictObject({
   host: z.string().trim().min(1).max(256),
   port: IpcPortSchema,
+  probeTicket: z.string().regex(/^probe_[a-f0-9]{64}$/, "probe ticket must be opaque and complete"),
   /** What the server presented. Not "verified" — see `types/host-key.ts`. */
   presentedFingerprint: IpcFingerprintSchema,
   comparison: z.enum(HOST_KEY_COMPARISONS),
@@ -221,7 +222,11 @@ export const IPC_SCHEMAS = {
     response: ServerHostKeyProbeResponseSchema,
   },
   server_host_key_trust: {
-    params: z.strictObject({ serverId: IpcServerIdSchema, fingerprint: IpcFingerprintSchema }),
+    params: z.strictObject({
+      serverId: IpcServerIdSchema,
+      probeTicket: z.string().regex(/^probe_[a-f0-9]{64}$/, "probe ticket must be opaque and complete"),
+      fingerprint: IpcFingerprintSchema,
+    }),
     response: ServerHostKeyTrustResponseSchema,
   },
   server_host_key_forget: {

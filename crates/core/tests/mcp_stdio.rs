@@ -76,6 +76,10 @@ fn skip_or_fail(what: &str) {
 /// `None` means "this machine has no node" (after `skip_or_fail` has already decided whether that
 /// is a skip or a failure).
 fn config(mode: &str) -> Option<McpStdioConfig> {
+    config_for(SERVER_ID, mode)
+}
+
+fn config_for(server_id: &str, mode: &str) -> Option<McpStdioConfig> {
     let Some(node) = env_path("YUKINAL_TEST_NODE") else {
         skip_or_fail("YUKINAL_TEST_NODE");
         return None;
@@ -90,7 +94,7 @@ fn config(mode: &str) -> Option<McpStdioConfig> {
         fixture.display()
     );
     Some(
-        McpStdioConfig::new(SERVER_ID, "mcp fixture", node, TEST_TIMEOUT)
+        McpStdioConfig::new(server_id, "mcp fixture", node, TEST_TIMEOUT)
             .expect("a legal fixture server id")
             .with_args([fixture.into_os_string(), OsString::from(mode)]),
     )
@@ -657,6 +661,35 @@ async fn shutdown_all_kills_every_server_it_manages() {
     assert!(
         status.last_exit.is_some(),
         "shutdown_all is an exit too, and it must be recorded"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_all_runs_independent_servers_in_parallel() {
+    const COUNT: usize = 6;
+    let Some(first) = config_for("mcp_shutdown_0", "ignore-eof") else {
+        return;
+    };
+    let supervisor = McpSupervisor::new();
+    for index in 0..COUNT {
+        let mut config = first.clone();
+        config.server_id = format!("mcp_shutdown_{index}");
+        config.segment = format!("mcp-shutdown-{index}");
+        supervisor.start(&config).await.expect("start");
+    }
+
+    let started = Instant::now();
+    let reports = supervisor.shutdown_all().await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(reports.len(), COUNT);
+    assert!(
+        reports.iter().all(|(_, report)| report.was_running),
+        "every server must contribute its own shutdown outcome"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "{COUNT} independent shutdowns took {elapsed:?}; they are running serially"
     );
 }
 

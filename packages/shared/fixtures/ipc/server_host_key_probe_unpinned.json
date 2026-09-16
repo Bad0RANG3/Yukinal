@@ -1,6 +1,7 @@
 {
   "host": "api.example.com",
   "port": 22,
+  "probeTicket": "probe_1111111111111111111111111111111111111111111111111111111111111111",
   "presentedFingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "comparison": "unpinned"
 }

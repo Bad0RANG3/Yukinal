@@ -150,6 +150,13 @@ impl McpServerHandle {
         }
     }
 
+    pub(crate) async fn force_stop(&self) -> ShutdownReport {
+        match self {
+            Self::Stdio(handle) => handle.force_stop().await,
+            Self::Http(handle) => handle.force_stop(),
+        }
+    }
+
     pub(crate) fn exit_watch(&self) -> Option<McpExitWatch> {
         match self {
             Self::Stdio(handle) => Some(handle.exit_watch()),

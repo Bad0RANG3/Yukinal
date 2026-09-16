@@ -343,6 +343,7 @@ test("server ids on the wire must be opaque srv_ ids", () => {
   assert.equal(
     IPC_SCHEMAS.server_host_key_trust.params.safeParse({
       serverId: "api.example.com:22",
+      probeTicket: "probe_0000000000000000000000000000000000000000000000000000000000000000",
       fingerprint: "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
     }).success,
     false,
@@ -400,8 +401,12 @@ test("a probe answer is a comparison, and a mismatch carries both fingerprints",
 
 test("a fingerprint on the wire is a real SHA256 fingerprint, not a placeholder", () => {
   const params = IPC_SCHEMAS.server_host_key_trust.params;
+  const probeTicket = "probe_0000000000000000000000000000000000000000000000000000000000000000";
   const real = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
-  assert.equal(params.safeParse({ serverId: "srv_01abc", fingerprint: real }).success, true);
+  assert.equal(
+    params.safeParse({ serverId: "srv_01abc", probeTicket, fingerprint: real }).success,
+    true,
+  );
 
   for (const bogus of [
     // 这正是被替换掉的那个占位字符串：它曾经被塞进一个叫 fingerprint 的字段。
@@ -413,14 +418,15 @@ test("a fingerprint on the wire is a real SHA256 fingerprint, not a placeholder"
     "",
   ]) {
     assert.equal(
-      params.safeParse({ serverId: "srv_01abc", fingerprint: bogus }).success,
+      params.safeParse({ serverId: "srv_01abc", probeTicket, fingerprint: bogus }).success,
       false,
       `trust must refuse to pin ${JSON.stringify(bogus)}`,
     );
   }
 
   // 指纹是必填的：一个「钉住……什么？」的请求不存在。
-  assert.equal(params.safeParse({ serverId: "srv_01abc" }).success, false);
+  assert.equal(params.safeParse({ serverId: "srv_01abc", fingerprint: real }).success, false);
+  assert.equal(params.safeParse({ serverId: "srv_01abc", probeTicket, fingerprint: real }).success, true);
 });
 
 test("terminal param shapes match the contract", () => {

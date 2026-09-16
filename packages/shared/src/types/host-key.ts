@@ -36,6 +36,8 @@ export interface ServerHostKeyStatus {
 export interface ServerHostKeyProbeResult {
   host: string;
   port: number;
+  /** Opaque, single-use proof of this exact probe. Returned unchanged to `trust`. */
+  probeTicket: string;
   /**
    * What the server presented during that handshake.
    *

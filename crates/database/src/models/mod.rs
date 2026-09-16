@@ -64,6 +64,7 @@ macro_rules! enum_as_str {
 
 mod activity;
 mod chat;
+mod cleanup;
 mod collector;
 mod execution;
 mod input;
@@ -73,6 +74,7 @@ mod settings;
 
 pub use activity::{Activity, ActivityOutcome, ActivitySource, ActivityType};
 pub use chat::{ChatMessage, ChatMessageRole, ChatSession, ChatSessionCounts};
+pub use cleanup::PendingCredentialCleanup;
 pub use collector::{CollectorSample, ContainerInfo, ServerSnapshot};
 pub use execution::{PermissionMode, RiskLevel, ToolExecutionRecord, ToolExecutionStatus};
 pub use input::{AddServerInput, AuthenticationInput, UpdateServerInput};

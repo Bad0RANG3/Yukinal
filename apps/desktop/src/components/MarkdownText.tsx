@@ -11,14 +11,14 @@
  *    元素里的文字节点。解析器不认 HTML，这里也不把它当 HTML。
  * 2. **链接只在外部浏览器打开。** 渲染层使用 opener 能力允许的 `http(s)` / `mailto`
  *    URL，不让 WebView 导航离开应用。未知 scheme 在解析阶段已经是普通文字。
- * 3. **图片不携带来源信息。** 只有解析器认可的 `http(s)` URL 会进入 `<img>`，
- *    并使用 `no-referrer`；HTML 仍然永远只是文字。
+ * 3. **远程图片需要明确同意。** 默认只显示替代文字和加载按钮；用户点击后才会为
+ *    同一个 `http(s)` URL 创建带 `no-referrer` 的 `<img>`。
  *
  * 关键词着色（`KeywordText`）在正文里全量保留 —— Markdown 只负责结构，哪些词是
  * 错误、路径还是标识符，与原来一样由 token 规则决定。
  */
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
@@ -205,17 +205,7 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
               </button>
             );
           case "image":
-            return (
-              <img
-                className="md-image"
-                key={index}
-                src={node.href}
-                alt={node.alt}
-                loading="lazy"
-                decoding="async"
-                referrerPolicy="no-referrer"
-              />
-            );
+            return <RemoteMarkdownImage key={index} href={node.href} alt={node.alt} />;
           case "footnote":
             return (
               <sup className="md-footnote-ref" key={index}>
@@ -228,6 +218,47 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
       })}
     </>
   );
+}
+
+/**
+ * A remote image is a network capability. Rendering Markdown is not user consent to
+ * exercise it, so the default state contains no resource-bearing element at all.
+ */
+function RemoteMarkdownImage({ href, alt }: { href: string; alt: string }) {
+  const [approvedHref, setApprovedHref] = useState<string | null>(null);
+  const src = approvedRemoteImageSource(approvedHref, href);
+
+  if (src !== null) {
+    return (
+      <img
+        className="md-image"
+        src={src}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="md-image-prompt"
+      title={href}
+      onClick={() => setApprovedHref(href)}
+    >
+      <span className="md-image-prompt-alt">{alt || "远程图片"}</span>
+      <span className="md-image-prompt-action">加载远程图片</span>
+    </button>
+  );
+}
+
+export function approvedRemoteImageSource(
+  approvedHref: string | null,
+  href: string,
+): string | null {
+  return approvedHref === href ? href : null;
 }
 
 function clampLevel(level: number): keyof typeof HEADING_TAG {

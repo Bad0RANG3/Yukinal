@@ -58,9 +58,3 @@ where
         })
     })
 }
-
-/// 只在 Windows 之外可用的本机 runner：采集器解析的是 Linux 输出
-/// （`/proc`、`df` 等），Windows 上跑它只会得到解析失败 —— 诚实报错。
-pub fn local_linux_only() -> Runner {
-    local()
-}

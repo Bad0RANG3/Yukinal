@@ -297,6 +297,7 @@ pub async fn server_update(
         }
         return Err(error.to_string());
     }
+    state.host_keys.invalidate(&server.id);
 
     if let Some(old_id) =
         old_identity_id.filter(|id| Some(id) != server.connection.identity_id.as_ref())
@@ -334,6 +335,7 @@ pub async fn server_delete(
         .servers()
         .delete(&server_id)
         .map_err(|error| error.to_string())?;
+    state.host_keys.invalidate(&server_id);
     if let Some(identity_id) = server.connection.identity_id {
         reclaim_identity(&state, &identity_id, &server_id)?;
     }
@@ -400,7 +402,10 @@ pub async fn server_add(
         created_at: now.clone(),
         updated_at: now,
     };
-    insert_server_and_attach_identity(&state.database, &server, &identity_id)?;
+    if let Err(error) = insert_server_and_attach_identity(&state.database, &server, &identity_id) {
+        let _ = reclaim_identity(&state, &identity_id, &id);
+        return Err(error);
+    }
 
     record_user_activity(
         &state,

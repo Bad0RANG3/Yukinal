@@ -191,9 +191,9 @@ export interface IpcCommandMap {
    */
   server_host_key_status: { params: { serverId: string }; response: ServerHostKeyStatus };
   server_host_key_probe: { params: { serverId: string }; response: ServerHostKeyProbeResult };
-  /** The confirmed fingerprint rides on the params: it is the whole request. */
+  /** The one-shot probe ticket and confirmed fingerprint must both match server state. */
   server_host_key_trust: {
-    params: { serverId: string; fingerprint: string };
+    params: { serverId: string; probeTicket: string; fingerprint: string };
     response: ServerHostKeyTrustResult;
   };
   server_host_key_forget: { params: { serverId: string }; response: ServerHostKeyForgetResult };

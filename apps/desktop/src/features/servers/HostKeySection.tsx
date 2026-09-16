@@ -87,18 +87,22 @@ export function HostKeySection({
       }}
       onTrust={() => {
         if (!probe) return;
-        actions.trust.mutate(probe.presentedFingerprint, {
-          // 钉子变了，这次的探针结果就不再描述现在 —— 丢掉它，按钮随之回到「需要先探针」。
-          onSuccess: (result) => {
-            setProbe(null);
-            // 后端区分了「新建了钉子」与「本来就钉着这一个」：界面照实说，不把没做的事说成做了。
-            setNotice(
-              result.alreadyPinned
-                ? `${result.fingerprint} 本来就钉着，没有重复写入。`
-                : `已钉住 ${result.fingerprint}。今后这台主机出示别的指纹都会被拒绝。`,
-            );
+        actions.trust.mutate(
+          {
+            probeTicket: probe.probeTicket,
+            fingerprint: probe.presentedFingerprint,
           },
-        });
+          {
+            onSuccess: (result) => {
+              setProbe(null);
+              setNotice(
+                result.alreadyPinned
+                  ? `${result.fingerprint} 本来就钉着，没有重复写入。`
+                  : `已钉住 ${result.fingerprint}。今后这台主机出示别的指纹都会被拒绝。`,
+              );
+            },
+          },
+        );
       }}
       onForget={() => {
         actions.forget.mutate(undefined, {

@@ -418,6 +418,23 @@ impl McpHttpHandle {
         }
     }
 
+    pub(crate) fn force_stop(&self) -> ShutdownReport {
+        let was_running = self.inner.running.swap(false, Ordering::Relaxed);
+        self.inner.shutdown.cancel();
+        self.inner.fail_pending(|method| McpError::Cancelled {
+            server_id: self.server_id().to_string(),
+            method,
+        });
+        if let Some(task) = lock_or_recover(&self.inner.get_task).take() {
+            task.abort();
+        }
+        ShutdownReport {
+            was_running,
+            killed: false,
+            unreaped: false,
+        }
+    }
+
     fn not_running_error(&self) -> McpError {
         McpError::NotRunning {
             server_id: self.server_id().to_string(),

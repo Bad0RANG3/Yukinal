@@ -164,7 +164,7 @@ fn save(
     };
     if let Err(error) = database.app_settings().save_network_proxy(&config) {
         if let Some(staged) = &staged {
-            let _ = credentials.delete(staged);
+            let _ = crate::state::credential_cleanup::reclaim(database, credentials, staged);
         }
         return Err(format!("could not save the network proxy setting: {error}"));
     }
@@ -172,9 +172,11 @@ fn save(
     if let Some(previous) = existing.credential_ref {
         if credential_ref.as_deref() != Some(previous.as_str()) {
             if let Ok(reference) = CredentialRef::parse(&previous) {
-                if let Err(error) = credentials.delete(&reference) {
+                if let Err(error) =
+                    crate::state::credential_cleanup::reclaim(database, credentials, &reference)
+                {
                     tracing::warn!(
-                        "saved the network proxy setting but could not reclaim its previous credential: {error}"
+                        "saved the network proxy setting but could not immediately reclaim its previous credential: {error}"
                     );
                 }
             }

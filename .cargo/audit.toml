@@ -1,0 +1,5 @@
+[advisories]
+# No fixed `rsa` release exists yet. RSA remains required for servers that only
+# expose RSA keys; the accepted risk and mitigations are documented in
+# docs/security.md. Every other advisory remains fatal.
+ignore = ["RUSTSEC-2023-0071"]

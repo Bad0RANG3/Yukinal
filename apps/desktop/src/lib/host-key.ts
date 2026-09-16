@@ -44,7 +44,13 @@ export function useHostKeyStatus(serverId: string, options: { enabled?: boolean 
 
 export interface HostKeyActions {
   probe: ReturnType<typeof useMutation<ServerHostKeyProbeResult, Error, void>>;
-  trust: ReturnType<typeof useMutation<ServerHostKeyTrustResult, Error, string>>;
+  trust: ReturnType<
+    typeof useMutation<
+      ServerHostKeyTrustResult,
+      Error,
+      { probeTicket: string; fingerprint: string }
+    >
+  >;
   forget: ReturnType<typeof useMutation<ServerHostKeyForgetResult, Error, void>>;
   /** 三个动作里有没有正在跑的 —— 用来禁用按钮，避免边探边钉。 */
   busy: boolean;
@@ -68,9 +74,13 @@ export function useHostKeyActions(serverId: string): HostKeyActions {
     // 「探针做了点什么」。状态里唯一会变的是比较结果，而那由探针结果自己带回来。
   });
 
-  const trust = useMutation<ServerHostKeyTrustResult, Error, string>({
-    mutationFn: (fingerprint) =>
-      callDesktop(IPC_COMMANDS.serverHostKeyTrust, { serverId, fingerprint }),
+  const trust = useMutation<
+    ServerHostKeyTrustResult,
+    Error,
+    { probeTicket: string; fingerprint: string }
+  >({
+    mutationFn: ({ probeTicket, fingerprint }) =>
+      callDesktop(IPC_COMMANDS.serverHostKeyTrust, { serverId, probeTicket, fingerprint }),
     onSettled: () => void refreshStatus(),
   });
 

@@ -16,9 +16,12 @@ use yukinal_database::Database;
 use yukinal_ssh::RusshBackend;
 
 mod auth;
+pub(crate) mod credential_cleanup;
+pub(crate) mod host_key;
 mod oauth;
 
 pub use auth::AuthChallengeBroker;
+pub use host_key::HostKeyProbeBroker;
 pub use oauth::OAuthFlowBroker;
 
 pub struct AppState {
@@ -32,6 +35,8 @@ pub struct AppState {
     pub terminals: TerminalService,
     /// One-shot SSH keyboard-interactive challenges and responses.
     pub auth: AuthChallengeBroker,
+    /// One-shot, endpoint-bound host-key probes awaiting explicit user trust.
+    pub host_keys: HostKeyProbeBroker,
     /// In-flight MCP OAuth authorizations, so the UI can stop one it started.
     pub oauth: OAuthFlowBroker,
     /// MCP 服务进程（ADR 0014）。与 sidecar 的 `Supervisor` 并列：sidecar 管**一个**进程，
@@ -49,13 +54,18 @@ impl AppState {
         let ssh =
             Arc::new(RusshBackend::from_data_dir(data_dir).map_err(|error| error.to_string())?);
         let terminals = TerminalService::new(Arc::clone(&ssh));
+        let credentials = Arc::new(OsCredentialStore);
+        for failure in credential_cleanup::reconcile(&database, credentials.as_ref()) {
+            tracing::warn!("credential cleanup reconciliation: {failure}");
+        }
         Ok(Self {
             supervisor: Supervisor::new(),
             database,
-            credentials: Arc::new(OsCredentialStore),
+            credentials,
             ssh,
             terminals,
             auth: AuthChallengeBroker::new(),
+            host_keys: HostKeyProbeBroker::new(),
             // 空的：授权流程只在用户按下「连接 OAuth」时存在，装配阶段不派生轮询。
             oauth: OAuthFlowBroker::new(),
             // 空 supervisor：**不在这里**启动任何 MCP 服务器。启动第三方进程是用户按下的

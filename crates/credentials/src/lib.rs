@@ -17,6 +17,8 @@ pub mod os;
 use std::borrow::Cow;
 use std::fmt;
 
+use zeroize::Zeroize as _;
+
 /// 不透明字节。故意不实现会泄露内容的 `Display`/`Debug`。
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(Vec<u8>);
@@ -44,6 +46,12 @@ impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // 稳定占位符：即使有人把 secret 误打进日志，也只泄露「它存在」。
         f.write_str("Secret(<redacted>)")
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 

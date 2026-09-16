@@ -369,8 +369,7 @@ async fn delete_server(
                 header.name
             )
         })?;
-        credentials
-            .delete(&reference)
+        crate::state::credential_cleanup::reclaim(database, credentials, &reference)
             .map_err(|error| format!("MCP 服务器 `{server_id}` 已删除，但凭据回收失败：{error}"))?;
     }
     if let Some(reference) = row
@@ -381,9 +380,9 @@ async fn delete_server(
         let reference = CredentialRef::parse(reference).map_err(|error| {
             format!("MCP 服务器 `{server_id}` 已删除，但其 OAuth 凭据引用无效：{error}")
         })?;
-        credentials.delete(&reference).map_err(|error| {
-            format!("MCP 服务器 `{server_id}` 已删除，但 OAuth 凭据回收失败：{error}")
-        })?;
+        crate::state::credential_cleanup::reclaim(database, credentials, &reference).map_err(
+            |error| format!("MCP 服务器 `{server_id}` 已删除，但 OAuth 凭据回收失败：{error}"),
+        )?;
     }
     if let Some(reference) = row
         .oauth
@@ -393,9 +392,11 @@ async fn delete_server(
         let reference = CredentialRef::parse(reference).map_err(|error| {
             format!("MCP 服务器 `{server_id}` 已删除，但其 OAuth client secret 引用无效：{error}")
         })?;
-        credentials.delete(&reference).map_err(|error| {
-            format!("MCP 服务器 `{server_id}` 已删除，但 OAuth client secret 回收失败：{error}")
-        })?;
+        crate::state::credential_cleanup::reclaim(database, credentials, &reference).map_err(
+            |error| {
+                format!("MCP 服务器 `{server_id}` 已删除，但 OAuth client secret 回收失败：{error}")
+            },
+        )?;
     }
     // 私钥也一起回收：那台服务器已经不在了，留下一把谁也用不了的钥匙只会让凭据库更难读。
     if let Some(reference) = row
@@ -406,9 +407,9 @@ async fn delete_server(
         let reference = CredentialRef::parse(reference).map_err(|error| {
             format!("MCP 服务器 `{server_id}` 已删除，但其 DPoP 密钥引用无效：{error}")
         })?;
-        credentials.delete(&reference).map_err(|error| {
-            format!("MCP 服务器 `{server_id}` 已删除，但 DPoP 密钥回收失败：{error}")
-        })?;
+        crate::state::credential_cleanup::reclaim(database, credentials, &reference).map_err(
+            |error| format!("MCP 服务器 `{server_id}` 已删除，但 DPoP 密钥回收失败：{error}"),
+        )?;
     }
     Ok(McpServerDeleteResponse {
         deleted: true,
@@ -785,8 +786,13 @@ pub(crate) fn save(
         .as_ref()
         .map(|row| row.http_auth_headers.as_slice())
         .unwrap_or_default();
-    let (http_auth_headers, newly_staged) =
-        resolve_http_auth_headers(id, existing_headers, requested_headers, credentials)?;
+    let (http_auth_headers, newly_staged) = resolve_http_auth_headers(
+        database,
+        id,
+        existing_headers,
+        requested_headers,
+        credentials,
+    )?;
     let (oauth, staged_secrets) = match resolve_oauth_config(
         id,
         is_http,
@@ -797,7 +803,7 @@ pub(crate) fn save(
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
-            delete_credentials(credentials, &newly_staged);
+            delete_credentials(database, credentials, &newly_staged);
             return Err(error);
         }
     };
@@ -837,7 +843,7 @@ pub(crate) fn save(
     };
 
     if let Err(error) = check_transport(&config) {
-        delete_credentials(credentials, &newly_staged);
+        delete_credentials(database, credentials, &newly_staged);
         return Err(error);
     }
 
@@ -864,7 +870,7 @@ pub(crate) fn save(
         .and_then(|oauth| oauth.dpop_key_ref.clone());
 
     if let Err(error) = database.mcp_servers().upsert(&config) {
-        delete_credentials(credentials, &newly_staged);
+        delete_credentials(database, credentials, &newly_staged);
         return Err(format!("保存 MCP 服务器 `{id}` 失败：{error}"));
     }
 
@@ -875,10 +881,12 @@ pub(crate) fn save(
             .any(|header| header.credential_ref == old_ref)
         {
             if let Ok(reference) = CredentialRef::parse(&old_ref) {
-                if let Err(error) = credentials.delete(&reference) {
+                if let Err(error) =
+                    crate::state::credential_cleanup::reclaim(database, credentials, &reference)
+                {
                     tracing::warn!(
                         server_id = %id,
-                        "saved MCP HTTP authentication but could not reclaim its previous credential: {error}"
+                        "saved MCP HTTP authentication but could not immediately reclaim its previous credential: {error}"
                     );
                 }
             }
@@ -892,10 +900,12 @@ pub(crate) fn save(
             != Some(old_ref.as_str())
         {
             if let Ok(reference) = CredentialRef::parse(&old_ref) {
-                if let Err(error) = credentials.delete(&reference) {
+                if let Err(error) =
+                    crate::state::credential_cleanup::reclaim(database, credentials, &reference)
+                {
                     tracing::warn!(
                         server_id = %id,
-                        "saved MCP OAuth configuration but could not reclaim its previous token: {error}"
+                        "saved MCP OAuth configuration but could not immediately reclaim its previous token: {error}"
                     );
                 }
             }
@@ -911,10 +921,12 @@ pub(crate) fn save(
             != Some(old_ref.as_str())
         {
             if let Ok(reference) = CredentialRef::parse(&old_ref) {
-                if let Err(error) = credentials.delete(&reference) {
+                if let Err(error) =
+                    crate::state::credential_cleanup::reclaim(database, credentials, &reference)
+                {
                     tracing::warn!(
                         server_id = %id,
-                        "saved MCP OAuth configuration but could not reclaim its previous client secret: {error}"
+                        "saved MCP OAuth configuration but could not immediately reclaim its previous client secret: {error}"
                     );
                 }
             }
@@ -931,10 +943,12 @@ pub(crate) fn save(
             != Some(old_ref.as_str())
         {
             if let Ok(reference) = CredentialRef::parse(&old_ref) {
-                if let Err(error) = credentials.delete(&reference) {
+                if let Err(error) =
+                    crate::state::credential_cleanup::reclaim(database, credentials, &reference)
+                {
                     tracing::warn!(
                         server_id = %id,
-                        "saved MCP OAuth configuration but could not reclaim its previous DPoP key: {error}"
+                        "saved MCP OAuth configuration but could not immediately reclaim its previous DPoP key: {error}"
                     );
                 }
             }
@@ -1105,6 +1119,7 @@ fn resolve_oauth_config(
 }
 
 fn resolve_http_auth_headers(
+    database: &Database,
     server_id: &str,
     existing: &[McpHttpAuthHeaderConfig],
     requested: Vec<McpHttpAuthHeaderInput>,
@@ -1122,17 +1137,17 @@ fn resolve_http_auth_headers(
     for header in requested {
         let name = header.name.trim();
         if name.is_empty() {
-            delete_credentials(credentials, &staged);
+            delete_credentials(database, credentials, &staged);
             return Err("HTTP 认证头需要一个非空名称。".to_string());
         }
         if !seen.insert(name.to_ascii_lowercase()) {
-            delete_credentials(credentials, &staged);
+            delete_credentials(database, credentials, &staged);
             return Err(format!("HTTP 认证头 `{name}` 重复。"));
         }
         let secret = header.secret.filter(|value| !value.is_empty());
         if let Err(error) = McpHttpAuthHeader::new(name, secret.as_deref().unwrap_or("placeholder"))
         {
-            delete_credentials(credentials, &staged);
+            delete_credentials(database, credentials, &staged);
             return Err(format!("无效的 HTTP 认证头 `{name}`：{error}"));
         }
         if let Some(secret) = secret {
@@ -1143,7 +1158,7 @@ fn resolve_http_auth_headers(
             ) {
                 Ok(reference) => reference,
                 Err(error) => {
-                    delete_credentials(credentials, &staged);
+                    delete_credentials(database, credentials, &staged);
                     return Err(format!("保存 MCP HTTP 凭据失败：{error}"));
                 }
             };
@@ -1158,7 +1173,7 @@ fn resolve_http_auth_headers(
             .iter()
             .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
         else {
-            delete_credentials(credentials, &staged);
+            delete_credentials(database, credentials, &staged);
             return Err(format!(
                 "HTTP 认证头 `{name}` 没有新 secret，也没有可保留的现有凭据。"
             ));
@@ -1171,9 +1186,19 @@ fn resolve_http_auth_headers(
     Ok((resolved, staged))
 }
 
-fn delete_credentials(credentials: &dyn CredentialStore, references: &[CredentialRef]) {
+fn delete_credentials(
+    database: &Database,
+    credentials: &dyn CredentialStore,
+    references: &[CredentialRef],
+) {
     for reference in references {
-        let _ = credentials.delete(reference);
+        if let Err(error) =
+            crate::state::credential_cleanup::reclaim(database, credentials, reference)
+        {
+            tracing::warn!(
+                "could not immediately reclaim a staged MCP credential; it was queued for retry: {error}"
+            );
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Tables: servers / groups / workspaces / identities / server_identities /
 //! snapshots / services / activities / chat_sessions / chat_messages /
-//! tool_executions / provider_configs / mcp_servers.
+//! tool_executions / provider_configs / mcp_servers / credential_cleanup_queue.
 //!
 //! Rules:
 //! - Only `credential_ref` is stored. Secret material (key material, passwords,
@@ -31,6 +31,13 @@
 //! an unindexed join, a migration run inline), it will stall an async worker rather
 //! than merely being slow, and that is the moment to reach for `spawn_blocking`.
 //! A previous version of this comment described callers doing that already.
+//!
+//! Audit note (2026-09-16): the widest current query is conversation search, but every
+//! chat command is a synchronous Tauri command and therefore already runs on Tauri's
+//! blocking pool. Schema migrations and credential-cleanup reconciliation run during
+//! startup assembly, before async command work begins. No current async command performs
+//! an unbounded SQLite scan. If one starts to, this crate should expose a blocking adapter
+//! rather than running that query inline.
 
 pub mod models;
 pub mod repositories;
@@ -141,6 +148,10 @@ impl Database {
 
     pub fn app_settings(&self) -> repositories::AppSettingsRepository<'_> {
         repositories::AppSettingsRepository::new(self)
+    }
+
+    pub fn credential_cleanup(&self) -> repositories::CredentialCleanupRepository<'_> {
+        repositories::CredentialCleanupRepository::new(self)
     }
 
     pub fn snapshots(&self) -> repositories::SnapshotsRepository<'_> {

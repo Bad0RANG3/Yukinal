@@ -702,16 +702,21 @@ pub(super) async fn connect(
     updated.credential_ref = Some(reference.to_string_ref());
     row.oauth = Some(updated.clone());
     if let Err(error) = database.mcp_servers().upsert(&row) {
-        let _ = credentials.delete(&reference);
+        let _ =
+            crate::state::credential_cleanup::reclaim(database, credentials.as_ref(), &reference);
         return Err(format!("could not save the connected OAuth state: {error}"));
     }
     if let Some(previous_reference) = previous_reference {
         if previous_reference != reference.to_string_ref() {
             if let Ok(previous_reference) = CredentialRef::parse(&previous_reference) {
-                if let Err(error) = credentials.delete(&previous_reference) {
+                if let Err(error) = crate::state::credential_cleanup::reclaim(
+                    database,
+                    credentials.as_ref(),
+                    &previous_reference,
+                ) {
                     tracing::warn!(
                         server_id,
-                        "OAuth token was replaced but the previous token could not be reclaimed: {error}"
+                        "OAuth token was replaced but the previous token could not be reclaimed immediately: {error}"
                     );
                 }
             }
@@ -1103,16 +1108,21 @@ async fn store_connected_bundle(
     oauth.credential_ref = Some(reference.to_string_ref());
     row.oauth = Some(oauth.clone());
     if let Err(error) = database.mcp_servers().upsert(&row) {
-        let _ = credentials.delete(&reference);
+        let _ =
+            crate::state::credential_cleanup::reclaim(database, credentials.as_ref(), &reference);
         return Err(format!("could not save the connected OAuth state: {error}"));
     }
     if let Some(previous_reference) = previous_reference {
         if previous_reference != reference.to_string_ref() {
             if let Ok(previous_reference) = CredentialRef::parse(&previous_reference) {
-                if let Err(error) = credentials.delete(&previous_reference) {
+                if let Err(error) = crate::state::credential_cleanup::reclaim(
+                    database,
+                    credentials.as_ref(),
+                    &previous_reference,
+                ) {
                     tracing::warn!(
                         server_id,
-                        "OAuth token was replaced but the previous token could not be reclaimed: {error}"
+                        "OAuth token was replaced but the previous token could not be reclaimed immediately: {error}"
                     );
                 }
             }

@@ -363,3 +363,68 @@ fn forget_then_trust_is_the_only_way_to_change_a_pin() {
         Some("SHA256:new".into())
     );
 }
+
+#[test]
+fn a_failed_persist_rolls_the_in_memory_pin_back() {
+    let path = temp_path("rollback");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&path);
+
+    let mut store = KnownHostsStore::load(&path).expect("load missing file");
+    store
+        .register("api.example.com", 22, "SHA256:old")
+        .expect("initial pin");
+
+    // A directory at the destination makes the final atomic rename fail while
+    // leaving the in-memory map temporarily mutated enough to expose the bug.
+    std::fs::remove_file(&path).expect("remove file");
+    std::fs::create_dir(&path).expect("replace file with directory");
+
+    assert!(store.register("api.example.com", 22, "SHA256:new").is_err());
+    assert_eq!(
+        store.pinned_fingerprint("api.example.com", 22),
+        Some("SHA256:old".into()),
+        "a failed write must not leave memory ahead of durable state"
+    );
+
+    std::fs::remove_dir(&path).expect("remove directory");
+}
+
+#[test]
+fn concurrent_atomic_saves_never_leave_a_partial_file() {
+    use std::sync::{Arc, Barrier};
+
+    let path = temp_path("concurrent");
+    let _ = std::fs::remove_file(&path);
+    let barrier = Arc::new(Barrier::new(8));
+    let mut workers = Vec::new();
+
+    for worker in 0..8 {
+        let path = path.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let mut store = KnownHostsStore::load(&path).expect("load");
+            barrier.wait();
+            store
+                .register(&format!("host-{worker}.example.com"), 22, "SHA256:aaa")
+                .expect("atomic save");
+        }));
+    }
+    for worker in workers {
+        worker.join().expect("writer thread");
+    }
+
+    let loaded = KnownHostsStore::load(&path).expect("final file must be complete");
+    let final_pins = (0..8)
+        .filter(|worker| {
+            loaded.pinned_fingerprint(&format!("host-{worker}.example.com"), 22)
+                == Some("SHA256:aaa".to_string())
+        })
+        .count();
+    assert!(
+        final_pins >= 1,
+        "at least the last successful writer must survive"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

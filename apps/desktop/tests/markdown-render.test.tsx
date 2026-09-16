@@ -5,14 +5,17 @@
  *   - 正文里的 HTML 必须是**文字**（没有 `dangerouslySetInnerHTML`，也没有过滤规则
  *     需要维护对错）；
  *   - 链接不能生成可导航的 `<a href>`；点击必须经过受限 opener 交给系统浏览器；
- *   - 图片使用 `<img>` 但不发送 referrer。
+ *   - 远程图片只有在用户明确点击后才创建 `<img>`，并使用 lazy/no-referrer。
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { MarkdownText } from "../src/components/MarkdownText.js";
+import {
+  approvedRemoteImageSource,
+  MarkdownText,
+} from "../src/components/MarkdownText.js";
 
 const render = (text: string): string =>
   renderToStaticMarkup(<MarkdownText text={text} className="agent-entry-body agent-markdown" />);
@@ -59,14 +62,21 @@ test("an unknown scheme stays plain text", () => {
   assert.equal(markup.includes("javascript:alert(1)"), true);
 });
 
-test("images render with alt text, lazy loading and no referrer", () => {
+test("remote images render as inert text until the user explicitly loads them", () => {
   const markup = render("![拓扑图](https://example.test/a.png)");
-  assert.equal(markup.includes("<img"), true);
-  assert.equal(markup.includes('src="https://example.test/a.png"'), true);
-  assert.equal(markup.includes('alt="拓扑图"'), true);
-  assert.equal(markup.includes('loading="lazy"'), true);
-  assert.equal(markup.includes('referrerPolicy="no-referrer"') || markup.includes('referrerpolicy="no-referrer"'), true);
+  assert.equal(markup.includes("<img"), false, "rendering Markdown must not request the image");
+  assert.equal(markup.includes(" src="), false, "no resource-bearing src may exist before consent");
+  assert.equal(markup.includes("alt="), false, "the inert placeholder is not an image");
+  assert.equal(markup.includes("md-image-prompt"), true);
+  assert.equal(markup.includes("加载远程图片"), true);
   assert.equal(markup.includes("拓扑图"), true);
+});
+
+test("image consent is bound to the exact URL that was approved", () => {
+  const approved = "https://example.test/a.png";
+  assert.equal(approvedRemoteImageSource(approved, approved), approved);
+  assert.equal(approvedRemoteImageSource(approved, "https://attacker.test/b.png"), null);
+  assert.equal(approvedRemoteImageSource(null, approved), null);
 });
 
 test("task lists show a box instead of a bullet", () => {

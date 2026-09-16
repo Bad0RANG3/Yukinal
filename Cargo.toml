@@ -32,6 +32,8 @@ sha2 = "0.10"
 sha1 = "0.10"
 thiserror = "2.0"
 tracing = "0.1"
+tempfile = "3.23"
+zeroize = "1.8"
 
 # SSH backend. ADR 0002: russh (pure Rust, tokio-native, PTY + SFTP).
 # Crypto backend: `ring` instead of the default aws-lc-rs — aws-lc-sys needs a C
@@ -56,9 +58,9 @@ tokio-util = "0.7"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "http2", "rustls-no-provider", "form"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
-# Test-only randomness: generating throwaway SSH key material (and passphrase-encrypting
-# it) in `yukinal-ssh` tests. Same version the russh stack already pulls in, so it adds
-# no new crate to the build graph.
+# Cryptographic randomness for DPoP keys, host-key probe tickets, and throwaway SSH key
+# material in tests. Same version the russh stack already pulls in, so it adds no new
+# crate to the build graph.
 rand = "0.10"
 
 # OS credential store: keyring over Keychain / Credential Manager / Secret Service.

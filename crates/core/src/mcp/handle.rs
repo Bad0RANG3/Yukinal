@@ -717,6 +717,26 @@ impl McpStdioHandle {
         }
     }
 
+    pub(crate) async fn force_stop(&self) -> ShutdownReport {
+        let was_running = !self.inner.exited.swap(true, Ordering::Relaxed);
+        let stdin = self.inner.stdin.lock().await.take();
+        drop(stdin);
+        self.inner.fail_pending(PendingFailure::Closed);
+
+        let exited = if was_running {
+            let mut child = lock_or_recover(&self.inner.child);
+            let _ = child.start_kill();
+            child.try_wait().ok().flatten().is_some()
+        } else {
+            true
+        };
+        ShutdownReport {
+            was_running,
+            killed: was_running,
+            unreaped: was_running && !exited,
+        }
+    }
+
     fn not_running_error(&self) -> McpError {
         McpError::NotRunning {
             server_id: self.server_id().to_string(),

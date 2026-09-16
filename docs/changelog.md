@@ -6,6 +6,8 @@
 
 ### 新增与改进
 
+- **安全与一致性审计重构。** 远程 Markdown 图片改为点击后才加载，而且同意的 URL 变化即失效；HostKey 探针签发绑定端点、指纹和短 TTL 的一次性票据；`known_hosts` 改为同目录临时文件加原子替换，写入失败回滚内存，提交后的目录同步失败不再制造内存与磁盘分叉；MCP 退出改为并行执行且带全局截止时间。Provider 换 key 使用新引用并在失败时清理，旧 key 只会在没有其他 Provider 引用时回收；服务器新增失败会回收身份；凭据先解除数据库引用，再删除或在 SQLite 持久清理队列中重试。GitHub Actions 固定到提交 SHA，并加入 RustSec advisory job；`Secret` 析构时清零。根清单中未使用的 `@deepseek-ai/dsh` 与 `web` 依赖被移除，锁文件减少约 490 个包。
+
 - **Provider 高级配置接通。** Anthropic `apiVersion` 与受控的非敏感自定义请求头可从设置页保存、写入数据库并下发到运行时；`apiVersion` 只允许 Anthropic，自定义头在 UI、Zod 与 Rust 三层共用同一套边界，OpenAI-compatible 的网络异常也已经过统一脱敏。
 - **MCP 生命周期与工具审核补齐。** 取消会发送标准 `notifications/cancelled`；崩溃的服务器会按有界退避重建进程与工具目录，状态报告尝试次数与耗尽，恢复不重放中断的调用。设置页可在服务器启动后审核工具，只有 `allowedTools` 中的工具会进入 Agent 目录，调用仍保持 `critical` 逐项审批。官方 `@modelcontextprotocol/server-everything` 已通过显式启用的真实互操作测试，长工具名会稳定缩短并在调用时还原远端原名。
 - **MCP Streamable HTTP、静态认证头与 OAuth。** 设置页可在 stdio 与 HTTP 之间选择；HTTP 支持 `Mcp-Session-Id`、协议版本头、JSON 与 SSE 的 POST 回包、可选 GET 事件流、取消通知和 DELETE 会话终止。可配置最多 16 条有序的非保留静态认证头，编辑时可逐项保留、重排或轮换。OAuth 支持手填 issuer，也会从 `WWW-Authenticate` / RFC 9728 protected-resource metadata 自动发现 issuer，再走 RFC 8414 discovery + authorization code + PKCE S256；client id 留空时通过 RFC 7591 注册 `token_endpoint_auth_method: none` 的公共客户端。浏览器回调只监听随机 `127.0.0.1` 端口，token bundle 只进系统凭据库，过期前自动刷新，401 会强制刷新并仅重试一次。替换或删除服务器会回收旧凭据。远程 endpoint 强制 HTTPS，明文 HTTP 仅限回环地址，且拒绝 URL 内嵌凭据、查询参数、fragment 与重定向。按请求动态签名仍是明确限制。
@@ -24,7 +26,7 @@
 - **ssh-agent 签名失败可分类。** 直接匹配 russh 公开的 `AgentAuthError::{Send, Key}`，把 SSH 通道中断、agent 拒绝签名、agent 协议异常和 agent 交换失败分别映射；不再把“连接在签名途中断了”误报成“agent 拒绝了身份”。
 - **Host certificate CA/principal 信任。** 每台服务器可保存 OpenSSH CA 公钥与最多 32 个 principal 模式（支持 `*`/`?`）；启用后客户端显式广告证书算法，并校验 host 证书类型、签名、CA 公钥、有效期、critical options 与 principal，普通 host key 无法降级绕过。未配置 CA 时仍沿用原有 TOFU/叶子指纹策略。
 - **Host certificate KRL 撤销（初始实现）。** 每台服务器可配置本地 OpenSSH KRL；客户端解析证书序列号列表/范围/位图、key ID、通配或指定 CA、显式公钥与 SHA-1/SHA-256 指纹撤销，并在 CA 签名和有效期校验后拒绝命中的 host certificate。当时只接受未签名 KRL；在线下载与 CA 签名验证已在本节后段补齐。
-- **Markdown 与外部内容。** 新增 setext 标题、缩进代码块、引用式链接与脚注；`http(s)` 链接经受限 opener 打开，图片以 lazy/no-referrer 加载。流式文本与最终文本不再二选一：前缀可扩展时合并，真正分歧时保留两段。
+- **Markdown 与外部内容。** 新增 setext 标题、缩进代码块、引用式链接与脚注；`http(s)` 链接经受限 opener 打开。远程图片默认只显示替代文字和显式加载按钮，用户点击后才以 lazy/no-referrer 加载。流式文本与最终文本不再二选一：前缀可扩展时合并，真正分歧时保留两段。
 - **Linux 打包依赖基线。** `.deb` 与 `.rpm` 明确声明 WebKitGTK/GTK 依赖，打包契约拒绝空依赖表；跨发行版安装仍需真实验证。
 - **IPC fixture 两侧闭合。** 之前只有 TypeScript 一侧解析的 provider、服务器 CRUD、终端、远程文件、Agent 停止/审批与 MCP fixture，现在都由 Rust 用真实响应类型反序列化、再序列化回原 JSON；字段缺失、改名或静默丢弃都会让门禁失败。
 - **音频附件（WAV / MP3 / OGG / FLAC）。** 输入框可选择、拖放或粘贴音频，格式按**魔数**校验而不看扩展名与 MIME；单段最多 4 MiB、最多 2 段，并与图片、PDF 共用同一个 5 MiB 原始字节预算（受 8 MiB 单帧上限约束）。待发送区用 `<audio>` 播放器预览并可逐项移除，附件随消息持久化，历史恢复与重试沿用同一条路径；admission 指纹覆盖音频字节（新增 kind 现在会让指纹函数编译失败，而不是悄悄漏掉）。Provider 映射：OpenAI 的 `input_audio`（`chat` 与 `responses` 两种方言，只接受 WAV/MP3，其它格式在发请求之前就明确失败）、Gemini 的 `inlineData`（四种都收）、Anthropic 明确报「没有音频内容块」而不是静默丢掉。**这两条 OpenAI 形状尚未对真实 API 确认**，与两个原生适配器的整体状态一致。

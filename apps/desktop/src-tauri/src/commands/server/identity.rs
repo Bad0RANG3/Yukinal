@@ -13,7 +13,7 @@ use yukinal_core::identity::{
 };
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::Identity;
-use yukinal_database::{AuthenticationInput, Database};
+use yukinal_database::{AuthenticationInput, Database, DatabaseError};
 
 use super::next_id;
 
@@ -62,9 +62,9 @@ impl StagedSecrets {
 
     /// 回滚这一次写入：私钥与口令两条都删（`delete` 是幂等的，所以口令写失败时
     /// 已经删过一次私钥也无所谓）。
-    fn rollback(&self, credentials: &dyn CredentialStore) {
+    fn rollback(&self, database: &yukinal_database::Database, credentials: &dyn CredentialStore) {
         for reference in self.credential_ref.iter().chain(self.passphrase_ref.iter()) {
-            let _ = credentials.delete(reference);
+            let _ = crate::state::credential_cleanup::reclaim(database, credentials, reference);
         }
     }
 }
@@ -189,7 +189,15 @@ impl<'a> IdentitySecrets<'a> {
             Err(error) => {
                 // Never leave a key whose passphrase failed to persist: the failure
                 // would otherwise appear later as `PassphraseRequired`.
-                let _ = self.credentials.delete(&key_ref);
+                if let Err(cleanup) = crate::state::credential_cleanup::reclaim(
+                    self.database,
+                    self.credentials,
+                    &key_ref,
+                ) {
+                    return Err(format!(
+                        "{error}; the staged private key could not be reclaimed immediately: {cleanup}"
+                    ));
+                }
                 Err(error.to_string())
             }
         }
@@ -201,23 +209,56 @@ impl<'a> IdentitySecrets<'a> {
     /// （拿不回来，也没人会清）。解析不出来的引用（agent 身份的空串）跳过 ——
     /// 它本来就没有对应条目。
     fn reclaim(&self, identity_id: &str) -> Result<(), String> {
-        if let Ok(identity) = self.database.identities().get(identity_id) {
-            for reference in [
-                Some(identity.credential_ref.as_str()),
-                identity.passphrase_ref.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if let Ok(reference) = CredentialRef::parse(reference) {
-                    self.credentials
-                        .delete(&reference)
-                        .map_err(|error| error.to_string())?;
-                }
+        let identity = match self.database.identities().get(identity_id) {
+            Ok(identity) => identity,
+            Err(DatabaseError::NotFound) => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "could not read identity `{identity_id}` before reclaiming it: {error}"
+                ));
             }
-            let _ = self.database.identities().delete(identity_id);
+        };
+
+        // The row must stop referencing the secrets before they can be queued for
+        // deletion. Otherwise a transient backend failure would leave a live identity
+        // pointing at credentials that startup reconciliation later removes.
+        self.database
+            .identities()
+            .delete(identity_id)
+            .map_err(|error| format!("could not delete identity `{identity_id}`: {error}"))?;
+
+        let mut failures = Vec::new();
+        for reference in [
+            Some(identity.credential_ref.as_str()),
+            identity.passphrase_ref.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|reference| !reference.is_empty())
+        {
+            let reference = match CredentialRef::parse(reference) {
+                Ok(reference) => reference,
+                Err(error) => {
+                    failures.push(format!(
+                        "identity `{identity_id}` has an invalid credential reference: {error}"
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = crate::state::credential_cleanup::reclaim(
+                self.database,
+                self.credentials,
+                &reference,
+            ) {
+                failures.push(error);
+            }
         }
-        Ok(())
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     /// 带回守卫的回收：身份还挂在别的服务器上时**什么都不删**。
@@ -264,7 +305,7 @@ pub(super) async fn store_identity(
     let staged = secrets.stage(authentication, &account)?;
     let identity = staged.to_identity(next_id("idn"), format!("{label} ({server_id})"), now);
     if let Err(error) = secrets.database.identities().insert(&identity) {
-        staged.rollback(secrets.credentials);
+        staged.rollback(secrets.database, secrets.credentials);
         return Err(error.to_string());
     }
     if matches!(write, IdentityWrite::Replace) {
@@ -274,7 +315,7 @@ pub(super) async fn store_identity(
             .attach_to_server(server_id, &identity.id)
         {
             let _ = secrets.database.identities().delete(&identity.id);
-            staged.rollback(secrets.credentials);
+            staged.rollback(secrets.database, secrets.credentials);
             return Err(error.to_string());
         }
     }
@@ -294,11 +335,11 @@ pub(super) fn reclaim_identity(
 mod tests {
     // -- keychain 侧：两条条目 + 回收 -----------------------------------------
 
-    use super::IdentitySecrets;
+    use super::{DatabaseError, IdentitySecrets};
     use std::path::PathBuf;
     use yukinal_core::identity::PASSPHRASE_ACCOUNT_SUFFIX;
     use yukinal_credentials::memory::MemoryCredentialStore;
-    use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
+    use yukinal_credentials::{CredentialError, CredentialRef, CredentialStore, Secret};
     use yukinal_database::models::{
         Environment, Identity, Server, ServerCapabilities, ServerConnection, ServerMetadata,
         ServerStatus,
@@ -317,6 +358,102 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let database = Database::open(&path).expect("open database");
         (path, database)
+    }
+
+    #[derive(Debug)]
+    struct FailPassphraseDelete {
+        inner: MemoryCredentialStore,
+    }
+
+    impl FailPassphraseDelete {
+        fn new() -> Self {
+            Self {
+                inner: MemoryCredentialStore::new(),
+            }
+        }
+    }
+
+    impl CredentialStore for FailPassphraseDelete {
+        fn set(
+            &self,
+            service: &str,
+            account: &str,
+            secret: &Secret,
+        ) -> Result<CredentialRef, CredentialError> {
+            self.inner.set(service, account, secret)
+        }
+
+        fn get(&self, reference: &CredentialRef) -> Result<Secret, CredentialError> {
+            self.inner.get(reference)
+        }
+
+        fn delete(&self, reference: &CredentialRef) -> Result<(), CredentialError> {
+            if reference.account().ends_with(PASSPHRASE_ACCOUNT_SUFFIX) {
+                return Err(CredentialError::Backend(
+                    "injected passphrase deletion failure".into(),
+                ));
+            }
+            self.inner.delete(reference)
+        }
+
+        fn has(&self, reference: &CredentialRef) -> Result<bool, CredentialError> {
+            self.inner.has(reference)
+        }
+    }
+
+    #[test]
+    fn reclaim_removes_the_database_reference_before_queueing_failed_secret_deletion() {
+        let (path, database) = temp_database("queue-before-delete");
+        let credentials = FailPassphraseDelete::new();
+        let key = credentials
+            .set(
+                "ssh",
+                "srv_queue",
+                &Secret::from_utf8("private-key-material"),
+            )
+            .expect("stage key");
+        let passphrase = credentials
+            .set(
+                "ssh",
+                &format!("srv_queue{PASSPHRASE_ACCOUNT_SUFFIX}"),
+                &Secret::from_utf8("passphrase"),
+            )
+            .expect("stage passphrase");
+        database
+            .identities()
+            .insert(&Identity {
+                id: "idn_queue".into(),
+                label: "queued".into(),
+                method: "privateKey".into(),
+                credential_ref: key.to_string_ref(),
+                passphrase_ref: Some(passphrase.to_string_ref()),
+                private_key_path: None,
+                certificate_path: None,
+                created_at: NOW.into(),
+            })
+            .expect("insert identity");
+
+        let secrets = IdentitySecrets {
+            database: &database,
+            credentials: &credentials,
+        };
+        let error = secrets
+            .reclaim("idn_queue")
+            .expect_err("passphrase reclaim fails");
+        assert!(error.contains("queued"), "{error}");
+        assert!(matches!(
+            database.identities().get("idn_queue"),
+            Err(DatabaseError::NotFound)
+        ));
+        assert!(!credentials.has(&key).expect("key lookup"));
+        assert!(credentials.has(&passphrase).expect("passphrase lookup"));
+        let queued = database.credential_cleanup().list().expect("cleanup queue");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].reference, passphrase.to_string_ref());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
     /// 带口令的私钥写下**两条**条目：私钥 `keychain://ssh/{account}`、口令

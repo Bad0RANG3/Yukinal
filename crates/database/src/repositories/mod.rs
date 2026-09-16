@@ -5,6 +5,7 @@
 
 mod activities;
 mod chat;
+mod credential_cleanup;
 mod decode;
 mod executions;
 mod identities;
@@ -16,6 +17,7 @@ mod workspaces;
 
 pub use activities::ActivitiesRepository;
 pub use chat::ChatRepository;
+pub use credential_cleanup::CredentialCleanupRepository;
 pub use executions::ToolExecutionsRepository;
 pub use identities::IdentitiesRepository;
 pub use providers::{McpServersRepository, ProviderConfigsRepository};

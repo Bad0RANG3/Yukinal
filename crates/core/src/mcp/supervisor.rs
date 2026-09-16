@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,6 +21,8 @@ use super::handle::{McpServerStart, McpServerStatus, McpStdioHandle, ShutdownRep
 use super::http::McpHttpHandle;
 use super::transport::McpServerHandle;
 use super::truncated;
+
+const GLOBAL_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(7);
 
 /// One managed server. The handle can be replaced after a crash while the exit and
 /// restart records remain on this entry, so a recovered process cannot erase the reason
@@ -232,10 +234,40 @@ impl McpSupervisor {
                 })
                 .collect()
         };
+        let mut remaining: HashMap<String, McpServerHandle> = handles.iter().cloned().collect();
         let mut reports = Vec::with_capacity(handles.len());
+        let mut tasks = tokio::task::JoinSet::new();
         for (server_id, handle) in handles {
-            reports.push((server_id, handle.shutdown().await));
+            tasks.spawn(async move {
+                let report = handle.shutdown().await;
+                (server_id, report)
+            });
         }
+
+        let collect = async {
+            while let Some(joined) = tasks.join_next().await {
+                if let Ok((server_id, report)) = joined {
+                    remaining.remove(&server_id);
+                    reports.push((server_id, report));
+                }
+            }
+        };
+        if tokio::time::timeout(GLOBAL_SHUTDOWN_DEADLINE, collect)
+            .await
+            .is_err()
+        {
+            tasks.abort_all();
+            while let Some(joined) = tasks.join_next().await {
+                if let Ok((server_id, report)) = joined {
+                    remaining.remove(&server_id);
+                    reports.push((server_id, report));
+                }
+            }
+        }
+        for (server_id, handle) in remaining {
+            reports.push((server_id, handle.force_stop().await));
+        }
+        reports.sort_by(|left, right| left.0.cmp(&right.0));
         reports
     }
 

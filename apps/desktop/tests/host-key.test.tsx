@@ -23,6 +23,8 @@ import { hostKeyTrustEligibility } from "../src/lib/host-key.js";
 
 const PINNED = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
 const PRESENTED = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const PROBE_TICKET =
+  "probe_0000000000000000000000000000000000000000000000000000000000000000";
 
 const noop = () => {};
 
@@ -90,6 +92,7 @@ test("a probe result is labelled as what the server presented, never as verified
       probe={{
         host: "api.example.com",
         port: 22,
+        probeTicket: PROBE_TICKET,
         presentedFingerprint: PRESENTED,
         comparison: "unpinned",
       }}
@@ -116,6 +119,7 @@ test("a mismatch shows both fingerprints and offers no way to accept the new one
       probe={{
         host: "api.example.com",
         port: 22,
+        probeTicket: PROBE_TICKET,
         presentedFingerprint: PRESENTED,
         comparison: "mismatch",
         pinnedFingerprint: PINNED,
@@ -149,6 +153,7 @@ test("a mismatch is announced, not just coloured", () => {
       probe={{
         host: "api.example.com",
         port: 22,
+        probeTicket: PROBE_TICKET,
         presentedFingerprint: PRESENTED,
         comparison: "mismatch",
         pinnedFingerprint: PINNED,
@@ -173,6 +178,7 @@ test("a matching probe says so and leaves nothing to trust", () => {
       probe={{
         host: "api.example.com",
         port: 22,
+        probeTicket: PROBE_TICKET,
         presentedFingerprint: PINNED,
         comparison: "matches",
         pinnedFingerprint: PINNED,
@@ -205,6 +211,7 @@ test("CA policy makes leaf pins visibly informational and disables pin actions",
       probe={{
         host: "api.example.com",
         port: 22,
+        probeTicket: PROBE_TICKET,
         presentedFingerprint: PRESENTED,
         comparison: "mismatch",
         pinnedFingerprint: PINNED,

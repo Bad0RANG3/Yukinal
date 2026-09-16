@@ -60,6 +60,8 @@ pnpm clean
 
 `pnpm check` 是唯一的本地门禁（`scripts/check.mjs`），CI 也是跑同一条命令（`.github/workflows/check.yml`，三个平台各跑一遍）。它按固定顺序执行，遇到必需步骤失败即停止：
 
+同一 workflow 还有一个独立的 RustSec advisory job，直接检查 `Cargo.lock`；所有 GitHub Actions 都固定到提交 SHA，标签移动不会悄悄改变执行内容。
+
 1. `node scripts/check-publication.mjs` —— 公开文档卫生（禁止引用未发布的内部材料；公开标准的编号是例外，见脚本里的 `PUBLIC_STANDARD`）
 2. `node scripts/check-secrets.mjs` —— 已跟踪文件中不得出现凭据形态的字符串
 3. 构建契约库：`@yukinal/shared`、`@yukinal/provider-sdk`、`@yukinal/agent-sdk`

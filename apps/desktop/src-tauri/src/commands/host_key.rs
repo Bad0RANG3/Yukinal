@@ -44,6 +44,9 @@ pub struct ServerHostKeyStatusResponse {
 pub struct ServerHostKeyProbeResponse {
     pub host: String,
     pub port: u16,
+    /// Server-issued, single-use proof of this exact probe. The caller must return it
+    /// unchanged; a caller-supplied fingerprint alone is never sufficient to trust.
+    pub probe_ticket: String,
     /// 服务器出示的指纹。**不是**「已验证」—— 见模块文档第 2 条。
     pub presented_fingerprint: String,
     /// `unpinned` / `matches` / `mismatch`（词形由 `Comparison::as_str` 给出，
@@ -166,9 +169,15 @@ pub async fn server_host_key_probe(
         .host_key_check(&host, port, &probe.fingerprint)
         .map_err(|error| format!("读取 known_hosts 失败：{error}。请重试；持续失败请检查数据目录下 known_hosts 的权限。"))?;
 
+    let probe_ticket = state
+        .host_keys
+        .issue(&server_id, &host, port, &probe.fingerprint)
+        .map_err(|error| format!("issue a host-key probe ticket: {error}"))?;
+
     Ok(ServerHostKeyProbeResponse {
         host,
         port,
+        probe_ticket,
         presented_fingerprint: probe.fingerprint,
         comparison: comparison_word(&check),
         pinned_fingerprint: check.pinned().map(str::to_string),
@@ -184,9 +193,30 @@ pub async fn server_host_key_probe(
 pub async fn server_host_key_trust(
     state: State<'_, AppState>,
     server_id: String,
+    probe_ticket: String,
     fingerprint: String,
 ) -> Result<ServerHostKeyTrustResponse, String> {
     let (host, port) = resolve_endpoint(&state, &server_id)?;
+    state
+        .host_keys
+        .claim(&probe_ticket, &server_id, &host, port, &fingerprint)
+        .map_err(|reason| match reason {
+            crate::state::host_key::ProbeClaimError::Unknown => {
+                "host-key probe ticket is missing or was already used; probe again before trusting"
+                    .to_string()
+            }
+            crate::state::host_key::ProbeClaimError::Expired => {
+                "host-key probe ticket expired; probe the server again before trusting".to_string()
+            }
+            crate::state::host_key::ProbeClaimError::EndpointChanged => {
+                "the server endpoint changed after the probe; probe the current endpoint again"
+                    .to_string()
+            }
+            crate::state::host_key::ProbeClaimError::FingerprintChanged => {
+                "the fingerprint does not match the server-issued probe ticket; probe again"
+                    .to_string()
+            }
+        })?;
 
     let decision = state.ssh.trust_host(&host, port, &fingerprint).map_err(|error| {
         format!("写入 known_hosts 失败：{error}。指纹**没有**被记住；请检查数据目录是否可写，然后重试。")
@@ -228,6 +258,7 @@ pub async fn server_host_key_forget(
     server_id: String,
 ) -> Result<ServerHostKeyForgetResponse, String> {
     let (host, port) = resolve_endpoint(&state, &server_id)?;
+    state.host_keys.invalidate(&server_id);
 
     let outcome = state.ssh.forget_host(&host, port).map_err(|error| {
         format!("从 known_hosts 删除 {host}:{port} 失败：{error}。钉子仍然在，连接行为没有改变；请检查数据目录是否可写，然后重试。")
@@ -264,6 +295,10 @@ mod tests {
 
     const PINNED: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
     const PRESENTED: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const PROBE_TICKET: &str =
+        "probe_0000000000000000000000000000000000000000000000000000000000000000";
+    const UNPINNED_TICKET: &str =
+        "probe_1111111111111111111111111111111111111111111111111111111111111111";
 
     fn fixture(raw: &str) -> serde_json::Value {
         serde_json::from_str(raw).expect("fixture json")
@@ -307,6 +342,7 @@ mod tests {
         let actual = serde_json::to_value(ServerHostKeyProbeResponse {
             host: "api.example.com".into(),
             port: 22,
+            probe_ticket: PROBE_TICKET.into(),
             presented_fingerprint: PRESENTED.into(),
             comparison: "mismatch",
             pinned_fingerprint: Some(PINNED.into()),
@@ -317,6 +353,7 @@ mod tests {
         let actual = serde_json::to_value(ServerHostKeyProbeResponse {
             host: "api.example.com".into(),
             port: 22,
+            probe_ticket: UNPINNED_TICKET.into(),
             presented_fingerprint: PRESENTED.into(),
             comparison: "unpinned",
             pinned_fingerprint: None,

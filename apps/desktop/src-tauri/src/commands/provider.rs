@@ -10,7 +10,7 @@ use crate::state::AppState;
 use yukinal_core::provider::{
     primary_provider_id, runtime_provider_config, sanitize_custom_headers,
 };
-use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
+use yukinal_credentials::{CredentialError, CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{
     ActivityOutcome, ActivityType, AiProviderConfig, AiProviderKind, ProviderModelOption,
 };
@@ -180,12 +180,42 @@ pub async fn provider_save(
         .or_else(|| requested_id.map(str::to_string))
         .unwrap_or_else(|| crate::commands::server::next_id("prv"));
 
+    let providers_before = state
+        .database
+        .providers()
+        .list_ai()
+        .map_err(|error| error.to_string())?;
+    let provider_existed = existing.is_some();
+    let mut api_key_rollback = None;
     let api_key_credential_ref = match api_key {
         Some(key) if !key.trim().is_empty() => {
+            let credential_ref = CredentialRef::new(
+                "openai",
+                format!("provider_{id}_{}", crate::commands::server::next_id("cred")),
+            );
+            let rollback = match state.credentials.get(&credential_ref) {
+                Ok(previous) => CredentialRollback::Restore {
+                    reference: credential_ref.clone(),
+                    secret: previous,
+                },
+                Err(CredentialError::NotFound { .. }) => CredentialRollback::Delete {
+                    reference: credential_ref.clone(),
+                },
+                Err(error) => {
+                    return Err(format!(
+                        "could not read the provider credential before replacing it: {error}"
+                    ));
+                }
+            };
             let reference = state
                 .credentials
-                .set("openai", &format!("provider_{id}"), &Secret::from_utf8(key))
+                .set(
+                    credential_ref.service(),
+                    credential_ref.account(),
+                    &Secret::from_utf8(key),
+                )
                 .map_err(|error| error.to_string())?;
+            api_key_rollback = Some(rollback);
             Some(reference.to_string_ref())
         }
         // 没给新 key：沿用旧的（没有旧的就保持无 key，本地端点场景）。
@@ -218,12 +248,50 @@ pub async fn provider_save(
             .unwrap_or_else(|| now.clone()),
         updated_at: now,
     };
-    state
-        .database
-        .providers()
-        .upsert_ai(&provider)
-        .map_err(|error| error.to_string())?;
-    activate_only(&state, &provider.id)?;
+    if let Err(error) = state.database.providers().upsert_ai(&provider) {
+        return Err(with_credential_rollback(
+            &state.database,
+            state.credentials.as_ref(),
+            api_key_rollback.as_ref(),
+            format!("could not save the provider: {error}"),
+        ));
+    }
+    if let Err(error) = activate_only(&state, &provider.id) {
+        let database_rollback =
+            rollback_provider_rows(&state, &providers_before, &provider.id, provider_existed);
+        let message = match database_rollback {
+            Ok(()) => format!("could not activate the provider: {error}"),
+            Err(rollback_error) => format!(
+                "could not activate the provider: {error}; restoring the previous provider rows also failed: {rollback_error}"
+            ),
+        };
+        return Err(with_credential_rollback(
+            &state.database,
+            state.credentials.as_ref(),
+            api_key_rollback.as_ref(),
+            message,
+        ));
+    }
+    if let Some(write) = api_key_rollback.as_ref() {
+        if let Some(previous) = existing
+            .as_ref()
+            .and_then(|provider| provider.api_key_credential_ref.as_deref())
+        {
+            if previous != write.reference().to_string_ref() {
+                if let Err(error) = reclaim_replaced_provider_key(
+                    &state.database,
+                    state.credentials.as_ref(),
+                    &provider.id,
+                    previous,
+                ) {
+                    tracing::warn!(
+                        provider_id = %provider.id,
+                        "saved the provider but could not reclaim its previous credential: {error}"
+                    );
+                }
+            }
+        }
+    }
     record_user_activity(
         &state,
         None,
@@ -234,6 +302,88 @@ pub async fn provider_save(
     )?;
 
     Ok(ProviderSaveResponse { provider })
+}
+
+enum CredentialRollback {
+    Restore {
+        reference: CredentialRef,
+        secret: Secret,
+    },
+    Delete {
+        reference: CredentialRef,
+    },
+}
+
+impl CredentialRollback {
+    fn reference(&self) -> &CredentialRef {
+        match self {
+            Self::Restore { reference, .. } | Self::Delete { reference } => reference,
+        }
+    }
+}
+
+fn reclaim_replaced_provider_key(
+    database: &yukinal_database::Database,
+    credentials: &dyn CredentialStore,
+    provider_id: &str,
+    previous_reference: &str,
+) -> Result<(), String> {
+    if database
+        .providers()
+        .credential_ref_used_elsewhere(previous_reference, provider_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let reference = CredentialRef::parse(previous_reference).map_err(|error| error.to_string())?;
+    crate::state::credential_cleanup::reclaim(database, credentials, &reference)
+}
+
+fn with_credential_rollback(
+    database: &yukinal_database::Database,
+    credentials: &dyn CredentialStore,
+    rollback: Option<&CredentialRollback>,
+    message: String,
+) -> String {
+    let Some(rollback) = rollback else {
+        return message;
+    };
+    let rollback_result = match rollback {
+        CredentialRollback::Restore { reference, secret } => credentials
+            .set(reference.service(), reference.account(), secret)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        CredentialRollback::Delete { reference } => {
+            crate::state::credential_cleanup::reclaim(database, credentials, reference)
+        }
+    };
+    match rollback_result {
+        Ok(()) => message,
+        Err(error) => format!("{message}; restoring the previous credential also failed: {error}"),
+    }
+}
+
+fn rollback_provider_rows(
+    state: &AppState,
+    previous: &[AiProviderConfig],
+    provider_id: &str,
+    existed_before: bool,
+) -> Result<(), String> {
+    if !existed_before {
+        state
+            .database
+            .providers()
+            .delete(provider_id)
+            .map_err(|error| error.to_string())?;
+    }
+    for provider in previous {
+        state
+            .database
+            .providers()
+            .upsert_ai(provider)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// `YYYY-MM-DD`，且年月日字段范围正确。只按位数判断会把 `2026-99-99` 存进库，
@@ -450,10 +600,11 @@ pub async fn provider_delete(
     let credential_reclaimed = match reference.as_deref() {
         Some(reference) if !shared => {
             let reference = CredentialRef::parse(reference).map_err(|error| error.to_string())?;
-            state
-                .credentials
-                .delete(&reference)
-                .map_err(|error| error.to_string())?;
+            crate::state::credential_cleanup::reclaim(
+                &state.database,
+                state.credentials.as_ref(),
+                &reference,
+            )?;
             true
         }
         _ => false,
@@ -581,10 +732,158 @@ fn provider_is_usable(state: &AppState, provider: &AiProviderConfig) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::is_iso_date;
     use super::ProviderDeleteResponse;
+    use super::{reclaim_replaced_provider_key, with_credential_rollback, CredentialRollback};
     use serde_json::{json, Value};
-    use yukinal_database::models::AiProviderKind;
+    use yukinal_credentials::memory::MemoryCredentialStore;
+    use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
+    use yukinal_database::models::{AiProviderConfig, AiProviderKind};
+    use yukinal_database::Database;
+
+    fn temp_database(name: &str) -> (PathBuf, Database) {
+        let path = std::env::temp_dir().join(format!(
+            "yukinal-provider-rollback-{}-{}.sqlite",
+            std::process::id(),
+            name
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", path.display())));
+        }
+        let database = Database::open(&path).expect("open temp database");
+        (path, database)
+    }
+
+    fn provider(id: &str, credential_ref: Option<&str>) -> AiProviderConfig {
+        AiProviderConfig {
+            id: id.into(),
+            kind: AiProviderKind::OpenaiCompatible,
+            label: id.into(),
+            base_url: "https://example.test/v1".into(),
+            model: "test-model".into(),
+            wire_api: Some("chat".into()),
+            api_key_credential_ref: credential_ref.map(str::to_string),
+            enabled: false,
+            custom_headers: None,
+            api_version: None,
+            max_input_tokens: None,
+            models: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn replacing_a_provider_key_preserves_a_credential_another_row_still_uses() {
+        let (path, database) = temp_database("shared");
+        let credentials = MemoryCredentialStore::new();
+        let reference = credentials
+            .set("openai", "shared-provider-key", &Secret::from_utf8("key"))
+            .expect("shared key");
+        database
+            .providers()
+            .upsert_ai(&provider("prv_first", Some(&reference.to_string_ref())))
+            .expect("first provider");
+        database
+            .providers()
+            .upsert_ai(&provider("prv_second", Some(&reference.to_string_ref())))
+            .expect("second provider");
+
+        reclaim_replaced_provider_key(
+            &database,
+            &credentials,
+            "prv_first",
+            &reference.to_string_ref(),
+        )
+        .expect("shared credential is left alone");
+        assert!(credentials.has(&reference).expect("shared lookup"));
+
+        database
+            .providers()
+            .delete("prv_first")
+            .expect("delete first provider");
+        database
+            .providers()
+            .delete("prv_second")
+            .expect("delete second provider");
+        reclaim_replaced_provider_key(
+            &database,
+            &credentials,
+            "prv_first",
+            &reference.to_string_ref(),
+        )
+        .expect("orphaned credential is reclaimed");
+        assert!(!credentials.has(&reference).expect("orphan lookup"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn replacing_a_provider_key_can_restore_the_previous_secret() {
+        let (path, database) = temp_database("restore");
+        let credentials = MemoryCredentialStore::new();
+        let reference = credentials
+            .set("openai", "provider_prv_1", &Secret::from_utf8("old-key"))
+            .expect("old key");
+        let previous = credentials.get(&reference).expect("read old key");
+        credentials
+            .set(
+                reference.service(),
+                reference.account(),
+                &Secret::from_utf8("new-key"),
+            )
+            .expect("replace key");
+
+        let message = with_credential_rollback(
+            &database,
+            &credentials,
+            Some(&CredentialRollback::Restore {
+                reference: reference.clone(),
+                secret: previous,
+            }),
+            "save failed".to_string(),
+        );
+        assert_eq!(message, "save failed");
+        assert_eq!(
+            credentials
+                .get(&reference)
+                .expect("restored")
+                .as_utf8()
+                .expect("utf8"),
+            "old-key"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn replacing_a_missing_provider_key_can_delete_the_staged_secret() {
+        let (path, database) = temp_database("delete");
+        let credentials = MemoryCredentialStore::new();
+        let reference = CredentialRef::new("openai", "provider_prv_2");
+        credentials
+            .set(
+                reference.service(),
+                reference.account(),
+                &Secret::from_utf8("new-key"),
+            )
+            .expect("stage key");
+
+        let message = with_credential_rollback(
+            &database,
+            &credentials,
+            Some(&CredentialRollback::Delete {
+                reference: reference.clone(),
+            }),
+            "save failed".to_string(),
+        );
+        assert_eq!(message, "save failed");
+        assert!(!credentials.has(&reference).expect("lookup"));
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn ai_provider_kind_uses_shared_wire_spelling() {

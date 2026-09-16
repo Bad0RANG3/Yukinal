@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tempfile = { workspace = true }
 yukinal-net = { workspace = true }
 
 # New deps rationale (repo rule): russh/russh-sftp — MIT, maintained, pure Rust,
