@@ -16,9 +16,9 @@ Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务
 
 | 工作区与 Agent | 终端工作区 |
 | --- | --- |
-| ![Yukinal 首次使用工作区](./docs/assets/screenshots/yukinal-workspace.png) | ![Yukinal 终端日志与 Agent 示例](./docs/assets/screenshots/yukinal-terminal-demo.png) |
+| ![Yukinal 首次使用工作区](./docs/assets/screenshots/yukinal-workspace.png) | ![Yukinal 终端页空状态](./docs/assets/screenshots/yukinal-terminal.png) |
 
-左图展示首次使用引导和 Agent 面板；右图在真实终端与 Agent 布局上放入了脱敏示例：Nginx 配置检查、服务 reload、健康检查、Docker 状态，以及 Agent 的只读分析。示例日志和回答用于展示交互效果，不代表已经连接真实主机或模型。
+左图展示首次使用引导和 Agent 面板；右图展示终端页的 PTY 工作区布局。没有选择服务器时，终端会明确提示下一步，而不会伪造远程 shell 输出。
 
 ## 项目状态
 
