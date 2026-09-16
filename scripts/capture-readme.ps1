@@ -1,6 +1,8 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")),
     [string]$Output = "docs\assets\screenshots\yukinal-workspace.png",
+    [ValidateSet("workspace", "terminal-empty")]
+    [string]$View = "workspace",
     [int]$TimeoutSeconds = 20
 )
 
@@ -47,6 +49,19 @@ public static class YukinalWindowCapture
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int command);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+    public static void Click(int x, int y)
+    {
+        SetCursorPos(x, y);
+        mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+        mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+    }
 }
 "@
 
@@ -68,6 +83,20 @@ try {
     [YukinalWindowCapture]::ShowWindow($process.MainWindowHandle, 9) | Out-Null
     [YukinalWindowCapture]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
     Start-Sleep -Seconds 3
+
+    $rect = New-Object YukinalWindowCapture+RECT
+    if (-not [YukinalWindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) {
+        throw "Could not read the desktop window bounds before navigation."
+    }
+
+    if ($View -eq "terminal-empty") {
+        # The temporary data directory contains no server. Close the onboarding
+        # guide, open the Terminal tab, and capture its honest empty state.
+        [YukinalWindowCapture]::Click($rect.Left + 877, $rect.Top + 216)
+        Start-Sleep -Milliseconds 700
+        [YukinalWindowCapture]::Click($rect.Left + 482, $rect.Top + 140)
+        Start-Sleep -Seconds 1
+    }
 
     $rect = New-Object YukinalWindowCapture+RECT
     if (-not [YukinalWindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) {
@@ -94,7 +123,7 @@ try {
 
     $bitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
     $bitmap.Dispose()
-    Write-Output "PASS: captured ${width}x${height} to $outputPath"
+    Write-Output "PASS: captured ${width}x${height} ($View) to $outputPath"
 }
 finally {
     if ($null -eq $previousDataDirectory) {
