@@ -4,95 +4,144 @@
 [![CI](https://github.com/Bad0RANG3/Yukinal/actions/workflows/check.yml/badge.svg)](https://github.com/Bad0RANG3/Yukinal/actions/workflows/check.yml)
 [![Release](https://img.shields.io/badge/release-1.0.0-blue.svg)](./docs/changelog.md)
 
-Yukinal 是一个把「远程开发与基础设施运维」和「AI Agent」放进同一个桌面窗口的工作区。它把 SSH 连接、服务器健康快照、终端、远程文件、服务与日志、活动审计，以及一个可审批的 Agent 面板组织到一起。
+> 把 SSH、服务器状态和可审批的 AI Agent 放进一个桌面工作区。
 
-它要解决的问题是：当人们想用模型操作自己的服务器时，常见的做法是直接把 shell 交给模型。这样权限不可解释、越权无法追溯、误操作无法预防。Yukinal 把模型放在「提议者」的位置上——模型只能提出工具调用请求，是否执行由 Permission Engine 决策，实际操作由 Rust 宿主在已解析的目标上完成，整个过程落成可回放的活动记录与执行审计。模型不会绕开现有的运维流程，它是在既有的目标、风险规则和用户授权边界内工作。
+Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务器连接、健康快照、终端、远程文件、服务与日志、活动记录，以及 Agent 对话放在同一个窗口里。
+
+它的核心取舍很简单：Agent 可以提出操作，但不能直接碰服务器。每次工具调用都要经过 Permission Engine；Rust 宿主会在已经解析和校验过的目标上执行操作，并把请求、授权和结果记录下来。
+
+![Yukinal 桌面工作区](./docs/assets/screenshots/yukinal-workspace.png)
+
+*截图：空白数据目录下的真实 Yukinal Tauri 窗口，展示首次使用引导、服务器工作区和 Agent 面板。*
 
 ## 项目状态
 
-Yukinal 当前版本为 `1.0.0`，这是首个稳定接口基线。版本号唯一来源是 `packages/shared/src/version.ts` 的 `APP_VERSION`；其余六个 `package.json`、`tauri.conf.json`、Cargo workspace 与 IPC fixture 都由 `packages/shared/src/version.test.ts` 钉在同一个值上，改一处而漏改其余会让 `pnpm check` 变红。
+当前版本为 `1.0.0`，作为首个稳定的跨层接口基线。版本号唯一来源是 [`packages/shared/src/version.ts`](./packages/shared/src/version.ts)，跨 TypeScript、Rust、Tauri 配置和 IPC fixture 的版本一致性由测试守护。
 
-1.0.0 表示跨层接口与行为基线已经冻结；以下发布限制仍必须在安装或分发前阅读：
+当前状态需要注意：
 
-- **安装包已经在本机构建出来了，但没有签名。** `pnpm package` 在 Windows 上产出了 NSIS 安装程序与 WiX `.msi`（见 [打包与分发](./docs/packaging.md#打包与分发)），两者都在 `target/release/bundle/` 下。未签名意味着 Windows SmartScreen 与 macOS Gatekeeper 会对首次启动发出警告；也没有公证与自动更新。**macOS 与 Linux 的安装包从未构建过**（各自只能在各自平台上打）。
-- **接口已进入 1.0 兼容基线。** Tauri IPC 命令、sidecar JSON-RPC 方法和跨层类型从 `1.0.0` 起按语义化版本维护；破坏性变更只在下一个主版本发布。
-- **仍然有明确的能力空缺。** Agent 输入支持图片、PDF、UTF-8 文本文件与音频（WAV/MP3/OGG/FLAC，按魔数校验；Anthropic 没有音频块，带音频的请求会明确失败），不支持任意二进制文件；两套原生 Provider 适配器尚未对真实 API 调用过。详见[当前限制](./docs/limitations.md#当前限制)。
+- Windows 安装包已经可以构建，但目前未签名，也没有完成安装后的启动验收。
+- macOS 与 Linux 安装包需要在对应平台构建；本机尚未对它们做真实产物验证。
+- Provider、MCP、多模态输入、文件并发修改等边界仍有明确限制，完整清单见[当前限制](./docs/limitations.md#当前限制)。
 
 ## 今天真正可用的能力
 
-以下每一条都能在仓库中找到对应实现；括号里是主要位置。
+### 服务器工作区
 
-**桌面工作区（需要 Tauri 窗口）**
+- 管理多台 SSH 服务器，保存连接配置，并在首次连接时处理主机指纹；密码、私钥和其他 secret 交给操作系统凭据库保存。
+- 查看 OS、CPU、内存、运行时长、磁盘、网络和 Docker 等健康快照。
+- 使用多会话 PTY 终端、SFTP 远程文件浏览，以及有上限的文本读取。
+- 查看服务和日志；探测不到时明确返回 `unavailable`，不会用假数据填充界面。
+- 记录连接、配置变更和 Agent 工具执行，方便回看一次操作是如何发生的。
 
-- 服务器条目的增删改查，落本地 SQLite；SSH 密码、私钥与加密口令只进操作系统凭据库，OpenSSH 用户证书按路径读取，证书与私钥路径作为非敏感元数据保存。密码、私钥、证书或 agent 的第一因素部分成功后，服务器声明的 keyboard-interactive 二次认证会以一次性内存挑战显示在桌面端；host 证书还可配置受信 CA 公钥、主机 principal 模式、本地路径或 HTTPS URL 形式的 OpenSSH KRL，以及最多 8 把独立 KRL 签名公钥，启用后普通 host key 会被拒绝（I/O 在 `apps/desktop/src-tauri/src/commands/server/`，命名与挂载规则在 `crates/core/src/identity.rs`）。
-- 连接管理：连接、断开、连接状态与最近错误；同一服务器的连接会被缓存复用（`commands/terminal.rs` 的 `ensure_session`）。
-- 概览页的真实健康快照：7 个采集器（OS、CPU、内存、运行时长、磁盘、网络、Docker）各带 5 秒命令超时，采集结果入库并可回看（`crates/collector`）。
-- 终端：基于 russh 的 PTY（`xterm-256color`），支持多会话、写入、改尺寸和关闭，数据通过 `terminal:data` 等事件流回界面（`crates/terminal`）。
-- 远程文件：SFTP 目录列表与有上限的文本读取（上限 1 MiB，超出部分标记为已截断），读取结果带回内容的 SHA-256 摘要（`commands/files.rs`、`crates/filesystem`、`crates/ssh`）。写入只作为 Agent 工具存在（`filesystem.write` 覆盖写、`filesystem.edit` 先读后改），界面没有写文件的入口。
-- 服务与日志：固定的只读探测命令，先试 `systemctl` 再退到 `docker ps`；日志先试 `journalctl` 再退到 `/var/log/syslog`、`/var/log/messages`，最多 120 行并做级别分类；探测不到时明确返回 `unavailable`，不会编造内容（`commands/services.rs`、`commands/logs.rs`）。
-- 活动记录：连接、配置变更、Agent 工具执行都会写入 `activities` 表并推 `activity.created` 事件（`commands/activity.rs`、`commands/host.rs`）。
-- Agent 对话记录：会话与消息持久化到 `chat_sessions` / `chat_messages`，面板里的记录视图按日期分组（今天 / 昨天 / 最近 7 天 / 更早），可搜标题与消息正文、按进行中 / 已归档 / 全部筛选、每页 50 条往下翻、就地重命名，并归档或删除（`commands/chat.rs`、`apps/desktop/src/features/agent/AgentHistoryPane.tsx`）。
-- Agent 面板：流式文本、图片、PDF、UTF-8 文本文件与音频附件、工具调用卡片、审批按钮、停止运行、模型选择、运行模式、批准方式与目标策略切换。图片可通过选择、粘贴或拖放加入消息；文本文件、PDF 与音频在选择、拖放或粘贴后会先按**内容**（魔数）与上限校验，PDF 与音频共用与图片相同的总预算；音频在待发送区用播放器预览，可逐项移除；附件随会话持久化。Agent 的回复按 Markdown 渲染（标题、列表、代码块、表格、行内代码、引用式链接），解析器是仓库自己的、不注入 HTML。`http(s)` 链接经受限 opener 交给系统浏览器，图片使用 no-referrer 加载（`apps/desktop/src/lib/markdown/`、[Markdown 渲染](./docs/boundaries/markdown.md#agent-回复的-markdown-渲染)）。窗口里只有「你与 Agent 的对话正文」可以拖动选中，其余界面不参与选择。
-- MCP 服务器：配置、启动、停止与删除，支持 stdio 与 Streamable HTTP（命令在 `commands/mcp.rs`，连接与目录解析在 `crates/core/src/mcp/`，网络与进程归宿主）；HTTP 可配最多 16 条有序静态认证头，或使用可自动发现 issuer、支持动态客户端注册的 OAuth 并自动刷新 token —— 流程可选 authorization code + PKCE（浏览器回调）或 device code（显示 `user_code`、打开验证页面、按服务器给的间隔轮询，随时可取消），客户端认证可选公共客户端、`client_secret_post` 或 `client_secret_basic`（手填密钥可保留、轮换与回收，界面从不回填），所有 secret 均由系统凭据库持有；stdio 崩溃后按有界退避重建，不重放中断的调用；工具目录经既有 `host.mcp.catalog` 交给 sidecar —— 没有第二条执行通道。见 [外部工具（MCP）](./docs/boundaries/mcp.md#边界外部工具mcp)。
+### Agent 工作流
 
-**Agent 运行时（Node.js sidecar）**
+- 使用 Node.js sidecar 执行完整的 agent loop：组装上下文、调用模型、请求授权、执行工具、回灌结果，再进入下一轮。
+- 内置服务器信息、Docker、文件读写和编辑等工具；真正的 SSH、SFTP、SQLite、凭据和进程资源由 Rust 宿主持有。
+- 运行模式与批准方式分开控制：`goal`、`plan`、`readonly` 决定允许改变什么，`ask`、`auto` 决定由谁确认。
+- 支持流式回答、工具调用卡片、逐项审批、停止运行、模型选择、会话历史和活动追踪。
+- 支持图片、PDF、UTF-8 文本文件与音频附件，并按内容特征和大小上限校验；具体 Provider 的输入能力仍以[当前限制](./docs/limitations.md#当前限制)为准。
 
-- 一次完整的 agent loop：组装上下文 → 调用模型 → 解析工具调用 → 请求授权 → 执行 → 把结果回灌模型进入下一轮。单次运行受 `maxSteps`（默认 25）与墙钟上限（默认 15 分钟）约束（`apps/agent/src/runtime/agent-loop.ts`）。
-- 9 个内置工具：`system.echo` 在无宿主时也可用；`server.info`、`docker.ps`、`docker.logs`、`docker.inspect`、`docker.restart`、`filesystem.read`、`filesystem.write`、`filesystem.edit` 需要 Rust 宿主在线，实际执行发生在宿主侧（`apps/agent/src/tools/builtin/`）。
-- 权限决策：三层风险事实合成一个决策，产出可执行的 ticket（`apps/agent/src/permissions/`）。
-- 审批往返：等待用户批准，2 分钟未响应按「已过期」处理并拒绝，不会永久挂起运行。
-- 取消：停止一次运行会中止在途的 HTTP 流、工具执行和等待中的审批，并把取消状态如实上报。
-- 执行追踪：每次运行有一个 `TraceRecorder` 账本，工具事件携带的 `traceId` / `stepId` 都由它发出，被策略拒绝或被驳回的调用也会把步骤收尾（不会留下永远 `running` 的步骤），完成的运行在结果里带上自己的 `traceId`，Rust 侧写入的审计行因此可以按运行检索（`apps/agent/src/trace/`）。
-- 运行模式与批准方式两个正交的轴：`goal`/`plan`/`readonly` 决定这次运行**能改到什么程度**，`ask`/`auto` 决定**允许的部分由谁点头**（`packages/shared/src/types/risk.ts`）。
-- MCP 工具：宿主问出来的外部工具以 `mcp.<服务器>.<工具>` 进入同一个 registry，声明里一律是 `critical`（服务器的自我描述不被采信），所以每个调用都要用户逐项批准；`host.tool.execute` 按 `mcp.` 前缀分流，与 `docker.*` / `filesystem.*` 共用同一条路径和同一套取消令牌。
+### Provider 与 MCP
 
-**Provider**
+- 支持 OpenAI-compatible（Chat Completions / Responses）、Anthropic Messages 和 Gemini `generateContent` 三类协议。
+- 支持模型目录、SSE 文本增量、工具调用增量、取消、超时和安全的错误摘要。
+- 支持 stdio 与 Streamable HTTP MCP 服务器；HTTP 端点可使用静态认证头或 OAuth，凭据仍由系统凭据库持有。
+- MCP 工具进入和内置工具相同的执行链路，但默认按 `critical` 处理，必须逐项审批。
 
-- 三种协议各一个适配器：**OpenAI-compatible**（Chat Completions 与 Responses 两种请求方言）、**Anthropic Messages**、**Gemini `generateContent`**。三者都支持模型目录、SSE 文本增量、工具调用增量、取消、超时和安全的错误摘要；两个原生适配器还会解析 token 统计与推理增量（`apps/agent/src/providers/`，细节见 [模型 Provider](./docs/boundaries/provider.md#边界模型-provider)）。
-- 协议选择是配置里的一列（`provider_configs.kind`），`buildProvider()` 是唯一按 Provider 身份分支的地方；`wireApi` 只对 OpenAI-compatible 有意义，其余两种带上它会被拒绝，而不是被忽略。
-- 凭据链路：SQLite 只保存 `credentialRef`，密钥存操作系统凭据库，Rust 在每次运行开始时解析并以一次性参数交给 sidecar，不写配置、不写日志。
+### 安全边界
 
-**浏览器预览模式**
+Yukinal 把模型当作“提议者”，而不是拥有 shell 的操作者：
 
-- 执行 `pnpm --filter @yukinal/desktop dev` 可以在普通浏览器里开发界面。预览模式不提供 SQLite、SSH、Tauri IPC 或 sidecar；调用原生命令会抛出「请在 Yukinal 桌面应用中执行此操作」，界面会显示「预览模式」标记，不会用假数据伪装这些能力（`apps/desktop/src/lib/ipc.ts`）。
+```text
+React 界面
+    │ 白名单 Tauri IPC
+    ▼
+Rust 宿主 ── SSH / SFTP / PTY ──► 远程服务器
+    │
+    └── NDJSON JSON-RPC ──► Node.js Agent ── HTTPS / SSE ──► 模型 Provider
+                              │
+                              └── Permission Engine：决定执行、询问或拒绝
+```
+
+执行前会综合工具风险、命令风险和目标环境；危险动作不能通过提示词或长期授权绕过逐项审批。凭据、主机身份、数据边界和权限档位的完整规则放在 [`docs/`](./docs/README.md) 中，而不是重复写在这里。
 
 ## 快速开始
 
-前置条件：Node.js `>= 24`、pnpm `11.8.0`、Rust `1.85` 以上（工具链 `stable`，含 `rustfmt` 与 `clippy`），以及 Tauri 2 在当前平台的系统依赖。完整清单见 [开始开发](./docs/development.md#开始开发)。
+### 前置条件
+
+- Node.js `>= 24`
+- pnpm `11.8.0`
+- Rust `1.85+`，并包含 `rustfmt` 与 `clippy`
+- 当前平台所需的 Tauri 2 系统依赖
+
+完整环境清单见[开始开发](./docs/development.md#开始开发)。
+
+### 安装与校验
 
 ```bash
 pnpm install
-pnpm check                            # 完整门禁：文档卫生、凭据扫描、跨层契约、类型检查、单元测试、冒烟与 Rust 侧检查
-pnpm --filter @yukinal/desktop tauri dev   # 完整桌面应用（需要 Rust）
-pnpm desktop:dev                      # 浏览器预览：只能调界面，原生能力不可用
-pnpm package                          # 打安装包（当前只有 Windows 路径被跑通过）
+pnpm check
 ```
 
-首次使用要按顺序做三件事：先在「设置 ▸ Provider」里填一个协议与密钥，再在「服务器」里添加一台服务器并连接，之后概览、终端、文件、服务与日志才可用。逐步说明见 [首次使用引导](./docs/development.md#首次使用引导)。
+`pnpm check` 是本地和 CI 共用的门禁，包含文档链接、凭据扫描、跨层契约、类型检查、单元测试、sidecar 冒烟、打包契约以及 Rust 检查。
+
+### 启动
+
+启动完整桌面应用：
+
+```bash
+pnpm --filter @yukinal/desktop tauri dev
+```
+
+只预览 React 界面：
+
+```bash
+pnpm desktop:dev
+# http://127.0.0.1:1420/
+```
+
+浏览器预览只用于界面开发，不提供 SQLite、SSH、PTY、系统凭据库、MCP 子进程或 Agent 原生能力。
+
+首次打开桌面应用后，按「使用引导」完成三步：
+
+1. 在「设置 → Provider」中保存并测试模型连接。
+2. 添加服务器，核验主机身份后连接 SSH。
+3. 让 Agent 生成一次只读健康巡检草稿，确认内容后再发送。
+
+### 构建安装包
+
+```bash
+pnpm package
+```
+
+安装包输出到 `target/release/bundle/`。当前实际跑通过的是 Windows NSIS 与 MSI；签名、公证、自动更新和跨平台安装后的验收仍不在本版本承诺内，详见[打包与分发](./docs/packaging.md#打包与分发)。
+
+## 项目结构
+
+```text
+apps/desktop/       React 19 + Vite 界面，以及 Tauri Rust 外壳
+apps/agent/         Node.js Agent loop、工具、权限引擎和 Provider
+packages/shared/    TypeScript/Rust 共用的 IPC、事件、协议与 schema 契约
+packages/*-sdk/     Provider 与 Agent SDK
+crates/             SSH、PTY、采集、SQLite、凭据、文件系统和宿主核心
+docs/               架构、权限、安全边界、限制、开发和发布文档
+scripts/            校验、冒烟、打包和桌面窗口辅助脚本
+```
 
 ## 文档
 
-这份 `README.md` 只介绍项目：它是什么、现在能做什么、怎么跑起来。**规则、约束与决策不写在这里**，各自成篇放在 `docs/` 下 —— 它们的读者是改代码的人，改动它们要动的是契约而不是说明。
-
-| 文档 | 写什么 | 什么时候读 |
-| --- | --- | --- |
-| [文档索引](./docs/README.md) | `docs/` 的阅读顺序与文档治理规则 | 想知道某件事写在哪 |
-| [架构总览](./docs/architecture.md) | 一次运行的完整链路、分层边界、仓库地图 | 想知道某个东西住在哪一层 |
-| [执行与授权模型](./docs/execution-model.md) | 三层风险事实如何合成一个决策、票据与授权的共享规则 | 要改权限、审批或目标解析 |
-| [权限档位：read](./docs/risk-tiers/read.md) · [write](./docs/risk-tiers/write.md) · [dangerous](./docs/risk-tiers/dangerous.md) | 三档各自的完整规则：构成、策略表取值、谁能批准、什么会拒绝它 | 要判断一次调用会走哪条路 |
-| [安全与数据边界](./docs/security.md) | 凭据、主机指纹、Agent 能碰什么、各项上限 | 要碰凭据、文件路径或上限 |
-| [边界：模型 Provider](./docs/boundaries/provider.md) | 三种协议的适配器与它们的假设 | 要加 Provider 或改协议翻译 |
-| [边界：外部工具（MCP）](./docs/boundaries/mcp.md) | 接入形状、十条约束、已知未验证处 | 要碰 MCP 的进程、目录或调用 |
-| [Agent 回复的 Markdown 渲染](./docs/boundaries/markdown.md) | 为什么自己写解析器，以及它的子集边界 | 要改渲染或加语法 |
-| [当前限制与有意为之的边界](./docs/limitations.md) | **全部**已知缺口，以及不会被补完的安全边界 | 想确认某件事是不是还没做 |
-| [开始开发](./docs/development.md) | 前置条件、各种启动方式、验证命令、首次使用引导 | 第一次跑起来 |
-| [打包与分发](./docs/packaging.md) | 安装包怎么产出、装了什么、签名与平台现状 | 要出安装包 |
-| [架构决策记录](./docs/adr.md) | ADR 0001–0015，代码注释里的 `ADR NNNN` 指向这里 | 想知道某个形状是为什么 |
-| [版本与发布历史](./docs/changelog.md) | 未发布与已发布的变化、每个版本的包含与缺口 | 要写发布说明 |
-
-| [贡献指南](./CONTRIBUTING.md) | 开发环境、提交规范、审查流程与验证要求 | 准备提交代码或文档 |
-| [安全策略](./SECURITY.md) | 漏洞私下报告渠道、支持版本与响应流程 | 发现潜在安全问题时 |
-| [行为准则](./CODE_OF_CONDUCT.md) | 社区互动与执行标准 | 参与讨论或协作时 |
+| 文档 | 用途 |
+| --- | --- |
+| [文档索引](./docs/README.md) | 阅读顺序与文档治理规则 |
+| [架构总览](./docs/architecture.md) | 分层边界、运行链路和仓库地图 |
+| [执行与授权模型](./docs/execution-model.md) | 风险事实、授权票据和 Agent 执行流程 |
+| [安全与数据边界](./docs/security.md) | 凭据、主机身份、数据上限和审计 |
+| [当前限制](./docs/limitations.md) | 已知缺口与有意保留的安全边界 |
+| [开始开发](./docs/development.md) | 环境、启动方式、首次使用和验证命令 |
+| [打包与分发](./docs/packaging.md) | 安装包、sidecar 资源和平台状态 |
+| [Provider 边界](./docs/boundaries/provider.md) · [MCP 边界](./docs/boundaries/mcp.md) | 接入协议与跨模块约束 |
+| [贡献指南](./CONTRIBUTING.md) · [安全策略](./SECURITY.md) | 参与项目与报告安全问题 |
 
 ## 许可证
 
