@@ -11,6 +11,7 @@ import { ActivityFeed } from "../features/activity/ActivityFeed.js";
 import { ServicesPane } from "../features/services/ServicesPane.js";
 import { LogsPane } from "../features/logs/LogsPane.js";
 import { ProjectsPane } from "../features/projects/ProjectsPane.js";
+import { InvestigationsPane } from "../features/investigations/InvestigationsPane.js";
 import { Icon, type IconName } from "../components/Icon.js";
 import brandMark from "../assets/brand-mark.png";
 import {
@@ -29,6 +30,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Keyb
 const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = {
   servers: { label: "服务器", icon: "servers" },
   projects: { label: "项目", icon: "projects" },
+  tasks: { label: "排查任务", icon: "agent" },
   activity: { label: "动态", icon: "activity" },
   settings: { label: "设置", icon: "settings" },
 };
@@ -200,6 +202,7 @@ export function AppShell() {
           <div hidden={guideOpen} className="workspace-pages">
           {primary === "settings" && !guideOpen ? <RuntimeSettings /> : null}
           {primary === "projects" && !guideOpen ? <ProjectsPane /> : null}
+          {primary === "tasks" && !guideOpen ? <InvestigationsPane /> : null}
           {primary === "activity" && !guideOpen ? <ActivityFeed /> : null}
           {primary === "servers" && !guideOpen ? (
             <>

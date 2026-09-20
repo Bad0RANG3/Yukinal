@@ -66,6 +66,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const agentStatus = useAgentStatus();
   const spawnAgent = useSpawnAgent();
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const selectedTaskId = useWorkspaceStore((state) => state.selectedTaskId);
   const agentOpen = useWorkspaceStore((state) => state.agentOpen);
   const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
   const toggleAgent = useWorkspaceStore((state) => state.toggleAgent);
@@ -165,6 +166,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     }
     const outcome = await run.start({
       prompt: text,
+      taskId: selectedTaskId,
       parts,
       persistUserMessage: (messageId, promptParts) =>
         sessions.recordUserMessage(text, messageId, focusServerId, promptParts),

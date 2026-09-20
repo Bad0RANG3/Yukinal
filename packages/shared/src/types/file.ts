@@ -46,6 +46,18 @@ export interface FilesystemWriteOutput {
   bytesWritten: number;
 }
 
+/** Create a host-owned sibling backup of one complete regular file. */
+export interface FilesystemBackupInput {
+  path: string;
+}
+
+export interface FilesystemBackupOutput {
+  path: string;
+  backupPath: string;
+  revision: string;
+  bytesBackedUp: number;
+}
+
 /**
  * Agent 侧的读-改-写：拿刚读到的摘要去换一次精确替换。
  *
@@ -69,4 +81,63 @@ export interface FilesystemEditOutput {
   bytesAfter: number;
   /** 行数变化，可正可负。 */
   lineDelta: number;
+}
+
+/** Restore a host-owned backup only when the target still has the expected revision. */
+export interface FilesystemRestoreInput {
+  path: string;
+  backupPath: string;
+  expectedRevision: string;
+}
+
+export interface FilesystemRestoreOutput {
+  path: string;
+  backupPath: string;
+  revision: string;
+  bytesBefore: number;
+  bytesAfter: number;
+}
+
+/** Delete a host-owned backup only when its bytes still match the recorded revision. */
+export interface FilesystemBackupCleanupInput {
+  path: string;
+  backupPath: string;
+  expectedRevision: string;
+}
+
+export interface FilesystemBackupCleanupOutput {
+  path: string;
+  backupPath: string;
+  revision: string;
+  bytesDeleted: number;
+}
+
+export const FILESYSTEM_BACKUP_STATUSES = ["available", "restored", "deleted"] as const;
+export type FilesystemBackupStatus = (typeof FILESYSTEM_BACKUP_STATUSES)[number];
+
+/** Read the host-owned backup ledger for the current investigation task. */
+export interface FilesystemBackupListInput {
+  status?: FilesystemBackupStatus;
+  path?: string;
+  limit?: number;
+}
+
+export interface FilesystemBackupLedgerItem {
+  id: string;
+  serverId: string;
+  taskId: string;
+  path: string;
+  backupPath: string;
+  revision: string;
+  bytesBackedUp: number;
+  status: FilesystemBackupStatus;
+  createdAt: string;
+  updatedAt: string;
+  restoredAt?: string;
+  deletedAt?: string;
+}
+
+export interface FilesystemBackupListOutput {
+  backups: FilesystemBackupLedgerItem[];
+  truncated: boolean;
 }

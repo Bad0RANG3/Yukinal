@@ -508,7 +508,35 @@ test("the host file tools are registered, not merely implemented", async () => {
 
   const hosted = createRuntime({ log: silentLogger(), hostToolClient: new HostRpcClient(() => {}) });
   const declared = hosted.declarations.map((tool) => tool.name);
-  for (const name of ["filesystem.read", "filesystem.write", "filesystem.edit"]) {
+  for (const name of [
+    "server.info",
+    "server.logs",
+    "server.services",
+    "docker.ps",
+    "docker.logs",
+    "docker.inspect",
+    "systemd.inspect",
+    "systemd.restart",
+    "package.inspect",
+    "package.install",
+    "filesystem.read",
+    "filesystem.write",
+    "filesystem.edit",
+    "filesystem.backup",
+    "filesystem.backup.list",
+    "filesystem.backup.cleanup",
+    "filesystem.restore",
+    "investigation.evidence",
+    "investigation.evidence.search",
+    "investigation.evidence.compare",
+    "investigation.evidence.correlate",
+    "investigation.evidence.triage",
+    "investigation.retention.preview",
+    "investigation.finding",
+    "investigation.brief",
+    "investigation.plan",
+    "investigation.playbook",
+  ]) {
     assert.ok(declared.includes(name), `${name} must be declared to the model`);
   }
 });

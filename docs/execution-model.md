@@ -23,7 +23,7 @@ Permission Engine 决策（工具风险 × 命令风险 × 目标环境）
    └─ auto ─► 自动执行（记录来源：policy / agent / user）
    │
    ▼
-ToolRegistry 校验 ticket（工具名 · 目标 · 决策来源 · 审批 ID）
+ToolRegistry 校验 ticket（工具名 · 目标 · 输入指纹 · 决策来源 · 审批 ID · durable plan）
    │  host.tool.execute（JSON-RPC 请求发给 Rust 宿主）
    ▼
 Rust 宿主在已解析的目标上执行受限操作（SSH 命令 / SFTP / Docker）
@@ -50,8 +50,10 @@ Rust 宿主在已解析的目标上执行受限操作（SSH 命令 / SFTP / Dock
 
 三档共享的规则留在这里，它们是同一条链路的不同段。
 
-**授权结果有四种 ticket 来源**，ToolRegistry 会逐一复核，任一字段不匹配就拒绝执行：`policy_auto`（环境策略自动批准，来源必须标记 `policy`）、`agent_auto`（用户在运行级委托 Agent，档位必须是 `write` 且环境是开发或预发布）、`session_auto`（用户在本会话批准过同名同目标的操作，来源必须标记 `user`）、`user_approved`（与挂起审批的 ID 完全匹配的逐项批准）。所有 ticket 还须满足工具名与目标四元组（host、serverId、workspaceId、environment）与决策完全一致。任一字段不匹配得到的是 `denied_by_policy` 的工具结果，而不是一条被忽略的日志。哪一种来源能用在哪个档位上，写在各自那份文档里。
+**授权结果有四种 ticket 来源**，ToolRegistry 会逐一复核，任一字段不匹配就拒绝执行：`policy_auto`（环境策略自动批准，来源必须标记 `policy`）、`agent_auto`（用户在运行级委托 Agent，档位必须是 `write` 且环境是开发或预发布）、`session_auto`（用户在本会话批准过同一工具、目标和输入的操作，来源必须标记 `user`）、`user_approved`（与挂起审批的 ID 完全匹配的逐项批准）。所有 ticket 还须满足工具名、目标四元组（host、serverId、workspaceId、environment）和规范化输入指纹与决策完全一致。任一字段不匹配得到的是 `denied_by_policy` 的工具结果，而不是一条被忽略的日志。哪一种来源能用在哪个档位上，写在各自那份文档里。
 
-**会话授权的作用域是单次运行**：引擎实例比单次运行长命，所以 loop 在没有运行在飞时调用 `clearGrants()`；没有这一步，「批准本会话」会一直授权到 sidecar 进程退出，跨越多次无关运行。它始终绑定具体的工具与目标。
+**会话授权的作用域是单次运行**：引擎实例比单次运行长命，所以 loop 在没有运行在飞时调用 `clearGrants()`；没有这一步，「批准本会话」会一直授权到 sidecar 进程退出，跨越多次无关运行。它始终绑定具体的工具、目标和规范化输入指纹。
+
+**副作用工具还有一条独立的 durable plan 栅栏。** 标记为 `effectful` 的内置工具和全部 `mcp.*` 工具，必须同时带非空 `taskId`、`planId`、`planStepId`；ToolRegistry 和 Rust host dispatcher 都会复核，普通聊天不能用自动票据直接写入。会话批准的输入会先做规范化 SHA-256，决策、grant 和 ticket 必须匹配同一输入；改路径、容器、服务或包版本会重新要求批准。交互式终端不在这条 Agent 链中，是用户直接操作的人工旁路。
 
 **只读运行模式先于一切委托。** `plan` / `readonly` 下任何非 `read` 档位直接 `deny`，判断发生在策略、委托和会话授权**之前**，所以限制是被执行的，不是被请求的。运行级委托 `auto` 的范围是封闭的：只有档位是 `write` 且目标环境是 `development` 或 `staging` 时结果才变成自动，其余回落 `ask`。任何 `deny` 都不能被运行模式或会话授权重新打开。

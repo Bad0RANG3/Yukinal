@@ -61,6 +61,17 @@ impl OAuthFlowBroker {
             None => false,
         }
     }
+
+    /// Cancel every in-flight authorization during host shutdown. The flow
+    /// guards stay registered until their futures unwind, so callers must not
+    /// assume the map is empty when this returns.
+    pub fn cancel_all(&self) -> usize {
+        let pending = self.pending.lock().expect("OAuth flow map");
+        for token in pending.values() {
+            token.cancel();
+        }
+        pending.len()
+    }
 }
 
 /// One registered flow. Dropping it unregisters the server id.
@@ -166,5 +177,26 @@ mod tests {
             broker.pending.lock().expect("map").contains_key("mcp_1"),
             "the newer registration must survive the older guard's drop"
         );
+    }
+
+    #[test]
+    fn host_shutdown_cancels_every_in_flight_flow() {
+        let broker = OAuthFlowBroker::new();
+        let first = broker.begin("mcp_1").expect("first flow");
+        let second = broker.begin("mcp_2").expect("second flow");
+        let first_token = first.token();
+        let second_token = second.token();
+
+        assert_eq!(broker.cancel_all(), 2);
+        assert!(first_token.is_cancelled());
+        assert!(second_token.is_cancelled());
+        assert_eq!(
+            broker.cancel_all(),
+            2,
+            "registered guards remain until drop"
+        );
+        drop(first);
+        drop(second);
+        assert_eq!(broker.cancel_all(), 0);
     }
 }

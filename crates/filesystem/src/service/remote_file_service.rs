@@ -1,14 +1,17 @@
 //! `RemoteFileService`：策略 + 上限 + 有界解码，套在一个 `RemoteFileTransport` 外面。
 
-use crate::limits::{BROWSER_READ_BYTES, MAX_AGENT_EDIT_BYTES};
+use crate::limits::{BROWSER_READ_BYTES, MAX_AGENT_BACKUP_BYTES, MAX_AGENT_EDIT_BYTES};
 use crate::revision::content_revision;
 
 use super::error::{Error, Result};
 use super::helpers::{byte_match_offsets, count_lines, join_remote_path, read_result};
-use super::request::{AgentEditRequest, AgentReadRequest, AgentWriteRequest};
+use super::request::{
+    AgentCleanupBackupRequest, AgentEditRequest, AgentReadRequest, AgentWriteRequest,
+};
 use super::types::{
-    RemoteEdit, RemoteEntry, RemoteEntryKind, RemoteFileTransport, RemoteListing, RemoteRead,
-    RemoteWrite, ReplaceError, ReplaceGuard,
+    RemoteBackup, RemoteBackupCleanup, RemoteEdit, RemoteEntry, RemoteEntryKind,
+    RemoteFileTransport, RemoteListing, RemoteRead, RemoteRestore, RemoteWrite, ReplaceError,
+    ReplaceGuard,
 };
 
 /// 远端文件服务：策略 + 上限 + 有界解码，套在一个 [`RemoteFileTransport`] 外面。
@@ -79,6 +82,191 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
         Ok(RemoteWrite {
             path: request.path.clone(),
             bytes_written: request.content.len(),
+        })
+    }
+
+    /// Agent `filesystem.backup`: read one complete regular file and create a host-derived sibling
+    /// without replacing an existing recovery copy.
+    pub async fn agent_backup(
+        &self,
+        server_id: &str,
+        request: &super::request::AgentBackupRequest,
+    ) -> Result<RemoteBackup> {
+        let before = self.transport.stat(server_id, &request.path).await?;
+        ensure_copyable_file(&request.path, before, "backup")?;
+        ensure_single_link(
+            &request.path,
+            self.transport.link_count(server_id, &request.path).await?,
+        )?;
+        let bytes = self
+            .transport
+            .read_bounded(server_id, &request.path, MAX_AGENT_BACKUP_BYTES)
+            .await?;
+        if bytes.len() > MAX_AGENT_BACKUP_BYTES {
+            return Err(Error::FileTooLargeToBackup {
+                limit: MAX_AGENT_BACKUP_BYTES,
+            });
+        }
+        let after = self.transport.stat(server_id, &request.path).await?;
+        if before.size != after.size || before.modified != after.modified {
+            return Err(Error::ConcurrentChange(format!(
+                "{} changed while the backup was being read; re-read it and create a new backup",
+                request.path
+            )));
+        }
+        let revision = content_revision(&bytes);
+        self.transport
+            .create_exclusive(server_id, &request.backup_path, &bytes)
+            .await?;
+        Ok(RemoteBackup {
+            path: request.path.clone(),
+            backup_path: request.backup_path.clone(),
+            revision,
+            bytes_backed_up: bytes.len(),
+        })
+    }
+
+    /// Agent `filesystem.restore`: atomically replace the target with a host-owned backup only if
+    /// the target still has the caller's expected revision.
+    pub async fn agent_restore(
+        &self,
+        server_id: &str,
+        request: &super::request::AgentRestoreRequest,
+    ) -> Result<RemoteRestore> {
+        let target_before = self.transport.stat(server_id, &request.path).await?;
+        ensure_copyable_file(&request.path, target_before, "restore")?;
+        ensure_single_link(
+            &request.path,
+            self.transport.link_count(server_id, &request.path).await?,
+        )?;
+        let target_bytes = self
+            .transport
+            .read_bounded(server_id, &request.path, MAX_AGENT_BACKUP_BYTES)
+            .await?;
+        if target_bytes.len() > MAX_AGENT_BACKUP_BYTES {
+            return Err(Error::FileTooLargeToBackup {
+                limit: MAX_AGENT_BACKUP_BYTES,
+            });
+        }
+        let actual = content_revision(&target_bytes);
+        if !actual.eq_ignore_ascii_case(&request.expected_revision) {
+            return Err(Error::RevisionMismatch {
+                expected: request.expected_revision.clone(),
+                actual,
+            });
+        }
+        let target_after = self.transport.stat(server_id, &request.path).await?;
+        if target_before.size != target_after.size
+            || target_before.modified != target_after.modified
+        {
+            return Err(Error::ConcurrentChange(format!(
+                "{} changed while the restore guard was being checked; re-read it and retry",
+                request.path
+            )));
+        }
+
+        let backup_stat = self.transport.stat(server_id, &request.backup_path).await?;
+        ensure_copyable_file(&request.backup_path, backup_stat, "restore source")?;
+        ensure_single_link(
+            &request.backup_path,
+            self.transport
+                .link_count(server_id, &request.backup_path)
+                .await?,
+        )?;
+        let backup_bytes = self
+            .transport
+            .read_bounded(server_id, &request.backup_path, MAX_AGENT_BACKUP_BYTES)
+            .await?;
+        if backup_bytes.len() > MAX_AGENT_BACKUP_BYTES {
+            return Err(Error::FileTooLargeToBackup {
+                limit: MAX_AGENT_BACKUP_BYTES,
+            });
+        }
+        let backup_after = self.transport.stat(server_id, &request.backup_path).await?;
+        if backup_stat.size != backup_after.size || backup_stat.modified != backup_after.modified {
+            return Err(Error::ConcurrentChange(format!(
+                "{} changed while the restore source was being read; create a new recovery plan",
+                request.backup_path
+            )));
+        }
+
+        let replaced = self
+            .transport
+            .replace_guarded(
+                server_id,
+                &request.path,
+                &ReplaceGuard {
+                    size: target_before.size,
+                    modified: target_before.modified,
+                },
+                &backup_bytes,
+            )
+            .await
+            .map_err(map_replace_error)?;
+        if replaced.size != backup_bytes.len() as u64 {
+            return Err(Error::ConcurrentChange(format!(
+                "{} is {} bytes after restore instead of the {} bytes from the backup",
+                request.path,
+                replaced.size,
+                backup_bytes.len()
+            )));
+        }
+        Ok(RemoteRestore {
+            path: request.path.clone(),
+            backup_path: request.backup_path.clone(),
+            revision: content_revision(&backup_bytes),
+            bytes_before: target_bytes.len(),
+            bytes_after: backup_bytes.len(),
+        })
+    }
+
+    /// Agent `filesystem.backup.cleanup`: verify the host-owned recovery copy
+    /// still contains the expected bytes, then remove that exact sibling path.
+    /// The caller must separately prove ownership through the host ledger.
+    pub async fn agent_cleanup_backup(
+        &self,
+        server_id: &str,
+        request: &AgentCleanupBackupRequest,
+    ) -> Result<RemoteBackupCleanup> {
+        let before = self.transport.stat(server_id, &request.backup_path).await?;
+        ensure_copyable_file(&request.backup_path, before, "backup cleanup")?;
+        ensure_single_link(
+            &request.backup_path,
+            self.transport
+                .link_count(server_id, &request.backup_path)
+                .await?,
+        )?;
+        let bytes = self
+            .transport
+            .read_bounded(server_id, &request.backup_path, MAX_AGENT_BACKUP_BYTES)
+            .await?;
+        if bytes.len() > MAX_AGENT_BACKUP_BYTES {
+            return Err(Error::FileTooLargeToBackup {
+                limit: MAX_AGENT_BACKUP_BYTES,
+            });
+        }
+        let actual = content_revision(&bytes);
+        if !actual.eq_ignore_ascii_case(&request.expected_revision) {
+            return Err(Error::RevisionMismatch {
+                expected: request.expected_revision.clone(),
+                actual,
+            });
+        }
+        let after = self.transport.stat(server_id, &request.backup_path).await?;
+        if before.size != after.size || before.modified != after.modified {
+            return Err(Error::ConcurrentChange(format!(
+                "{} changed while the backup was being checked for cleanup; preserve it and reconcile",
+                request.backup_path
+            )));
+        }
+        self.transport
+            .remove_file(server_id, &request.backup_path)
+            .await?;
+        Ok(RemoteBackupCleanup {
+            path: request.path.clone(),
+            backup_path: request.backup_path.clone(),
+            revision: content_revision(&bytes),
+            bytes_deleted: bytes.len(),
         })
     }
 
@@ -234,6 +422,30 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
     }
 }
 
+fn ensure_copyable_file(path: &str, stat: super::types::RemoteStat, operation: &str) -> Result<()> {
+    if stat.kind != RemoteEntryKind::File {
+        return Err(Error::UnsafeRemoteWrite(format!(
+            "{path} is not a regular file, so it cannot be used for {operation}"
+        )));
+    }
+    // A backup or restore published through rename must not silently leave another hard-linked
+    // name pointing at the old bytes. Unknown link counts fail closed just like filesystem.edit.
+    // The caller performs the transport probe separately so this helper only owns the shape check.
+    Ok(())
+}
+
+fn ensure_single_link(path: &str, links: Option<u64>) -> Result<()> {
+    match links {
+        Some(1) => Ok(()),
+        Some(count) => Err(Error::UnsafeRemoteWrite(format!(
+            "{path} has {count} hard links; copying or restoring it would not describe one independent file"
+        ))),
+        None => Err(Error::UnsafeRemoteWrite(format!(
+            "the server did not report how many names point at {path}, so the file operation refuses to guess"
+        ))),
+    }
+}
+
 /// [`ReplaceError`] → 服务层的失败分类。三类分开传，不合并成一句话。
 fn map_replace_error(error: ReplaceError) -> Error {
     match error {
@@ -248,6 +460,7 @@ fn map_replace_error(error: ReplaceError) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use crate::limits::{
@@ -257,7 +470,8 @@ mod tests {
     use crate::policy::AGENT_PATH_POLICY_MESSAGE;
     use crate::revision::content_revision;
     use crate::service::{
-        AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error, ListedEntry, RemoteEntryKind,
+        AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest, AgentReadRequest,
+        AgentRestoreRequest, AgentWriteRequest, Error, ListedEntry, RemoteEntryKind,
         RemoteFileService, RemoteFileTransport, RemoteStat, ReplaceError, ReplaceGuard,
         ReplacedFile, TransportError, TransportResult,
     };
@@ -312,6 +526,7 @@ mod tests {
         log: CallLog,
         entries: Vec<ListedEntry>,
         file: Arc<Mutex<Vec<u8>>>,
+        backups: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         failure: Option<&'static str>,
         kind: RemoteEntryKind,
         /// `None` = 远端不报告链接数（Windows 上的 OpenSSH 就是这样）。
@@ -342,6 +557,14 @@ mod tests {
         fn file(&self) -> Vec<u8> {
             self.file.lock().expect("file lock").clone()
         }
+
+        fn backup(&self, path: &str) -> Option<Vec<u8>> {
+            self.backups
+                .lock()
+                .expect("backups lock")
+                .get(path)
+                .cloned()
+        }
     }
 
     impl RemoteFileTransport for FakeTransport {
@@ -364,7 +587,7 @@ mod tests {
             if let Some(message) = self.failure {
                 return Err(TransportError::new(message));
             }
-            let file = self.file();
+            let file = self.backup(path).unwrap_or_else(|| self.file());
             // 上限 + 1 是「还有更多」的信号，与 `decode_bounded` 的约定一致。
             let end = file.len().min(max_bytes.saturating_add(1));
             Ok(file[..end].to_vec())
@@ -380,16 +603,58 @@ mod tests {
             Ok(())
         }
 
+        async fn create_exclusive(
+            &self,
+            server_id: &str,
+            path: &str,
+            data: &[u8],
+        ) -> TransportResult<()> {
+            self.log.record(format!(
+                "create-exclusive {server_id} {path} {}b",
+                data.len()
+            ));
+            if let Some(message) = self.failure {
+                return Err(TransportError::new(message));
+            }
+            let mut backups = self.backups.lock().expect("backups lock");
+            if backups.contains_key(path) {
+                return Err(TransportError::new("backup already exists"));
+            }
+            backups.insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+
+        async fn remove_file(&self, server_id: &str, path: &str) -> TransportResult<()> {
+            self.log.record(format!("remove {server_id} {path}"));
+            if let Some(message) = self.failure {
+                return Err(TransportError::new(message));
+            }
+            let removed = self.backups.lock().expect("backups lock").remove(path);
+            if removed.is_none() {
+                return Err(TransportError::new("backup does not exist"));
+            }
+            Ok(())
+        }
+
         async fn stat(&self, server_id: &str, path: &str) -> TransportResult<RemoteStat> {
             self.log.record(format!("stat {server_id} {path}"));
             if let Some(message) = self.failure {
                 return Err(TransportError::new(message));
             }
+            let size = self
+                .backup(path)
+                .map(|file| file.len() as u64)
+                .unwrap_or_else(|| {
+                    self.stat_size_override
+                        .unwrap_or_else(|| self.file().len() as u64)
+                });
             Ok(RemoteStat {
-                kind: self.kind,
-                size: self
-                    .stat_size_override
-                    .unwrap_or_else(|| self.file().len() as u64),
+                kind: if self.backup(path).is_some() {
+                    RemoteEntryKind::File
+                } else {
+                    self.kind
+                },
+                size,
                 modified: self.modified,
             })
         }
@@ -594,6 +859,144 @@ mod tests {
                 "write srv_1 /var/app/uni.txt 4b".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn backup_creates_a_single_use_sibling_and_returns_the_source_revision() {
+        const CONTENT: &[u8] = b"MODE=managed\n";
+        let transport = FakeTransport::with_content(CONTENT);
+        let log = transport.log();
+        let backups = transport.backups.clone();
+        let service = RemoteFileService::new(transport);
+        let token = "0123456789abcdef0123456789abcdef";
+
+        runtime().block_on(async {
+            let request = AgentBackupRequest::check("/etc/yukinal.conf", token).expect("request");
+            let backup = service
+                .agent_backup("srv_1", &request)
+                .await
+                .expect("backup");
+            assert_eq!(backup.path, "/etc/yukinal.conf");
+            assert_eq!(backup.revision, content_revision(CONTENT));
+            assert_eq!(backup.bytes_backed_up, CONTENT.len());
+            assert_eq!(
+                backups
+                    .lock()
+                    .expect("backups lock")
+                    .get(&backup.backup_path),
+                Some(&CONTENT.to_vec())
+            );
+        });
+
+        assert!(log
+            .snapshot()
+            .iter()
+            .any(|call| call.starts_with("create-exclusive srv_1 /etc/.yukinal-backup-")));
+        assert!(AgentBackupRequest::check("/etc/yukinal.conf", token).is_ok());
+    }
+
+    #[test]
+    fn restore_requires_the_current_revision_and_publishes_backup_bytes() {
+        const ORIGINAL: &[u8] = b"MODE=managed\n";
+        const CHANGED: &[u8] = b"MODE=legacy\n";
+        let transport = FakeTransport::with_content(ORIGINAL);
+        let file = transport.file.clone();
+        let service = RemoteFileService::new(transport);
+        let token = "0123456789abcdef0123456789abcdef";
+
+        runtime().block_on(async {
+            let backup_request =
+                AgentBackupRequest::check("/etc/yukinal.conf", token).expect("backup request");
+            let backup = service
+                .agent_backup("srv_1", &backup_request)
+                .await
+                .expect("backup");
+            *file.lock().expect("file lock") = CHANGED.to_vec();
+            let restore_request = AgentRestoreRequest::check(
+                "/etc/yukinal.conf",
+                &backup.backup_path,
+                &content_revision(CHANGED),
+            )
+            .expect("restore request");
+            let restored = service
+                .agent_restore("srv_1", &restore_request)
+                .await
+                .expect("restore");
+            assert_eq!(restored.revision, content_revision(ORIGINAL));
+            assert_eq!(restored.bytes_before, CHANGED.len());
+            assert_eq!(restored.bytes_after, ORIGINAL.len());
+            assert_eq!(*file.lock().expect("file lock"), ORIGINAL);
+        });
+    }
+
+    #[test]
+    fn restore_refuses_a_stale_target_or_an_arbitrary_backup_path() {
+        const ORIGINAL: &[u8] = b"MODE=managed\n";
+        let transport = FakeTransport::with_content(ORIGINAL);
+        let service = RemoteFileService::new(transport);
+        let token = "0123456789abcdef0123456789abcdef";
+
+        runtime().block_on(async {
+            let backup_request =
+                AgentBackupRequest::check("/etc/yukinal.conf", token).expect("backup request");
+            let backup = service
+                .agent_backup("srv_1", &backup_request)
+                .await
+                .expect("backup");
+            let stale = AgentRestoreRequest::check(
+                "/etc/yukinal.conf",
+                &backup.backup_path,
+                &content_revision(b"different"),
+            )
+            .expect("shape is valid");
+            let error = service
+                .agent_restore("srv_1", &stale)
+                .await
+                .expect_err("stale restore");
+            assert!(matches!(error, Error::RevisionMismatch { .. }));
+        });
+
+        assert!(AgentRestoreRequest::check(
+            "/etc/yukinal.conf",
+            "/etc/other.conf",
+            &content_revision(ORIGINAL),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cleanup_requires_the_backup_revision_and_removes_only_the_sibling_copy() {
+        const CONTENT: &[u8] = b"MODE=managed\n";
+        let transport = FakeTransport::with_content(CONTENT);
+        let backups = transport.backups.clone();
+        let service = RemoteFileService::new(transport);
+        let token = "0123456789abcdef0123456789abcdef";
+
+        runtime().block_on(async {
+            let backup_request =
+                AgentBackupRequest::check("/etc/yukinal.conf", token).expect("backup request");
+            let backup = service
+                .agent_backup("srv_1", &backup_request)
+                .await
+                .expect("backup");
+            let cleanup_request = AgentCleanupBackupRequest::check(
+                "/etc/yukinal.conf",
+                &backup.backup_path,
+                &backup.revision,
+            )
+            .expect("cleanup request");
+            let cleaned = service
+                .agent_cleanup_backup("srv_1", &cleanup_request)
+                .await
+                .expect("cleanup");
+            assert_eq!(cleaned.path, "/etc/yukinal.conf");
+            assert_eq!(cleaned.bytes_deleted, CONTENT.len());
+            assert!(backups
+                .lock()
+                .expect("backups lock")
+                .get(&backup.backup_path)
+                .is_none());
+        });
     }
 
     #[test]

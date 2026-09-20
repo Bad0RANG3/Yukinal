@@ -321,6 +321,318 @@ const MIGRATIONS: &[&str] = &[
         last_error TEXT NOT NULL
     );
     "#,
+    // 18 — durable investigation tasks and evidence-backed decision material.
+    // Evidence is bounded and already redacted before it reaches this layer.
+    r#"
+    CREATE TABLE investigation_tasks (
+        id                TEXT PRIMARY KEY,
+        workspace_id      TEXT,
+        server_id         TEXT,
+        objective         TEXT NOT NULL,
+        success_criteria  TEXT NOT NULL, -- JSON array
+        scope             TEXT NOT NULL, -- JSON ToolTarget
+        mode              TEXT NOT NULL CHECK (mode IN ('goal','plan','readonly')),
+        permission_mode   TEXT NOT NULL CHECK (permission_mode IN ('ask','auto')),
+        automation_level  TEXT NOT NULL CHECK (automation_level IN ('readonly','propose','execute')),
+        status            TEXT NOT NULL CHECK (status IN ('pending','investigating','waiting_user','executing','verifying','completed','failed','stopped','expired')),
+        max_steps         INTEGER NOT NULL CHECK (max_steps > 0),
+        max_run_ms        INTEGER NOT NULL CHECK (max_run_ms > 0),
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        completed_at      TEXT
+    );
+    CREATE INDEX idx_investigation_tasks_status ON investigation_tasks (status, updated_at DESC);
+    CREATE INDEX idx_investigation_tasks_server ON investigation_tasks (server_id, updated_at DESC);
+
+    CREATE TABLE investigation_evidence (
+        id                TEXT PRIMARY KEY,
+        task_id           TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        scope             TEXT NOT NULL, -- JSON ToolTarget
+        kind              TEXT NOT NULL CHECK (kind IN ('snapshot','log','service','container','file','tool_result','failure')),
+        source_tool       TEXT NOT NULL,
+        collected_at      TEXT NOT NULL,
+        input_summary     TEXT NOT NULL,
+        content_type      TEXT NOT NULL CHECK (content_type IN ('json','text')),
+        content           TEXT NOT NULL, -- bounded JSON value
+        content_hash      TEXT NOT NULL CHECK (length(content_hash) = 64),
+        truncated         INTEGER NOT NULL CHECK (truncated IN (0,1)),
+        redaction_status  TEXT NOT NULL CHECK (redaction_status IN ('clean','redacted','unknown'))
+    );
+    CREATE INDEX idx_investigation_evidence_task ON investigation_evidence (task_id, collected_at DESC);
+
+    CREATE TABLE investigation_findings (
+        id                TEXT PRIMARY KEY,
+        task_id           TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        title             TEXT NOT NULL,
+        kind              TEXT NOT NULL CHECK (kind IN ('fact','inference','unknown')),
+        statement         TEXT NOT NULL,
+        evidence_ids      TEXT NOT NULL, -- JSON array
+        confidence         TEXT NOT NULL CHECK (confidence IN ('high','medium','low')),
+        next_verification TEXT,
+        created_at        TEXT NOT NULL
+    );
+    CREATE INDEX idx_investigation_findings_task ON investigation_findings (task_id, created_at DESC);
+
+    CREATE TABLE investigation_decision_briefs (
+        id                  TEXT PRIMARY KEY,
+        task_id             TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        generated_at        TEXT NOT NULL,
+        status              TEXT NOT NULL CHECK (status IN ('draft','presented','selected','dismissed')),
+        finding_ids         TEXT NOT NULL, -- JSON array
+        options             TEXT NOT NULL, -- JSON array of DecisionOption
+        selected_option_id  TEXT
+    );
+    CREATE INDEX idx_investigation_briefs_task ON investigation_decision_briefs (task_id, generated_at DESC);
+    "#,
+    // 19 — durable task attempts, checkpoints and bounded step outcomes. A sidecar run is
+    // not the task itself: these rows let the host distinguish a retry, an interruption and a
+    // completed objective after the sidecar or UI has been restarted.
+    r#"
+    ALTER TABLE investigation_tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0);
+    ALTER TABLE investigation_tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT 'user';
+    ALTER TABLE investigation_tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'investigating'
+        CHECK (phase IN ('investigating','decision','execution','verification','recovery','completed'));
+    ALTER TABLE investigation_tasks ADD COLUMN active_run_id TEXT;
+    ALTER TABLE investigation_tasks ADD COLUMN last_failure TEXT;
+
+    CREATE TABLE investigation_runs (
+        id            TEXT PRIMARY KEY,
+        task_id       TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        session_id    TEXT,
+        message_id    TEXT,
+        trace_id      TEXT,
+        attempt       INTEGER NOT NULL CHECK (attempt > 0),
+        phase         TEXT NOT NULL CHECK (phase IN ('investigating','decision','execution','verification','recovery','completed')),
+        status        TEXT NOT NULL CHECK (status IN ('admitted','running','waiting_user','completed','failed','cancelled','interrupted')),
+        started_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        ended_at      TEXT,
+        checkpoint    TEXT,
+        failure       TEXT
+    );
+    CREATE INDEX idx_investigation_runs_task ON investigation_runs (task_id, updated_at DESC);
+    CREATE INDEX idx_investigation_runs_active ON investigation_runs (task_id, status);
+
+    CREATE TABLE investigation_steps (
+        id              TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        run_id          TEXT NOT NULL REFERENCES investigation_runs(id) ON DELETE CASCADE,
+        ordinal         INTEGER NOT NULL CHECK (ordinal >= 0),
+        kind            TEXT NOT NULL CHECK (kind IN ('plan','evidence','decision','action','verification','recovery')),
+        title           TEXT NOT NULL,
+        status          TEXT NOT NULL CHECK (status IN ('pending','running','waiting_user','succeeded','failed','skipped')),
+        attempt         INTEGER NOT NULL CHECK (attempt > 0),
+        tool_name       TEXT,
+        target          TEXT,
+        input_summary   TEXT,
+        output_summary  TEXT,
+        evidence_ids    TEXT NOT NULL,
+        started_at      TEXT,
+        ended_at        TEXT,
+        failure         TEXT
+    );
+    CREATE INDEX idx_investigation_steps_task ON investigation_steps (task_id, ordinal, id);
+    CREATE INDEX idx_investigation_steps_run ON investigation_steps (run_id, ordinal, id);
+    "#,
+    // 20 — versioned task plans. The host compares every task tool call with the active
+    // revision before execution; old revisions remain visible as superseded audit records.
+    r#"
+    CREATE TABLE investigation_plans (
+        id              TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        revision        INTEGER NOT NULL CHECK (revision > 0),
+        status          TEXT NOT NULL CHECK (status IN ('draft','active','superseded','completed')),
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        current_step_id TEXT,
+        steps           TEXT NOT NULL
+    );
+    CREATE INDEX idx_investigation_plans_task ON investigation_plans (task_id, revision DESC, id DESC);
+    CREATE UNIQUE INDEX idx_investigation_plans_active ON investigation_plans (task_id)
+        WHERE status IN ('draft','active');
+    "#,
+    // 21 — bind observed tool steps to the host-validated plan revision and step.
+    r#"
+    ALTER TABLE investigation_steps ADD COLUMN plan_id TEXT;
+    ALTER TABLE investigation_steps ADD COLUMN plan_step_id TEXT;
+    CREATE INDEX idx_investigation_steps_plan ON investigation_steps (plan_id, plan_step_id);
+    "#,
+    // 22 — durable phase artifacts. Execution, verification and failure reports are
+    // task-owned records rather than transient model text, so a reopened task can
+    // explain what was attempted and what remains undecided.
+    r#"
+    CREATE TABLE investigation_artifacts (
+        id          TEXT PRIMARY KEY,
+        task_id     TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        run_id      TEXT REFERENCES investigation_runs(id) ON DELETE SET NULL,
+        phase       TEXT NOT NULL CHECK (phase IN ('investigating','decision','execution','verification','recovery','completed')),
+        kind        TEXT NOT NULL CHECK (kind IN ('investigation_plan','baseline','evidence_set','decision_brief','change_plan','execution','verification','failure')),
+        status      TEXT NOT NULL CHECK (status IN ('draft','ready','succeeded','failed','superseded')),
+        title       TEXT NOT NULL,
+        summary     TEXT NOT NULL,
+        content     TEXT NOT NULL,
+        evidence_ids TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX idx_investigation_artifacts_task ON investigation_artifacts (task_id, updated_at DESC, id DESC);
+    CREATE INDEX idx_investigation_artifacts_run ON investigation_artifacts (run_id, updated_at DESC);
+    "#,
+    // 23 — bind artifacts to the host-validated plan revision and step that produced them.
+    // This lets a required baseline be rejected when it belongs to an older plan.
+    r#"
+    ALTER TABLE investigation_artifacts ADD COLUMN plan_id TEXT;
+    ALTER TABLE investigation_artifacts ADD COLUMN plan_step_id TEXT;
+    CREATE INDEX idx_investigation_artifacts_plan ON investigation_artifacts (task_id, plan_id, kind, updated_at DESC);
+    "#,
+    // 24 — bind a decision brief to the plan revision it explains. A proposal-mode
+    // action may only be unlocked by selecting an option from the current revision.
+    r#"
+    ALTER TABLE investigation_decision_briefs ADD COLUMN plan_id TEXT;
+    CREATE INDEX idx_investigation_briefs_plan ON investigation_decision_briefs (task_id, plan_id, generated_at DESC);
+    "#,
+    // 25 — persist the user/policy approval that unlocks a proposal-mode plan.
+    r#"
+    ALTER TABLE investigation_plans ADD COLUMN approval TEXT;
+    "#,
+    // 26 — host-owned post-change observation state. The plan keeps the bounded
+    // configuration and sample ledger together so reopening the app cannot skip the
+    // observation window or infer completion from a transient Agent response.
+    r#"
+    ALTER TABLE investigation_plans ADD COLUMN observation_window TEXT;
+    "#,
+    // 27 — durable local read-only schedule triggers and their claimed runs. A
+    // schedule references a task only; provider credentials and execution handles stay
+    // outside SQLite, and the unique dedupe key makes retries/restarts idempotent.
+    r#"
+    CREATE TABLE investigation_schedules (
+        id                    TEXT PRIMARY KEY,
+        task_id               TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        status                TEXT NOT NULL CHECK (status IN ('active','paused','revoked')),
+        interval_seconds      INTEGER NOT NULL CHECK (interval_seconds > 0),
+        cooldown_seconds      INTEGER NOT NULL CHECK (cooldown_seconds >= 0),
+        dedupe_window_seconds INTEGER NOT NULL CHECK (dedupe_window_seconds > 0),
+        max_concurrent_runs  INTEGER NOT NULL CHECK (max_concurrent_runs > 0),
+        budget                TEXT NOT NULL,
+        notification_policy   TEXT NOT NULL CHECK (notification_policy IN ('silent','on_change','always','failed_runs_only')),
+        next_run_at           TEXT NOT NULL,
+        last_run_at           TEXT,
+        last_outcome          TEXT,
+        last_error            TEXT,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+    );
+    CREATE INDEX idx_investigation_schedules_due ON investigation_schedules (status, next_run_at, id);
+    CREATE INDEX idx_investigation_schedules_task ON investigation_schedules (task_id, status);
+
+    CREATE TABLE investigation_schedule_runs (
+        id            TEXT PRIMARY KEY,
+        schedule_id   TEXT NOT NULL REFERENCES investigation_schedules(id) ON DELETE CASCADE,
+        task_id       TEXT NOT NULL REFERENCES investigation_tasks(id) ON DELETE CASCADE,
+        status        TEXT NOT NULL CHECK (status IN ('queued','claimed','running','succeeded','failed','skipped','interrupted')),
+        scheduled_at  TEXT NOT NULL,
+        claimed_at    TEXT,
+        started_at    TEXT,
+        finished_at   TEXT,
+        dedupe_key    TEXT NOT NULL,
+        outcome       TEXT,
+        error         TEXT
+    );
+    CREATE UNIQUE INDEX idx_investigation_schedule_runs_dedupe
+        ON investigation_schedule_runs (schedule_id, dedupe_key);
+    CREATE INDEX idx_investigation_schedule_runs_schedule
+        ON investigation_schedule_runs (schedule_id, scheduled_at DESC, id DESC);
+    CREATE INDEX idx_investigation_schedule_runs_active
+        ON investigation_schedule_runs (schedule_id, status);
+    "#,
+    // 28 — bind evidence to the host-owned investigation run that collected it. The
+    // sidecar may suggest a value, but the host overwrites it from the active run before
+    // persistence; this makes scheduled samples comparable without trusting model text.
+    r#"
+    ALTER TABLE investigation_evidence ADD COLUMN run_id TEXT REFERENCES investigation_runs(id) ON DELETE SET NULL;
+    CREATE INDEX idx_investigation_evidence_run ON investigation_evidence (run_id, collected_at DESC, id DESC);
+    "#,
+    // 29 — host-owned action idempotency ledger. A sidecar may resend the same
+    // call after losing a response (or after its own restart), but an unsafe
+    // remote action must never be run twice. The response is deliberately kept
+    // out of SQLite: it can contain file contents or third-party tool output.
+    // The live host keeps a bounded replay cache; after a desktop restart the
+    // ledger fails closed and asks for reconciliation instead of guessing.
+    r#"
+    CREATE TABLE host_tool_calls (
+        trace_id            TEXT NOT NULL,
+        call_id             TEXT NOT NULL,
+        task_id             TEXT,
+        plan_id             TEXT,
+        plan_step_id        TEXT,
+        tool_name           TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        status              TEXT NOT NULL CHECK (status IN ('running','success','failed','cancelled','uncertain')),
+        started_at          TEXT NOT NULL,
+        ended_at            TEXT,
+        PRIMARY KEY (trace_id, call_id)
+    );
+    CREATE INDEX idx_host_tool_calls_task ON host_tool_calls (task_id, started_at DESC);
+    CREATE INDEX idx_host_tool_calls_status ON host_tool_calls (status, started_at DESC);
+    "#,
+    // 30 — action fingerprints let a resumed durable plan reject the same
+    // logical write even when a restarted sidecar generates a new call ID.
+    // Rows created by migration 29 remain exact-call protected; nullable is
+    // intentional for those historical rows.
+    r#"
+    ALTER TABLE host_tool_calls ADD COLUMN action_fingerprint TEXT;
+    CREATE INDEX idx_host_tool_calls_action
+        ON host_tool_calls (task_id, plan_id, plan_step_id, action_fingerprint, status);
+    "#,
+    // 31 — host-owned remote filesystem backup ledger. The bytes stay on the
+    // target server; SQLite stores only enough metadata to prove that a later
+    // restore refers to a backup this host created for the same target. This
+    // also gives a future cleanup pass a durable, non-arbitrary inventory.
+    r#"
+    CREATE TABLE filesystem_backups (
+        id              TEXT PRIMARY KEY,
+        server_id       TEXT NOT NULL,
+        task_id         TEXT,
+        plan_id         TEXT,
+        plan_step_id    TEXT,
+        trace_id        TEXT,
+        call_id         TEXT,
+        path            TEXT NOT NULL,
+        backup_path     TEXT NOT NULL,
+        revision        TEXT NOT NULL CHECK (length(revision) = 64),
+        bytes_backed_up INTEGER NOT NULL CHECK (bytes_backed_up >= 0),
+        status          TEXT NOT NULL CHECK (status IN ('available','restored','deleted')),
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        restored_at     TEXT,
+        deleted_at      TEXT,
+        UNIQUE (server_id, backup_path)
+    );
+    CREATE INDEX idx_filesystem_backups_target
+        ON filesystem_backups (server_id, path, status, created_at DESC);
+    CREATE INDEX idx_filesystem_backups_task
+        ON filesystem_backups (task_id, created_at DESC);
+    "#,
+    // 32 — evidence search is task-scoped and commonly filtered by source plus
+    // collection time. Keep the metadata query bounded without scanning bodies.
+    r#"
+    CREATE INDEX idx_investigation_evidence_source_time
+        ON investigation_evidence (task_id, source_tool, collected_at DESC, id DESC);
+    "#,
+    // 33 — host-enforced task guardrails. The JSON object is intentionally
+    // append-only metadata so older task rows decode to empty boundaries.
+    r#"
+    ALTER TABLE investigation_tasks ADD COLUMN guardrails TEXT NOT NULL DEFAULT '{}';
+    "#,
+    // 34 — an explicit successful schedule run may be selected as the
+    // comparison baseline. The reference stays optional so existing schedules
+    // keep the previous "latest successful run" behavior after migration.
+    r#"
+    ALTER TABLE investigation_schedules
+        ADD COLUMN baseline_run_id TEXT REFERENCES investigation_schedule_runs(id) ON DELETE SET NULL;
+    CREATE INDEX idx_investigation_schedules_baseline
+        ON investigation_schedules (baseline_run_id);
+    "#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

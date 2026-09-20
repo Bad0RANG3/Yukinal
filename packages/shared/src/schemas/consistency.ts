@@ -9,21 +9,99 @@ import type { z } from "zod";
 import type { AgentRunRequest, AgentStreamEvent, ApprovalResponse } from "../types/chat.js";
 import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
 import type { Activity, ToolExecutionListResponse } from "../types/activity.js";
-import type { ServerService, ServerServicesResponse } from "../types/service.js";
-import type { ServerLogLine, ServerLogsResponse } from "../types/log.js";
-import type { FilesystemEditInput, FilesystemEditOutput, FilesystemReadInput, FilesystemReadOutput, FilesystemWriteInput, FilesystemWriteOutput } from "../types/file.js";
+import type {
+  ServerService,
+  ServerServicesInput,
+  ServerServicesResponse,
+  SystemdInspectInput,
+  SystemdInspectResult,
+  SystemdRestartInput,
+  SystemdRestartResult,
+} from "../types/service.js";
+import type { ServerLogLine, ServerLogsInput, ServerLogsResponse } from "../types/log.js";
+import type {
+  FilesystemBackupInput,
+  FilesystemBackupCleanupInput,
+  FilesystemBackupCleanupOutput,
+  FilesystemBackupListInput,
+  FilesystemBackupListOutput,
+  FilesystemBackupOutput,
+  FilesystemEditInput,
+  FilesystemEditOutput,
+  FilesystemReadInput,
+  FilesystemReadOutput,
+  FilesystemRestoreInput,
+  FilesystemRestoreOutput,
+  FilesystemWriteInput,
+  FilesystemWriteOutput,
+} from "../types/file.js";
 import type { DockerInspectResult, DockerLogsResult, DockerRestartInput, DockerRestartResult } from "../types/docker.js";
-import type { HostContextRequest, HostContextResponse } from "../types/host.js";
+import type {
+  PackageInstallInput,
+  PackageInstallResult,
+  PackageInspectInput,
+  PackageInspectResult,
+} from "../types/package.js";
+import type {
+  HostContextRequest,
+  HostContextResponse,
+  HostEvidenceCorrelationRequest,
+  HostEvidenceCorrelationResponse,
+  HostEvidenceCompareRequest,
+  HostEvidenceCompareResponse,
+  HostEvidenceSearchRequest,
+  HostEvidenceSearchResponse,
+} from "../types/host.js";
+import type { InvestigationContext } from "../types/investigation.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
 import type { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
 import type { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
-import type { ServerServiceSchema, ServerServicesResponseSchema } from "./service.js";
-import type { ServerLogLineSchema, ServerLogsResponseSchema } from "./log.js";
-import type { FilesystemEditInputSchema, FilesystemEditOutputSchema, FilesystemReadInputSchema, FilesystemReadOutputSchema, FilesystemWriteInputSchema, FilesystemWriteOutputSchema } from "./file.js";
+import type {
+  ServerServiceSchema,
+  ServerServicesInputSchema,
+  ServerServicesResponseSchema,
+  SystemdInspectInputSchema,
+  SystemdInspectResultSchema,
+  SystemdRestartInputSchema,
+  SystemdRestartResultSchema,
+} from "./service.js";
+import type { ServerLogLineSchema, ServerLogsInputSchema, ServerLogsResponseSchema } from "./log.js";
+import type {
+  FilesystemBackupInputSchema,
+  FilesystemBackupCleanupInputSchema,
+  FilesystemBackupCleanupOutputSchema,
+  FilesystemBackupListInputSchema,
+  FilesystemBackupListOutputSchema,
+  FilesystemBackupOutputSchema,
+  FilesystemEditInputSchema,
+  FilesystemEditOutputSchema,
+  FilesystemReadInputSchema,
+  FilesystemReadOutputSchema,
+  FilesystemRestoreInputSchema,
+  FilesystemRestoreOutputSchema,
+  FilesystemWriteInputSchema,
+  FilesystemWriteOutputSchema,
+} from "./file.js";
 import type { DockerInspectResultSchema, DockerLogsResultSchema, DockerRestartInputSchema, DockerRestartResultSchema } from "./docker.js";
-import type { HostContextRequestSchema, HostContextResponseSchema } from "./host.js";
+import type {
+  PackageInstallInputSchema,
+  PackageInstallResultSchema,
+  PackageInspectInputSchema,
+  PackageInspectResultSchema,
+} from "./package.js";
+import type {
+  HostContextRequestSchema,
+  HostContextResponseSchema,
+  HostEvidenceCorrelationRequestSchema,
+  HostEvidenceCorrelationResponseSchema,
+  HostEvidenceCompareRequestSchema,
+  HostEvidenceCompareResponseSchema,
+  HostEvidenceSearchRequestSchema,
+  HostEvidenceSearchResponseSchema,
+} from "./host.js";
+import { InvestigationContextSchema } from "./investigation.js";
 import type {
   AgentRunRequestSchema,
   ApprovalResponseSchema,
@@ -69,8 +147,14 @@ export type _UpdateServerContract = Expect<Assignable<typeof UpdateServerInputSc
 export type _ActivityContract = Expect<Assignable<typeof ActivitySchema, Activity>>;
 export type _ToolExecutionListContract = Expect<Assignable<typeof ToolExecutionListResponseSchema, ToolExecutionListResponse>>;
 export type _ServerServiceContract = Expect<Assignable<typeof ServerServiceSchema, ServerService>>;
+export type _ServerServicesInputContract = Expect<Assignable<typeof ServerServicesInputSchema, ServerServicesInput>>;
 export type _ServerServicesContract = Expect<Assignable<typeof ServerServicesResponseSchema, ServerServicesResponse>>;
+export type _SystemdInspectInputContract = Expect<Assignable<typeof SystemdInspectInputSchema, SystemdInspectInput>>;
+export type _SystemdInspectResultContract = Expect<Assignable<typeof SystemdInspectResultSchema, SystemdInspectResult>>;
+export type _SystemdRestartInputContract = Expect<Assignable<typeof SystemdRestartInputSchema, SystemdRestartInput>>;
+export type _SystemdRestartResultContract = Expect<Assignable<typeof SystemdRestartResultSchema, SystemdRestartResult>>;
 export type _ServerLogLineContract = Expect<Assignable<typeof ServerLogLineSchema, ServerLogLine>>;
+export type _ServerLogsInputContract = Expect<Assignable<typeof ServerLogsInputSchema, ServerLogsInput>>;
 export type _ServerLogsContract = Expect<Assignable<typeof ServerLogsResponseSchema, ServerLogsResponse>>;
 export type _FilesystemReadInputContract = Expect<Assignable<typeof FilesystemReadInputSchema, FilesystemReadInput>>;
 export type _FilesystemReadOutputContract = Expect<Assignable<typeof FilesystemReadOutputSchema, FilesystemReadOutput>>;
@@ -78,12 +162,31 @@ export type _FilesystemEditInputContract = Expect<Assignable<typeof FilesystemEd
 export type _FilesystemEditOutputContract = Expect<Assignable<typeof FilesystemEditOutputSchema, FilesystemEditOutput>>;
 export type _FilesystemWriteInputContract = Expect<Assignable<typeof FilesystemWriteInputSchema, FilesystemWriteInput>>;
 export type _FilesystemWriteOutputContract = Expect<Assignable<typeof FilesystemWriteOutputSchema, FilesystemWriteOutput>>;
+export type _FilesystemBackupInputContract = Expect<Assignable<typeof FilesystemBackupInputSchema, FilesystemBackupInput>>;
+export type _FilesystemBackupCleanupInputContract = Expect<Assignable<typeof FilesystemBackupCleanupInputSchema, FilesystemBackupCleanupInput>>;
+export type _FilesystemBackupCleanupOutputContract = Expect<Assignable<typeof FilesystemBackupCleanupOutputSchema, FilesystemBackupCleanupOutput>>;
+export type _FilesystemBackupOutputContract = Expect<Assignable<typeof FilesystemBackupOutputSchema, FilesystemBackupOutput>>;
+export type _FilesystemBackupListInputContract = Expect<Assignable<typeof FilesystemBackupListInputSchema, FilesystemBackupListInput>>;
+export type _FilesystemBackupListOutputContract = Expect<Assignable<typeof FilesystemBackupListOutputSchema, FilesystemBackupListOutput>>;
+export type _FilesystemRestoreInputContract = Expect<Assignable<typeof FilesystemRestoreInputSchema, FilesystemRestoreInput>>;
+export type _FilesystemRestoreOutputContract = Expect<Assignable<typeof FilesystemRestoreOutputSchema, FilesystemRestoreOutput>>;
 export type _DockerLogsContract = Expect<Assignable<typeof DockerLogsResultSchema, DockerLogsResult>>;
 export type _DockerInspectContract = Expect<Assignable<typeof DockerInspectResultSchema, DockerInspectResult>>;
 export type _DockerRestartInputContract = Expect<Assignable<typeof DockerRestartInputSchema, DockerRestartInput>>;
 export type _DockerRestartResultContract = Expect<Assignable<typeof DockerRestartResultSchema, DockerRestartResult>>;
+export type _PackageInspectInputContract = Expect<Assignable<typeof PackageInspectInputSchema, PackageInspectInput>>;
+export type _PackageInspectResultContract = Expect<Assignable<typeof PackageInspectResultSchema, PackageInspectResult>>;
+export type _PackageInstallInputContract = Expect<Assignable<typeof PackageInstallInputSchema, PackageInstallInput>>;
+export type _PackageInstallResultContract = Expect<Assignable<typeof PackageInstallResultSchema, PackageInstallResult>>;
 export type _HostContextRequestContract = Expect<Assignable<typeof HostContextRequestSchema, HostContextRequest>>;
 export type _HostContextResponseContract = Expect<Assignable<typeof HostContextResponseSchema, HostContextResponse>>;
+export type _HostEvidenceSearchRequestContract = Expect<Assignable<typeof HostEvidenceSearchRequestSchema, HostEvidenceSearchRequest>>;
+export type _HostEvidenceSearchResponseContract = Expect<Assignable<typeof HostEvidenceSearchResponseSchema, HostEvidenceSearchResponse>>;
+export type _HostEvidenceCorrelationRequestContract = Expect<Assignable<typeof HostEvidenceCorrelationRequestSchema, HostEvidenceCorrelationRequest>>;
+export type _HostEvidenceCorrelationResponseContract = Expect<Assignable<typeof HostEvidenceCorrelationResponseSchema, HostEvidenceCorrelationResponse>>;
+export type _HostEvidenceCompareRequestContract = Expect<Assignable<typeof HostEvidenceCompareRequestSchema, HostEvidenceCompareRequest>>;
+export type _HostEvidenceCompareResponseContract = Expect<Assignable<typeof HostEvidenceCompareResponseSchema, HostEvidenceCompareResponse>>;
+export type _InvestigationContextContract = Expect<Assignable<typeof InvestigationContextSchema, InvestigationContext>>;
 export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDecisionSchema, PermissionDecision>>;
 export type _ToolDeclarationContract = Expect<Assignable<typeof ToolDeclarationSchema, ToolDeclaration>>;
 export type _ApprovalResponseContract = Expect<Assignable<typeof ApprovalResponseSchema, ApprovalResponse>>;
@@ -157,6 +260,21 @@ export type _IpcParamsContracts = {
   mcp_oauth_cancel: Expect<Assignable<ParamsOf<"mcp_oauth_cancel">, IpcCommandMap["mcp_oauth_cancel"]["params"]>>;
   network_proxy_get: Expect<Assignable<ParamsOf<"network_proxy_get">, IpcCommandMap["network_proxy_get"]["params"]>>;
   network_proxy_save: Expect<Assignable<ParamsOf<"network_proxy_save">, IpcCommandMap["network_proxy_save"]["params"]>>;
+  investigation_task_list: Expect<Assignable<ParamsOf<"investigation_task_list">, IpcCommandMap["investigation_task_list"]["params"]>>;
+  investigation_task_get: Expect<Assignable<ParamsOf<"investigation_task_get">, IpcCommandMap["investigation_task_get"]["params"]>>;
+  investigation_task_create: Expect<Assignable<ParamsOf<"investigation_task_create">, IpcCommandMap["investigation_task_create"]["params"]>>;
+  investigation_task_start: Expect<Assignable<ParamsOf<"investigation_task_start">, IpcCommandMap["investigation_task_start"]["params"]>>;
+  investigation_task_stop: Expect<Assignable<ParamsOf<"investigation_task_stop">, IpcCommandMap["investigation_task_stop"]["params"]>>;
+  investigation_task_status_update: Expect<Assignable<ParamsOf<"investigation_task_status_update">, IpcCommandMap["investigation_task_status_update"]["params"]>>;
+  investigation_task_recover: Expect<Assignable<ParamsOf<"investigation_task_recover">, IpcCommandMap["investigation_task_recover"]["params"]>>;
+  investigation_brief_select: Expect<Assignable<ParamsOf<"investigation_brief_select">, IpcCommandMap["investigation_brief_select"]["params"]>>;
+  investigation_retention_preview: Expect<Assignable<ParamsOf<"investigation_retention_preview">, IpcCommandMap["investigation_retention_preview"]["params"]>>;
+  investigation_retention_prune: Expect<Assignable<ParamsOf<"investigation_retention_prune">, IpcCommandMap["investigation_retention_prune"]["params"]>>;
+  investigation_schedule_list: Expect<Assignable<ParamsOf<"investigation_schedule_list">, IpcCommandMap["investigation_schedule_list"]["params"]>>;
+  investigation_schedule_runs: Expect<Assignable<ParamsOf<"investigation_schedule_runs">, IpcCommandMap["investigation_schedule_runs"]["params"]>>;
+  investigation_schedule_create: Expect<Assignable<ParamsOf<"investigation_schedule_create">, IpcCommandMap["investigation_schedule_create"]["params"]>>;
+  investigation_schedule_update: Expect<Assignable<ParamsOf<"investigation_schedule_update">, IpcCommandMap["investigation_schedule_update"]["params"]>>;
+  investigation_schedule_tick: Expect<Assignable<ParamsOf<"investigation_schedule_tick">, IpcCommandMap["investigation_schedule_tick"]["params"]>>;
 };
 
 export type _IpcResponseContracts = {
@@ -223,6 +341,21 @@ export type _IpcResponseContracts = {
   mcp_oauth_cancel: Expect<Assignable<ResponseOf<"mcp_oauth_cancel">, IpcCommandMap["mcp_oauth_cancel"]["response"]>>;
   network_proxy_get: Expect<Assignable<ResponseOf<"network_proxy_get">, IpcCommandMap["network_proxy_get"]["response"]>>;
   network_proxy_save: Expect<Assignable<ResponseOf<"network_proxy_save">, IpcCommandMap["network_proxy_save"]["response"]>>;
+  investigation_task_list: Expect<Assignable<ResponseOf<"investigation_task_list">, IpcCommandMap["investigation_task_list"]["response"]>>;
+  investigation_task_get: Expect<Assignable<ResponseOf<"investigation_task_get">, IpcCommandMap["investigation_task_get"]["response"]>>;
+  investigation_task_create: Expect<Assignable<ResponseOf<"investigation_task_create">, IpcCommandMap["investigation_task_create"]["response"]>>;
+  investigation_task_start: Expect<Assignable<ResponseOf<"investigation_task_start">, IpcCommandMap["investigation_task_start"]["response"]>>;
+  investigation_task_stop: Expect<Assignable<ResponseOf<"investigation_task_stop">, IpcCommandMap["investigation_task_stop"]["response"]>>;
+  investigation_task_status_update: Expect<Assignable<ResponseOf<"investigation_task_status_update">, IpcCommandMap["investigation_task_status_update"]["response"]>>;
+  investigation_task_recover: Expect<Assignable<ResponseOf<"investigation_task_recover">, IpcCommandMap["investigation_task_recover"]["response"]>>;
+  investigation_brief_select: Expect<Assignable<ResponseOf<"investigation_brief_select">, IpcCommandMap["investigation_brief_select"]["response"]>>;
+  investigation_retention_preview: Expect<Assignable<ResponseOf<"investigation_retention_preview">, IpcCommandMap["investigation_retention_preview"]["response"]>>;
+  investigation_retention_prune: Expect<Assignable<ResponseOf<"investigation_retention_prune">, IpcCommandMap["investigation_retention_prune"]["response"]>>;
+  investigation_schedule_list: Expect<Assignable<ResponseOf<"investigation_schedule_list">, IpcCommandMap["investigation_schedule_list"]["response"]>>;
+  investigation_schedule_runs: Expect<Assignable<ResponseOf<"investigation_schedule_runs">, IpcCommandMap["investigation_schedule_runs"]["response"]>>;
+  investigation_schedule_create: Expect<Assignable<ResponseOf<"investigation_schedule_create">, IpcCommandMap["investigation_schedule_create"]["response"]>>;
+  investigation_schedule_update: Expect<Assignable<ResponseOf<"investigation_schedule_update">, IpcCommandMap["investigation_schedule_update"]["response"]>>;
+  investigation_schedule_tick: Expect<Assignable<ResponseOf<"investigation_schedule_tick">, IpcCommandMap["investigation_schedule_tick"]["response"]>>;
 };
 
 /**

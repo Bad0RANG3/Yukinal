@@ -1,0 +1,23 @@
+{
+  "result": {
+    "taskId": "task_retention",
+    "cutoffAt": "2026-02-01T00:00:00Z",
+    "deleted": [
+      {
+        "id": "ev_drop",
+        "taskId": "task_retention",
+        "kind": "evidence",
+        "createdAt": "2026-01-02T00:00:00Z",
+        "bytes": 20,
+        "reason": "unreferenced_evidence"
+      }
+    ],
+    "skipped": [
+      {
+        "id": "ev_keep",
+        "kind": "evidence",
+        "reason": "referenced_by_task_history"
+      }
+    ]
+  }
+}

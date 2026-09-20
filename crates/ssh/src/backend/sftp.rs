@@ -153,6 +153,57 @@ impl RusshBackend {
         Ok(())
     }
 
+    /// Create a new file without replacing an existing path. Used for host-owned recovery copies.
+    pub async fn sftp_create_file_exclusive(
+        &self,
+        client: &SftpClient,
+        path: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        use russh_sftp::protocol::OpenFlags;
+        use tokio::io::AsyncWriteExt;
+
+        let sftp = lock_sftp(client).await?;
+        let mut file = match sftp
+            .open_with_flags(
+                path,
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+            )
+            .await
+        {
+            Ok(file) => file,
+            Err(error) => return Err(Error::Channel(error.to_string())),
+        };
+        let result = async {
+            file.write_all(data)
+                .await
+                .map_err(|error| Error::Channel(error.to_string()))?;
+            file.sync_all()
+                .await
+                .map_err(|error| Error::Channel(error.to_string()))?;
+            file.close()
+                .await
+                .map_err(|error| Error::Channel(error.to_string()))?;
+            Ok::<(), Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = sftp.remove_file(path).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Remove one remote file. Callers are responsible for validating the
+    /// path and checking its shape before invoking this narrow primitive.
+    pub async fn sftp_remove_file(&self, client: &SftpClient, path: &str) -> Result<()> {
+        let sftp = lock_sftp(client).await?;
+        sftp.remove_file(path)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        Ok(())
+    }
+
     /// 读取一个路径的属性（不跟随 symlink：`lstat` 语义）。
     pub async fn sftp_stat(&self, client: &SftpClient, path: &str) -> Result<SftpFileStat> {
         let sftp = lock_sftp(client).await?;

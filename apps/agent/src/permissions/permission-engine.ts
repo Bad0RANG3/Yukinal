@@ -33,6 +33,7 @@ import {
   type ToolTarget,
 } from "@yukinal/shared";
 
+import { actionFingerprint } from "../security/action-fingerprint.js";
 import { analyzeCommand, extractCommand } from "./command-risk.js";
 
 /** Layer 3: the floor the target environment imposes, independent of the tool. */
@@ -62,11 +63,12 @@ export interface PermissionRequest {
   mode?: AgentRunMode;
 }
 
-/** Grants are scoped to `tool + target`, never to a name the model typed. */
-export function grantKey(toolName: string, target: ToolTarget): string {
+/** Grants are scoped to the exact `tool + input + target` action. */
+export function grantKey(toolName: string, target: ToolTarget, inputFingerprint = "none"): string {
   const where = target.host === "local" ? "local" : (target.serverId ?? "unknown-server");
   const workspace = target.workspaceId ?? "global";
-  return `${toolName}@${where}@${workspace}@${target.environment}`;
+  const base = `${toolName}@${where}@${workspace}@${target.environment}`;
+  return inputFingerprint === "none" ? base : `${base}@${inputFingerprint}`;
 }
 
 export class PermissionEngine {
@@ -192,7 +194,7 @@ export class PermissionEngine {
       outcome === "ask" &&
       tier !== "dangerous" &&
       finalRisk !== "critical" &&
-      this.#grants.has(grantKey(declaration.name, target))
+      this.#grants.has(grantKey(declaration.name, target, actionFingerprint(input)))
     ) {
       outcome = "auto";
       // `approvedBy` is the provenance the rest of the pipeline dispatches on,
@@ -212,6 +214,7 @@ export class PermissionEngine {
       facts,
       policyId: policy.id,
       toolName: declaration.name,
+      inputFingerprint: actionFingerprint(input),
       reason,
       approvedBy,
       target: { ...target },
@@ -236,7 +239,7 @@ export class PermissionEngine {
   grantSession(decision: PermissionDecision): void {
     if (decision.tier === "dangerous") return;
     if (decision.finalRisk === "critical") return;
-    this.#grants.add(grantKey(decision.toolName, decision.target));
+    this.#grants.add(grantKey(decision.toolName, decision.target, decision.inputFingerprint));
   }
 
   /**

@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{broadcast, Mutex};
+use tokio_util::sync::CancellationToken;
 use yukinal_ssh::PtyEvent;
 
 use crate::event::{TerminalAppEvent, TerminalSessionInfo};
@@ -17,6 +18,34 @@ struct Session<P: TerminalPty> {
     info: TerminalSessionInfo,
     pty: Arc<P>,
     generation: u64,
+    close_state: Arc<CloseState>,
+}
+
+#[derive(Default)]
+struct CloseState {
+    emitted: AtomicBool,
+    exit_code: StdMutex<Option<u32>>,
+}
+
+enum CloseNotice {
+    Emit(Option<u32>),
+    AlreadyEmitted,
+}
+
+impl CloseState {
+    fn claim(&self, code: Option<u32>) -> CloseNotice {
+        let mut stored = self
+            .exit_code
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if code.is_some() {
+            *stored = code;
+        }
+        if self.emitted.swap(true, Ordering::AcqRel) {
+            return CloseNotice::AlreadyEmitted;
+        }
+        CloseNotice::Emit(*stored)
+    }
 }
 
 /// 多会话 terminal 管理器。`subscribe` 的 broadcast 是 UI 唯一事件入口。
@@ -25,6 +54,7 @@ pub struct TerminalManager<P: TerminalPty> {
     next_id: AtomicU64,
     next_generation: AtomicU64,
     events: broadcast::Sender<TerminalAppEvent>,
+    cancel: CancellationToken,
 }
 
 impl<P: TerminalPty + 'static> Default for TerminalManager<P> {
@@ -42,6 +72,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
             next_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
             events,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -71,6 +102,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                 info,
                 pty: Arc::new(pty),
                 generation: self.next_generation.fetch_add(1, Ordering::Relaxed),
+                close_state: Arc::new(CloseState::default()),
             },
         );
 
@@ -102,6 +134,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
         session.info.cols = cols;
         session.info.rows = rows;
         session.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        session.close_state = Arc::new(CloseState::default());
 
         let session_id = terminal_session_id.to_string();
         let info = session.info.clone();
@@ -139,19 +172,58 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
 
     /// 关闭会话（唯一删除路径）：`pty.close()` + 移除路由 + 上抛 Closed。
     pub async fn close(&self, terminal_session_id: &str) -> Result<()> {
-        let pty = {
-            let mut sessions = self.sessions.lock().await;
-            sessions
-                .remove(terminal_session_id)
-                .map(|session| session.pty)
-                .ok_or_else(|| TerminalError::NotFound(terminal_session_id.to_string()))?
+        let (pty, close_state, generation) = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .get(terminal_session_id)
+                .ok_or_else(|| TerminalError::NotFound(terminal_session_id.to_string()))?;
+            (
+                Arc::clone(&session.pty),
+                Arc::clone(&session.close_state),
+                session.generation,
+            )
         };
-        pty.close().await?;
-        let _ = self.events.send(TerminalAppEvent::Closed {
-            terminal_session_id: terminal_session_id.to_string(),
-            exit_code: None,
-        });
-        Ok(())
+
+        // Let the PTY finalizer publish its real exit status before the manager's
+        // fallback claims the one-shot close event.
+        let close_result = pty.close().await;
+        let notice = close_state.claim(None);
+        {
+            let mut sessions = self.sessions.lock().await;
+            if sessions
+                .get(terminal_session_id)
+                .is_some_and(|session| session.generation == generation)
+            {
+                sessions.remove(terminal_session_id);
+            }
+        }
+        if let CloseNotice::Emit(exit_code) = notice {
+            let _ = self.events.send(TerminalAppEvent::Closed {
+                terminal_session_id: terminal_session_id.to_string(),
+                exit_code,
+            });
+        }
+        match (close_result, notice) {
+            (Err(error), CloseNotice::Emit(_)) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Close every PTY. Used during host shutdown after all UI work has stopped.
+    pub async fn close_all(&self) -> usize {
+        let ids: Vec<String> = self
+            .list()
+            .await
+            .into_iter()
+            .map(|info| info.terminal_session_id)
+            .collect();
+        let mut closed = 0;
+        for terminal_session_id in ids {
+            if self.close(&terminal_session_id).await.is_ok() {
+                closed += 1;
+            }
+        }
+        closed
     }
 
     /// Close every terminal belonging to one server. Disconnecting a server
@@ -208,19 +280,34 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
     /// 每会话一个转发任务：pty 输出 → Data；Closed → 上抛（不做删除，
     /// 删除权归 `close()`，避免 reopen 与任务移除互踩）。
     fn spawn_forwarder(&self, terminal_session_id: String, generation: u64) {
-        let sessions = Arc::clone(&self.sessions);
+        let sessions = Arc::downgrade(&self.sessions);
         let events = self.events.clone();
+        let cancel = self.cancel.clone();
         tokio::spawn(async move {
-            let receiver = {
-                let guard = sessions.lock().await;
+            let Some(initial_sessions) = sessions.upgrade() else {
+                return;
+            };
+            let (receiver, close_state) = {
+                let guard = initial_sessions.lock().await;
                 let Some(session) = guard.get(&terminal_session_id) else {
                     return;
                 };
-                session.pty.events()
+                if session.generation != generation {
+                    return;
+                }
+                (session.pty.events(), Arc::clone(&session.close_state))
             };
+            drop(initial_sessions);
             let mut receiver = receiver;
             loop {
-                match receiver.recv().await {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    event = receiver.recv() => event,
+                };
+                let Some(sessions) = sessions.upgrade() else {
+                    break;
+                };
+                match event {
                     Some(PtyEvent::Output(bytes)) => {
                         let current = sessions
                             .lock()
@@ -248,10 +335,12 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                             .get(&terminal_session_id)
                             .is_some_and(|session| session.generation == generation);
                         if current {
-                            let _ = events.send(TerminalAppEvent::Closed {
-                                terminal_session_id: terminal_session_id.clone(),
-                                exit_code: code,
-                            });
+                            if let CloseNotice::Emit(exit_code) = close_state.claim(code) {
+                                let _ = events.send(TerminalAppEvent::Closed {
+                                    terminal_session_id: terminal_session_id.clone(),
+                                    exit_code,
+                                });
+                            }
                         }
                         break;
                     }
@@ -262,16 +351,24 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                             .get(&terminal_session_id)
                             .is_some_and(|session| session.generation == generation);
                         if current {
-                            let _ = events.send(TerminalAppEvent::Closed {
-                                terminal_session_id: terminal_session_id.clone(),
-                                exit_code: None,
-                            });
+                            if let CloseNotice::Emit(exit_code) = close_state.claim(None) {
+                                let _ = events.send(TerminalAppEvent::Closed {
+                                    terminal_session_id: terminal_session_id.clone(),
+                                    exit_code,
+                                });
+                            }
                         }
                         break;
                     }
                 }
             }
         });
+    }
+}
+
+impl<P: TerminalPty> Drop for TerminalManager<P> {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -285,6 +382,7 @@ impl<P: TerminalPty> fmt::Debug for TerminalManager<P> {
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     /// 内存 pty：记录写入 / 改尺寸 / 关闭，但不产生任何输出事件。
     ///
@@ -528,6 +626,28 @@ mod tests {
                 }
                 other => panic!("expected Closed, got {other:?}"),
             }
+        });
+    }
+
+    #[test]
+    fn dropping_manager_releases_sessions_and_stops_the_forwarder() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let manager = TerminalManager::<ScriptedMemoryPty>::new();
+            let weak_sessions = Arc::downgrade(&manager.sessions);
+            let pty = ScriptedMemoryPty::new();
+            let emitter = pty.output_tx.clone();
+            manager.open("srv_1", 120, 30, pty).await.expect("open");
+
+            drop(manager);
+
+            tokio::time::timeout(Duration::from_secs(1), emitter.closed())
+                .await
+                .expect("the forwarder must stop when its manager is dropped");
+            assert!(
+                weak_sessions.upgrade().is_none(),
+                "the forwarder must not keep the session map alive"
+            );
         });
     }
 }

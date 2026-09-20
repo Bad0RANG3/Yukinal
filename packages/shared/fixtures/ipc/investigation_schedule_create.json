@@ -1,0 +1,20 @@
+{
+  "schedule": {
+    "id": "schedule_01",
+    "taskId": "task_01",
+    "status": "active",
+    "intervalSeconds": 300,
+    "cooldownSeconds": 120,
+    "dedupeWindowSeconds": 300,
+    "maxConcurrentRuns": 1,
+    "budget": {
+      "maxSteps": 25,
+      "maxRunMs": 900000,
+      "maxAttempts": 3
+    },
+    "notificationPolicy": "on_change",
+    "nextRunAt": "2026-01-01T00:05:00Z",
+    "createdAt": "2026-01-01T00:00:00Z",
+    "updatedAt": "2026-01-01T00:00:00Z"
+  }
+}

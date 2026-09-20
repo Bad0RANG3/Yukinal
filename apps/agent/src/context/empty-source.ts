@@ -18,5 +18,8 @@ export function createEmptyContextSource(): ContextSource {
     async workspace() {
       return undefined;
     },
+    async investigation() {
+      return undefined;
+    },
   };
 }

@@ -179,6 +179,7 @@ test("every event the UI subscribes to has a gate", () => {
     // 设备码流程的 user_code 在请求还没返回时就到达界面，所以它必须是订阅得到的频道。
     "mcp.oauth_device_code",
     "activity.created",
+    "investigation.schedule_notification",
   ] as const;
 
   for (const name of subscribed) {

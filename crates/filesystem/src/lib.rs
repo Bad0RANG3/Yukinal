@@ -1,5 +1,5 @@
 //! yukinal-filesystem — 远端文件能力的唯一实现处：路径规则、字节/字符上限，以及有界的
-//! `list` / `read` / `write` / `edit`。
+//! `list` / `read` / `write` / `edit` / `backup` / `restore`。
 //!
 //! 这个 crate 以前是一份 7 行的契约占位（「本地与远端文件能力」），而真正的规则住在别处：
 //! 凭据路径黑名单、远端路径校验与读写上限全在
@@ -19,13 +19,17 @@
 //!   策略与上限在服务里生效，失败是类型化的 [`Error`]；`invalid_input` /
 //!   `denied_by_policy` / `transport` 这些**码**由上层映射（见下）。
 //!
-//! # 两个写工具为什么都在
+//! # 写入、备份和恢复工具为什么都在
 //! - [`RemoteFileService::agent_write`] 是**覆盖写**：整份内容由调用方给出，写下去就是全部。
 //!   它存在的理由是「创建文件」和「我确实要整份换掉」。它不带守卫，也不会自己先读一遍再合并
 //!   —— 那种「隐式读改写」恰恰是它今天会覆盖掉并发修改的原因，把它改成补丁语义不会解决这个
 //!   问题，只会让「整份替换」这件事没有工具可用。
 //! - [`RemoteFileService::agent_edit`] 是**有守卫的精确替换**（先读后改）：它要求
 //!   `expectedRevision` 与文件当前内容一致，且 `oldString` 恰好出现一次。
+//! - [`RemoteFileService::agent_backup`] 是**宿主决定目的地的完整副本**：它只复制一个有界的
+//!   普通单链接文件，并以独占创建避免覆盖旧备份。
+//! - [`RemoteFileService::agent_restore`] 是**带当前 revision 守卫的恢复**：它只接受由同一
+//!   目标路径推导出的备份，并通过受保护的替换发布，不把任意远端路径交给 Agent。
 //!
 //! # 编辑的保证边界（诚实版本）
 //! `edit` 的前置条件是「文件的内容还是我读过的那一份」，它拦得住的是：读完之后别人改过、
@@ -53,20 +57,24 @@
 //!   所以 [`RemoteFileService::list`] / [`RemoteFileService::browse_read`] 只受上限约束，
 //!   不查黑名单 —— 这不是漏掉的一步。
 
+pub mod backup;
 pub mod limits;
 pub mod policy;
 pub mod revision;
 pub mod service;
 
+pub use backup::{backup_path_for, is_backup_path_for, is_safe_backup_token, BACKUP_MARKER};
 pub use limits::{
-    decode_bounded, BoundedRead, BROWSER_READ_BYTES, DEFAULT_AGENT_READ_BYTES,
-    MAX_AGENT_EDIT_BYTES, MAX_AGENT_READ_BYTES, MAX_AGENT_WRITE_BYTES, MAX_REMOTE_PATH_CHARS,
+    decode_bounded, BoundedRead, BACKUP_TOKEN_CHARS, BROWSER_READ_BYTES, DEFAULT_AGENT_READ_BYTES,
+    MAX_AGENT_BACKUP_BYTES, MAX_AGENT_EDIT_BYTES, MAX_AGENT_READ_BYTES, MAX_AGENT_WRITE_BYTES,
+    MAX_REMOTE_PATH_CHARS,
 };
 pub use policy::{is_agent_blocked_path, validate_remote_path, AGENT_PATH_POLICY_MESSAGE};
 pub use revision::{content_revision, is_content_revision};
 pub use service::{
-    AgentEditRequest, AgentReadRequest, AgentWriteRequest, Error, ListedEntry, RemoteEdit,
-    RemoteEntry, RemoteEntryKind, RemoteFileService, RemoteFileTransport, RemoteListing,
-    RemoteRead, RemoteStat, RemoteWrite, ReplaceError, ReplaceGuard, ReplacedFile, Result,
-    TransportError, TransportResult,
+    AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest, AgentReadRequest,
+    AgentRestoreRequest, AgentWriteRequest, Error, ListedEntry, RemoteBackup, RemoteBackupCleanup,
+    RemoteEdit, RemoteEntry, RemoteEntryKind, RemoteFileService, RemoteFileTransport,
+    RemoteListing, RemoteRead, RemoteRestore, RemoteStat, RemoteWrite, ReplaceError, ReplaceGuard,
+    ReplacedFile, Result, TransportError, TransportResult,
 };

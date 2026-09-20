@@ -43,7 +43,7 @@ Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务
 ### Agent 工作流
 
 - 使用 Node.js sidecar 执行完整的 agent loop：组装上下文、调用模型、请求授权、执行工具、回灌结果，再进入下一轮。
-- 内置服务器信息、Docker、文件读写和编辑等工具；真正的 SSH、SFTP、SQLite、凭据和进程资源由 Rust 宿主持有。
+- 内置服务器信息、Docker、受限文件读写/编辑、宿主生成备份与守卫恢复等工具；真正的 SSH、SFTP、SQLite、凭据和进程资源由 Rust 宿主持有。
 - 运行模式与批准方式分开控制：`goal`、`plan`、`readonly` 决定允许改变什么，`ask`、`auto` 决定由谁确认。
 - 支持流式回答、工具调用卡片、逐项审批、停止运行、模型选择、会话历史和活动追踪。
 - 支持图片、PDF、UTF-8 文本文件与音频附件，并按内容特征和大小上限校验；具体 Provider 的输入能力仍以[当前限制](./docs/limitations.md#当前限制)为准。
@@ -53,7 +53,7 @@ Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务
 - 支持 OpenAI-compatible（Chat Completions / Responses）、Anthropic Messages 和 Gemini `generateContent` 三类协议。
 - 支持模型目录、SSE 文本增量、工具调用增量、取消、超时和安全的错误摘要。
 - 支持 stdio 与 Streamable HTTP MCP 服务器；HTTP 端点可使用静态认证头或 OAuth，凭据仍由系统凭据库持有。
-- MCP 工具进入和内置工具相同的执行链路，但默认按 `critical` 处理，必须逐项审批。
+- MCP 工具进入和内置工具相同的执行链路，但默认按 `critical` 处理，必须逐项审批，并且 Agent 调用必须绑定 durable task/ChangePlan 步骤；交互式终端仍是用户直接操作的人工旁路。
 
 ### 安全边界
 

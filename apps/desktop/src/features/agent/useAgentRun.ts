@@ -55,6 +55,8 @@ export type StartOutcome =
 
 export type StartRunInput = {
   prompt: string;
+  /** Optional durable investigation objective receiving read-only evidence. */
+  taskId?: string | null;
   /** Exact prompt parts, including bounded images, PDFs and text files. Omitted means text-only fallback. */
   parts?: AgentPromptPart[];
   /**
@@ -143,6 +145,7 @@ export function useAgentRun(options: {
     sessionId: string;
     prompt: string;
     parts: AgentPromptPart[];
+    taskId?: string | null;
   } | null>(null);
 
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -331,7 +334,7 @@ export function useAgentRun(options: {
     const contentKey = JSON.stringify(parts);
     const previous = pendingAdmission.current;
     const reusable =
-      previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey
+      previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null)
         ? previous
         : null;
     const expectedRunId = reusable?.runId ?? newId("run");
@@ -362,13 +365,14 @@ export function useAgentRun(options: {
       if (!reusable) {
         const messageId = newId("msg");
         const sessionId = await input.persistUserMessage(messageId, parts);
-        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts };
+        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null };
       }
       const admitted = pendingAdmission.current;
       if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
       const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
         runId: admitted.runId,
         sessionId: admitted.sessionId,
+        taskId: input.taskId ?? undefined,
         prompt,
         messageId: admitted.messageId,
         parts,
@@ -387,6 +391,7 @@ export function useAgentRun(options: {
       const response = await callDesktop(IPC_COMMANDS.agentRunStart, {
         runId: admitted.runId,
         sessionId: admitted.sessionId,
+        taskId: input.taskId ?? undefined,
         prompt,
         messageId: admitted.messageId,
         parts,

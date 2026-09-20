@@ -9,12 +9,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::provider::resolve_api_key;
 use crate::state::AppState;
 use yukinal_core::provider::runtime_provider_config;
-use yukinal_database::models::AiProviderConfig;
+use yukinal_database::models::{
+    AiProviderConfig, InvestigationFailure, InvestigationRun, InvestigationRunStatus,
+    InvestigationTargetHost, TaskFailureCode, TaskPhase, TaskStatus,
+};
+use yukinal_database::repositories::TaskProgressUpdate;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -355,8 +359,26 @@ fn run_start_timeout(delivery: Option<&str>) -> Duration {
     }
 }
 
+/// A task may omit the focused server only while the host is still able to fill the
+/// server stored in its remote scope. A local task, however, must never inherit a
+/// remote server merely because the Agent panel happened to have one selected.
+fn task_server_matches(
+    scope_host: InvestigationTargetHost,
+    task_server_id: Option<&str>,
+    focused_server_id: Option<&str>,
+) -> bool {
+    match scope_host {
+        InvestigationTargetHost::Local => focused_server_id.is_none(),
+        InvestigationTargetHost::Remote => match (task_server_id, focused_server_id) {
+            (Some(task_server), Some(focused_server)) => task_server == focused_server,
+            (Some(_), None) => true,
+            (None, _) => false,
+        },
+    }
+}
+
 /// 第一个启用的 AI provider；没有就明确报错（UI 引导去配置，不做假 provider）。
-fn resolve_provider(
+pub(crate) fn resolve_provider(
     state: &AppState,
     provider_id: Option<&str>,
 ) -> Result<AiProviderConfig, String> {
@@ -378,12 +400,105 @@ fn resolve_provider(
         })
 }
 
+fn interrupt_stale_investigation_run(
+    state: &AppState,
+    task_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    let mut run = match state.database.investigations().get_run(run_id) {
+        Ok(run) if run.task_id == task_id => run,
+        Ok(_) => return Err("active investigation run belongs to another task".into()),
+        Err(yukinal_database::DatabaseError::NotFound) => return Ok(()),
+        Err(error) => return Err(format!("failed to read active investigation run: {error}")),
+    };
+    if !matches!(
+        run.status,
+        InvestigationRunStatus::Admitted
+            | InvestigationRunStatus::Running
+            | InvestigationRunStatus::WaitingUser
+    ) {
+        return Ok(());
+    }
+    let now = yukinal_core::sidecar::iso8601_now();
+    let failure = InvestigationFailure {
+        code: TaskFailureCode::Transport,
+        message: "上一轮 sidecar 运行未完成，本次恢复前已标记为中断".into(),
+        retryable: true,
+        attempt: run.attempt,
+        at: now.clone(),
+        detail: None,
+        options: Some(super::failure_options(TaskFailureCode::Transport, true)),
+    };
+    run.status = InvestigationRunStatus::Interrupted;
+    run.updated_at = now.clone();
+    run.ended_at = Some(now);
+    run.failure = Some(failure);
+    state
+        .database
+        .investigations()
+        .update_run(&run)
+        .map_err(|error| format!("failed to interrupt stale investigation run: {error}"))?;
+    Ok(())
+}
+
+pub(crate) fn fail_admitted_investigation_run(
+    state: &AppState,
+    task_id: &str,
+    run_id: &str,
+    message: &str,
+    code: TaskFailureCode,
+) {
+    let mut run = match state.database.investigations().get_run(run_id) {
+        Ok(run) if run.task_id == task_id => run,
+        Ok(_) | Err(yukinal_database::DatabaseError::NotFound) => return,
+        Err(error) => {
+            eprintln!("[yukinal] failed to read investigation run after start error: {error}");
+            return;
+        }
+    };
+    let now = yukinal_core::sidecar::iso8601_now();
+    let retryable = matches!(code, TaskFailureCode::Transport | TaskFailureCode::Timeout);
+    let failure = InvestigationFailure {
+        code,
+        message: message.chars().take(4_096).collect(),
+        retryable,
+        attempt: run.attempt,
+        at: now.clone(),
+        detail: None,
+        options: Some(super::failure_options(code, retryable)),
+    };
+    run.status = InvestigationRunStatus::Failed;
+    run.updated_at = now.clone();
+    run.ended_at = Some(now.clone());
+    run.failure = Some(failure.clone());
+    if let Err(error) = state.database.investigations().update_run(&run) {
+        eprintln!("[yukinal] failed to persist investigation start failure: {error}");
+        return;
+    }
+    if let Err(error) = state
+        .database
+        .investigations()
+        .update_task_progress(&TaskProgressUpdate {
+            id: task_id,
+            status: TaskStatus::Failed,
+            phase: TaskPhase::Recovery,
+            active_run_id: None,
+            last_failure: Some(&failure),
+            updated_at: &now,
+            completed_at: Some(&now),
+        })
+    {
+        eprintln!("[yukinal] failed to persist investigation task start failure: {error}");
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_run_start(
     state: State<'_, AppState>,
     run_id: Option<String>,
     session_id: String,
+    task_id: Option<String>,
     prompt: String,
     message_id: Option<String>,
     parts: Option<Vec<PromptPart>>,
@@ -404,6 +519,8 @@ pub async fn agent_run_start(
     // parameter exists to remove.
     policy_id: Option<String>,
 ) -> Result<RunStartResponse, String> {
+    let mut focus_server_id = focus_server_id;
+    let mut workspace_id = workspace_id;
     // Repair legacy databases before resolving the provider. The UI normally does
     // this through provider_list, but run.start must remain safe when invoked
     // directly or while the startup query is still refreshing.
@@ -444,6 +561,127 @@ pub async fn agent_run_start(
         .map_err(|error| format!("failed to encode prompt parts: {error}"))?;
     let provider_config = runtime_provider_config(&provider, &selected_model, api_key, 120_000);
 
+    let task = task_id
+        .as_deref()
+        .map(|id| {
+            state
+                .database
+                .investigations()
+                .get_task(id)
+                .map_err(|error| format!("investigation task is not available: {error}"))
+        })
+        .transpose()?;
+    let mut effective_mode = mode;
+    let mut effective_permission_mode = permission_mode;
+    if let Some(task) = task.as_ref() {
+        if matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Stopped | TaskStatus::Expired
+        ) {
+            return Err("terminal investigation tasks cannot start a new Agent run".into());
+        }
+        if !task_server_matches(
+            task.scope.host,
+            task.server_id.as_deref(),
+            focus_server_id.as_deref(),
+        ) {
+            return Err("Agent target does not match the investigation task scope".into());
+        }
+        if let (Some(task_workspace), Some(focused_workspace)) =
+            (task.workspace_id.as_deref(), workspace_id.as_deref())
+        {
+            if task_workspace != focused_workspace {
+                return Err("Agent workspace does not match the investigation task scope".into());
+            }
+        }
+        if focus_server_id.is_none() {
+            focus_server_id = task.server_id.clone();
+        }
+        if workspace_id.is_none() {
+            workspace_id = task.workspace_id.clone();
+        }
+        // A durable task owns its safety envelope. UI preferences may choose the
+        // envelope for an unbound chat, but cannot widen a task created as readonly.
+        effective_mode = Some(task.mode.as_str().to_string());
+        effective_permission_mode = Some(task.permission_mode.as_str().to_string());
+        if resume.unwrap_or(true)
+            && !matches!(
+                task.status,
+                TaskStatus::Completed
+                    | TaskStatus::Failed
+                    | TaskStatus::Stopped
+                    | TaskStatus::Expired
+            )
+        {
+            // The same run id may reach this command again when the UI retries a transport
+            // response. Reuse the durable receipt instead of opening a second attempt.
+            let existing = state.database.investigations().get_run(&run_id);
+            match existing {
+                Err(yukinal_database::DatabaseError::NotFound) => {
+                    if let Some(active_run_id) = task.active_run_id.as_deref() {
+                        if active_run_id != run_id {
+                            interrupt_stale_investigation_run(&state, &task.id, active_run_id)?;
+                        }
+                    }
+                    let attempt = state
+                        .database
+                        .investigations()
+                        .list_runs(&task.id, 64)
+                        .map_err(|error| format!("failed to read investigation attempts: {error}"))?
+                        .iter()
+                        .map(|run| run.attempt)
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    if attempt > task.budget.max_attempts {
+                        return Err(format!(
+                            "investigation attempt budget exhausted ({}/{})",
+                            attempt.saturating_sub(1),
+                            task.budget.max_attempts
+                        ));
+                    }
+                    let now = yukinal_core::sidecar::iso8601_now();
+                    state
+                        .database
+                        .investigations()
+                        .create_run(&InvestigationRun {
+                            id: run_id.clone(),
+                            task_id: task.id.clone(),
+                            session_id: Some(session_id.clone()),
+                            message_id: Some(message_id.clone()),
+                            trace_id: None,
+                            attempt,
+                            phase: TaskPhase::Investigating,
+                            status: InvestigationRunStatus::Admitted,
+                            started_at: now.clone(),
+                            updated_at: now,
+                            ended_at: None,
+                            checkpoint: None,
+                            failure: None,
+                        })
+                        .map_err(|error| format!("failed to persist investigation run: {error}"))?;
+                }
+                Ok(existing) if existing.task_id == task.id => {}
+                Ok(_) => return Err("run id is already bound to another investigation task".into()),
+                Err(error) => return Err(format!("failed to read investigation run: {error}")),
+            }
+            let now = yukinal_core::sidecar::iso8601_now();
+            state
+                .database
+                .investigations()
+                .update_task_progress(&TaskProgressUpdate {
+                    id: &task.id,
+                    status: TaskStatus::Investigating,
+                    phase: TaskPhase::Investigating,
+                    active_run_id: Some(&run_id),
+                    last_failure: None,
+                    updated_at: &now,
+                    completed_at: None,
+                })
+                .map_err(|error| format!("failed to start investigation task: {error}"))?;
+        }
+    }
+
     // Chosen before `params` is built, because building it moves `delivery` into the
     // JSON-RPC params.
     let request_timeout = run_start_timeout(delivery.as_deref());
@@ -458,8 +696,34 @@ pub async fn agent_run_start(
         "resume": resume.unwrap_or(true),
         "providerConfig": provider_config,
     });
+    if let Some(task_id) = task_id.as_deref() {
+        params["taskId"] = json!(task_id);
+        if let Some(task) = task.as_ref() {
+            params["taskBudget"] = json!({
+                "maxSteps": task.budget.max_steps,
+                "maxRunMs": task.budget.max_run_ms,
+                "maxAttempts": task.budget.max_attempts,
+            });
+        }
+    }
     if let Some(workspace_id) = workspace_id.as_deref() {
         params["workspaceId"] = json!(workspace_id);
+    }
+    // A local durable task has no server id to trigger the remote-target branch below, but its
+    // environment and workspace are still part of the task scope. Preserve them in the sidecar
+    // target so host-owned playbooks cannot be rejected as `local/unknown` after task start.
+    if let Some(task) = task
+        .as_ref()
+        .filter(|task| task.scope.host == InvestigationTargetHost::Local)
+    {
+        let mut target = json!({
+            "host": "local",
+            "environment": task.scope.environment,
+        });
+        if let Some(workspace_id) = workspace_id.as_deref() {
+            target["workspaceId"] = json!(workspace_id);
+        }
+        params["target"] = target;
     }
     if let Some(server_id) = focus_server_id.as_deref() {
         let server = state
@@ -478,25 +742,63 @@ pub async fn agent_run_start(
         params["focusServerId"] = json!(server_id);
         params["target"] = target;
     }
-    if let Some(permission_mode) = permission_mode {
+    if let Some(permission_mode) = effective_permission_mode {
         params["permissionMode"] = json!(permission_mode);
     }
-    if let Some(mode) = mode {
+    if let Some(mode) = effective_mode {
         params["mode"] = json!(mode);
     }
     if let Some(policy_id) = policy_id.as_deref() {
         params["policyId"] = json!(policy_id);
     }
-    let response = state
-        .supervisor
-        .request("agent.run.start", params, request_timeout)
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => {
+            let error = "application shutdown cancelled the Agent run";
+            if let Some(task) = task.as_ref() {
+                fail_admitted_investigation_run(
+                    &state,
+                    &task.id,
+                    &run_id,
+                    error,
+                    TaskFailureCode::Internal,
+                );
+            }
+            return Err(error.into());
+        }
+        response = state
+            .supervisor
+            .request("agent.run.start", params, request_timeout) => response,
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(task) = task.as_ref() {
+                fail_admitted_investigation_run(
+                    &state,
+                    &task.id,
+                    &run_id,
+                    &error.to_string(),
+                    TaskFailureCode::Transport,
+                );
+            }
+            return Err(error.to_string());
+        }
+    };
     let returned_run_id = response
         .get("runId")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "agent sidecar returned an invalid run.start response".to_string())?;
     if returned_run_id != run_id {
+        if let Some(task) = task.as_ref() {
+            fail_admitted_investigation_run(
+                &state,
+                &task.id,
+                &run_id,
+                "agent sidecar returned a different run id",
+                TaskFailureCode::Internal,
+            );
+        }
         return Err("agent sidecar returned a different run id".into());
     }
     // The sidecar always answers with `started`; a response without it is a contract
@@ -505,7 +807,22 @@ pub async fn agent_run_start(
     let started = response
         .get("started")
         .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| "agent sidecar returned an invalid run.start response".to_string())?;
+        .ok_or_else(|| "agent sidecar returned an invalid run.start response".to_string());
+    let started = match started {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(task) = task.as_ref() {
+                fail_admitted_investigation_run(
+                    &state,
+                    &task.id,
+                    &run_id,
+                    &error,
+                    TaskFailureCode::Internal,
+                );
+            }
+            return Err(error);
+        }
+    };
     let duplicate = response
         .get("duplicate")
         .and_then(serde_json::Value::as_bool);
@@ -525,23 +842,70 @@ pub async fn agent_run_start(
 
 #[tauri::command]
 pub async fn agent_run_stop(
+    app: AppHandle,
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<RunStopResponse, String> {
-    let response = state
-        .supervisor
-        .request(
+    let stopped = stop_investigation_run(&app, &state, &run_id).await?;
+    Ok(RunStopResponse { stopped })
+}
+
+/// Stop a sidecar run and, when it belongs to a durable investigation, immediately
+/// persist the host-owned cancellation fence.  Keeping this in one helper makes a
+/// decision option's explicit `stop` continuation use exactly the same path as the
+/// Agent panel's stop button.
+pub(crate) async fn stop_investigation_run(
+    app: &AppHandle,
+    state: &AppState,
+    run_id: &str,
+) -> Result<bool, String> {
+    if run_id.trim().is_empty() || run_id.chars().count() > 256 {
+        return Err("run id must be between 1 and 256 characters".into());
+    }
+    let response = tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => {
+            return Err("application shutdown cancelled the Agent stop request".into());
+        }
+        response = state.supervisor.request(
             "agent.run.stop",
             json!({ "runId": run_id }),
             std::time::Duration::from_secs(10),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(RunStopResponse {
-        stopped: response
-            .get("stopped")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| "agent sidecar returned an invalid run.stop response".to_string())?,
+        ) => response,
+    }
+    .map_err(|error| error.to_string())?;
+    let stopped = response
+        .get("stopped")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "agent sidecar returned an invalid run.stop response".to_string())?;
+    if stopped {
+        // The sidecar acknowledges cancellation before its final stream frame is guaranteed to
+        // reach this window. Fence the durable task immediately with the same host-owned event
+        // path; a later `agent.completed` frame then becomes harmless audit noise instead of
+        // reopening or leaving an apparently running task behind a successful stop click.
+        if let Ok(run) = state.database.investigations().get_run(run_id) {
+            let now = yukinal_core::sidecar::iso8601_now();
+            let params = durable_stop_event(run_id, &run.task_id, &now);
+            super::sync_investigation_task_status(app, "agent.completed", &params);
+            super::persist_investigation_event(app, "agent.completed", &params);
+        }
+    }
+    Ok(stopped)
+}
+
+fn durable_stop_event(run_id: &str, task_id: &str, at: &str) -> serde_json::Value {
+    json!({
+        "type": "agent.completed",
+        "runId": run_id,
+        "taskId": task_id,
+        "result": {
+            "runId": run_id,
+            "state": "cancelled",
+            "text": "",
+            "steps": 0,
+            "toolCalls": 0,
+        },
+        "at": at,
     })
 }
 
@@ -552,9 +916,12 @@ pub async fn agent_approval_respond(
     run_id: String,
     decision: String,
 ) -> Result<ApprovalRespondResponse, String> {
-    let response = state
-        .supervisor
-        .request(
+    let response = tokio::select! {
+        biased;
+        _ = state.shutdown.cancelled() => {
+            return Err("application shutdown cancelled the Agent approval response".into());
+        }
+        response = state.supervisor.request(
             "agent.approval.respond",
             json!({
                 "approvalId": approval_id,
@@ -563,9 +930,9 @@ pub async fn agent_approval_respond(
                 "respondedAt": yukinal_core::sidecar::iso8601_now(),
             }),
             std::time::Duration::from_secs(10),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        ) => response,
+    }
+    .map_err(|error| error.to_string())?;
     Ok(ApprovalRespondResponse {
         accepted: response
             .get("accepted")
@@ -577,10 +944,11 @@ pub async fn agent_approval_respond(
 #[cfg(test)]
 mod tests {
     use super::{
-        run_start_timeout, validate_prompt_parts, PromptPart, RunStartResponse, MAX_AUDIO_BYTES,
-        MAX_FILE_BYTES, MAX_IMAGE_BYTES,
+        durable_stop_event, run_start_timeout, task_server_matches, validate_prompt_parts,
+        PromptPart, RunStartResponse, MAX_AUDIO_BYTES, MAX_FILE_BYTES, MAX_IMAGE_BYTES,
     };
     use std::time::Duration;
+    use yukinal_database::models::InvestigationTargetHost;
 
     /// The sidecar's own wall-clock bound for one run (`maxRunMs`, 15 minutes by default
     /// in `apps/agent/src/config.ts`). Rust cannot read that value; this constant is the
@@ -595,6 +963,18 @@ mod tests {
     /// there is no run outcome, this one pins that it survives the trip when there is.
     const SYNC_FIXTURE: &str =
         include_str!("../../../../../packages/shared/fixtures/ipc/agent_run_start_sync.json");
+
+    #[test]
+    fn stop_confirmation_uses_a_complete_cancelled_terminal_event_shape() {
+        let event = durable_stop_event("run_stop", "task_stop", "2026-09-20T00:00:00Z");
+        assert_eq!(event["type"], "agent.completed");
+        assert_eq!(event["runId"], "run_stop");
+        assert_eq!(event["taskId"], "task_stop");
+        assert_eq!(event["result"]["runId"], "run_stop");
+        assert_eq!(event["result"]["state"], "cancelled");
+        assert_eq!(event["result"]["steps"], 0);
+        assert_eq!(event["result"]["toolCalls"], 0);
+    }
 
     #[test]
     fn admission_is_not_waited_for_like_a_sync_run() {
@@ -620,6 +1000,35 @@ mod tests {
         // value must fall back to the short wait rather than holding the request open for
         // sixteen minutes.
         assert_eq!(run_start_timeout(Some("stream")), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn task_scope_never_inherits_a_different_remote_target() {
+        assert!(task_server_matches(
+            InvestigationTargetHost::Remote,
+            Some("srv_a"),
+            None
+        ));
+        assert!(task_server_matches(
+            InvestigationTargetHost::Remote,
+            Some("srv_a"),
+            Some("srv_a")
+        ));
+        assert!(!task_server_matches(
+            InvestigationTargetHost::Remote,
+            Some("srv_a"),
+            Some("srv_b")
+        ));
+        assert!(!task_server_matches(
+            InvestigationTargetHost::Local,
+            None,
+            Some("srv_a")
+        ));
+        assert!(task_server_matches(
+            InvestigationTargetHost::Local,
+            None,
+            None
+        ));
     }
 
     #[test]

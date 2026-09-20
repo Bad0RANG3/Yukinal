@@ -34,6 +34,8 @@ export interface ToolDeclaration {
   inputSchema: JsonSchema;
   /** Grouping for UI + MCP provenance. */
   origin: ToolOrigin;
+  /** True when the call can change state or invoke an unbounded external side effect. */
+  effectful?: boolean;
 }
 
 export type ToolOrigin =
@@ -57,6 +59,13 @@ export interface ToolCallRequest {
   toolName: string;
   input: unknown;
   target: ToolTarget;
+  /** Durable investigation scope, when this call belongs to a task. */
+  taskId?: string;
+  /** Host-validated plan revision and step that authorize this call. */
+  planId?: string;
+  planStepId?: string;
+  /** Evidence required by the active plan step. */
+  evidenceIds?: string[];
   /** Why the agent believes this call is needed — shown in the trace. */
   intent?: string;
 }
@@ -72,6 +81,7 @@ export interface ToolCallRequest {
  */
 export const TOOL_ERROR_CODES = [
   "invalid_input",
+  "plan_deviation",
   "denied_by_policy",
   "approval_rejected",
   "approval_timeout",

@@ -5,7 +5,7 @@
 //! replays the call that was in flight when the old process exited.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -46,7 +46,11 @@ pub struct McpSupervisor {
 #[derive(Debug, Default)]
 struct SupervisorInner {
     /// Serializes check -> spawn -> handshake -> publish for all server ids.
-    start_lock: AsyncMutex<()>,
+    ///
+    /// This is independently owned by restart tasks while they launch a child. Keeping the
+    /// lock separate means a restart can serialize against explicit starts without holding
+    /// the whole supervisor alive across spawn or handshake waits.
+    start_lock: Arc<AsyncMutex<()>>,
     servers: AsyncMutex<HashMap<String, ManagedServer>>,
     restart_policy: RestartPolicy,
 }
@@ -61,7 +65,7 @@ impl McpSupervisor {
     pub fn with_restart_policy(restart_policy: RestartPolicy) -> Self {
         Self {
             inner: Arc::new(SupervisorInner {
-                start_lock: AsyncMutex::new(()),
+                start_lock: Arc::new(AsyncMutex::new(())),
                 servers: AsyncMutex::new(HashMap::new()),
                 restart_policy,
             }),
@@ -125,7 +129,12 @@ impl McpSupervisor {
             );
             generation
         };
-        self.watch_for_exit(config.server_id(), generation, handle);
+        watch_for_exit(
+            Arc::downgrade(&self.inner),
+            config.server_id().to_string(),
+            generation,
+            handle,
+        );
         Ok(start)
     }
 
@@ -270,31 +279,28 @@ impl McpSupervisor {
         reports.sort_by(|left, right| left.0.cmp(&right.0));
         reports
     }
+}
 
-    fn watch_for_exit(&self, server_id: &str, generation: u64, handle: McpServerHandle) {
-        let weak = Arc::downgrade(&self.inner);
-        let Some(watch) = handle.exit_watch() else {
+fn watch_for_exit(
+    inner: Weak<SupervisorInner>,
+    server_id: String,
+    generation: u64,
+    handle: McpServerHandle,
+) {
+    let Some(watch) = handle.exit_watch() else {
+        return;
+    };
+    drop(handle);
+    tokio::spawn(async move {
+        let Some((_pid, exit)) = watch.wait().await else {
             return;
         };
-        drop(handle);
-        let server_id = server_id.to_string();
-        tokio::spawn(async move {
-            let Some((_pid, exit)) = watch.wait().await else {
-                return;
-            };
-            let Some(inner) = weak.upgrade() else {
-                return;
-            };
-            McpSupervisor { inner }
-                .handle_unexpected_exit(&server_id, generation, exit)
-                .await;
-        });
-    }
-
-    async fn handle_unexpected_exit(&self, server_id: &str, generation: u64, exit: McpExitRecord) {
         let restart = {
-            let mut servers = self.inner.servers.lock().await;
-            let Some(managed) = servers.get_mut(server_id) else {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let mut servers = inner.servers.lock().await;
+            let Some(managed) = servers.get_mut(&server_id) else {
                 return;
             };
             if managed.manual_stop || managed.generation != generation {
@@ -303,70 +309,86 @@ impl McpSupervisor {
             managed.last_exit = Some(exit);
             managed.config.clone()
         };
-        self.automatic_restart(server_id, generation, restart).await;
-    }
+        automatic_restart(inner, server_id, generation, restart).await;
+    });
+}
 
-    async fn automatic_restart(
-        &self,
-        server_id: &str,
-        generation: u64,
-        config: McpTransportConfig,
-    ) {
-        loop {
-            let delay = {
-                let mut servers = self.inner.servers.lock().await;
-                let Some(managed) = servers.get_mut(server_id) else {
-                    return;
-                };
-                if managed.manual_stop || managed.generation != generation {
-                    return;
-                }
-                match managed.restart.decide(
-                    &self.inner.restart_policy,
-                    Instant::now(),
-                    crate::sidecar::iso8601_now(),
-                ) {
-                    RestartDecision::Exhausted { .. } => return,
-                    RestartDecision::Retry { delay, .. } => delay,
-                }
+async fn automatic_restart(
+    inner: Weak<SupervisorInner>,
+    server_id: String,
+    generation: u64,
+    config: McpTransportConfig,
+) {
+    loop {
+        let delay = {
+            let Some(inner) = inner.upgrade() else {
+                return;
             };
-
-            tokio::time::sleep(delay).await;
-
-            let _start = self.inner.start_lock.lock().await;
-            {
-                let servers = self.inner.servers.lock().await;
-                match servers.get(server_id) {
-                    Some(managed) if !managed.manual_stop && managed.generation == generation => {}
-                    _ => return,
-                }
-            }
-
-            let handle = match launch_ready(&config).await {
-                Ok(handle) => handle,
-                Err(_) => continue,
+            let mut servers = inner.servers.lock().await;
+            let Some(managed) = servers.get_mut(&server_id) else {
+                return;
             };
-
-            let installed = {
-                let mut servers = self.inner.servers.lock().await;
-                match servers.get_mut(server_id) {
-                    Some(managed) if !managed.manual_stop && managed.generation == generation => {
-                        managed.handle = handle.clone();
-                        managed.restart.mark_started();
-                        true
-                    }
-                    _ => false,
-                }
-            };
-
-            if installed {
-                self.watch_for_exit(server_id, generation, handle);
+            if managed.manual_stop || managed.generation != generation {
                 return;
             }
+            match managed.restart.decide(
+                &inner.restart_policy,
+                Instant::now(),
+                crate::sidecar::iso8601_now(),
+            ) {
+                RestartDecision::Exhausted { .. } => return,
+                RestartDecision::Retry { delay, .. } => delay,
+            }
+        };
 
-            handle.shutdown().await;
+        tokio::time::sleep(delay).await;
+
+        let start_lock = {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            Arc::clone(&inner.start_lock)
+        };
+        let _start = start_lock.lock().await;
+        {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let servers = inner.servers.lock().await;
+            match servers.get(&server_id) {
+                Some(managed) if !managed.manual_stop && managed.generation == generation => {}
+                _ => return,
+            }
+        }
+
+        let handle = match launch_ready(&config).await {
+            Ok(handle) => handle,
+            Err(_) => continue,
+        };
+
+        let installed = {
+            let Some(inner) = inner.upgrade() else {
+                handle.shutdown().await;
+                return;
+            };
+            let mut servers = inner.servers.lock().await;
+            match servers.get_mut(&server_id) {
+                Some(managed) if !managed.manual_stop && managed.generation == generation => {
+                    managed.handle = handle.clone();
+                    managed.restart.mark_started();
+                    true
+                }
+                _ => false,
+            }
+        };
+
+        if installed {
+            watch_for_exit(inner, server_id, generation, handle);
             return;
         }
+
+        handle.shutdown().await;
+        return;
     }
 }
 
@@ -391,6 +413,7 @@ async fn launch_ready(config: &McpTransportConfig) -> Result<McpServerHandle, Mc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::config::McpHttpConfig;
 
     #[tokio::test]
     async fn a_supervisor_that_never_started_anything_still_answers() {
@@ -422,5 +445,67 @@ mod tests {
         assert!(payload.get("restart").is_none());
         assert_eq!(payload["running"], serde_json::json!(false));
         assert_eq!(payload["toolCount"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn restart_backoff_does_not_keep_the_supervisor_alive() {
+        let http_config = McpHttpConfig::new(
+            "mcp-1",
+            "restart test",
+            "https://example.com/mcp",
+            Duration::from_secs(1),
+        )
+        .expect("test HTTP config");
+        let config = McpTransportConfig::Http(http_config.clone());
+        let handle = McpServerHandle::Http(
+            McpHttpHandle::new(&http_config).expect("the test handle does not make a request"),
+        );
+        let supervisor = McpSupervisor::with_restart_policy(RestartPolicy {
+            enabled: true,
+            max_attempts: 1,
+            base_delay: Duration::from_millis(250),
+            max_delay: Duration::from_millis(250),
+            healthy_after: Duration::from_secs(60),
+        });
+        {
+            let mut restart = RestartState::default();
+            restart.mark_started();
+            supervisor.inner.servers.lock().await.insert(
+                "mcp-1".to_string(),
+                ManagedServer {
+                    handle,
+                    config: config.clone(),
+                    generation: 1,
+                    manual_stop: false,
+                    last_exit: None,
+                    restart,
+                },
+            );
+        }
+
+        let weak = Arc::downgrade(&supervisor.inner);
+        let observer = weak.clone();
+        let restart_task = tokio::spawn(automatic_restart(weak, "mcp-1".to_string(), 1, config));
+
+        // Let the task record the retry decision and enter its backoff sleep.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            observer.strong_count(),
+            1,
+            "the backoff task must not hold a strong supervisor reference"
+        );
+
+        drop(supervisor);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            observer.strong_count(),
+            0,
+            "dropping the last public supervisor handle must release its state immediately"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), restart_task)
+            .await
+            .expect("the restart task must stop after its supervisor is gone")
+            .expect("the restart task must not panic");
     }
 }

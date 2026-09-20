@@ -6,6 +6,14 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export const LOG_SOURCES = ["journalctl", "syslog", "messages", "unavailable"] as const;
 export type LogSource = (typeof LOG_SOURCES)[number];
 
+/** Optional bounded query for the host's read-only journal probe. */
+export interface ServerLogsInput {
+  /** Read at most this many seconds into the past; the host caps it at 24 hours. */
+  sinceSeconds?: number;
+  /** Restrict journalctl to one validated systemd service unit. */
+  unit?: string;
+}
+
 export interface ServerLogLine {
   /** Original remote line, kept intact for diagnosis and copy/paste. */
   text: string;

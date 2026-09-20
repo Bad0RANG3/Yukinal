@@ -59,6 +59,87 @@ pub fn iso8601_utc(epoch: u64) -> String {
     )
 }
 
+/// Parse the UTC form emitted by [`iso8601_utc`]. Optional fractional seconds are
+/// accepted and deliberately discarded because all durable scheduler decisions use
+/// whole-second precision.
+#[must_use]
+pub fn parse_iso8601_utc(value: &str) -> Option<u64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    let year = parse_digits(&bytes[0..4])? as i64;
+    let month = parse_digits(&bytes[5..7])?;
+    let day = parse_digits(&bytes[8..10])?;
+    let hour = parse_digits(&bytes[11..13])? as u64;
+    let minute = parse_digits(&bytes[14..16])? as u64;
+    let second = parse_digits(&bytes[17..19])? as u64;
+    if !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let suffix = &bytes[19..];
+    if suffix == b"Z" {
+        // exact whole-second form
+    } else if suffix.first() == Some(&b'.') && suffix.last() == Some(&b'Z') {
+        if suffix.len() <= 2
+            || suffix[1..suffix.len() - 1]
+                .iter()
+                .any(|byte| !byte.is_ascii_digit())
+        {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn parse_digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() || bytes.iter().any(|byte| !byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(
+        bytes
+            .iter()
+            .fold(0_u32, |value, byte| value * 10 + u32::from(byte - b'0')),
+    )
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 /// 公历日期转换，Howard Hinnant 的 `civil_from_days` 算法。
 ///
 /// 用整数运算而不是查表或日期库：它要能在任何平台上对任何 `u64` 秒数给出同一个
@@ -160,5 +241,28 @@ mod tests {
             rendered.as_str() <= iso8601_utc(after).as_str(),
             "{rendered} postdates the reading taken after it"
         );
+    }
+
+    #[test]
+    fn parser_accepts_emitted_and_fractional_utc_values() {
+        let epoch = 1_700_000_000;
+        assert_eq!(parse_iso8601_utc(&iso8601_utc(epoch)), Some(epoch));
+        assert_eq!(
+            parse_iso8601_utc("2023-11-14T22:13:20.987654Z"),
+            Some(epoch)
+        );
+    }
+
+    #[test]
+    fn parser_rejects_non_utc_or_impossible_values() {
+        for value in [
+            "2023-11-14T22:13:20+08:00",
+            "2023-02-29T22:13:20Z",
+            "2023-11-14T24:00:00Z",
+            "2023-11-14T22:13:20.xZ",
+            "2023-11-14 22:13:20Z",
+        ] {
+            assert_eq!(parse_iso8601_utc(value), None, "accepted invalid {value}");
+        }
     }
 }

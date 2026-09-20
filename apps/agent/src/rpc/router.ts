@@ -317,6 +317,7 @@ export class RpcRouter {
       this.#notificationSink?.(AGENT_NOTIFICATIONS.stream, {
         type: "agent.failed",
         runId: parsed.runId,
+        ...(parsed.taskId ? { taskId: parsed.taskId } : {}),
         error: message,
         at: new Date().toISOString(),
       });

@@ -6,7 +6,15 @@
  * executing anything.
  */
 
-import type { RetryPolicy, RiskLevel, ToolError, ToolOrigin, ToolTarget } from "@yukinal/shared";
+import type {
+  AgentPermissionMode,
+  AgentRunMode,
+  RetryPolicy,
+  RiskLevel,
+  ToolError,
+  ToolOrigin,
+  ToolTarget,
+} from "@yukinal/shared";
 import type { z } from "zod";
 
 export interface ToolLogger {
@@ -18,6 +26,16 @@ export interface ToolContext {
   traceId: string;
   /** Resolved, stable target. A tool must never re-guess the server. */
   target: ToolTarget;
+  /** Durable investigation scope, when this call belongs to a task. */
+  taskId?: string;
+  /** Host-validated durable plan binding for this task call. */
+  planId?: string;
+  planStepId?: string;
+  evidenceIds?: string[];
+  /** Run-level delegation, copied from the host-admitted request for plan generation. */
+  permissionMode?: AgentPermissionMode;
+  /** Run scope, used to avoid generating an auto-delegated plan for a read-only run. */
+  mode?: AgentRunMode;
   /** Aborted on user Stop or timeout. Long-running work must check it. */
   signal: AbortSignal;
   /** Epoch ms after which the call is considered timed out. */
@@ -34,6 +52,8 @@ export interface Tool<TInput extends Record<string, unknown> = Record<string, un
   readonly timeoutMs: number;
   readonly cancellable: boolean;
   readonly retry: RetryPolicy;
+  /** Explicit side-effect marker; risk alone is not a durable execution boundary. */
+  readonly effectful?: boolean;
   /**
    * Where this tool came from. Defaults to `{ kind: "builtin" }` in the registry.
    *

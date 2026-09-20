@@ -33,3 +33,4 @@ yukinal-filesystem = { workspace = true }
 yukinal-net = { workspace = true }
 yukinal-ssh = { workspace = true }
 yukinal-terminal = { workspace = true }
+yukinal-time = { workspace = true }

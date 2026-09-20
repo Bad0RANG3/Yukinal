@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio_util::sync::CancellationToken;
 use yukinal_ssh::SshBackend;
@@ -14,7 +14,18 @@ const SERVICE_DISCOVERY_COMMAND: &str = r#"if command -v systemctl >/dev/null 2>
 const SOURCE_PREFIX: &str = "__YUKINAL_SOURCE__=";
 const MAX_SERVICES: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) fn service_discovery_command() -> &'static str {
+    SERVICE_DISCOVERY_COMMAND
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ServerServicesInput {
+    pub name: Option<String>,
+    pub state: Option<ServiceState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceState {
     Running,
@@ -50,6 +61,38 @@ pub struct ServerServicesResponse {
     pub message: Option<String>,
 }
 
+pub(crate) fn filter_services(
+    response: &mut ServerServicesResponse,
+    input: &ServerServicesInput,
+) -> Result<(), String> {
+    if let Some(name) = input.name.as_deref() {
+        if name.trim().is_empty()
+            || name.chars().count() > 128
+            || name.chars().any(char::is_control)
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '.' | '@' | ':' | '/' | '-')
+            })
+            || !name
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+        {
+            return Err(
+                "server.services name must be a bounded service or container reference".into(),
+            );
+        }
+    }
+    response.services.retain(|service| {
+        input
+            .name
+            .as_deref()
+            .is_none_or(|name| service.name == name)
+            && input.state.is_none_or(|state| service.state == state)
+    });
+    Ok(())
+}
+
 /// `server_services`: connect if necessary, then run one fixed read-only probe.
 #[tauri::command]
 pub async fn server_services(
@@ -76,7 +119,7 @@ pub async fn server_services(
         .map_err(|error| format!("service discovery returned an invalid response: {error}"))
 }
 
-fn parse_services_output(raw: &str) -> Result<ServerServicesResponse, String> {
+pub(crate) fn parse_services_output(raw: &str) -> Result<ServerServicesResponse, String> {
     let source = raw
         .lines()
         .map(str::trim)
@@ -185,7 +228,8 @@ fn state_from_docker(state: &str) -> ServiceState {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_services_output, ServerService, ServerServicesResponse, ServiceSource, ServiceState,
+        filter_services, parse_services_output, ServerService, ServerServicesInput,
+        ServerServicesResponse, ServiceSource, ServiceState,
     };
 
     const FIXTURE: &str =
@@ -213,6 +257,35 @@ mod tests {
         );
         assert_eq!(response.services[2].state, ServiceState::Failed);
         assert_eq!(response.services[3].state, ServiceState::Stopped);
+    }
+
+    #[test]
+    fn filters_service_inventory_without_changing_the_source_shape() {
+        let mut response = parse_services_output(concat!(
+            "nginx.service loaded active running Nginx\n",
+            "worker.service loaded failed failed Worker\n",
+            "__YUKINAL_SOURCE__=systemd\n",
+        ))
+        .expect("service output");
+        filter_services(
+            &mut response,
+            &ServerServicesInput {
+                name: None,
+                state: Some(ServiceState::Failed),
+            },
+        )
+        .expect("filter");
+        assert_eq!(response.source, ServiceSource::Systemd);
+        assert_eq!(response.services.len(), 1);
+        assert_eq!(response.services[0].name, "worker.service");
+        assert!(filter_services(
+            &mut response,
+            &ServerServicesInput {
+                name: Some("worker.service;id".into()),
+                state: None,
+            },
+        )
+        .is_err());
     }
 
     #[test]

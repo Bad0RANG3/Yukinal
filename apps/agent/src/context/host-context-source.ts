@@ -8,6 +8,7 @@ import {
   ServerSchema,
   ServerSnapshotSchema,
   WorkspaceSchema,
+  InvestigationContextSchema,
   type HostContextKind,
   type HostContextResponse,
 } from "@yukinal/shared";
@@ -24,6 +25,7 @@ export function createHostContextSource(client: HostRpcClient): ContextSource {
     server: (id) => read(client, { kind: "server", id }, ServerSchema),
     snapshot: (id) => read(client, { kind: "snapshot", id }, ServerSnapshotSchema),
     workspace: (id) => read(client, { kind: "workspace", id }, WorkspaceSchema),
+    investigation: (id) => read(client, { kind: "investigation", id }, InvestigationContextSchema),
   };
 }
 

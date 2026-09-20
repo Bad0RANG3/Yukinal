@@ -5,10 +5,24 @@ import type { HostToolExecuteRequest, HostToolExecuteResponse, ToolTarget } from
 
 import { dockerPsTool } from "./docker-ps.js";
 import { dockerRestartTool } from "./docker-restart.js";
+import { filesystemBackupTool } from "./filesystem-backup.js";
+import { filesystemBackupListTool } from "./filesystem-backup-list.js";
+import { filesystemBackupCleanupTool } from "./filesystem-backup-cleanup.js";
 import { filesystemEditTool } from "./filesystem-edit.js";
 import { filesystemReadTool } from "./filesystem-read.js";
+import { filesystemRestoreTool } from "./filesystem-restore.js";
 import { filesystemWriteTool } from "./filesystem-write.js";
+import { investigationEvidenceSearchTool } from "./investigation-evidence-search.js";
+import { investigationEvidenceCompareTool } from "./investigation-evidence-compare.js";
+import { investigationEvidenceCorrelateTool } from "./investigation-evidence-correlate.js";
+import { investigationRetentionPreviewTool } from "./investigation-retention-preview.js";
+import { packageInspectTool } from "./package-inspect.js";
+import { packageInstallTool } from "./package-install.js";
 import { serverInfoTool } from "./server-info.js";
+import { serverLogsTool } from "./server-logs.js";
+import { serverServicesTool } from "./server-services.js";
+import { systemdInspectTool } from "./systemd-inspect.js";
+import { systemdRestartTool } from "./systemd-restart.js";
 import { ToolFailure, type ToolContext } from "../tool.js";
 import type { HostToolExecutor } from "./host-backed.js";
 
@@ -64,7 +78,172 @@ test("host-backed failures retain the shared error code", async () => {
   );
 });
 
+test("server logs and services stay structured at the host boundary", async () => {
+  const seen: HostToolExecuteRequest[] = [];
+  const logs = serverLogsTool(
+    fakeHost(
+      {
+        status: "success",
+        output: {
+          source: "journalctl",
+          lines: [{ text: "app: failed to connect", level: "error" }],
+        },
+      },
+      seen,
+    ),
+  );
+  const services = serverServicesTool(
+    fakeHost({
+      status: "success",
+      output: {
+        source: "systemd",
+        services: [{ name: "nginx.service", state: "failed", status: "failed/failed" }],
+      },
+    }, seen),
+  );
+
+  const logOutput = await logs.execute({ sinceSeconds: 3_600, unit: "nginx.service" }, context);
+  const serviceOutput = await services.execute({ name: "nginx.service", state: "failed" }, context);
+
+  assert.equal(logOutput.source, "journalctl");
+  assert.equal(logOutput.lines[0]?.level, "error");
+  assert.equal(serviceOutput.services[0]?.state, "failed");
+  assert.deepEqual(seen.map((request) => request.toolName), ["server.logs", "server.services"]);
+  assert.deepEqual(seen[0]?.input, { sinceSeconds: 3_600, unit: "nginx.service" });
+  assert.deepEqual(seen[1]?.input, { name: "nginx.service", state: "failed" });
+});
+
 const REVISION = "a".repeat(64);
+
+test("investigation evidence search returns metadata and keeps raw bodies out", async () => {
+  const tool = investigationEvidenceSearchTool({
+    searchEvidence: async (request) => {
+      assert.equal(request.taskId, "task_1");
+      return {
+        status: "success",
+        evidence: [{
+          id: "ev_1",
+          taskId: "task_1",
+          scope: target,
+          kind: "log",
+          sourceTool: "docker.logs",
+          collectedAt: "2026-09-19T00:00:00.000Z",
+          inputSummary: "tail=100",
+          contentType: "text",
+          contentHash: REVISION,
+          truncated: false,
+          redactionStatus: "clean",
+        }],
+      };
+    },
+  });
+  const output = await tool.execute({ sourceTool: "docker.logs", limit: 4 }, { ...context, taskId: "task_1" });
+  assert.equal(tool.risk, "read");
+  assert.equal(output.evidence[0]?.id, "ev_1");
+  assert.equal("content" in (output.evidence[0] ?? {}), false);
+});
+
+test("investigation evidence compare returns bounded differences without raw bodies", async () => {
+  const tool = investigationEvidenceCompareTool({
+    compareEvidence: async (request) => {
+      assert.deepEqual(request, { taskId: "task_1", leftEvidenceId: "ev_1", rightEvidenceId: "ev_2" });
+      return {
+        status: "success",
+        comparison: {
+          status: "changed",
+          shape: "json",
+          left: {
+            id: "ev_1", taskId: "task_1", scope: target, kind: "snapshot", sourceTool: "server.info",
+            collectedAt: "2026-09-19T00:00:00.000Z", inputSummary: "{}", contentType: "json",
+            contentHash: REVISION, truncated: false, redactionStatus: "clean",
+          },
+          right: {
+            id: "ev_2", taskId: "task_1", scope: target, kind: "snapshot", sourceTool: "server.info",
+            collectedAt: "2026-09-19T00:05:00.000Z", inputSummary: "{}", contentType: "json",
+            contentHash: "b".repeat(64), truncated: false, redactionStatus: "clean",
+          },
+          changedPaths: ["$.status"],
+          changedPathCount: 1,
+          diffTruncated: false,
+          warnings: [],
+        },
+      };
+    },
+  });
+  const output = await tool.execute(
+    { leftEvidenceId: "ev_1", rightEvidenceId: "ev_2" },
+    { ...context, taskId: "task_1" },
+  );
+  assert.equal(tool.risk, "read");
+  assert.deepEqual(output.comparison.changedPaths, ["$.status"]);
+  assert.equal("content" in output.comparison.left, false);
+  assert.equal("content" in output.comparison.right, false);
+});
+
+test("investigation evidence correlation returns same-run metadata without raw bodies", async () => {
+  const tool = investigationEvidenceCorrelateTool({
+    correlateEvidence: async (request) => {
+      assert.deepEqual(request, { taskId: "task_1", anchorEvidenceId: "ev_1", limit: 8 });
+      return {
+        status: "success",
+        correlation: {
+          anchor: {
+            id: "ev_1", taskId: "task_1", runId: "run_1", scope: target, kind: "snapshot", sourceTool: "server.info",
+            collectedAt: "2026-09-19T00:00:00.000Z", inputSummary: "health", contentType: "json",
+            contentHash: REVISION, truncated: false, redactionStatus: "clean",
+          },
+          evidence: [{
+            id: "ev_2", taskId: "task_1", runId: "run_1", scope: target, kind: "log", sourceTool: "server.logs",
+            collectedAt: "2026-09-19T00:00:01.000Z", inputSummary: "tail=20", contentType: "text",
+            contentHash: "b".repeat(64), truncated: false, redactionStatus: "clean",
+          }],
+          matchedBy: "same_run",
+          windowSeconds: 300,
+          sourceTools: ["server.info", "server.logs"],
+          warnings: [],
+        },
+      };
+    },
+  });
+  const output = await tool.execute({ anchorEvidenceId: "ev_1", limit: 8 }, { ...context, taskId: "task_1" });
+  assert.equal(tool.risk, "read");
+  assert.equal(output.correlation.matchedBy, "same_run");
+  assert.equal("content" in (output.correlation.anchor ?? {}), false);
+});
+
+test("investigation retention preview is read-only and requires a durable task", async () => {
+  const tool = investigationRetentionPreviewTool({
+    previewRetention: async (request) => {
+      assert.deepEqual(request, { taskId: "task_1", limit: 8 });
+      return {
+        status: "success",
+        preview: {
+          taskId: "task_1",
+          cutoffAt: "2026-02-01T00:00:00Z",
+          candidates: [{
+            id: "ev_old",
+            taskId: "task_1",
+            kind: "evidence",
+            createdAt: "2026-01-01T00:00:00Z",
+            bytes: 12,
+            reason: "unreferenced_evidence",
+          }],
+          protectedCount: 1,
+          candidateBytes: 12,
+          truncated: false,
+        },
+      };
+    },
+  });
+  const output = await tool.execute({ limit: 8 }, { ...context, taskId: "task_1" });
+  assert.equal(tool.name, "investigation.retention.preview");
+  assert.equal(tool.risk, "read");
+  assert.equal(output.candidates[0]?.id, "ev_old");
+  await assert.rejects(
+    tool.execute({ limit: 8 }, context),
+    (error: unknown) => error instanceof ToolFailure && error.code === "invalid_input",
+  );
+});
 
 test("filesystem tools validate bounded output and declare writes as medium risk", async () => {
   const read = filesystemReadTool(
@@ -82,7 +261,37 @@ test("filesystem tools validate bounded output and declare writes as medium risk
   );
   const writeOutput = await write.execute({ path: "/etc/app.env", content: "PORT=8080" }, context);
   assert.equal(write.risk, "medium");
+  assert.equal(write.effectful, true);
   assert.equal(writeOutput.bytesWritten, 9);
+});
+
+test("filesystem.backup.list is read-only, task-scoped metadata", async () => {
+  const seen: HostToolExecuteRequest[] = [];
+  const tool = filesystemBackupListTool(
+    fakeHost({
+      status: "success",
+      output: {
+        backups: [{
+          id: "backup_1",
+          serverId: "srv_01abc",
+          taskId: "task_1",
+          path: "/etc/app.env",
+          backupPath: "/etc/.yukinal-backup-0123456789abcdef-0123456789abcdef0123456789abcdef",
+          revision: REVISION,
+          bytesBackedUp: 12,
+          status: "available",
+          createdAt: "2026-09-20T00:00:00Z",
+          updatedAt: "2026-09-20T00:00:00Z",
+        }],
+        truncated: false,
+      },
+    }, seen),
+  );
+  const output = await tool.execute({ status: "available", limit: 8 }, { ...context, taskId: "task_1" });
+  assert.equal(tool.risk, "read");
+  assert.equal(output.backups[0]?.backupPath.includes(".yukinal-backup-"), true);
+  assert.equal(seen[0]?.toolName, "filesystem.backup.list");
+  assert.equal(seen[0]?.taskId, "task_1");
 });
 
 test("filesystem.read output without a revision is rejected instead of reaching the model", async () => {
@@ -202,6 +411,63 @@ test("filesystem.edit's description states the guard, the cap and the remaining 
   assert.match(tool.description, /filesystem\.write/);
 });
 
+test("filesystem backup creates a bounded recovery copy and restore is high-risk", async () => {
+  const seen: HostToolExecuteRequest[] = [];
+  const backup = filesystemBackupTool(
+    fakeHost({
+      status: "success",
+      output: {
+        path: "/etc/app.env",
+        backupPath: "/etc/.yukinal-backup-0123456789abcdef-0123456789abcdef0123456789abcdef",
+        revision: REVISION,
+        bytesBackedUp: 10,
+      },
+    }, seen),
+  );
+  const restore = filesystemRestoreTool(
+    fakeHost({
+      status: "success",
+      output: {
+        path: "/etc/app.env",
+        backupPath: "/etc/.yukinal-backup-0123456789abcdef-0123456789abcdef0123456789abcdef",
+        revision: "b".repeat(64),
+        bytesBefore: 20,
+        bytesAfter: 10,
+      },
+    }, seen),
+  );
+  const cleanup = filesystemBackupCleanupTool(
+    fakeHost({
+      status: "success",
+      output: {
+        path: "/etc/app.env",
+        backupPath: "/etc/.yukinal-backup-0123456789abcdef-0123456789abcdef0123456789abcdef",
+        revision: REVISION,
+        bytesDeleted: 10,
+      },
+    }, seen),
+  );
+
+  const backedUp = await backup.execute({ path: "/etc/app.env" }, context);
+  const restored = await restore.execute({
+    path: "/etc/app.env",
+    backupPath: backedUp.backupPath,
+    expectedRevision: REVISION,
+  }, context);
+  assert.equal(backup.risk, "medium");
+  assert.equal(backedUp.bytesBackedUp, 10);
+  assert.equal(restore.risk, "high");
+  assert.equal(restored.bytesAfter, 10);
+  const cleaned = await cleanup.execute({
+    path: "/etc/app.env",
+    backupPath: backedUp.backupPath,
+    expectedRevision: REVISION,
+  }, context);
+  assert.equal(cleanup.risk, "medium");
+  assert.equal(cleaned.bytesDeleted, 10);
+  assert.deepEqual(seen.map((request) => request.toolName), ["filesystem.backup", "filesystem.restore", "filesystem.backup.cleanup"]);
+});
+
 test("a host refusal that cannot be retried keeps its own code", async () => {
   // `unsupported` is the code for "this remote cannot do it, and retrying changes nothing".
   // Collapsing it into invalid_input would tell the model to re-read and try again forever.
@@ -234,4 +500,55 @@ test("docker restart is exposed as a high-risk host action", async () => {
   const output = await tool.execute({ container: "api_1", timeoutSeconds: 15 }, context);
   assert.equal(tool.risk, "high");
   assert.equal(output.restarted, true);
+});
+
+test("systemd restart is exposed as a high-risk host action and inspect is bounded", async () => {
+  const seen: HostToolExecuteRequest[] = [];
+  const inspect = systemdInspectTool(
+    fakeHost({
+      status: "success",
+      output: {
+        service: "nginx.service",
+        loadState: "loaded",
+        activeState: "active",
+        subState: "running",
+        description: "Nginx",
+      },
+    }, seen),
+  );
+  const restart = systemdRestartTool(
+    fakeHost({ status: "success", output: { service: "nginx.service", restarted: true } }, seen),
+  );
+
+  const inspected = await inspect.execute({ service: "nginx.service" }, context);
+  const restarted = await restart.execute({ service: "nginx.service", timeoutSeconds: 20 }, context);
+
+  assert.equal(inspected.activeState, "active");
+  assert.equal(restart.risk, "high");
+  assert.equal(restarted.restarted, true);
+  assert.deepEqual(seen.map((request) => request.toolName), ["systemd.inspect", "systemd.restart"]);
+});
+
+test("package install is high-risk and package inspect returns a normalized state", async () => {
+  const seen: HostToolExecuteRequest[] = [];
+  const inspect = packageInspectTool(
+    fakeHost({
+      status: "success",
+      output: { manager: "apt", package: "nginx", installed: true, version: "1.27.0-1" },
+    }, seen),
+  );
+  const install = packageInstallTool(
+    fakeHost({
+      status: "success",
+      output: { manager: "apt", package: "nginx", version: "1.27.0-1", installed: true },
+    }, seen),
+  );
+
+  const inspected = await inspect.execute({ manager: "apt", package: "nginx" }, context);
+  const installed = await install.execute({ manager: "apt", package: "nginx", version: "1.27.0-1" }, context);
+  assert.equal(inspected.installed, true);
+  assert.equal(inspected.version, "1.27.0-1");
+  assert.equal(install.risk, "high");
+  assert.equal(installed.installed, true);
+  assert.deepEqual(seen.map((request) => request.toolName), ["package.inspect", "package.install"]);
 });

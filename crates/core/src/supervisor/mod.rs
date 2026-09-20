@@ -11,7 +11,7 @@
 //! [`Supervisor`] / `Inner` / `Watcher`。
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -265,7 +265,7 @@ impl Supervisor {
         };
 
         let watcher = Watcher {
-            inner: Arc::clone(&self.inner),
+            inner: Arc::downgrade(&self.inner),
             pid: info.pid,
         };
 
@@ -303,9 +303,7 @@ impl Supervisor {
                     Ok(event) => match event {
                         SidecarEvent::Log(line) => watcher.remember_log(&line).await,
                         SidecarEvent::Exited { code, signal } => {
-                            Arc::clone(&watcher.inner)
-                                .handle_exit(watcher.pid, code, signal)
-                                .await;
+                            watcher.handle_exit(code, signal).await;
                             break;
                         }
                         frame @ SidecarEvent::Frame(_) => watcher.publish(frame).await,
@@ -341,7 +339,19 @@ impl Supervisor {
         self.inner.restart.lock().await.reset();
         match runtime {
             Some(state) => {
-                state.handle.shutdown().await;
+                let status = state.handle.shutdown_with_status().await;
+                *self.inner.last_exit.lock().await = Some(match status {
+                    Some(status) => ExitRecord {
+                        code: status.code(),
+                        signal: sidecar::exit_signal(&status),
+                        at: sidecar::iso8601_now(),
+                    },
+                    None => ExitRecord {
+                        code: None,
+                        signal: None,
+                        at: sidecar::iso8601_now(),
+                    },
+                });
                 true
             }
             None => false,
@@ -360,20 +370,33 @@ impl Supervisor {
     }
 }
 
-/// Task-side view of the supervisor. It holds `Arc<Inner>` rather than a `Supervisor`
-/// clone: the watcher must not keep the runtime slot alive by itself.
+/// Task-side view of the supervisor. The weak reference is deliberate: the watcher must
+/// not keep the runtime slot alive after the last external supervisor handle is dropped.
 struct Watcher {
-    inner: Arc<Inner>,
+    inner: Weak<Inner>,
     pid: u32,
 }
 
 impl Watcher {
     async fn remember_log(&self, line: &str) {
-        self.inner.remember_log(line).await;
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        inner.remember_log(line).await;
     }
 
     async fn publish(&self, event: SidecarEvent) {
-        self.inner.publish(event).await;
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        inner.publish(event).await;
+    }
+
+    async fn handle_exit(&self, code: Option<i32>, signal: Option<String>) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        inner.handle_exit(self.pid, code, signal).await;
     }
 }
 
@@ -457,7 +480,7 @@ impl Inner {
                 ))
                 .await;
                 let config = self.config.lock().await.clone();
-                spawn_restart(Arc::clone(self), config, delay, attempt);
+                spawn_restart(Arc::downgrade(self), config, delay, attempt);
             }
         }
     }
@@ -469,7 +492,7 @@ impl Inner {
 /// the exit path restarts through `start` again — a genuinely cyclic call graph, which the
 /// compiler refuses to give an opaque type to ("cycle detected when computing type of opaque
 /// `start`"). Erasing the future here is what breaks that cycle; it is not a style choice.
-fn spawn_restart(inner: Arc<Inner>, config: Option<SidecarConfig>, delay: Duration, attempt: u32) {
+fn spawn_restart(inner: Weak<Inner>, config: Option<SidecarConfig>, delay: Duration, attempt: u32) {
     let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
         Box::pin(async move { restart_loop(inner, config, delay, attempt).await });
     tokio::spawn(future);
@@ -482,26 +505,35 @@ fn spawn_restart(inner: Arc<Inner>, config: Option<SidecarConfig>, delay: Durati
 /// loop the supervisor would simply stop trying after the first failure and the UI would
 /// show a dead agent with attempts left unspent.
 async fn restart_loop(
-    inner: Arc<Inner>,
+    inner: Weak<Inner>,
     config: Option<SidecarConfig>,
     mut delay: Duration,
     attempt: u32,
 ) {
     let Some(config) = config else {
-        inner
-            .remember_log("[supervisor] no remembered sidecar config; not restarting")
-            .await;
+        if let Some(inner) = inner.upgrade() {
+            inner
+                .remember_log("[supervisor] no remembered sidecar config; not restarting")
+                .await;
+        }
         return;
     };
 
     let mut attempt = attempt;
     loop {
         tokio::time::sleep(delay).await;
+        let Some(supervisor_inner) = inner.upgrade() else {
+            return;
+        };
         let supervisor = Supervisor {
-            inner: Arc::clone(&inner),
+            inner: supervisor_inner,
         };
         match supervisor.restart(&config).await {
             Ok(outcome) => {
+                drop(supervisor);
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
                 inner
                     .remember_log(&format!(
                         "[supervisor] restart {attempt} succeeded (pid {}, reusing a running process: {})",
@@ -511,6 +543,10 @@ async fn restart_loop(
                 return;
             }
             Err(error) => {
+                drop(supervisor);
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
                 inner
                     .remember_log(&format!("[supervisor] restart {attempt} failed: {error}"))
                     .await;

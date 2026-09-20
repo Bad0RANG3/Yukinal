@@ -110,6 +110,25 @@ impl AuthChallengeBroker {
         challenge.sender.send(AuthResponse::Cancelled).is_ok()
     }
 
+    /// Cancel every keyboard-interactive round that is currently waiting for
+    /// the UI. Used only on host shutdown, where no response can arrive.
+    pub async fn cancel_all(&self) -> usize {
+        let pending: Vec<_> = self
+            .pending
+            .lock()
+            .await
+            .drain()
+            .map(|(_, item)| item)
+            .collect();
+        let mut cancelled = 0;
+        for challenge in pending {
+            if challenge.sender.send(AuthResponse::Cancelled).is_ok() {
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
     async fn request(
         &self,
         server_id: &str,
@@ -259,5 +278,28 @@ mod tests {
             Err(SshError::Cancelled)
         ));
         assert!(!broker.respond(&event.auth_id, vec!["654321".into()]).await);
+    }
+
+    #[tokio::test]
+    async fn host_shutdown_cancels_every_waiting_challenge() {
+        let broker = AuthChallengeBroker::new();
+        let first = broker.handler("srv_1".into(), "deploy".into(), "one.test".into());
+        let second = broker.handler("srv_2".into(), "deploy".into(), "two.test".into());
+        let mut events = broker.subscribe();
+        let first = tokio::spawn(async move { first.respond(&challenge()).await });
+        let second = tokio::spawn(async move { second.respond(&challenge()).await });
+
+        let _ = events.recv().await.expect("first challenge");
+        let _ = events.recv().await.expect("second challenge");
+        assert_eq!(broker.cancel_all().await, 2);
+        assert!(matches!(
+            first.await.expect("join"),
+            Err(SshError::Cancelled)
+        ));
+        assert!(matches!(
+            second.await.expect("join"),
+            Err(SshError::Cancelled)
+        ));
+        assert_eq!(broker.cancel_all().await, 0);
     }
 }

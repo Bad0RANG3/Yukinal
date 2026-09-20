@@ -86,6 +86,7 @@ test("an MCP tool is declared critical and carries its server as origin", () => 
   assert.deepEqual(declaration.origin, { kind: "mcp", serverId: "mcp_1" });
   assert.equal(declaration.timeoutMs, MCP_TOOL_TIMEOUT_MS);
   assert.equal(declaration.retry.maxAttempts, 1);
+  assert.equal(declaration.effectful, true);
 });
 
 test("the permission engine always asks for an MCP tool, whatever the run mode claims", async () => {
@@ -177,7 +178,16 @@ test("a call goes to the host under the internal name and comes back as the tool
   );
 
   const result = await registry.execute(
-    { callId: "call_1", traceId: "trace_1", toolName: "mcp.mcp-1.echo", input: { text: "hi" }, target },
+    {
+      callId: "call_1",
+      traceId: "trace_1",
+      toolName: "mcp.mcp-1.echo",
+      input: { text: "hi" },
+      target,
+      taskId: "task_mcp",
+      planId: "plan_mcp",
+      planStepId: "step_mcp",
+    },
     { kind: "user_approved", decision: { toolName: declaration.name, target, tier: "dangerous", finalRisk: "critical", outcome: "ask", reason: "mcp", facts: [], approvalId: "apr_1" } as never, approvalId: "apr_1", respondedAt: new Date().toISOString() },
   );
 

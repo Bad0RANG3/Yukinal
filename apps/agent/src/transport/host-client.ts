@@ -5,12 +5,60 @@ import {
   HostToolCancelRequestSchema,
   HostContextRequestSchema,
   HostContextResponseSchema,
+  HostEvidenceRecordRequestSchema,
+  HostEvidenceRecordResponseSchema,
+  HostEvidenceCompareRequestSchema,
+  HostEvidenceCompareResponseSchema,
+  HostEvidenceCorrelationRequestSchema,
+  HostEvidenceCorrelationResponseSchema,
+  HostEvidenceFetchRequestSchema,
+  HostEvidenceFetchResponseSchema,
+  HostEvidenceSearchRequestSchema,
+  HostEvidenceSearchResponseSchema,
+  HostRetentionPreviewRequestSchema,
+  HostRetentionPreviewResponseSchema,
+  HostFindingRecordRequestSchema,
+  HostFindingRecordResponseSchema,
+  HostBriefRecordRequestSchema,
+  HostBriefRecordResponseSchema,
+  HostPlanRecordRequestSchema,
+  HostPlanRecordResponseSchema,
+  HostPlanCheckRequestSchema,
+  HostPlanCheckResponseSchema,
+  HostPlanStepResultRequestSchema,
+  HostPlanStepResultResponseSchema,
+  HostArtifactRecordRequestSchema,
+  HostArtifactRecordResponseSchema,
   HOST_METHODS,
   HostMcpCatalogResponseSchema,
   HostToolExecuteRequestSchema,
   HostToolExecuteResponseSchema,
   type HostContextRequest,
   type HostContextResponse,
+  type HostEvidenceRecordRequest,
+  type HostEvidenceRecordResponse,
+  type HostEvidenceCompareRequest,
+  type HostEvidenceCompareResponse,
+  type HostEvidenceCorrelationRequest,
+  type HostEvidenceCorrelationResponse,
+  type HostEvidenceFetchRequest,
+  type HostEvidenceFetchResponse,
+  type HostEvidenceSearchRequest,
+  type HostEvidenceSearchResponse,
+  type HostRetentionPreviewRequest,
+  type HostRetentionPreviewResponse,
+  type HostFindingRecordRequest,
+  type HostFindingRecordResponse,
+  type HostBriefRecordRequest,
+  type HostBriefRecordResponse,
+  type HostPlanRecordRequest,
+  type HostPlanRecordResponse,
+  type HostPlanCheckRequest,
+  type HostPlanCheckResponse,
+  type HostPlanStepResultRequest,
+  type HostPlanStepResultResponse,
+  type HostArtifactRecordRequest,
+  type HostArtifactRecordResponse,
   type HostMcpCatalogResponse,
   type HostToolExecuteRequest,
   type HostToolExecuteResponse,
@@ -48,6 +96,162 @@ export class HostRpcClient {
       HOST_METHODS.contextFetch,
       params,
       (value) => HostContextResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  recordEvidence(
+    request: HostEvidenceRecordRequest,
+    signal?: AbortSignal,
+  ): Promise<HostEvidenceRecordResponse> {
+    const params = HostEvidenceRecordRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.evidenceRecord,
+      params,
+      (value) => HostEvidenceRecordResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  fetchEvidence(
+    request: HostEvidenceFetchRequest,
+    signal?: AbortSignal,
+  ): Promise<HostEvidenceFetchResponse> {
+    const params = HostEvidenceFetchRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.evidenceFetch,
+      params,
+      (value) => HostEvidenceFetchResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  searchEvidence(
+    request: HostEvidenceSearchRequest,
+    signal?: AbortSignal,
+  ): Promise<HostEvidenceSearchResponse> {
+    const params = HostEvidenceSearchRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.evidenceSearch,
+      params,
+      (value) => HostEvidenceSearchResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  compareEvidence(
+    request: HostEvidenceCompareRequest,
+    signal?: AbortSignal,
+  ): Promise<HostEvidenceCompareResponse> {
+    const params = HostEvidenceCompareRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.evidenceCompare,
+      params,
+      (value) => HostEvidenceCompareResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  correlateEvidence(
+    request: HostEvidenceCorrelationRequest,
+    signal?: AbortSignal,
+  ): Promise<HostEvidenceCorrelationResponse> {
+    const params = HostEvidenceCorrelationRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.evidenceCorrelate,
+      params,
+      (value) => HostEvidenceCorrelationResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  previewRetention(
+    request: HostRetentionPreviewRequest,
+    signal?: AbortSignal,
+  ): Promise<HostRetentionPreviewResponse> {
+    const params = HostRetentionPreviewRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.retentionPreview,
+      params,
+      (value) => HostRetentionPreviewResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  recordFinding(request: HostFindingRecordRequest, signal?: AbortSignal): Promise<HostFindingRecordResponse> {
+    const params = HostFindingRecordRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.findingRecord,
+      params,
+      (value) => HostFindingRecordResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  recordBrief(request: HostBriefRecordRequest, signal?: AbortSignal): Promise<HostBriefRecordResponse> {
+    const params = HostBriefRecordRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.briefRecord,
+      params,
+      (value) => HostBriefRecordResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  recordPlan(request: HostPlanRecordRequest, signal?: AbortSignal): Promise<HostPlanRecordResponse> {
+    const params = HostPlanRecordRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.planRecord,
+      params,
+      (value) => HostPlanRecordResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  checkPlan(request: HostPlanCheckRequest, signal?: AbortSignal): Promise<HostPlanCheckResponse> {
+    const params = HostPlanCheckRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.planCheck,
+      params,
+      (value) => HostPlanCheckResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  recordPlanStepResult(
+    request: HostPlanStepResultRequest,
+    signal?: AbortSignal,
+  ): Promise<HostPlanStepResultResponse> {
+    const params = HostPlanStepResultRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.planStepResult,
+      params,
+      (value) => HostPlanStepResultResponseSchema.parse(value),
+      signal,
+      false,
+    );
+  }
+
+  recordArtifact(
+    request: HostArtifactRecordRequest,
+    signal?: AbortSignal,
+  ): Promise<HostArtifactRecordResponse> {
+    const params = HostArtifactRecordRequestSchema.parse(request);
+    return this.#request(
+      HOST_METHODS.artifactRecord,
+      params,
+      (value) => HostArtifactRecordResponseSchema.parse(value),
       signal,
       false,
     );

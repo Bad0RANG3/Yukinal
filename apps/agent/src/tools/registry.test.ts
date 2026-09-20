@@ -86,6 +86,69 @@ test("checkTicket rejects a decision replayed onto a different target", () => {
   assert.match(error?.message ?? "", /srv_stg01.*srv_prd01/);
 });
 
+test("checkTicket binds effectful calls to a durable ChangePlan", () => {
+  const registry = new ToolRegistry();
+  const declaration = registry.register(echoTool({ name: "test.effectful", risk: "medium", effectful: true }));
+  const target: ToolTarget = { host: "remote", serverId: "srv_stg01", environment: "staging" };
+  const input = { text: "write" };
+  const decision = new PermissionEngine().evaluate({ declaration, target, input });
+  assert.equal(decision.outcome, "auto");
+
+  const ordinary = checkTicket(
+    declaration,
+    { callId: "c", traceId: "t", toolName: declaration.name, input, target },
+    { kind: "policy_auto", decision },
+  );
+  assert.equal(ordinary?.code, "denied_by_policy");
+  assert.match(ordinary?.message ?? "", /durable task.*ChangePlan.*plan step/);
+
+  const blank = checkTicket(
+    declaration,
+    {
+      callId: "c",
+      traceId: "t",
+      toolName: declaration.name,
+      input,
+      target,
+      taskId: "task_1",
+      planId: "plan_1",
+      planStepId: "   ",
+    },
+    { kind: "policy_auto", decision },
+  );
+  assert.equal(blank?.code, "denied_by_policy");
+
+  const planned = checkTicket(
+    declaration,
+    {
+      callId: "c",
+      traceId: "t",
+      toolName: declaration.name,
+      input,
+      target,
+      taskId: "task_1",
+      planId: "plan_1",
+      planStepId: "step_1",
+    },
+    { kind: "policy_auto", decision },
+  );
+  assert.equal(planned, undefined);
+});
+
+test("checkTicket refuses to replay an approval for a different input", () => {
+  const registry = new ToolRegistry();
+  const declaration = registry.register(echoTool({ name: "test.write", risk: "medium" }));
+  const target: ToolTarget = { host: "remote", serverId: "srv_stg01", environment: "staging" };
+  const decision = new PermissionEngine().evaluate({ declaration, target, input: { text: "original" } });
+  const error = checkTicket(
+    declaration,
+    { callId: "c", traceId: "t", toolName: declaration.name, input: { text: "changed" }, target },
+    { kind: "policy_auto", decision },
+  );
+  assert.equal(error?.code, "denied_by_policy");
+  assert.match(error?.message ?? "", /different tool input/);
+});
+
 test("checkTicket refuses a dangerous tier without a direct user approval", () => {
   const registry = new ToolRegistry();
   const declaration = registry.register(echoTool({ name: "test.danger", risk: "critical" }));

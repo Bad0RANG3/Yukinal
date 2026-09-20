@@ -30,7 +30,8 @@ impl TransportError {
 /// `Error::DeniedByPolicy` 对应 `denied_by_policy`（策略拒绝，不可重试），
 /// `Error::Transport` 交给 `transport_or_cancel`。
 ///
-/// [`Error::RevisionMismatch`] 与 [`Error::FileTooLargeToEdit`] 是编辑特有的两种拒绝。它们都
+/// [`Error::RevisionMismatch`] 与 size-cap errors are mapped onto the existing host `invalid_input`
+/// code. They all
 /// 落在**已有的** `invalid_input` 码上（宿主侧映射见 `commands/host.rs`），因为这套词汇里
 /// 没有「编辑」专属的码，而它们的文案自己就说清了下一步该做什么。新增一个码要同时改 Rust
 /// 映射、`packages/shared` 的码表与文档，收益不如把话说明白。
@@ -55,6 +56,11 @@ pub enum Error {
         "the file is larger than the {limit}-byte cap this tool can read in full, so an edit would write back only the part that fits and truncate the file; filesystem.write must be used deliberately instead"
     )]
     FileTooLargeToEdit { limit: usize },
+    /// A backup or restore source is larger than the complete-copy cap.
+    #[error(
+        "the file is larger than the {limit}-byte cap this tool can copy completely; a partial backup or restore would be unsafe"
+    )]
+    FileTooLargeToBackup { limit: usize },
     /// 远端做不到安全替换：symlink、硬链接、无法确认硬链接、或 rename 被拒（ADR 0017）。
     ///
     /// 与 [`Error::ConcurrentChange`] 分开，因为下一步完全不同：这里重试多少次都一样。

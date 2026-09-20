@@ -1,13 +1,15 @@
-//! Agent 三个文件工具的请求类型：字段私有，唯一构造入口是各自的 `check`。
+//! Agent 文件工具的请求类型：字段私有，唯一构造入口是各自的 `check`。
 //!
 //! 形状与上限校验在**构造时同步做完**，所以到达传输的请求一定已经过了路径策略 —— 这正是
 //! 「非法输入即使已经按下停止也必须报 `invalid_input`」这条顺序的结构化表达。
 
 use crate::limits::{
-    DEFAULT_AGENT_READ_BYTES, MAX_AGENT_EDIT_BYTES, MAX_AGENT_READ_BYTES, MAX_AGENT_WRITE_BYTES,
+    BACKUP_TOKEN_CHARS, DEFAULT_AGENT_READ_BYTES, MAX_AGENT_EDIT_BYTES, MAX_AGENT_READ_BYTES,
+    MAX_AGENT_WRITE_BYTES,
 };
 use crate::policy::{self, AGENT_PATH_POLICY_MESSAGE};
 use crate::revision::is_content_revision;
+use crate::{backup_path_for, is_backup_path_for, is_safe_backup_token};
 
 use super::error::{Error, Result};
 
@@ -52,6 +54,102 @@ impl AgentReadRequest {
 pub struct AgentWriteRequest {
     pub(super) path: String,
     pub(super) content: String,
+}
+
+/// Agent `filesystem.backup`: the host chooses the sibling destination from a private token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBackupRequest {
+    pub(super) path: String,
+    pub(super) backup_path: String,
+}
+
+impl AgentBackupRequest {
+    pub fn check(path: &str, token: &str) -> Result<Self> {
+        policy::validate_remote_path(path).map_err(Error::InvalidInput)?;
+        if policy::is_agent_blocked_path(path) {
+            return Err(Error::DeniedByPolicy(AGENT_PATH_POLICY_MESSAGE.to_string()));
+        }
+        if !is_safe_backup_token(token) {
+            return Err(Error::InvalidInput(format!(
+                "backup token must be {BACKUP_TOKEN_CHARS} lowercase hexadecimal characters"
+            )));
+        }
+        let backup_path = backup_path_for(path, token).map_err(Error::InvalidInput)?;
+        Ok(Self {
+            path: path.to_string(),
+            backup_path,
+        })
+    }
+}
+
+/// Agent `filesystem.restore`: restore only a host-derived sibling backup and only if the target
+/// still has the revision observed by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRestoreRequest {
+    pub(super) path: String,
+    pub(super) backup_path: String,
+    pub(super) expected_revision: String,
+}
+
+impl AgentRestoreRequest {
+    pub fn check(path: &str, backup_path: &str, expected_revision: &str) -> Result<Self> {
+        policy::validate_remote_path(path).map_err(Error::InvalidInput)?;
+        if policy::is_agent_blocked_path(path) {
+            return Err(Error::DeniedByPolicy(AGENT_PATH_POLICY_MESSAGE.to_string()));
+        }
+        policy::validate_remote_path(backup_path).map_err(Error::InvalidInput)?;
+        if !is_backup_path_for(path, backup_path) {
+            return Err(Error::InvalidInput(
+                "backupPath must be a host-generated backup for the same target path".to_string(),
+            ));
+        }
+        if !is_content_revision(expected_revision) {
+            return Err(Error::InvalidInput(
+                "expectedRevision must be the 64-character hex revision returned by filesystem.read or filesystem.edit"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            path: path.to_string(),
+            backup_path: backup_path.to_string(),
+            expected_revision: expected_revision.to_string(),
+        })
+    }
+}
+
+/// Agent `filesystem.backup.cleanup`: remove only a host-derived backup whose
+/// bytes still match the revision returned by `filesystem.backup`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCleanupBackupRequest {
+    pub(super) path: String,
+    pub(super) backup_path: String,
+    pub(super) expected_revision: String,
+}
+
+impl AgentCleanupBackupRequest {
+    pub fn check(path: &str, backup_path: &str, expected_revision: &str) -> Result<Self> {
+        policy::validate_remote_path(path).map_err(Error::InvalidInput)?;
+        if policy::is_agent_blocked_path(path) {
+            return Err(Error::DeniedByPolicy(AGENT_PATH_POLICY_MESSAGE.to_string()));
+        }
+        policy::validate_remote_path(backup_path).map_err(Error::InvalidInput)?;
+        if !is_backup_path_for(path, backup_path) {
+            return Err(Error::InvalidInput(
+                "backupPath must be a host-generated backup for the same target path".to_string(),
+            ));
+        }
+        if !is_content_revision(expected_revision) {
+            return Err(Error::InvalidInput(
+                "expectedRevision must be the 64-character hex revision returned by filesystem.backup"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            path: path.to_string(),
+            backup_path: backup_path.to_string(),
+            expected_revision: expected_revision.to_string(),
+        })
+    }
 }
 
 impl AgentWriteRequest {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { HostContextKind, Server, ServerSnapshot, Workspace } from "@yukinal/shared";
+import type { InvestigationContext } from "@yukinal/shared";
 
 import { HostRpcClient } from "../transport/host-client.js";
 import { createHostContextSource } from "./host-context-source.js";
@@ -34,8 +35,32 @@ const workspace: Workspace = {
   defaultEnvironment: "staging",
 };
 
-test("host context source requests and validates server, snapshot, and workspace rows", async () => {
-  const rows: Record<HostContextKind, unknown> = { server, snapshot, workspace };
+const investigation: InvestigationContext = {
+  task: {
+    id: "task_1",
+    createdBy: "user",
+    phase: "investigating",
+    objective: "检查 API",
+    successCriteria: ["收集日志"],
+    scope: { host: "remote", serverId: server.id, environment: "staging" },
+    guardrails: { forbiddenTools: [], forbiddenPathPrefixes: [] },
+    mode: "readonly",
+    permissionMode: "ask",
+    automationLevel: "readonly",
+    status: "pending",
+    budget: { maxSteps: 25, maxRunMs: 900_000, maxAttempts: 3 },
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  },
+  evidence: [],
+  findings: [],
+  artifacts: [],
+  runs: [],
+  steps: [],
+};
+
+test("host context source requests and validates server, snapshot, workspace and investigation rows", async () => {
+  const rows: Record<HostContextKind, unknown> = { server, snapshot, workspace, investigation };
   let client!: HostRpcClient;
   client = new HostRpcClient((raw) => {
     const request = JSON.parse(raw) as { id: number; params: { kind: HostContextKind } };
@@ -50,6 +75,7 @@ test("host context source requests and validates server, snapshot, and workspace
   assert.deepEqual(await source.server(server.id), server);
   assert.deepEqual(await source.snapshot(server.id), snapshot);
   assert.deepEqual(await source.workspace(workspace.id), workspace);
+  assert.deepEqual(await source.investigation(investigation.task.id), investigation);
 });
 
 test("a missing host context row becomes undefined, while a malformed row fails closed", async () => {
@@ -71,4 +97,37 @@ test("a missing host context row becomes undefined, while a malformed row fails 
   assert.equal(await source.server("srv_missing"), undefined);
   mode = "malformed";
   await assert.rejects(source.server("srv_broken"));
+});
+
+test("host context rejects an evidence body instead of carrying it into the sidecar", async () => {
+  let client!: HostRpcClient;
+  client = new HostRpcClient((raw) => {
+    const request = JSON.parse(raw) as { id: number };
+    client.handleIncoming({
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        status: "success",
+        data: {
+          ...investigation,
+          evidence: [{
+            id: "ev_1",
+            taskId: investigation.task.id,
+            scope: investigation.task.scope,
+            kind: "log",
+            sourceTool: "server.logs",
+            collectedAt: "2026-01-02T00:00:00.000Z",
+            inputSummary: "tail=10",
+            contentType: "text",
+            content: "body must be fetched by id",
+            contentHash: "a".repeat(64),
+            truncated: false,
+            redactionStatus: "clean",
+          }],
+        },
+      },
+    });
+  });
+  const source = createHostContextSource(client);
+  await assert.rejects(source.investigation(investigation.task.id));
 });

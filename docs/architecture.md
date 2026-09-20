@@ -37,9 +37,22 @@ sidecar 的 stdout 只承载协议帧，**所有日志写 stderr**——一条�
 - **Rust 拥有原生资源，且只做参数编组。** SSH 会话、PTY、SQLite、操作系统凭据库、sidecar 与 MCP 子进程句柄都由 Rust 持有。`apps/desktop/src-tauri` 只做参数编组与事件转发，逻辑落在 `crates/*`，这样不打开窗口也能测试——`yukinal-core` 里没有 Tauri 类型，sidecar 的启动、监督、崩溃与状态路径都能单测覆盖。
 - **`packages/shared` 是跨语言契约的唯一来源。** 类型、Zod schema、IPC 映射、事件名、JSON-RPC 协议、工具命名规则都在这里；`packages/shared/fixtures/ipc/` 下的 JSON 被 Rust（`include_str!`）和 TypeScript 同时解析，这是防止两侧静默漂移的机制——类型只保证编译期一致，fixture 保证运行时一致。本地门禁的第一步就是构建这些契约库（消费方导入它们的 `dist/*.d.ts`），顺序不能颠倒。
 - **ToolRegistry 是唯一的执行入口，Permission Engine 是唯一的授权决策入口。** 详见 [执行与授权模型](./execution-model.md#执行与授权模型)。
-- **Agent 不直接执行远程操作。** sidecar 通过 `host.tool.execute` 向宿主提出请求，宿主会重新校验目标服务器 ID、环境、工作区归属和文件路径策略，然后才执行；sidecar 自己不连 SSH、不访问 SQLite 与凭据库。
+- **Agent 不直接执行远程操作。** sidecar 通过 `host.tool.execute` 向宿主提出请求，宿主会重新校验目标服务器 ID、环境、工作区归属和文件路径策略，然后才执行；副作用工具还必须带完整的 durable `taskId`、`planId`、`planStepId`，普通聊天不能降级成自动写入。sidecar 自己不连 SSH、不访问 SQLite 与凭据库。交互式终端是独立的用户人工路径，不是 Agent 工具。
 - **Provider 差异被关在 Provider 边界内。** agent loop 只依赖 `LLMProvider` 与统一的 `StreamEvent`，不根据 Provider 身份分支；工具名的点号与双下划线转换也只发生在一个地方。
 - **有界性是一条设计约束，不是实现细节。** 帧大小、命令输出、文件读取、日志行数、审计条数、审批等待时长、单次运行的步数与墙钟时间都必须有明确上限，并且上限要写在文档里（见 [安全与数据边界](./security.md#安全与数据边界)）。
+- **决策摘要只能用显式 continuation 续接任务。** 选项省略 continuation 时宿主归一化为 `wait_user`；只有 `continue_readonly` 或 `start_plan` 的用户选择才会让桌面调用既有任务启动入口，`stop` 则由宿主封存任务并清除活动运行栅栏，任务详情页的 `investigation_task_stop` 也复用这条链路，不能由自然语言或旧摘要隐式启动或停止。
+
+**后台任务与关闭。** 需要跨网络等待、退避或长期运行的后台任务不能把所有者 `Arc` 作为隐形保活根。任务只持 `Weak` 或配置快照，进入同步临界区时才短暂升级；显式关闭使用取消令牌或关闭通知，`Drop` 作为同步兜底负责 abort 未完成的任务并关闭已经持有的句柄。子进程、PTY、SSE 和 keepalive 都必须有显式收口路径，且“本地任务已停止”不等于“远端副作用已撤销”。模块清单、回归测试和未验收边界见 [内存与生命周期审计](./memory-lifecycle-audit.md#内存与生命周期审计)。
+
+**动作重投保护。** 对文件写入、编辑、宿主生成备份、守卫恢复、容器重启和 MCP 调用，Rust 宿主在实际执行前以 traceId + callId 写入一次 SQLite 占位和请求指纹；绑定持久化计划时还比较不含 provider 身份的逻辑动作指纹。当前进程可以重放有界的已完成响应；运行中、响应丢失或结果不确定的调用只返回 duplicate_call 计划偏离，不能因为 sidecar 重启、换 callId 或界面重连而再次触达远端。文件备份另有只存元数据的归属账本，恢复必须命中同服务器、目标和任务的可用记录并在成功后消费它；账本不保存远端原文，外部网络和真实部署仍按未验证能力处理。
+
+**调查上下文与调度预算。** 宿主给 sidecar 的 `host.context.fetch` 只投影证据元数据和阶段工件摘要，不跨边界携带正文；任务证据再由 `investigation.evidence.search` 返回有界的元数据摘要。需要先对齐同一轮的多来源资料时，`investigation.evidence.correlate` 只按同一宿主运行 ID，或旧证据的受限时间窗，返回同一任务/目标范围内的摘要、来源集合和警告；它明确标记匹配方式，不做语义根因推断。需要解释两份样本时，`investigation.evidence.compare` 只在同一任务、同一目标范围内读取两条已保存证据，返回宿主计算的 JSON 变化路径或文本行数，以及来源/新鲜度警告，不返回原始值；只有模型随后用真实 `evidenceId` 调用 `investigation.evidence` 才能取回单条脱敏正文。这些本地只读路径不会伪造现场采样或推进计划。所有宿主展示路径都按 `default-v1` 计算新鲜度（15 分钟后 `stale`、24 小时后 `expired`，非法/未来时间戳为 `unknown`），把评估时刻和边界一起返回；它是动态只读投影，旧证据仍保留，Agent 不能提交或覆盖这个字段。持久化调度器在启动 sidecar 前由 Rust 对任务预算和调度预算逐字段取小值，调度规则可以缩短一次运行，但不能通过配置扩大任务原本允许的步数、墙钟时间或尝试次数。
+
+**迟到事件栅栏。** 事件转发到任务状态账本前，宿主要求事件的 `runId` 仍是任务的 `active_run_id`；恢复、终态收口或重试换 run 后，旧 sidecar 的迟到帧只能作为被丢弃的噪声。已终止的 run（包括 `interrupted`）也不接受任何后续事件，事件携带的 `taskId` 必须与持久化 run 归属相同。这样停止/恢复不会被传输时序反向打开，旧 run 仍保留供审计查询。
+
+**失败后的恢复入口。** `investigation_task_recover` 先在宿主事务中关闭旧 run、步骤、计划审批、基线和观察窗口，再返回 `investigating`/`recovery` 或明确的等待/停止状态。桌面端只有收到 `investigating` 且没有 `activeRunId` 时，才自动调用统一的 `investigation_task_start`；重试、重新规划和继续恢复因此不会要求用户复制目标到聊天框，回退、停止和等待用户仍不会隐式启动。启动失败保持可见错误，不能把恢复请求伪装成已运行。
+
+**异常后的只读复核。** 持久化调度器把上一轮宿主比较结果（`baseline`、`no_change`、`changed` 或 `insufficient_evidence`）转换成下一轮的有界提示。`changed` 要求 sidecar 先检索相邻证据、用宿主的 `investigation.evidence.compare` 查看无正文差异、再在原范围内采集新样本；它不会扩大工具、预算、目标或权限，也不会把差异升级成写入授权。复核仍通过同一条 sidecar、Permission Engine、计划和证据账本路径。
 
 ### 仓库地图
 
@@ -71,7 +84,7 @@ crates/
   collector/         7 个采集器与本地/SSH runner
   credentials/       OS 凭据库抽象（keychain 引用）
   database/          SQLite schema、迁移、model（按域拆开）与 repository
-  filesystem/        远端文件策略与上限（凭据路径黑名单、有界读写），传输由桌面层注入
+  filesystem/        远端文件策略与上限（凭据路径黑名单、有界读写、宿主备份/恢复），传输由桌面层注入
   time/              时间戳的唯一实现
 docs/
   README.md          文档索引与文档治理规则
@@ -81,9 +94,10 @@ docs/
   boundaries/        三个跨模块边界（Provider / MCP / Markdown 渲染）
   security.md        安全与数据边界
   limitations.md     当前限制与有意为之的边界
+  memory-lifecycle-audit.md  Rust 资源所有权、后台任务与关闭边界审计
   development.md     开始开发、验证命令与首次使用引导
   packaging.md       打包与分发
-  adr.md             架构决策记录 0001–0015
+  adr.md             架构决策记录 0001–0070
   changelog.md       版本与发布历史
 scripts/             校验、构建辅助、sidecar smoke、打包、桌面窗口检查
 ```

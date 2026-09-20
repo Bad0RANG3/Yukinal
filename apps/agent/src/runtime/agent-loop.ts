@@ -32,15 +32,26 @@ import {
   type AgentTextPromptPart,
   type ApprovalRequest,
   type ApprovalResponse,
+  type Evidence,
+  type HostEvidenceRecordResponse,
+  type HostArtifactRecordRequest,
+  type HostArtifactRecordResponse,
+  type HostPlanCheckRequest,
+  type HostPlanCheckResponse,
+  type HostPlanStepResultRequest,
+  type HostPlanStepResultResponse,
+  type InvestigationArtifact,
   type PermissionApprovalSource,
   type PermissionDecision,
   type ToolCallRequest,
   type ToolCallResult,
   type ToolDeclaration,
+  type ToolError,
 } from "@yukinal/shared";
 import { createProviderNameIndex, type LLMProvider, type LlmMessage, type StreamEvent } from "@yukinal/provider-sdk";
 
 import { ContextEngine } from "../context/context-engine.js";
+import { buildEvidence } from "../context/evidence.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { resolveRequestedPolicy } from "../permissions/policy-registry.js";
 import { RpcFailure } from "../errors.js";
@@ -66,6 +77,14 @@ export interface AgentLoopDeps {
    * end to end instead of trusting.
    */
   createTrace?: (info: { runId: string; title: string }) => TraceRecorder;
+  /** Host-owned persistence for evidence produced by a durable task. */
+  recordEvidence?: (evidence: Evidence, signal?: AbortSignal) => Promise<HostEvidenceRecordResponse>;
+  /** Host-owned persistence for phase artifacts produced by a durable task. */
+  recordArtifact?: (request: HostArtifactRecordRequest, signal?: AbortSignal) => Promise<HostArtifactRecordResponse>;
+  /** Host-owned plan gate. It is checked before permission evaluation and execution. */
+  checkPlan?: (request: HostPlanCheckRequest, signal?: AbortSignal) => Promise<HostPlanCheckResponse>;
+  /** Persist the outcome and advance the active plan step after a call. */
+  recordPlanStepResult?: (request: HostPlanStepResultRequest, signal?: AbortSignal) => Promise<HostPlanStepResultResponse>;
 }
 
 export interface AgentRunHooks {
@@ -82,6 +101,20 @@ interface ApprovalWaiter {
 
 type ApprovalOutcome = ApprovalResponse["decision"] | "expired";
 
+/**
+ * A host-approved continuation for a bounded post-change observation window.
+ *
+ * The sidecar never invents a new tool or input here. It only remembers the
+ * exact final verification read that the model already requested and replays
+ * that read after the host-provided sample time. The next plan check and the
+ * host's observation clock remain authoritative for every replay.
+ */
+interface ObservationReplay {
+  providerToolName: string;
+  input: Record<string, unknown>;
+  nextSampleAt?: string;
+}
+
 const APPROVAL_TTL_MS = 2 * 60_000;
 const DEFAULT_MAX_RUN_MS = 15 * 60_000;
 const MAX_RUN_TEXT_CHARS = 200_000;
@@ -92,6 +125,10 @@ export class AgentLoop {
   readonly approvalTtlMs: number;
   readonly #approvalWaiters = new Map<string, ApprovalWaiter>();
   readonly #tokensByRun = new Map<string, AbortController>();
+  /** Kept only while a run is alive so interrupted terminal events retain their durable task id. */
+  readonly #taskIdsByRun = new Map<string, string>();
+  /** Per-task limits must survive an abort long enough for the terminal failure to name them. */
+  readonly #budgetsByRun = new Map<string, { maxSteps: number; maxRunMs: number }>();
 
   constructor(readonly deps: AgentLoopDeps) {
     this.maxSteps = positiveInteger(deps.maxSteps ?? 25, "maxSteps");
@@ -151,7 +188,11 @@ export class AgentLoop {
     signal?.addEventListener("abort", onParentAbort, { once: true });
     if (signal?.aborted) onParentAbort();
     this.#tokensByRun.set(runId, token);
-    const runTimer = setTimeout(() => token.abort(new Error("run-timeout")), this.maxRunMs);
+    if (request.taskId) this.#taskIdsByRun.set(runId, request.taskId);
+    const maxSteps = Math.min(this.maxSteps, request.taskBudget?.maxSteps ?? this.maxSteps);
+    const maxRunMs = Math.min(this.maxRunMs, request.taskBudget?.maxRunMs ?? this.maxRunMs);
+    this.#budgetsByRun.set(runId, { maxSteps, maxRunMs });
+    const runTimer = setTimeout(() => token.abort(new Error("run-timeout")), maxRunMs);
     runTimer.unref?.();
 
     let steps = 0;
@@ -202,6 +243,9 @@ export class AgentLoop {
        * a third-party (MCP) tool from a built-in one without inferring it from the name.
        */
       origin: ToolDeclaration["origin"];
+      planId?: string;
+      planStepId?: string;
+      evidenceIds?: string[];
     }): void => {
       emit({
         type: "agent.tool_call",
@@ -217,6 +261,9 @@ export class AgentLoop {
         approvedBy: call.approvedBy,
         policyId: call.policyId,
         origin: call.origin,
+        planId: call.planId,
+        planStepId: call.planStepId,
+        evidenceIds: call.evidenceIds,
         at: now(),
       });
     };
@@ -234,6 +281,10 @@ export class AgentLoop {
       policyId: PermissionDecision["policyId"];
       /** See the note on the same field in `emitToolCall`. */
       origin: ToolDeclaration["origin"];
+      planId?: string;
+      planStepId?: string;
+      evidenceIds?: string[];
+      errorCode?: ToolError["code"];
       status: "success" | "failed" | "cancelled";
       outputSummary: string;
       error?: string;
@@ -255,6 +306,10 @@ export class AgentLoop {
         approvedBy: result.approvedBy,
         policyId: result.policyId,
         origin: result.origin,
+        planId: result.planId,
+        planStepId: result.planStepId,
+        evidenceIds: result.evidenceIds,
+        errorCode: result.errorCode,
         status: result.status,
         outputSummary: redactSensitiveText(result.outputSummary),
         error: result.error === undefined ? undefined : redactSensitiveText(result.error),
@@ -266,7 +321,7 @@ export class AgentLoop {
     };
 
     try {
-      emit({ type: "agent.started", runId, at: now() });
+      emit({ type: "agent.started", runId, ...(request.taskId ? { taskId: request.taskId } : {}), at: now() });
 
       const bundle = await this.deps.context.build(
         prompt
@@ -315,8 +370,9 @@ export class AgentLoop {
       ];
 
       const nameIndex = createProviderNameIndex(this.deps.registry.list());
+      let observationReplay: ObservationReplay | undefined;
 
-      for (; steps < this.maxSteps; steps++) {
+      for (; steps < maxSteps; steps++) {
         if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
 
         const events: StreamEvent[] = [];
@@ -377,15 +433,149 @@ export class AgentLoop {
         }
 
         if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
-        const calls = events.filter((event): event is Extract<StreamEvent, { type: "tool_call" }> => event.type === "tool_call");
+        let calls = events.filter((event): event is Extract<StreamEvent, { type: "tool_call" }> => event.type === "tool_call");
         if (streamError !== null) {
           throw new Error(`provider error: ${streamError}`);
+        }
+        if (calls.length === 0 && observationReplay !== undefined) {
+          const replay = observationReplay;
+          const ready = await waitForObservationSample(replay.nextSampleAt ?? "", token.signal);
+          if (token.signal.aborted) {
+            return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
+          }
+          if (!ready) {
+            observationReplay = undefined;
+            throw new Error("host returned an invalid observation sample schedule");
+          }
+          observationReplay = undefined;
+          calls = [{
+            type: "tool_call",
+            call: {
+              id: `observation_${randomUUID()}`,
+              name: replay.providerToolName,
+              arguments: replay.input,
+            },
+          }];
         }
         if (calls.length === 0) break; // 纯文本回合：回答完成
 
         const traceId = trace.traceId;
         const assistantToolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
         const toolMessages: LlmMessage[] = [];
+        const savePlanResult = async (
+          callId: string,
+          check: HostPlanCheckResponse | undefined,
+          status: "success" | "failed" | "cancelled",
+          retryable: boolean,
+          outputSummary?: string,
+          replay?: ObservationReplay,
+        ): Promise<HostPlanStepResultResponse | undefined> => {
+          if (!request.taskId || !this.deps.recordPlanStepResult || check?.status !== "allowed") return undefined;
+          try {
+            const response = await this.deps.recordPlanStepResult(
+              {
+                taskId: request.taskId,
+                planId: check.planId,
+                stepId: check.stepId,
+                status,
+                retryable,
+                outputSummary,
+              },
+              token.signal,
+            );
+            if (response.recorded && response.observation === "running") {
+              observationReplay = response.nextSampleAt && replay
+                ? { ...replay, nextSampleAt: response.nextSampleAt }
+                : undefined;
+              toolMessages.push({
+                role: "tool",
+                toolCallId: callId,
+                content: response.sampleAccepted === false
+                  ? `观察窗口仍在进行，尚未到下一次采样时间${response.nextSampleAt ? `（下一次不早于 ${response.nextSampleAt}）` : ""}。本轮不要把任务说成完成。`
+                  : `观察窗口已记录一次采样${response.nextSampleAt ? `；下一次不早于 ${response.nextSampleAt}` : ""}，窗口结束前不要把任务说成完成。`,
+              });
+            } else if (response.recorded && response.observation === "failed") {
+              observationReplay = undefined;
+              toolMessages.push({
+                role: "tool",
+                toolCallId: callId,
+                content: "观察窗口发现异常，宿主已停在等待用户状态；不要自行扩大操作范围。",
+              });
+            } else if (response.recorded) {
+              // A completed or otherwise terminal plan result closes any pending
+              // continuation. The host owns the authoritative window status.
+              observationReplay = undefined;
+            }
+            return response;
+          } catch (error) {
+            observationReplay = undefined;
+            // The tool outcome remains authoritative. A lost progress write is surfaced in
+            // the model-visible result so it can stop and ask for a fresh plan instead of
+            // assuming the old step advanced.
+            toolMessages.push({
+              role: "tool",
+              toolCallId: callId,
+              content: `计划进度未保存：${redactSensitiveText(error instanceof Error ? error.message : String(error))}`,
+            });
+            return undefined;
+          }
+        };
+        const savePhaseArtifact = async (args: {
+          callId: string;
+          check: HostPlanCheckResponse | undefined;
+          kind: InvestigationArtifact["kind"];
+          phase: InvestigationArtifact["phase"];
+          status: InvestigationArtifact["status"];
+          title: string;
+          summary: string;
+          content: unknown;
+          evidenceIds: string[];
+        }): Promise<boolean> => {
+          if (!request.taskId || !this.deps.recordArtifact || args.check?.status !== "allowed") return true;
+          const timestamp = now();
+          const safeSummary = redactSensitiveText(args.summary).slice(0, 8_192);
+          const artifact: InvestigationArtifact = {
+            id: `artifact_${args.kind}_${runId}_${args.check.stepId}`,
+            taskId: request.taskId,
+            runId,
+            planId: args.check.planId,
+            planStepId: args.check.stepId,
+            phase: args.phase,
+            kind: args.kind,
+            status: args.status,
+            title: args.title,
+            summary: safeSummary,
+            content: redactSensitiveValue(args.content),
+            evidenceIds: args.evidenceIds.slice(0, 256),
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          try {
+            const response = await this.deps.recordArtifact(
+              {
+                artifact,
+                planId: args.check.planId,
+                planStepId: args.check.stepId,
+                evidenceIds: args.check.evidenceIds,
+              },
+              token.signal,
+            );
+            if (response.recorded) return true;
+            toolMessages.push({
+              role: "tool",
+              toolCallId: args.callId,
+              content: `阶段工件未保存：${response.error.message}`,
+            });
+            return false;
+          } catch (error) {
+            toolMessages.push({
+              role: "tool",
+              toolCallId: args.callId,
+              content: `阶段工件未保存：${redactSensitiveText(error instanceof Error ? error.message : String(error))}`,
+            });
+            return false;
+          }
+        };
 
         for (let index = 0; index < calls.length; index++) {
           if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
@@ -403,9 +593,40 @@ export class AgentLoop {
             continue;
           }
 
+          const target = request.target ?? { host: "local" as const, environment: "unknown" as const };
+
+          // A durable task is not allowed to drift silently. Check the host-owned plan
+          // before evaluating permission so a call outside the declared step cannot even
+          // reach an approval card. Plan and bounded playbook tools are the deliberate
+          // exceptions: they create or replace the active revision after a deviation.
+          let planCheck: HostPlanCheckResponse | undefined;
+          let planCheckError: string | undefined;
+          if (
+            request.taskId &&
+            this.deps.checkPlan &&
+            internalName !== "investigation.plan" &&
+            internalName !== "investigation.playbook" &&
+            // Fetching an already persisted envelope is a local context operation. It
+            // must remain available while a plan is active and must not consume the
+            // current remote step merely because the model needed the original output.
+            internalName !== "investigation.evidence" &&
+            internalName !== "investigation.evidence.search" &&
+            internalName !== "investigation.evidence.compare" &&
+            internalName !== "investigation.evidence.correlate" &&
+            internalName !== "investigation.evidence.triage"
+          ) {
+            try {
+              planCheck = await this.deps.checkPlan(
+                { taskId: request.taskId, toolName: internalName, input: call.call.arguments, target },
+                token.signal,
+              );
+            } catch (error) {
+              planCheckError = redactSensitiveText(error instanceof Error ? error.message : String(error));
+            }
+          }
+
           // Permission decides (ADR 0005). The run mode is an explicit user
           // delegation, not a permission claim embedded in model text.
-          const target = request.target ?? { host: "local" as const, environment: "unknown" as const };
           const decision = this.deps.permission.evaluate({
             declaration,
             target,
@@ -417,6 +638,26 @@ export class AgentLoop {
             // the same one for every call of this run.
             policy,
           });
+          // An effectful declaration must never reach an approval card from ordinary chat.
+          // The registry and host repeat this check, but denying here keeps the UX honest and
+          // avoids asking the user to approve a call that cannot be executed without a plan.
+          const durablePlanBound =
+            request.taskId !== undefined &&
+            planCheck?.status === "allowed" &&
+            planCheck.planId.trim().length > 0 &&
+            planCheck.stepId.trim().length > 0;
+          if (declaration.effectful === true && !durablePlanBound) {
+            decision.outcome = "deny";
+            decision.approvedBy = undefined;
+            decision.approvalId = undefined;
+            decision.reason = `${declaration.name} requires a durable task, ChangePlan, and plan step before execution (${decision.reason})`;
+          }
+          if (planCheck?.status === "allowed" && planCheck.requiresApproval && decision.outcome === "auto") {
+            decision.outcome = "ask";
+            decision.approvedBy = undefined;
+            decision.approvalId = undefined;
+            decision.reason = `当前计划步骤要求用户批准：${decision.reason}`;
+          }
           assistantToolCalls.push({
             id: call.call.id,
             name: call.call.name,
@@ -445,7 +686,63 @@ export class AgentLoop {
             approvedBy: decision.approvedBy,
             policyId: decision.policyId,
             origin: declaration.origin,
+            ...(planCheck?.status === "allowed"
+              ? {
+                  planId: planCheck.planId,
+                  planStepId: planCheck.stepId,
+                  evidenceIds: planCheck.evidenceIds,
+                }
+              : {}),
           });
+
+          if (planCheckError !== undefined || (planCheck !== undefined && planCheck.status !== "allowed")) {
+            const at = now();
+            const deviation = planCheck?.status === "deviation" ? planCheck.deviation : undefined;
+            const planError = planCheck?.status === "failed" ? planCheck.error : undefined;
+            const errorCode = planCheckError !== undefined ? "internal" : deviation !== undefined ? "plan_deviation" : planError?.code ?? "internal";
+            const message = planCheckError ?? deviation?.message ?? planError?.message ?? "计划检查失败";
+            toolMessages.push({
+              role: "tool",
+              toolCallId: call.call.id,
+              content: `${planCheckError !== undefined ? "计划检查失败" : "计划未允许此调用"}：${message}`,
+            });
+            emitToolResult({
+              traceId,
+              stepId,
+              callId: call.call.id,
+              toolName: internalName,
+              input: call.call.arguments,
+              target,
+              riskLevel: decision.finalRisk,
+              decision: decision.outcome,
+              approvedBy: decision.approvedBy,
+              policyId: decision.policyId,
+              origin: declaration.origin,
+              ...(planCheck?.status === "allowed"
+                ? {
+                    planId: planCheck.planId,
+                    planStepId: planCheck.stepId,
+                    evidenceIds: planCheck.evidenceIds,
+                  }
+                : {}),
+              status: "failed",
+              outputSummary: planCheckError !== undefined ? "计划检查失败" : "计划偏离",
+              error: message,
+              errorCode,
+              startedAt: at,
+              endedAt: at,
+              durationMs: 0,
+            });
+            trace.updateStep(stepId, {
+              status: "failed",
+              kind: "tool",
+              outputSummary: planCheckError !== undefined ? "计划检查失败" : "计划偏离",
+              error: message,
+              endedAt: at,
+              durationMs: 0,
+            });
+            continue;
+          }
 
           let ticket: ExecutionTicket;
           if (decision.outcome === "auto") {
@@ -468,7 +765,13 @@ export class AgentLoop {
               expiresAt: new Date(Date.now() + this.approvalTtlMs).toISOString(),
             };
             trace.requireApproval(decision, stepId);
-            emit({ type: "agent.waiting_approval", runId, approval, at: now() });
+            emit({
+              type: "agent.waiting_approval",
+              runId,
+              ...(request.taskId ? { taskId: request.taskId } : {}),
+              approval,
+              at: now(),
+            });
             const approvalOutcome = await this.#awaitApproval(runId, approval, decision, token);
             if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
             if (approvalOutcome === "reject" || approvalOutcome === "expired") {
@@ -493,6 +796,13 @@ export class AgentLoop {
                 decision: decision.outcome,
                 policyId: decision.policyId,
                 origin: declaration.origin,
+                ...(planCheck?.status === "allowed"
+                  ? {
+                      planId: planCheck.planId,
+                      planStepId: planCheck.stepId,
+                      evidenceIds: planCheck.evidenceIds,
+                    }
+                  : {}),
                 status: "failed",
                 outputSummary: rejectionSummary,
                 error: approvalOutcome === "expired" ? "approval expired" : decision.reason,
@@ -508,6 +818,7 @@ export class AgentLoop {
                 endedAt: rejectedAt,
                 durationMs: 0,
               });
+              await savePlanResult(call.call.id, planCheck, "failed", false, rejectionSummary);
               continue;
             }
             ticket = { kind: "user_approved", decision, approvalId: approval.approvalId, respondedAt: now() };
@@ -528,9 +839,17 @@ export class AgentLoop {
               decision: decision.outcome,
               policyId: decision.policyId,
               origin: declaration.origin,
+              ...(planCheck?.status === "allowed"
+                ? {
+                    planId: planCheck.planId,
+                    planStepId: planCheck.stepId,
+                    evidenceIds: planCheck.evidenceIds,
+                  }
+                : {}),
               status: "failed",
               outputSummary: "策略禁止",
               error: decision.reason,
+              errorCode: "denied_by_policy",
               startedAt: deniedAt,
               endedAt: deniedAt,
               durationMs: 0,
@@ -543,6 +862,7 @@ export class AgentLoop {
               endedAt: deniedAt,
               durationMs: 0,
             });
+            await savePlanResult(call.call.id, planCheck, "failed", false, "策略禁止");
             continue;
           }
 
@@ -555,15 +875,171 @@ export class AgentLoop {
               toolName: internalName,
               input: call.call.arguments,
               target,
+              taskId: request.taskId,
+              ...(planCheck?.status === "allowed"
+                ? {
+                    planId: planCheck.planId,
+                    planStepId: planCheck.stepId,
+                    evidenceIds: planCheck.evidenceIds,
+                  }
+                : {}),
               intent: decision.reason,
             } satisfies ToolCallRequest,
             ticket,
-            { signal: token.signal, trace, stepId },
+            {
+              signal: token.signal,
+              trace,
+              stepId,
+              permissionMode: request.permissionMode,
+              mode: request.mode ?? "goal",
+            },
           );
           if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
+          const toolMessageIndex = toolMessages.length;
           this.#consumeResult(result, (output) =>
             toolMessages.push({ role: "tool", toolCallId: call.call.id, content: output }),
           );
+          const appendToToolMessage = (content: string): void => {
+            const existing = toolMessages[toolMessageIndex];
+            if (existing?.role === "tool") {
+              existing.content = `${existing.content}\n${content}`;
+            } else {
+              toolMessages.push({ role: "tool", toolCallId: call.call.id, content });
+            }
+          };
+          let planResultStatus: "success" | "failed" | "cancelled" =
+            result.status === "success" ? "success" : result.status === "cancelled" ? "cancelled" : "failed";
+          let planResultRetryable = result.error?.retryable ?? false;
+          let planResultOutputSummary = result.outputSummary;
+          if (
+            request.taskId &&
+            result.status === "success" &&
+            decision.finalRisk === "read" &&
+            shouldAutoRecordEvidence(internalName) &&
+            this.deps.recordEvidence
+          ) {
+            try {
+              const evidence = buildEvidence({
+                taskId: request.taskId,
+                target,
+                toolName: internalName,
+                input: call.call.arguments,
+                output: result.output,
+                collectedAt: result.endedAt,
+              });
+              const recorded = await this.deps.recordEvidence(evidence, token.signal);
+              if (!recorded.recorded) {
+                appendToToolMessage(`证据未保存：${recorded.error.message}`);
+                planResultStatus = "failed";
+                planResultRetryable = recorded.error.retryable;
+                planResultOutputSummary = `证据未保存：${recorded.error.message}`;
+              } else {
+                const evidenceId = recorded.evidenceId ?? evidence.id;
+                const reused = recorded.reused === true;
+                const reuseNote = reused ? "（本次运行已复用相同证据）" : "";
+                // The evidence id is the durable join key for findings, briefs and later
+                // recovery. Return it in the model-visible tool message; a boolean
+                // `recorded: true` is not enough for the next turn to cite the evidence
+                // without guessing an id that the host will (correctly) reject.
+                appendToToolMessage(`证据已保存：${evidenceId}${reuseNote}`);
+                if (reused && planCheck?.status === "allowed" && planCheck.stepKind === "evidence") {
+                  // A persistence dedupe is not a fresh observation. Treating it as a
+                  // successful evidence step would let a durable plan advance forever
+                  // while the target keeps returning the same sample. The host records
+                  // this as a non-retryable plan failure, which leaves the user with a
+                  // truthful failure artifact and forces a re-plan or an explicit wait.
+                  planResultStatus = "failed";
+                  planResultRetryable = false;
+                  planResultOutputSummary = "本次读取没有产生新的调查证据，计划步骤未推进；需要重规划或等待用户决定";
+                  appendToToolMessage(`${planResultOutputSummary}。请改用证据检索/比较/关联，或调整采样条件后重新规划。`);
+                } else if (planCheck?.status === "allowed" && planCheck.stepKind === "evidence") {
+                  const saved = await savePhaseArtifact({
+                    callId: call.call.id,
+                    check: planCheck,
+                    kind: "baseline",
+                    phase: "investigating",
+                    status: "ready",
+                    title: "自动记录的调查基线",
+                    summary: `来自 ${internalName} 的成功只读结果`,
+                    content: {
+                      sourceTool: internalName,
+                      evidenceId,
+                      reused,
+                      outputSummary: result.outputSummary ?? summarize(result.output),
+                    },
+                    evidenceIds: [evidenceId],
+                  });
+                  if (!saved) {
+                    planResultStatus = "failed";
+                    planResultRetryable = false;
+                  }
+                }
+              }
+            } catch (error) {
+              const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+              appendToToolMessage(`证据未保存：${message}`);
+              planResultStatus = "failed";
+              planResultRetryable = false;
+              planResultOutputSummary = `证据未保存：${message}`;
+            }
+          }
+          if (request.taskId && result.status === "success" && planCheck?.status === "allowed") {
+            const automaticArtifact =
+              planCheck.stepKind === "action"
+                ? {
+                    kind: "execution" as const,
+                    phase: "execution" as const,
+                    status: "succeeded" as const,
+                    title: "自动记录的执行结果",
+                    summary: result.outputSummary ?? summarize(result.output),
+                    content: {
+                      tool: internalName,
+                      status: result.status,
+                      outputSummary: result.outputSummary ?? summarize(result.output),
+                    },
+                  }
+                : planCheck.stepKind === "verification"
+                  ? {
+                      kind: "verification" as const,
+                      phase: "verification" as const,
+                      status: "succeeded" as const,
+                      title: "自动记录的验证结果",
+                      summary: result.outputSummary ?? summarize(result.output),
+                      content: {
+                        tool: internalName,
+                        status: result.status,
+                        outputSummary: result.outputSummary ?? summarize(result.output),
+                      },
+                    }
+                  : undefined;
+            if (automaticArtifact) {
+              const saved = await savePhaseArtifact({
+                callId: call.call.id,
+                check: planCheck,
+                ...automaticArtifact,
+                evidenceIds: planCheck.evidenceIds,
+              });
+              if (!saved) {
+                planResultStatus = "failed";
+                planResultRetryable = false;
+              }
+            }
+          }
+          if (shouldAdvancePlan(internalName)) {
+            await savePlanResult(
+              call.call.id,
+              planCheck,
+              planResultStatus,
+              planResultRetryable,
+              planResultOutputSummary,
+              result.status === "success" && planCheck?.status === "allowed" && planCheck.stepKind === "verification"
+                ? {
+                    providerToolName: call.call.name,
+                    input: { ...call.call.arguments },
+                  }
+                : undefined,
+            );
+          }
           emitToolResult({
             traceId,
             stepId,
@@ -576,9 +1052,17 @@ export class AgentLoop {
             approvedBy: ticket.kind === "policy_auto" ? "policy" : ticket.kind === "agent_auto" ? "agent" : "user",
             policyId: decision.policyId,
             origin: declaration.origin,
+            ...(planCheck?.status === "allowed"
+              ? {
+                  planId: planCheck.planId,
+                  planStepId: planCheck.stepId,
+                  evidenceIds: planCheck.evidenceIds,
+                }
+              : {}),
             status: result.status === "success" ? "success" : result.status === "cancelled" ? "cancelled" : "failed",
             outputSummary: redactSensitiveText(result.outputSummary ?? summarize(result.output)),
             error: result.error?.message === undefined ? undefined : redactSensitiveText(result.error.message),
+            errorCode: result.error?.code,
             startedAt: result.startedAt || startedAt,
             endedAt: result.endedAt,
             durationMs: result.durationMs,
@@ -591,26 +1075,28 @@ export class AgentLoop {
       }
 
       if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
-      if (steps >= this.maxSteps && finalText.trim().length === 0) {
-        throw new RpcFailure(RPC_ERROR.TIMEOUT, `run exceeded maxSteps=${this.maxSteps}`);
+      if (steps >= maxSteps && finalText.trim().length === 0) {
+        throw new RpcFailure(RPC_ERROR.TIMEOUT, `run exceeded maxSteps=${maxSteps}`);
       }
 
       finalText = finalText.trim();
       const result: AgentRunResult = { runId, state: "completed", text: finalText, steps, toolCalls, traceId: trace.traceId };
-      emit({ type: "agent.completed", runId, result, at: now() });
+      emit({ type: "agent.completed", runId, ...(request.taskId ? { taskId: request.taskId } : {}), result, at: now() });
       trace.finish("completed");
       return result;
     } catch (error) {
       if (token.signal.aborted) return this.#finishInterrupted({ runId, steps, toolCalls, text: finalText }, emit, now, token.signal, trace);
       const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
       const result: AgentRunResult = { runId, state: "failed", text: finalText.trim(), steps, toolCalls, error: message, traceId: trace.traceId };
-      emit({ type: "agent.failed", runId, error: message, at: now() });
+      emit({ type: "agent.failed", runId, ...(request.taskId ? { taskId: request.taskId } : {}), error: message, at: now() });
       trace.finish("failed");
       return result;
     } finally {
       clearTimeout(runTimer);
       signal?.removeEventListener("abort", onParentAbort);
       this.#tokensByRun.delete(runId);
+      this.#taskIdsByRun.delete(runId);
+      this.#budgetsByRun.delete(runId);
       for (const [approvalId, waiter] of this.#approvalWaiters) {
         if (waiter.runId === runId) {
           this.#approvalWaiters.delete(approvalId);
@@ -646,7 +1132,7 @@ export class AgentLoop {
     trace: TraceRecorder,
   ): AgentRunResult {
     if (isRunTimeout(signal)) {
-      const error = `run exceeded maxRunMs=${this.maxRunMs}`;
+      const error = `run exceeded maxRunMs=${this.#budgetsByRun.get(info.runId)?.maxRunMs ?? this.maxRunMs}`;
       const result: AgentRunResult = {
         runId: info.runId,
         state: "failed",
@@ -656,7 +1142,8 @@ export class AgentLoop {
         error,
         traceId: trace.traceId,
       };
-      emit({ type: "agent.failed", runId: info.runId, error, at: now() });
+      const taskId = this.#taskIdsByRun.get(info.runId);
+      emit({ type: "agent.failed", runId: info.runId, ...(taskId ? { taskId } : {}), error, at: now() });
       trace.finish("failed");
       return result;
     }
@@ -669,7 +1156,8 @@ export class AgentLoop {
       traceId: trace.traceId,
     };
     emit({ type: "agent.text", runId: info.runId, textDelta: "\n\n[已停止]", at: now() });
-    emit({ type: "agent.completed", runId: info.runId, result, at: now() });
+    const taskId = this.#taskIdsByRun.get(info.runId);
+    emit({ type: "agent.completed", runId: info.runId, ...(taskId ? { taskId } : {}), result, at: now() });
     trace.finish("cancelled");
     return result;
   }
@@ -728,6 +1216,56 @@ function runTitle(prompt: string): string {
 function isRunTimeout(signal: AbortSignal): boolean {
   const reason = signal.reason;
   return reason instanceof Error && reason.message === "run-timeout";
+}
+
+/**
+ * Wait for the next host-owned observation slot without ever outliving the
+ * run's abort signal. Invalid timestamps fail closed instead of turning a
+ * malformed host response into a tight sampling loop.
+ */
+function waitForObservationSample(nextSampleAt: string, signal: AbortSignal): Promise<boolean> {
+  const dueAt = Date.parse(nextSampleAt);
+  if (!Number.isFinite(dueAt)) return Promise.resolve(false);
+  const delayMs = Math.max(0, dueAt - Date.now());
+  if (delayMs === 0) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(ready);
+    };
+    const onAbort = (): void => finish(false);
+    timer = setTimeout(() => finish(true), Math.min(delayMs, 2_147_000_000));
+    timer.unref?.();
+    if (signal.aborted) finish(false);
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Investigation metadata tools are not observations of the target. Persisting their
+ * return values as fresh evidence would make a finding or an evidence lookup look like
+ * a new server sample and would make scheduled comparisons noisy.
+ */
+function shouldAutoRecordEvidence(toolName: string): boolean {
+  return !toolName.startsWith("investigation.");
+}
+
+/**
+ * Artifact persistence is deliberately orthogonal to the ordered plan. The loop already
+ * records execution/verification/failure artifacts automatically, and a model-authored
+ * artifact must not advance the next remote step a second time. Evidence lookup is also
+ * a context read, not a step completion.
+ */
+function shouldAdvancePlan(toolName: string): boolean {
+  return toolName !== "investigation.evidence"
+    && toolName !== "investigation.evidence.search"
+    && toolName !== "investigation.evidence.compare"
+    && toolName !== "investigation.artifact";
 }
 
 function summarize(output: unknown): string {

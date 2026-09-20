@@ -111,6 +111,7 @@ struct TestHttpServer {
     thread: Option<thread::JoinHandle<()>>,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     sse: Arc<Mutex<Option<TcpStream>>>,
+    sse_disconnected: Arc<AtomicBool>,
     policy: Arc<Mutex<AuthPolicy>>,
 }
 
@@ -121,10 +122,12 @@ impl TestHttpServer {
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let sse = Arc::new(Mutex::new(None));
+        let sse_disconnected = Arc::new(AtomicBool::new(false));
         let policy = Arc::new(Mutex::new(AuthPolicy::default()));
         let thread_stop = stop.clone();
         let thread_requests = requests.clone();
         let thread_sse = sse.clone();
+        let thread_sse_disconnected = sse_disconnected.clone();
         let thread_policy = policy.clone();
         let thread = thread::spawn(move || {
             for incoming in listener.incoming() {
@@ -136,10 +139,12 @@ impl TestHttpServer {
                 };
                 let requests = thread_requests.clone();
                 let sse = thread_sse.clone();
+                let sse_disconnected = thread_sse_disconnected.clone();
                 let policy = thread_policy.clone();
                 let stop = thread_stop.clone();
                 thread::spawn(move || {
-                    let _ = handle_connection(stream, requests, sse, policy, stop);
+                    let _ =
+                        handle_connection(stream, requests, sse, sse_disconnected, policy, stop);
                 });
             }
         });
@@ -149,6 +154,7 @@ impl TestHttpServer {
             thread: Some(thread),
             requests,
             sse,
+            sse_disconnected,
             policy,
         }
     }
@@ -187,6 +193,17 @@ impl TestHttpServer {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the optional GET SSE stream was not opened"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_sse_disconnect(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !self.sse_disconnected.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the optional GET SSE stream stayed open after the last handle was dropped"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -403,6 +420,7 @@ fn handle_connection(
     mut stream: TcpStream,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     sse: Arc<Mutex<Option<TcpStream>>>,
+    sse_disconnected: Arc<AtomicBool>,
     policy: Arc<Mutex<AuthPolicy>>,
     stop: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
@@ -497,9 +515,40 @@ fn handle_connection(
                   Connection: keep-alive\r\n\r\n",
             )?;
             stream.flush()?;
-            *sse.lock().expect("SSE stream") = Some(stream);
+            let writer = stream.try_clone()?;
+            *sse.lock().expect("SSE stream") = Some(writer);
+            stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+            let mut probe = [0_u8; 1];
             while !stop.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(20));
+                match stream.read(&mut probe) {
+                    Ok(0) => {
+                        *sse.lock().expect("SSE stream") = None;
+                        sse_disconnected.store(true, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        let mut sse = sse.lock().expect("SSE stream");
+                        let Some(writer) = sse.as_mut() else {
+                            break;
+                        };
+                        if write_sse_chunk(writer, ": keepalive\n\n").is_err() {
+                            *sse = None;
+                            sse_disconnected.store(true, Ordering::SeqCst);
+                            return Ok(());
+                        }
+                    }
+                    Err(_) => {
+                        *sse.lock().expect("SSE stream") = None;
+                        sse_disconnected.store(true, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                }
             }
             Ok(())
         }
@@ -960,6 +1009,29 @@ fn unused_local_port() -> u16 {
     let port = listener.local_addr().expect("addr").port();
     drop(listener);
     port
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_the_last_http_handle_stops_the_optional_get_stream() {
+    let server = TestHttpServer::start();
+    let config = McpHttpConfig::new(
+        "mcp_http_drop",
+        "HTTP drop fixture",
+        &server.url(),
+        DEFAULT_REQUEST_TIMEOUT,
+    )
+    .expect("valid HTTP config");
+    let supervisor = McpSupervisor::new();
+    let started = supervisor
+        .start_transport(&McpTransportConfig::Http(config))
+        .await
+        .expect("HTTP handshake and tool list");
+    assert!(started.info.pid.is_none());
+    server.wait_for_sse();
+
+    drop(supervisor);
+
+    server.wait_for_sse_disconnect();
 }
 
 #[tokio::test]

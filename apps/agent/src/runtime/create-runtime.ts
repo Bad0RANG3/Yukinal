@@ -20,10 +20,31 @@ import { dockerLogsTool } from "../tools/builtin/docker-logs.js";
 import { dockerPsTool } from "../tools/builtin/docker-ps.js";
 import { dockerRestartTool } from "../tools/builtin/docker-restart.js";
 import { filesystemEditTool } from "../tools/builtin/filesystem-edit.js";
+import { filesystemBackupTool } from "../tools/builtin/filesystem-backup.js";
+import { filesystemBackupListTool } from "../tools/builtin/filesystem-backup-list.js";
+import { filesystemBackupCleanupTool } from "../tools/builtin/filesystem-backup-cleanup.js";
 import { filesystemReadTool } from "../tools/builtin/filesystem-read.js";
+import { filesystemRestoreTool } from "../tools/builtin/filesystem-restore.js";
 import { filesystemWriteTool } from "../tools/builtin/filesystem-write.js";
+import { investigationEvidenceTool } from "../tools/builtin/investigation-evidence.js";
+import { investigationEvidenceSearchTool } from "../tools/builtin/investigation-evidence-search.js";
+import { investigationEvidenceCompareTool } from "../tools/builtin/investigation-evidence-compare.js";
+import { investigationEvidenceCorrelateTool } from "../tools/builtin/investigation-evidence-correlate.js";
+import { investigationEvidenceTriageTool } from "../tools/builtin/investigation-evidence-triage.js";
+import { investigationRetentionPreviewTool } from "../tools/builtin/investigation-retention-preview.js";
+import { investigationFindingTool } from "../tools/builtin/investigation-finding.js";
+import { investigationBriefTool } from "../tools/builtin/investigation-brief.js";
+import { investigationPlanTool } from "../tools/builtin/investigation-plan.js";
+import { investigationPlaybookTool } from "../tools/builtin/investigation-playbook.js";
+import { investigationArtifactTool } from "../tools/builtin/investigation-artifact.js";
+import { packageInspectTool } from "../tools/builtin/package-inspect.js";
+import { packageInstallTool } from "../tools/builtin/package-install.js";
 import { serverInfoTool } from "../tools/builtin/server-info.js";
+import { serverLogsTool } from "../tools/builtin/server-logs.js";
+import { serverServicesTool } from "../tools/builtin/server-services.js";
 import { systemEchoTool } from "../tools/builtin/system-echo.js";
+import { systemdInspectTool } from "../tools/builtin/systemd-inspect.js";
+import { systemdRestartTool } from "../tools/builtin/systemd-restart.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { HostRpcClient } from "../transport/host-client.js";
 
@@ -52,15 +73,36 @@ export function createRuntime(
   const declarations = [registry.register(systemEchoTool)];
   if (options.hostToolClient) {
     declarations.push(registry.register(serverInfoTool(options.hostToolClient)));
+    declarations.push(registry.register(serverLogsTool(options.hostToolClient)));
+    declarations.push(registry.register(serverServicesTool(options.hostToolClient)));
     declarations.push(registry.register(dockerPsTool(options.hostToolClient)));
     declarations.push(registry.register(dockerLogsTool(options.hostToolClient)));
     declarations.push(registry.register(dockerInspectTool(options.hostToolClient)));
     declarations.push(registry.register(dockerRestartTool(options.hostToolClient)));
+    declarations.push(registry.register(systemdInspectTool(options.hostToolClient)));
+    declarations.push(registry.register(systemdRestartTool(options.hostToolClient)));
+    declarations.push(registry.register(packageInspectTool(options.hostToolClient)));
+    declarations.push(registry.register(packageInstallTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemReadTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemWriteTool(options.hostToolClient)));
+    declarations.push(registry.register(filesystemBackupTool(options.hostToolClient)));
+    declarations.push(registry.register(filesystemBackupListTool(options.hostToolClient)));
+    declarations.push(registry.register(filesystemBackupCleanupTool(options.hostToolClient)));
+    declarations.push(registry.register(filesystemRestoreTool(options.hostToolClient)));
     // 读-改-写是**独立**的一项能力，不是 write 的开关：write 覆盖整个文件，edit 要求
     // 内容与刚读过的一致才替换。两者都给，模型才能自己选「要看清楚再改」还是「整份重写」。
     declarations.push(registry.register(filesystemEditTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationEvidenceTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationEvidenceSearchTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationEvidenceCompareTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationEvidenceCorrelateTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationEvidenceTriageTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationRetentionPreviewTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationFindingTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationBriefTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationPlanTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationPlaybookTool(options.hostToolClient)));
+    declarations.push(registry.register(investigationArtifactTool(options.hostToolClient)));
   }
 
   const permission = new PermissionEngine();
@@ -74,6 +116,18 @@ export function createRuntime(
     permission,
     context,
     maxRunMs: options.maxRunMs,
+    recordEvidence: options.hostToolClient
+      ? (evidence, signal) => options.hostToolClient!.recordEvidence({ evidence }, signal)
+      : undefined,
+    recordArtifact: options.hostToolClient
+      ? (request, signal) => options.hostToolClient!.recordArtifact(request, signal)
+      : undefined,
+    checkPlan: options.hostToolClient
+      ? (request, signal) => options.hostToolClient!.checkPlan(request, signal)
+      : undefined,
+    recordPlanStepResult: options.hostToolClient
+      ? (request, signal) => options.hostToolClient!.recordPlanStepResult(request, signal)
+      : undefined,
     createTrace: options.createTrace,
   });
 

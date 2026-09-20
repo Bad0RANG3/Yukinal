@@ -3,13 +3,14 @@
 //! russh types stay inside this module + `backend`; `Session`/`PtySession`/
 //! `SftpClient` in the crate root only hold `Arc`s to the handles defined here.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{watch, Mutex};
 
 use crate::backend::{establish, ConnHandler};
 use crate::known_hosts::KnownHostsStore;
-use crate::{ConnectionSecrets, PtyEvent, Result, SshConfig};
+use crate::{ConnectionSecrets, Error, PtyEvent, Result, SshConfig};
 
 /// 断开握手的上限。对端失联时 `disconnect()` 不会自己返回，而 `close()` 的
 /// 调用方在关窗/切服务器，不该被一台已经失联的主机拖住。
@@ -22,7 +23,9 @@ pub(crate) struct SessionHandle {
     pub config: SshConfig,
     secrets: ConnectionSecrets,
     reconnect_lock: Mutex<()>,
+    closed: AtomicBool,
     shutdown: watch::Sender<bool>,
+    current_connection: watch::Sender<Option<Arc<russh::client::Handle<ConnHandler>>>>,
     keepalive_task: tokio::task::JoinHandle<()>,
 }
 
@@ -36,21 +39,28 @@ impl SessionHandle {
         known_hosts: Arc<StdMutex<KnownHostsStore>>,
     ) -> Self {
         let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (current_connection, current_connection_rx) = watch::channel(Some(Arc::clone(&conn)));
         let keepalive_task = if config.keepalive_interval_secs > 0 {
             let interval =
                 std::time::Duration::from_secs(u64::from(config.keepalive_interval_secs));
-            let ka_conn = Arc::clone(&conn);
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(interval);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
                         _ = shutdown_rx.changed() => break,
-                        _ = tick.tick() => {
+                        _ = tick.tick() => {}
+                    }
+                    let Some(conn) = current_connection_rx.borrow().clone() else {
+                        break;
+                    };
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => break,
+                        result = conn.send_ping() => {
                             // Ping keeps NAT/proxy sessions alive; a failure here is
                             // surfaced on the next operation (ops reconnect), not raced
                             // from a background task that would clobber session state.
-                            if ka_conn.send_ping().await.is_err() {
+                            if result.is_err() {
                                 tracing::debug!("ssh keepalive ping failed; ops will reconnect");
                             }
                         }
@@ -69,9 +79,27 @@ impl SessionHandle {
             config,
             secrets,
             reconnect_lock: Mutex::new(()),
+            closed: AtomicBool::new(false),
             shutdown,
+            current_connection,
             keepalive_task,
         }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Return the live connection unless the session has been permanently closed.
+    pub(crate) async fn connection(&self) -> Result<Arc<russh::client::Handle<ConnHandler>>> {
+        if self.is_closed() {
+            return Err(Error::Channel("session is closed".into()));
+        }
+        let conn = self.conn.lock().await.clone();
+        if self.is_closed() {
+            return Err(Error::Channel("session is closed".into()));
+        }
+        Ok(conn)
     }
 
     /// Re-establish the connection using the stored config + resolved secrets.
@@ -79,7 +107,14 @@ impl SessionHandle {
     /// failed reconnect for a successful one.
     pub(crate) async fn reconnect(&self) -> Result<()> {
         let _guard = self.reconnect_lock.lock().await;
+        if self.is_closed() {
+            return Err(Error::Channel("session is closed".into()));
+        }
         let new_conn = establish(&self.config, &self.secrets, &self.known_hosts).await?;
+        if self.is_closed() {
+            return Err(Error::Channel("session is closed".into()));
+        }
+        let _ = self.current_connection.send(Some(Arc::clone(&new_conn)));
         *self.conn.lock().await = new_conn;
         Ok(())
     }
@@ -103,7 +138,14 @@ impl SessionHandle {
     /// 断开本身仍然加一个上限：`close()` 的调用方在关窗，不该被一个失联主机
     /// 拖到无法退出。超时后直接返回 —— 连接对象随后随 `Arc` 一起释放。
     pub(crate) async fn close(&self) -> Result<()> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let _ = self.shutdown.send(true);
+        let _ = self.current_connection.send(None);
+        // Serialize with reconnect so a connection cannot be published after the
+        // permanent close fence has been set.
+        let _guard = self.reconnect_lock.lock().await;
         // 作用域刻意收窄：`guard` 在这一行结束时就被释放，下面的 `await` 是
         // 在锁外进行的。写成 `Arc::clone(&self.conn.lock().await)` 会得到一个
         // 临时的 guard，其生命周期延续到整条语句结束 —— 也就是把锁又带进了
@@ -123,7 +165,9 @@ impl SessionHandle {
 
 impl Drop for SessionHandle {
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
         let _ = self.shutdown.send(true);
+        let _ = self.current_connection.send(None);
         // `keepalive_task` 原先是个**只写不读**的字段，而 `tokio::task::JoinHandle`
         // 被丢弃时只是 detach —— 任务继续跑。所以「握着句柄」这件事本身什么都没做，
         // 唯一真正停掉 keepalive 的是上面那个 shutdown 信号：任务在 `select!` 里
@@ -142,7 +186,7 @@ impl Drop for SessionHandle {
 pub(crate) enum PtyCmd {
     Write(Vec<u8>),
     Resize(u16, u16),
-    Close,
+    Close(tokio::sync::oneshot::Sender<()>),
 }
 
 /// PTY 输出队列的容量，单位是**事件**（每个 `PtyEvent::Output` 大致对应一个 russh

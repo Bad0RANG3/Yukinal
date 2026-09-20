@@ -1,0 +1,26 @@
+{
+  "brief": {
+    "id": "brief_01",
+    "taskId": "task_01",
+    "generatedAt": "2026-01-01T00:02:00.000Z",
+    "status": "selected",
+    "findingIds": ["finding_01"],
+    "options": [
+      {
+        "id": "option_01",
+        "title": "继续只读采样",
+        "summary": "在不改变远端状态的前提下收集第二个时间窗。",
+        "impact": "不会写入服务器。",
+        "riskLevel": "read",
+        "evidenceIds": ["ev_01"],
+        "findingIds": ["finding_01"],
+        "verification": "第二个样本应能确认延迟是否持续。",
+        "requiresApproval": false,
+        "status": "selected",
+        "continuation": "continue_readonly"
+      }
+    ],
+    "selectedOptionId": "option_01"
+  },
+  "continuation": "continue_readonly"
+}

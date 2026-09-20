@@ -12,6 +12,8 @@ import { z } from "zod";
 
 import {
   isValidInternalToolName,
+  type AgentPermissionMode,
+  type AgentRunMode,
   type JsonSchema,
   type PermissionDecision,
   type ToolCallRequest,
@@ -22,6 +24,7 @@ import {
 
 import { NotImplementedError } from "../errors.js";
 import { redactSensitiveText } from "../security/sensitive-data.js";
+import { actionFingerprint } from "../security/action-fingerprint.js";
 import type { TraceRecorder } from "../trace/trace-recorder.js";
 import type { AnyTool, Tool } from "./tool.js";
 
@@ -47,6 +50,10 @@ export interface ExecuteOptions {
   /** Injectable clock for tests. */
   now?: () => number;
   log?: (message: string, meta?: Record<string, unknown>) => void;
+  /** The admitted run's delegation, available to tools that generate durable plans. */
+  permissionMode?: AgentPermissionMode;
+  /** The admitted run's scope mode, available to tools that generate durable plans. */
+  mode?: AgentRunMode;
 }
 
 export interface RegisterOptions {
@@ -103,6 +110,7 @@ export class ToolRegistry {
       retry: tool.retry,
       inputSchema: toJsonSchema(tool.input),
       origin: tool.origin ?? { kind: "builtin" },
+      ...(tool.effectful === true ? { effectful: true } : {}),
     };
 
     this.#tools.set(tool.name, tool as unknown as AnyTool);
@@ -194,6 +202,12 @@ export class ToolRegistry {
             callId: request.callId,
             traceId: request.traceId,
             target: request.target,
+            taskId: request.taskId,
+            planId: request.planId,
+            planStepId: request.planStepId,
+            evidenceIds: request.evidenceIds,
+            permissionMode: options.permissionMode,
+            mode: options.mode,
             signal: controller.signal,
             deadlineAt,
             log: (message, meta) => options.log?.(`${declaration.name}: ${message}`, meta),
@@ -271,6 +285,23 @@ export function checkTicket(
     return {
       code: "denied_by_policy",
       message: `Approval was granted for ${describe(decision.target)} but the call targets ${describe(request.target)}`,
+      retryable: false,
+    };
+  }
+  if (decision.inputFingerprint !== undefined && decision.inputFingerprint !== actionFingerprint(request.input)) {
+    return {
+      code: "denied_by_policy",
+      message: "Approval was granted for a different tool input; refusing to replay it for another action",
+      retryable: false,
+    };
+  }
+  const hasDurablePlan = [request.taskId, request.planId, request.planStepId].every(
+    (value) => typeof value === "string" && value.trim().length > 0,
+  );
+  if (declaration.effectful === true && !hasDurablePlan) {
+    return {
+      code: "denied_by_policy",
+      message: "Effectful tools require a durable task, ChangePlan, and plan step before execution",
       retryable: false,
     };
   }

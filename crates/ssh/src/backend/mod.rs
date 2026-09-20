@@ -223,7 +223,7 @@ impl SshBackend for RusshBackend {
     }
 
     async fn pty_close(&self, pty: &crate::PtySession) -> Result<()> {
-        pty::pty_close(pty)
+        pty::pty_close(pty).await
     }
 
     async fn close(&self, session: &Session) -> Result<()> {
@@ -245,13 +245,19 @@ where
 {
     let mut attempt = 0;
     loop {
+        if session.inner.is_closed() {
+            return Err(Error::Channel("session is closed".into()));
+        }
         if cancel.is_some_and(|token| token.is_cancelled()) {
             return Err(Error::Cancelled);
         }
-        let conn = session.inner.conn.lock().await.clone();
+        let conn = session.inner.connection().await?;
         let result = op(conn).await;
         match result {
             Err(Error::Transport(_)) if attempt == 0 => {
+                if session.inner.is_closed() {
+                    return Err(Error::Channel("session is closed".into()));
+                }
                 if cancel.is_some_and(|token| token.is_cancelled()) {
                     return Err(Error::Cancelled);
                 }

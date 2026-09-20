@@ -32,7 +32,12 @@ if (listed.status !== 0) {
   console.error("check-docs-links: `git ls-files` failed; cannot establish scope");
   process.exit(2);
 }
-const files = listed.stdout.split("\0").filter((file) => file.endsWith(".md"));
+// `git ls-files --cached` includes tracked files deleted in the working tree. They are
+// intentionally out of scope for a local documentation check: attempting to read one would
+// turn a legitimate deletion into an unrelated ENOENT failure before the checker can report links.
+const files = listed.stdout
+  .split("\0")
+  .filter((file) => file.endsWith(".md") && existsSync(path.join(root, file)));
 if (files.length === 0) {
   console.error("check-docs-links: no markdown files found -- this run proves nothing");
   process.exit(2);

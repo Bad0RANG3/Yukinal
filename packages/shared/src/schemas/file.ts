@@ -63,3 +63,69 @@ export const FilesystemWriteOutputSchema = z.strictObject({
   path: RemoteAbsolutePathSchema,
   bytesWritten: z.number().int().nonnegative(),
 });
+
+export const FilesystemBackupInputSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+});
+
+export const FilesystemBackupOutputSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  revision: ContentRevisionSchema,
+  bytesBackedUp: z.number().int().nonnegative(),
+});
+
+export const FilesystemRestoreInputSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  expectedRevision: ContentRevisionSchema,
+});
+
+export const FilesystemRestoreOutputSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  revision: ContentRevisionSchema,
+  bytesBefore: z.number().int().nonnegative(),
+  bytesAfter: z.number().int().nonnegative(),
+});
+
+export const FilesystemBackupCleanupInputSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  expectedRevision: ContentRevisionSchema,
+});
+
+export const FilesystemBackupCleanupOutputSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  revision: ContentRevisionSchema,
+  bytesDeleted: z.number().int().nonnegative(),
+});
+
+const FilesystemBackupStatusSchema = z.enum(["available", "restored", "deleted"]);
+
+export const FilesystemBackupListInputSchema = z.strictObject({
+  status: FilesystemBackupStatusSchema.optional(),
+  path: RemoteAbsolutePathSchema.optional(),
+  limit: z.number().int().min(1).max(128).optional(),
+});
+
+export const FilesystemBackupLedgerItemSchema = z.strictObject({
+  id: z.string().trim().min(1).max(256),
+  serverId: z.string().trim().min(1).max(256),
+  taskId: z.string().trim().min(1).max(256),
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  revision: ContentRevisionSchema,
+  bytesBackedUp: z.number().int().nonnegative().max(1024 * 1024),
+  status: FilesystemBackupStatusSchema,
+  createdAt: z.string().trim().min(1).max(80),
+  updatedAt: z.string().trim().min(1).max(80),
+  restoredAt: z.string().trim().min(1).max(80).optional(),
+  deletedAt: z.string().trim().min(1).max(80).optional(),
+});
+
+export const FilesystemBackupListOutputSchema = z.strictObject({
+  backups: z.array(FilesystemBackupLedgerItemSchema).max(128),
+  truncated: z.boolean(),
+});

@@ -5,8 +5,12 @@
 //! `yukinal_core::supervisor`; this struct only holds the instances so commands can
 //! reach them. Nothing here is reachable from React except through `commands`.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use yukinal_core::mcp::McpSupervisor;
 use yukinal_core::supervisor::Supervisor;
@@ -24,10 +28,23 @@ pub use auth::AuthChallengeBroker;
 pub use host_key::HostKeyProbeBroker;
 pub use oauth::OAuthFlowBroker;
 
+/// Bounded live responses for host action retries. The durable ledger lives in
+/// SQLite; this cache only lets the same desktop process replay a completed
+/// response without persisting raw remote output.
+pub(crate) type HostToolReplayCache = Arc<Mutex<HashMap<(String, String), Value>>>;
+
 pub struct AppState {
+    /// Process-lifetime cancellation fence. Once Tauri asks the host to exit,
+    /// every background loop and long-running command observes this token and
+    /// stops admitting new work.
+    pub shutdown: CancellationToken,
     pub supervisor: Supervisor,
     /// SQLite（servers / identities / provider_configs / tool_executions …）。
     pub database: Database,
+    /// Host-side action responses keyed by `(traceId, callId)`. A missing cache
+    /// entry is intentionally handled as a fail-closed duplicate, not a reason
+    /// to execute the remote action again.
+    pub(crate) host_tool_replays: HostToolReplayCache,
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
     pub ssh: Arc<RusshBackend>,
@@ -59,8 +76,10 @@ impl AppState {
             tracing::warn!("credential cleanup reconciliation: {failure}");
         }
         Ok(Self {
+            shutdown: CancellationToken::new(),
             supervisor: Supervisor::new(),
             database,
+            host_tool_replays: Arc::new(Mutex::new(HashMap::new())),
             credentials,
             ssh,
             terminals,

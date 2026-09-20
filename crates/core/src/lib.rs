@@ -26,7 +26,9 @@ pub mod identity;
 pub mod ids;
 pub mod ipc;
 pub mod mcp;
+pub mod package;
 pub mod provider;
+pub mod service;
 
 /// 一行不可信文本 → 可以安全写进日志/错误的东西。
 ///

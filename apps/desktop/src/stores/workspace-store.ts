@@ -12,7 +12,7 @@ import { create } from "zustand";
 
 import type { AgentPromptPart } from "@yukinal/shared";
 
-export const PRIMARY_NAV = ["servers", "projects", "activity", "settings"] as const;
+export const PRIMARY_NAV = ["servers", "projects", "tasks", "activity", "settings"] as const;
 export type PrimaryNav = (typeof PRIMARY_NAV)[number];
 
 export const SERVER_PAGES = ["overview", "terminal", "files", "logs", "services", "activity"] as const;
@@ -24,6 +24,7 @@ export interface WorkspaceState {
   selectedServerId: string | null;
   selectedProviderId: string | null;
   selectedModel: string | null;
+  selectedTaskId: string | null;
   /** Right panel is session-scoped and opens automatically for approvals. */
   agentOpen: boolean;
   agentDraft: string;
@@ -38,6 +39,7 @@ export interface WorkspaceState {
   syncServerSelection(serverIds: readonly string[]): void;
   selectProvider(providerId: string | null, model?: string | null): void;
   selectModel(model: string | null): void;
+  selectTask(taskId: string | null): void;
   setAgentOpen(open: boolean): void;
   toggleAgent(): void;
 }
@@ -48,6 +50,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedServerId: null,
   selectedProviderId: null,
   selectedModel: null,
+  selectedTaskId: null,
   agentOpen: true,
   agentDraft: "",
   agentAttachments: [],
@@ -71,6 +74,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   }),
   selectProvider: (selectedProviderId, selectedModel = null) => set({ selectedProviderId, selectedModel }),
   selectModel: (selectedModel) => set({ selectedModel }),
+  selectTask: (selectedTaskId) => set({ selectedTaskId }),
   setAgentOpen: (agentOpen) => set({ agentOpen }),
   toggleAgent: () => set((state) => ({ agentOpen: !state.agentOpen })),
 }));

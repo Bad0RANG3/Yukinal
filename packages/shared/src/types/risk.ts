@@ -228,6 +228,8 @@ export interface PermissionDecision {
     workspaceId?: string;
     environment: Environment;
   };
+  /** SHA-256 of the canonical tool input, so an approval cannot be replayed for another action. */
+  inputFingerprint?: string;
   /** Present iff outcome === "ask". */
   approvalId?: string;
   requestedAt: string;

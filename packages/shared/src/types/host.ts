@@ -1,5 +1,19 @@
 /** Sidecar requests that are executed by the Rust host, never by Node. */
 
+import type {
+  Evidence,
+  EvidenceCorrelationInput,
+  EvidenceCorrelationResult,
+  EvidenceComparisonInput,
+  EvidenceComparisonResult,
+  EvidenceSearchInput,
+  EvidenceSearchResult,
+  InvestigationArtifact,
+  InvestigationPlan,
+  InvestigationPlanDeviation,
+  PlanStepKind,
+} from "./investigation.js";
+import type { InvestigationRetentionPreview, InvestigationRetentionPreviewInput } from "./retention.js";
 import type { ToolError, ToolTarget } from "./tool.js";
 
 export const HOST_METHODS = {
@@ -15,6 +29,18 @@ export const HOST_METHODS = {
    * response is `HostMcpCatalogResponse`.
    */
   mcpCatalog: "host.mcp.catalog",
+  evidenceRecord: "host.investigation.evidence.record",
+  evidenceFetch: "host.investigation.evidence.fetch",
+  evidenceSearch: "host.investigation.evidence.search",
+  evidenceCorrelate: "host.investigation.evidence.correlate",
+  evidenceCompare: "host.investigation.evidence.compare",
+  retentionPreview: "host.investigation.retention.preview",
+  findingRecord: "host.investigation.finding.record",
+  briefRecord: "host.investigation.brief.record",
+  planRecord: "host.investigation.plan.record",
+  planCheck: "host.investigation.plan.check",
+  planStepResult: "host.investigation.plan.step_result",
+  artifactRecord: "host.investigation.artifact.record",
 } as const;
 
 export interface HostToolExecuteRequest {
@@ -23,6 +49,10 @@ export interface HostToolExecuteRequest {
   toolName: string;
   input: unknown;
   target: ToolTarget;
+  taskId?: string;
+  planId?: string;
+  planStepId?: string;
+  evidenceIds?: string[];
 }
 
 /** Cancels a previously sent host.tool.execute request by its JSON-RPC id. */
@@ -39,6 +69,127 @@ export type HostToolExecuteResponse =
   | { status: "failed"; error: ToolError }
   | { status: "cancelled"; error?: ToolError };
 
+export interface HostEvidenceRecordRequest {
+  evidence: Evidence;
+}
+
+export type HostEvidenceRecordResponse =
+  | { recorded: true; evidenceId?: string; reused?: boolean }
+  | { recorded: false; error: ToolError };
+
+export interface HostEvidenceFetchRequest {
+  taskId: string;
+  evidenceId: string;
+}
+
+export type HostEvidenceFetchResponse =
+  | { status: "success"; evidence: Evidence }
+  | { status: "not_found" }
+  | { status: "failed"; error: ToolError };
+
+export interface HostEvidenceSearchRequest extends EvidenceSearchInput {
+  taskId: string;
+}
+
+export type HostEvidenceSearchResponse =
+  | ({ status: "success" } & EvidenceSearchResult)
+  | { status: "failed"; error: ToolError };
+
+export interface HostEvidenceCorrelationRequest extends EvidenceCorrelationInput {
+  taskId: string;
+}
+
+export type HostEvidenceCorrelationResponse =
+  | ({ status: "success" } & EvidenceCorrelationResult)
+  | { status: "failed"; error: ToolError };
+
+export interface HostEvidenceCompareRequest extends EvidenceComparisonInput {
+  taskId: string;
+}
+
+export type HostEvidenceCompareResponse =
+  | ({ status: "success" } & EvidenceComparisonResult)
+  | { status: "failed"; error: ToolError };
+
+export type HostRetentionPreviewRequest = InvestigationRetentionPreviewInput;
+
+export type HostRetentionPreviewResponse =
+  | { status: "success"; preview: InvestigationRetentionPreview }
+  | { status: "failed"; error: ToolError };
+
+export interface HostFindingRecordRequest {
+  finding: import("./investigation.js").Finding;
+}
+
+export type HostFindingRecordResponse =
+  | { recorded: true; finding: import("./investigation.js").Finding }
+  | { recorded: false; error: ToolError };
+
+export interface HostBriefRecordRequest {
+  brief: import("./investigation.js").DecisionBrief;
+}
+
+export type HostBriefRecordResponse =
+  | { recorded: true; brief: import("./investigation.js").DecisionBrief }
+  | { recorded: false; error: ToolError };
+
+export interface HostPlanRecordRequest {
+  plan: InvestigationPlan;
+}
+
+export type HostPlanRecordResponse =
+  | { recorded: true; plan: InvestigationPlan }
+  | { recorded: false; error: ToolError };
+
+export interface HostPlanCheckRequest {
+  taskId: string;
+  toolName: string;
+  input: unknown;
+  target: ToolTarget;
+}
+
+export type HostPlanCheckResponse =
+  | {
+      status: "allowed";
+      planId: string;
+      stepId: string;
+      stepKind: PlanStepKind;
+      evidenceIds: string[];
+      requiresApproval: boolean;
+    }
+  | { status: "deviation"; deviation: InvestigationPlanDeviation }
+  | { status: "failed"; error: ToolError };
+
+export interface HostPlanStepResultRequest {
+  taskId: string;
+  planId: string;
+  stepId: string;
+  status: "success" | "failed" | "cancelled";
+  retryable: boolean;
+  outputSummary?: string;
+}
+
+export type HostPlanStepResultResponse =
+  | {
+      recorded: true;
+      plan: InvestigationPlan;
+      observation?: "running" | "failed";
+      sampleAccepted?: boolean;
+      nextSampleAt?: string;
+    }
+  | { recorded: false; error: ToolError };
+
+export interface HostArtifactRecordRequest {
+  artifact: InvestigationArtifact;
+  planId?: string;
+  planStepId?: string;
+  evidenceIds?: string[];
+}
+
+export type HostArtifactRecordResponse =
+  | { recorded: true; artifact: InvestigationArtifact }
+  | { recorded: false; error: ToolError };
+
 /**
  * The tuple exists so `schemas/host.ts` can write `z.enum(HOST_CONTEXT_KINDS)`.
  *
@@ -48,7 +199,7 @@ export type HostToolExecuteResponse =
  * as a *runtime* failure rather than a compile error. This is the same pattern
  * `types/enums.ts` and `types/risk.ts` already use.
  */
-export const HOST_CONTEXT_KINDS = ["server", "snapshot", "workspace"] as const;
+export const HOST_CONTEXT_KINDS = ["server", "snapshot", "workspace", "investigation"] as const;
 export type HostContextKind = (typeof HOST_CONTEXT_KINDS)[number];
 
 export interface HostContextRequest {

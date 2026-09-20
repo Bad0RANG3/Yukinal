@@ -1,0 +1,29 @@
+{
+  "task": {
+    "id": "task_01",
+    "objective": "确认 staging API 延迟升高的原因",
+    "successCriteria": ["收集服务状态", "比较近期日志"],
+    "scope": {
+      "host": "remote",
+      "serverId": "srv_01abc",
+      "environment": "staging"
+    },
+    "guardrails": {
+      "forbiddenTools": [],
+      "forbiddenPathPrefixes": []
+    },
+    "mode": "readonly",
+    "permissionMode": "ask",
+    "automationLevel": "readonly",
+    "createdBy": "user",
+    "phase": "investigating",
+    "status": "pending",
+    "budget": {
+      "maxSteps": 25,
+      "maxRunMs": 900000,
+      "maxAttempts": 3
+    },
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  }
+}

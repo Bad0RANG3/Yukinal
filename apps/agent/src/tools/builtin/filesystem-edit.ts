@@ -28,6 +28,7 @@ export function filesystemEditTool(host: HostToolExecutor) {
       "re-read when the file may be busy. filesystem.write is the deliberate in-place overwrite for the " +
       "cases this tool refuses.",
     risk: "medium",
+    effectful: true,
     // One host operation, but the edit reads, stages, syncs and renames over SFTP, so its budget is
     // larger than a single write's.
     timeoutMs: 30_000,

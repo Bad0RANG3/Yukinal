@@ -6580,6 +6580,7 @@ name = "yukinal-collector"
 version = "1.0.0"
 dependencies = [
  "futures",
+ "nix",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -6627,8 +6628,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "yukinal-net",
+ "yukinal-time",
 ]
 
 [[package]]
@@ -6655,6 +6658,7 @@ dependencies = [
  "yukinal-net",
  "yukinal-ssh",
  "yukinal-terminal",
+ "yukinal-time",
 ]
 
 [[package]]
@@ -6703,6 +6707,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "yukinal-ssh",
  "yukinal-time",

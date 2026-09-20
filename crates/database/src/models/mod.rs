@@ -68,7 +68,9 @@ mod cleanup;
 mod collector;
 mod execution;
 mod input;
+mod investigation;
 mod provider;
+mod schedules;
 mod server;
 mod settings;
 
@@ -78,9 +80,28 @@ pub use cleanup::PendingCredentialCleanup;
 pub use collector::{CollectorSample, ContainerInfo, ServerSnapshot};
 pub use execution::{PermissionMode, RiskLevel, ToolExecutionRecord, ToolExecutionStatus};
 pub use input::{AddServerInput, AuthenticationInput, UpdateServerInput};
+pub use investigation::{
+    DecisionBrief, DecisionBriefStatus, DecisionOption, DecisionOptionContinuation,
+    DecisionOptionStatus, Evidence, EvidenceContentType, EvidenceKind, EvidenceRedactionStatus,
+    FailureOptionAction, Finding, FindingConfidence, FindingKind, InvestigationArtifact,
+    InvestigationFailure, InvestigationFailureOption, InvestigationObservationWindow,
+    InvestigationPermissionMode, InvestigationPlan, InvestigationPlanApproval,
+    InvestigationPlanDeviation, InvestigationPlanStep, InvestigationRun, InvestigationRunMode,
+    InvestigationRunStatus, InvestigationStep, InvestigationStepKind, InvestigationStepStatus,
+    InvestigationTarget, InvestigationTargetHost, InvestigationTask, InvestigationTaskGuardrails,
+    ObservationWindowStatus, PlanApprovalSource, PlanApprovalStatus, PlanDeviationAction,
+    PlanDeviationCode, PlanIdempotency, PlanStatus, PlanStepKind, PlanStepStatus, TaskArtifactKind,
+    TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
+    MAX_ARTIFACT_SERIALIZED_BYTES, MAX_EVIDENCE_SERIALIZED_BYTES,
+};
 pub use provider::{
     AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpHttpAuthHeaderConfig,
     McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow, McpServerConfig, ProviderModelOption,
+};
+pub use schedules::{
+    InvestigationNotificationPolicy, InvestigationSchedule, InvestigationScheduleComparison,
+    InvestigationScheduleComparisonStatus, InvestigationScheduleRun,
+    InvestigationScheduleRunStatus, InvestigationScheduleStatus,
 };
 pub use server::{
     Environment, HealthState, HostCertificateAuthority, Identity, Server, ServerCapabilities,
@@ -156,11 +177,34 @@ mod tests {
         assert_wire_contract!(ActivityType);
         assert_wire_contract!(ActivitySource);
         assert_wire_contract!(ActivityOutcome);
+        assert_wire_contract!(DecisionOptionContinuation);
         assert_wire_contract!(ChatMessageRole);
         assert_wire_contract!(ToolExecutionStatus);
         // `AiProviderKind` 是 `kebab-case`，不是上面那批 `lowercase`/`snake_case` 里的任何一个：
         // 它是唯一一个多词变体由连字符拼接的枚举，也正因为如此才需要这条断言。
         assert_wire_contract!(AiProviderKind);
+        assert_wire_contract!(TaskStatus);
+        assert_wire_contract!(TaskAutomationLevel);
+        assert_wire_contract!(TaskPhase);
+        assert_wire_contract!(InvestigationRunStatus);
+        assert_wire_contract!(InvestigationStepKind);
+        assert_wire_contract!(InvestigationStepStatus);
+        assert_wire_contract!(TaskFailureCode);
+        assert_wire_contract!(EvidenceKind);
+        assert_wire_contract!(EvidenceContentType);
+        assert_wire_contract!(EvidenceRedactionStatus);
+        assert_wire_contract!(FindingKind);
+        assert_wire_contract!(FindingConfidence);
+        assert_wire_contract!(DecisionBriefStatus);
+        assert_wire_contract!(DecisionOptionStatus);
+        assert_wire_contract!(InvestigationTargetHost);
+        assert_wire_contract!(InvestigationRunMode);
+        assert_wire_contract!(InvestigationPermissionMode);
+        assert_wire_contract!(PlanStatus);
+        assert_wire_contract!(PlanStepKind);
+        assert_wire_contract!(PlanStepStatus);
+        assert_wire_contract!(PlanDeviationCode);
+        assert_wire_contract!(PlanDeviationAction);
     }
 
     /// The multi-word variants specifically: these are the ones a `lowercase`

@@ -51,8 +51,10 @@ pub const PROTOCOL_VERSION: &str = "1.0";
 
 /// JSON-RPC request ids are local to this supervisor; the agent never allocates ids.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
-const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NODE_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+const SHUTDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
 /// CREATE_NO_WINDOW, so the sidecar never flashes a console on Windows.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -106,8 +108,9 @@ pub struct SidecarInfo {
 #[derive(Debug)]
 struct Inner {
     info: SidecarInfo,
-    stdin: AsyncMutex<ChildStdin>,
+    stdin: AsyncMutex<Option<ChildStdin>>,
     child: AsyncMutex<Child>,
+    exit: Mutex<Option<std::process::ExitStatus>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>,
     events: broadcast::Sender<SidecarEvent>,
     next_id: AtomicI64,
@@ -157,6 +160,10 @@ impl SidecarHandle {
             serde_json::to_vec(&frame).map_err(|error| SidecarError::Frame(error.to_string()))?;
         {
             let mut stdin = self.inner.stdin.lock().await;
+            let Some(stdin) = stdin.as_mut() else {
+                self.forget(id);
+                return Err(SidecarError::NotRunning);
+            };
             let mut buffer = payload;
             buffer.push(b'\n');
             if let Err(error) = stdin.write_all(&buffer).await {
@@ -209,6 +216,9 @@ impl SidecarHandle {
         payload.push(b'\n');
 
         let mut stdin = self.inner.stdin.lock().await;
+        let Some(stdin) = stdin.as_mut() else {
+            return Err(SidecarError::NotRunning);
+        };
         stdin
             .write_all(&payload)
             .await
@@ -221,23 +231,67 @@ impl SidecarHandle {
 
     /// Ask the sidecar to exit politely; the process is killed if it does not.
     pub async fn shutdown(&self) {
-        // Closing our ability to send more work comes first: requests in flight fail
-        // fast instead of hanging until a timeout.
+        let _ = self.shutdown_with_status().await;
+    }
+
+    /// Ask the sidecar to exit and return the reaped status to the owner.
+    ///
+    /// `shutdown()` is the fire-and-forget form used by callers that only need to ensure
+    /// the process is gone. The supervisor needs the status itself: it must publish the
+    /// requested exit synchronously before returning from `Supervisor::stop`, rather than
+    /// racing the asynchronous exit watcher for the same fact.
+    pub async fn shutdown_with_status(&self) -> Option<std::process::ExitStatus> {
+        // Closing stdin comes first: requests in flight fail fast instead of hanging
+        // until a timeout.
         self.inner.exited.store(true, Ordering::Relaxed);
-        let mut child = self.inner.child.lock().await;
-        // start_kill() signals without consuming the child, so we can still reap it.
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        let stdin = self.inner.stdin.lock().await.take();
+        drop(stdin);
+        self.inner
+            .fail_pending("agent sidecar is shutting down".to_string());
+
+        if let Some(status) = self.inner.exit_status() {
+            return Some(status);
+        }
+        if let Some(status) = self.await_exit_record(SHUTDOWN_GRACE).await {
+            return Some(status);
+        }
+
+        // EOF was not enough. start_kill only signals; the exit watcher remains the
+        // sole reaper and publishes the one Exited event for this process.
+        {
+            let mut child = self.inner.child.lock().await;
+            let _ = child.start_kill();
+        }
+        self.await_exit_record(SHUTDOWN_KILL_GRACE).await
     }
 
     fn forget(&self, id: i64) {
-        if let Ok(mut pending) = self.inner.pending.lock() {
+        self.inner.forget(id);
+    }
+
+    async fn await_exit_record(&self, grace: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            if let Some(status) = self.inner.exit_status() {
+                return Some(status);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+        }
+    }
+}
+
+impl Inner {
+    fn forget(&self, id: i64) {
+        if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&id);
         }
     }
 
     fn resolve(&self, id: i64, outcome: Result<Value, String>) {
-        let sender = match self.inner.pending.lock() {
+        let sender = match self.pending.lock() {
             Ok(mut pending) => pending.remove(&id),
             Err(_) => None,
         };
@@ -249,7 +303,25 @@ impl SidecarHandle {
 
     fn broadcast(&self, event: SidecarEvent) {
         // No subscriber yet is normal (e.g. during startup); never an error.
-        let _ = self.inner.events.send(event);
+        let _ = self.events.send(event);
+    }
+
+    fn fail_pending(&self, message: String) {
+        if let Ok(mut pending) = self.pending.lock() {
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err(message.clone()));
+            }
+        }
+    }
+
+    fn exit_status(&self) -> Option<std::process::ExitStatus> {
+        self.exit.lock().ok().and_then(|exit| *exit)
+    }
+
+    fn record_exit(&self, status: &std::process::ExitStatus) {
+        if let Ok(mut exit) = self.exit.lock() {
+            *exit = Some(*status);
+        }
     }
 }
 
@@ -296,8 +368,9 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
                 entry: config.entry_label.clone(),
                 started_at: iso8601_utc(yukinal_time::now_epoch_seconds()),
             },
-            stdin: AsyncMutex::new(stdin),
+            stdin: AsyncMutex::new(Some(stdin)),
             child: AsyncMutex::new(child),
+            exit: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             events: events.clone(),
             next_id: AtomicI64::new(1),
@@ -306,7 +379,7 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     };
 
     // stdout: NDJSON frames -> pending responses or forwarded notifications (ADR 0006).
-    let reader = handle.clone();
+    let reader = Arc::downgrade(&handle.inner);
     let mut lines = BufReader::new(stdout).lines();
     tokio::spawn(async move {
         let mut inside_private_key = false;
@@ -315,6 +388,9 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
             if line.is_empty() {
                 continue;
             }
+            let Some(reader) = reader.upgrade() else {
+                break;
+            };
             match serde_json::from_str::<Value>(line) {
                 Ok(frame) => reader.dispatch(frame),
                 Err(error) => reader.broadcast(SidecarEvent::Log(format!(
@@ -326,11 +402,14 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     });
 
     // stderr is the sidecar's log channel; surface it, never swallow it.
-    let logger = handle.clone();
+    let logger = Arc::downgrade(&handle.inner);
     let mut err_lines = BufReader::new(stderr).lines();
     tokio::spawn(async move {
         let mut inside_private_key = false;
         while let Ok(Some(line)) = err_lines.next_line().await {
+            let Some(logger) = logger.upgrade() else {
+                break;
+            };
             logger.broadcast(SidecarEvent::Log(redact_process_log_line(
                 &line,
                 &mut inside_private_key,
@@ -339,26 +418,27 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     });
 
     // Exit watcher doubles as the reaper, so the child never becomes a zombie.
-    let watcher = handle.clone();
+    let watcher = Arc::downgrade(&handle.inner);
     tokio::spawn(async move {
         loop {
+            let Some(watcher) = watcher.upgrade() else {
+                break;
+            };
             let status = {
-                let mut child = watcher.inner.child.lock().await;
+                let mut child = watcher.child.lock().await;
                 child.try_wait().ok().flatten()
             };
             if let Some(status) = status {
-                watcher.inner.exited.store(true, Ordering::Relaxed);
-                if let Ok(mut pending) = watcher.inner.pending.lock() {
-                    for (_, sender) in pending.drain() {
-                        let _ = sender.send(Err("agent sidecar exited".to_string()));
-                    }
-                }
+                watcher.record_exit(&status);
+                watcher.exited.store(true, Ordering::Relaxed);
+                watcher.fail_pending("agent sidecar exited".to_string());
                 watcher.broadcast(SidecarEvent::Exited {
                     code: status.code(),
                     signal: exit_signal(&status),
                 });
                 break;
             }
+            drop(watcher);
             tokio::time::sleep(EXIT_POLL_INTERVAL).await;
         }
     });
@@ -410,7 +490,7 @@ async fn ensure_node_prerequisite(config: &SidecarConfig) -> Result<(), SidecarE
     Ok(())
 }
 
-impl SidecarHandle {
+impl Inner {
     fn dispatch(&self, frame: Value) {
         let id = frame.get("id").and_then(Value::as_i64);
         let Some(id) = id else {
@@ -439,13 +519,13 @@ impl SidecarHandle {
 }
 
 #[cfg(unix)]
-fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
+pub(crate) fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
     status.signal().map(|signal| format!("signal {signal}"))
 }
 
 #[cfg(not(unix))]
-fn exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
+pub(crate) fn exit_signal(_status: &std::process::ExitStatus) -> Option<String> {
     None
 }
 

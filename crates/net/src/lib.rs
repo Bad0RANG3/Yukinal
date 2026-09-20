@@ -351,6 +351,7 @@ fn read_platform_proxy() -> Option<PlatformProxy> {
 
 /// Windows 的 `ProxyServer` 有两种形状：`host:port`，或按 scheme 分列的
 /// `http=host:port;https=host:port;ftp=…`。取 https，其次 http，其次第一个非空项。
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_windows_proxy_server(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

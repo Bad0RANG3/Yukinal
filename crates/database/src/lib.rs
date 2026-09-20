@@ -2,7 +2,8 @@
 //!
 //! Tables: servers / groups / workspaces / identities / server_identities /
 //! snapshots / services / activities / chat_sessions / chat_messages /
-//! tool_executions / provider_configs / mcp_servers / credential_cleanup_queue.
+//! tool_executions / provider_configs / mcp_servers / credential_cleanup_queue /
+//! filesystem_backups.
 //!
 //! Rules:
 //! - Only `credential_ref` is stored. Secret material (key material, passwords,
@@ -64,6 +65,8 @@ pub enum DatabaseError {
     SerdeJson(#[from] serde_json::Error),
     #[error("row not found")]
     NotFound,
+    #[error("validation failed: {0}")]
+    Validation(String),
     /// The on-disk schema is newer than this binary understands.
     #[error("database schema is version {schema}, this build supports {app}")]
     NewerSchema { schema: i64, app: i64 },
@@ -162,8 +165,24 @@ impl Database {
         repositories::ToolExecutionsRepository::new(self)
     }
 
+    pub fn host_tool_calls(&self) -> repositories::HostToolCallsRepository<'_> {
+        repositories::HostToolCallsRepository::new(self)
+    }
+
+    pub fn filesystem_backups(&self) -> repositories::FilesystemBackupsRepository<'_> {
+        repositories::FilesystemBackupsRepository::new(self)
+    }
+
     pub fn activities(&self) -> repositories::ActivitiesRepository<'_> {
         repositories::ActivitiesRepository::new(self)
+    }
+
+    pub fn investigations(&self) -> repositories::InvestigationsRepository<'_> {
+        repositories::InvestigationsRepository::new(self)
+    }
+
+    pub fn investigation_retention(&self) -> repositories::InvestigationRetentionRepository<'_> {
+        repositories::InvestigationRetentionRepository::new(self)
     }
 
     pub fn chat(&self) -> repositories::ChatRepository<'_> {

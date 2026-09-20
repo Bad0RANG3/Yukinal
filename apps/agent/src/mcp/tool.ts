@@ -84,6 +84,10 @@ export interface McpToolOptions {
     toolName: string;
     input: unknown;
     target: ToolTarget;
+    taskId?: string;
+    planId?: string;
+    planStepId?: string;
+    evidenceIds?: string[];
   }, signal?: AbortSignal): Promise<HostToolExecuteResponse>;
 }
 
@@ -149,6 +153,7 @@ export function mcpToolFromCatalog(tool: HostMcpCatalogTool, options: McpToolOpt
     timeoutMs: MCP_TOOL_TIMEOUT_MS,
     cancellable: true,
     retry: { ...MCP_TOOL_RETRY },
+    effectful: true,
     origin,
     input: MCP_TOOL_INPUT,
     async execute(input, context) {
@@ -159,6 +164,10 @@ export function mcpToolFromCatalog(tool: HostMcpCatalogTool, options: McpToolOpt
           toolName: tool.name,
           input,
           target: context.target,
+          ...(context.taskId ? { taskId: context.taskId } : {}),
+          ...(context.planId ? { planId: context.planId } : {}),
+          ...(context.planStepId ? { planStepId: context.planStepId } : {}),
+          ...(context.evidenceIds ? { evidenceIds: context.evidenceIds } : {}),
         },
         context.signal,
       );

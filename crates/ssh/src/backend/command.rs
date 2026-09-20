@@ -26,8 +26,11 @@ impl RusshBackend {
         timeout: Option<std::time::Duration>,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<CommandResult> {
+        if session.inner.is_closed() {
+            return Err(Error::Channel("session is closed".into()));
+        }
         run_command(
-            session.inner.conn.lock().await.clone(),
+            session.inner.connection().await?,
             command,
             timeout,
             cancel,

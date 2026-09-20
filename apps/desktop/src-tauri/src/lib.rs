@@ -26,6 +26,11 @@ pub fn run() {
             let app_state = AppState::bootstrap(&data_dir)?;
             app.manage(app_state);
 
+            // Durable read-only investigation schedules recover claimed rows and
+            // start their own bounded loop. The scheduler never stores provider
+            // credentials and cannot widen a task's safety envelope.
+            commands::scheduler::start_scheduler(app.handle().clone());
+
             forward_terminal_events(app.handle().clone());
             forward_auth_challenges(app.handle().clone());
             // Once per window, before anything can start the agent: the forwarder has to
@@ -107,6 +112,21 @@ pub fn run() {
             commands::mcp::mcp_oauth_cancel,
             commands::network::network_proxy_get,
             commands::network::network_proxy_save,
+            commands::investigation::investigation_task_list,
+            commands::investigation::investigation_task_get,
+            commands::investigation::investigation_task_create,
+            commands::investigation::investigation_task_start,
+            commands::investigation::investigation_task_stop,
+            commands::investigation::investigation_task_status_update,
+            commands::investigation::investigation_task_recover,
+            commands::investigation::investigation_brief_select,
+            commands::investigation::investigation_retention_preview,
+            commands::investigation::investigation_retention_prune,
+            commands::investigation::investigation_schedule_list,
+            commands::investigation::investigation_schedule_runs,
+            commands::investigation::investigation_schedule_create,
+            commands::investigation::investigation_schedule_update,
+            commands::investigation::investigation_schedule_tick,
             commands::server::server_snapshot,
             commands::services::server_services,
             commands::logs::server_logs,
@@ -121,22 +141,22 @@ pub fn run() {
         .expect("failed to start Yukinal")
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                // Killing the sidecar here is the "no orphan process" guarantee
-                //; `kill_on_drop` is the backstop if we never get here.
                 let state = app_handle.state::<AppState>();
-                let supervisor = state.supervisor.clone();
-                // MCP servers are third-party programs we started, so they get the same
-                // treatment as our own sidecar. `kill_on_drop` alone is not enough: it is
-                // a `Drop` impl, and a force-kill on Windows never runs one — the children
-                // would outlive the window that owns them, which is precisely the outcome
-                // the MCP boundary refuses to accept.
-                let mcp = state.mcp.clone();
+                state.shutdown.cancel();
+                if let Ok(mut replays) = state.host_tool_replays.lock() {
+                    replays.clear();
+                }
                 tauri::async_runtime::block_on(async move {
-                    let _ = supervisor.stop().await;
+                    // Close host-owned resources first so no terminal or SSH
+                    // operation can race the sidecar/MCP teardown that follows.
+                    state.terminals.shutdown().await;
+                    state.auth.cancel_all().await;
+                    state.oauth.cancel_all();
+                    let _ = state.supervisor.stop().await;
                     // Servers are independent of each other, so one failing to die must
                     // not keep the rest alive. `shutdown_all` reports per-server outcomes
                     // instead of failing as a whole.
-                    let _ = mcp.shutdown_all().await;
+                    let _ = state.mcp.shutdown_all().await;
                 });
             }
         });
@@ -151,10 +171,16 @@ fn configured_data_dir(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::
 
 /// PTY Manager 事件 → Tauri events，UI 只认这几个名字（`@yukinal/shared` 里有契）。
 fn forward_terminal_events(app: tauri::AppHandle) {
+    let shutdown = app.state::<AppState>().shutdown.clone();
     tauri::async_runtime::spawn(async move {
         let mut receiver = app.state::<AppState>().terminals.subscribe();
         loop {
-            match receiver.recv().await {
+            let event = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                event = receiver.recv() => event,
+            };
+            match event {
                 Ok(TerminalAppEvent::Data {
                     terminal_session_id,
                     data,
@@ -195,10 +221,16 @@ fn forward_terminal_events(app: tauri::AppHandle) {
 /// return through commands, never through this channel.
 fn forward_auth_challenges(app: tauri::AppHandle) {
     let broker = app.state::<AppState>().auth.clone();
+    let shutdown = app.state::<AppState>().shutdown.clone();
     tauri::async_runtime::spawn(async move {
         let mut receiver = broker.subscribe();
         loop {
-            match receiver.recv().await {
+            let event = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                event = receiver.recv() => event,
+            };
+            match event {
                 Ok(challenge) => {
                     let payload = serde_json::to_value(challenge).unwrap_or_default();
                     let _ = app.emit(

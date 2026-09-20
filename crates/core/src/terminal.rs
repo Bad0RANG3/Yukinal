@@ -183,6 +183,29 @@ impl TerminalService {
         Ok(self.ssh.sftp_write_file(&client, path, data).await?)
     }
 
+    /// Create one host-owned recovery copy without replacing an existing path.
+    pub async fn sftp_create_exclusive(
+        &self,
+        server_id: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        let session = self.cached_session(server_id)?;
+        let client = self.ssh.sftp(&session).await?;
+        Ok(self
+            .ssh
+            .sftp_create_file_exclusive(&client, path, data)
+            .await?)
+    }
+
+    /// Remove one remote file after the filesystem service has checked its
+    /// host-owned backup path and contents.
+    pub async fn sftp_remove_file(&self, server_id: &str, path: &str) -> Result<()> {
+        let session = self.cached_session(server_id)?;
+        let client = self.ssh.sftp(&session).await?;
+        Ok(self.ssh.sftp_remove_file(&client, path).await?)
+    }
+
     /// 一个远端路径的属性（`lstat` 语义：symlink 不会被跟随）。
     pub async fn sftp_stat(&self, server_id: &str, path: &str) -> Result<SftpFileStat> {
         let session = self.cached_session(server_id)?;
@@ -280,6 +303,37 @@ impl TerminalService {
     pub async fn close(&self, terminal_session_id: &str) -> Result<()> {
         self.manager.close(terminal_session_id).await?;
         Ok(())
+    }
+
+    /// Close every PTY and every cached SSH connection. This is the host's
+    /// process-exit path: it must not leave a background terminal or connection
+    /// task holding the runtime open after the window has gone away.
+    pub async fn shutdown(&self) {
+        let closed_terminals = self.manager.close_all().await;
+        let sessions: Vec<Session> = {
+            let mut sessions = self.sessions();
+            sessions.drain().map(|(_, session)| session).collect()
+        };
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for session in sessions {
+            let ssh = Arc::clone(&self.ssh);
+            tasks.spawn(async move { ssh.close(&session).await });
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!("failed to close cached SSH session during shutdown: {error}");
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        "cached SSH session close task failed during shutdown: {error}"
+                    );
+                }
+            }
+        }
+        tracing::debug!(closed_terminals, "terminal service shutdown completed");
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<TerminalAppEvent> {

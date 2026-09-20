@@ -14,6 +14,7 @@ export function filesystemWriteTool(host: HostToolExecutor) {
       "mean to replace all of it, and use filesystem.edit when you are changing part of an existing file " +
       "(it verifies the revision you read and replaces one exact match). Content is capped at 512 KiB.",
     risk: "medium",
+    effectful: true,
     timeoutMs: 20_000,
     input: FilesystemWriteInputSchema,
     output: FilesystemWriteOutputSchema,

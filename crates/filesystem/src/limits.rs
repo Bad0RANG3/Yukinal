@@ -33,6 +33,15 @@ pub const MAX_AGENT_WRITE_BYTES: usize = 512 * 1024;
 /// 不可能的**唯一**手段 —— 不是优化，也不是可以放宽的阈值。
 pub const MAX_AGENT_EDIT_BYTES: usize = MAX_AGENT_WRITE_BYTES;
 
+/// Agent `filesystem.backup` / `filesystem.restore` copy cap.
+///
+/// A backup must be complete because its revision is used as the recovery source. Keep the cap
+/// equal to the guarded edit cap so restore uses the same bounded atomic replacement primitive.
+pub const MAX_AGENT_BACKUP_BYTES: usize = MAX_AGENT_EDIT_BYTES;
+
+/// The host-generated hexadecimal suffix used in a backup path.
+pub const BACKUP_TOKEN_CHARS: usize = 32;
+
 /// UI 远端文件浏览器的单次读取上限（1 MiB）。浏览器无法请求更大的量。
 pub const BROWSER_READ_BYTES: usize = 1024 * 1024;
 
@@ -76,8 +85,9 @@ pub fn decode_bounded(bytes: &[u8], max_bytes: usize) -> BoundedRead {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_bounded, BROWSER_READ_BYTES, DEFAULT_AGENT_READ_BYTES, MAX_AGENT_EDIT_BYTES,
-        MAX_AGENT_READ_BYTES, MAX_AGENT_WRITE_BYTES, MAX_REMOTE_PATH_CHARS,
+        decode_bounded, BACKUP_TOKEN_CHARS, BROWSER_READ_BYTES, DEFAULT_AGENT_READ_BYTES,
+        MAX_AGENT_BACKUP_BYTES, MAX_AGENT_EDIT_BYTES, MAX_AGENT_READ_BYTES, MAX_AGENT_WRITE_BYTES,
+        MAX_REMOTE_PATH_CHARS,
     };
 
     #[test]
@@ -89,6 +99,8 @@ mod tests {
         assert_eq!(MAX_AGENT_READ_BYTES, 1_048_576);
         assert_eq!(MAX_AGENT_WRITE_BYTES, 524_288);
         assert_eq!(MAX_AGENT_EDIT_BYTES, 524_288);
+        assert_eq!(MAX_AGENT_BACKUP_BYTES, 524_288);
+        assert_eq!(BACKUP_TOKEN_CHARS, 32);
         assert_eq!(BROWSER_READ_BYTES, 1_048_576);
     }
 

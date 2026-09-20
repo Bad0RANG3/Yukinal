@@ -73,6 +73,20 @@ struct HttpInner {
     get_task: StdMutex<Option<JoinHandle<()>>>,
 }
 
+impl Drop for HttpInner {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        let task = self
+            .get_task
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
+}
+
 /// A live Streamable HTTP MCP session.
 #[derive(Clone)]
 pub struct McpHttpHandle {
@@ -578,19 +592,17 @@ impl McpHttpHandle {
         let weak = Arc::downgrade(&self.inner);
         let client = self.inner.client.clone();
         let endpoint = self.inner.endpoint.clone();
+        let config = self.inner.config.clone();
         let session_id = self.session_id();
         let protocol_version = self.protocol_version();
         let shutdown = self.inner.shutdown.clone();
         let task = tokio::spawn(async move {
-            let Some(inner) = weak.upgrade() else {
-                return;
-            };
-            let proxy = inner.config.proxy.clone();
+            let proxy = config.proxy.clone();
             let response = tokio::select! {
                 _ = shutdown.cancelled() => return,
                 response = tokio::time::timeout(
                     GET_START_TIMEOUT,
-                    inner.send_authenticated("GET", || {
+                    send_authenticated_snapshot(&endpoint, &config, "GET", || {
                         let mut request = client
                             .get(endpoint.clone())
                             .header(ACCEPT, "text/event-stream");
@@ -606,16 +618,20 @@ impl McpHttpHandle {
             };
             let response = match response {
                 Err(_) => {
-                    inner.remember_diagnostic(yukinal_net::route_context(
-                        &proxy,
-                        "timed out opening the optional MCP GET event stream",
-                    ));
+                    if let Some(inner) = weak.upgrade() {
+                        inner.remember_diagnostic(yukinal_net::route_context(
+                            &proxy,
+                            "timed out opening the optional MCP GET event stream",
+                        ));
+                    }
                     return;
                 }
                 Ok(Err(error)) => {
-                    inner.remember_diagnostic(format!(
-                        "could not open the optional MCP GET event stream: {error}"
-                    ));
+                    if let Some(inner) = weak.upgrade() {
+                        inner.remember_diagnostic(format!(
+                            "could not open the optional MCP GET event stream: {error}"
+                        ));
+                    }
                     return;
                 }
                 Ok(Ok(response)) => response,
@@ -812,6 +828,127 @@ fn encode_json_frame(server_id: &str, frame: &Value) -> Result<Vec<u8>, McpError
     Ok(payload)
 }
 
+async fn send_authenticated_snapshot<F>(
+    endpoint: &Url,
+    config: &McpHttpConfig,
+    method: &str,
+    build: F,
+) -> Result<Response, McpError>
+where
+    F: Fn() -> RequestBuilder,
+{
+    let mut nonce: Option<String> = None;
+    let mut force_refresh = false;
+    for _ in 0..AUTH_ATTEMPTS {
+        let request = authenticated_snapshot(
+            build(),
+            config,
+            method,
+            endpoint,
+            force_refresh,
+            nonce.clone(),
+        )
+        .await?;
+        let response = request.send().await.map_err(|error| {
+            let reason = error.without_url().to_string();
+            McpError::Http {
+                server_id: config.server_id.clone(),
+                method: truncated(method),
+                reason: redacted(&truncated(&yukinal_net::route_context(
+                    &config.proxy,
+                    &reason,
+                ))),
+            }
+        })?;
+        if response.status() != StatusCode::UNAUTHORIZED || config.oauth.is_none() {
+            return Ok(response);
+        }
+        if let Some(challenge) = dpop_nonce(&response) {
+            if nonce.as_deref() != Some(challenge.as_str()) {
+                nonce = Some(challenge);
+                continue;
+            }
+        }
+        if !force_refresh {
+            force_refresh = true;
+            continue;
+        }
+        return Ok(response);
+    }
+    Err(McpError::Http {
+        server_id: config.server_id.clone(),
+        method: truncated(method),
+        reason: "the authenticated request produced no response".to_string(),
+    })
+}
+
+async fn authenticated_snapshot(
+    mut request: RequestBuilder,
+    config: &McpHttpConfig,
+    method: &str,
+    url: &Url,
+    force_refresh: bool,
+    nonce: Option<String>,
+) -> Result<RequestBuilder, McpError> {
+    for auth in &config.auth_headers {
+        request = request.header(auth.name(), auth.value());
+    }
+    if let Some(source) = &config.oauth {
+        let authorization = source
+            .authorization(McpAuthorizationRequest {
+                method: method.to_ascii_uppercase(),
+                url: url.as_str().to_string(),
+                force_refresh,
+                nonce,
+            })
+            .await
+            .map_err(|reason| McpError::OAuth {
+                server_id: config.server_id.clone(),
+                reason: redacted(&truncated(&reason)),
+            })?;
+        let token = authorization.token;
+        if token.is_empty()
+            || token.len() > 8 * 1024
+            || token
+                .bytes()
+                .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+        {
+            return Err(McpError::OAuth {
+                server_id: config.server_id.clone(),
+                reason: "the OAuth token source returned an empty, oversized, or unsafe token"
+                    .to_string(),
+            });
+        }
+        match authorization.scheme {
+            McpAuthScheme::Bearer => {
+                request = request.bearer_auth(token);
+            }
+            McpAuthScheme::Dpop => {
+                let proof = authorization.proof.ok_or_else(|| McpError::OAuth {
+                    server_id: config.server_id.clone(),
+                    reason: "the OAuth token source returned a DPoP token without a proof"
+                        .to_string(),
+                })?;
+                if proof.is_empty()
+                    || proof.len() > 8 * 1024
+                    || proof
+                        .bytes()
+                        .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+                {
+                    return Err(McpError::OAuth {
+                        server_id: config.server_id.clone(),
+                        reason: "the OAuth token source returned an unsafe DPoP proof".to_string(),
+                    });
+                }
+                request = request
+                    .header(reqwest::header::AUTHORIZATION, format!("DPoP {token}"))
+                    .header(DPOP_HEADER, proof);
+            }
+        }
+    }
+    Ok(request)
+}
+
 impl HttpInner {
     /// Send one authenticated request, retrying a `401` a bounded number of times.
     ///
@@ -823,125 +960,7 @@ impl HttpInner {
     where
         F: Fn() -> RequestBuilder,
     {
-        let mut nonce: Option<String> = None;
-        let mut force_refresh = false;
-        for _ in 0..AUTH_ATTEMPTS {
-            let request = self
-                .authenticated(
-                    build(),
-                    method,
-                    &self.endpoint,
-                    force_refresh,
-                    nonce.clone(),
-                )
-                .await?;
-            let response = request.send().await.map_err(|error| {
-                let reason = error.without_url().to_string();
-                McpError::Http {
-                    server_id: self.config.server_id.clone(),
-                    method: truncated(method),
-                    // 代理环境里「连不上」必须说清是谁的问题：目标还是代理（ADR 0022 第 7 条）。
-                    reason: redacted(&truncated(&yukinal_net::route_context(
-                        &self.config.proxy,
-                        &reason,
-                    ))),
-                }
-            })?;
-            if response.status() != StatusCode::UNAUTHORIZED || self.config.oauth.is_none() {
-                return Ok(response);
-            }
-            // A DPoP nonce challenge: the token is fine, the proof needs the server's fresh
-            // nonce. Retry once with it; a nonce we already tried counts as a failure.
-            if let Some(challenge) = dpop_nonce(&response) {
-                if nonce.as_deref() != Some(challenge.as_str()) {
-                    nonce = Some(challenge);
-                    continue;
-                }
-            }
-            if !force_refresh {
-                force_refresh = true;
-                continue;
-            }
-            return Ok(response);
-        }
-        // Only reachable if the two retry branches above were both taken on the last
-        // attempt, which the counters make impossible; the honest answer is still an error.
-        Err(McpError::Http {
-            server_id: self.config.server_id.clone(),
-            method: truncated(method),
-            reason: "the authenticated request produced no response".to_string(),
-        })
-    }
-
-    async fn authenticated(
-        &self,
-        mut request: RequestBuilder,
-        method: &str,
-        url: &Url,
-        force_refresh: bool,
-        nonce: Option<String>,
-    ) -> Result<RequestBuilder, McpError> {
-        for auth in &self.config.auth_headers {
-            request = request.header(auth.name(), auth.value());
-        }
-        if let Some(source) = &self.config.oauth {
-            let authorization = source
-                .authorization(McpAuthorizationRequest {
-                    method: method.to_ascii_uppercase(),
-                    url: url.as_str().to_string(),
-                    force_refresh,
-                    nonce,
-                })
-                .await
-                .map_err(|reason| McpError::OAuth {
-                    server_id: self.config.server_id.clone(),
-                    reason: redacted(&truncated(&reason)),
-                })?;
-            let token = authorization.token;
-            if token.is_empty()
-                || token.len() > 8 * 1024
-                || token
-                    .bytes()
-                    .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
-            {
-                return Err(McpError::OAuth {
-                    server_id: self.config.server_id.clone(),
-                    reason: "the OAuth token source returned an empty, oversized, or unsafe token"
-                        .to_string(),
-                });
-            }
-            match authorization.scheme {
-                McpAuthScheme::Bearer => {
-                    request = request.bearer_auth(token);
-                }
-                McpAuthScheme::Dpop => {
-                    let proof = authorization.proof.ok_or_else(|| McpError::OAuth {
-                        server_id: self.config.server_id.clone(),
-                        reason: "the OAuth token source returned a DPoP token without a proof"
-                            .to_string(),
-                    })?;
-                    if proof.is_empty()
-                        || proof.len() > 8 * 1024
-                        || proof
-                            .bytes()
-                            .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
-                    {
-                        return Err(McpError::OAuth {
-                            server_id: self.config.server_id.clone(),
-                            reason: "the OAuth token source returned an unsafe DPoP proof"
-                                .to_string(),
-                        });
-                    }
-                    // `bearer_auth` would spell the scheme `Bearer`; RFC 9449 §7.1 requires the
-                    // token to be presented with the `DPoP` scheme, so the header is built by
-                    // hand (the token itself is already checked for CR/LF/NUL above).
-                    request = request
-                        .header(reqwest::header::AUTHORIZATION, format!("DPoP {token}"))
-                        .header(DPOP_HEADER, proof);
-                }
-            }
-        }
-        Ok(request)
+        send_authenticated_snapshot(&self.endpoint, &self.config, method, build).await
     }
 
     fn expire_session(&self, reason: &str) {

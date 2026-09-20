@@ -15,6 +15,9 @@ use super::{retry_transport_async, RusshBackend};
 use crate::conn::PtyHandle;
 use crate::{Error, PtyEvent, PtySession, Result, Session};
 
+const PTY_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const PTY_FINAL_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl RusshBackend {
     fn next_pty_id(&self) -> String {
         static PTY_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -43,14 +46,17 @@ pub(super) async fn open_pty(
     // 单一任务持有完整 `Channel`：对外转发远端输出，对内消费写入/改尺寸命令。
     tokio::spawn(async move {
         let mut channel = channel;
-        loop {
+        let mut exit_code = None;
+        let (final_code, acknowledge, notify_closed) = loop {
             tokio::select! {
                 command = commands_rx.recv() => {
-                    let Some(command) = command else { break; };
+                    let Some(command) = command else {
+                        break (exit_code, None, false);
+                    };
                     match command {
                         crate::conn::PtyCmd::Write(data) => {
                             if channel.data_bytes(data).await.is_err() {
-                                break;
+                                break (exit_code, None, true);
                             }
                         }
                         crate::conn::PtyCmd::Resize(cols, rows) => {
@@ -58,16 +64,14 @@ pub(super) async fn open_pty(
                                 .window_change(u32::from(cols), u32::from(rows), 0, 0)
                                 .await;
                         }
-                        crate::conn::PtyCmd::Close => {
-                            let _ = channel.close().await;
-                            let _ = output_tx.send(PtyEvent::Closed { code: None }).await;
-                            break;
+                        crate::conn::PtyCmd::Close(acknowledge) => {
+                            break (exit_code, Some(acknowledge), true);
                         }
                     }
                 }
                 message = channel.wait() => {
                     match message {
-                        None => break,
+                        None => break (exit_code, None, true),
                         // `.await` 是有意的：输出队列有界（`PTY_OUTPUT_CAPACITY`），
                         // 满了就在这里挂起，于是本任务不再 `channel.wait()`，russh 的
                         // 接收缓冲填满、TCP 窗口关闭，背压传回远端。远端刷屏时应当让
@@ -75,30 +79,36 @@ pub(super) async fn open_pty(
                         // 订阅者退出（终端已关）时 `send` 立刻返回 Err，照样 break。
                         Some(ChannelMsg::Data { data }) => {
                             if output_tx.send(PtyEvent::Output(data.to_vec())).await.is_err() {
-                                break; // 订阅者退出 = 终端已关
+                                break (exit_code, None, false); // 订阅者退出 = 终端已关
                             }
                         }
                         Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
                             if output_tx.send(PtyEvent::Output(data.to_vec())).await.is_err() {
-                                break;
+                                break (exit_code, None, false);
                             }
                         }
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
-                            let _ = output_tx
-                                .send(PtyEvent::Closed {
-                                    code: Some(exit_status),
-                                })
-                                .await;
-                            break;
+                            exit_code = Some(exit_status);
                         }
                         Some(ChannelMsg::Close | ChannelMsg::Eof) => {
-                            let _ = output_tx.send(PtyEvent::Closed { code: None }).await;
-                            break;
+                            break (exit_code, None, true);
                         }
                         Some(_) => {}
                     }
                 }
             }
+        };
+
+        let _ = channel.close().await;
+        if notify_closed {
+            let _ = tokio::time::timeout(
+                PTY_FINAL_EVENT_TIMEOUT,
+                output_tx.send(PtyEvent::Closed { code: final_code }),
+            )
+            .await;
+        }
+        if let Some(acknowledge) = acknowledge {
+            let _ = acknowledge.send(());
         }
     });
 
@@ -130,11 +140,16 @@ pub(super) fn pty_resize(pty: &PtySession, cols: u16, rows: u16) -> Result<()> {
 }
 
 /// [`crate::SshBackend::pty_close`] 的实现体。
-pub(super) fn pty_close(pty: &PtySession) -> Result<()> {
+pub(super) async fn pty_close(pty: &PtySession) -> Result<()> {
+    let (acknowledge, closed) = tokio::sync::oneshot::channel();
     pty.inner
         .commands
-        .send(crate::conn::PtyCmd::Close)
+        .send(crate::conn::PtyCmd::Close(acknowledge))
         .map_err(|_| Error::Channel("pty is closed".into()))?;
+    // The PTY task may be blocked behind a full output queue or a dead transport.
+    // Waiting is useful for observing completion, but it must not turn close into
+    // an unbounded operation.
+    let _ = tokio::time::timeout(PTY_CLOSE_ACK_TIMEOUT, closed).await;
     Ok(())
 }
 

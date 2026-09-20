@@ -15,6 +15,7 @@ interface HostBackedToolSpec<TInput extends Record<string, unknown>, TOutput> {
   timeoutMs: number;
   input: z.ZodType<TInput>;
   output: z.ZodType<TOutput>;
+  effectful?: boolean;
 }
 
 export function hostBackedTool<TInput extends Record<string, unknown>, TOutput>(
@@ -28,6 +29,7 @@ export function hostBackedTool<TInput extends Record<string, unknown>, TOutput>(
     timeoutMs: spec.timeoutMs,
     cancellable: true,
     retry: { maxAttempts: 1, backoffMs: 0 },
+    ...(spec.effectful === true ? { effectful: true } : {}),
     input: spec.input,
     async execute(input: TInput, context: ToolContext): Promise<TOutput> {
       const response = await host.execute(
@@ -37,6 +39,10 @@ export function hostBackedTool<TInput extends Record<string, unknown>, TOutput>(
           toolName: spec.name,
           input,
           target: context.target,
+          ...(context.taskId ? { taskId: context.taskId } : {}),
+          ...(context.planId ? { planId: context.planId } : {}),
+          ...(context.planStepId ? { planStepId: context.planStepId } : {}),
+          ...(context.evidenceIds ? { evidenceIds: context.evidenceIds } : {}),
         },
         context.signal,
       );

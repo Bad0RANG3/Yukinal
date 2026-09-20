@@ -42,6 +42,7 @@ const SUBSCRIBABLE = [
   "server.auth_challenge",
   "mcp.oauth_device_code",
   "activity.created",
+  "investigation.schedule_notification",
 ] as const;
 
 /**

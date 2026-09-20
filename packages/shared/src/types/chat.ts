@@ -7,7 +7,8 @@
 import type { AGENT_RUN_STATES, TOOL_RESULT_STATUSES } from "./enums.js";
 import type { RuntimeProviderConfig } from "./provider.js";
 import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
-import type { ToolOrigin, ToolTarget } from "./tool.js";
+import type { ToolError, ToolOrigin, ToolTarget } from "./tool.js";
+import type { TaskBudget } from "./investigation.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
 
@@ -217,6 +218,10 @@ export type AgentPromptPart =
 export interface AgentRunRequest {
   runId: string;
   sessionId: string;
+  /** Optional durable investigation task receiving evidence from read-only tools. */
+  taskId?: string;
+  /** Host-owned budget copied from the durable task; the sidecar cannot widen it. */
+  taskBudget?: TaskBudget;
   prompt: string;
   /** Stable message identity for admission/retry semantics. */
   messageId?: string;
@@ -348,6 +353,10 @@ export type AgentStreamEvent =
       approvedBy?: PermissionApprovalSource;
       policyId?: string;
       origin?: ToolOrigin;
+      /** Host-validated durable plan binding, when this is a task call. */
+      planId?: string;
+      planStepId?: string;
+      evidenceIds?: string[];
       at: string;
     }
   | {
@@ -364,6 +373,11 @@ export type AgentStreamEvent =
       approvedBy?: PermissionApprovalSource;
       policyId?: string;
       origin?: ToolOrigin;
+      /** Host-validated durable plan binding, when this is a task call. */
+      planId?: string;
+      planStepId?: string;
+      evidenceIds?: string[];
+      errorCode?: ToolError["code"];
       status: ToolResultStatus;
       outputSummary: string;
       error?: string;
@@ -372,7 +386,7 @@ export type AgentStreamEvent =
       durationMs: number;
       at: string;
     }
-  | { type: "agent.waiting_approval"; runId: string; approval: ApprovalRequest; at: string }
+  | { type: "agent.waiting_approval"; runId: string; taskId?: string; approval: ApprovalRequest; at: string }
   | { type: "agent.approval_expired"; runId: string; approvalId: string; at: string }
-  | { type: "agent.completed"; runId: string; result: AgentRunResult; at: string }
-  | { type: "agent.failed"; runId: string; error: string; at: string };
+  | { type: "agent.completed"; runId: string; taskId?: string; result: AgentRunResult; at: string }
+  | { type: "agent.failed"; runId: string; taskId?: string; error: string; at: string };

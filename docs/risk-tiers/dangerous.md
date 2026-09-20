@@ -2,6 +2,8 @@
 
 一句话：**这一档永远不会自动执行。** 无论策略表怎么配、用户怎么委托、本会话里批准过什么，一次危险档位的调用只有一条路：用户看到它、然后逐项批准。
 
+此外，所有会改变远端状态或由第三方 MCP 服务器执行的 effectful 调用，都必须先绑定 durable task、ChangePlan 和具体 plan step；没有完整绑定时，连逐项审批后的 Agent 请求也不会进入宿主分派。交互式终端仍是用户直接操作的人工旁路。
+
 同一族的三份文档：[`read`](./read.md) · [`write`](./write.md)。共同规则（三层事实怎么合成一个档位、票据怎么复核）写在仓库的 [执行与授权模型](../execution-model.md#执行与授权模型)。
 
 ## 这一档由哪些风险等级构成
@@ -11,7 +13,7 @@
 ## 它怎么落进来：三条路径
 
 1. **工具声明 `high` 或 `critical`。**
-   - `docker.restart` 声明 `high`（`apps/agent/src/tools/builtin/docker-restart.ts:11`）。
+   - `filesystem.restore`、`docker.restart`、`systemd.restart` 与 `package.install` 声明 `high`（`apps/agent/src/tools/builtin/filesystem-restore.ts:9`、`apps/agent/src/tools/builtin/docker-restart.ts:11`、`apps/agent/src/tools/builtin/systemd-restart.ts:9`、`apps/agent/src/tools/builtin/package-install.ts:9`）。
    - **每一个 MCP 工具都声明 `critical`**（`apps/agent/src/mcp/tool.ts:42` 的 `MCP_TOOL_RISK`）。理由不是「保守一点」：MCP 服务器可以在工具注解里自称只读，采信它等于把授权级别交给被授权方，所以适配器根本不读注解，一律取最严的那一档（见 [外部工具（MCP）](../boundaries/mcp.md#边界外部工具mcp)）。
 2. **命令分析命中 `high` / `critical` 规则。** 16 条规则里 7 条 `critical`（`rm -rf`、`rm /`、`mkfs`、`dd of=/dev/`、重定向到块设备、`drop database`、`chmod -R /`），6 条 `high`（`truncate`、`shutdown`/`poweroff`/`halt`、`reboot`、`kubectl delete`、`docker system prune`、`curl|sh`）（`apps/agent/src/permissions/command-risk.ts:20-32`）。这一层今天没有内置工具会触发 —— `apps/agent/src/tools/` 下没有任何输入 schema 带 `command` 或 `argv`，规则由测试用假想的 `ssh.execute` 覆盖。
 3. **环境抬高。** 生产与未标注环境的下限是 `high`（`ENVIRONMENT_RISK_FLOOR`，`apps/agent/src/permissions/permission-engine.ts:39-46`），所以任何**内在风险不是 `read`** 的调用在生产上都落进这一档 —— 包括一次普通的文件写入。代价写在 [ADR 0005](../adr.md#adr-0005permission-engine-是唯一的执行授权决策者) 里：生产上的普通写入不再能通过「批准本会话」免除确认。

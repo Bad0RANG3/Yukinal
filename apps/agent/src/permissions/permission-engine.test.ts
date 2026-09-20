@@ -176,6 +176,12 @@ test("a session grant covers a write-tier action", () => {
   const second = engine.evaluate(request);
   assert.equal(second.outcome, "auto");
   assert.equal(second.approvedBy, "user");
+
+  const differentInput = engine.evaluate({
+    ...request,
+    input: { path: "/srv/app/other.yml" },
+  });
+  assert.equal(differentInput.outcome, "ask", "a session grant must not cover a different path");
 });
 
 test("a session grant never covers the dangerous tier, however it was reached", () => {

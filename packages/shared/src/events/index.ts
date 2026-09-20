@@ -12,6 +12,7 @@
 import type { Activity } from "../types/activity.js";
 import type { AgentStreamEvent } from "../types/chat.js";
 import type { ServerStatus } from "../types/server.js";
+import type { InvestigationNotificationPolicy } from "../types/schedule.js";
 
 export const EVENT_NAMES = [
   "server.connected",
@@ -33,6 +34,7 @@ export const EVENT_NAMES = [
   "terminal.data",
   "terminal.closed",
   "activity.created",
+  "investigation.schedule_notification",
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -125,6 +127,20 @@ export interface TerminalClosedEvent {
   exitCode: number | null;
 }
 
+/** A scheduler notification that survived the configured policy gate. */
+export interface InvestigationScheduleNotificationEvent {
+  scheduleId: string;
+  scheduleRunId: string;
+  taskId: string;
+  outcome: "changed" | "failed" | "baseline" | "no_change" | "insufficient_evidence";
+  notificationPolicy: InvestigationNotificationPolicy;
+  title: string;
+  evidenceIds: string[];
+  findingId?: string;
+  briefId?: string;
+  at: string;
+}
+
 /** UI-facing envelope: every event on the wire is one of these. */
 export type YukinalEvent =
   | { name: "server.connected"; payload: ServerConnectedEvent }
@@ -136,4 +152,5 @@ export type YukinalEvent =
   | { name: "terminal.data"; payload: TerminalDataEvent }
   | { name: "terminal.closed"; payload: TerminalClosedEvent }
   | { name: "activity.created"; payload: Activity }
+  | { name: "investigation.schedule_notification"; payload: InvestigationScheduleNotificationEvent }
   | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

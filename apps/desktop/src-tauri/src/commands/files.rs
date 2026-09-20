@@ -105,6 +105,33 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
             .map_err(|error| TransportError::new(error.to_string()))
     }
 
+    async fn create_exclusive(
+        &self,
+        server_id: &str,
+        path: &str,
+        data: &[u8],
+    ) -> TransportResult<()> {
+        ensure_session(self.state, server_id)
+            .await
+            .map_err(TransportError::new)?;
+        self.state
+            .terminals
+            .sftp_create_exclusive(server_id, path, data)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn remove_file(&self, server_id: &str, path: &str) -> TransportResult<()> {
+        ensure_session(self.state, server_id)
+            .await
+            .map_err(TransportError::new)?;
+        self.state
+            .terminals
+            .sftp_remove_file(server_id, path)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
     async fn stat(&self, server_id: &str, path: &str) -> TransportResult<RemoteStat> {
         ensure_session(self.state, server_id)
             .await

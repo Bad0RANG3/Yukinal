@@ -15,6 +15,7 @@ import {
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, PERMISSION_APPROVAL_SOURCES, PERMISSION_MODES, PERMISSION_TIERS } from "../types/risk.js";
 import { TOOL_EXECUTION_STATUSES } from "../types/enums.js";
 import { EnvironmentSchema, RiskLevelSchema, SERVER_ID_SCHEMA, ToolTargetSchema } from "./server.js";
+import { TaskBudgetSchema } from "./investigation.js";
 import {
   ApiVersionSchema,
   HttpBaseUrlSchema,
@@ -103,6 +104,7 @@ export const PermissionDecisionSchema = z.object({
   reason: z.string(),
   approvedBy: PermissionApprovalSourceSchema.optional(),
   target: ToolTargetSchema,
+  inputFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   approvalId: z.string().optional(),
   requestedAt: z.string(),
 });
@@ -128,6 +130,7 @@ export const ToolDeclarationSchema = z.object({
   retry: RetryPolicySchema,
   inputSchema: z.record(z.string(), z.unknown()),
   origin: ToolOriginSchema,
+  effectful: z.boolean().optional(),
 });
 
 export const ToolExecutionStatusSchema = z.enum(TOOL_EXECUTION_STATUSES);
@@ -373,6 +376,8 @@ export const AgentRunRequestSchema = z
   .strictObject({
     runId: z.string().trim().min(1).max(256),
     sessionId: z.string().trim().min(1).max(256),
+    taskId: z.string().trim().min(1).max(256).optional(),
+    taskBudget: TaskBudgetSchema.optional(),
     prompt: z.string().max(100_000),
     messageId: z.string().trim().min(1).max(256).optional(),
     parts: AgentPromptPartsSchema.optional(),

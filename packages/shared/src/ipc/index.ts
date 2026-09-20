@@ -21,6 +21,7 @@ import type {
   ChatSessionRenameInput,
 } from "../types/chat.js";
 import type { AgentPermissionMode, AgentRunMode } from "../types/risk.js";
+import type { TaskBudget } from "../types/investigation.js";
 import type { NetworkProxySaveInput, NetworkProxyView } from "../types/network.js";
 import type {
   ActivityListInput,
@@ -51,6 +52,34 @@ import type {
   McpServerView,
 } from "../types/mcp.js";
 import type { RestartRecord } from "../types/lifecycle.js";
+import type {
+  InvestigationBriefResponse,
+  InvestigationBriefSelectInput,
+  InvestigationTaskCreateInput,
+  InvestigationTaskDetailResponse,
+  InvestigationTaskListInput,
+  InvestigationTaskListResponse,
+  InvestigationTaskRecoverInput,
+  InvestigationTaskResponse,
+  InvestigationTaskStartResponse,
+  InvestigationTaskStopInput,
+  InvestigationTaskStatusUpdateInput,
+} from "../types/investigation.js";
+import type {
+  InvestigationSchedule,
+  InvestigationScheduleCreateInput,
+  InvestigationScheduleListResponse,
+  InvestigationScheduleRunListResponse,
+  InvestigationScheduleTickInput,
+  InvestigationScheduleTickResponse,
+  InvestigationScheduleUpdateInput,
+} from "../types/schedule.js";
+import type {
+  InvestigationRetentionPreview,
+  InvestigationRetentionPreviewInput,
+  InvestigationRetentionPruneInput,
+  InvestigationRetentionPruneResult,
+} from "../types/retention.js";
 
 export const IPC_COMMANDS = {
   /** Proves the IPC round trip works. */
@@ -162,6 +191,21 @@ export const IPC_COMMANDS = {
   mcpOAuthCancel: "mcp_oauth_cancel",
   networkProxyGet: "network_proxy_get",
   networkProxySave: "network_proxy_save",
+  investigationTaskList: "investigation_task_list",
+  investigationTaskGet: "investigation_task_get",
+  investigationTaskCreate: "investigation_task_create",
+  investigationTaskStart: "investigation_task_start",
+  investigationTaskStop: "investigation_task_stop",
+  investigationTaskStatusUpdate: "investigation_task_status_update",
+  investigationTaskRecover: "investigation_task_recover",
+  investigationBriefSelect: "investigation_brief_select",
+  investigationRetentionPreview: "investigation_retention_preview",
+  investigationRetentionPrune: "investigation_retention_prune",
+  investigationScheduleList: "investigation_schedule_list",
+  investigationScheduleRuns: "investigation_schedule_runs",
+  investigationScheduleCreate: "investigation_schedule_create",
+  investigationScheduleUpdate: "investigation_schedule_update",
+  investigationScheduleTick: "investigation_schedule_tick",
 } as const;
 
 export type IpcCommandName = (typeof IPC_COMMANDS)[keyof typeof IPC_COMMANDS];
@@ -223,6 +267,8 @@ export interface IpcCommandMap {
       /** UI-generated identity lets the event consumer reject a foreign started event. */
       runId?: string;
       sessionId: string;
+      taskId?: string;
+      taskBudget?: TaskBudget;
       prompt: string;
       messageId?: string;
       parts?: AgentPromptPart[];
@@ -299,6 +345,45 @@ export interface IpcCommandMap {
   mcp_oauth_cancel: { params: { serverId: string }; response: McpOAuthCancelResponse };
   network_proxy_get: { params: Record<string, never>; response: NetworkProxyView };
   network_proxy_save: { params: { input: NetworkProxySaveInput }; response: NetworkProxyView };
+  investigation_task_list: { params: InvestigationTaskListInput; response: InvestigationTaskListResponse };
+  investigation_task_get: { params: { taskId: string }; response: InvestigationTaskDetailResponse };
+  investigation_task_create: { params: { input: InvestigationTaskCreateInput }; response: InvestigationTaskResponse };
+  investigation_task_start: { params: { taskId: string }; response: InvestigationTaskStartResponse };
+  investigation_task_stop: { params: InvestigationTaskStopInput; response: InvestigationTaskResponse };
+  investigation_task_status_update: {
+    params: InvestigationTaskStatusUpdateInput;
+    response: InvestigationTaskResponse;
+  };
+  investigation_task_recover: {
+    params: { input: InvestigationTaskRecoverInput };
+    response: InvestigationTaskResponse;
+  };
+  investigation_brief_select: {
+    params: { input: InvestigationBriefSelectInput };
+    response: InvestigationBriefResponse;
+  };
+  investigation_retention_preview: {
+    params: InvestigationRetentionPreviewInput;
+    response: { preview: InvestigationRetentionPreview };
+  };
+  investigation_retention_prune: {
+    params: { input: InvestigationRetentionPruneInput };
+    response: { result: InvestigationRetentionPruneResult };
+  };
+  investigation_schedule_list: { params: Record<string, never>; response: InvestigationScheduleListResponse };
+  investigation_schedule_runs: { params: { scheduleId: string }; response: InvestigationScheduleRunListResponse };
+  investigation_schedule_create: {
+    params: { input: InvestigationScheduleCreateInput };
+    response: { schedule: InvestigationSchedule };
+  };
+  investigation_schedule_update: {
+    params: { input: InvestigationScheduleUpdateInput };
+    response: { schedule: InvestigationSchedule };
+  };
+  investigation_schedule_tick: {
+    params: { input: InvestigationScheduleTickInput };
+    response: InvestigationScheduleTickResponse;
+  };
 }
 
 /**

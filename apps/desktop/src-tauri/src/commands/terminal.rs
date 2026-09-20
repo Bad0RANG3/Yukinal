@@ -3,6 +3,10 @@
 //! Wire: resolve server (SQLite) → identity (SQLite) → credential (OS keychain) →
 //! ssh connect (cached per server) → PTY → TerminalManager. React never holds an
 //! ssh `Session`.
+//!
+//! This is intentionally a manual UI path, not an Agent tool. It has no task/plan ticket and
+//! must not be called as an autonomous write primitive; the durable-plan gate lives in
+//! `commands::host` for Agent-side effectful tools.
 
 use serde::{Deserialize, Serialize};
 use tauri::State;

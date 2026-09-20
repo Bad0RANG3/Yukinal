@@ -329,6 +329,70 @@ test("approval responses are bound to the run that displayed them", async () => 
   assert.equal(result.toolCalls, 1);
 });
 
+test("an ordinary chat effectful call is denied before an approval card", async () => {
+  const registry = new ToolRegistry();
+  let executed = false;
+  registry.register({
+    name: "test.effectful",
+    description: "Test state-changing action",
+    risk: "medium",
+    effectful: true,
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({}),
+    execute: async () => {
+      executed = true;
+      return { ok: true };
+    },
+  });
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+  });
+
+  let calls = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "tool_call", call: { id: "call_effectful_chat", name: "test__effectful", arguments: {} } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "blocked" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+
+  const events: AgentStreamEvent[] = [];
+  const result = await loop.start(
+    {
+      runId: "run_effectful_chat",
+      sessionId: "ses_effectful_chat",
+      prompt: "write the file",
+      target: { host: "remote", serverId: "srv_effectful_chat", environment: "staging" },
+    },
+    { emit: (event) => events.push(event) },
+    provider,
+  );
+
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(result.toolCalls, 0);
+  assert.equal(executed, false);
+  assert.equal(events.some((event) => event.type === "agent.waiting_approval"), false);
+  const toolResult = events.find((event) => event.type === "agent.tool_result");
+  assert(toolResult && toolResult.type === "agent.tool_result");
+  assert.equal(toolResult.errorCode, "denied_by_policy");
+  assert.match(toolResult.error ?? "", /durable task.*ChangePlan.*plan step/);
+});
+
 test("auto mode cannot self-approve a dangerous production tool", async () => {
   const registry = new ToolRegistry();
   registry.register({
@@ -643,6 +707,14 @@ test("an MCP call is emitted with its server as origin", async () => {
     registry,
     permission: new PermissionEngine(),
     context: new ContextEngine(createEmptyContextSource()),
+    checkPlan: async () => ({
+      status: "allowed",
+      planId: "plan_mcp",
+      stepId: "step_mcp",
+      stepKind: "action",
+      evidenceIds: [],
+      requiresApproval: false,
+    }),
   });
 
   let calls = 0;
@@ -674,6 +746,7 @@ test("an MCP call is emitted with its server as origin", async () => {
     {
       runId: "run_mcp",
       sessionId: "ses_mcp",
+      taskId: "task_mcp",
       prompt: "echo something",
       target,
     },
@@ -701,4 +774,3 @@ test("an MCP call is emitted with its server as origin", async () => {
   assert.equal(call.toolName, "mcp.mcp-1.echo", "审计行上的名字必须带得出服务器段");
   assert.equal(call.toolName.startsWith("mcp."), true);
 });
-

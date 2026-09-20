@@ -56,6 +56,36 @@ import { HOST_KEY_COMPARISONS } from "../types/host-key.js";
 import { REMOTE_FILE_TYPES } from "../types/file.js";
 import { RestartRecordSchema } from "./lifecycle.js";
 import { NetworkProxySaveInputSchema, NetworkProxyViewSchema } from "./network.js";
+import {
+  InvestigationTaskCreateInputSchema,
+  InvestigationTaskDetailResponseSchema,
+  InvestigationTaskListInputSchema,
+  InvestigationTaskListResponseSchema,
+  InvestigationTaskRecoverInputSchema,
+  InvestigationTaskResponseSchema,
+  InvestigationTaskStartResponseSchema,
+  InvestigationTaskStopInputSchema,
+  InvestigationTaskStatusUpdateInputSchema,
+  TaskBudgetSchema,
+  InvestigationBriefResponseSchema,
+  InvestigationBriefSelectInputSchema,
+} from "./investigation.js";
+import {
+  InvestigationScheduleCreateInputSchema,
+  InvestigationScheduleListResponseSchema,
+  InvestigationScheduleRunListResponseSchema,
+  InvestigationScheduleSchema,
+  InvestigationScheduleTickInputSchema,
+  InvestigationScheduleTickResponseSchema,
+  InvestigationScheduleUpdateInputSchema,
+} from "./schedule.js";
+import {
+  InvestigationRetentionPreviewInputSchema,
+  InvestigationRetentionPreviewResponseSchema,
+  InvestigationRetentionPruneInputSchema,
+  InvestigationRetentionPruneResponseSchema,
+} from "./retention.js";
+import { INVESTIGATION_NOTIFICATION_POLICIES } from "../types/schedule.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -301,6 +331,8 @@ export const IPC_SCHEMAS = {
       .strictObject({
         runId: z.string().trim().min(1).max(256).optional(),
         sessionId: z.string().trim().min(1).max(256),
+        taskId: z.string().trim().min(1).max(256).optional(),
+        taskBudget: TaskBudgetSchema.optional(),
         prompt: z.string().max(100_000),
         messageId: z.string().trim().min(1).max(256).optional(),
         parts: AgentPromptPartsSchema.optional(),
@@ -457,6 +489,66 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ input: NetworkProxySaveInputSchema }),
     response: NetworkProxyViewSchema,
   },
+  investigation_task_list: {
+    params: InvestigationTaskListInputSchema,
+    response: InvestigationTaskListResponseSchema,
+  },
+  investigation_task_get: {
+    params: z.strictObject({ taskId: z.string().trim().min(1).max(256) }),
+    response: InvestigationTaskDetailResponseSchema,
+  },
+  investigation_task_create: {
+    params: z.strictObject({ input: InvestigationTaskCreateInputSchema }),
+    response: InvestigationTaskResponseSchema,
+  },
+  investigation_task_start: {
+    params: z.strictObject({ taskId: z.string().trim().min(1).max(256) }),
+    response: InvestigationTaskStartResponseSchema,
+  },
+  investigation_task_stop: {
+    params: InvestigationTaskStopInputSchema,
+    response: InvestigationTaskResponseSchema,
+  },
+  investigation_task_status_update: {
+    params: InvestigationTaskStatusUpdateInputSchema,
+    response: InvestigationTaskResponseSchema,
+  },
+  investigation_task_recover: {
+    params: z.strictObject({ input: InvestigationTaskRecoverInputSchema }),
+    response: InvestigationTaskResponseSchema,
+  },
+  investigation_brief_select: {
+    params: z.strictObject({ input: InvestigationBriefSelectInputSchema }),
+    response: InvestigationBriefResponseSchema,
+  },
+  investigation_retention_preview: {
+    params: InvestigationRetentionPreviewInputSchema,
+    response: InvestigationRetentionPreviewResponseSchema,
+  },
+  investigation_retention_prune: {
+    params: z.strictObject({ input: InvestigationRetentionPruneInputSchema }),
+    response: InvestigationRetentionPruneResponseSchema,
+  },
+  investigation_schedule_list: {
+    params: EMPTY_PAYLOAD,
+    response: InvestigationScheduleListResponseSchema,
+  },
+  investigation_schedule_runs: {
+    params: z.strictObject({ scheduleId: z.string().trim().min(1).max(256) }),
+    response: InvestigationScheduleRunListResponseSchema,
+  },
+  investigation_schedule_create: {
+    params: z.strictObject({ input: InvestigationScheduleCreateInputSchema }),
+    response: z.strictObject({ schedule: InvestigationScheduleSchema }),
+  },
+  investigation_schedule_update: {
+    params: z.strictObject({ input: InvestigationScheduleUpdateInputSchema }),
+    response: z.strictObject({ schedule: InvestigationScheduleSchema }),
+  },
+  investigation_schedule_tick: {
+    params: z.strictObject({ input: InvestigationScheduleTickInputSchema }),
+    response: InvestigationScheduleTickResponseSchema,
+  },
   provider_test: {
     params: z.strictObject({ providerId: z.string().min(1) }),
     response: z.strictObject({ ok: z.literal(true) }),
@@ -544,4 +636,16 @@ export const EVENT_SCHEMAS = {
     expiresAt: z.string().min(1).max(80),
   }),
   "activity.created": ActivitySchema,
+  "investigation.schedule_notification": z.strictObject({
+    scheduleId: z.string().trim().min(1).max(256),
+    scheduleRunId: z.string().trim().min(1).max(256),
+    taskId: z.string().trim().min(1).max(256),
+    outcome: z.enum(["changed", "failed", "baseline", "no_change", "insufficient_evidence"]),
+    notificationPolicy: z.enum(INVESTIGATION_NOTIFICATION_POLICIES),
+    title: z.string().trim().min(1).max(512),
+    evidenceIds: z.array(z.string().trim().min(1).max(256)).max(256),
+    findingId: z.string().trim().min(1).max(256).optional(),
+    briefId: z.string().trim().min(1).max(256).optional(),
+    at: z.string().trim().min(1).max(80),
+  }),
 } as const;

@@ -97,6 +97,24 @@ pub trait RemoteFileTransport: Send + Sync {
         data: &[u8],
     ) -> impl std::future::Future<Output = TransportResult<()>> + Send;
 
+    /// Create a new regular file without replacing an existing path.
+    ///
+    /// Backup paths are host-derived and single-use. A separate exclusive operation is required
+    /// so a collision cannot silently destroy an older recovery copy.
+    fn create_exclusive(
+        &self,
+        server_id: &str,
+        path: &str,
+        data: &[u8],
+    ) -> impl std::future::Future<Output = TransportResult<()>> + Send;
+
+    /// Remove one file after the service has verified its shape and contents.
+    fn remove_file(
+        &self,
+        server_id: &str,
+        path: &str,
+    ) -> impl std::future::Future<Output = TransportResult<()>> + Send;
+
     /// One path's attributes (`lstat` semantics: a symlink is not followed).
     ///
     /// The edit guard needs this twice: once to learn what kind of thing the path is, and once
@@ -185,4 +203,32 @@ pub struct RemoteWrite {
     pub path: String,
     /// 写入的**字节**数（正文按 UTF-8 编码后的长度）。
     pub bytes_written: usize,
+}
+
+/// A completed host-owned backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBackup {
+    pub path: String,
+    pub backup_path: String,
+    pub revision: String,
+    pub bytes_backed_up: usize,
+}
+
+/// A guarded restore from a host-owned backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRestore {
+    pub path: String,
+    pub backup_path: String,
+    pub revision: String,
+    pub bytes_before: usize,
+    pub bytes_after: usize,
+}
+
+/// A deleted host-owned backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBackupCleanup {
+    pub path: String,
+    pub backup_path: String,
+    pub revision: String,
+    pub bytes_deleted: usize,
 }

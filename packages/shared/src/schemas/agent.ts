@@ -5,6 +5,7 @@ import { z } from "zod";
 import { RiskLevelSchema, ToolTargetSchema } from "./server.js";
 import { PermissionApprovalSourceSchema, PermissionModeSchema, ToolOriginSchema } from "./permission.js";
 import { TOOL_RESULT_STATUSES } from "../types/enums.js";
+import { TOOL_ERROR_CODES } from "../types/tool.js";
 
 const RunIdSchema = z.string().trim().min(1).max(256);
 const TimestampSchema = z.string().min(1).max(80);
@@ -73,7 +74,7 @@ export const AgentRunResultSchema = z.strictObject({
  * accepting what the transport cannot produce.
  */
 export const AGENT_EVENT_MEMBER_SCHEMAS = {
-  "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, at: TimestampSchema }),
+  "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, taskId: RunIdSchema.optional(), at: TimestampSchema }),
   "agent.thinking": z.strictObject({ type: z.literal("agent.thinking"), runId: RunIdSchema, textDelta: z.string().max(20_000).optional(), at: TimestampSchema }),
   "agent.text": z.strictObject({ type: z.literal("agent.text"), runId: RunIdSchema, textDelta: z.string().max(20_000), at: TimestampSchema }),
   "agent.usage": z.strictObject({
@@ -105,6 +106,9 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
      * rather than as "builtin".
      */
     origin: ToolOriginSchema.optional(),
+    planId: z.string().trim().min(1).max(256).optional(),
+    planStepId: z.string().trim().min(1).max(256).optional(),
+    evidenceIds: z.array(z.string().trim().min(1).max(256)).max(256).optional(),
     at: TimestampSchema,
   }),
   "agent.tool_result": z.strictObject({
@@ -123,6 +127,10 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     policyId: z.string().trim().min(1).max(256).optional(),
     /** See `agent.tool_call` above. */
     origin: ToolOriginSchema.optional(),
+    planId: z.string().trim().min(1).max(256).optional(),
+    planStepId: z.string().trim().min(1).max(256).optional(),
+    evidenceIds: z.array(z.string().trim().min(1).max(256)).max(256).optional(),
+    errorCode: z.enum(TOOL_ERROR_CODES).optional(),
     status: z.enum(TOOL_RESULT_STATUSES),
     outputSummary: z.string().max(4_000),
     error: z.string().max(4_000).optional(),
@@ -131,10 +139,10 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     durationMs: z.number().nonnegative(),
     at: TimestampSchema,
   }),
-  "agent.waiting_approval": z.strictObject({ type: z.literal("agent.waiting_approval"), runId: RunIdSchema, approval: ApprovalRequestSchema, at: TimestampSchema }),
+  "agent.waiting_approval": z.strictObject({ type: z.literal("agent.waiting_approval"), runId: RunIdSchema, taskId: RunIdSchema.optional(), approval: ApprovalRequestSchema, at: TimestampSchema }),
   "agent.approval_expired": z.strictObject({ type: z.literal("agent.approval_expired"), runId: RunIdSchema, approvalId: RunIdSchema, at: TimestampSchema }),
-  "agent.completed": z.strictObject({ type: z.literal("agent.completed"), runId: RunIdSchema, result: AgentRunResultSchema, at: TimestampSchema }),
-  "agent.failed": z.strictObject({ type: z.literal("agent.failed"), runId: RunIdSchema, error: z.string().max(4_000), at: TimestampSchema }),
+  "agent.completed": z.strictObject({ type: z.literal("agent.completed"), runId: RunIdSchema, taskId: RunIdSchema.optional(), result: AgentRunResultSchema, at: TimestampSchema }),
+  "agent.failed": z.strictObject({ type: z.literal("agent.failed"), runId: RunIdSchema, taskId: RunIdSchema.optional(), error: z.string().max(4_000), at: TimestampSchema }),
 } as const;
 
 /**

@@ -13,8 +13,8 @@
 //!
 //! 实现拆成四个子模块，公开路径由下面的 `pub use` 原样转出：
 //! `error`（`Error` / `TransportError` / 两个 `Result` 别名）、
-//! `types`（`RemoteFileTransport` 与 `Listing` / `Read` / `Edit` / `Write` 结果）、
-//! `request`（三个 `Agent*Request`）、`remote_file_service`（`RemoteFileService` 自身）、
+//! `types`（`RemoteFileTransport` 与 `Listing` / `Read` / `Edit` / `Write` / `Backup` 结果）、
+//! `request`（各个 `Agent*Request`）、`remote_file_service`（`RemoteFileService` 自身）、
 //! `helpers`（`byte_match_offsets` / `count_lines` / `read_result` / `join_remote_path`）。
 
 mod error;
@@ -25,8 +25,12 @@ mod types;
 
 pub use error::{Error, Result, TransportError, TransportResult};
 pub use remote_file_service::RemoteFileService;
-pub use request::{AgentEditRequest, AgentReadRequest, AgentWriteRequest};
+pub use request::{
+    AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest, AgentReadRequest,
+    AgentRestoreRequest, AgentWriteRequest,
+};
 pub use types::{
-    ListedEntry, RemoteEdit, RemoteEntry, RemoteEntryKind, RemoteFileTransport, RemoteListing,
-    RemoteRead, RemoteStat, RemoteWrite, ReplaceError, ReplaceGuard, ReplacedFile,
+    ListedEntry, RemoteBackup, RemoteBackupCleanup, RemoteEdit, RemoteEntry, RemoteEntryKind,
+    RemoteFileTransport, RemoteListing, RemoteRead, RemoteRestore, RemoteStat, RemoteWrite,
+    ReplaceError, ReplaceGuard, ReplacedFile,
 };

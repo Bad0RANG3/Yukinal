@@ -9,6 +9,7 @@ export function dockerRestartTool(host: HostToolExecutor) {
     name: "docker.restart",
     description: "Restart one Docker container on the resolved remote server after explicit approval.",
     risk: "high",
+    effectful: true,
     timeoutMs: 30_000,
     input: DockerRestartInputSchema,
     output: DockerRestartResultSchema,

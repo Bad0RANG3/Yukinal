@@ -50,7 +50,7 @@ pub type Runner =
 /// 目标 + 可变 capabilities。capabilities 由 `detect()` 写入，与数据库行对齐。
 pub struct CollectorContext {
     pub server_id: String,
-    pub capabilities: std::sync::Mutex<Vec<(String, bool)>>,
+    pub capabilities: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     pub runner: Runner,
 }
 
@@ -59,7 +59,7 @@ impl CollectorContext {
     pub fn new(server_id: &str, runner: Runner) -> Self {
         Self {
             server_id: server_id.to_string(),
-            capabilities: std::sync::Mutex::new(Vec::new()),
+            capabilities: Arc::new(std::sync::Mutex::new(Vec::new())),
             runner,
         }
     }
@@ -69,12 +69,7 @@ impl CollectorContext {
     pub fn clone_context(&self) -> CollectorContext {
         CollectorContext {
             server_id: self.server_id.clone(),
-            capabilities: std::sync::Mutex::new(
-                self.capabilities
-                    .lock()
-                    .map(|caps| caps.clone())
-                    .unwrap_or_default(),
-            ),
+            capabilities: Arc::clone(&self.capabilities),
             runner: Arc::clone(&self.runner),
         }
     }
@@ -201,4 +196,32 @@ impl CollectorEngine {
 /// `docker: command not found` 会被 Docker 采集器特判，不吞）。
 pub(crate) async fn run(context: &CollectorContext, command: &str) -> Result<CommandOutput> {
     (context.runner)(command, CollectorContext::COMMAND_TIMEOUT).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloned_context_shares_capabilities() {
+        let context = CollectorContext::new(
+            "server-1",
+            Arc::new(|_, _| {
+                Box::pin(async {
+                    Ok(CommandOutput {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                })
+            }),
+        );
+        let cloned = context.clone_context();
+        cloned.set_capability("linux", true);
+
+        let capabilities = context.capabilities.lock().expect("capabilities lock");
+        assert!(capabilities
+            .iter()
+            .any(|(key, present)| key == "linux" && *present));
+    }
 }
