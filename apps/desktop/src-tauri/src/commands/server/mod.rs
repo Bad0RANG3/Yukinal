@@ -76,10 +76,15 @@ pub async fn server_snapshot(
         .map_err(|error| error.to_string())?;
     let collected_at = yukinal_core::sidecar::iso8601_now();
 
-    let (snapshot, _samples) =
-        yukinal_core::collector::collect_snapshot(&state.ssh, &session, &server_id, &collected_at)
-            .await
-            .map_err(|error| error.to_string())?;
+    let (snapshot, _samples) = yukinal_core::collector::collect_snapshot(
+        &state.ssh,
+        &session,
+        &server_id,
+        &collected_at,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
 
     // 先入库（audit / 趋势都靠 snapshots 行），再返回给 UI。
     state

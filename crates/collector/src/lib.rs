@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use tokio_util::sync::CancellationToken;
 
 pub mod collectors;
 pub mod runners;
@@ -29,6 +30,8 @@ pub enum CollectorError {
     CommandFailed { exit_code: i32, stderr: String },
     #[error("command timed out")]
     Timeout,
+    #[error("command cancelled")]
+    Cancelled,
     #[error("collector {collector} failed: {message}")]
     Collect { collector: String, message: String },
     #[error("runner error: {0}")]
@@ -44,14 +47,18 @@ pub struct CommandOutput {
 }
 
 /// 命令执行入口（远端 ssh / 本机进程的公共视图）。
-pub type Runner =
-    Arc<dyn Fn(&str, Duration) -> BoxFuture<'static, Result<CommandOutput>> + Send + Sync>;
+pub type Runner = Arc<
+    dyn Fn(&str, Duration, &CancellationToken) -> BoxFuture<'static, Result<CommandOutput>>
+        + Send
+        + Sync,
+>;
 
 /// 目标 + 可变 capabilities。capabilities 由 `detect()` 写入，与数据库行对齐。
 pub struct CollectorContext {
     pub server_id: String,
     pub capabilities: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     pub runner: Runner,
+    cancel: CancellationToken,
 }
 
 impl CollectorContext {
@@ -61,7 +68,15 @@ impl CollectorContext {
             server_id: server_id.to_string(),
             capabilities: Arc::new(std::sync::Mutex::new(Vec::new())),
             runner,
+            cancel: CancellationToken::new(),
         }
+    }
+
+    /// Bind every command in this context to the caller's lifetime.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// 把上下文克隆进采集器的 async future（runner 是 Arc 闭包，拷贝很便宜）。
@@ -71,6 +86,7 @@ impl CollectorContext {
             server_id: self.server_id.clone(),
             capabilities: Arc::clone(&self.capabilities),
             runner: Arc::clone(&self.runner),
+            cancel: self.cancel.clone(),
         }
     }
 
@@ -195,7 +211,7 @@ impl CollectorEngine {
 /// 便捷：context 的 runner 执行一条命令；非零退出按失败处理（exit 127 的
 /// `docker: command not found` 会被 Docker 采集器特判，不吞）。
 pub(crate) async fn run(context: &CollectorContext, command: &str) -> Result<CommandOutput> {
-    (context.runner)(command, CollectorContext::COMMAND_TIMEOUT).await
+    (context.runner)(command, CollectorContext::COMMAND_TIMEOUT, &context.cancel).await
 }
 
 #[cfg(test)]
@@ -206,7 +222,7 @@ mod tests {
     fn cloned_context_shares_capabilities() {
         let context = CollectorContext::new(
             "server-1",
-            Arc::new(|_, _| {
+            Arc::new(|_, _, _| {
                 Box::pin(async {
                     Ok(CommandOutput {
                         exit_code: 0,

@@ -46,6 +46,7 @@ impl Collector for Docker {
             let probe = run(&context, "docker info >/dev/null 2>&1").await;
             let daemon_ok = match probe {
                 Ok(_) => true,
+                Err(CollectorError::Cancelled) => return Err(CollectorError::Cancelled),
                 // docker 未安装 / daemon 没起：available=false，不算采集错误。
                 Err(CollectorError::CommandFailed { .. })
                 | Err(CollectorError::Runner(_))

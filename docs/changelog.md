@@ -6,7 +6,7 @@
 
 ### 新增与改进
 
-- **Rust 资源生命周期审计与修复。** 明确 Rust 的安全保证不覆盖 `Arc` 循环、后台任务保活和外部句柄收口，并按这条边界修复 MCP HTTP GET 流、MCP/sidecar supervisor、终端 forwarder 与 SSH keepalive 的生命周期：长等待任务只持 `Weak` 或配置快照，停止走取消令牌/显式关闭，`Drop` 作为同步兜底。新增本地回归覆盖最后 HTTP 句柄释放、重启退避不保活 supervisor、supervisor 释放回收 sidecar、管理器释放停止终端转发器；真实 SSH、Provider、第三方 MCP 和长时间资源曲线仍未验证。系统结论与残余风险见[内存与生命周期审计](./memory-lifecycle-audit.md#内存与生命周期审计)和 [ADR 0070](./adr.md#adr-0070后台任务弱引用加显式取消)。
+- **Rust 资源生命周期审计与修复。** 明确 Rust 的安全保证不覆盖 `Arc` 循环、后台任务保活和外部句柄收口，并按这条边界修复 MCP HTTP GET 流、MCP/sidecar supervisor、终端 forwarder、SSH keepalive 与 Collector 取消路径：长等待任务只持 `Weak` 或配置快照，停止走取消令牌/显式关闭，`Drop` 作为同步兜底。新增本地回归覆盖最后 HTTP 句柄释放、重启退避不保活 supervisor、supervisor 释放回收 sidecar、管理器释放停止终端转发器，以及取消时终止本地进程组和远端 SSH 命令；真实公网 SSH、Provider、第三方 MCP 和长时间资源曲线仍未验证。生命周期契约见[架构总览](./architecture.md#架构总览)，未验收边界见[当前限制](./limitations.md#当前限制)，决策见 [ADR 0070](./adr.md#adr-0070后台任务弱引用加显式取消)。
 
 - **副作用执行先过 durable plan 栅栏。** Agent registry 与 Rust host dispatcher 现在都拒绝没有完整 `taskId`、`planId`、`planStepId` 的 filesystem 写入、备份/恢复、重启、包安装和 MCP 调用；普通聊天不能通过伪造自动票据直接写入。交互式终端继续作为用户明确输入的人工旁路，不进入 Agent 自动任务链。会话授权同时绑定规范化输入的 SHA-256 指纹，改路径、容器、服务或包版本会重新请求授权。
 

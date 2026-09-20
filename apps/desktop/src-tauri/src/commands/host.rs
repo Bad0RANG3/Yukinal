@@ -4066,6 +4066,7 @@ async fn server_info(
             &session,
             server_id,
             &collected_at,
+            cancel,
         ) => match result {
             Ok(result) => result,
             Err(error) => return Ok(transport_or_cancel(error, cancel)),

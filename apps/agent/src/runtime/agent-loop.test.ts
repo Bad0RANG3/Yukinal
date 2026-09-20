@@ -11,12 +11,36 @@ import { RpcFailure } from "../errors.js";
 import { mcpToolFromCatalog } from "../mcp/tool.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { ToolRegistry } from "../tools/registry.js";
-import { AgentLoop } from "./agent-loop.js";
+import { AgentLoop, shouldAdvancePlan, shouldCheckPlan } from "./agent-loop.js";
 import { createRuntime } from "./create-runtime.js";
 import type { AgentLogger } from "../config.js";
 
 const noop = (): void => {};
 const silent: AgentLogger = { debug: noop, info: noop, warn: noop, error: noop, child: () => silent };
+
+test("plan classification keeps local context available without consuming a remote step", () => {
+  const localContextTools = [
+    "investigation.evidence",
+    "investigation.evidence.search",
+    "investigation.evidence.compare",
+    "investigation.evidence.correlate",
+    "investigation.evidence.triage",
+  ];
+  for (const toolName of localContextTools) {
+    assert.equal(shouldCheckPlan(toolName), false, `${toolName} must not be checked against the remote step`);
+    assert.equal(shouldAdvancePlan(toolName), false, `${toolName} must not advance the remote step`);
+  }
+
+  for (const toolName of ["investigation.plan", "investigation.playbook"]) {
+    assert.equal(shouldCheckPlan(toolName), false, `${toolName} owns the active plan revision`);
+    assert.equal(shouldAdvancePlan(toolName), false, `${toolName} must not advance a step`);
+  }
+
+  assert.equal(shouldCheckPlan("investigation.artifact"), true);
+  assert.equal(shouldAdvancePlan("investigation.artifact"), false);
+  assert.equal(shouldCheckPlan("server.info"), true);
+  assert.equal(shouldAdvancePlan("server.info"), true);
+});
 
 test("without a provider the loop refuses to run instead of faking output", async () => {
   const runtime = createRuntime({ log: silent });

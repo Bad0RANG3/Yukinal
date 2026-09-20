@@ -17,59 +17,72 @@ const REAP_GRACE: Duration = Duration::from_secs(1);
 /// 本机执行：`tokio::process::Command`，带超时（超时即杀进程）。
 #[must_use]
 pub fn local() -> Runner {
-    Arc::new(|command: &str, timeout: Duration| {
-        let command = command.to_string();
-        Box::pin(async move {
-            let mut command_builder = Command::new("sh");
-            command_builder
-                .arg("-c")
-                .arg(&command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            configure_process_group(&mut command_builder);
+    Arc::new(
+        |command: &str, timeout: Duration, cancel: &tokio_util::sync::CancellationToken| {
+            let command = command.to_string();
+            let cancel = cancel.clone();
+            Box::pin(async move {
+                let mut command_builder = Command::new("sh");
+                command_builder
+                    .arg("-c")
+                    .arg(&command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true);
+                configure_process_group(&mut command_builder);
 
-            let mut child = command_builder
-                .spawn()
-                .map_err(|error| CollectorError::Runner(error.to_string()))?;
-            let pid = child.id();
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| CollectorError::Runner("stdout was not piped".to_string()))?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| CollectorError::Runner("stderr was not piped".to_string()))?;
-            let stdout_task = tokio::spawn(read_capped(stdout));
-            let stderr_task = tokio::spawn(read_capped(stderr));
+                let mut child = command_builder
+                    .spawn()
+                    .map_err(|error| CollectorError::Runner(error.to_string()))?;
+                let pid = child.id();
+                let stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| CollectorError::Runner("stdout was not piped".to_string()))?;
+                let stderr = child
+                    .stderr
+                    .take()
+                    .ok_or_else(|| CollectorError::Runner("stderr was not piped".to_string()))?;
+                let stdout_task = tokio::spawn(read_capped(stdout));
+                let stderr_task = tokio::spawn(read_capped(stderr));
 
-            match tokio::time::timeout(timeout, child.wait()).await {
-                Ok(Ok(status)) => {
-                    let (stdout, stderr) =
-                        collect_pipe_output(stdout_task, stderr_task, pid).await?;
-                    Ok(CommandOutput {
-                        exit_code: status.code().unwrap_or(-1),
-                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                    })
+                let outcome = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        kill_process_tree(&mut child, pid);
+                        let _ = tokio::time::timeout(REAP_GRACE, child.wait()).await;
+                        let _ = collect_pipe_output(stdout_task, stderr_task, pid).await;
+                        return Err(CollectorError::Cancelled);
+                    }
+                    outcome = tokio::time::timeout(timeout, child.wait()) => outcome,
+                };
+
+                match outcome {
+                    Ok(Ok(status)) => {
+                        let (stdout, stderr) =
+                            collect_pipe_output(stdout_task, stderr_task, pid).await?;
+                        Ok(CommandOutput {
+                            exit_code: status.code().unwrap_or(-1),
+                            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                        })
+                    }
+                    Ok(Err(error)) => {
+                        kill_process_group(pid);
+                        let _ = tokio::time::timeout(REAP_GRACE, child.wait()).await;
+                        let _ = collect_pipe_output(stdout_task, stderr_task, pid).await;
+                        Err(CollectorError::Runner(error.to_string()))
+                    }
+                    Err(_) => {
+                        kill_process_tree(&mut child, pid);
+                        let _ = tokio::time::timeout(REAP_GRACE, child.wait()).await;
+                        let _ = collect_pipe_output(stdout_task, stderr_task, pid).await;
+                        Err(CollectorError::Timeout)
+                    }
                 }
-                Ok(Err(error)) => {
-                    kill_process_group(pid);
-                    let _ = tokio::time::timeout(REAP_GRACE, child.wait()).await;
-                    let _ = collect_pipe_output(stdout_task, stderr_task, pid).await;
-                    Err(CollectorError::Runner(error.to_string()))
-                }
-                Err(_) => {
-                    kill_process_tree(&mut child, pid);
-                    let _ = tokio::time::timeout(REAP_GRACE, child.wait()).await;
-                    let _ = collect_pipe_output(stdout_task, stderr_task, pid).await;
-                    Err(CollectorError::Timeout)
-                }
-            }
-        })
-    })
+            })
+        },
+    )
 }
 
 async fn read_capped<R>(mut reader: R) -> std::io::Result<Vec<u8>>
@@ -152,26 +165,29 @@ pub fn ssh<B>(backend: Arc<B>, session: Session) -> Runner
 where
     B: SshBackend + Send + Sync + 'static,
 {
-    Arc::new(move |command: &str, timeout: Duration| {
-        let backend = Arc::clone(&backend);
-        let session = session.clone();
-        let command = command.to_string();
-        Box::pin(async move {
-            use tokio_util::sync::CancellationToken;
-            let result = backend
-                .execute(&session, &command, Some(timeout), &CancellationToken::new())
-                .await
-                .map_err(|error| match error {
-                    yukinal_ssh::Error::Timeout => CollectorError::Timeout,
-                    other => CollectorError::Runner(other.to_string()),
-                })?;
-            Ok(CommandOutput {
-                exit_code: result.exit_code,
-                stdout: result.stdout_lossy(),
-                stderr: result.stderr_lossy(),
+    Arc::new(
+        move |command: &str, timeout: Duration, cancel: &tokio_util::sync::CancellationToken| {
+            let backend = Arc::clone(&backend);
+            let session = session.clone();
+            let command = command.to_string();
+            let cancel = cancel.clone();
+            Box::pin(async move {
+                let result = backend
+                    .execute(&session, &command, Some(timeout), &cancel)
+                    .await
+                    .map_err(|error| match error {
+                        yukinal_ssh::Error::Timeout => CollectorError::Timeout,
+                        yukinal_ssh::Error::Cancelled => CollectorError::Cancelled,
+                        other => CollectorError::Runner(other.to_string()),
+                    })?;
+                Ok(CommandOutput {
+                    exit_code: result.exit_code,
+                    stdout: result.stdout_lossy(),
+                    stderr: result.stderr_lossy(),
+                })
             })
-        })
-    })
+        },
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -213,7 +229,12 @@ mod tests {
         let marker = temp_path("descendant-pid");
         let command = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
         let runner = local();
-        let result = runner(&command, Duration::from_millis(100)).await;
+        let result = runner(
+            &command,
+            Duration::from_millis(100),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
         assert!(matches!(result, Err(CollectorError::Timeout)));
 
         let descendant = std::fs::read_to_string(&marker)
@@ -228,9 +249,13 @@ mod tests {
     #[tokio::test]
     async fn local_output_is_bounded_without_blocking_the_child() {
         let runner = local();
-        let output = runner("yes x | head -c 2097152", Duration::from_secs(5))
-            .await
-            .expect("large output must be drained");
+        let output = runner(
+            "yes x | head -c 2097152",
+            Duration::from_secs(5),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("large output must be drained");
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.stdout.len(), MAX_CAPTURE_BYTES);
     }
@@ -241,11 +266,35 @@ mod tests {
         let output = runner(
             "printf stdout; printf stderr >&2; exit 7",
             Duration::from_secs(5),
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .expect("ordinary command must complete");
         assert_eq!(output.exit_code, 7);
         assert_eq!(output.stdout, "stdout");
         assert_eq!(output.stderr, "stderr");
+    }
+
+    #[tokio::test]
+    async fn local_cancellation_kills_the_whole_process_group() {
+        let marker = temp_path("cancelled-descendant-pid");
+        let command = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            trigger.cancel();
+        });
+
+        let result = local()(&command, Duration::from_secs(30), &cancel).await;
+        assert!(matches!(result, Err(CollectorError::Cancelled)));
+
+        let descendant = std::fs::read_to_string(&marker)
+            .expect("cancelled command must write its descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("descendant pid must be numeric");
+        wait_until_gone(descendant).await;
+        std::fs::remove_file(marker).ok();
     }
 }

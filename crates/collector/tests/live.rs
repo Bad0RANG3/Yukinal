@@ -133,7 +133,12 @@ async fn command_timeout_is_surfaced_not_hung() {
         yukinal_collector::runners::ssh(backend, session),
     );
     // sleep 60 会撞上超时（2s）→ 返回 Timeout 错误，而不是挂死。
-    let result = (context.runner)("sleep 60", Duration::from_secs(2)).await;
+    let result = (context.runner)(
+        "sleep 60",
+        Duration::from_secs(2),
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
     assert!(matches!(
         result,
         Err(yukinal_collector::CollectorError::Timeout)

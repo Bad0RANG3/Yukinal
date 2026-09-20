@@ -6,7 +6,7 @@
 
 - **想知道现在能做什么、还差什么**：根目录的 [项目状态](../README.md#项目状态) 与 [今天真正可用的能力](../README.md#今天真正可用的能力)；缺口以 [当前限制](./limitations.md#当前限制) 为准，它是**全部**已知缺口的唯一来源。
 - **想理解整个项目**：先读 [执行与授权模型](./execution-model.md#执行与授权模型)（这是整个项目的重点），再读 [架构总览](./architecture.md#架构总览)。
-- **想审计 Rust 资源生命周期**：读 [内存与生命周期审计](./memory-lifecycle-audit.md#内存与生命周期审计)；它说明安全 Rust 的保证、`Arc`/后台任务的逻辑保活边界，以及本机验收能证明什么。
+- **要改 Rust 后台任务或关闭路径**：读[架构总览](./architecture.md#架构总览)的生命周期契约，并同时核对[当前限制](./limitations.md#当前限制)；安全 Rust 的内存安全和逻辑资源生命周期不是同一件事。
 - **要动手改**：先在 [仓库地图](./architecture.md#仓库地图) 里定位到层，再读那一层的边界文档 —— [模型 Provider](./boundaries/provider.md#边界模型-provider)、[外部工具（MCP）](./boundaries/mcp.md#边界外部工具mcp)、[Markdown 渲染](./boundaries/markdown.md#agent-回复的-markdown-渲染)。
 - **要做真实外部验证**：看 [外部验证运行手册](./external-validation.md)；默认门禁不访问网络，只有显式 opt-in 才会运行真实 Provider 或 MCP 矩阵。
 - **要动权限**：三档各自一份 —— [read](./risk-tiers/read.md)、[write](./risk-tiers/write.md)、[dangerous](./risk-tiers/dangerous.md)。
@@ -20,7 +20,6 @@
 | [执行与授权模型](./execution-model.md) | 三层风险事实如何合成一个决策，票据来源、运行模式与会话授权的共享规则 |
 | [权限档位：read](./risk-tiers/read.md) · [write](./risk-tiers/write.md) · [dangerous](./risk-tiers/dangerous.md) | 三档各自的完整规则：构成、各环境策略表取值、谁能批准、什么会拒绝它、审计里留下什么 |
 | [安全与数据边界](./security.md) | 凭据、主机指纹、Agent 能碰什么、各项上限、审计 |
-| [内存与生命周期审计](./memory-lifecycle-audit.md) | Rust 安全保证与逻辑生命周期问题的边界、已修复的 `Arc`/任务/句柄收口、本机与 WSL 回环验收限制 |
 | [边界：模型 Provider](./boundaries/provider.md) | 三种协议的适配器、它们各自的假设、未验证的部分 |
 | [边界：外部工具（MCP）](./boundaries/mcp.md) | 接入形状、十条约束逐条对照、进程与目录归属、已知未验证处 |
 | [Agent 回复的 Markdown 渲染](./boundaries/markdown.md) | 为什么自己写解析器、它的子集边界 |

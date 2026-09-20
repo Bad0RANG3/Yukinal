@@ -604,16 +604,7 @@ export class AgentLoop {
           if (
             request.taskId &&
             this.deps.checkPlan &&
-            internalName !== "investigation.plan" &&
-            internalName !== "investigation.playbook" &&
-            // Fetching an already persisted envelope is a local context operation. It
-            // must remain available while a plan is active and must not consume the
-            // current remote step merely because the model needed the original output.
-            internalName !== "investigation.evidence" &&
-            internalName !== "investigation.evidence.search" &&
-            internalName !== "investigation.evidence.compare" &&
-            internalName !== "investigation.evidence.correlate" &&
-            internalName !== "investigation.evidence.triage"
+            shouldCheckPlan(internalName)
           ) {
             try {
               planCheck = await this.deps.checkPlan(
@@ -1255,17 +1246,35 @@ function shouldAutoRecordEvidence(toolName: string): boolean {
   return !toolName.startsWith("investigation.");
 }
 
+const PLAN_CONTROL_TOOLS = new Set(["investigation.plan", "investigation.playbook"]);
+const LOCAL_PLAN_CONTEXT_TOOLS = new Set([
+  "investigation.evidence",
+  "investigation.evidence.search",
+  "investigation.evidence.compare",
+  "investigation.evidence.correlate",
+  "investigation.evidence.triage",
+]);
+const PLAN_NON_ADVANCING_TOOLS = new Set([
+  ...PLAN_CONTROL_TOOLS,
+  ...LOCAL_PLAN_CONTEXT_TOOLS,
+  "investigation.artifact",
+]);
+
 /**
- * Artifact persistence is deliberately orthogonal to the ordered plan. The loop already
- * records execution/verification/failure artifacts automatically, and a model-authored
- * artifact must not advance the next remote step a second time. Evidence lookup is also
- * a context read, not a step completion.
+ * Plan tools create or replace a revision, while local context reads only inspect
+ * already-persisted material. Neither may be rejected by the active step's tool list.
  */
-function shouldAdvancePlan(toolName: string): boolean {
-  return toolName !== "investigation.evidence"
-    && toolName !== "investigation.evidence.search"
-    && toolName !== "investigation.evidence.compare"
-    && toolName !== "investigation.artifact";
+export function shouldCheckPlan(toolName: string): boolean {
+  return !PLAN_CONTROL_TOOLS.has(toolName) && !LOCAL_PLAN_CONTEXT_TOOLS.has(toolName);
+}
+
+/**
+ * Only a target observation or action may complete the current remote step.
+ * Artifact persistence is deliberately orthogonal: it keeps the active plan binding
+ * for host validation, but recording a summary must not consume that step twice.
+ */
+export function shouldAdvancePlan(toolName: string): boolean {
+  return !PLAN_NON_ADVANCING_TOOLS.has(toolName);
 }
 
 function summarize(output: unknown): string {

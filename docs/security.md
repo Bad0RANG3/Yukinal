@@ -12,6 +12,11 @@
 
 - 应用级出站网络设置默认直连，也可显式选择系统代理；MCP Streamable HTTP、OAuth discovery/token 请求和远端 KRL 下载共用同一份解析结果。系统代理只读取静态环境变量或平台设置，不执行 PAC；`NO_PROXY` / `ProxyOverride` 交给 HTTP 客户端匹配。代理凭据只写入操作系统凭据库，SQLite 只保存引用，设置响应只返回是否存在，并且只以 Basic `Proxy-Authorization` 发给代理。代理错误会标明代理地址与来源，直连错误会标明直连路径；这不改变 endpoint 的 HTTPS、TLS、redirect 或认证策略。
 
+## 依赖告警
+
+- 2026-09-20 的 `cargo audit` 未发现漏洞级 advisory，但有 8 条上游 warning：Tauri 2.11.5 的 GTK 链带入 1 条 `proc-macro-error` unmaintained（`RUSTSEC-2024-0370`）、5 条 `unic-*` unmaintained（`RUSTSEC-2025-0075`、`RUSTSEC-2025-0080`、`RUSTSEC-2025-0081`、`RUSTSEC-2025-0098`、`RUSTSEC-2025-0100`）和 `glib 0.18.5` 的 `VariantStrIter` unsound（`RUSTSEC-2024-0429`）；SSH 链带入被 yank 的 `wnaf 0.14.0`（`russh 0.63.1 -> p256/p384/p521 0.14.0 -> primeorder 0.14.0`）。这些 warning 没有被加入忽略清单。
+- 当前代码没有直接调用 `glib::VariantStrIter`，GTK/WebKit 由 Tauri 管理；`wnaf` 也没有对应 advisory。升级会同时替换 Tauri 的 GTK 版本或 RustCrypto 的曲线实现，不能只改应用锁文件而假装消除风险。后续在 Tauri 或 `russh` 发布包含修复/替代依赖的版本后升级，并重新运行 `cargo audit`；在此之前保留 warning，避免用 suppress 隐藏供应链状态。
+
 ## 主机指纹
 
 - 首次成功认证后把主机指纹按 `host:port` 记录到数据目录下的 `known_hosts`（自有格式 `v1:host:port:SHA256:…`，指纹写法与 OpenSSH 一致）；之后指纹不一致即拒绝连接，并且错误里同时给出**已钉住的**与**服务器出示的**两个指纹 —— 两个都看得见，才谈得上判断。

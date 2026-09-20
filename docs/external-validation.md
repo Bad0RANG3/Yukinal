@@ -40,20 +40,6 @@ cargo test -p yukinal-core --test mcp_live --offline -- --test-threads=1
 实际 handshake 名称/版本和工具调用结果。HTTP 客户端会按现有实现验证 JSON/SSE 回包、GET stream 与
 DELETE 关闭；测试不会自动安装官方 SDK，也不会自行启动虚拟机。
 
-## 已完成的一次记录（2026-09-15）
-
-- 官方 `@modelcontextprotocol/server-everything` 包 `2026.8.31`：报告 server `mcp-servers/everything`
-  `2.0.0`，Streamable HTTP，无认证；`echo` 工具调用成功。原始探针确认 POST 的 SSE 回包、GET
-  `200 text/event-stream` 与 DELETE `200`。
-- 官方 TypeScript SDK `1.30.0` 的 `enableJsonResponse` 临时 server：Streamable HTTP，无认证；
-  JSON 回包与 `echo` 工具调用成功。
-- 独立 `@ericthered926/duckduckgo-mcp-server` 包 `0.6.0`：报告 server `duckduckgo-mcp-server`
-  `0.3.0`，stdio，无认证；握手与两个工具的目录读取成功，搜索调用被 DuckDuckGo 的上游反爬限制拒绝。
-- 独立 `mcp-fetch-server` 包 `1.1.2`：stdio，无认证；握手与工具目录成功，访问 `example.com`
-  时如实收到它自己的 SSRF 防护错误（当前代理将域名解析到 `198.18.0.78`）。这不是客户端把错误吞掉或改写成成功。
-
-这是一组有边界的抽样记录，不代表所有第三方 server 都兼容；真实上游错误也保留在记录中。
-
 示例形状：
 
 ```json
@@ -85,5 +71,4 @@ DELETE 关闭；测试不会自动安装官方 SDK，也不会自行启动虚拟
 }
 ```
 
-真实运行后，把命令输出中的日期、模型/server 版本、认证方式、transport 和结果追加到本文件的
-验证记录；没有真实凭据或 server 时不要把它写成已验证。
+真实运行要记录日期、模型/server 版本、认证方式、transport 和结果；没有真实凭据或 server 时不得把能力写成已验证。一次运行的结果属于验收证据，不回写成长期行为承诺。

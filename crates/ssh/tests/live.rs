@@ -105,7 +105,7 @@ async fn password_auth_executes_a_command() {
     assert_eq!(result.stdout_lossy(), "pong-yukinal");
 
     // 命令超时会被显式报告，而不是挂死。
-    let _ = backend
+    let timed_out = backend
         .execute(
             &session,
             "sleep 30",
@@ -113,6 +113,53 @@ async fn password_auth_executes_a_command() {
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;
+    assert!(matches!(timed_out, Err(Error::Timeout)));
+    backend.close(&session).await.expect("close");
+}
+
+#[tokio::test]
+async fn command_cancellation_is_surfaced_and_closes_the_channel() {
+    if !is_enabled() {
+        eprintln!("skipped: requires real host");
+        return;
+    }
+    let backend = RusshBackend::from_data_dir(&std::env::temp_dir()).expect("backend");
+    let session = backend
+        .connect(
+            test_config("srv_cancel", KnownHostsPolicy::TrustOnFirstUse),
+            secrets(),
+        )
+        .await
+        .expect("connect");
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        trigger.cancel();
+    });
+
+    let cancelled = backend
+        .execute(
+            &session,
+            "sleep 30",
+            Some(std::time::Duration::from_secs(30)),
+            &cancel,
+        )
+        .await;
+    assert!(matches!(cancelled, Err(Error::Cancelled)));
+
+    // 取消的是当前命令通道，不是共享会话本身。
+    let result = backend
+        .execute(
+            &session,
+            "printf after-cancel",
+            Some(std::time::Duration::from_secs(10)),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("execute after cancellation");
+    assert_eq!(result.stdout_lossy(), "after-cancel");
     backend.close(&session).await.expect("close");
 }
 

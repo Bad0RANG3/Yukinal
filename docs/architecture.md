@@ -42,7 +42,9 @@ sidecar 的 stdout 只承载协议帧，**所有日志写 stderr**——一条�
 - **有界性是一条设计约束，不是实现细节。** 帧大小、命令输出、文件读取、日志行数、审计条数、审批等待时长、单次运行的步数与墙钟时间都必须有明确上限，并且上限要写在文档里（见 [安全与数据边界](./security.md#安全与数据边界)）。
 - **决策摘要只能用显式 continuation 续接任务。** 选项省略 continuation 时宿主归一化为 `wait_user`；只有 `continue_readonly` 或 `start_plan` 的用户选择才会让桌面调用既有任务启动入口，`stop` 则由宿主封存任务并清除活动运行栅栏，任务详情页的 `investigation_task_stop` 也复用这条链路，不能由自然语言或旧摘要隐式启动或停止。
 
-**后台任务与关闭。** 需要跨网络等待、退避或长期运行的后台任务不能把所有者 `Arc` 作为隐形保活根。任务只持 `Weak` 或配置快照，进入同步临界区时才短暂升级；显式关闭使用取消令牌或关闭通知，`Drop` 作为同步兜底负责 abort 未完成的任务并关闭已经持有的句柄。子进程、PTY、SSE 和 keepalive 都必须有显式收口路径，且“本地任务已停止”不等于“远端副作用已撤销”。模块清单、回归测试和未验收边界见 [内存与生命周期审计](./memory-lifecycle-audit.md#内存与生命周期审计)。
+**Rust 生命周期契约。** 安全 Rust 排除了 use-after-free、double free 和数据竞争，但不会替业务决定对象何时释放、任务何时取消或外部句柄何时回收。需要跨网络等待、退避或长期运行的后台任务不能把所有者 `Arc` 作为隐形保活根：任务只持 `Weak`、独立状态快照或配置快照，进入同步临界区时才短暂升级；任务必须有取消令牌或关闭通知；所有者需要提供显式 `shutdown`/`close`，`Drop` 只负责同步兜底，不替代异步关闭协议。子进程、PTY、SSE 和 keepalive 都必须在所有者释放或显式停止时收口。释放本地内存、收到取消、停止本地任务和撤销远端副作用是四种不同事实，状态与错误文案不能混为一谈。
+
+这条契约已落实在 MCP HTTP GET 流、MCP/sidecar supervisor、终端 forwarder、SSH keepalive、Collector 本地/SSH runner 与桌面后台任务中，并由对应的本地回归和 WSL OpenSSH 回环测试覆盖；远程公网主机、第三方服务取消语义和长时间资源曲线仍属于未验收边界，见 [当前限制](./limitations.md#当前限制)。
 
 **动作重投保护。** 对文件写入、编辑、宿主生成备份、守卫恢复、容器重启和 MCP 调用，Rust 宿主在实际执行前以 traceId + callId 写入一次 SQLite 占位和请求指纹；绑定持久化计划时还比较不含 provider 身份的逻辑动作指纹。当前进程可以重放有界的已完成响应；运行中、响应丢失或结果不确定的调用只返回 duplicate_call 计划偏离，不能因为 sidecar 重启、换 callId 或界面重连而再次触达远端。文件备份另有只存元数据的归属账本，恢复必须命中同服务器、目标和任务的可用记录并在成功后消费它；账本不保存远端原文，外部网络和真实部署仍按未验证能力处理。
 
@@ -94,7 +96,6 @@ docs/
   boundaries/        三个跨模块边界（Provider / MCP / Markdown 渲染）
   security.md        安全与数据边界
   limitations.md     当前限制与有意为之的边界
-  memory-lifecycle-audit.md  Rust 资源所有权、后台任务与关闭边界审计
   development.md     开始开发、验证命令与首次使用引导
   packaging.md       打包与分发
   adr.md             架构决策记录 0001–0070

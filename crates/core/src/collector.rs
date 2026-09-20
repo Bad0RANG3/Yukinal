@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use yukinal_collector::{CollectedData, CollectorContext, CollectorEngine, CollectorSample};
 use yukinal_database::models::{HealthState, ServerCapabilities, ServerSnapshot};
 use yukinal_ssh::{RusshBackend, Session};
@@ -16,12 +17,14 @@ pub async fn collect_snapshot(
     session: &Session,
     server_id: &str,
     collected_at: &str,
+    cancel: &CancellationToken,
 ) -> yukinal_collector::Result<(ServerSnapshot, Vec<CollectorSample>)> {
     let engine = CollectorEngine::with_mvp();
     let context = CollectorContext::new(
         server_id,
         yukinal_collector::runners::ssh(Arc::clone(ssh), session.clone()),
-    );
+    )
+    .with_cancel(cancel.clone());
     engine.detect_all(&context).await?;
     let samples = engine.collect_all(&context, collected_at).await;
 
