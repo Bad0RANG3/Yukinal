@@ -111,7 +111,14 @@ function callTool(frame) {
     case "echo":
       reply(frame.id, {
         content: [{ type: "text", text: `echo: ${args.text ?? ""}` }],
-        structuredContent: { echoed: args.text ?? "", serverPid: process.pid },
+        structuredContent: {
+          echoed: args.text ?? "",
+          serverPid: process.pid,
+          // The environment the host handed us, as names only. The Rust integration test
+          // uses this to prove the host cleared the inherited environment rather than
+          // handing a third-party process every token it holds.
+          environmentKeys: Object.keys(process.env).sort(),
+        },
       });
       return;
     case "explode":

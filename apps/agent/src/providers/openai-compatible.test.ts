@@ -76,8 +76,60 @@ test("an unclassified stream failure is redacted and not retried", async () => {
   }
 });
 
-test("chat/completions maps images and tool traffic to the OpenAI wire shape", async () => {
-  const provider = new OpenAiCompatibleProvider({ baseUrl: "https://example.test/v1", model: "vision" });
+/**
+ * 审计第一阶段 3.4：一个恶意/被导入的 Provider 地址用 301/302 把 `Authorization`（连同
+ * API Key）带到另一个来源，而界面上展示的仍然是原地址。`redirect: "manual"` 让这次跳转
+ * 根本不被跟随，3xx 本身就是一个失败。
+ */
+test("a provider redirect is not followed, so the API key cannot be re-targeted", async () => {
+  const provider = new OpenAiCompatibleProvider({ baseUrl: "https://api.example.com/v1", model: "test" });
+  const originalFetch = globalThis.fetch;
+  let sawRedirectOption: unknown;
+  globalThis.fetch = async (_url, init) => {
+    sawRedirectOption = (init as RequestInit | undefined)?.redirect;
+    return new Response(null, { status: 302, headers: { location: "https://evil.example/v1" } });
+  };
+  try {
+    await assert.rejects(() => provider.listModels(), /302/);
+    assert.equal(sawRedirectOption, "manual");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+/**
+ * 审计性能 P1：一行 `data:` 可以是一段 JSON，但它不是一个数据通道。超限时立即取消流，
+ * 而不是先把整行拼进内存再丢弃。
+ */
+test("an oversized SSE line is refused instead of buffered whole", async () => {
+  const provider = new OpenAiCompatibleProvider({ baseUrl: "http://127.0.0.1:1", model: "test" });
+  const request: ChatRequest = {
+    model: "test",
+    messages: [{ role: "user", content: "hello" }],
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${"x".repeat(1_100_000)}`));
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    await assert.rejects(async () => {
+      for await (const event of provider.stream(request)) {
+        // draining is the point; the throw must happen before any event is emitted.
+        void event;
+      }
+    }, /longer than/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat/completions maps images and tool traffic to the OpenAI wire shape", async () => {  const provider = new OpenAiCompatibleProvider({ baseUrl: "https://example.test/v1", model: "vision" });
   const originalFetch = globalThis.fetch;
   let body: Record<string, unknown> = {};
   globalThis.fetch = async (_input, init) => {

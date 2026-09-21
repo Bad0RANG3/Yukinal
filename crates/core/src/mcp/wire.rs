@@ -67,7 +67,7 @@ pub(super) const METHOD_CANCELLED_NOTIFICATION: &str = "notifications/cancelled"
 
 /// 一行读取的结果。
 #[derive(Debug)]
-pub(super) enum FrameRead {
+pub(crate) enum FrameRead {
     Line(String),
     /// 这一行超过了上限：内容被丢掉，但连接没坏（下一个换行就是下一帧的开始）。
     TooLong {
@@ -77,7 +77,10 @@ pub(super) enum FrameRead {
 }
 
 /// 读一行，硬上限 `limit` 字节。
-pub(super) async fn read_frame<R>(reader: &mut R, limit: usize) -> Result<FrameRead, String>
+///
+/// `pub(crate)` 而不是 `pub(super)`：sidecar 的 stdout/stderr 泵复用它，好让「一行协议帧
+/// 在读取前就有字节上限」这条规则在 MCP 与 sidecar 之间只有一份实现。
+pub(crate) async fn read_frame<R>(reader: &mut R, limit: usize) -> Result<FrameRead, String>
 where
     R: AsyncBufRead + Unpin,
 {

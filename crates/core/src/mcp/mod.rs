@@ -100,6 +100,9 @@ pub use supervisor::McpSupervisor;
 // 让依赖 core 的地方不必再多认一个 crate。
 pub use transport::McpServerHandle;
 pub use wire::{McpInitialize, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
+
+/// 有界的一行帧读取：MCP 与 sidecar 共用同一份实现（`crate::sidecar` 也从这里取）。
+pub(crate) use wire::{read_frame, FrameRead, MAX_FRAME_BYTES};
 pub use yukinal_net::{
     NetworkProxy, NetworkProxyMode, OutboundProxy, ProxyCredential, ProxySource,
 };

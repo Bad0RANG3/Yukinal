@@ -104,9 +104,12 @@ fn resolve_capabilities(
                 revocation_list_signers: authority.revocation_list_signers.clone(),
             },
         ),
-        // MVP：终端首连自动信任并记录；host key 之后的严格匹配由 known_hosts 保证。
+        // 终端/文件/SFTP/服务器探测共用这一条（`ensure_session`）：未知主机必须在
+        // **认证之前**停下，由用户走 `server_host_key_probe` → `server_host_key_trust`
+        // 显式核验指纹。首连自动信任（TOFU）会把一次中间人劫持固化成「可信」，而项目
+        // 其余 SSH 入口本来就已经是显式确认。
         outbound_proxy: proxy,
-        known_hosts_policy: KnownHostsPolicy::TrustOnFirstUse,
+        known_hosts_policy: KnownHostsPolicy::RequireMatch,
         keepalive_interval_secs: 30,
     };
     Ok((config, secrets))
@@ -267,7 +270,7 @@ mod tests {
         Environment, Identity, Server, ServerCapabilities, ServerConnection, ServerMetadata,
         ServerStatus,
     };
-    use yukinal_ssh::Authentication;
+    use yukinal_ssh::{Authentication, KnownHostsPolicy};
 
     const NOW: &str = "2026-01-01T00:00:00.000Z";
 
@@ -526,6 +529,13 @@ mod tests {
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 2222);
         assert_eq!(config.username, "deploy");
+        // 审计第一阶段 3.1：终端（以及复用 `ensure_session` 的文件/SFTP/服务/日志路径）
+        // 不再首连自动信任。未知主机在 TCP/认证之前就被拒绝，指纹只能由用户显式确认。
+        assert_eq!(
+            config.known_hosts_policy,
+            KnownHostsPolicy::RequireMatch,
+            "every interactive surface must refuse an unpinned host before authentication"
+        );
         // 一个 secret 都不带 —— 连 keychain 都没碰。
         assert_eq!(secrets.password, None);
         assert_eq!(secrets.private_key_pem, None);

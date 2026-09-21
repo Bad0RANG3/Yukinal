@@ -24,9 +24,23 @@ import {
 // 只用它的类型层（`z.output`），所以是 `import type`：这行不会进入运行时产物。
 import type { z } from "zod";
 
-/** True when running inside Tauri; false in a plain browser during `vite dev`. */
-export function isDesktopShell(): boolean {
+import { isPreviewFixture, previewResponse } from "./preview-fixtures.js";
+
+/** True only when a real Tauri runtime is present. */
+export function isNativeDesktopShell(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
+ * Whether desktop-shaped data is usable.
+ *
+ * The development fixture is a local, schema-validated adapter used only for
+ * visual audits. It is intentionally kept separate from `isNativeDesktopShell`
+ * so code that needs an actual native API (for example opening an external URL)
+ * cannot mistake preview data for a Tauri capability.
+ */
+export function isDesktopShell(): boolean {
+  return isNativeDesktopShell() || isPreviewFixture();
 }
 
 export class IpcUnavailableError extends Error {
@@ -57,6 +71,7 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
     ? { input: validatedParams }
     : { ...(validatedParams as Record<string, unknown>) };
   try {
+    if (isPreviewFixture()) return parse(previewResponse(command, validatedParams));
     return parse(await invoke<unknown>(command, args));
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error));
@@ -101,6 +116,10 @@ export async function listenDesktop<E extends DesktopEventName>(
   name: E,
   handler: (payload: DesktopEventPayload<E>) => void,
 ): Promise<UnlistenFn> {
+  // Browser preview cannot install Tauri event listeners. Returning a no-op
+  // subscription keeps components that always mount a listener (such as the
+  // SSH authentication modal) from producing an unhandled browser rejection.
+  if (!isNativeDesktopShell()) return () => {};
   const schema = EVENT_SCHEMAS[name];
   return listen<unknown>(tauriEventName(name), (event) => {
     const parsed = schema.safeParse(event.payload);

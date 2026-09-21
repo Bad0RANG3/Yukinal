@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { isDesktopShell } from "../../lib/ipc.js";
+import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useServers } from "../../lib/servers.js";
 import { usePreferencesStore } from "../../stores/preferences-store.js";
@@ -105,7 +106,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     return () => setAgentBusy(false);
   }, [run.running, setAgentBusy]);
   const [runContext, setRunContext] = useState<string | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  // 预览页应当一打开就展示已注入的虚构对话，方便视觉检查与 README 截图；
+  // 正式桌面壳仍保持默认收起，避免遮住工作区。
+  const [historyOpen, setHistoryOpen] = useState(() => isPreviewFixture());
   /** 记录视图关闭时把焦点还给它 —— 见 AgentHistoryPane 的卸载 effect。 */
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   /**

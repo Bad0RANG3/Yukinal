@@ -32,11 +32,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 
 mod config;
+
+use crate::mcp::{read_frame, FrameRead, MAX_FRAME_BYTES};
 
 /// 启动配置仍从这里导出 —— 路径与拆分类名前一致，调用方无需知道它换了文件。
 pub use config::SidecarConfig;
@@ -166,6 +168,10 @@ impl SidecarHandle {
             };
             let mut buffer = payload;
             buffer.push(b'\n');
+            if let Err(error) = ensure_frame_size(&buffer) {
+                self.forget(id);
+                return Err(error);
+            }
             if let Err(error) = stdin.write_all(&buffer).await {
                 self.forget(id);
                 return Err(SidecarError::Write(error.to_string()));
@@ -214,6 +220,7 @@ impl SidecarHandle {
         let mut payload =
             serde_json::to_vec(&frame).map_err(|error| SidecarError::Frame(error.to_string()))?;
         payload.push(b'\n');
+        ensure_frame_size(&payload)?;
 
         let mut stdin = self.inner.stdin.lock().await;
         let Some(stdin) = stdin.as_mut() else {
@@ -325,6 +332,21 @@ impl Inner {
     }
 }
 
+/// 拒绝写出一个超过 NDJSON 帧上限的载荷。
+///
+/// 上限与 `@yukinal/shared` 的 `MAX_FRAME_BYTES` 是同一个数（由 `crate::mcp` 提供）：
+/// 编码端不设限时，一条超大的 `run.start` 会被序列化成 JSON 再交给管道，在 Node 侧才被
+/// 丢弃 —— 内存已经分配过了。在写出之前拒绝，才是「读取前上限」的另一半。
+fn ensure_frame_size(payload: &[u8]) -> Result<(), SidecarError> {
+    if payload.len() > MAX_FRAME_BYTES {
+        return Err(SidecarError::Frame(format!(
+            "refusing to write a {}-byte frame; the NDJSON frame limit is {MAX_FRAME_BYTES} bytes",
+            payload.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Launch the sidecar. The returned handle has *not* been initialized -- callers that
 /// need a handshake should call `initialize` explicitly (see `crate::commands`).
 pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError> {
@@ -332,6 +354,11 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     let mut command = Command::new(&config.program);
     command
         .args(&config.args)
+        // sidecar 是我们自己的 Node bundle，但仍然会加载第三方包：给它的环境与给 MCP 的
+        // 一样，是显式白名单，而不是宿主的全部环境（见 `crate::child_env`）。它比 MCP
+        // 多保留几个只属于我们自己进程的 `YUKINAL_*` 启动旋钮。
+        .env_clear()
+        .envs(crate::child_env::minimal_sidecar_environment())
         .envs(config.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -379,41 +406,79 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     };
 
     // stdout: NDJSON frames -> pending responses or forwarded notifications (ADR 0006).
+    //
+    // 读取**在读之前**就有字节上限（`read_frame`）：`BufReader::lines()` 要读完一整行
+    // 才知道它有多长，于是一个只写不换行的 sidecar 就能把宿主内存吃光。
     let reader = Arc::downgrade(&handle.inner);
-    let mut lines = BufReader::new(stdout).lines();
+    let mut input = BufReader::new(stdout);
     tokio::spawn(async move {
         let mut inside_private_key = false;
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Some(reader) = reader.upgrade() else {
-                break;
-            };
-            match serde_json::from_str::<Value>(line) {
-                Ok(frame) => reader.dispatch(frame),
-                Err(error) => reader.broadcast(SidecarEvent::Log(format!(
-                    "dropped non-JSON stdout line ({error}): {}",
-                    redact_process_log_line(&truncate(line), &mut inside_private_key)
-                ))),
+        loop {
+            match read_frame(&mut input, MAX_FRAME_BYTES).await {
+                Ok(FrameRead::Line(line)) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let Some(reader) = reader.upgrade() else {
+                        break;
+                    };
+                    match serde_json::from_str::<Value>(line) {
+                        Ok(frame) => reader.dispatch(frame),
+                        Err(error) => reader.broadcast(SidecarEvent::Log(format!(
+                            "dropped non-JSON stdout line ({error}): {}",
+                            redact_process_log_line(&truncate(line), &mut inside_private_key)
+                        ))),
+                    }
+                }
+                Ok(FrameRead::TooLong { limit }) => {
+                    let Some(logger) = reader.upgrade() else {
+                        break;
+                    };
+                    logger.broadcast(SidecarEvent::Log(format!(
+                        "dropped a sidecar stdout line longer than {limit} bytes"
+                    )));
+                }
+                Ok(FrameRead::Eof) => break,
+                Err(reason) => {
+                    if let Some(logger) = reader.upgrade() {
+                        logger.broadcast(SidecarEvent::Log(format!(
+                            "stopped reading sidecar stdout: {reason}"
+                        )));
+                    }
+                    break;
+                }
             }
         }
     });
 
     // stderr is the sidecar's log channel; surface it, never swallow it.
     let logger = Arc::downgrade(&handle.inner);
-    let mut err_lines = BufReader::new(stderr).lines();
+    let mut err_reader = BufReader::new(stderr);
     tokio::spawn(async move {
         let mut inside_private_key = false;
-        while let Ok(Some(line)) = err_lines.next_line().await {
-            let Some(logger) = logger.upgrade() else {
-                break;
-            };
-            logger.broadcast(SidecarEvent::Log(redact_process_log_line(
-                &line,
-                &mut inside_private_key,
-            )));
+        loop {
+            match read_frame(&mut err_reader, MAX_FRAME_BYTES).await {
+                Ok(FrameRead::Line(line)) => {
+                    let Some(logger) = logger.upgrade() else {
+                        break;
+                    };
+                    logger.broadcast(SidecarEvent::Log(redact_process_log_line(
+                        &line,
+                        &mut inside_private_key,
+                    )));
+                }
+                Ok(FrameRead::TooLong { limit }) => {
+                    let Some(logger) = logger.upgrade() else {
+                        break;
+                    };
+                    logger.broadcast(SidecarEvent::Log(format!(
+                        "[one sidecar stderr line longer than {limit} bytes was dropped]"
+                    )));
+                }
+                Ok(FrameRead::Eof) => break,
+                Err(_) => break,
+            }
         }
     });
 
@@ -641,5 +706,18 @@ mod tests {
             yukinal_time::iso8601_now as fn() -> String,
         ));
         assert_eq!(iso8601_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn a_frame_over_the_limit_is_refused_before_it_is_written() {
+        assert!(ensure_frame_size(&[0u8; 16]).is_ok());
+        // 边界值本身合法：8 MiB 帧按协议是允许的，只是不能再大。
+        assert!(
+            ensure_frame_size(&vec![0u8; MAX_FRAME_BYTES]).is_ok(),
+            "the limit is inclusive"
+        );
+        let oversized = vec![0u8; MAX_FRAME_BYTES + 1];
+        let error = ensure_frame_size(&oversized).expect_err("over the frame limit");
+        assert!(matches!(error, SidecarError::Frame(_)), "{error:?}");
     }
 }

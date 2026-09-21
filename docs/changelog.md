@@ -6,6 +6,10 @@
 
 ### 新增与改进
 
+- **宿主命令层按职责拆分。** `commands/host.rs`（6,561 行）拆为根模块加 `host/` 子模块：`tools`（工具执行体）、`evidence`（证据/发现/决策摘要/留存）、`plan`（ChangePlan 与 guardrail）、`context`（`host.context.fetch` 投影）与 `tests`；根模块只保留协议分发、请求/响应类型与共享的失败包装。`commands/mcp/oauth.rs`（4,003 行）的非测试代码与 OAuth 测试分开（`mcp/oauth/tests.rs`），`commands/mcp.rs`、`commands/investigation.rs`、`commands/mod.rs`、`crates/filesystem/src/service/remote_file_service.rs` 的测试模块同样独立成文件；`crates/database/src/repositories/investigations.rs` 按任务/运行、证据、计划、调度拆成多个 `impl` 子模块；`crates/database/tests/persistence.rs` 拆为共享 fixture 加服务器/Provider、调查任务两个验收文件。拆分只移动代码与调整可见性，不改行为：完整 `pnpm check`（含跨语言测试）保持绿色。
+
+- **安全止血（外部审计第一阶段）。** 桌面端 SSH 首次连接不再自动信任：终端、文件、SFTP、日志、服务与概览采集统一要求已知主机指纹（`RequireMatch`），未知主机在认证前失败（认证处理器收不到密码或 keyboard-interactive 回答），会建立连接的面板上直接提供「探针 → 对照 → 信任」的核验闸门，取代原先的 TOFU 行为（见 [ADR 0071](./adr.md#adr-0071桌面端-ssh-首连不再自动信任主机密钥)）。stdio MCP 与 sidecar 子进程改为清空继承环境、只保留显式白名单（第三方 MCP 拿不到 `SSH_AUTH_SOCK`、云厂商密钥与开发 Token），MCP 参数与环境变量增加数量/长度上限。Provider 地址非回环强制 HTTPS、禁止跟随重定向、保存时在命令层二次校验；终端广播 `Lagged` 不再停止转发，而是发出结构化的输出丢失通知；Provider SSE 增加单行/累计上限，sidecar 与 MCP 的 NDJSON 帧读写都加 8 MiB 上限。
+
 - **Rust 资源生命周期审计与修复。** 明确 Rust 的安全保证不覆盖 `Arc` 循环、后台任务保活和外部句柄收口，并按这条边界修复 MCP HTTP GET 流、MCP/sidecar supervisor、终端 forwarder、SSH keepalive 与 Collector 取消路径：长等待任务只持 `Weak` 或配置快照，停止走取消令牌/显式关闭，`Drop` 作为同步兜底。新增本地回归覆盖最后 HTTP 句柄释放、重启退避不保活 supervisor、supervisor 释放回收 sidecar、管理器释放停止终端转发器，以及取消时终止本地进程组和远端 SSH 命令；真实公网 SSH、Provider、第三方 MCP 和长时间资源曲线仍未验证。生命周期契约见[架构总览](./architecture.md#架构总览)，未验收边界见[当前限制](./limitations.md#当前限制)，决策见 [ADR 0070](./adr.md#adr-0070后台任务弱引用加显式取消)。
 
 - **副作用执行先过 durable plan 栅栏。** Agent registry 与 Rust host dispatcher 现在都拒绝没有完整 `taskId`、`planId`、`planStepId` 的 filesystem 写入、备份/恢复、重启、包安装和 MCP 调用；普通聊天不能通过伪造自动票据直接写入。交互式终端继续作为用户明确输入的人工旁路，不进入 Agent 自动任务链。会话授权同时绑定规范化输入的 SHA-256 指纹，改路径、容器、服务或包版本会重新请求授权。

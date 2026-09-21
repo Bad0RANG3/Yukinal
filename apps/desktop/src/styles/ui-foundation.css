@@ -1,0 +1,1265 @@
+/* Yukinal UI foundation: near-black surfaces, rounded cards and one readable
+   monospace system. The legacy selectors above remain as page primitives; this
+   layer is the single visual contract consumed by the current React views. */
+
+* {
+  box-sizing: border-box;
+}
+html {
+  color-scheme: dark;
+  overflow: hidden;
+}
+
+body {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-ui);
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+button,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: #31564f;
+  color: #f4fbf8;
+}
+
+/* ── Icon contract ────────────────────────────────────────────────────────
+   Every icon is one <svg class="icon"> on a 24×24 viewBox, drawn at a step of
+   the `ICON_SIZE` scale in components/Icon.tsx. Three rules keep icons
+   optically centred no matter which control they land in.
+
+   1. An icon is a block and never flexes. Left inline, an SVG sits on the
+      text baseline and inherits the line box's descender space, which is what
+      makes an icon read a pixel or two high next to its own label once the
+      row's `align-items` stops applying.
+
+   2. A control that contains nothing but an icon has zero padding. Chromium's
+      user-agent sheet gives every <button> `padding: 1px 6px`. On a 25px or
+      28px square that padding shrinks the content box below the icon's own
+      width; the icon then overflows its grid track and drifts off-centre by
+      half the overflow — 2.5px on the Agent settings trigger, 2px on the
+      history search clear, 1px on the history delete, 0.5px on the
+      collapsed-panel toggle. The content box must be the icon's box.
+
+   3. Vertical padding on a rail item or tab stays symmetric, so the icon and
+      its label share one optical centre instead of being pulled apart by an
+      asymmetric pair such as 12px over 11px.
+
+   These are grouped in one place on purpose: the failure mode is invisible in
+   review and only shows up as a half-pixel drift in the running app. */
+.icon {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.icon-button,
+.agent-composer-tool,
+.server-row-actions button,
+.search-clear,
+.agent-history-search > button,
+.agent-history-delete {
+  padding: 0;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface-1);
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid var(--surface-1);
+  border-radius: 999px;
+  background: #34383e;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4b5159;
+}
+
+.app-shell {
+  grid-template-columns: 64px 248px minmax(0, 1fr) 328px;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  background: var(--bg);
+  font-size: var(--ui-font-size, 13px);
+}
+
+.app-shell.agent-collapsed {
+  grid-template-columns: 64px 248px minmax(0, 1fr);
+}
+
+.app-rail,
+.server-sidebar,
+.workspace-main,
+.agent-panel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+}
+
+.app-rail {
+  border-right: 1px solid var(--line);
+  background: #08090a;
+  padding: 16px 9px 12px;
+}
+
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-color: #345b53;
+  border-radius: 11px;
+  background: #09090b;
+}
+
+.rail-nav {
+  gap: 6px;
+  margin-top: 28px;
+}
+
+.rail-button {
+  gap: 6px;
+  border-radius: 9px;
+  color: var(--faint);
+  padding: 9px 3px;
+  /* 过渡统一由动效层给出；这里原本的 `140ms` 是它的死重复。 */
+}
+
+.rail-button:hover {
+  border-color: var(--line);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.rail-button-active {
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
+  color: var(--accent);
+}
+
+.rail-icon, .rail-button svg, .server-tab svg, .button-primary svg, .button-secondary svg, .icon-text-button svg, .agent-toggle-inline svg{
+  display: block;
+  flex: 0 0 auto;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.server-sidebar {
+  border-right: 1px solid var(--line);
+  background: var(--surface-1);
+  padding: 18px 14px 12px;
+}
+
+.server-sidebar h2 {
+  font-size: 16px;
+}
+
+.server-search {
+  margin-top: 18px;
+  border-color: var(--line);
+  border-radius: var(--control-radius);
+  background: var(--surface-2);
+}
+
+.server-search:focus-within {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
+}
+
+.server-list-meta {
+  margin-top: 15px;
+}
+
+.server-list {
+  gap: 5px;
+}
+
+.server-list-item .server-row {
+  display: block;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+}
+
+.server-list-item .server-row:hover {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+.server-list-item .server-row.server-row-selected {
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
+}
+
+.server-row-main {
+  width: 100%;
+  min-height: 56px;
+  padding: 9px 10px;
+}
+
+.server-row-actions {
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 8px 8px 28px;
+}
+
+.server-row-actions button {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-color: transparent;
+  border-radius: 6px;
+  color: var(--faint);
+}
+
+.server-row-actions button:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.server-status-pill {
+  margin-right: auto;
+  min-width: 45px;
+  color: var(--faint);
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.server-status-connecting {
+  color: var(--warning);
+}
+
+.server-status-connected {
+  color: var(--success);
+}
+
+.server-status-error {
+  color: var(--danger);
+}
+
+.server-status-disconnected {
+  color: var(--faint);
+}
+
+.server-dot-unknown {
+  background: var(--faint);
+}
+
+.env-badge {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--muted);
+  padding: 5px 9px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.env-badge-production {
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+
+.env-badge-staging {
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
+  color: var(--warning);
+}
+
+.env-badge-development {
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
+  color: var(--success);
+}
+
+.env-badge-local {
+  border-color: #31516b;
+  background: #111d29;
+  color: var(--info);
+}
+
+.env-badge-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.env-badge-divider {
+  color: color-mix(in srgb, currentColor 45%, transparent);
+}
+
+.env-badge-server,
+.env-badge-region {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.env-badge-server {
+  color: var(--text);
+}
+
+.workspace-main {
+  background: var(--surface-1);
+  container-type: inline-size;
+}
+
+.workspace-header {
+  min-height: 72px;
+  border-bottom-color: var(--line);
+  padding: 0 24px;
+}
+
+.workspace-header h1 {
+  font-size: 19px;
+}
+
+.workspace-header-meta {
+  gap: 10px;
+}
+
+.context-chip,
+.agent-toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--ok-line);
+  border-radius: 999px;
+  background: var(--ok-surface);
+  color: var(--accent);
+  padding: 5px 9px;
+  font-size: 10px;
+}
+
+.agent-toggle-inline {
+  border-radius: var(--control-radius);
+  background: var(--surface-3);
+}
+
+.agent-toggle-inline:hover {
+  border-color: var(--accent);
+  background: var(--ok-surface);
+}
+
+.server-tabs {
+  gap: 18px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  border-bottom-color: var(--line);
+  padding: 0 24px;
+}
+
+.server-tab {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 12px 1px;
+}
+
+.workspace-content {
+  padding: 22px 24px 30px;
+}
+
+.eyebrow {
+  letter-spacing: 0.08em;
+}
+
+.button-secondary, .button-primary{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: var(--control-radius);
+  padding: 7px 11px;
+  /* 操作名称不能被逐字拆成一列；窄屏应由说明文本换行，而不是让“刷新”读成两行。 */
+  white-space: nowrap;
+  /* 过渡不写在这里：动效层（文件末尾）是 transition 的唯一出处，
+     这里原本那条 `140ms` 因为同权重、后出现而被它整条覆盖，是死声明。 */
+}
+
+.button-secondary{
+  border: 1px solid var(--line-strong);
+  background: var(--surface-3);
+  color: var(--muted);
+}
+
+.button-secondary:hover:not(:disabled){
+  border-color: var(--accent);
+  background: #12221f;
+  color: var(--accent);
+}
+
+.button-primary {
+  border: 1px solid #4b9d8c;
+  background: var(--accent);
+  color: #071713;
+  font-weight: 700;
+}
+
+.button-primary:hover:not(:disabled) {
+  background: #94ebd4;
+  color: #06120f;
+}
+
+.button-small {
+  min-height: 28px;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.icon-button {
+  border-color: var(--line-strong);
+  border-radius: var(--control-radius);
+  background: var(--surface-3);
+}
+
+.icon-button-accent {
+  border-color: #3b806f;
+  background: var(--ok-surface);
+}
+
+.icon-button:hover,
+.icon-button-accent:hover {
+  border-color: var(--accent);
+  background: #12221f;
+}
+
+.text-button,
+.icon-text-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 只有图标、没有文字的 text-button（侧栏的「刷新服务器列表」）。
+   .text-button 的 `padding: 0` 是给带文字的按钮写的（那里文字本身就是热区），
+   纯图标按钮套上它之后整个点击目标就是图标自己的 14×14 —— 鼠标能点中，但很难
+   点中。
+
+   这里**不能**用 min-width/min-height 撑开：这个按钮坐在 .server-list-meta 里，
+   撑高它会连带把整张服务器列表推下去 12px（实测 .server-list-meta 从 14px 涨到
+   26px）。所以用「内边距 + 等量负外边距」这一对：border box 长到 26×26（热区
+   真的变大了，`elementFromPoint` 在四角都能命中它），而 margin box 仍是 14×14，
+   flex 行按 margin box 排版，于是版面一动不动。
+
+   按钮本身没有底色和描边，多出来的 6px 在视觉上完全不可见；它左侧是
+   space-between 撑出来的空白，也不会抢走别的控件的点击。 */
+.icon-text-button {
+  padding: 6px;
+  margin: -6px;
+}
+
+.inline-error {
+  border-color: #693d43;
+  border-radius: 9px;
+  background: var(--danger-surface);
+}
+
+.text-button-danger {
+  color: var(--danger);
+}
+
+.overview-page,
+.activity-page,
+.services-page,
+.logs-page,
+.projects-page,
+.remote-files-page,
+.settings-page {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+}
+
+.overview-title,
+.activity-page-header h2,
+.services-page-header h2,
+.logs-page-header h2,
+.projects-page-header h2 {
+  font-size: 23px;
+}
+
+.overview-subtitle,
+.metric-card strong,
+.server-row-detail,
+.container-name,
+.log-source,
+.log-line-number,
+.log-row code,
+.file-preview-content,
+.service-row code,
+.provider-meta,
+.settings-fact dd,
+.agent-log-viewer {
+  font-family: var(--font-ui);
+}
+
+.server-facts,
+.metric-card,
+.section-block,
+.project-card,
+.activity-list,
+.service-list,
+.log-list,
+.file-list-panel,
+.file-preview-panel {
+  border-color: var(--line);
+  border-radius: var(--card-radius);
+  background: var(--surface-2);
+}
+
+.server-facts {
+  gap: 1px;
+  margin: 24px 0;
+  background: var(--line);
+}
+
+.server-facts div {
+  background: var(--surface-2);
+}
+
+.section-block {
+  margin-top: 20px;
+  border: 1px solid var(--line);
+  padding: 17px;
+}
+
+.metric-grid {
+  gap: 10px;
+}
+
+.metric-card {
+  background: var(--surface-3);
+}
+
+.attention-panel,
+.agent-notice,
+.settings-notice,
+.log-notice,
+.service-notice {
+  border-radius: 10px;
+}
+
+.empty-state {
+  color: var(--muted);
+}
+
+.empty-state > svg {
+  color: var(--accent);
+}
+
+.empty-state-mark,
+.agent-empty-mark {
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
+}
+
+.empty-state h2 {
+  font-size: 16px;
+}
+
+.loading-panel,
+.error-panel {
+  min-height: 300px;
+}
+
+.loading-spinner {
+  border-color: var(--line-strong);
+  border-top-color: var(--accent);
+}
+
+.keyword-token {
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.keyword-token-error {
+  color: var(--danger);
+}
+
+.keyword-token-warning {
+  color: var(--warning);
+}
+
+.keyword-token-success {
+  color: var(--success);
+}
+
+.keyword-token-pending {
+  color: var(--accent);
+}
+
+.keyword-token-identifier {
+  color: #c9b1df;
+}
+
+.keyword-token-path {
+  color: var(--info);
+}
+
+.keyword-token-key {
+  color: #d7c17e;
+}
+
+.agent-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: var(--surface-1);
+}
+
+.agent-panel-hidden {
+  display: none;
+}
+
+.agent-header {
+  min-height: 72px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 16px;
+}
+
+.agent-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-token-usage {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.agent-toggle {
+  width: 28px;
+  height: 28px;
+}
+
+.agent-orb {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid #3b806f;
+  border-radius: 50%;
+  background: var(--ok-surface);
+  color: var(--accent);
+}
+
+.agent-feed {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 16px;
+}
+
+.agent-entry,
+.tool-card,
+.approval-card,
+.agent-error {
+  border-radius: 9px;
+}
+
+.agent-reasoning {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-2) 76%, transparent);
+  color: var(--muted);
+}
+
+.agent-reasoning-summary {
+  cursor: pointer;
+  padding: 7px 9px;
+  color: var(--faint);
+  font-size: 10px;
+  user-select: none;
+}
+
+.agent-reasoning[open] .agent-reasoning-summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-reasoning-text {
+  margin: 0;
+  padding: 9px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.agent-entry-user {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-3);
+  padding: 10px;
+}
+
+/* 对话正文：动态里唯一可以拖动选中的地方（起点见 `.app-shell` 的 user-select）。
+   两行都挂这个类 —— 你说的话是纯文本，Agent 的那份由 MarkdownText 铺成块级结构。 */
+.agent-entry-body {
+  display: block;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 自己敲的多行草稿（Shift+Enter）回到动态里必须还是多行：默认的空白折叠会把
+   整段话压成一行。 */
+.agent-entry-user .agent-entry-body {
+  white-space: pre-wrap;
+}
+
+.agent-user-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-user-attachments img {
+  display: block;
+  width: 88px;
+  height: 88px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  object-fit: cover;
+  background: var(--surface-3);
+}
+
+/* ── Markdown 正文 ────────────────────────────────────────────────────────
+   Agent 的回复常常带结构（标题、列表、表格、代码块）。这里给那些结构一套
+   在窄栏里也读得下去的排版，而不是把 `#` 和 `-` 原样铺在屏幕上。
+
+   规则集中在一处：块间距只由 `margin-bottom` 表达，首尾块的外边距去掉，
+   这样正文与上面的「Agent」标签之间不会凭空多出一道空隙。 */
+.agent-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-markdown .md-paragraph {
+  margin: 0 0 8px;
+}
+
+.agent-markdown .md-heading {
+  margin: 12px 0 6px;
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.agent-markdown > .md-heading:first-child {
+  margin-top: 0;
+}
+
+.agent-markdown h1 { font-size: 15px; }
+.agent-markdown h2 { font-size: 14px; }
+.agent-markdown h3 { font-size: 13px; }
+.agent-markdown h4,
+.agent-markdown h5,
+.agent-markdown h6 {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agent-markdown .md-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+
+.agent-markdown .md-list .md-list {
+  margin: 4px 0 0;
+}
+
+.agent-markdown .md-list li {
+  margin: 2px 0;
+}
+
+/* 嵌套容器里最后一块的外边距归零：间距由容器自己给一次，而不是内外两层叠加。 */
+.agent-markdown blockquote > :last-child,
+.agent-markdown .md-list li > :last-child {
+  margin-bottom: 0;
+}
+
+/* 列表项的第一段贴着项目符号，第二段才需要距离。 */
+.agent-markdown .md-list li > .md-paragraph {
+  margin-bottom: 0;
+}
+
+.agent-markdown .md-list li > .md-paragraph + .md-paragraph {
+  margin-top: 6px;
+}
+
+.agent-markdown .md-task {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.agent-markdown .md-task-mark {
+  margin-right: 5px;
+  color: var(--muted);
+}
+
+.agent-markdown .md-quote {
+  margin: 0 0 8px;
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+  color: var(--muted);
+}
+
+.agent-markdown .md-rule {
+  margin: 10px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.agent-markdown code {
+  border-radius: 4px;
+  background: var(--surface-3);
+  padding: 1px 4px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+}
+
+/* 代码块：横向滚动而不是折行 —— 一段被折断的命令行没法读，也没法对着敲。 */
+.agent-markdown .md-code-block {
+  position: relative;
+  margin: 0 0 8px;
+}
+
+.agent-markdown .md-code-pre {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  padding: 9px 10px;
+  overflow-x: auto;
+}
+
+.agent-markdown .md-code-pre code {
+  display: block;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.agent-markdown .md-code-language {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-markdown .md-table-wrap {
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+
+.agent-markdown .md-table {
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.agent-markdown .md-table th,
+.agent-markdown .md-table td {
+  border: 1px solid var(--line);
+  padding: 4px 7px;
+  text-align: left;
+}
+
+.agent-markdown .md-table th {
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.agent-markdown .md-align-left { text-align: left; }
+.agent-markdown .md-align-center { text-align: center; }
+.agent-markdown .md-align-right { text-align: right; }
+
+/* 链接通过受限的 opener 能力交给系统浏览器；按钮本身仍保持正文行内排版。 */
+.agent-markdown .md-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.agent-markdown .md-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border-radius: 6px;
+}
+
+.agent-markdown .md-image-prompt {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 9px 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-markdown .md-image-prompt:hover {
+  border-color: var(--info);
+  background: var(--surface-3);
+}
+
+.agent-markdown .md-image-prompt-alt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-markdown .md-image-prompt-action {
+  flex: none;
+  color: var(--info);
+  font-size: 12px;
+}
+
+.mcp-tool-review {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-markdown .md-footnote-ref {
+  color: var(--info);
+  font-size: 0.75em;
+}
+
+.agent-markdown .md-footnotes {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.tool-card {
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  background: var(--surface-2);
+  padding: 10px 11px;
+}
+
+.tool-card-heading,
+.tool-card-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.tool-card-heading {
+  flex-wrap: wrap;
+}
+
+.tool-card-label {
+  margin: 0;
+  color: var(--faint);
+}
+
+.tool-name {
+  min-width: 0;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.tool-card-meta {
+  flex-wrap: wrap;
+  color: var(--muted);
+}
+
+.tool-card-meta code,
+.tool-result-copy,
+.approval-heading code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-ui);
+  font-size: 10px;
+}
+
+.tool-card-meta code {
+  flex: 1 1 100%;
+  color: var(--muted);
+}
+
+.risk-badge,
+.decision-badge,
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 3px 6px;
+  font-size: 9px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.risk-read,
+.risk-low,
+.decision-auto,
+.decision-source,
+.status-badge-success,
+.settings-status-ready {
+  color: var(--success);
+}
+
+.risk-read,
+.risk-low,
+.decision-auto,
+.decision-source,
+.status-badge-success {
+  border-color: var(--ok-line);
+  background: var(--ok-surface);
+}
+
+.risk-medium,
+.risk-high,
+.decision-ask {
+  color: var(--warning);
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
+}
+
+.risk-critical,
+.decision-deny {
+  color: var(--danger);
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
+}
+
+/* 工具卡片上的结局文字：贴右显示，颜色沿用语义前景。 */
+.tool-status {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  font-size: 10px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.tool-status-running { color: var(--warning); }
+.tool-status-success { color: var(--success); }
+.tool-status-failed { color: var(--danger); }
+.tool-status-cancelled { color: var(--muted); }
+
+.tool-result-copy {
+  display: block;
+  color: var(--muted);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.approval-card {
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
+}
+
+.approval-icon {
+  display: grid;
+  place-items: center;
+}.approval-button{
+  border-radius: var(--control-radius);
+}.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 4px;
+}
+
+.settings-page-heading h2 {
+  margin: 0;
+  font-size: 23px;
+  letter-spacing: -0.03em;
+}
+
+.settings-page-heading > p:last-child,
+.settings-card-header p:last-child {
+  margin: 7px 0 0;
+  color: var(--muted);
+}
+
+.settings-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--warn-line);
+  background: var(--warn-surface);
+  color: var(--warning);
+  padding: 11px 13px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.settings-error-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border: 1px solid rgb(170 88 88 / 45%); border-radius: 6px; background: rgb(75 29 31 / 35%); padding: 9px 10px; color: var(--danger); font-size: 11px; line-height: 1.5; }
+.settings-error-row > span { min-width: 0; overflow-wrap: anywhere; }
+
+.settings-card {
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  background: var(--surface-2);
+}
+
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.settings-card-header h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+.settings-card-header > svg {
+  color: var(--accent);
+}
+
+.settings-status,
+.settings-count,
+.settings-editing {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.settings-status-ready,
+.settings-editing {
+  color: var(--success);
+}
+
+.settings-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.settings-fact {
+  min-width: 0;
+  background: var(--surface-3);
+  padding: 11px 12px;
+}
+
+.settings-fact-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-fact dt {
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.settings-fact dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.settings-card-actions,
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.settings-card-header-actions,
+.provider-picker-actions,
+.provider-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

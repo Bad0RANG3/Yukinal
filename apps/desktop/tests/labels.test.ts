@@ -175,6 +175,7 @@ test("every event the UI subscribes to has a gate", () => {
     "agent.failed",
     "terminal.data",
     "terminal.closed",
+    "terminal.output_lost",
     "server.auth_challenge",
     // 设备码流程的 user_code 在请求还没返回时就到达界面，所以它必须是订阅得到的频道。
     "mcp.oauth_device_code",
@@ -202,6 +203,15 @@ test("the terminal data gate rejects a drifted payload instead of passing it to 
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", data: 42 }).success, false);
   assert.equal(schema.safeParse({ terminalSessionId: "", data: "hello" }).success, false);
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", data: "hi", extra: 1 }).success, false);
+});
+
+test("the terminal loss notice is gated as a count, not as opaque text", () => {
+  const schema = EVENT_SCHEMAS["terminal.output_lost"];
+  assert.equal(schema.safeParse({ missedEvents: 3 }).success, true);
+  assert.equal(schema.safeParse({ missedEvents: -1 }).success, false);
+  assert.equal(schema.safeParse({ missedEvents: 1.5 }).success, false);
+  assert.equal(schema.safeParse({}).success, false);
+  assert.equal(schema.safeParse({ missedEvents: 1, extra: true }).success, false);
 });
 
 test("the terminal gate matches the exact shape the Rust forwarder emits", () => {
@@ -260,7 +270,7 @@ test("the declared font families exist as real faces in the stylesheet", () => {
   // A family name that no `@font-face` declares does not fail — it silently falls
   // back to Consolas. So the names are checked against the stylesheet rather than
   // trusted, which is the whole reason these stacks were worth centralising.
-  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/styles/app-shell.css", import.meta.url), "utf8");
   const declared = new Set(
     [...css.matchAll(/@font-face\s*\{[^}]*?font-family:\s*"([^"]+)"/gs)].map((match) => match[1]),
   );
@@ -303,10 +313,10 @@ test("the declared font families exist as real faces in the stylesheet", () => {
 });
 
 test("the terminal stack matches the --font-terminal token", () => {
-  // `styles.css` already carries this exact stack as `--font-terminal`, which is what
+  // `styles/app-shell.css` already carries this exact stack as `--font-terminal`, which is what
   // the xterm container inherits before the JS option overwrites it. Two copies of the
   // same list drift; this pins them together.
-  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/styles/app-shell.css", import.meta.url), "utf8");
   const token = /--font-terminal:\s*([^;]+);/.exec(css);
   assert.ok(token, "--font-terminal is not defined");
   const tokenValue = token[1];

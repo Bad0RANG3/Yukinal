@@ -1,0 +1,756 @@
+/* Once the content column becomes compact, preserve card proportions by
+   changing the layout shape instead of squeezing every card thinner. */
+@container (max-width: 620px) {
+  .welcome-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container (min-width: 621px) {
+  .metric-grid {
+    grid-template-columns: repeat(3, minmax(150px, 1fr));
+  }
+
+  .split-sections {
+    grid-template-columns: repeat(2, minmax(260px, 1fr));
+  }
+
+  .welcome-steps {
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+}
+
+/* Agent composer: intentionally mirrors the compact single-card input in the
+   reference UI. Advanced task configuration stays out of the primary path. */
+.agent-composer {
+  border-top: 1px solid var(--line);
+  background: var(--composer-bg);
+  padding: 10px 12px 12px;
+}
+
+.agent-composer-shell {
+  position: relative;
+  display: flex;
+  min-height: 94px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid var(--composer-line);
+  border-radius: 18px;
+  background: var(--composer-surface);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 18%);
+  padding: 12px 9px 9px 14px;
+}
+
+/* 焦点提示放在整张输入卡片上，而不是贴着文字画一圈方框。
+   与 .server-search / .agent-history-search 用的是同一套 :focus-within 写法，
+   所以「聚焦的输入区」在全站看起来是一致的一件事。 */
+.agent-composer-shell:focus-within {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
+}
+
+.agent-composer-shell.is-dragging-attachment {
+  border-color: var(--composer-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--composer-accent) 22%, transparent);
+}
+
+.agent-composer-file-input {
+  display: none;
+}
+
+.agent-composer-attachments {
+  display: flex;
+  align-items: stretch;
+  gap: 7px;
+  max-width: 100%;
+  margin: 0;
+  padding: 0 0 2px;
+  overflow-x: auto;
+  list-style: none;
+}
+
+.agent-composer-attachment {
+  display: grid;
+  width: 112px;
+  min-width: 112px;
+  grid-template-columns: 40px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--composer-line);
+  border-radius: 9px;
+  background: var(--composer-bg);
+  padding: 5px;
+}
+
+.agent-composer-attachment img {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface-3);
+}
+
+/* 音频附件比图片宽：播放器需要横向空间，而它取代的是那个 40px 的缩略图。 */
+.agent-composer-audio-attachment {
+  width: 220px;
+  min-width: 220px;
+  grid-template-columns: 96px minmax(0, 1fr) 20px;
+}
+
+.agent-composer-audio-attachment audio {
+  width: 96px;
+  height: 32px;
+}
+
+.agent-user-file-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-user-file-attachment {
+  display: inline-flex;
+  max-width: 320px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-3);
+  padding: 6px 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-user-file-attachment span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-attachment > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-attachment button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--faint);
+}
+
+.agent-composer-attachment button:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.agent-composer-file-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  max-width: 100%;
+  margin: 0;
+  padding: 0 0 2px;
+  list-style: none;
+}
+
+.agent-composer-file-attachment {
+  display: grid;
+  width: 184px;
+  max-width: 100%;
+  grid-template-columns: 20px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--composer-line);
+  border-radius: 9px;
+  background: var(--composer-bg);
+  padding: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-composer-file-attachment > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-file-attachment button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--faint);
+}
+
+.agent-composer-file-attachment button:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.agent-composer-attachment-error {
+  margin: -5px 0 0;
+  color: var(--danger, #ff8f8f);
+  font-size: 10px;
+}
+
+.agent-composer-input {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  max-height: 120px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #f2f2f2;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* 上面那条 `outline: 0` 单独一条压不住全局的 `textarea:focus-visible`：
+   后者带伪类，权重 (0,1,1) 高于 (0,1,0)。而 textarea 属于「可接受键盘输入」
+   的元素，规范要求它即使在鼠标点击/拖动获得焦点时也命中 :focus-visible ——
+   于是每次往输入框里拖一下，文字周围就会被画上一圈 2px 的浅灰方框，
+   看起来像「整块输入框被选中了」，而实际上一个字符都没选中。
+   这里显式取消它，焦点提示改由上面卡片上的 :focus-within 承担。 */
+.agent-composer-input:focus-visible {
+  outline: none;
+}
+
+/* 这两条 ::placeholder 规则随占位提示一起删除 —— 输入框已经没有 placeholder
+   属性了，留着是永不匹配的死规则。 */
+
+/* @ / 候选列表：浮在输入框上方，不挤动下面的工具条。
+   用 absolute 而不是插入文档流，否则每敲一个字弹窗出现/消失都会让整个
+   输入卡片跳动。 */
+.composer-suggestions {
+  position: absolute;
+  z-index: 20;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  max-height: 208px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--composer-line);
+  border-radius: 12px;
+  background: var(--composer-surface);
+  box-shadow: 0 14px 34px rgb(0 0 0 / 46%);
+}
+
+.composer-suggestion {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 11px;
+}
+
+.composer-suggestion.is-active:not(:disabled) {
+  background: var(--composer-bg);
+  color: var(--text);
+}
+
+.composer-suggestion:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.composer-suggestion-name {
+  flex: 0 0 auto;
+  color: var(--composer-accent);
+  font-weight: 600;
+}
+
+.composer-suggestion:disabled .composer-suggestion-name {
+  color: var(--faint);
+}
+
+.composer-suggestion-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-toolbar,
+.agent-composer-toolbar-left,
+.agent-composer-toolbar-right {
+  display: flex;
+  align-items: center;
+}
+
+.agent-composer-toolbar {
+  justify-content: space-between;
+  gap: 8px;
+  /* 这一行不允许靠压缩文字来腾地方。「目标模式」「请求批准」都是三四个字的
+     短标签，被挤掉几个像素就会截断成「目标模…」—— 而发送按钮一出现就必然
+     发生（实测左侧工具组被压掉 4px）。放不下时整组换行，而不是把标签剪短。 */
+  flex-wrap: wrap;
+}
+
+.agent-composer-toolbar-left,
+.agent-composer-toolbar-right {
+  gap: 7px;
+  min-width: 0;
+}
+
+/* 左侧是「这次运行会怎样」的唯一常驻说明，任何情况下都保持完整。 */
+.agent-composer-toolbar-left {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.agent-composer-toolbar-right {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.agent-composer-tool {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #d6d7d8;
+}
+
+.agent-composer-tool:hover:not(:disabled) {
+  background: #3a3b3d;
+  color: #fff;
+}
+
+/* 这里原本是「帮我批准」勾选框。它把「请求批准」表达成「未勾选」，用户看到的
+   是一个空框，读不出「不勾 = 每次都会问你」；而「帮我批准」的勾选态又和
+   「已经批准了什么」混在一起。现在批准方式是设置面板里的两档选择。 */
+
+/* 当前运行状态的常驻摘要。不展开设置也能一眼看出这次运行会怎样 ——
+   模式是随请求发出的，用户必须能在按下发送前确认它。 */
+.agent-mode-summary,
+.agent-approval-summary,
+.agent-policy-summary {
+  overflow: hidden;
+  color: #a5a6a8;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-mode-summary {
+  border: 1px solid var(--composer-line);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.agent-policy-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-policy-summary.has-warning {
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-surface);
+  color: #e6e6e6;
+  padding: 2px 7px;
+}
+
+.agent-settings-warning {
+  margin: 0;
+  border: 1px solid var(--warn-line);
+  border-radius: 7px;
+  background: var(--warn-surface);
+  color: #e6e6e6;
+  padding: 7px 9px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* 只读类模式给一个明确的视觉标记：它改变的是「能不能改东西」，
+   和模型、批准方式不是一个层级的信息。 */
+.agent-mode-summary.is-readonly {
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
+  color: #e6e6e6;
+}
+
+/* 这里原来有一条 `.agent-approval-summary { color: #8d8f92 }`，把批准方式这一格
+   单独压暗。已删除，理由有二：
+     1. .agent-mode-summary 是它的成对项、用 #a5a6a8 —— 同一行里的两句话用两个
+        亮度，读起来像是有层级差别，但它们其实是并列的两个设置。
+     2. #8d8f92 落在 --composer-surface (#292a2c) 上只有 4.43:1，差 0.07 不到
+        WCAG AA 的 4.5:1。灰阶主题里「再暗一档表示次要」这个手法在更亮的底上
+        会直接失效，所以这类覆盖宁可删掉、统一到上面那条基础规则。 */
+
+.agent-settings-trigger.is-open {
+  background: #3a3b3d;
+  color: #fff;
+}
+
+/* 「+」展开的设置面板：运行模式与批准方式。
+   用 absolute 浮在输入框上方，与候选列表同一层，避免撑动整个卡片。 */
+.agent-settings-panel {
+  position: absolute;
+  z-index: 21;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  display: flex;
+  max-height: 60vh;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  border: 1px solid var(--composer-line);
+  border-radius: 14px;
+  background: var(--composer-surface);
+  box-shadow: 0 16px 38px rgb(0 0 0 / 50%);
+  padding: 12px;
+}
+
+.agent-settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-settings-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 说明文字用 --muted 而不是 --faint。--faint (#8d8d8d) 在暗色面板上够用
+   （#151515 上是 5.5:1），但这个弹层的底色是更亮的 --composer-surface (#292a2c)，
+   同一档灰在那里只有 4.33:1 —— 差一点点不到 WCAG AA 的 4.5:1。灰阶主题里
+   靠「再暗一档」来表示次要，在亮一档的底上就会失效，所以这一处必须换档。 */
+.agent-settings-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-settings-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-settings-option {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--composer-bg);
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.agent-settings-option:hover:not(:disabled) {
+  border-color: var(--focus-line);
+}
+
+.agent-settings-option.is-selected {
+  border-color: var(--composer-accent);
+  background: #2b2c2e;
+}
+
+.agent-settings-option:disabled {
+  opacity: 0.55;
+}
+
+.agent-settings-option-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.agent-settings-option.is-selected .agent-settings-option-label {
+  color: #fff;
+}
+
+/* 「不改动」标记：只读类模式的选项上直接写清楚它意味着什么。 */
+.agent-settings-badge {
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-surface);
+  color: #dcdcdc;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.agent-settings-option-note {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-settings-option.is-selected .agent-settings-option-note {
+  color: var(--muted);
+}
+
+/* 模型选择器从 10px 纯文本提权为明确的控件：它是「这次运行用哪个模型」
+   的唯一指示，之前小到几乎看不见，用户无从确认自己选的是什么。
+
+   现在它是自绘的 listbox（见 ModelPicker.tsx），不是原生 <select>：
+   原生控件在关闭态只能显示 option 的完整文本，而模型 ID 常见形如
+   "anthropic/claude-sonnet-4.5" —— 要么把底栏撑到换行，要么被截成省略号，
+   两种都答不出「我现在用的是哪个模型」。自绘之后关闭态只显示模型短名，
+   完整名称留在 title 与列表项里。 */
+.agent-model-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.agent-model-select {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--composer-line);
+  border-radius: 999px;
+  background: var(--composer-bg);
+  color: #efefef;
+  padding: 4px 6px 4px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.agent-model-select:hover:not(:disabled),
+.agent-model-select.is-open {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+/* 关闭态的自适应宽度上限：再长就省略，完整名称由 title 兜底。
+   140px 覆盖了「去掉 vendor 前缀」后最长的常见模型名（约 20 字符），
+   同时给同排的发送按钮留出空间。 */
+.agent-model-value {
+  min-width: 0;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 键盘焦点环由全局 button:focus-visible 提供，这里不再写 outline，
+   避免又出现「同优先级、靠源码顺序决定谁生效」的老问题。 */
+
+/* ── 滚动条里的焦点环 ───────────────────────────────────────────────────────
+   全局焦点环画在边框盒**外面**（2px 描边 + 2px 偏移）。这一点在滚动容器里会
+   出事：overflow 不是 visible 的元素把绘制裁在自己的 padding box 上，而
+   .server-list / .server-tabs 的 padding 在需要让位的那一侧是 0 —— 于是 Tab 到
+   服务器行或页签时，环被削掉一条边（实测分别少 3px 和 4px）。
+
+   解法不是给容器加内边距（那会把整条工具栏或整个列表推下去，改变版面节奏），
+   而是把这两处的环改成**内缩**：outline-offset 取负值，环画在边框盒里面，
+   任何祖先都裁不到它。选择器的权重也刚好压过全局那条 button:focus-visible。 */
+.server-list .server-row-main:focus-visible,
+.server-tabs .server-tab:focus-visible {
+  outline-offset: -2px;
+}
+
+/* 弹层向上开：输入区贴在面板底部，向下没有空间。 */
+.agent-model-menu {
+  position: absolute;
+  z-index: 22;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 100%;
+  max-width: min(300px, 84vw);
+  max-height: 264px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--composer-line);
+  border-radius: 12px;
+  background: var(--composer-surface);
+  box-shadow: 0 16px 38px rgb(0 0 0 / 50%);
+}
+
+.agent-model-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 6px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.agent-model-option.is-active {
+  background: var(--composer-bg);
+  color: var(--text);
+}
+
+/* 当前生效项用强调色标出，而不是靠一个需要额外图标的勾。 */
+.agent-model-option[aria-selected="true"] .agent-model-option-name {
+  color: var(--composer-accent);
+  font-weight: 600;
+}
+
+.agent-model-option-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-model-option-from {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.agent-model-empty {
+  max-width: 100px;
+  overflow: hidden;
+  color: #96989a;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 发送按钮：只在有内容时出现，且不再兼任停止。
+   原来发送与停止共用一个图标按钮，导致「没有输入」和「正在运行」都表现为
+   一个禁用的图标 —— 鼠标悬停只看到「禁止」，既点不动也说不清原因。
+   现在它是一枚有文字的按钮，出现即代表真的能发。 */
+.agent-send-button {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--composer-accent);
+  color: #fff;
+  padding: 5px 14px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.agent-send-button:hover:not(:disabled) {
+  background: var(--composer-accent-hover);
+}
+
+.agent-send-button:disabled {
+  opacity: 0.42;
+}
+
+/* 停止条：只在运行中出现，和发送按钮互斥，各自都有文字说明。
+   中断是安全功能 —— 它不能藏在一个「看着像禁用」的图标后面。 */
+.agent-running-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--composer-line);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.agent-running-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-running-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--composer-accent);
+  /* `soft-pulse` is the motion layer's one looping opacity animation. */
+  animation: soft-pulse var(--motion-soft-cycle) ease-in-out infinite;
+}
+
+.agent-stop-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--danger-line);
+  border-radius: 999px;
+  background: var(--danger-surface);
+  color: #efefef;
+  padding: 4px 11px;
+  font-size: 10px;
+}
+
+.agent-stop-button:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.agent-stop-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agent-composer-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+@media (max-width: 480px) {
+  .agent-composer {
+    padding: 8px;
+  }
+
+  .agent-composer-shell {
+    min-height: 92px;
+    border-radius: 16px;
+    padding-left: 12px;
+  }
+
+  /* 极窄屏优先保住左侧那组状态说明，模型名退到更短。 */
+  .agent-model-value {
+    max-width: 86px;
+  }
+}

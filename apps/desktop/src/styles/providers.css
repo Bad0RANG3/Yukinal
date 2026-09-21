@@ -1,0 +1,685 @@
+/* 选 Provider：一行 —— 选择框加一个动作，下面一行只讲后果。
+   底端对齐是因为按钮要和输入框的下沿齐平（上面还有 `field-label` 那一行）。 */
+.provider-picker {
+  display: grid;
+  gap: 9px;
+}
+.provider-picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.provider-picker-field {
+  min-width: 0;
+  flex: 1 1 220px;
+}
+
+.provider-picker-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--faint);
+  font-size: calc(var(--ui-font-size, 13px) - 2px);
+}
+
+/* 「删除」在有确认之前是克制的描边按钮，不抢「设为当前」的位置；确认块出现后它才用
+   危险色（与对话记录的二次确认同一套 token：`--danger-surface` / `--danger-line`）。
+   两处都刻意用行内确认而不是 `window.confirm`：系统弹窗会盖住上下文，也无法说明
+   「密钥会不会一起删」这种只有这一屏知道的事。 */
+.provider-picker-delete {
+  color: var(--muted);
+}
+
+.provider-picker-delete:hover:not(:disabled) {
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
+  color: var(--text);
+}
+
+.provider-picker-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-radius: 8px;
+  background: var(--danger-surface);
+  padding: 9px 10px;
+}
+
+.provider-picker-confirm p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.provider-picker-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.provider-picker-confirm-actions .text-button {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.provider-picker-confirm-actions .text-button:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.provider-picker-confirm-delete {
+  border-color: var(--danger-line);
+  color: var(--text);
+}
+
+.provider-picker-confirm-delete:hover:not(:disabled) {
+  border-color: var(--danger-line);
+  background: #2f1a1e;
+}
+
+/* 删除后的结果提示：密钥到底有没有被一起删掉，只有这一次响应知道。 */
+.provider-picker-notice {
+  margin: 10px 0 0;
+}
+
+.settings-storage-note {
+  color: var(--faint);
+}
+
+.agent-log-viewer {
+  max-height: 260px;
+  margin: 14px 0 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #070809;
+  color: var(--muted);
+  padding: 12px;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-form-grid-provider {
+  gap: 14px 12px;
+}
+
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-field,
+.form-field {
+  min-width: 0;
+}
+
+.field-label,
+.source-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.form-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  outline: 0;
+  background: var(--surface-3);
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.form-input:hover {
+  border-color: var(--line-strong);
+}
+
+.form-input:focus {
+  border-color: var(--focus-line);
+  box-shadow: 0 0 0 3px var(--focus-halo);
+}
+
+/* 与 .agent-composer-input 同一个坑：上面那条 `outline: 0` 权重 (0,1,0)，
+   压不过全局 `input:focus-visible` 的 (0,1,1)。而 input 属于「可接受键盘输入」
+   的元素，鼠标点进去也命中 :focus-visible —— 于是每个表单字段在已经有一条
+   青色边框 + 光晕的情况下，外面还会再多画一圈 2px 的浅灰方框。
+   这里的焦点提示由 .form-input:focus 独自承担，不需要那圈方框。 */
+.form-input:focus-visible {
+  outline: none;
+}
+
+.form-input::placeholder {
+  color: var(--faint);
+}
+
+select.form-input {
+  appearance: auto;
+}
+
+.form-input-mono,
+.form-textarea {
+  font-family: var(--font-ui);
+}
+
+.form-textarea {
+  min-height: 115px;
+  resize: vertical;
+}
+
+.form-hint,
+.form-error,
+.form-success {
+  display: block;
+  margin: 7px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.form-hint {
+  color: var(--faint);
+}
+
+.form-hint-warning {
+  color: var(--warning);
+}
+
+.form-error {
+  color: var(--danger);
+}
+
+.form-success {
+  color: var(--success);
+}
+
+.settings-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 15px;
+}
+
+.settings-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-3);
+  color: var(--text);
+  padding: 10px;
+  cursor: pointer;
+}
+
+.settings-check-row input,
+.form-radio-option input {
+  accent-color: var(--accent-strong);
+  margin-top: 2px;
+}
+
+.settings-check-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-check-row strong {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.settings-check-row small {
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.provider-list,
+.source-list-stack,
+.source-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.provider-row,
+.source-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-3);
+  padding: 11px 12px;
+}
+
+/* `.provider-row-active` 随 Provider 列表一起删掉了：那个列表现在是一个选择框，
+   选中状态由控件自己表达。`.provider-list` / `.provider-row` 仍在，MCP 面板还在用。 */
+
+.provider-copy,
+.source-item-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.provider-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+}
+
+.provider-name > span:nth-last-child(1) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-status-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.provider-status-on {
+  background: var(--success);
+  box-shadow: 0 0 0 3px #86dba51a;
+}
+
+.provider-status-off {
+  background: var(--faint);
+}
+
+.provider-meta {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-group {
+  min-width: 0;
+}
+
+.source-title {
+  margin: 0 0 6px;
+  color: var(--faint);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.source-item {
+  padding: 9px 10px;
+}
+
+.source-item-copy {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-item-copy small {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 72%);
+  padding: 20px;
+}
+
+.server-modal {
+  position: relative;
+  width: min(100%, 620px);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  margin: auto;
+  color: var(--text);
+  font: inherit;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--card-radius);
+  background: var(--surface-2);
+  box-shadow: 0 22px 80px rgb(0 0 0 / 48%);
+  padding: 20px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.auth-challenge-modal {
+  width: min(100%, 520px);
+}
+
+/* 设备码弹窗比默认的 `server-modal` 窄一档，与 SSH 二次认证弹窗同一宽度。 */
+.mcp-device-code-dialog {
+  width: min(100%, 520px);
+}
+
+/* 那串字符是用户要抄到另一个设备上的东西，所以它必须是这一屏最显眼的一行，
+   而且不换行、不被截断、字母间距不被「排版美化」动过 —— 中间多一个空格就是一个无效的代码。 */
+.mcp-device-code-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--card-radius);
+  background: var(--surface-3);
+}
+
+.mcp-device-code-value code {
+  flex: 1 1 auto;
+  overflow-x: auto;
+  font-family: var(--font-terminal);
+  font-size: 22px;
+  white-space: nowrap;
+}
+
+.auth-challenge-target {
+  display: inline-flex;
+  max-width: 50%;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-challenge-instructions {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.modal-close {
+  flex: 0 0 auto;
+}
+
+.server-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-grid-host {
+  grid-template-columns: minmax(0, 1fr) 110px;
+}
+
+.form-fieldset {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px 12px;
+}
+
+.form-fieldset .field-label {
+  padding: 0 4px;
+}
+
+.form-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.form-radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.form-check-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.form-check-option input {
+  margin-top: 2px;
+  accent-color: var(--accent-strong);
+}
+
+.form-textarea-compact {
+  min-height: 74px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.terminal-page {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.terminal-toolbar,
+.section-heading-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-heading-inline {
+  justify-content: flex-start;
+}
+
+.section-heading-inline h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.terminal-toolbar-note {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.terminal-shell {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  background: #08090a;
+  padding: 14px;
+}
+
+.terminal-shell .xterm {
+  height: 100%;
+}
+
+.terminal-shell .xterm-viewport {
+  scrollbar-color: #34383e #08090a;
+}
+
+.terminal-empty {
+  display: flex;
+  min-height: 360px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--card-radius);
+  color: var(--muted);
+  text-align: center;
+}
+
+.terminal-empty svg {
+  margin-bottom: 5px;
+  color: var(--accent);
+}
+
+.terminal-empty strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.terminal-empty span {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.remote-files-page {
+  gap: 14px;
+}
+
+.files-toolbar {
+  gap: 8px;
+}
+
+.files-path-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+}
+
+.files-layout {
+  gap: 12px;
+  min-height: 420px;
+}
+
+.file-list-panel,
+.file-preview-panel {
+  min-height: 420px;
+  padding: 16px;
+}
+
+.remote-file-row {
+  border-radius: 7px;
+  border-bottom-color: var(--line);
+}
+
+.remote-file-row:hover,
+.remote-file-row-selected {
+  background: var(--surface-4);
+}
+
+.remote-file-icon {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.file-preview-content {
+  border: 1px solid var(--line);
+  background: #070809;
+  color: var(--text);
+}
+
+.activity-page,
+.services-page,
+.logs-page,
+.projects-page {
+  gap: 16px;
+}
+
+.activity-list,
+.service-list,
+.log-list {
+  background: var(--surface-2);
+}
+
+.activity-row,
+.service-row,
+.log-row {
+  border-bottom-color: var(--line);
+}
+
+.activity-type-icon {
+  border-radius: 9px;
+}
+
+.activity-row-meta,
+.service-summary,
+.log-summary,
+.project-card-meta {
+  color: var(--muted);
+}
+
+.activity-trace-detail {
+  border-color: #31514d;
+  border-radius: 9px;
+  background: #080f0f;
+}
+
+.activity-trace-step-input,
+.activity-trace-step-output {
+  font-family: var(--font-ui);
+}
+
+.service-row,
+.log-row {
+  padding-right: 15px;
+  padding-left: 15px;
+}
+
+.service-row code {
+  font-size: 10px;
+}
+
+.project-card {
+  padding: 16px;
+}
+
+.project-card:hover {
+  border-color: var(--line-strong);
+}

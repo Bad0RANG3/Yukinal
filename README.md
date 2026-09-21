@@ -12,7 +12,15 @@ Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务
 
 ### 界面预览
 
-下面的截图来自真实 Yukinal Tauri 窗口，使用临时空白数据目录生成，不包含个人服务器、凭据或模型配置。
+下面三张截图来自本地 Vite 的 `?fixture=1` 演示模式，用于展示完整工作区的视觉状态。服务器名、地址、资源指标、文件名、审计项和 Agent 对话均为虚构 fixture 数据；不包含真实服务器、凭据、模型配置或远程输出。
+
+| 概览与只读 Agent 对话 | 审计动态 | 文件与对话记录 |
+| --- | --- | --- |
+| ![Yukinal 概览与虚构 Agent 对话](./docs/assets/screenshots/fixture-overview-agent.png) | ![Yukinal 虚构审计动态](./docs/assets/screenshots/fixture-activity-audit.png) | ![Yukinal 文件浏览与虚构对话记录](./docs/assets/screenshots/fixture-files-history.png) |
+
+第一张展示服务器健康快照和 Agent 的只读排查对话；第二张展示失败、成功和取消的审计动态；第三张展示 SFTP 文件浏览布局与已保存会话。它们是 UI 视觉验收和文档演示素材，不能证明对任何真实主机完成了连接、读取或执行。
+
+下方两张截图来自真实 Yukinal Tauri 窗口，使用临时空白数据目录生成，同样不包含个人服务器、凭据或模型配置。
 
 | 工作区与 Agent | 终端工作区 |
 | --- | --- |
@@ -144,6 +152,8 @@ scripts/            校验、冒烟、打包和桌面窗口辅助脚本
 | [执行与授权模型](./docs/execution-model.md) | 风险事实、授权票据和 Agent 执行流程 |
 | [安全与数据边界](./docs/security.md) | 凭据、主机身份、数据上限和审计 |
 | [当前限制](./docs/limitations.md) | 已知缺口与有意保留的安全边界 |
+| [项目自我审查与后续计划](./docs/project-review-and-roadmap.md) | 当前短板、优先级和分阶段完善计划 |
+| [三轮审计与重构记录](./docs/refactor-progress.md) | 本次结构、可靠性与 GUI 审计的进度、证据和外部验证限制 |
 | [开始开发](./docs/development.md) | 环境、启动方式、首次使用和验证命令 |
 | [打包与分发](./docs/packaging.md) | 安装包、sidecar 资源和平台状态 |
 | [Provider 边界](./docs/boundaries/provider.md) · [MCP 边界](./docs/boundaries/mcp.md) | 接入协议与跨模块约束 |

@@ -22,14 +22,9 @@ import { randomUUID } from "node:crypto";
 
 import {
   RPC_ERROR,
-  type AgentImagePromptPart,
-  type AgentDocumentPromptPart,
-  type AgentAudioPromptPart,
   type AgentRunRequest,
   type AgentRunResult,
   type AgentStreamEvent,
-  type AgentTextFilePromptPart,
-  type AgentTextPromptPart,
   type ApprovalRequest,
   type ApprovalResponse,
   type Evidence,
@@ -41,12 +36,9 @@ import {
   type HostPlanStepResultRequest,
   type HostPlanStepResultResponse,
   type InvestigationArtifact,
-  type PermissionApprovalSource,
   type PermissionDecision,
   type ToolCallRequest,
   type ToolCallResult,
-  type ToolDeclaration,
-  type ToolError,
 } from "@yukinal/shared";
 import { createProviderNameIndex, type LLMProvider, type LlmMessage, type StreamEvent } from "@yukinal/provider-sdk";
 
@@ -58,7 +50,26 @@ import { RpcFailure } from "../errors.js";
 import { redactSensitiveText, redactSensitiveValue } from "../security/sensitive-data.js";
 import { TraceRecorder } from "../trace/trace-recorder.js";
 import { ToolRegistry, toolStepTitle, type ExecutionTicket } from "../tools/registry.js";
+import {
+  agentPromptAudios,
+  agentPromptDocuments,
+  agentPromptFiles,
+  agentPromptImages,
+  agentPromptText,
+  isRunTimeout,
+  positiveInteger,
+  promptWithTextFiles,
+  runTitle,
+  shouldAdvancePlan,
+  shouldAutoRecordEvidence,
+  shouldCheckPlan,
+  summarize,
+  waitForObservationSample,
+} from "./agent-loop-helpers.js";
+import { createToolEventEmitter } from "./tool-event-emitter.js";
 import { SYSTEM_PROMPT, renderPermissionGuidance, renderRunModeGuidance } from "./prompts.js";
+
+export { shouldAdvancePlan, shouldCheckPlan } from "./agent-loop-helpers.js";
 
 export interface AgentLoopDeps {
   registry: ToolRegistry;
@@ -222,103 +233,7 @@ export class AgentLoop {
       ? this.deps.createTrace({ runId, title })
       : new TraceRecorder(runId, title);
 
-    const emitToolCall = (call: {
-      traceId: string;
-      stepId: string;
-      callId: string;
-      toolName: string;
-      input: unknown;
-      target: ToolCallRequest["target"];
-      riskLevel: PermissionDecision["finalRisk"];
-      decision: PermissionDecision["outcome"];
-      approvedBy?: PermissionApprovalSource;
-      /**
-       * The policy the decision was made under, taken from the decision itself rather
-       * than from the request: the engine is the authority on which policy it applied,
-       * and this is the field that makes that observable from the event stream.
-       */
-      policyId: PermissionDecision["policyId"];
-      /**
-       * Where the tool came from. Carried on the event so the audit trail and the UI can tell
-       * a third-party (MCP) tool from a built-in one without inferring it from the name.
-       */
-      origin: ToolDeclaration["origin"];
-      planId?: string;
-      planStepId?: string;
-      evidenceIds?: string[];
-    }): void => {
-      emit({
-        type: "agent.tool_call",
-        runId,
-        traceId: call.traceId,
-        stepId: call.stepId,
-        callId: call.callId,
-        toolName: call.toolName,
-        input: redactSensitiveValue(call.input),
-        target: call.target,
-        riskLevel: call.riskLevel,
-        decision: call.decision,
-        approvedBy: call.approvedBy,
-        policyId: call.policyId,
-        origin: call.origin,
-        planId: call.planId,
-        planStepId: call.planStepId,
-        evidenceIds: call.evidenceIds,
-        at: now(),
-      });
-    };
-
-    const emitToolResult = (result: {
-      traceId: string;
-      stepId: string;
-      callId: string;
-      toolName: string;
-      input: unknown;
-      target: ToolCallRequest["target"];
-      riskLevel: PermissionDecision["finalRisk"];
-      decision: PermissionDecision["outcome"];
-      approvedBy?: PermissionApprovalSource;
-      policyId: PermissionDecision["policyId"];
-      /** See the note on the same field in `emitToolCall`. */
-      origin: ToolDeclaration["origin"];
-      planId?: string;
-      planStepId?: string;
-      evidenceIds?: string[];
-      errorCode?: ToolError["code"];
-      status: "success" | "failed" | "cancelled";
-      outputSummary: string;
-      error?: string;
-      startedAt: string;
-      endedAt: string;
-      durationMs: number;
-    }): void => {
-      emit({
-        type: "agent.tool_result",
-        runId,
-        traceId: result.traceId,
-        stepId: result.stepId,
-        callId: result.callId,
-        toolName: result.toolName,
-        input: redactSensitiveValue(result.input),
-        target: result.target,
-        riskLevel: result.riskLevel,
-        decision: result.decision,
-        approvedBy: result.approvedBy,
-        policyId: result.policyId,
-        origin: result.origin,
-        planId: result.planId,
-        planStepId: result.planStepId,
-        evidenceIds: result.evidenceIds,
-        errorCode: result.errorCode,
-        status: result.status,
-        outputSummary: redactSensitiveText(result.outputSummary),
-        error: result.error === undefined ? undefined : redactSensitiveText(result.error),
-        startedAt: result.startedAt,
-        endedAt: result.endedAt,
-        durationMs: result.durationMs,
-        at: result.endedAt,
-      });
-    };
+    const { emitToolCall, emitToolResult } = createToolEventEmitter({ runId, emit, now });
 
     try {
       emit({ type: "agent.started", runId, ...(request.taskId ? { taskId: request.taskId } : {}), at: now() });
@@ -1179,179 +1094,4 @@ export class AgentLoop {
       else token.signal.addEventListener("abort", onAbort, { once: true });
     });
   }
-}
-
-function positiveInteger(value: number, name: string): number {
-  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
-  return value;
-}
-
-/**
- * The trace ledger's title for one run: the first non-blank line of the user's prompt,
- * redacted and bounded.
- *
- * Taken from the prompt rather than from the model's answer because the title exists to
- * make a **finished** run recognisable in a list of traces — and a run that failed before
- * it produced any text is exactly the one a reader is looking for.
- */
-function runTitle(prompt: string): string {
-  const firstLine =
-    redactSensitiveText(prompt)
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.length > 0) ?? "";
-  if (!firstLine) return "Agent run";
-  return firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine;
-}
-
-function isRunTimeout(signal: AbortSignal): boolean {
-  const reason = signal.reason;
-  return reason instanceof Error && reason.message === "run-timeout";
-}
-
-/**
- * Wait for the next host-owned observation slot without ever outliving the
- * run's abort signal. Invalid timestamps fail closed instead of turning a
- * malformed host response into a tight sampling loop.
- */
-function waitForObservationSample(nextSampleAt: string, signal: AbortSignal): Promise<boolean> {
-  const dueAt = Date.parse(nextSampleAt);
-  if (!Number.isFinite(dueAt)) return Promise.resolve(false);
-  const delayMs = Math.max(0, dueAt - Date.now());
-  if (delayMs === 0) return Promise.resolve(true);
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (ready: boolean): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      resolve(ready);
-    };
-    const onAbort = (): void => finish(false);
-    timer = setTimeout(() => finish(true), Math.min(delayMs, 2_147_000_000));
-    timer.unref?.();
-    if (signal.aborted) finish(false);
-    else signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-/**
- * Investigation metadata tools are not observations of the target. Persisting their
- * return values as fresh evidence would make a finding or an evidence lookup look like
- * a new server sample and would make scheduled comparisons noisy.
- */
-function shouldAutoRecordEvidence(toolName: string): boolean {
-  return !toolName.startsWith("investigation.");
-}
-
-const PLAN_CONTROL_TOOLS = new Set(["investigation.plan", "investigation.playbook"]);
-const LOCAL_PLAN_CONTEXT_TOOLS = new Set([
-  "investigation.evidence",
-  "investigation.evidence.search",
-  "investigation.evidence.compare",
-  "investigation.evidence.correlate",
-  "investigation.evidence.triage",
-]);
-const PLAN_NON_ADVANCING_TOOLS = new Set([
-  ...PLAN_CONTROL_TOOLS,
-  ...LOCAL_PLAN_CONTEXT_TOOLS,
-  "investigation.artifact",
-]);
-
-/**
- * Plan tools create or replace a revision, while local context reads only inspect
- * already-persisted material. Neither may be rejected by the active step's tool list.
- */
-export function shouldCheckPlan(toolName: string): boolean {
-  return !PLAN_CONTROL_TOOLS.has(toolName) && !LOCAL_PLAN_CONTEXT_TOOLS.has(toolName);
-}
-
-/**
- * Only a target observation or action may complete the current remote step.
- * Artifact persistence is deliberately orthogonal: it keeps the active plan binding
- * for host validation, but recording a summary must not consume that step twice.
- */
-export function shouldAdvancePlan(toolName: string): boolean {
-  return !PLAN_NON_ADVANCING_TOOLS.has(toolName);
-}
-
-function summarize(output: unknown): string {
-  if (output === undefined || output === null) return "(no output)";
-  const text = redactSensitiveText(typeof output === "string" ? output : JSON.stringify(output));
-  return text.length > 400 ? `${text.slice(0, 400)}…` : text;
-}
-
-function agentPromptText(parts: AgentRunRequest["parts"]): string {
-  return (
-    parts
-      ?.filter((part): part is AgentTextPromptPart => part.type === "text")
-      .map((part) => part.text)
-      .join("\n")
-      .trim() ?? ""
-  );
-}
-
-function agentPromptImages(parts: AgentRunRequest["parts"]): Array<{
-  mediaType: AgentImagePromptPart["mediaType"];
-  data: string;
-  name?: string;
-}> {
-  return (
-    parts
-      ?.filter((part): part is AgentImagePromptPart => part.type === "image")
-      .map(({ mediaType, data, name }) => ({ mediaType, data, ...(name ? { name } : {}) })) ?? []
-  );
-}
-
-function agentPromptFiles(parts: AgentRunRequest["parts"]): AgentTextFilePromptPart[] {
-  return (
-    parts?.filter(
-      (part): part is AgentTextFilePromptPart => part.type === "file",
-    ) ?? []
-  );
-}
-
-function agentPromptDocuments(
-  parts: AgentRunRequest["parts"],
-): Array<{
-  mediaType: AgentDocumentPromptPart["mediaType"];
-  data: string;
-  name: string;
-}> {
-  return (
-    parts
-      ?.filter(
-        (part): part is AgentDocumentPromptPart => part.type === "document",
-      )
-      .map(({ mediaType, data, name }) => ({ mediaType, data, name })) ?? []
-  );
-}
-
-function agentPromptAudios(
-  parts: AgentRunRequest["parts"],
-): Array<{
-  mediaType: AgentAudioPromptPart["mediaType"];
-  data: string;
-  name?: string;
-}> {
-  return (
-    parts
-      ?.filter((part): part is AgentAudioPromptPart => part.type === "audio")
-      .map(({ mediaType, data, name }) => ({
-        mediaType,
-        data,
-        ...(name ? { name } : {}),
-      })) ?? []
-  );
-}
-
-function promptWithTextFiles(prompt: string, files: readonly AgentTextFilePromptPart[]): string {
-  if (files.length === 0) return prompt;
-  const blocks = files.map(
-    (file) =>
-      `--- BEGIN ATTACHED TEXT FILE: ${file.name} ---\n${file.data}\n--- END ATTACHED TEXT FILE ---`,
-  );
-  return [prompt, ...blocks].filter((block) => block.trim().length > 0).join("\n\n");
 }

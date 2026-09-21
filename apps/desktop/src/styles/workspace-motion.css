@@ -1,0 +1,1074 @@
+/* Workspace sizing follows the content area, including a collapsed Agent. */
+.app-shell:not([data-primary="servers"]) { grid-template-columns: 64px minmax(0, 1fr) 328px; }
+.app-shell.agent-collapsed:not([data-primary="servers"]) { grid-template-columns: 64px minmax(0, 1fr); }
+.app-shell:not([data-primary="servers"]) .server-sidebar { display: none; }
+[hidden] { display: none !important; }
+.app-rail, .server-sidebar, .workspace-main, .agent-panel { min-height: 0; }
+.workspace-header, .agent-header { flex-shrink: 0; gap: 12px; }
+.workspace-heading, .workspace-header-meta { min-width: 0; }
+.workspace-heading h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-header-meta { flex-shrink: 0; }
+.breadcrumb-divider { margin: 0 7px; color: var(--line-strong); }
+.sidebar-toggle, .sidebar-scrim { display: none; }
+.server-sidebar-close { display: none; }
+.preview-chip { color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 10px; white-space: nowrap; }
+.settings-card-header, .provider-row, .source-item { flex-wrap: wrap; }
+.settings-card-header > div, .provider-copy { min-width: 0; }
+.settings-editing { max-width: 100%; overflow-wrap: anywhere; }
+.provider-name, .provider-meta { flex-wrap: wrap; overflow-wrap: anywhere; }
+.settings-form-fields, .server-form-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+.server-form-fields { display: flex; flex-direction: column; gap: 14px; }
+.server-modal::backdrop { background: rgb(2 6 9 / 76%); backdrop-filter: blur(6px); }
+.terminal-container { height: 100%; min-height: 0; }
+.terminal-page { min-height: 300px; }
+.section-heading h2, .section-heading h3, .overview-subtitle, .file-preview-panel h3 { overflow-wrap: anywhere; }
+.overview-hero, .identity-line { flex-wrap: wrap; gap: 12px; }
+.empty-icon { display: grid; place-items: center; width: 64px; height: 64px; margin-bottom: 20px; color: var(--accent); border: 1px solid var(--ok-line); border-radius: 18px; background: var(--ok-surface); }
+.connection-empty .button-primary { margin-top: 20px; }
+.connection-empty small { color: var(--faint); line-height: 1.7; }
+.compact-empty { gap: 10px; padding: 24px 8px; }
+.file-preview-empty { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--faint); text-align: center; }
+.file-preview-empty p { margin-bottom: 5px; color: var(--muted); }
+.file-preview-empty small { line-height: 1.6; }/* A restrained hierarchy, with text sizes that follow the user's preference. */
+.form-input, .agent-entry, .muted-copy, .provider-name, .server-row-name{ font-size: var(--ui-font-size, 13px); }.server-tab, .button-primary, .button-secondary, .field-label, .server-row-detail, .settings-card-header p:last-child, .settings-page-heading > p:last-child, .settings-fact dd, .agent-empty p, .empty-state p{ font-size: calc(var(--ui-font-size, 13px) - 1px); line-height: 1.65; }
+.eyebrow, .server-row-env, .server-status-pill, .settings-storage-note, .agent-status, .agent-notice,
+.provider-meta, .form-hint, .section-note, .metric-hint, .server-facts dt { font-size: calc(var(--ui-font-size, 13px) - 2px); }
+.rail-button { font-size: 11px; }
+.server-row-env { flex-shrink: 0; }
+.form-input { min-height: 38px; }
+.button-primary, .button-secondary { min-height: 34px; }
+.metric-card { padding: 18px; }
+.metric-card strong { letter-spacing: -0.05em; }
+.metric-track { height: 5px; }
+.metric-card-topline { gap: 8px; }
+.settings-card { padding: 22px; }
+.settings-card-header { margin-bottom: 20px; }
+.settings-form-grid { gap: 18px; }
+
+.welcome-page { display: flex; flex-direction: column; justify-content: center; min-height: 100%; max-width: 840px; margin: 0 auto; padding: 20px 0; }
+.welcome-kicker { display: inline-flex; align-items: center; gap: 10px; color: var(--accent); font-size: 12px; }
+.welcome-copy h2 { margin: 24px 0 18px; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: clamp(28px, 4.5cqw, 44px); font-weight: 650; line-height: 1.5; letter-spacing: -0.035em; }
+.welcome-copy h2 span { color: var(--muted); }
+.welcome-copy > p { color: var(--faint); font-size: 13px; line-height: 1.9; }
+.welcome-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 32px 0; }
+.welcome-steps > div { position: relative; display: flex; flex-direction: column; gap: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); padding: 20px 16px; }
+.welcome-step-number { position: absolute; top: 18px; right: 14px; color: var(--faint); font-size: 10px; }
+.welcome-steps svg { color: var(--accent); }
+.welcome-steps strong { font-size: 12px; font-weight: 500; }
+.welcome-steps p { margin: -8px 0 0; color: var(--faint); font-size: 11px; line-height: 1.75; }
+.welcome-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; border-top: 1px solid var(--line); padding-top: 20px; }
+.welcome-footer > span { display: flex; flex: 1 1 240px; align-items: center; gap: 8px; color: var(--faint); font-size: 11px; line-height: 1.7; }
+.welcome-footer svg { flex-shrink: 0; }
+
+.agent-context { display: flex; align-items: center; gap: 8px; margin: 12px 16px 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.agent-context > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-context small { flex-shrink: 0; color: var(--faint); font-size: 10px; }
+.agent-empty strong { font-size: 16px; }
+.agent-empty-mark { display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--ok-line); border-radius: 16px; background: var(--ok-surface); color: var(--accent); }
+.agent-suggestions { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 24px; }
+.agent-suggestions button { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); padding: 11px 12px; text-align: left; font-size: 11px; }
+.agent-suggestions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.agent-notice { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); padding: 9px; line-height: 1.45; }
+.agent-notice-error { display: block; margin-top: 6px; color: var(--danger); overflow-wrap: anywhere; }
+.agent-retry { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); padding: 9px 10px; color: var(--muted); font-size: 11px; }.approval-target { overflow-wrap: anywhere; font-size: 11px; }
+.approval-resolved { color: var(--muted); font-size: 12px; }
+
+@container (max-width: 760px) {
+  .files-layout, .split-sections { grid-template-columns: minmax(0, 1fr); }
+  .files-layout, .file-list-panel, .file-preview-panel { min-height: 280px; }
+}
+@container (max-width: 580px) {
+  .metric-grid, .settings-form-grid, .settings-check-grid, .settings-facts { grid-template-columns: minmax(0, 1fr); }
+  .server-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-wide, .settings-fact-wide { grid-column: auto; }
+  .workspace-header, .server-tabs { padding-right: 18px; padding-left: 18px; }
+  .workspace-content { padding: 20px 18px; }
+  .settings-card { padding: 18px; }
+  .workspace-header .eyebrow { font-size: 9px; }
+}
+@container (max-width: 410px) {
+  .preview-chip { display: none; }
+  .welcome-steps { grid-template-columns: minmax(0, 1fr); margin: 20px 0; }
+  .welcome-steps > div { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 16px; }
+  .welcome-steps p { grid-column: 2; margin: 0; }
+  .welcome-step-number { top: 14px; }
+  .files-toolbar { flex-wrap: wrap; }
+  .files-path-input { flex-basis: 60%; }
+}
+@media (max-width: 1150px) {
+  .app-shell, .app-shell.agent-collapsed { grid-template-columns: 60px 228px minmax(0, 1fr); gap: 8px; padding: 8px; }
+  .app-shell:not([data-primary="servers"]), .app-shell.agent-collapsed:not([data-primary="servers"]) { grid-template-columns: 60px minmax(0, 1fr); }
+  .agent-panel:not(.agent-panel-hidden) { position: fixed; top: 74px; right: 8px; bottom: 8px; z-index: 15; width: min(348px, calc(100vw - 32px)); box-shadow: -16px 0 60px rgb(0 0 0 / 55%); }
+  .agent-scrim { display: block; position: fixed; inset: 0; z-index: 14; border: 0; background: rgb(0 0 0 / 50%); cursor: default; animation: scrim-enter var(--motion-medium) ease both; }
+}
+@media (max-width: 820px) {
+  .app-shell, .app-shell.agent-collapsed { grid-template-columns: 60px minmax(0, 1fr); }
+  .server-sidebar { display: none; }
+  .sidebar-toggle { display: grid; }
+  .sidebar-open[data-primary="servers"] .server-sidebar { display: flex; position: fixed; inset: 8px auto 8px 76px; width: min(280px, calc(100vw - 92px)); z-index: 18; }
+  .sidebar-open[data-primary="servers"] .server-sidebar-close { display: grid; }
+  .sidebar-scrim { display: block; position: fixed; inset: 0; z-index: 17; border: 0; background: rgb(0 0 0 / 50%); cursor: default; }
+}
+@media (max-width: 480px) {
+  .app-shell, .app-shell.agent-collapsed, .app-shell:not([data-primary="servers"]), .app-shell.agent-collapsed:not([data-primary="servers"]) { grid-template-columns: 48px minmax(0, 1fr); gap: 6px; padding: 6px; }
+  .app-rail { padding: 12px 4px; }
+  .brand-mark { width: 32px; height: 32px; }
+  .rail-button { font-size: 10px; }
+  .workspace-header { gap: 6px; }
+  .workspace-header-meta { gap: 6px; }
+  .workspace-header h1 { font-size: 16px; }
+  .workspace-header .eyebrow { display: none; }
+  .server-modal { width: calc(100vw - 24px); padding: 18px; }
+  .form-grid, .form-grid-host { grid-template-columns: minmax(0, 1fr); }
+  .sidebar-open[data-primary="servers"] .server-sidebar { left: 60px; }
+}
+[data-density="compact"] .workspace-content {
+  padding-top: 16px;
+  padding-bottom: 20px;
+}
+
+[data-density="compact"] .server-row-main {
+  min-height: 48px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+[data-density="compact"] .agent-feed {
+  gap: 7px;
+  padding: 12px;
+}
+
+[data-density="compact"] .settings-card,
+[data-density="compact"] .section-block {
+  padding: 14px;
+}
+
+[data-reduce-motion="true"] * {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.001ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ═══ Motion layer ══════════════════════════════════════════════════════════
+   Movement in Yukinal answers exactly one question: what just changed? It is
+   not decoration. A list that settles tells you the list is new; a panel that
+   slides tells you where it came from; a pulse tells you the app is still
+   waiting on something. Anything that does not answer that question is not
+   animated.
+
+   The rules of the system:
+
+   - Only `opacity` and `transform` carry movement. Both are compositor-only,
+     so an animation never triggers layout or paint. The single exception is
+     the shell's `grid-template-columns`, which is the one thing that cannot be
+     expressed as a transform.
+
+   - Distance stays small. An element already on screen that enters from 10px
+     away reads as a jump; 6px reads as settling.
+
+   - Entrance is slower than exit. A user who dismisses a panel has already
+     decided, so it should get out of the way rather than linger.
+
+   - Every duration and easing comes from a token below. Scattered magic
+     numbers are how a motion system drifts out of tune.
+
+   - `prefers-reduced-motion` and the in-app reduce-motion preference both
+     flatten this entire layer; see the two blocks near the end of the file.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Five durations are enough. Shorter than `instant` reads as a glitch;
+     longer than `entrance` reads as latency. */
+  --motion-instant: 90ms;
+  --motion-fast: 160ms;
+  --motion-medium: 280ms;
+  --motion-slow: 380ms;
+  --motion-entrance: 520ms;
+  /* 一次「测量」的时长：数值落定、仪表填满。比任何入场都慢，因为它表达的不是
+     「有新东西出现」，而是「这个读数已经取到了」。 */
+  --motion-measure: 720ms;
+  --motion-measure-delay: 180ms;
+  /* 循环类动效的周期。呼吸环刻意比心跳慢：它在说明「还在等」，不是「出事了」。 */
+  --motion-ring-cycle: 1.8s;
+  --motion-blink-cycle: 1s;
+  --motion-shimmer-cycle: 1.4s;
+  --motion-spin-cycle: 0.8s;
+  --motion-soft-cycle: 1.4s;
+
+  /* `ease` decelerates into place and is what almost everything entering
+     uses. `exit` accelerates away so a dismissal feels decisive. `spring`
+     overshoots slightly and is reserved for an element that should feel
+     physically attached to the pointer. */
+  --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --motion-lift: 6px;
+  --motion-slide: 16px;
+  --motion-stagger: 38ms;
+  --motion-press: scale(0.97);
+
+  /* 弹层的「贴附位移」：弹层浮在触发它的控件上方，所以它从**靠近触发器**的
+     方向长出来 —— 起点在下方 5px，落位到 0。反过来（从上方落下）会让它看起来
+     是从别处飞进来的，而不是从这个按钮里长出来的。 */
+  --motion-pop-shift: 5px;
+  /* 控件在行内出现/消失时的起始缩放。比 --motion-press 更小一点，
+     因为它要读成「刚刚被放进这一行」而不是「被按了一下」。 */
+  --motion-pop-scale: 0.9;
+}
+
+/* ── Entrance ───────────────────────────────────────────────────────────── */
+
+@keyframes shell-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes view-enter {
+  from { opacity: 0; transform: translateY(var(--motion-lift)); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes list-item-enter {
+  from { opacity: 0; transform: translateY(var(--motion-lift)); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes panel-enter {
+  from { opacity: 0; transform: translateX(var(--motion-slide)); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes panel-exit {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(var(--motion-slide)); }
+}
+
+@keyframes scrim-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-enter {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes modal-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* A notice is inserted above live content, so it opens downward from its own
+   edge rather than lifting into place like a card. */
+@keyframes notice-enter {
+  from { opacity: 0; transform: translateY(calc(var(--motion-lift) * -1)); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* A block that opens downward from a heading — the trace detail, the log
+   viewer. It grows out of its own top edge, so it starts slightly above where
+   it lands. `expand-exit` is the same movement reversed and faster: collapsing
+   is a decision the user already made. */
+@keyframes expand-enter {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes expand-exit {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
+}
+
+/* An empty state is the whole answer to "what is here?", so it arrives with a
+   touch of scale instead of a slide. */
+@keyframes empty-enter {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ── Popovers ───────────────────────────────────────────────────────────────
+   Every popover in the composer is anchored to a control *below* it and opens
+   upward, so it grows out of that control: the start position is nudged down
+   toward the anchor and scaled down slightly. Enter and exit are a matched pair
+   with the same origin, which is what makes a dismissal read as "going back
+   where it came from" rather than as a second, unrelated animation.
+
+   `transform-origin` is set per-popover in its own rule, because the anchor is
+   the trigger's corner, not the popover's centre. */
+
+@keyframes popover-enter {
+  from { opacity: 0; transform: translateY(var(--motion-pop-shift)) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes popover-exit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(calc(var(--motion-pop-shift) / 2)) scale(0.985); }
+}
+
+/* A control that mounts into an existing flex row. It has no anchor edge to
+   grow from, so it simply arrives in place: no translation, just the smallest
+   possible scale. */
+@keyframes pop-enter {
+  from { opacity: 0; transform: scale(var(--motion-pop-scale)); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pop-exit {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(var(--motion-pop-scale)); }
+}
+
+/* ── Feedback ───────────────────────────────────────────────────────────── */
+
+@keyframes icon-pop {
+  0% { transform: scale(0.84); }
+  65% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+/* A rejected or failed action shakes once. One shake, not a loop: a repeating
+   shake is an alarm, and this is only a correction. */
+@keyframes deny-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
+/* A resolved approval confirms itself with a single brightening, because the
+   decision removes the buttons the user was aiming at.
+
+   这一次闪光是唯一一处「一次性的、非位移的变化」，而它也必须落在 opacity 上：
+   底色交给一块铺满的 ::before，动画只改它的不透明度。直接动 background-color
+   会让这个元素每帧重新光栅化 —— 一张卡片、一帧而已，但契约里写的是「只有
+   opacity 与 transform」，一处例外就会变成下一处的借口。 */
+@keyframes resolve-flash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ── Live and looping ───────────────────────────────────────────────────── */
+
+/* 呼吸环：一圈描边从元素边缘向外放大并淡出，读作「还在等结果」。
+   它画在 ::after 上，只用 transform 与 opacity —— 这两条是合成器唯一不重绘的
+   属性，也是这张契约允许的全部。
+
+   这里原来是一条 `@keyframes pulse-ring`，逐帧改 `box-shadow` 的 spread。
+   两个问题：一是 box-shadow 每帧都要重绘，与本层的契约自相矛盾；二是
+   `0 0 0 3px` → `0 0 0 6px` → `0 0 0 3px` 是「胀一下再缩回去」，而注释里写的
+   意图是「扩大并淡出」。现在两者一致了。
+
+   环的放大倍数由 `--ring-scale` 控制：6px 的小圆点要放大很多才看得出在动，
+   52px 的方块只要一点点，用同一个倍数会让方块的环飞出容器。 */
+@keyframes ring-expand {
+  from { opacity: 0.5; transform: scale(1); }
+  to { opacity: 0; transform: scale(var(--ring-scale, 2.2)); }
+}
+
+.status-pulse,
+.context-chip.server-status-connecting,
+.agent-empty-mark {
+  position: relative;
+  --ring-scale: 2.2;
+}
+
+.agent-empty-mark {
+  --ring-scale: 1.16;
+}
+
+.status-pulse::after,
+.context-chip.server-status-connecting::after,
+.agent-empty-mark::after {
+  position: absolute;
+  border: 1px solid currentColor;
+  border-radius: inherit;
+  content: "";
+  inset: -1px;
+  pointer-events: none;
+  animation: ring-expand var(--motion-ring-cycle) ease-out infinite;
+}
+
+@keyframes soft-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.28; }
+}
+
+@keyframes metric-fill-enter {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+/* The streaming caret marks the one place in the feed that is still moving. */
+@keyframes caret-blink {
+  0%, 45% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.app-shell {
+  position: relative;
+  --shell-padding: 12px;
+  /* 选中策略：**只有「你与 Agent 的对话正文」能拖动选中**，界面其余部分（按钮、
+     标签、工具卡片、日志、设置项）都不参与选择 —— 在窗口里随手一拖不再把半个
+     侧栏涂蓝，也不会在选择时把「Agent」这种标签粘进复制的内容里。
+
+     user-select 是继承属性，所以只在根上关掉、再在正文那一处打开（见
+     `.agent-entry-body`）。不给每个容器补一条 `none`：那样每加一个元素都要记得
+     跟上一条规则，漏掉的那个就是下一个能选中界面的洞。 */
+  user-select: none;
+  -webkit-user-select: none;
+  animation: shell-enter var(--motion-entrance) var(--motion-ease) both;
+  /* The one transition in the app that cannot be a transform: collapsing the
+     Agent column changes the grid itself, and doing it with a transform would
+     leave the reclaimed space unusable. */
+  transition: grid-template-columns var(--motion-medium) var(--motion-ease);
+}
+
+/* 可输入的地方当然要能选中自己刚写下的字。原生输入控件在部分浏览器里不吃继承
+   下来的 `none`，这条规则同时也是「composer 里的草稿还能全选」的保证。 */
+.app-shell input,
+.app-shell textarea,
+.app-shell [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.agent-scrim { display: none; }
+
+.app-shell[data-reduce-motion="true"] {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+.brand-mark {
+  animation: icon-pop var(--motion-entrance) var(--motion-ease) 90ms both;
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
+}
+
+/* 悬浮反馈只留在边框、阴影和位移上。原来那层 #16332f 的绿色底是给字形做背景的，
+   现在底板上压着图标：绿色底会从图标的透明留白里透出来，把图标框成一个绿方块。 */
+.brand-mark:hover {
+  border-color: var(--accent);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 24%);
+  transform: translateY(-2px) rotate(-2deg);
+}
+
+.brand-mark:active {
+  transform: translateY(0) rotate(0);
+}
+
+.rail-button {
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
+}
+
+.rail-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.rail-button:active:not(:disabled) {
+  transform: translateY(0) var(--motion-press);
+}
+
+.rail-button-active .rail-icon {
+  animation: icon-pop var(--motion-medium) var(--motion-ease) both;
+}
+
+.workspace-header,
+.server-tabs {
+  animation: view-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+.workspace-header {
+  animation-delay: 70ms;
+}
+
+.server-tabs {
+  animation-delay: 120ms;
+}
+
+.server-tab {
+  transition: color var(--motion-fast) ease;
+}
+
+/* The active underline is one element that scales, so moving between tabs
+   reads as the marker travelling rather than as two separate lines. */
+.server-tab::after {
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform var(--motion-medium) var(--motion-ease);
+}
+
+.server-tab:hover::after {
+  transform: scaleX(0.55);
+}
+
+.server-tab-active::after,
+.server-tab-active:hover::after {
+  transform: scaleX(1);
+}
+
+.server-tab:active:not(:disabled) {
+  transform: var(--motion-press);
+}
+
+/* 每个视图进入时的落位动画。`.workspace-pages` 是 `display: contents` 的包装层
+   （它的存在是为了能在引导页与工作区之间整块 hidden），所以视图不再是
+   `.workspace-content` 的直接子元素 —— 只匹配直接子代会让这条规则在正常使用
+   时永远不生效。两条都留着：引导页是直接子代，工作区视图在包装层里。 */
+.workspace-content > :not([hidden]),
+.workspace-pages > :not([hidden]) {
+  animation: view-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* Promote the three continuously re-rendered surfaces onto their own
+   compositor layers once, so the Agent column's width transition and the
+   feed's entrance animations do not repaint the whole shell. */
+.server-sidebar,
+.workspace-main,
+.agent-panel {
+  transform: translateZ(0);
+}
+
+/* List and card entrances stagger so a populated view settles into place
+   instead of appearing all at once. The index is carried on a custom property
+   rather than hard-coded per rule, so every container shares one delay curve
+   and one place to retune it. */
+.server-list > li,
+.remote-file-list > li,
+.service-list > li,
+.log-list > li,
+.project-grid > li,
+.activity-list > .activity-row,
+.container-list > li,
+.metric-grid > .metric-card,
+.split-sections > .section-block,
+.settings-stack > .settings-card,
+.settings-page > .settings-card {
+  animation: list-item-enter var(--motion-slow) var(--motion-ease) both;
+  animation-delay: calc(var(--stagger-index, 0) * var(--motion-stagger));
+}
+
+/* Only the first eight positions are indexed. Past that the delay would exceed
+   the animation itself and the tail of a long list would visibly lag, so later
+   items enter together with the eighth. */
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(1) { --stagger-index: 0; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(2) { --stagger-index: 1; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(3) { --stagger-index: 2; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(4) { --stagger-index: 3; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(5) { --stagger-index: 4; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(6) { --stagger-index: 5; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(7) { --stagger-index: 6; }
+:is(.server-list, .remote-file-list, .service-list, .log-list, .project-grid, .activity-list, .container-list, .metric-grid, .split-sections, .settings-stack, .settings-page) > :nth-child(n + 8) { --stagger-index: 7; }
+
+/* Cards lift toward the pointer. The lift is 2px because these cards sit in a
+   grid: a larger offset would collide with the card above. */
+.metric-card,
+.section-block,
+.project-card,
+.settings-card,
+.file-list-panel,
+.file-preview-panel {
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
+}
+
+.metric-card:hover,
+.project-card:hover,
+.settings-card:hover {
+  box-shadow: 0 10px 28px rgb(0 0 0 / 18%);
+  transform: translateY(-2px);
+}
+
+/* Rows slide toward the pointer instead of lifting, because a row's job is to
+   say "this whole line is the target". */
+.server-row,
+.remote-file-row,
+.activity-row,
+.service-row,
+.log-row,
+.provider-row,
+.source-item,
+.settings-check-row {
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-fast) var(--motion-ease);
+}
+
+.server-row:hover,
+.remote-file-row:hover,
+.activity-row:hover,
+.service-row:hover,
+.log-row:hover,
+.provider-row:hover,
+.source-item:hover,
+.settings-check-row:hover {
+  transform: translateX(2px);
+}
+
+.server-row:active,
+.remote-file-row:active,
+.provider-row:active,
+.source-item:active {
+  transform: translateX(2px) var(--motion-press);
+}
+
+/* Press feedback is the fastest thing in the system: it has to land inside the
+   same frame as the click to feel like the control moved under the finger. */
+.button-primary, .button-secondary, .icon-button, .agent-toggle-inline, .approval-button, .agent-composer-tool, .server-row-actions button, .search-clear, .agent-history-tabs button, .agent-history-delete, .agent-send-button, .agent-stop-button, .composer-suggestion, .text-button, .icon-text-button{
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-instant) var(--motion-ease);
+}
+
+.button-primary:active:not(:disabled), .button-secondary:active:not(:disabled), .icon-button:active:not(:disabled), .agent-toggle-inline:active:not(:disabled), .approval-button:active:not(:disabled), .agent-composer-tool:active:not(:disabled), .server-row-actions button:active:not(:disabled), .search-clear:active:not(:disabled), .agent-history-tabs button:active:not(:disabled), .agent-history-delete:active:not(:disabled), .agent-send-button:active:not(:disabled), .agent-stop-button:active:not(:disabled), .composer-suggestion:active:not(:disabled){
+  transform: var(--motion-press);
+}
+
+/* Text-only controls have no box to scale, so they lean on colour instead and
+   must not inherit a transform. */
+.text-button:active:not(:disabled),
+.icon-text-button:active:not(:disabled) {
+  transform: none;
+}
+
+/* Inputs settle their border and focus halo rather than snapping, which stops
+   the focus ring from flickering while tabbing through a form. */
+.form-input,
+.server-search,
+.agent-history-search,
+.server-form-fields input,
+.server-form-fields select,
+.server-form-fields textarea,
+.agent-model-select {
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+/* ── Live data ──────────────────────────────────────────────────────────── */
+
+/* The status-pulse ring is the `::after` defined in the Live and looping
+   section; this block only notes what it means. A static rule here would fight
+   that one. */
+
+/* A connecting server says so with the expanding ring. The animation lives on
+   the `::after` (see the Live and looping section), so the chip itself carries
+   no animation and its own box-shadow stays a static resting value. */
+
+/* The meter fills from the left on mount so a healthy server looks like it
+   settled rather than like it snapped to a value.
+
+   This is longer than any --motion-* token on purpose: a value settling is not
+   an element entering, and it has to read as a measurement being taken rather
+   than as the UI appearing. It still comes from tokens so the number lives in
+   one place. */
+.metric-fill {
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: metric-fill-enter var(--motion-measure) var(--motion-ease) var(--motion-measure-delay) both;
+}
+
+/* ── Agent panel ────────────────────────────────────────────────────────── */
+
+.agent-panel:not(.agent-panel-hidden) {
+  animation: panel-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* The closing panel is taken out of the grid and pinned over the space it is
+   vacating, so the workspace reclaims the column while the panel is still
+   sliding out. Both states keep four tracks to make that continuous. */
+.agent-panel.agent-panel-closing {
+  position: absolute;
+  z-index: 15;
+  top: var(--shell-padding);
+  right: var(--shell-padding);
+  bottom: var(--shell-padding);
+  /* 与网格里的 Agent 列同宽，否则收起动画会在宽度上跳一下。 */
+  width: 448px;
+  min-width: 0;
+  pointer-events: none;
+  animation: panel-exit var(--motion-medium) var(--motion-exit) both;
+}
+
+.agent-context,
+.agent-composer {
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+
+/* Feed entries arrive as they are appended during a run, staggered just enough
+   that a burst of tool calls reads as a sequence rather than a wall. */
+.agent-feed > :not(.agent-empty) {
+  animation: list-item-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+.agent-feed > :nth-child(n + 2) { animation-delay: var(--motion-stagger); }
+.agent-feed > :nth-child(n + 3) { animation-delay: calc(var(--motion-stagger) * 2); }
+.agent-feed > :nth-child(n + 4) { animation-delay: calc(var(--motion-stagger) * 3); }
+.agent-feed > :nth-child(n + 5) { animation-delay: calc(var(--motion-stagger) * 4); }
+
+/* 空态标记的呼吸环更慢：它在一块静止的空白里唯一的活动，快起来会显得急躁。
+   环本体仍由 Live and looping 里的 `::after` 提供。 */
+.agent-empty-mark::after {
+  animation-duration: 2.6s;
+}
+
+/* The caret marks the single place in the feed that is still moving. Without
+   it a slow model turn is indistinguishable from a stalled one. It hangs on the
+   last block of the rendered Markdown, so a streaming answer shows it after the
+   paragraph the model is currently writing. */
+.agent-entry-streaming .agent-entry-body > :last-child::after {
+  display: inline-block;
+  width: 0.5em;
+  margin-left: 0.15em;
+  background: currentColor;
+  content: "";
+  height: 1em;
+  vertical-align: -0.15em;
+  animation: caret-blink var(--motion-blink-cycle) steps(1, end) infinite;
+}
+
+/* A resolved approval flashes once, because the decision removes the buttons
+   the user was aiming at and the card would otherwise look unchanged.
+
+   底色画在 ::before 上，动画改的是它的 opacity —— 见上面 resolve-flash 的定义。
+   `isolation: isolate` 把这块自身建成层叠上下文，负 z-index 的底色才会停在
+   文字下面而不是掉到卡片背景后面去。 */
+.approval-resolved {
+  position: relative;
+  isolation: isolate;
+}
+
+.approval-resolved::before {
+  position: absolute;
+  z-index: -1;
+  border-radius: 4px;
+  background: var(--ok-surface);
+  content: "";
+  inset: -3px -6px;
+  animation: resolve-flash var(--motion-slow) var(--motion-ease) both;
+  pointer-events: none;
+}
+
+/* A refused or failed action shakes once. A looping shake would be an alarm;
+   this is a correction. */
+.agent-error,
+.inline-error {
+  animation: deny-shake var(--motion-medium) var(--motion-ease) both;
+}
+
+/* Terminal I/O failure banner. An inline row rather than a panel: the terminal
+   below is still on screen and still worth reading, so this must not take over
+   the pane the way `error-panel` does. */
+.terminal-io-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--muted);
+  font-size: 12px;
+  animation: notice-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+.terminal-io-error > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.terminal-io-error > .icon {
+  color: var(--faint);
+}
+
+.terminal-io-error > button {
+  flex: 0 0 auto;
+}
+
+/* ── Overlays ───────────────────────────────────────────────────────────── */
+
+.activity-trace-detail,
+.agent-log-viewer {
+  animation: expand-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* 收起方向。只有挂了 presence 的那一处会加上 .is-closing —— 没有它的话
+   `both` 填充会把元素留在 opacity:0，而节点还在，等于一块看不见的挡板。 */
+.activity-trace-detail.is-closing,
+.agent-log-viewer.is-closing {
+  pointer-events: none;
+  animation: expand-exit var(--motion-fast) var(--motion-exit) both;
+}
+
+/* The modal is a native <dialog>, so it has no exit animation: the browser
+   removes it from the top layer synchronously. Making the entrance slower than
+   the exit is what keeps the dismissal from feeling abrupt. */
+.server-modal[open] {
+  animation: modal-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+.server-modal::backdrop {
+  animation: modal-backdrop-enter var(--motion-fast) ease both;
+}
+
+/* Panel-level notices are inserted above live content, so they drop in from
+   their own edge. */
+.agent-notice,
+.agent-retry {
+  animation: notice-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* Empty states are the whole answer to "what is here?", so they arrive with a
+   touch of scale instead of a slide.
+
+   注意：这一组只能放动画。三个空状态类各自靠 flex 做居中（见 .empty-state /
+   .agent-empty / .agent-history-empty 的定义），而 .error-copy 的
+   `display: block` 曾经和它们写在同一个选择器组里 —— 那条声明会覆盖空状态的
+   `display: flex`，于是 align-items / justify-content / gap 一起失效，图标、
+   标题、说明各自退化成块级左对齐，看起来就是「文字错位」。两者必须分开。 */
+.empty-state,
+.agent-empty,
+.agent-history-empty {
+  animation: empty-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* Inline error text for the two panes that have not been migrated to
+   `.error-panel` yet (ActivityFeed's execution list, RemoteFilesPane's read
+   failure). Both emitted this class with no rule behind it, so the text rendered
+   as ordinary body copy. It is defined here so the class is at least honest;
+   folding these two sites into `.error-panel` is the real fix. */
+.error-copy {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.file-preview-empty,
+.loading-panel,
+.error-panel {
+  animation: empty-enter var(--motion-slow) var(--motion-ease) both;
+}
+
+/* ── Disclosure ─────────────────────────────────────────────────────────────
+   A `<details>` body is `display: none` when closed, so it has nothing to
+   transition. Chromium can animate the disclosure box itself through
+   `::details-content` once `interpolate-size: allow-keywords` lets `block-size`
+   interpolate to and from `auto`.
+
+   This is wrapped in `@supports` on purpose: on an engine without it the
+   declarations are dropped, and the fallback is today's instant open. Without
+   the guard a partial implementation could leave the body at `block-size: 0`
+   and the card would render as an empty shell.
+
+   `content-visibility` has to be in the transition list with `allow-discrete`,
+   otherwise the content is removed from the box tree at the start of the
+   collapse and the height animation has nothing left to measure. */
+
+@supports (interpolate-size: allow-keywords) {
+  :root {
+    interpolate-size: allow-keywords;
+  }
+
+  /* 只有真正的 `<details>` 能用 ::details-content。
+     `.activity-trace-detail` 是一个条件渲染的 div，不是 details —— 它靠
+     presence + expand-enter / expand-exit 走另一条路，不要写在这里。 */
+  .tool-card::details-content {
+    block-size: 0;
+    overflow: hidden;
+    transition:
+      block-size var(--motion-medium) var(--motion-ease),
+      content-visibility var(--motion-medium) allow-discrete;
+  }
+
+  .tool-card[open]::details-content {
+    block-size: auto;
+  }
+}
+
+/* ── Composer popovers ──────────────────────────────────────────────────────
+   Three popovers share one behaviour: the `@`/`/` suggestion list, the `+` run
+   settings panel, and the model listbox. All three open upward out of a control
+   in the toolbar, so all three use the same enter/exit pair and differ only in
+   `transform-origin`, which is the corner of their trigger:
+
+     - the suggestion list is anchored to the whole input card  → bottom centre
+     - the run settings panel is opened by the `+` at the left   → bottom left
+     - the model listbox is opened by the picker at the right    → bottom right
+
+   Without the origin they would all scale from their own centre, which for a
+   left-anchored panel reads as a jump toward the middle.
+
+   The exit class is applied by `usePresence`, which keeps the element in the
+   DOM for the length of `popover-exit` so the animation actually runs. */
+
+.composer-suggestions,
+.agent-settings-panel,
+.agent-model-menu {
+  transform-origin: bottom center;
+  animation: popover-enter var(--motion-fast) var(--motion-ease) both;
+}
+
+.agent-settings-panel {
+  transform-origin: bottom left;
+}
+
+.agent-model-menu {
+  transform-origin: bottom right;
+}
+
+.composer-suggestions.is-closing,
+.agent-settings-panel.is-closing,
+.agent-model-menu.is-closing {
+  pointer-events: none;
+  animation: popover-exit var(--motion-fast) var(--motion-exit) both;
+}
+
+/* 候选列表的高亮是跟着方向键走的，所以它必须能看见「移过去」这个过程。
+   不加过渡的话每按一次方向键都是瞬移，用户看不出自己移动了几格。 */
+.composer-suggestion,
+.agent-settings-option,
+.agent-model-option {
+  transition: background-color var(--motion-instant) linear, color var(--motion-instant) linear, border-color var(--motion-instant) linear;
+}
+
+/* ── Composer controls that mount into the toolbar ──────────────────────────
+   The send button and the running bar are mutually exclusive and both swap in
+   and out as the user types and as a run starts. They have no anchor edge to
+   grow from, so they arrive in place with `pop-enter` — the smallest movement
+   that still says "this just became available" rather than "this was always
+   here and you missed it". */
+
+.agent-send-button {
+  animation: pop-enter var(--motion-fast) var(--motion-spring) both;
+}
+
+.agent-send-button.is-closing {
+  pointer-events: none;
+  animation: pop-exit var(--motion-instant) var(--motion-exit) both;
+}
+
+.agent-running-bar {
+  animation: notice-enter var(--motion-medium) var(--motion-ease) both;
+}
+
+/* 与它自己的入场配成一对：notice-enter 是从上边缘往下长出来的，所以退场就该
+   往回收，而不是缩成一个点。成对的进/退是「同一个东西来回」；不成对会让退场
+   看起来像另一个动画碰巧发生在同一个位置。 */
+.agent-running-bar.is-closing {
+  pointer-events: none;
+  animation: expand-exit var(--motion-fast) var(--motion-exit) both;
+}
+
+/* The settings trigger renders a plus in both states and rotates it 45° to
+   read as a close glyph. Swapping the drawing instead would give the eye
+   nothing to follow, and a 45° rotation is exactly what the close glyph is. */
+.agent-settings-trigger .icon {
+  transition: transform var(--motion-medium) var(--motion-spring);
+}
+
+.agent-settings-trigger.is-open .icon {
+  transform: rotate(45deg);
+}
+
+/* 箭头退到 --faint：它只负责说明「这是可展开的」，不该和模型名抢注意力。 */
+.agent-model-select .icon {
+  flex: 0 0 auto;
+  color: var(--faint);
+  transition: transform var(--motion-fast) var(--motion-ease);
+}
+
+/* 展开时把箭头翻上来，和弹层的方向一致。 */
+.agent-model-select.is-open .icon {
+  transform: rotate(180deg);
+}
+
+@media (max-width: 820px) {
+  .sidebar-open[data-primary="servers"] .server-sidebar {
+    animation: panel-enter var(--motion-medium) var(--motion-ease) both;
+  }
+
+  .sidebar-scrim {
+    animation: scrim-enter var(--motion-fast) ease both;
+  }
+
+  .agent-scrim {
+    animation: scrim-enter var(--motion-fast) ease both;
+  }
+}
+
+/* Keep both states at four tracks so the workspace can reclaim the Agent
+   column continuously instead of jumping after the exit animation.
+
+   Agent 列宽 448px：底栏那一排（+ / 运行模式 / 批准方式 / 模型选择 / 发送）
+   需要的总宽是固定的，328px 时输入卡片只有 302px，必然折成两行 —— 用户看到
+   的就是「模式标签被挤断、模型和发送被顶到下一行」。448px 让这一排在「输入框
+   有内容（发送按钮出现）+ 模型名较长」的最坏组合下仍留有余量。
+   1fr 的下限同时从 420 降到 340：64+248+420+448 已经超过窗口 minWidth 1160
+   减去内边距与间隙，不降的话缩到最小窗口时工作区会被挤爆。 */
+@media (min-width: 1151px) {
+  .app-shell {
+    min-width: 1160px;
+    grid-template-columns: 64px 248px minmax(340px, 1fr) 448px;
+  }
+
+  .app-shell.agent-collapsed {
+    grid-template-columns: 64px 248px minmax(340px, 1fr) 0px;
+  }
+
+  .app-shell.agent-collapsed .workspace-main {
+    margin-right: -12px;
+  }
+
+  .app-shell:not([data-primary="servers"]) {
+    grid-template-columns: 64px minmax(340px, 1fr) 448px;
+  }
+
+  .app-shell.agent-collapsed:not([data-primary="servers"]) {
+    grid-template-columns: 64px minmax(340px, 1fr);
+  }
+
+  /* Agent 列**不**做任何位移。
+     这里曾经有一条 `translate: 12px 0`（只作用于非服务器栏目，并在收起动画里被
+     `translate: 0 0` 抵消）。它没有补偿任何东西：Agent 面板是最后一列，而
+     `64px 248px minmax(340px,1fr) 448px` 与 `64px minmax(340px,1fr) 448px` 这两种轨道
+     把它的左边缘放在**同一个 x** 上（服务器侧栏的 248px 全部被中间那列吸收），收起动画里
+     它又是绝对定位钉在 `--shell-padding` 上的。于是那 12px 成了纯粹的坏处：离开服务器栏目
+     时整张卡片向右跳一下，右边缘压到窗口边（其余每张卡片都留着 12px 外边距），收起时还会
+     在动画第一帧再跳回去。同一张卡片在两个栏目里位置相同，才是不用解释的行为。 */
+}
+
+@media (max-width: 1150px) {
+  .app-shell {
+    --shell-padding: 8px;
+  }
+
+  .agent-panel.agent-panel-closing {
+    top: 74px;
+    right: 8px;
+    bottom: 8px;
+    width: min(348px, calc(100vw - 32px));
+  }
+}
+
+@media (max-width: 480px) {
+  .app-shell {
+    --shell-padding: 6px;
+  }
+}

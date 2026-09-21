@@ -4,14 +4,8 @@ import { useOnboardingStore } from "../features/onboarding/onboarding-store.js";
 import { RuntimeSettings } from "../features/settings/RuntimeSettings.js";
 import { ServerList } from "../features/servers/ServerList.js";
 import { ServerAuthChallengeModal } from "../features/servers/ServerAuthChallengeModal.js";
-import { TerminalPane } from "../features/terminal/TerminalPane.js";
+import { HostKeyGate } from "../features/servers/HostKeyGate.js";
 import { ServerOverview } from "../features/overview/ServerOverview.js";
-import { RemoteFilesPane } from "../features/files/RemoteFilesPane.js";
-import { ActivityFeed } from "../features/activity/ActivityFeed.js";
-import { ServicesPane } from "../features/services/ServicesPane.js";
-import { LogsPane } from "../features/logs/LogsPane.js";
-import { ProjectsPane } from "../features/projects/ProjectsPane.js";
-import { InvestigationsPane } from "../features/investigations/InvestigationsPane.js";
 import { Icon, type IconName } from "../components/Icon.js";
 import brandMark from "../assets/brand-mark.png";
 import {
@@ -25,7 +19,15 @@ import { usePreferencesStore } from "../stores/preferences-store.js";
 import { useServers } from "../lib/servers.js";
 import { isDesktopShell } from "../lib/ipc.js";
 import { SERVER_STATUS_LABEL } from "../lib/labels.js";
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+
+const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
+const RemoteFilesPane = lazy(async () => ({ default: (await import("../features/files/RemoteFilesPane.js")).RemoteFilesPane }));
+const ActivityFeed = lazy(async () => ({ default: (await import("../features/activity/ActivityFeed.js")).ActivityFeed }));
+const ServicesPane = lazy(async () => ({ default: (await import("../features/services/ServicesPane.js")).ServicesPane }));
+const LogsPane = lazy(async () => ({ default: (await import("../features/logs/LogsPane.js")).LogsPane }));
+const ProjectsPane = lazy(async () => ({ default: (await import("../features/projects/ProjectsPane.js")).ProjectsPane }));
+const InvestigationsPane = lazy(async () => ({ default: (await import("../features/investigations/InvestigationsPane.js")).InvestigationsPane }));
 
 const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = {
   servers: { label: "服务器", icon: "servers" },
@@ -43,6 +45,10 @@ const SERVER_PAGE_META: Record<ServerPage, { label: string; icon: IconName }> = 
   services: { label: "服务", icon: "services" },
   activity: { label: "活动", icon: "activity" },
 };
+
+function PageLoadingFallback() {
+  return <div className="compact-empty" role="status">正在加载页面…</div>;
+}
 
 export function AppShell() {
   const primary = useWorkspaceStore((state) => state.primary);
@@ -63,7 +69,9 @@ export function AppShell() {
   const agentToggleRef = useRef<HTMLButtonElement>(null);
   const workspaceContentRef = useRef<HTMLDivElement>(null);
   const focusAgentToggleOnRender = useRef(false);
+  const responsiveAgentDefaultApplied = useRef(false);
   const terminalActive = primary === "servers" && serverPage === "terminal";
+  const [terminalVisited, setTerminalVisited] = useState(terminalActive);
   const layoutAgentOpen = agentOpen || agentLayoutOpen;
   const onAgentCloseStart = useCallback(() => {
     if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#agent-panel")) {
@@ -79,11 +87,24 @@ export function AppShell() {
 
   useEffect(() => setSidebarOpen(false), [primary, selectedServerId]);
   useEffect(() => {
+    if (terminalActive) setTerminalVisited(true);
+  }, [terminalActive]);
+  useEffect(() => {
     if (agentOpen) {
       setAgentLayoutOpen(true);
       setAgentToggleVisible(false);
     }
   }, [agentOpen]);
+
+  // At tablet widths the Agent is deliberately an overlay (see styles.css), so
+  // showing it by default would hide the very dashboard a user just opened.
+  // Apply this only to the initial responsive state: once someone explicitly
+  // opens the panel, resizing the window must not make that choice disappear.
+  useEffect(() => {
+    if (responsiveAgentDefaultApplied.current) return;
+    responsiveAgentDefaultApplied.current = true;
+    if (window.matchMedia?.("(max-width: 1150px)").matches) setAgentOpen(false);
+  }, [setAgentOpen]);
 
   useEffect(() => {
     if (agentOpen || !agentToggleVisible || !focusAgentToggleOnRender.current) return;
@@ -200,20 +221,22 @@ export function AppShell() {
         <div ref={workspaceContentRef} className="workspace-content" id={primary === "servers" ? "server-view" : undefined} role={primary === "servers" && !guideOpen ? "tabpanel" : undefined} aria-labelledby={primary === "servers" && !guideOpen ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
           {guideOpen ? <GettingStarted onClose={closeGuide} /> : null}
           <div hidden={guideOpen} className="workspace-pages">
-          {primary === "settings" && !guideOpen ? <RuntimeSettings /> : null}
-          {primary === "projects" && !guideOpen ? <ProjectsPane /> : null}
-          {primary === "tasks" && !guideOpen ? <InvestigationsPane /> : null}
-          {primary === "activity" && !guideOpen ? <ActivityFeed /> : null}
+          {primary === "settings" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><RuntimeSettings /></Suspense> : null}
+          {primary === "projects" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ProjectsPane /></Suspense> : null}
+          {primary === "tasks" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><InvestigationsPane /></Suspense> : null}
+          {primary === "activity" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed /></Suspense> : null}
           {primary === "servers" && !guideOpen ? (
             <>
-              {serverPage === "overview" ? <ServerOverview key={selectedServerId} /> : null}
-              {serverPage === "files" ? <RemoteFilesPane key={selectedServerId} /> : null}
-              {serverPage === "logs" ? <LogsPane /> : null}
-              {serverPage === "services" ? <ServicesPane /> : null}
-              {serverPage === "activity" ? <ActivityFeed serverId={selectedServerId} /> : null}
+              {/* 任何会建立 SSH 连接的面板都先过主机指纹闸门：未钉住的服务器在认证之前
+                  就会被 `RequireMatch` 拒绝，这里把那次拒绝提前成可操作的核验流程。 */}
+              {serverPage === "overview" ? <HostKeyGate serverId={selectedServerId}><ServerOverview key={selectedServerId} /></HostKeyGate> : null}
+              {serverPage === "files" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><RemoteFilesPane key={selectedServerId} /></Suspense></HostKeyGate> : null}
+              {serverPage === "logs" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><LogsPane /></Suspense></HostKeyGate> : null}
+              {serverPage === "services" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServicesPane /></Suspense></HostKeyGate> : null}
+              {serverPage === "activity" ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed serverId={selectedServerId} /></Suspense> : null}
             </>
           ) : null}
-          <div hidden={!terminalActive} className="terminal-container"><TerminalPane key={selectedServerId} active={terminalActive} /></div>
+          {terminalVisited || terminalActive ? <div hidden={!terminalActive} className="terminal-container"><HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><TerminalPane key={selectedServerId} active={terminalActive} /></Suspense></HostKeyGate></div> : null}
           </div>
         </div>
       </main>

@@ -10,6 +10,7 @@
 
 import type { ChatRequest, FinishReason, LLMProvider, LlmMessage, ModelInfo, StreamEvent } from "@yukinal/provider-sdk";
 import { ProviderError } from "@yukinal/provider-sdk";
+import { providerBaseUrlRejection } from "@yukinal/shared";
 import { z } from "zod";
 
 export interface OpenAiCompatibleConfig {
@@ -24,6 +25,17 @@ export interface OpenAiCompatibleConfig {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/** 单行 SSE 的字节上限（1 MiB）：一行 `data:` 是一个 JSON chunk 或 `[DONE]`，不是数据通道。 */
+const SSE_MAX_LINE_BYTES = 1024 * 1024;
+/**
+ * 单次流式响应的累计字节上限。
+ *
+ * 这是一个硬上限，不是从 max output token 推导出来的：推导需要模型上下文里的一份可信
+ * 数字，而这里拿不到那份信任。它的作用是在一个恶意/失控的网关无限推帧时先把连接关上，
+ * 而不是先把整段响应读进内存再丢弃（审计性能 P1）。
+ */
+const SSE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const ProviderModelsResponseSchema = z.strictObject({
   data: z.array(z.strictObject({ id: z.string().trim().min(1).max(256) })).max(1_000).optional(),
 });
@@ -38,8 +50,14 @@ export class OpenAiCompatibleProvider implements LLMProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
+      // 发请求前的最后一道：共享 schema 拦不住被直接构造出来的 config，而这里决定的是
+      // API Key 会被发到哪里。规则与 `HttpBaseUrlSchema` 同源。
+      this.#assertBaseUrl();
       const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/models`, {
         headers: this.#headers(),
+        // 不跟随重定向：一个 301/302 会把 `Authorization`（以及这把 key）带到另一个来源，
+        // 而界面上展示的仍然是原地址（审计第一阶段 3.4）。
+        redirect: "manual",
         signal: AbortSignal.timeout(this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
       });
       if (!response.ok) {
@@ -73,6 +91,7 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     timer.unref?.();
 
     try {
+      this.#assertBaseUrl();
       const responsesDialect = this.config.wireApi === "responses";
       const endpoint = `${this.config.baseUrl.replace(/\/$/, "")}/${responsesDialect ? "responses" : "chat/completions"}`;
       const response = await fetch(endpoint, {
@@ -102,6 +121,8 @@ export class OpenAiCompatibleProvider implements LLMProvider {
                 max_tokens: request.maxOutputTokens,
               },
         ),
+        // 与 `listModels` 相同：跨源 301/302 不得携带 API Key。
+        redirect: "manual",
         signal: controller.signal,
       });
 
@@ -137,6 +158,17 @@ export class OpenAiCompatibleProvider implements LLMProvider {
     } finally {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onParentAbort);
+    }
+  }
+
+  /**
+   * 发请求前的最后一道地址检查。抛 `ProviderError` 而不是静默改写：一个被拒的地址
+   * 说明配置本身错了，用户需要看到原因，而不是让它被发往一个「看起来差不多」的地方。
+   */
+  #assertBaseUrl(): void {
+    const rejection = providerBaseUrlRejection(this.config.baseUrl);
+    if (rejection) {
+      throw new ProviderError(`provider baseUrl is refused: ${rejection}`, false);
     }
   }
 
@@ -294,22 +326,44 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      buffer += decoder.decode();
-      break;
+  let totalBytes = 0;
+  const tooLong = (): ProviderError =>
+    new ProviderError(
+      `provider sent a single SSE line longer than ${SSE_MAX_LINE_BYTES} bytes`,
+      false,
+    );
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > SSE_MAX_TOTAL_BYTES) {
+        throw new ProviderError(
+          `provider stream exceeded the ${SSE_MAX_TOTAL_BYTES} byte response limit`,
+          false,
+        );
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      // `buffer` 是尚未结束的那一行：逐块增长时在这里就能把它限住，不必等一个换行。
+      if (buffer.length > SSE_MAX_LINE_BYTES) throw tooLong();
+      for (const line of lines) {
+        if (line.length > SSE_MAX_LINE_BYTES) throw tooLong();
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data:")) yield trimmed.slice(5).trim();
+      }
     }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("data:")) yield trimmed.slice(5).trim();
-    }
+    const finalLine = buffer.trim();
+    if (finalLine.length > SSE_MAX_LINE_BYTES) throw tooLong();
+    if (finalLine.startsWith("data:")) yield finalLine.slice(5).trim();
+  } finally {
+    // 提前退出（超限、取消、消费者 break）时把底层连接关掉，而不是让上游继续推。
+    void reader.cancel().catch(() => {});
   }
-  const finalLine = buffer.trim();
-  if (finalLine.startsWith("data:")) yield finalLine.slice(5).trim();
 }
 
 interface SseChunk {

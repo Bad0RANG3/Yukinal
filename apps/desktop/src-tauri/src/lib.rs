@@ -66,11 +66,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::core_ping,
-            commands::agent_spawn,
-            commands::agent_status,
-            commands::agent_kill,
-            commands::agent_logs,
+            commands::sidecar::core_ping,
+            commands::sidecar::agent_spawn,
+            commands::sidecar::agent_status,
+            commands::sidecar::agent_kill,
+            commands::sidecar::agent_logs,
             commands::agent_run::agent_run_start,
             commands::agent_run::agent_run_stop,
             commands::agent_run::agent_approval_respond,
@@ -211,7 +211,17 @@ fn forward_terminal_events(app: tauri::AppHandle) {
                         }),
                     );
                 }
-                Err(_) => break,
+                // 队列溢出不能结束转发任务：过去这里对所有错误统一 `break`，于是一次
+                // `Lagged` 之后终端输出就永久不再到达 UI（审计性能 P0）。丢帧是可以发生
+                // 的，但必须被说出来并继续，而不是静默停掉。
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    let _ = app.emit(
+                        &commands::tauri_event_name("terminal.output_lost"),
+                        serde_json::json!({ "missedEvents": missed }),
+                    );
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });

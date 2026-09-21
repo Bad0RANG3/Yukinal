@@ -606,6 +606,13 @@ export const EVENT_SCHEMAS = {
     // Rust sends `Option<u32>`, so a negative or fractional code is drift.
     exitCode: z.number().int().nonnegative().nullable(),
   }),
+  /**
+   * A dropped-output notice. `missedEvents` is the count the broadcast channel reported
+   * as lagged; it is not attributable to one session, so there is no session id here.
+   */
+  "terminal.output_lost": z.strictObject({
+    missedEvents: z.number().int().nonnegative(),
+  }),
   "server.auth_challenge": z.strictObject({
     authId: z.string().trim().min(1).max(256),
     serverId: IpcServerIdSchema,

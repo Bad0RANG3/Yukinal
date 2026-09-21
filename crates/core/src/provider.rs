@@ -13,6 +13,7 @@
 //! 因此本模块的每一条规则都能在没有窗口、没有 keychain 的情况下被测试。
 
 use serde_json::Value;
+use std::net::IpAddr;
 use yukinal_database::models::{AiProviderConfig, AiProviderKind};
 
 /// 可以安全随请求带出去的网关元数据头白名单。
@@ -191,6 +192,61 @@ pub fn is_local_endpoint(base_url: &str) -> bool {
             || normalized.starts_with(&format!("{prefix}:"))
             || normalized.starts_with(&format!("{prefix}/"))
     })
+}
+
+/// Provider base URL 的出站策略，返回规范化（去空白、去尾部 `/`）的 URL。
+///
+/// 与 `packages/shared/src/schemas/provider.ts` 的 `HttpBaseUrlSchema`、以及 Node provider
+/// 发请求前的运行时检查是**同一套规则**，三处必须同时成立（审计第一阶段 3.4）：
+///
+/// - 必须是绝对 http(s) URL，且带 host；
+/// - 不得内嵌用户名/密码（那会把密钥写进配置、日志和数据库）；
+/// - 明文 `http` 只允许回环主机（`localhost`、`*.localhost`、`127.0.0.0/8`、`::1`），
+///   其余一律要求 `https`，否则 API Key、Prompt 与服务器信息会明文出门。
+///
+/// 这里**不**做 DNS 解析：保存时解析一次并不能阻止重绑定（解析与连接之间的 TOCTOU）。
+/// 运行时的地址族检查另有一道，DNS 重绑定防护在 Node provider 侧。
+pub fn validate_provider_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("baseUrl 不能为空".to_string());
+    }
+    let url =
+        reqwest::Url::parse(trimmed).map_err(|error| format!("baseUrl 不是合法的 URL：{error}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "baseUrl 没有主机名".to_string())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("baseUrl 不得内嵌用户名或密码；密钥应保存进系统凭据库，而不是 URL".to_string());
+    }
+    match url.scheme() {
+        "https" => {}
+        "http" if is_loopback_provider_host(host) => {}
+        "http" => {
+            return Err(
+                "明文 http 只允许回环地址；远程 Provider 必须使用 https，否则 API Key \
+                 与提示词会以明文发送"
+                    .to_string(),
+            )
+        }
+        scheme => {
+            return Err(format!(
+                "baseUrl 的 scheme `{scheme}` 不受支持；请使用 https，或回环地址上的 http"
+            ))
+        }
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+/// 这个主机名是不是回环地址（含 `localhost` 族与回环 IP 字面量）。
+#[must_use]
+pub fn is_loopback_provider_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// 只留下可以安全持久化的网关元数据头。
@@ -416,6 +472,43 @@ mod tests {
         assert_eq!(
             sanitized.get("HTTP-Referer"),
             Some(&Value::String("https://desktop.example".into()))
+        );
+    }
+
+    #[test]
+    fn provider_base_urls_require_https_off_loopback() {
+        // 明文 HTTP 到公网：拒绝。
+        assert!(validate_provider_base_url("http://example.com/v1").is_err());
+        // 看起来像回环、实际是别的域名的写法必须拒绝（前缀匹配做不到这点，解析器可以）。
+        assert!(validate_provider_base_url("http://127.0.0.1.evil.test/v1").is_err());
+        // 内嵌凭据：拒绝。
+        assert!(validate_provider_base_url("https://user:pass@example.com/v1").is_err());
+        // 不支持的 scheme：拒绝。
+        assert!(validate_provider_base_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn provider_base_urls_allow_https_and_loopback_http() {
+        assert_eq!(
+            validate_provider_base_url("  https://example.com/v1/  ").expect("https is allowed"),
+            "https://example.com/v1"
+        );
+        for local in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://127.5.6.7/v1",
+            "http://[::1]:1234/v1",
+            "http://ollama.localhost/v1",
+        ] {
+            assert!(
+                validate_provider_base_url(local).is_ok(),
+                "loopback HTTP must stay usable for local runtimes: {local}"
+            );
+        }
+        // 归一化：尾部斜杠不会进数据库。
+        assert_eq!(
+            validate_provider_base_url("http://localhost:11434/").expect("loopback"),
+            "http://localhost:11434"
         );
     }
 }

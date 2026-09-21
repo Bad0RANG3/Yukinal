@@ -245,6 +245,11 @@ impl McpStdioHandle {
         let mut command = Command::new(&config.program);
         command
             .args(&config.args)
+            // 先清空继承来的环境，再只放回进程运行时必需的白名单，最后叠加调用方显式
+            // 传入的变量。这样 `SSH_AUTH_SOCK`、云厂商密钥和开发 Token 默认不会到达一个
+            // 第三方本地进程（见 `crate::child_env`）。
+            .env_clear()
+            .envs(crate::child_env::minimal_child_environment())
             .envs(config.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -774,6 +779,18 @@ impl McpStdioHandle {
         // 一行一帧：换行就是 MCP stdio 的分帧方式，与 sidecar 的 NDJSON 长得像，
         // 但两边的帧内容没有任何关系。
         payload.push(b'\n');
+        // 写出方向同样有上限：远端工具声明、`tools/call` 参数都可能把它撑大，而一个
+        // 已经被序列化进内存的载荷再去「之后丢弃」不叫上限。
+        if payload.len() > wire::MAX_FRAME_BYTES {
+            return Err(McpError::Protocol {
+                server_id: self.server_id().to_string(),
+                reason: format!(
+                    "refusing to write a {}-byte frame; the stdio frame limit is {} bytes",
+                    payload.len(),
+                    wire::MAX_FRAME_BYTES
+                ),
+            });
+        }
 
         let written = {
             let mut guard = self.inner.stdin.lock().await;

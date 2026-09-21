@@ -329,6 +329,50 @@ async fn a_tool_call_returns_the_servers_result() {
     supervisor.shutdown(SERVER_ID).await;
 }
 
+/// 审计第一阶段 3.2：stdio MCP 服务是一个第三方本地进程，它**不能**默认拿到宿主持有的
+/// 每一份凭据。
+///
+/// 这里证明的是 `env_clear()` 真的执行了，而不只是白名单里没有秘密：`pnpm check` 会在这
+/// 个 Rust 测试进程上设置 `YUKINAL_TEST_*`，如果子进程继承宿主环境，它们必然出现。
+#[tokio::test]
+async fn a_stdio_server_does_not_inherit_the_host_environment() {
+    let Some(config) = config("ok") else { return };
+    let supervisor = McpSupervisor::new();
+    supervisor.start(&config).await.expect("start");
+
+    let result = supervisor
+        .call(SERVER_ID, "echo", json!({ "text": "env" }))
+        .await
+        .expect("the fixture answers echo");
+    let keys = result
+        .structured_content
+        .expect("the fixture sends structuredContent")["environmentKeys"]
+        .as_array()
+        .expect("environmentKeys is an array")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    for inherited in [
+        "YUKINAL_TEST_NODE",
+        "YUKINAL_TEST_REQUIRED",
+        "YUKINAL_TEST_ENTRY",
+    ] {
+        assert!(
+            !keys.iter().any(|key| key.eq_ignore_ascii_case(inherited)),
+            "{inherited} leaked into the MCP server environment: {keys:?}"
+        );
+    }
+    // 反例的另一半：白名单里必须留下进程运行时基础，否则真实服务根本起不来。
+    assert!(
+        keys.iter().any(|key| key.eq_ignore_ascii_case("PATH")),
+        "PATH must survive the allowlist: {keys:?}"
+    );
+
+    supervisor.shutdown(SERVER_ID).await;
+}
+
 #[tokio::test]
 async fn a_tool_that_reports_is_error_is_not_a_transport_failure() {
     let Some(config) = config("ok") else { return };

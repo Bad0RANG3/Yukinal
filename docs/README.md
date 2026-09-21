@@ -9,6 +9,8 @@
 - **要改 Rust 后台任务或关闭路径**：读[架构总览](./architecture.md#架构总览)的生命周期契约，并同时核对[当前限制](./limitations.md#当前限制)；安全 Rust 的内存安全和逻辑资源生命周期不是同一件事。
 - **要动手改**：先在 [仓库地图](./architecture.md#仓库地图) 里定位到层，再读那一层的边界文档 —— [模型 Provider](./boundaries/provider.md#边界模型-provider)、[外部工具（MCP）](./boundaries/mcp.md#边界外部工具mcp)、[Markdown 渲染](./boundaries/markdown.md#agent-回复的-markdown-渲染)。
 - **要做真实外部验证**：看 [外部验证运行手册](./external-validation.md)；默认门禁不访问网络，只有显式 opt-in 才会运行真实 Provider 或 MCP 矩阵。
+- **想看项目自我审查和后续路线**：读 [项目自我审查与后续完善计划](./project-review-and-roadmap.md)。
+- **想复核本次三轮重构**：按 [进度记录](./refactor-progress.md)、[第一轮](./audit-round-1.md)、[第二轮](./audit-round-2.md)、[第三轮](./audit-round-3.md) 的顺序读；后三份报告明确区分本地证据与未验证的外部能力。
 - **要动权限**：三档各自一份 —— [read](./risk-tiers/read.md)、[write](./risk-tiers/write.md)、[dangerous](./risk-tiers/dangerous.md)。
 - **想知道某个形状是为什么**：[架构决策记录](./adr.md#架构决策记录adr-00010070)。代码注释里的 `ADR NNNN` 指的就是那里。
 
@@ -28,6 +30,7 @@
 | [打包与分发](./packaging.md) | 安装包怎么产出、装了什么、签名与平台现状 |
 | [架构决策记录](./adr.md) | ADR 0001–0070，以及记录本身的两处历史瑕疵 |
 | [版本与发布历史](./changelog.md) | 未发布与已发布的变化、每个版本的包含与缺口 |
+| [三轮审计与重构记录](./refactor-progress.md) · [第一轮](./audit-round-1.md) · [第二轮](./audit-round-2.md) · [第三轮](./audit-round-3.md) | 本次本地审计的证据、重构 seam、GUI fixture 与明确的环境限制 |
 
 ## 写进这里的内容需要满足至少一条
 

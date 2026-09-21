@@ -39,6 +39,7 @@ const SUBSCRIBABLE = [
   "agent.failed",
   "terminal.data",
   "terminal.closed",
+  "terminal.output_lost",
   "server.auth_challenge",
   "mcp.oauth_device_code",
   "activity.created",

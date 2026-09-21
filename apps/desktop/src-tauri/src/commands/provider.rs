@@ -102,6 +102,12 @@ pub async fn provider_save(
                 .unwrap_or(provider.enabled)
         });
 
+    // 出站策略必须在**命令层**再验一次：共享 schema 是前端的第一道门，而直接调用 Tauri
+    // command 可以绕过它。这里决定的是「API Key 与提示词会被发到哪里」，因此不接受一个
+    // 只经过字符串清理的地址（审计第一阶段 3.4）。返回的规范化 URL 就是落库值。
+    let base_url = yukinal_core::provider::validate_provider_base_url(&base_url)
+        .map_err(|reason| format!("baseUrl 被拒绝：{reason}"))?;
+
     // `kind` 与 `wireApi` 正交：原生协议只有一种请求形状，所以给它们配一个方言是**请求错误**，
     // 不是被忽略的字段。共享 schema 已经拒绝这种组合；这里再拒一次，因为这个参数会直接落库。
     let requested_wire_api = wire_api
@@ -229,7 +235,7 @@ pub async fn provider_save(
         id: id.clone(),
         kind,
         label: label.unwrap_or_else(|| base_url.clone()),
-        base_url: base_url.trim().trim_end_matches('/').to_string(),
+        base_url: base_url.clone(),
         model: model.trim().to_string(),
         api_key_credential_ref,
         enabled: true,

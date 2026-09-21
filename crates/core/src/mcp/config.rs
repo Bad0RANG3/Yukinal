@@ -48,6 +48,19 @@ pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// useful authentication configuration; it is an accidental data dump.
 pub const MAX_HTTP_AUTH_HEADERS: usize = 16;
 
+/// stdio 服务允许的参数个数上限。真实服务的参数是「程序 + 若干开关 + 路径」，不是数据通道。
+pub const MAX_STDIO_ARGS: usize = 256;
+/// 单个参数的最大字节数。
+pub const MAX_STDIO_ARG_BYTES: usize = 8 * 1024;
+/// 全部参数加起来的最大字节数。防止许多「刚好不超单个上限」的参数把命令行撑爆。
+pub const MAX_STDIO_ARGS_BYTES: usize = 64 * 1024;
+/// 额外环境变量的个数上限。
+pub const MAX_STDIO_ENV_VARS: usize = 32;
+/// 环境变量名的最大字节数。
+pub const MAX_STDIO_ENV_NAME_BYTES: usize = 256;
+/// 环境变量值的最大字节数（值可能是路径列表，给得比名字宽）。
+pub const MAX_STDIO_ENV_VALUE_BYTES: usize = 8 * 1024;
+
 /// Validate an OAuth issuer, authorization, or token endpoint with the same
 /// origin rules as the MCP endpoint itself.
 pub fn validate_oauth_url(server_id: &str, raw: &str) -> Result<String, McpError> {
@@ -208,6 +221,49 @@ impl McpStdioConfig {
                 "the request timeout must be between {MIN_REQUEST_TIMEOUT:?} and {MAX_REQUEST_TIMEOUT:?}; \
                  a zero or unbounded timeout cannot be told apart from a hang"
             )));
+        }
+        // 参数与环境变量都是**数据**，不是协议通道：给它们显式上限，避免一个手写配置把
+        // 命令行或子进程环境变成一个不受限的载荷（审计第一阶段第 3.2 条）。
+        if self.args.len() > MAX_STDIO_ARGS {
+            return Err(invalid(format!(
+                "the server has {} arguments, over the {MAX_STDIO_ARGS} argument limit",
+                self.args.len()
+            )));
+        }
+        let mut total_args_bytes = 0usize;
+        for arg in &self.args {
+            let bytes = arg.len();
+            if bytes > MAX_STDIO_ARG_BYTES {
+                return Err(invalid(format!(
+                    "one argument is {bytes} bytes, over the {MAX_STDIO_ARG_BYTES} byte limit"
+                )));
+            }
+            total_args_bytes = total_args_bytes.saturating_add(bytes);
+        }
+        if total_args_bytes > MAX_STDIO_ARGS_BYTES {
+            return Err(invalid(format!(
+                "the arguments total {total_args_bytes} bytes, over the {MAX_STDIO_ARGS_BYTES} byte limit"
+            )));
+        }
+        if self.env.len() > MAX_STDIO_ENV_VARS {
+            return Err(invalid(format!(
+                "the server sets {} environment variables, over the {MAX_STDIO_ENV_VARS} limit",
+                self.env.len()
+            )));
+        }
+        for (name, value) in &self.env {
+            if name.is_empty()
+                || name.len() > MAX_STDIO_ENV_NAME_BYTES
+                || name.contains('=')
+                || name.contains('\0')
+                || value.len() > MAX_STDIO_ENV_VALUE_BYTES
+                || value.contains('\0')
+            {
+                return Err(invalid(format!(
+                    "the environment entry `{}` is not a valid, bounded name/value pair",
+                    truncated(name)
+                )));
+            }
         }
         Ok(())
     }
@@ -939,6 +995,39 @@ mod tests {
         );
 
         config.request_timeout = timeout();
+        assert!(config.validate().is_ok());
+
+        // 参数是两个方向上的资源：个数和总量。
+        config.args = vec![OsString::from("x".repeat(MAX_STDIO_ARG_BYTES + 1))];
+        assert!(
+            config.validate().is_err(),
+            "one oversized argument is refused"
+        );
+        config.args = vec![OsString::from("x"); MAX_STDIO_ARGS + 1];
+        assert!(config.validate().is_err(), "too many arguments are refused");
+        config.args = vec![OsString::from("x".repeat(MAX_STDIO_ARG_BYTES)); MAX_STDIO_ARGS];
+        assert!(
+            config.validate().is_err(),
+            "a legal per-argument size must still hit the total-argument budget"
+        );
+        config.args = Vec::new();
+
+        // 环境变量同样有界，而且名字不能是 `A=B` 这种会改变语义的字符串。
+        config.env = vec![("KEY".to_string(), "value".to_string())];
+        assert!(config.validate().is_ok());
+        config.env = vec![("A=B".to_string(), "value".to_string())];
+        assert!(
+            config.validate().is_err(),
+            "a name containing `=` is refused"
+        );
+        config.env = vec![("KEY".to_string(), "x".repeat(MAX_STDIO_ENV_VALUE_BYTES + 1))];
+        assert!(config.validate().is_err(), "an oversized value is refused");
+        config.env = vec![("KEY".to_string(), "value".to_string()); MAX_STDIO_ENV_VARS + 1];
+        assert!(
+            config.validate().is_err(),
+            "too many environment variables are refused"
+        );
+        config.env = Vec::new();
         assert!(config.validate().is_ok());
     }
 

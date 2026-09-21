@@ -30,6 +30,11 @@ pub mod package;
 pub mod provider;
 pub mod service;
 
+/// 派生子进程时使用的**最小环境**白名单。
+///
+/// 私有（`mod`，非 `pub mod`）：这是宿主内部的资源边界，不是 crate 的公开能力。
+mod child_env;
+
 /// 一行不可信文本 → 可以安全写进日志/错误的东西。
 ///
 /// 它是 crate 级能力而不是 `sidecar` 的私有工具：sidecar 的日志转发与 MCP 客户端的

@@ -1,6 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import { isDesktopShell } from "./ipc.js";
+import { isNativeDesktopShell } from "./ipc.js";
 
 /** URLs the Markdown renderer may hand to the operating system. */
 export function isExternalOpenUrl(url: string): boolean {
@@ -20,7 +20,7 @@ export function isExternalOpenUrl(url: string): boolean {
  */
 export async function openExternalUrl(url: string): Promise<void> {
   if (!isExternalOpenUrl(url)) throw new Error("Only http(s) and mailto links can be opened");
-  if (isDesktopShell()) {
+  if (isNativeDesktopShell()) {
     await openUrl(url);
     return;
   }

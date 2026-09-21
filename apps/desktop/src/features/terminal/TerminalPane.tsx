@@ -163,6 +163,14 @@ export function TerminalPane({ active }: { active: boolean }) {
       }).stop,
     );
 
+    unlisteners.push(
+      // 宿主广播队列溢出时会明确告知丢帧，而不是静默停止转发（性能 P0）。
+      subscribeDesktop("terminal.output_lost", (payload) => {
+        if (disposed) return;
+        term.write(`\r\n\x1b[1;33m[输出速率过高，${payload.missedEvents} 个终端帧已丢失]\x1b[0m\r\n`);
+      }).stop,
+    );
+
     // Open the PTY through the trusted chain.
     const rows = term.rows;
     void callDesktop(IPC_COMMANDS.terminalOpen, {

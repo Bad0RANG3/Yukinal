@@ -18,15 +18,53 @@ import { AI_PROVIDER_KINDS, type AiProviderKind } from "../types/provider.js";
  * 只有变量名和 `min/max` 的书写方式不同）。同时 `RuntimeSettings.tsx` 又在
  * 前端做了第三次检查，**而且漏掉了凭据这一条** —— 于是编辑器认为合法、
  * IPC 层随后拒绝，用户看到的是一个没有来源的错误。
+ *
+ * 非回环地址必须 HTTPS（审计第一阶段 3.4）：明文 http 会让 API Key、Prompt 与
+ * 服务器信息在网络上明文传输；回环地址（`localhost`、`*.localhost`、`127.0.0.0/8`、
+ * `::1`）上的本地运行时（Ollama、LM Studio）仍然允许 http。
  */
-export const HttpBaseUrlSchema = z.string().trim().min(1).max(2_048).refine((value) => {
+export const HttpBaseUrlSchema = z.string().trim().min(1).max(2_048).refine(
+  (value) => providerBaseUrlRejection(value) === null,
+  "baseUrl must be https, or http only for a loopback host, and must not embed credentials",
+);
+
+/**
+ * `baseUrl` 不符合出站策略时返回原因，合法时返回 `null`。
+ *
+ * 抽成纯函数是为了让三处共享**同一套规则**：本 schema、`RuntimeProviderConfigSchema`
+ * （随运行下发给 sidecar），以及 Node provider 在发请求前的运行时检查。共享 schema 是
+ * 前端的门，但它拦不住直接调用 IPC 或在 sidecar 里被构造出来的地址。
+ */
+export function providerBaseUrlRejection(value: string): string | null {
+  let url: URL;
   try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
+    url = new URL(value);
   } catch {
-    return false;
+    return "baseUrl must be an absolute http(s) URL";
   }
-}, "baseUrl must be an http(s) URL without embedded credentials");
+  if (!url.hostname) return "baseUrl must include a host";
+  if (url.username || url.password) {
+    return "baseUrl must not embed credentials; the API key belongs in the OS credential store";
+  }
+  if (url.protocol === "https:") return null;
+  if (url.protocol === "http:") {
+    return isLoopbackProviderHost(url.hostname)
+      ? null
+      : "plain HTTP is allowed only for loopback providers; remote providers must use HTTPS";
+  }
+  return `unsupported baseUrl scheme "${url.protocol}"`;
+}
+
+/** 这个主机名是不是回环地址（含 `localhost` 族与回环 IP 字面量）。 */
+export function isLoopbackProviderHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)
+  );
+}
 
 /** Provider 配置里的 base URL 与运行时用的是同一条规则，别名只为读起来贴合语境。 */
 const ProviderBaseUrlSchema = HttpBaseUrlSchema;

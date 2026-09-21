@@ -1,0 +1,1271 @@
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../assets/fonts/JetBrainsMono-Regular.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400;
+}
+
+.workspace-pages { display: contents; }
+.workspace-pages[hidden] { display: none; }
+.getting-started { max-width: 900px; margin: 0 auto; padding: 28px; display: flex; flex-direction: column; gap: 20px; }
+.getting-started p { color: var(--muted); line-height: 1.7; }
+.getting-started h2 { margin: 8px 0; font-size: 24px; }
+.getting-started h3 { margin: 0 0 12px; font-size: 15px; }
+.getting-started-header, .getting-started-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.getting-started-footer > span { color: var(--faint); font-size: 12px; }
+.getting-started-steps { display: grid; grid-template-columns: repeat(3, 1fr); list-style: none; padding: 0; margin: 0; gap: 12px; }
+.getting-started-steps li { padding: 14px; border: 1px solid var(--line); border-radius: var(--control-radius); color: var(--faint); line-height: 1.7; }
+.getting-started-steps li span { display: block; font-size: 12px; }
+.getting-started-steps li[aria-current="step"] { background: var(--panel-raised); border-color: var(--accent); color: var(--text); }
+.getting-started .settings-card { margin: 0; min-width: 0; }
+@media (max-width: 700px) {
+  .getting-started { padding: 16px; }
+  .getting-started-steps { grid-template-columns: 1fr; gap: 6px; }
+  .getting-started-steps li span { display: inline; margin-right: 10px; }
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../assets/fonts/JetBrainsMono-SemiBold.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 600 800;
+}
+
+@font-face {
+  font-family: "JetBrains Mono NL";
+  src: url("../assets/fonts/JetBrainsMonoNL-Regular.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: "JetBrains Mono NL";
+  src: url("../assets/fonts/JetBrainsMonoNL-SemiBold.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 600 800;
+}
+
+@font-face {
+  font-family: "JetBrains Mono Nerd";
+  src: url("../assets/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400;
+}
+
+:root {
+  --bg: #080808;
+  --panel: #0c0c0c;
+  --panel-raised: #121212;
+  --panel-soft: #090909;
+  --surface-1: #0f0f0f;
+  --surface-2: #151515;
+  --surface-3: #1b1b1b;
+  --surface-4: #242424;
+  --line: #2a2a2a;
+  --line-strong: #454545;
+  --text: #f2f2f2;
+  --muted: #b3b3b3;
+  --faint: #8d8d8d;
+  --accent: #d0d0d0;
+  --accent-strong: #a7a7a7;
+  --warning: #d6d6d6;
+  --danger: #e3e3e3;
+  --success: #bdbdbd;
+  --info: #b0b0b0;
+  --card-radius: 14px;
+  --control-radius: 8px;
+
+  /* 语义色。这套界面刻意保持灰阶文字：颜色只作为边框与底色的浅染色出现，
+     前景沿用 --success / --warning / --danger 的灰阶值，因此状态区分靠
+     底色与描边，而不是靠刺眼的彩色文字。
+     在这里集中定义，改动配色不必再去逐条替换散落的 hex。 */
+  --ok-line: #315a52;
+  --ok-surface: #102621;
+  --warn-line: #655531;
+  --warn-surface: #211c11;
+  --danger-line: #673b42;
+  --danger-surface: #241417;
+  /* 输入控件的聚焦描边：比一般描边更亮，用来补偿灰阶主题下焦点环不显眼。 */
+  --focus-line: #477d71;
+  --focus-halo: #78dfc51a;
+  /* Agent 输入区刻意比工作区略亮一档，让「正在输入」的地方自己浮起来。 */
+  --composer-bg: #151719;
+  --composer-surface: #292a2c;
+  --composer-line: #343638;
+  --composer-accent: #ed72ae;
+  --composer-accent-hover: #f38abd;
+
+  --font-ui: "JetBrains Mono", "JetBrains Mono NL", "Cascadia Mono", Consolas, "Microsoft YaHei UI", "Microsoft YaHei", monospace;
+  --font-terminal: "JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--ui-font-size, 13px);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.app-shell {
+  display: grid;
+  height: 100%;
+  /* Keep legacy page primitives and terminal ANSI output in the same monochrome
+     contract while their individual selectors are migrated to the gray palette.
+
+     Measured consequences of leaving this in place, so the trade-off is not
+     re-litigated from memory:
+
+     - It suppresses 66 non-neutral colour literals, not just leftovers. Those
+       include deliberately semantic ones — #34d399 (success), #f87171 (error),
+       #7faed8 (info), the amber warning family, the translucent diff tints
+       (#67d39a1c / #ee7f811c) and the ANSI colours this comment names — plus the
+       design tokens --composer-accent (#ed72ae) and --focus-line (#477d71). So
+       this is a broad desaturation, not dead scaffolding: removing it is a visual
+       redesign, not a cleanup.
+     - It has NO layout effect. `filter` does make the element a containing block
+       for `position: fixed` descendants, which matters because the <=1150px rules
+       make .agent-panel / .agent-scrim / .server-sidebar / .sidebar-scrim fixed.
+       But .app-shell is a border-less, full-viewport grid, so its padding box
+       equals the viewport and every offset resolves identically. Verified by
+       measuring each fixed descendant's rect with the filter present and removed
+       at a 1000x760 viewport: zero geometry change.
+     - It does NOT cause a contrast failure. On .agent-send-button (white text on
+       --composer-accent) it actually helps slightly: 3.19:1 grayscaled vs 2.76:1
+       unfiltered. Both miss WCAG AA (4.5:1) for 11px text, so that button has a
+       real contrast problem — but it is caused by white-on-pink, not by this
+       filter, and it needs the text colour changed rather than the filter removed. */
+  filter: grayscale(1);
+}
+
+.app-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* 左上角这枚标记就是任务栏里那枚应用图标本身：src/assets/brand-mark.png 取自
+   src-tauri/icons/128x128.png（由 scripts/generate-app-icon.ps1 生成、`pnpm --filter
+   @yukinal/desktop icon` 铺开的那套图标里的 128px 一档），所以换了图标就跟着换。
+   图标自带一圈透明留白和 #09090b 的深色底板，底色因此直接取底板同色：留白落在同色底上，
+   rail 里只剩环与节点，不用再画内描边。容器只负责摆位与悬浮反馈，原来那套字形、字重
+   样式随 "Y" 一起删掉了。
+   `.app-shell` 上的 grayscale(1) 会把这枚图标一起压成灰阶（和整屏的灰阶契约一致）：
+   要看它本来的青色，得在这里单独写 filter: grayscale(0)，那属于打破既有契约，别顺手加。 */
+.brand-mark {
+  display: grid;
+  place-items: center;
+  border: 1px solid #3a625c;
+}
+
+/* 图标铺满容器：等比缩放到 38px，留白由图标自己提供，容器不再加 padding。 */
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  -webkit-user-drag: none;
+}
+
+.rail-nav {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+}
+
+.rail-button {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+
+
+/* `.rail-icon` used to hold a text glyph, which is why this rule once carried a
+   font-size. Icons are SVG now and the size lives in the `ICON_SIZE` scale, so
+   the wrapper only has to be a centring box. */
+.rail-icon {
+  place-items: center;
+}
+
+.server-sidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}.server-sidebar-header, .server-list-meta, .workspace-header, .section-heading, .metric-card-topline, .identity-line, .agent-header, .agent-title, .approval-heading{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.server-sidebar-header-actions { display: flex; align-items: center; gap: 6px; }
+
+.eyebrow {
+  margin: 0 0 5px;
+  color: var(--faint);
+  font-weight: 650;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.server-sidebar h2,
+.workspace-header h1,
+.agent-header h2,
+.overview-title,
+.section-heading h2,
+.section-heading h3,
+.empty-state h2 {
+  margin: 0;
+  color: var(--text);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+
+/* A fixed square that centres one icon. The `font-size`/`line-height` pair this
+   rule used to carry was for the text glyphs that predated the SVG icon set;
+   with the icon contract in place the grid does the centring and no glyph
+   metrics are involved. */
+.icon-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.icon-button:hover {
+  color: var(--accent);
+}
+
+.icon-button-accent {
+  color: var(--accent);
+}
+
+.server-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  color: var(--faint);
+  padding: 8px 9px;
+}
+
+
+.server-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.server-search input::placeholder {
+  color: var(--faint);
+}
+
+.search-clear,
+.text-button {
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  padding: 0;
+}
+
+.search-clear:hover,
+.text-button:hover {
+  color: var(--accent);
+}
+
+.server-list-meta {
+  margin: 17px 2px 8px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.server-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.server-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  padding: 10px 9px;
+  text-align: left;
+}
+
+.server-row:hover {
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.server-row-selected {
+  border-color: #2f6259;
+  background: #15332f;
+  color: var(--text);
+}
+
+.server-dot,
+.health-dot,
+.container-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.server-dot-production,
+.health-dot-critical {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px #ee7f811c;
+}
+
+.server-dot-staging,
+.health-dot-warning {
+  background: var(--warning);
+}
+
+.server-dot-development,
+.health-dot-healthy,
+.container-dot-running {
+  background: var(--success);
+}
+
+.server-dot-local {
+  background: #7faed8;
+}
+
+.server-row-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.server-row-name {
+  overflow: hidden;
+  color: inherit;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「主机:端口」拆成两段来省略，而不是整行一起省略。
+   整行一起省略时，`text-overflow: ellipsis` 从右往左吃掉字符 —— 而排在最后的
+   恰好是端口。窗口收到 1150px 以下时侧栏从 248px 变窄到 228px，这一行只溢出
+   3px，却刚好把 `:22` 整个换成省略号（实测），于是「连哪台机器的哪个端口」
+   这个列表里最要紧的信息没了。
+   拆开之后，可压缩的只有主机名部分：主机可以省，端口永远显示。 */
+.server-row-detail {
+  display: flex;
+  min-width: 0;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.server-row-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.server-row-port {
+  flex-shrink: 0;
+}
+
+.server-row-env {
+  color: var(--faint);
+}
+
+.inline-error {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid #704044;
+  color: var(--danger);
+  margin: 4px 0 10px;
+  padding: 10px;
+  font-size: 11px;
+}
+
+.inline-error span {
+  overflow: hidden;
+  color: #c98f92;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-button-danger {
+  align-self: flex-start;
+  font-size: 11px;
+}
+
+.workspace-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.workspace-header {
+  border-bottom: 1px solid var(--line);
+}
+
+
+.workspace-header-meta {
+  display: flex;
+  align-items: center;
+}
+
+
+.shortcut-hint {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.server-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+}
+
+.server-tab {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+}
+
+.server-tab:hover {
+  color: var(--muted);
+}
+
+.server-tab-active {
+  color: var(--accent);
+}
+
+.server-tab-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--accent);
+  content: "";
+}
+
+.workspace-content {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+
+.overview-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.identity-line {
+  justify-content: flex-start;
+}
+
+/* 概览页顶部的大字服务器名。它不再是标题元素（名字已经是这一页的 h1，
+   再标一次 h2 只会让读屏连听两遍），所以排版挂在类上而不是 `h2` 标签上。
+   字号不写在这里 —— 它和各个页头一起在下面那条 `.overview-title, ...-page-header h2`
+   里定，那里才是这套「页面级大字」的统一出处（原先两条规则同权重，靠源码顺序
+   由下面那条生效，字号一直是 23px 而不是这里的 27px）。 */
+.overview-title {
+  margin-top: 15px;
+}
+
+.overview-subtitle {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.health-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.health-label-critical {
+  color: var(--danger);
+}
+
+.health-label-warning {
+  color: var(--warning);
+}
+
+.health-label-healthy {
+  color: var(--success);
+}
+
+.refresh-button {
+  flex: 0 0 auto;
+}
+
+
+.button-secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.server-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+}
+
+.server-facts div {
+  padding: 14px 16px;
+}
+
+.server-facts dt {
+  margin-bottom: 6px;
+  color: var(--faint);
+  text-transform: uppercase;
+}
+
+.server-facts dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+
+.section-heading {
+  align-items: flex-end;
+  margin-bottom: 13px;
+}
+
+.section-heading h2,
+.section-heading h3 {
+  font-size: 15px;
+}
+
+.section-note {
+  color: var(--faint);
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.metric-card {
+  border: 1px solid var(--line);
+}
+
+.metric-card-topline {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.metric-card strong {
+  display: block;
+  margin: 12px 0 10px;
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.metric-status {
+  font-size: 10px;
+}
+
+.metric-status-healthy {
+  color: var(--success);
+}
+
+.metric-status-warning {
+  color: var(--warning);
+}
+
+.metric-status-critical {
+  color: var(--danger);
+}
+
+.metric-status-unknown {
+  color: var(--faint);
+}
+
+.metric-track {
+  overflow: hidden;
+  border-radius: 99px;
+  background: #273039;
+}
+
+.metric-fill {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.metric-fill-healthy {
+  background: var(--success);
+}
+
+.metric-fill-warning {
+  background: var(--warning);
+}
+
+.metric-fill-critical {
+  background: var(--danger);
+}
+
+.metric-fill-unknown {
+  background: var(--faint);
+}
+
+.metric-hint {
+  display: block;
+  margin-top: 10px;
+  overflow: hidden;
+  color: var(--faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attention-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-top: 20px;
+  border: 1px solid #6f5a32;
+  background: #292217;
+  color: var(--warning);
+  padding: 14px;
+}
+
+.attention-critical {
+  border-color: #704044;
+  background: #291a1d;
+  color: var(--danger);
+}
+
+.attention-icon,
+.error-panel-icon {
+  display: grid;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.attention-panel strong,
+.error-panel strong {
+  display: block;
+  font-size: 12px;
+}
+
+.attention-panel p,
+.error-panel p {
+  margin: 5px 0 0;
+  color: #c7a86e;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.attention-critical p {
+  color: #d79b9d;
+}
+
+.split-sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  /* 概览页的竖直节奏由各块自己的 margin 决定（.server-facts 24px、
+     .section-block 20px），相邻 margin 会合并成较大的那个。但 .split-sections 是
+     网格容器：它的子块带着 margin，网格又不会让它们穿透出去合并 —— 所以缺了这条
+     的话，这一块会**紧贴**上面那张「资源概况」卡片（实测 gap = 0），而页面上其他
+     每一处都是 20–24px。补上 24px，节奏才是连续的。 */
+  margin-top: 24px;
+}
+
+.section-block-flex {
+  min-width: 0;
+}
+
+.container-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.container-list li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #1d252c;
+  padding-bottom: 9px;
+  font-size: 11px;
+}
+
+.container-name {
+  color: var(--text);
+}
+
+.container-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.muted-copy,
+.activity-empty {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.activity-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  padding: 13px;
+}
+
+.activity-empty p {
+  margin: 0;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.page-empty {
+  min-height: 360px;
+  margin: auto;
+}
+
+.compact-empty {
+  align-items: flex-start;
+  justify-content: flex-start;
+  margin: 23px 4px;
+  text-align: left;
+}
+
+.empty-state-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #31554f;
+  border-radius: 9px;
+  color: var(--accent);
+}
+
+.empty-state h2 {
+  margin-top: 15px;
+}
+
+.empty-state p {
+  max-width: 390px;
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.empty-state small {
+  display: block;
+  margin-top: 7px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.compact-empty .empty-state-mark {
+  width: 28px;
+  height: 28px;
+}
+
+.compact-empty p {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.compact-empty .button-secondary {
+  margin-top: 13px;
+}
+
+.no-results {
+  color: var(--faint);
+  padding: 20px 4px;
+  font-size: 11px;
+}
+
+.skeleton-list {
+  height: 120px;
+  margin-top: 10px;
+  border-radius: 7px;
+  background: linear-gradient(90deg, #13191f, #192128, #13191f);
+  background-size: 200% 100%;
+  /* Keyframes live in the motion layer at the end of this file. */
+  animation: shimmer var(--motion-shimmer-cycle) ease-in-out infinite;
+}
+
+.loading-panel,
+.error-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.loading-panel {
+  flex-direction: column;
+  text-align: center;
+}
+
+.loading-panel strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.loading-panel span {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.loading-spinner {
+  width: 23px;
+  height: 23px;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+  /* Keyframes live in the motion layer at the end of this file. */
+  animation: spin var(--motion-spin-cycle) linear infinite;
+}
+
+.error-panel {
+  max-width: 540px;
+  margin: auto;
+}
+
+.error-panel-icon {
+  color: var(--danger);
+}
+
+.error-panel p {
+  max-width: 450px;
+  margin-bottom: 12px;
+  color: #d79b9d;
+  overflow-wrap: anywhere;
+}
+
+.agent-title {
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.agent-header h2 {
+  font-size: 16px;
+}
+
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--faint);
+}
+
+.agent-status-ready {
+  color: var(--success);
+}
+
+/* 未就绪。这条规则之前不存在 —— 组件一直带着 `agent-status-idle`，而样式表里
+   从来没有对应规则，于是这个状态只是「碰巧」继承了 .agent-status 的 --faint。
+   继承来的颜色不算契约：谁改一下 .agent-status，这个状态就跟着变，而没人会想到
+   去看 AgentHeader。三档状态现在各有一条明确的规则：
+   active（运行中，带呼吸环）> ready（已就绪）> idle（未启动/预览）。 */
+.agent-status-idle {
+  color: var(--faint);
+}
+
+.agent-status-active {
+  color: var(--accent);
+}
+
+/* A ring that expands and fades reads as "working on it" without moving any
+   pixels of layout, so it never disturbs the row it sits in. The ring itself is
+   the `::after` in the Live and looping section; all this rule has to do is give
+   it something to sit on. */
+.status-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 4px #63d8c41c;
+}
+
+.agent-empty {
+  display: flex;
+  flex: 1;
+  min-height: 220px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  text-align: center;
+}
+
+.agent-empty strong {
+  margin-top: 13px;
+  color: var(--text);
+}
+
+.agent-empty p {
+  max-width: 220px;
+  margin: 7px 0 0;
+  color: var(--faint);
+}
+
+.agent-entry {
+  line-height: 1.55;
+}
+
+.entry-label,
+.tool-card-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-entry-user .entry-label {
+  color: var(--accent);
+}
+
+.agent-entry-assistant {
+  color: var(--text);
+  padding: 0 2px;
+}
+
+/* 应用自己说的话（例如 /help）。刻意做得比 Agent 的回复更轻、更像旁注，
+   以免读者把它当成模型输出。 */
+.agent-entry-system {
+  color: var(--muted);
+  padding: 0 2px;
+}
+
+.agent-entry-system .entry-label {
+  color: var(--faint);
+}
+
+.agent-entry-system-text {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 一次工具调用就是一张卡片：<details> 同时承载「调用了什么」与「结果如何」。
+   默认展开（open 写在 JSX 上），因为这个面板的意义就是可追溯 —— 把结果
+   藏进一次点击之后，等于让审计变难。左侧色条表达这一步的结局。 */
+.tool-card {
+  display: flex;
+  flex-direction: column;
+  border-left: 2px solid var(--line-strong);
+}
+
+.tool-card > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+/* 去掉浏览器默认的三角标记：状态色已经说明了这一步的结局，
+   再堆一个与内容无关的箭头只会增加噪声。 */
+.tool-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-card > summary::marker {
+  content: "";
+}
+
+.tool-card-running { border-left-color: var(--warn-line); }
+.tool-card-success { border-left-color: var(--ok-line); }
+.tool-card-failed { border-left-color: var(--danger-line); }
+.tool-card-cancelled { border-left-color: var(--line-strong); }
+
+/* 执行中的卡片轻微脉动，表示「还在等结果」。
+   这里呼吸的是**文字**，所以用 soft-pulse（纯 opacity），不是呼吸环 —— 给一行
+   文字套一圈描边会让它看起来像一个可点的控件。 */
+.tool-card-running > summary .tool-status {
+  animation: soft-pulse var(--motion-soft-cycle) ease-in-out infinite;
+}
+
+.tool-card code,
+.approval-heading code {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.agent-error {
+  border: 1px solid #704044;
+  background: #291a1d;
+  color: var(--danger);
+  padding: 9px;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.approval-card {
+  border: 1px solid #6f5a32;
+  padding: 11px;
+}
+
+.approval-heading {
+  justify-content: flex-start;
+  gap: 9px;
+}
+
+.approval-heading > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.approval-heading strong {
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.approval-icon {
+  width: 19px;
+  height: 19px;
+  border: 1px solid var(--warning);
+  border-radius: 50%;
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.approval-card p {
+  margin: 10px 0;
+  color: #c7a86e;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}.approval-button{
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
+.approval-button-reject {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+}
+
+.approval-button-approve {
+  border: 1px solid #b58a3b;
+  background: var(--warning);
+  color: #241d10;
+}.composer-permission-standalone {
+  margin-bottom: 8px;
+}.composer-permission-select {
+  max-width: 100%;
+}.server-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+.server-list-item .server-row { align-items: stretch; padding: 0; }
+.server-row-actions { display: flex; align-items: center; }
+.server-row-actions button { border: 1px solid var(--line, #27272a); background: transparent; cursor: pointer; }
+.remote-files-page { min-height: 0; display: flex; flex-direction: column; }
+.files-toolbar { display: flex; align-items: center; }
+.files-toolbar input { flex: 1; min-width: 0; border: 1px solid #27272a; border-radius: 6px; background: #09090b; color: #e4e4e7; padding: 8px 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.files-layout { display: grid; grid-template-columns: minmax(260px, .9fr) minmax(320px, 1.1fr); }
+.file-list-panel, .file-preview-panel { border: 1px solid #27272a; min-width: 0; }
+.remote-file-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.remote-file-row { display: flex; width: 100%; gap: 10px; align-items: center; border: 0; border-bottom: 1px solid rgba(39,39,42,.7); background: transparent; color: #d4d4d8; padding: 9px 4px; text-align: left; cursor: pointer; }
+.remote-file-icon { width: 16px; }
+.remote-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-file-size { color: var(--faint); font-size: 11px; }
+.file-preview-content { overflow: auto; max-height: 470px; margin-top: 12px; padding: 12px; border-radius: 6px; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 900px) { .files-layout { grid-template-columns: 1fr; } }
+.activity-page { min-height: 0; display: flex; flex-direction: column; }
+.activity-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.activity-page-header h2 { margin: 3px 0 0; letter-spacing: -.03em; }
+.activity-list { display: flex; flex-direction: column; border: 1px solid var(--line); overflow: hidden; }
+.activity-row { display: flex; gap: 13px; padding: 16px 18px; border-bottom: 1px solid rgba(39, 50, 54, .72); }
+.activity-row:last-child { border-bottom: 0; }
+.activity-type-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #34524d; color: #92c8bc; background: rgba(55, 112, 99, .16); }
+.activity-type-configuration { color: #b5b4df; border-color: #4a4a72; background: rgba(89, 85, 146, .16); }
+.activity-type-agent_action { color: #e1c58a; border-color: #6b5732; background: rgba(130, 95, 32, .16); }
+.activity-type-health { color: #8fc6dc; border-color: #31596a; background: rgba(43, 111, 140, .16); }
+.activity-row-body { min-width: 0; flex: 1; }
+.activity-row-title { display: flex; align-items: center; gap: 9px; min-height: 21px; }
+.activity-row-title strong { color: var(--text); font-size: 13px; font-weight: 620; }
+.activity-outcome { padding: 2px 6px; border-radius: 4px; font-size: 10px; line-height: 1.2; }
+.activity-outcome-success { color: #8dd0af; background: rgba(55, 140, 91, .15); }
+.activity-outcome-failure, .activity-outcome-denied { color: #eaa0a0; background: rgba(161, 58, 58, .15); }
+.activity-outcome-cancelled { color: #d8b985; background: rgba(155, 112, 48, .15); }
+.activity-row-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; }
+.activity-row-meta time { margin-left: auto; color: var(--faint); }
+.activity-row-body p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.activity-detail-toggle { margin-left: auto; border: 0; padding: 3px 6px; color: var(--accent); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.activity-detail-toggle:hover { color: var(--text); }
+.activity-trace-detail { display: flex; flex-direction: column; gap: 8px; margin-top: 11px; padding: 10px; border: 1px solid rgba(64, 88, 87, .72); }
+.activity-trace-step { display: flex; flex-direction: column; gap: 5px; padding-bottom: 8px; border-bottom: 1px solid rgba(39, 50, 54, .72); }
+.activity-trace-step:last-child { padding-bottom: 0; border-bottom: 0; }
+.activity-trace-step-top, .activity-trace-step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.activity-trace-step-top strong { color: var(--text); font-size: 12px; }
+.activity-trace-step-top code, .activity-trace-step-meta { color: var(--muted); font-size: 10px; }
+.activity-trace-step-top code { margin-left: auto; }
+.activity-execution-status { padding: 2px 5px; border-radius: 4px; color: #9bc6bc; background: rgba(55, 140, 91, .13); font-size: 10px; }
+.activity-execution-status-failed, .activity-execution-status-cancelled { color: #eaa0a0; background: rgba(161, 58, 58, .15); }
+.activity-execution-status-waiting_approval { color: #e7c88e; background: rgba(155, 112, 48, .15); }
+.activity-trace-step-input, .activity-trace-step-output { display: block; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--faint); font-size: 10px; line-height: 1.45; }
+.activity-trace-step-error { color: #eaa0a0; }
+.services-page { min-height: 0; display: flex; flex-direction: column; }
+.services-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.services-page-header h2 { margin: 3px 0 0; letter-spacing: -.03em; }
+.services-page-header p:last-child { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.service-summary { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.service-source { border: 1px solid var(--line-strong); border-radius: 5px; padding: 4px 7px; color: var(--text); background: var(--panel-raised); }
+.service-source-systemd { border-color: #31596a; color: #9bd1e3; background: rgba(43, 111, 140, .13); }
+.service-source-docker { border-color: #34524d; color: #92c8bc; background: rgba(55, 112, 99, .13); }
+.service-source-unavailable { border-color: #6b5732; color: var(--warning); background: rgba(130, 95, 32, .13); }
+.service-notice { border: 1px solid #6b5732; background: rgba(130, 95, 32, .13); color: var(--warning); padding: 11px 13px; font-size: 12px; }
+.service-list { display: flex; flex-direction: column; margin: 0; padding: 0; overflow: hidden; list-style: none; border: 1px solid var(--line); }
+.service-row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 13px 16px; border-bottom: 1px solid rgba(39, 50, 54, .72); }
+.service-row:last-child { border-bottom: 0; }
+.service-state-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
+.service-state-dot-running { background: var(--success); box-shadow: 0 0 0 3px #67d39a1c; }
+.service-state-dot-stopped, .service-state-dot-unknown { background: var(--faint); }
+.service-state-dot-failed { background: var(--danger); box-shadow: 0 0 0 3px #ee7f811c; }
+.service-row-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+.service-row-copy strong { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.service-row-copy span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.service-row code { max-width: 30%; overflow: hidden; color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.service-state { min-width: 48px; color: var(--muted); font-size: 10px; text-align: right; }
+.service-state-running { color: var(--success); }
+.service-state-failed { color: var(--danger); }
+.service-empty { min-height: 260px; }
+.logs-page { min-height: 0; display: flex; flex-direction: column; }
+.logs-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.logs-page-header h2 { margin: 3px 0 0; letter-spacing: -.03em; }
+.logs-page-header p:last-child { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.log-summary { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.log-source { border: 1px solid var(--line-strong); border-radius: 5px; padding: 4px 7px; color: var(--text); background: var(--panel-raised); }
+.log-source-journalctl { border-color: #31596a; color: #9bd1e3; background: rgba(43, 111, 140, .13); }
+.log-source-syslog, .log-source-messages { border-color: #34524d; color: #92c8bc; background: rgba(55, 112, 99, .13); }
+.log-source-unavailable { border-color: #6b5732; color: var(--warning); background: rgba(130, 95, 32, .13); }
+.log-notice { border: 1px solid #6b5732; background: rgba(130, 95, 32, .13); color: var(--warning); padding: 11px 13px; font-size: 12px; }
+.log-list { display: flex; flex-direction: column; margin: 0; padding: 0; overflow: auto; list-style: none; border: 1px solid var(--line); }
+.log-row { display: grid; grid-template-columns: 34px 38px minmax(0, 1fr); align-items: baseline; gap: 10px; padding: 10px 13px; border-bottom: 1px solid rgba(39, 50, 54, .6); }
+.log-row:last-child { border-bottom: 0; }
+.log-line-number { color: var(--faint); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
+.log-level { font-size: 9px; font-weight: 650; letter-spacing: .04em; }
+.log-level-info { color: #8fc6dc; }
+.log-level-warning { color: var(--warning); }
+.log-level-error { color: var(--danger); }
+.log-row code { min-width: 0; overflow: hidden; color: var(--text); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-empty { min-height: 260px; }
+.projects-page { min-height: 0; display: flex; flex-direction: column; }
+.projects-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.projects-page-header h2 { margin: 3px 0 0; letter-spacing: -.03em; }
+.projects-page-header p:last-child { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 0; padding: 0; list-style: none; }
+.project-card { display: flex; min-width: 0; flex-direction: column; gap: 15px; border: 1px solid var(--line); }
+.project-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.project-card-header h3 { margin: 3px 0 0; color: var(--text); font-size: 17px; font-weight: 650; }
+.project-environment { flex: 0 0 auto; border: 1px solid var(--line-strong); border-radius: 5px; padding: 4px 7px; color: var(--muted); font-size: 10px; }
+.project-environment-production { border-color: #704044; color: var(--danger); background: rgba(161, 58, 58, .14); }
+.project-environment-staging { border-color: #6b5732; color: var(--warning); background: rgba(130, 95, 32, .14); }
+.project-environment-development { border-color: #34524d; color: var(--success); background: rgba(55, 112, 99, .14); }
+.project-card-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10px; }
+.project-card-meta span + span::before { content: "·"; margin-right: 8px; color: var(--line-strong); }
+.project-card-section { display: flex; min-width: 0; flex-direction: column; gap: 8px; border-top: 1px solid rgba(39, 50, 54, .72); padding-top: 12px; }
+.project-card-label { color: var(--faint); font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+.project-server-list, .project-repository-list { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.project-server-list li { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
+.project-resource-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); }
+.project-repository-list li { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.project-repository-list strong { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.project-repository-list span, .project-muted { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.project-empty { min-height: 260px; }

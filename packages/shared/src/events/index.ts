@@ -33,6 +33,7 @@ export const EVENT_NAMES = [
   "terminal.opened",
   "terminal.data",
   "terminal.closed",
+  "terminal.output_lost",
   "activity.created",
   "investigation.schedule_notification",
 ] as const;
@@ -122,6 +123,19 @@ export interface TerminalDataEvent {
   data: string;
 }
 
+/**
+ * A broadcast gap: the UI fell behind and `missedEvents` terminal frames were dropped
+ * before it could read them.
+ *
+ * It is deliberately **not** per-session (the host's broadcast channel is global) and
+ * deliberately not an error: losing output under a flood is expected, and the honest
+ * response is to say so rather than to silently stop forwarding forever (ADR: the
+ * terminal must survive `Lagged` instead of ending its forwarding task).
+ */
+export interface TerminalOutputLostEvent {
+  missedEvents: number;
+}
+
 export interface TerminalClosedEvent {
   terminalSessionId: string;
   exitCode: number | null;
@@ -151,6 +165,7 @@ export type YukinalEvent =
   | { name: "terminal.opened"; payload: TerminalOpenedEvent }
   | { name: "terminal.data"; payload: TerminalDataEvent }
   | { name: "terminal.closed"; payload: TerminalClosedEvent }
+  | { name: "terminal.output_lost"; payload: TerminalOutputLostEvent }
   | { name: "activity.created"; payload: Activity }
   | { name: "investigation.schedule_notification"; payload: InvestigationScheduleNotificationEvent }
   | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

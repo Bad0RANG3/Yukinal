@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   AiProviderKindSchema,
+  HttpBaseUrlSchema,
   ProviderConfigSchema,
   ProviderSaveInputSchema,
   SafeCustomHeadersSchema,
+  providerBaseUrlRejection,
 } from "./provider.js";
 import { RuntimeProviderConfigSchema } from "./permission.js";
 
@@ -150,4 +152,32 @@ test("wireApi is rejected wherever the kind has no dialect axis", () => {
   assert.equal(ProviderConfigSchema.safeParse({ ...row, kind: "gemini", wireApi: "chat" }).success, false);
   assert.equal(ProviderConfigSchema.safeParse({ ...row, kind: "gemini" }).success, true);
   assert.equal(ProviderConfigSchema.safeParse({ ...row, kind: "cohere" }).success, false);
+});
+
+/* ── 出站地址策略（审计第一阶段 3.4） ────────────────────────────────────────── */
+
+test("provider base URLs require HTTPS off loopback and reject embedded credentials", () => {
+  assert.equal(providerBaseUrlRejection("https://api.example.com/v1"), null);
+  assert.notEqual(providerBaseUrlRejection("http://api.example.com/v1"), null);
+  // 看起来像回环、实际不是：前缀匹配会放过它，URL 解析器不会。
+  assert.notEqual(providerBaseUrlRejection("http://127.0.0.1.evil.test/v1"), null);
+  assert.notEqual(providerBaseUrlRejection("https://user:pass@api.example.com/v1"), null);
+  assert.notEqual(providerBaseUrlRejection("file:///etc/passwd"), null);
+  assert.notEqual(providerBaseUrlRejection("not a url"), null);
+
+  for (const local of [
+    "http://localhost:11434/v1",
+    "http://127.0.0.1:1234/v1",
+    "http://127.5.6.7/v1",
+    "http://[::1]:1234/v1",
+    "http://ollama.localhost/v1",
+  ]) {
+    assert.equal(providerBaseUrlRejection(local), null, local);
+  }
+});
+
+test("the base URL schema is the same gate the provider runtime uses", () => {
+  assert.equal(HttpBaseUrlSchema.safeParse("http://api.example.com/v1").success, false);
+  assert.equal(HttpBaseUrlSchema.safeParse("http://127.0.0.1:1234/v1").success, true);
+  assert.equal(HttpBaseUrlSchema.safeParse("https://user:pass@api.example.com/v1").success, false);
 });
