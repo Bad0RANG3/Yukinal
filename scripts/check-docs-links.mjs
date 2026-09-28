@@ -101,7 +101,7 @@ for (const file of files) {
 }
 
 // Controls: the run must have read real links, and must be able to fail.
-const positive = anchorsOf("docs/README.md").has("阅读顺序");
+const positive = anchorsOf("docs/README.md").has("从哪里开始");
 const negative = anchorsOf("docs/README.md").has("这个锚点一定不存在");
 if (links === 0 || !positive || negative) {
   console.error(

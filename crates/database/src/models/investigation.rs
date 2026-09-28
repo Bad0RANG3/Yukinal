@@ -14,6 +14,7 @@ enum_as_str!(InvestigationRunStatus, Admitted => "admitted", Running => "running
 enum_as_str!(InvestigationStepKind, Plan => "plan", Evidence => "evidence", Decision => "decision", Action => "action", Verification => "verification", Recovery => "recovery");
 enum_as_str!(InvestigationStepStatus, Pending => "pending", Running => "running", WaitingUser => "waiting_user", Succeeded => "succeeded", Failed => "failed", Skipped => "skipped");
 enum_as_str!(TaskFailureCode, BudgetExhausted => "budget_exhausted", Timeout => "timeout", Cancelled => "cancelled", ApprovalRequired => "approval_required", ApprovalRejected => "approval_rejected", Authentication => "authentication", Transport => "transport", TargetNotFound => "target_not_found", PermissionDenied => "permission_denied", InvalidInput => "invalid_input", PlanDeviation => "plan_deviation", CommandFailed => "command_failed", OutputTruncated => "output_truncated", EvidenceMissing => "evidence_missing", StaleTarget => "stale_target", Unsupported => "unsupported", Internal => "internal", Unknown => "unknown");
+enum_as_str!(ErrorCategory, Input => "input", Permission => "permission", Approval => "approval", Authentication => "authentication", Transport => "transport", Timeout => "timeout", Cancelled => "cancelled", Budget => "budget", NotFound => "not_found", Unsupported => "unsupported", RemoteFailure => "remote_failure", Output => "output", Evidence => "evidence", Stale => "stale", Plan => "plan", Internal => "internal", Unknown => "unknown");
 enum_as_str!(FailureOptionAction, Retry => "retry", Replan => "replan", WaitUser => "wait_user", Inspect => "inspect", Stop => "stop", Resume => "resume", Rollback => "rollback");
 enum_as_str!(EvidenceKind, Snapshot => "snapshot", Log => "log", Service => "service", Container => "container", File => "file", ToolResult => "tool_result", Failure => "failure");
 enum_as_str!(EvidenceContentType, Json => "json", Text => "text");
@@ -126,6 +127,69 @@ pub enum TaskFailureCode {
     Unsupported,
     Internal,
     Unknown,
+}
+
+/// Canonical, user-actionable error category. Mirrors `ERROR_CATEGORIES` in
+/// `@yukinal/shared`; `crates/database/tests/error_taxonomy.rs` pins the wire-code
+/// mapping against the shared fixture so the host and the UI cannot drift. A
+/// screen decides its next step from this value, never from message text.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    Input,
+    Permission,
+    Approval,
+    Authentication,
+    Transport,
+    Timeout,
+    Cancelled,
+    Budget,
+    NotFound,
+    Unsupported,
+    RemoteFailure,
+    Output,
+    Evidence,
+    Stale,
+    Plan,
+    Internal,
+    #[default]
+    Unknown,
+}
+
+impl TaskFailureCode {
+    /// The actionable category a screen may branch on.
+    #[must_use]
+    pub fn category(self) -> ErrorCategory {
+        match self {
+            Self::BudgetExhausted => ErrorCategory::Budget,
+            Self::Timeout => ErrorCategory::Timeout,
+            Self::Cancelled => ErrorCategory::Cancelled,
+            Self::ApprovalRequired | Self::ApprovalRejected => ErrorCategory::Approval,
+            Self::Authentication => ErrorCategory::Authentication,
+            Self::Transport => ErrorCategory::Transport,
+            Self::TargetNotFound => ErrorCategory::NotFound,
+            Self::PermissionDenied => ErrorCategory::Permission,
+            Self::InvalidInput => ErrorCategory::Input,
+            Self::PlanDeviation => ErrorCategory::Plan,
+            Self::CommandFailed => ErrorCategory::RemoteFailure,
+            Self::OutputTruncated => ErrorCategory::Output,
+            Self::EvidenceMissing => ErrorCategory::Evidence,
+            Self::StaleTarget => ErrorCategory::Stale,
+            Self::Unsupported => ErrorCategory::Unsupported,
+            Self::Internal => ErrorCategory::Internal,
+            Self::Unknown => ErrorCategory::Unknown,
+        }
+    }
+
+    /// Whether retrying with the same input may succeed. This is the single
+    /// host-owned retryability rule; `failure_options`, the startup recovery
+    /// predicate and the UI's retry affordance must all agree with it.
+    #[must_use]
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Timeout | Self::Transport | Self::Authentication)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

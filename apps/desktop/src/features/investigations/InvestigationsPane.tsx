@@ -22,7 +22,7 @@ import type {
   TaskAutomationLevel,
   TaskStatus,
 } from "@yukinal/shared";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
@@ -31,7 +31,8 @@ import { callDesktop, isDesktopShell, subscribeDesktop, type DesktopEventPayload
 import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { canDelegateAgentAuto, effectiveTaskPermissionMode, shouldAutoStartCreatedTask } from "./auto-delegation.js";
-import { shouldAutoRecoverDelegatedTask, shouldAutoStartRecoveredTask } from "./recovery.js";
+import { describeInvestigationFailure } from "./error-display.js";
+import { shouldAutoStartRecoveredTask } from "./recovery.js";
 import {
   INVESTIGATION_NOTIFICATION_POLICIES,
   notificationPolicyLabel,
@@ -178,20 +179,6 @@ export function InvestigationsPane() {
       }
     },
   });
-  const autoRecoveryAttempt = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!shell || !tasks.data || recoverTask.isPending) return;
-    const candidate = tasks.data.tasks.find(shouldAutoRecoverDelegatedTask);
-    const failure = candidate?.lastFailure;
-    if (!candidate || !failure) return;
-    const attemptKey = `${candidate.id}:${failure.attempt}:${failure.code}`;
-    if (autoRecoveryAttempt.current === attemptKey) return;
-    autoRecoveryAttempt.current = attemptKey;
-    // The host increments the recovery attempt, invalidates stale plan state,
-    // and returns `investigating`; the existing success path then starts the
-    // next run through the same durable entry point.
-    recoverTask.mutate({ taskId: candidate.id });
-  }, [recoverTask.isPending, recoverTask.mutate, shell, tasks.data]);
   const createSchedule = useMutation({
     mutationFn: (taskId: string) => callDesktop("investigation_schedule_create", {
       input: { taskId, intervalSeconds: 300, notificationPolicy: "on_change" },
@@ -551,6 +538,7 @@ function InvestigationDetail({
   const canSchedule = task.mode === "readonly" && task.automationLevel === "readonly" && !["completed", "failed", "stopped", "expired"].includes(task.status);
   const canStart = (task.status === "pending" || task.status === "waiting_user") && !task.activeRunId;
   const canStop = !["completed", "failed", "stopped", "expired"].includes(task.status);
+  const failureDisplay = task.lastFailure ? describeInvestigationFailure(task.lastFailure) : undefined;
   return (
     <section className="investigation-detail" aria-labelledby="investigation-detail-title">
       <div className="investigation-detail-header">
@@ -586,11 +574,11 @@ function InvestigationDetail({
         <span><strong>{runs.length}</strong> 次运行</span>
         <span><strong>{steps.length}</strong> 个步骤</span>
       </div>
-      {task.lastFailure ? (
+      {task.lastFailure && failureDisplay ? (
         <div className="investigation-failure" role="status">
-          <strong>上一轮未完成：{task.lastFailure.code}</strong>
+          <strong>上一轮未完成：{failureDisplay.label}</strong>
           <p>{task.lastFailure.message}</p>
-          <small>第 {task.lastFailure.attempt} 次尝试 · {task.lastFailure.retryable ? "可重试" : "需要重新判断"}</small>
+          <small>第 {task.lastFailure.attempt} 次尝试 · {task.lastFailure.retryable ? "可重试" : "需要重新判断"} · 下一步：{failureDisplay.nextStep}</small>
           {task.lastFailure.options?.length ? (
             <div className="investigation-failure-options">
               {task.lastFailure.options.map((option) => (

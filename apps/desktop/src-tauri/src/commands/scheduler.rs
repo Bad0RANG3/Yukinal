@@ -17,7 +17,7 @@ use yukinal_core::provider::runtime_provider_config;
 use yukinal_database::models::{
     InvestigationRun, InvestigationRunMode, InvestigationRunStatus, InvestigationSchedule,
     InvestigationScheduleRun, InvestigationScheduleRunStatus, InvestigationScheduleStatus,
-    TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
+    TaskBudget, TaskPhase, TaskStatus,
 };
 use yukinal_database::repositories::TaskProgressUpdate;
 
@@ -338,10 +338,7 @@ fn close_admitted_launch_failure(
     failure_code: yukinal_database::models::TaskFailureCode,
     outcome: &str,
 ) -> Result<(), String> {
-    let retryable = matches!(
-        failure_code,
-        TaskFailureCode::Transport | TaskFailureCode::Timeout
-    );
+    let retryable = failure_code.retryable();
     let schedule_run = state
         .database
         .investigations()

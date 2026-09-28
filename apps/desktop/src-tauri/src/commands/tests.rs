@@ -11,9 +11,10 @@ use super::{
 use crate::state::AppState;
 use serde_json::json;
 use yukinal_database::models::{
-    Environment, InvestigationPermissionMode, InvestigationRun, InvestigationRunMode,
-    InvestigationRunStatus, InvestigationTarget, InvestigationTargetHost, InvestigationTask,
-    TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus, ToolExecutionStatus,
+    Environment, ErrorCategory, InvestigationPermissionMode, InvestigationRun,
+    InvestigationRunMode, InvestigationRunStatus, InvestigationTarget, InvestigationTargetHost,
+    InvestigationTask, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
+    ToolExecutionStatus,
 };
 
 /// 三个终态放行，三个在途状态一律挡住 —— 挡住的那三个正是「崩溃中断」会留下的形状，
@@ -282,6 +283,38 @@ fn tool_failure_codes_keep_recovery_categories_structured() {
         Some(TaskFailureCode::CommandFailed)
     );
     assert_eq!(task_failure_code_from_tool_error("unknown_code"), None);
+}
+
+/// The Rust tool-error mapping is part of the shared taxonomy: every wire code in
+/// the fixture must map to a task failure whose category matches, so the UI never
+/// has to guess a category for a tool error the host already understood.
+#[test]
+fn the_shipped_tool_error_mapping_matches_the_shared_taxonomy() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Taxonomy {
+        tool_errors: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        code: String,
+        category: ErrorCategory,
+    }
+    let taxonomy: Taxonomy = serde_json::from_str(include_str!(
+        "../../../../../packages/shared/fixtures/error-taxonomy.json"
+    ))
+    .expect("the shared taxonomy fixture must parse");
+    assert!(!taxonomy.tool_errors.is_empty());
+    for entry in taxonomy.tool_errors {
+        let code = task_failure_code_from_tool_error(&entry.code)
+            .unwrap_or_else(|| panic!("tool error {} has no Rust mapping", entry.code));
+        assert_eq!(
+            code.category(),
+            entry.category,
+            "tool error {} maps to the wrong category",
+            entry.code
+        );
+    }
 }
 
 #[test]

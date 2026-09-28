@@ -641,10 +641,32 @@ const MIGRATIONS: &[&str] = &[
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// Highest schema version this build can open. Used by the pre-migration backup
+/// manifest to name the upgrade target it is about to attempt.
+pub(crate) fn supported_version() -> i64 {
+    SCHEMA_VERSION
+}
+
+/// The on-disk schema version, read without applying anything.
+pub(crate) fn on_disk_version(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+/// Whether opening this database would apply at least one migration.
+pub(crate) fn has_pending(connection: &Connection) -> Result<bool> {
+    Ok(on_disk_version(connection)? < SCHEMA_VERSION)
+}
+
 /// Apply pending migrations in order. Each migration runs in its own transaction;
 /// `PRAGMA user_version` is bumped only after the statements succeed.
+///
+/// A failure is reported as [`DatabaseError::Migration`] naming the version, so a
+/// half-upgraded database is attributable to one migration rather than "sqlite
+/// error". The caller is responsible for the pre-migration copy and rollback
+/// (see [`crate::migration`]); this function only guarantees the transaction
+/// boundary.
 pub(crate) fn migrate(connection: &Connection) -> Result<()> {
-    let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let current = on_disk_version(connection)?;
     if current > SCHEMA_VERSION {
         return Err(DatabaseError::NewerSchema {
             schema: current,
@@ -656,10 +678,18 @@ pub(crate) fn migrate(connection: &Connection) -> Result<()> {
         if version <= current {
             continue;
         }
-        let tx = connection.unchecked_transaction()?;
-        tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", version)?;
-        tx.commit()?;
+        apply_migration(connection, version, sql).map_err(|error| DatabaseError::Migration {
+            version,
+            message: error.to_string(),
+        })?;
     }
+    Ok(())
+}
+
+fn apply_migration(connection: &Connection, version: i64, sql: &str) -> Result<()> {
+    let tx = connection.unchecked_transaction()?;
+    tx.execute_batch(sql)?;
+    tx.pragma_update(None, "user_version", version)?;
+    tx.commit()?;
     Ok(())
 }

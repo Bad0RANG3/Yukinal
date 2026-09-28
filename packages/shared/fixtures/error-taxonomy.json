@@ -1,0 +1,36 @@
+{
+  "taskFailures": [
+    { "code": "budget_exhausted", "category": "budget", "retryable": false },
+    { "code": "timeout", "category": "timeout", "retryable": true },
+    { "code": "cancelled", "category": "cancelled", "retryable": false },
+    { "code": "approval_required", "category": "approval", "retryable": false },
+    { "code": "approval_rejected", "category": "approval", "retryable": false },
+    { "code": "authentication", "category": "authentication", "retryable": true },
+    { "code": "transport", "category": "transport", "retryable": true },
+    { "code": "target_not_found", "category": "not_found", "retryable": false },
+    { "code": "permission_denied", "category": "permission", "retryable": false },
+    { "code": "invalid_input", "category": "input", "retryable": false },
+    { "code": "plan_deviation", "category": "plan", "retryable": false },
+    { "code": "command_failed", "category": "remote_failure", "retryable": false },
+    { "code": "output_truncated", "category": "output", "retryable": false },
+    { "code": "evidence_missing", "category": "evidence", "retryable": false },
+    { "code": "stale_target", "category": "stale", "retryable": false },
+    { "code": "unsupported", "category": "unsupported", "retryable": false },
+    { "code": "internal", "category": "internal", "retryable": false },
+    { "code": "unknown", "category": "unknown", "retryable": false }
+  ],
+  "toolErrors": [
+    { "code": "invalid_input", "category": "input" },
+    { "code": "plan_deviation", "category": "plan" },
+    { "code": "denied_by_policy", "category": "permission" },
+    { "code": "approval_rejected", "category": "approval" },
+    { "code": "approval_timeout", "category": "approval" },
+    { "code": "timeout", "category": "timeout" },
+    { "code": "cancelled", "category": "cancelled" },
+    { "code": "not_found", "category": "not_found" },
+    { "code": "transport", "category": "transport" },
+    { "code": "unsupported", "category": "unsupported" },
+    { "code": "execution_failed", "category": "remote_failure" },
+    { "code": "internal", "category": "internal" }
+  ]
+}

@@ -1,12 +1,12 @@
 # 限制放宽与完善：实施手册
 
-> 内部工程文档，供实施者（人或 AI）直接照做。它描述**要做的改动**，不代表已经实现；完成后以 [当前限制](./limitations.md#当前限制) 为准。
+> 历史实施快照：工作包已在 `5a5c065` 合入。本文件保留当时的基线和任务拆解，不再作为待办清单；当前状态以 [当前限制](../limitations.md#当前限制) 和 [下一阶段实施计划](../implementation-plan.md) 为准。
 > 日期：2026-09-28。基线提交：`acbffd7`。基线门禁：`pnpm test` 全绿（agent 259 项），`cargo check --workspace --all-targets` 通过。
 
 ## 0. 总则（所有工作包都必须遵守）
 
-1. **五个工作包互相独立**，可以并行给不同实施者；但 §7 的文档/ADR 统一最后做，工作包里**不要**改 `docs/limitations.md`、`docs/adr.md`、`docs/changelog.md`、`docs/boundaries/*.md`，只在完成报告里写一段中文行为说明。
-2. 本项目的规矩：放宽授权边界**必须新增 ADR**（ADR 0009 原文：“放宽它需要一条新的 ADR 而不是一次配置改动”）。ADR 编号预分配见 §7。
+1. **五个工作包互相独立**，可以并行给不同实施者；但第七节的文档/ADR 统一最后做，工作包里**不要**改 `docs/limitations.md`、`docs/adr.md`、`docs/changelog.md`、`docs/boundaries/*.md`，只在完成报告里写一段中文行为说明。
+2. 本项目的规矩：放宽授权边界**必须新增 ADR**（ADR 0009 原文：“放宽它需要一条新的 ADR 而不是一次配置改动”）。ADR 编号预分配见第七节。
 3. 每一条放宽都要同时改**所有副本**：Rust 常量、TS 常量/Zod schema、UI 文案、Agent 工具 description、测试里钉死的数字。本手册给出了已知副本位置，但实施者仍须 `grep` 旧数字确认没有遗漏（很多 Rust 检查是裸字面量）。
 4. 失败关闭原则不变：查不到、解析不了、旧版本对端没发字段 → 走旧的、更严格的路径。
 5. 不使用真实服务器/Provider/第三方 MCP；只做本地编译、单测、fixture、回环。
@@ -57,7 +57,7 @@
 3. **`packages/shared` 测试**：`schemas/*.test.ts` 里给 `agent.waiting_approval` 事件加一个带 `sessionGrantable` 的合法样例，以及 `sessionGrantable: "yes"` 被拒绝的样例；给 `isSessionGrantable` 写一组表驱动单测（critical×各环境、high×local/remote×各环境、medium）。
 4. **桌面 UI 测试**：在 `apps/desktop/tests/` 找渲染 `AgentEntryView` 审批卡片的测试（`grep -rn "本次运行批准" apps/desktop/tests`），补：`sessionGrantable:false` 时没有该按钮且出现说明；缺省时按钮存在。
 5. **宿主侧**：已确认 Rust 不解析 `ApprovalRequest` 字段（`grep factsSummary` 在 `.rs` 中无结果），无需改 Rust。若 `packages/shared/fixtures/ipc/` 中有 waiting_approval 相关 fixture，可选择加上字段。
-6. 行为说明段落（供 §7）：会话授权现在可覆盖 dev/staging 远程目标上的 high 动作，严格绑定输入指纹、只在本次运行有效；critical 与生产/未知/本机上的 dangerous 仍逐次批准。
+6. 行为说明段落（供第七节）：会话授权现在可覆盖 dev/staging 远程目标上的 high 动作，严格绑定输入指纹、只在本次运行有效；critical 与生产/未知/本机上的 dangerous 仍逐次批准。
 
 ### 验收
 - `pnpm --filter @yukinal/agent test`、`pnpm --filter @yukinal/shared test`、`pnpm --filter @yukinal/desktop test` 全绿。
@@ -237,7 +237,7 @@ WP2 也改 `agent-loop.ts` 的 prompt 无关区域，冲突小；WP3 改 `apps/a
 
 ---
 
-## §7 文档与 ADR（集成者最后统一做）
+## 第七节：文档与 ADR（集成者最后统一做）
 
 1. `docs/adr.md`：标题计数 `ADR 0001–0070` 实际已到 0071，改为 `0001–0076`；新增：
    - **ADR 0072** high 风险精确动作可在 dev/staging 远程目标上会话授权；在 ADR 0009 与“有意为之的边界”记录里标注被部分取代。决定/为什么/代价/备选四栏齐全（代价：长任务中重复重启同一容器不再每次打断，但批准一次后同指纹动作在本次运行内不再可见地确认；用审计 `approvedBy:"user"` + 指纹 + 运行结束清除来界定）。
@@ -250,7 +250,7 @@ WP2 也改 `agent-loop.ts` 的 prompt 无关区域，冲突小；WP3 改 `apps/a
 4. `docs/security.md`（:35-37 附件/备份数字）、`docs/architecture.md:32`（帧）、`docs/boundaries/mcp.md`、`docs/boundaries/provider.md:40-44`、`docs/risk-tiers/dangerous.md`（会话授权规则）同步。
 5. 跑 `node scripts/check-publication.mjs` 与完整 `pnpm check`。
 
-## §8 集成者检查清单（我来复查时逐项核对）
+## 第八节：集成者检查清单（我来复查时逐项核对）
 
 - [ ] 五个工作包各自测试全绿，合并后 `pnpm check` 全绿。
 - [ ] `grep -rn "512 \* 1024\|86_400\|MAX_FRAME_BYTES\|\.max(16)\|\.max(8)"` 没有遗漏的旧副本（与本手册列出的“有意不动”对照）。

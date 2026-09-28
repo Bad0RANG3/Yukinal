@@ -27,6 +27,7 @@ export * from "./types/mcp.js";
 export * from "./types/lifecycle.js";
 export * from "./types/network.js";
 export * from "./types/investigation.js";
+export * from "./types/errors.js";
 export * from "./types/retention.js";
 export * from "./types/schedule.js";
 
@@ -48,6 +49,7 @@ export * from "./schemas/mcp.js";
 export * from "./schemas/lifecycle.js";
 export * from "./schemas/network.js";
 export * from "./schemas/investigation.js";
+export * from "./schemas/errors.js";
 export * from "./schemas/retention.js";
 export * from "./schemas/schedule.js";
 

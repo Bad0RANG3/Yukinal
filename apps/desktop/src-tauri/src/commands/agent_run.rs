@@ -423,11 +423,14 @@ fn interrupt_stale_investigation_run(
     let failure = InvestigationFailure {
         code: TaskFailureCode::Transport,
         message: "上一轮 sidecar 运行未完成，本次恢复前已标记为中断".into(),
-        retryable: true,
+        retryable: TaskFailureCode::Transport.retryable(),
         attempt: run.attempt,
         at: now.clone(),
         detail: None,
-        options: Some(super::failure_options(TaskFailureCode::Transport, true)),
+        options: Some(super::failure_options(
+            TaskFailureCode::Transport,
+            TaskFailureCode::Transport.retryable(),
+        )),
     };
     run.status = InvestigationRunStatus::Interrupted;
     run.updated_at = now.clone();
@@ -457,7 +460,7 @@ pub(crate) fn fail_admitted_investigation_run(
         }
     };
     let now = yukinal_core::sidecar::iso8601_now();
-    let retryable = matches!(code, TaskFailureCode::Transport | TaskFailureCode::Timeout);
+    let retryable = code.retryable();
     let failure = InvestigationFailure {
         code,
         message: message.chars().take(4_096).collect(),
@@ -509,6 +512,49 @@ pub async fn agent_run_start(
     workspace_id: Option<String>,
     focus_server_id: Option<String>,
     permission_mode: Option<String>,
+    mode: Option<String>,
+    policy_id: Option<String>,
+) -> Result<RunStartResponse, String> {
+    start_agent_run(
+        &state,
+        run_id,
+        session_id,
+        task_id,
+        prompt,
+        message_id,
+        parts,
+        delivery,
+        resume,
+        provider_id,
+        model,
+        workspace_id,
+        focus_server_id,
+        permission_mode,
+        mode,
+        policy_id,
+    )
+    .await
+}
+
+/// The body of [`agent_run_start`], callable without a Tauri `State` so the host
+/// lifecycle (startup recovery, scheduler) can start a durable run on the same
+/// code path the UI uses.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_agent_run(
+    state: &AppState,
+    run_id: Option<String>,
+    session_id: String,
+    task_id: Option<String>,
+    prompt: String,
+    message_id: Option<String>,
+    parts: Option<Vec<PromptPart>>,
+    delivery: Option<String>,
+    resume: Option<bool>,
+    provider_id: Option<String>,
+    model: Option<String>,
+    workspace_id: Option<String>,
+    focus_server_id: Option<String>,
+    permission_mode: Option<String>,
     // Run mode (readonly / plan / goal). Forwarded verbatim: the sidecar's
     // permission engine owns the meaning, so Rust must not reinterpret it.
     mode: Option<String>,
@@ -524,9 +570,9 @@ pub async fn agent_run_start(
     // Repair legacy databases before resolving the provider. The UI normally does
     // this through provider_list, but run.start must remain safe when invoked
     // directly or while the startup query is still refreshing.
-    crate::commands::provider::normalize_active_provider(&state)?;
-    let provider = resolve_provider(&state, provider_id.as_deref())?;
-    let api_key = resolve_api_key(&state, &provider)?;
+    crate::commands::provider::normalize_active_provider(state)?;
+    let provider = resolve_provider(state, provider_id.as_deref())?;
+    let api_key = resolve_api_key(state, &provider)?;
     let selected_model = model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| provider.model.clone());
@@ -620,7 +666,7 @@ pub async fn agent_run_start(
                 Err(yukinal_database::DatabaseError::NotFound) => {
                     if let Some(active_run_id) = task.active_run_id.as_deref() {
                         if active_run_id != run_id {
-                            interrupt_stale_investigation_run(&state, &task.id, active_run_id)?;
+                            interrupt_stale_investigation_run(state, &task.id, active_run_id)?;
                         }
                     }
                     let attempt = state
@@ -757,7 +803,7 @@ pub async fn agent_run_start(
             let error = "application shutdown cancelled the Agent run";
             if let Some(task) = task.as_ref() {
                 fail_admitted_investigation_run(
-                    &state,
+                    state,
                     &task.id,
                     &run_id,
                     error,
@@ -775,7 +821,7 @@ pub async fn agent_run_start(
         Err(error) => {
             if let Some(task) = task.as_ref() {
                 fail_admitted_investigation_run(
-                    &state,
+                    state,
                     &task.id,
                     &run_id,
                     &error.to_string(),
@@ -792,7 +838,7 @@ pub async fn agent_run_start(
     if returned_run_id != run_id {
         if let Some(task) = task.as_ref() {
             fail_admitted_investigation_run(
-                &state,
+                state,
                 &task.id,
                 &run_id,
                 "agent sidecar returned a different run id",
@@ -813,7 +859,7 @@ pub async fn agent_run_start(
         Err(error) => {
             if let Some(task) = task.as_ref() {
                 fail_admitted_investigation_run(
-                    &state,
+                    state,
                     &task.id,
                     &run_id,
                     &error,

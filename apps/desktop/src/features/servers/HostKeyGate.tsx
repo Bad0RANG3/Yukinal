@@ -15,7 +15,7 @@
  * ## 为什么不是解析错误文本
  *
  * 仓库的规则是「不要让 UI 根据英文错误文本判断下一步」（见
- * `docs/project-review-and-roadmap.md` 的错误分类工作项）。这里的判断来自结构化命令
+ * `docs/implementation-plan.md` 的错误分类工作项）。这里的判断来自结构化命令
  * `server_host_key_status`，与错误措辞无关；错误分类落地后这个组件也不需要改。
  *
  * ## CA 策略是例外

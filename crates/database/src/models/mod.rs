@@ -82,17 +82,18 @@ pub use execution::{PermissionMode, RiskLevel, ToolExecutionRecord, ToolExecutio
 pub use input::{AddServerInput, AuthenticationInput, UpdateServerInput};
 pub use investigation::{
     DecisionBrief, DecisionBriefStatus, DecisionOption, DecisionOptionContinuation,
-    DecisionOptionStatus, Evidence, EvidenceContentType, EvidenceKind, EvidenceRedactionStatus,
-    FailureOptionAction, Finding, FindingConfidence, FindingKind, InvestigationArtifact,
-    InvestigationFailure, InvestigationFailureOption, InvestigationObservationWindow,
-    InvestigationPermissionMode, InvestigationPlan, InvestigationPlanApproval,
-    InvestigationPlanDeviation, InvestigationPlanStep, InvestigationRun, InvestigationRunMode,
-    InvestigationRunStatus, InvestigationStep, InvestigationStepKind, InvestigationStepStatus,
-    InvestigationTarget, InvestigationTargetHost, InvestigationTask, InvestigationTaskGuardrails,
-    ObservationWindowStatus, PlanApprovalSource, PlanApprovalStatus, PlanDeviationAction,
-    PlanDeviationCode, PlanIdempotency, PlanStatus, PlanStepKind, PlanStepStatus, TaskArtifactKind,
-    TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
-    MAX_ARTIFACT_SERIALIZED_BYTES, MAX_EVIDENCE_SERIALIZED_BYTES,
+    DecisionOptionStatus, ErrorCategory, Evidence, EvidenceContentType, EvidenceKind,
+    EvidenceRedactionStatus, FailureOptionAction, Finding, FindingConfidence, FindingKind,
+    InvestigationArtifact, InvestigationFailure, InvestigationFailureOption,
+    InvestigationObservationWindow, InvestigationPermissionMode, InvestigationPlan,
+    InvestigationPlanApproval, InvestigationPlanDeviation, InvestigationPlanStep, InvestigationRun,
+    InvestigationRunMode, InvestigationRunStatus, InvestigationStep, InvestigationStepKind,
+    InvestigationStepStatus, InvestigationTarget, InvestigationTargetHost, InvestigationTask,
+    InvestigationTaskGuardrails, ObservationWindowStatus, PlanApprovalSource, PlanApprovalStatus,
+    PlanDeviationAction, PlanDeviationCode, PlanIdempotency, PlanStatus, PlanStepKind,
+    PlanStepStatus, TaskArtifactKind, TaskArtifactStatus, TaskAutomationLevel, TaskBudget,
+    TaskFailureCode, TaskPhase, TaskStatus, MAX_ARTIFACT_SERIALIZED_BYTES,
+    MAX_EVIDENCE_SERIALIZED_BYTES,
 };
 pub use provider::{
     AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpAnnotationTrust,
@@ -191,6 +192,7 @@ mod tests {
         assert_wire_contract!(InvestigationStepKind);
         assert_wire_contract!(InvestigationStepStatus);
         assert_wire_contract!(TaskFailureCode);
+        assert_wire_contract!(ErrorCategory);
         assert_wire_contract!(EvidenceKind);
         assert_wire_contract!(EvidenceContentType);
         assert_wire_contract!(EvidenceRedactionStatus);

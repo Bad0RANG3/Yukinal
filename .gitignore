@@ -53,3 +53,6 @@ pnpm-debug.log*
 # local working notes: design drafts and step plans, never committed
 .private/
 .yukinal-dev-data/
+
+# local agent worktrees: per-session checkouts, never part of the repository
+.claude/

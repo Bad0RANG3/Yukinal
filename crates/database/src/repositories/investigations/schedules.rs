@@ -637,7 +637,7 @@ impl<'a> InvestigationsRepository<'a> {
                 let failure = InvestigationFailure {
                     code: TaskFailureCode::Transport,
                     message: format!("active investigation run was interrupted: {reason}"),
-                    retryable: true,
+                    retryable: TaskFailureCode::Transport.retryable(),
                     attempt,
                     at: now.to_string(),
                     detail: Some(serde_json::json!({ "reason": reason })),
@@ -746,7 +746,7 @@ impl<'a> InvestigationsRepository<'a> {
                 let failure = InvestigationFailure {
                     code: TaskFailureCode::Transport,
                     message: "应用重启时持续巡检运行被标记为中断".into(),
-                    retryable: true,
+                    retryable: TaskFailureCode::Transport.retryable(),
                     attempt,
                     at: now.to_string(),
                     detail: Some(serde_json::json!({

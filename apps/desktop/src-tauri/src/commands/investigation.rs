@@ -370,7 +370,16 @@ pub async fn investigation_task_start(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<InvestigationTaskStartResponse, String> {
-    let task_id = validate_id(&task_id, "task id")?;
+    start_investigation_task(&state, &task_id).await
+}
+
+/// Body of [`investigation_task_start`], callable from the host lifecycle
+/// (startup auto-recovery) without a Tauri `State`.
+pub(crate) async fn start_investigation_task(
+    state: &AppState,
+    task_id: &str,
+) -> Result<InvestigationTaskStartResponse, String> {
+    let task_id = validate_id(task_id, "task id")?;
     let task = state
         .database
         .investigations()
@@ -401,7 +410,7 @@ pub async fn investigation_task_start(
     let session_id = format!("session_task_{}", task.id);
     let message_id = format!("message_{run_id}");
     let prompt = autonomous_task_prompt(&task);
-    let response = crate::commands::agent_run::agent_run_start(
+    let response = crate::commands::agent_run::start_agent_run(
         state,
         Some(run_id),
         session_id,
@@ -796,7 +805,19 @@ pub fn investigation_task_recover(
     state: State<'_, AppState>,
     input: InvestigationTaskRecoverInput,
 ) -> Result<InvestigationTaskResponse, String> {
-    let task_id = validate_id(&input.task_id, "task id")?;
+    let task = recover_investigation_task(&state, &input.task_id, input.option_id.as_deref())?;
+    Ok(InvestigationTaskResponse { task })
+}
+
+/// Body of [`investigation_task_recover`], callable from the host lifecycle. The
+/// selected option is optional: `None` is the retry/resume path the startup
+/// recovery uses after it has already validated the task's envelope.
+pub(crate) fn recover_investigation_task(
+    state: &AppState,
+    task_id: &str,
+    option_id: Option<&str>,
+) -> Result<InvestigationTask, String> {
+    let task_id = validate_id(task_id, "task id")?;
     let task = state
         .database
         .investigations()
@@ -805,7 +826,7 @@ pub fn investigation_task_recover(
     if matches!(task.status, TaskStatus::Completed | TaskStatus::Expired) {
         return Err("completed or expired investigation tasks cannot be recovered".into());
     }
-    let selected_action = match input.option_id.as_deref() {
+    let selected_action = match option_id {
         Some(option_id) => Some(
             task.last_failure
                 .as_ref()
@@ -820,7 +841,7 @@ pub fn investigation_task_recover(
         selected_action,
         Some(yukinal_database::models::FailureOptionAction::Inspect)
     ) {
-        return Ok(InvestigationTaskResponse { task });
+        return Ok(task);
     }
     let now = yukinal_core::sidecar::iso8601_now();
     let mut failure = task.last_failure.clone().unwrap_or(InvestigationFailure {
@@ -839,7 +860,7 @@ pub fn investigation_task_recover(
             == Some(yukinal_database::models::FailureOptionAction::Rollback),
         "requiresFreshBaseline": true,
     });
-    if let Some(option_id) = input.option_id.as_deref() {
+    if let Some(option_id) = option_id {
         recovery_detail["selectedOption"] = json!(option_id);
     }
     failure.detail = Some(recovery_detail);
@@ -911,7 +932,7 @@ pub fn investigation_task_recover(
         }
         Some(yukinal_database::models::FailureOptionAction::Inspect) => unreachable!(),
     }
-    Ok(InvestigationTaskResponse { task: recovered })
+    Ok(recovered)
 }
 
 /// Recovery cannot trust an old approval or a baseline captured before a

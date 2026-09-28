@@ -40,6 +40,7 @@
 //! an unbounded SQLite scan. If one starts to, this crate should expose a blocking adapter
 //! rather than running that query inline.
 
+mod migration;
 pub mod models;
 pub mod repositories;
 mod schema;
@@ -70,6 +71,27 @@ pub enum DatabaseError {
     /// The on-disk schema is newer than this binary understands.
     #[error("database schema is version {schema}, this build supports {app}")]
     NewerSchema { schema: i64, app: i64 },
+    /// A single migration failed. The message names the version so a half-upgraded
+    /// database is attributable to one step instead of a bare sqlite error.
+    #[error("migration to version {version} failed: {message}")]
+    Migration { version: i64, message: String },
+    /// The pre-migration copy could not be made. Migrations are not attempted
+    /// without a recovery point, so this is a fail-closed startup error.
+    #[error("could not prepare a pre-migration backup at {path}: {message}")]
+    MigrationBackup { path: String, message: String },
+    /// A migration failed and the database was restored from the retained copy.
+    #[error("migration failed and was rolled back from {backup}: {message}")]
+    MigrationRolledBack { message: String, backup: String },
+    /// A migration failed and the rollback itself failed. The retained copy at
+    /// `backup` is the manual recovery point; the database is in an unknown state.
+    #[error(
+        "migration failed and rolling back from {backup} also failed: {rollback} (migration: {message})"
+    )]
+    MigrationRollbackFailed {
+        message: String,
+        backup: String,
+        rollback: String,
+    },
     #[error("failed to create database directory {0}: {1}")]
     Io(String, #[source] std::io::Error),
 }
@@ -85,6 +107,11 @@ pub struct Database {
 impl Database {
     /// Open (creating when needed) a database file, apply pending migrations and
     /// wire the per-connection pragmas the schema relies on.
+    ///
+    /// When migrations are pending on an existing file, one bounded pre-migration
+    /// copy is written first (see the `migration` module). A failed migration restores
+    /// that copy and returns [`DatabaseError::MigrationRolledBack`], so the caller
+    /// never observes a half-upgraded database.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -93,27 +120,61 @@ impl Database {
                     .map_err(|error| DatabaseError::Io(parent.display().to_string(), error))?;
             }
         }
+        // Captured before `Connection::open`, which creates a 0-byte file for a
+        // brand-new database. There is nothing to preserve in that case.
+        let existing = path.metadata().map(|m| m.len() > 0).unwrap_or(false);
         let mut connection = Connection::open(path)?;
-        Self::init(&mut connection)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-        })
+        Self::prepare(&mut connection)?;
+
+        let backup = if existing && schema::has_pending(&connection)? {
+            let source = schema::on_disk_version(&connection)?;
+            Some(migration::PreMigrationBackup::create(
+                &connection,
+                path,
+                source,
+            )?)
+        } else {
+            None
+        };
+
+        match schema::migrate(&connection) {
+            Ok(()) => Ok(Self {
+                connection: Mutex::new(connection),
+            }),
+            Err(error) => {
+                drop(connection);
+                match backup {
+                    Some(backup) => match backup.restore(path) {
+                        Ok(()) => Err(DatabaseError::MigrationRolledBack {
+                            message: error.to_string(),
+                            backup: backup.path().display().to_string(),
+                        }),
+                        Err(rollback) => Err(DatabaseError::MigrationRollbackFailed {
+                            message: error.to_string(),
+                            backup: backup.path().display().to_string(),
+                            rollback: rollback.to_string(),
+                        }),
+                    },
+                    None => Err(error),
+                }
+            }
+        }
     }
 
     /// Test/sandbox handle; `:memory:` connections have no file to re-open.
     #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
-        Self::init(&mut connection)?;
+        Self::prepare(&mut connection)?;
+        schema::migrate(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
     }
 
-    fn init(connection: &mut Connection) -> Result<()> {
+    fn prepare(connection: &mut Connection) -> Result<()> {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        schema::migrate(connection)?;
         Ok(())
     }
 

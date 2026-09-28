@@ -52,7 +52,7 @@ sidecar 的 stdout 只承载协议帧，**所有日志写 stderr**——一条�
 
 **迟到事件栅栏。** 事件转发到任务状态账本前，宿主要求事件的 `runId` 仍是任务的 `active_run_id`；恢复、终态收口或重试换 run 后，旧 sidecar 的迟到帧只能作为被丢弃的噪声。已终止的 run（包括 `interrupted`）也不接受任何后续事件，事件携带的 `taskId` 必须与持久化 run 归属相同。这样停止/恢复不会被传输时序反向打开，旧 run 仍保留供审计查询。
 
-**失败后的恢复入口。** `investigation_task_recover` 先在宿主事务中关闭旧 run、步骤、计划审批、基线和观察窗口，再返回 `investigating`/`recovery` 或明确的等待/停止状态。桌面端只有收到 `investigating` 且没有 `activeRunId` 时，才自动调用统一的 `investigation_task_start`；重试、重新规划和继续恢复因此不会要求用户复制目标到聊天框，回退、停止和等待用户仍不会隐式启动。启动失败保持可见错误，不能把恢复请求伪装成已运行。
+**失败后的恢复入口。** `investigation_task_recover` 先在宿主事务中关闭旧 run、步骤、计划审批、基线和观察窗口，再返回 `investigating`/`recovery` 或明确的等待/停止状态。恢复入口分两条：显式用户动作仍是「宿主恢复事务 → 桌面端仅在收到 `investigating` 且没有 `activeRunId` 时调用统一的 `investigation_task_start`」；而合规 auto 任务的**自动**恢复判定已移到宿主生命周期（`commands/recovery.rs`），在应用启动、sidecar 就绪后对符合条件的可重试 transport/timeout 失败执行同一恢复事务并按 `maxAttempts` 重启，UI 不再自己决定是否恢复（[ADR 0077](./adr.md#adr-0077合规-auto-任务的自动失败恢复归宿主启动入口)）。重试、重新规划和继续恢复因此不会要求用户复制目标到聊天框；回退、停止和等待用户仍不会隐式启动。启动失败保持可见错误，自动启动失败会把任务退回可见失败态，不能把恢复请求伪装成已运行。应用完全退出期间不运行任何后台恢复。
 
 **异常后的只读复核。** 持久化调度器把上一轮宿主比较结果（`baseline`、`no_change`、`changed` 或 `insufficient_evidence`）转换成下一轮的有界提示。`changed` 要求 sidecar 先检索相邻证据、用宿主的 `investigation.evidence.compare` 查看无正文差异、再在原范围内采集新样本；它不会扩大工具、预算、目标或权限，也不会把差异升级成写入授权。复核仍通过同一条 sidecar、Permission Engine、计划和证据账本路径。
 

@@ -830,10 +830,7 @@ fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailu
     Some(InvestigationFailure {
         code,
         message,
-        retryable: matches!(
-            code,
-            TaskFailureCode::Timeout | TaskFailureCode::Transport | TaskFailureCode::Authentication
-        ),
+        retryable: code.retryable(),
         attempt,
         at: params
             .get("at")
@@ -842,15 +839,7 @@ fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailu
             .map(|value| bounded_audit_text(value, 80))
             .unwrap_or_else(yukinal_core::sidecar::iso8601_now),
         detail: None,
-        options: Some(failure_options(
-            code,
-            matches!(
-                code,
-                TaskFailureCode::Timeout
-                    | TaskFailureCode::Transport
-                    | TaskFailureCode::Authentication
-            ),
-        )),
+        options: Some(failure_options(code, code.retryable())),
     })
 }
 

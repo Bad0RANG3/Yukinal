@@ -30,6 +30,9 @@ pub fn run() {
             // start their own bounded loop. The scheduler never stores provider
             // credentials and cannot widen a task's safety envelope.
             commands::scheduler::start_scheduler(app.handle().clone());
+            // One-shot host-owned recovery for delegated, retryable task failures.
+            // It runs at startup only; the investigation pane never decides this.
+            commands::recovery::start_auto_recovery(app.handle().clone());
 
             forward_terminal_events(app.handle().clone());
             forward_auth_challenges(app.handle().clone());

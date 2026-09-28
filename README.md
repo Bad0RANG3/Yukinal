@@ -152,8 +152,8 @@ scripts/            校验、冒烟、打包和桌面窗口辅助脚本
 | [执行与授权模型](./docs/execution-model.md) | 风险事实、授权票据和 Agent 执行流程 |
 | [安全与数据边界](./docs/security.md) | 凭据、主机身份、数据上限和审计 |
 | [当前限制](./docs/limitations.md) | 已知缺口与有意保留的安全边界 |
-| [项目自我审查与后续计划](./docs/project-review-and-roadmap.md) | 当前短板、优先级和分阶段完善计划 |
-| [三轮审计与重构记录](./docs/refactor-progress.md) | 本次结构、可靠性与 GUI 审计的进度、证据和外部验证限制 |
+| [下一阶段实施计划](./docs/implementation-plan.md) | 可继续实施的边界、优先级、工作包和验收条件 |
+| [历史审计与计划](./docs/history/README.md) | 旧审查、三轮审计及已完成的限制放宽手册 |
 | [开始开发](./docs/development.md) | 环境、启动方式、首次使用和验证命令 |
 | [打包与分发](./docs/packaging.md) | 安装包、sidecar 资源和平台状态 |
 | [Provider 边界](./docs/boundaries/provider.md) · [MCP 边界](./docs/boundaries/mcp.md) | 接入协议与跨模块约束 |

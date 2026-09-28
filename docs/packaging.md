@@ -49,7 +49,7 @@ pnpm run package           # 契约库 -> agent 单文件 -> 打包契约 -> tau
 no agent bundle to launch (searched <它找过的每一个路径>); run `pnpm --filter @yukinal/agent build`
 ```
 
-`searched` 里包含打包路径，所以用户和排查的人都能看见它到底去哪儿找过 —— 有一条测试专门钉住这一点。`node` 本身完全不存在时，启动错误会直接点名最低版本、`nodejs.org` 与 `YUKINAL_NODE`。仍然**不做** `node --version` 预检，这是 ADR 0013 的知情决定（每次启动都多起一个进程，而且仍抓不到“装了但太旧”）；因此已安装的错误版本可能表现为 stderr 上的一行解析错误加退出码。
+`searched` 里包含打包路径，所以用户和排查的人都能看见它到底去哪儿找过 —— 有一条测试专门钉住这一点。正常 Node 启动路径会在拉起 sidecar 前执行有 5 秒上限的 `node --version` 预检；缺失、过旧或无法解析都会点名最低版本、`nodejs.org` 与 `YUKINAL_NODE`。显式 `YUKINAL_AGENT_COMMAND` 是自定义程序，刻意不做 Node 版本探测。
 
 ## 运行时会用到的路径与开关
 
@@ -91,6 +91,16 @@ pnpm --filter @yukinal/desktop icon     # 即 tauri icon design/app-icon.png
 5. 提交为 `release: prepare vX.Y.Z`，创建 annotated tag：`git tag -a vX.Y.Z -m "Yukinal vX.Y.Z"`。
 6. 推送提交与标签；`.github/workflows/package.yml` 会在 `v*` 标签上重新运行门禁，并上传三个平台的安装包 artifact。
 7. 发布负责人下载 artifact、核对来源和校验值，再按 GitHub Release 说明附上平台限制；未签名产物不得被描述成已签名发布。
+
+### 数据库升级与恢复证据
+
+每次 schema 变化时，除常规门禁外还要能复现一次旧库升级与失败恢复。当前可重复的命令是：
+
+```bash
+cargo test -p yukinal-database --test migration
+```
+
+它用测试内构造的旧 schema fixture 建立旧库，覆盖「旧库 → 当前版本」成功升级并保留上一版本副本、迁移失败不推进 `user_version` 且保留原行、副本 manifest 的来源版本与 SHA-256、以及只存在于 WAL 侧车文件的写入也进入副本。产物是主库旁的 `<库文件>.pre-migration.bak` 与 `.pre-migration.json`；失败时应用会自动还原，诊断信息里同时给出失败的迁移版本与副本路径。发布证据包记录 commit、命令与结果，并标明是否使用了来自真实发布版二进制的脱敏 fixture —— 后者目前还没有。
 
 ## 未签名与未验证的部分
 

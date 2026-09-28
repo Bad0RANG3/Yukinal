@@ -39,6 +39,7 @@ pub mod logs;
 pub mod mcp;
 pub mod network;
 pub mod provider;
+pub mod recovery;
 pub mod scheduler;
 pub mod server;
 pub mod services;

@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  shouldAutoRecoverDelegatedTask,
-  shouldAutoStartRecoveredTask,
-} from "../src/features/investigations/recovery.js";
+import { shouldAutoStartRecoveredTask } from "../src/features/investigations/recovery.js";
+import { describeInvestigationFailure } from "../src/features/investigations/error-display.js";
 import {
   canDelegateAgentAuto,
   effectiveTaskPermissionMode,
@@ -26,26 +24,21 @@ test("retry-like recovery auto-starts only after the host clears the active run"
   assert.equal(shouldAutoStartRecoveredTask({ status: "stopped", activeRunId: undefined }), false);
 });
 
-test("only retryable delegated goals auto-recover within their attempt budget", () => {
-  const base = {
-    status: "failed" as const,
-    activeRunId: undefined,
-    scope: staging,
-    mode: "goal" as const,
-    permissionMode: "auto" as const,
-    automationLevel: "execute" as const,
-    budget: { maxAttempts: 3 },
-    lastFailure: { retryable: true, attempt: 1, code: "transport" as const },
-  };
-  assert.equal(shouldAutoRecoverDelegatedTask(base), true);
-  assert.equal(shouldAutoRecoverDelegatedTask({ ...base, activeRunId: "run_live" }), false);
-  assert.equal(shouldAutoRecoverDelegatedTask({ ...base, permissionMode: "ask" }), false);
-  assert.equal(shouldAutoRecoverDelegatedTask({ ...base, lastFailure: { ...base.lastFailure, retryable: false } }), false);
-  assert.equal(shouldAutoRecoverDelegatedTask({ ...base, lastFailure: { ...base.lastFailure, attempt: 3 } }), false);
-  assert.equal(shouldAutoRecoverDelegatedTask({
-    ...base,
-    scope: { host: "remote", environment: "production" },
-  }), false);
+test("a failure is presented by its category, not its message text", () => {
+  const transport = describeInvestigationFailure({ code: "transport" });
+  assert.equal(transport.label, "连接中断");
+  assert.ok(transport.nextStep.length > 0);
+
+  // Two different codes in the same category present identically; the message is
+  // never consulted for the next step.
+  assert.deepEqual(
+    describeInvestigationFailure({ code: "approval_rejected" }),
+    describeInvestigationFailure({ code: "approval_required" }),
+  );
+  assert.notDeepEqual(
+    describeInvestigationFailure({ code: "transport" }),
+    describeInvestigationFailure({ code: "permission_denied" }),
+  );
 });
 
 test("task auto delegation is available only for executable remote development/staging goals", () => {
