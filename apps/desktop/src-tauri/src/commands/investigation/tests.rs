@@ -189,7 +189,7 @@ fn autonomous_task_prompt_preserves_the_goal_and_completion_contract() {
     delegated.scope.environment = Environment::Staging;
     let delegated_prompt = autonomous_task_prompt(&delegated);
     assert!(delegated_prompt.contains("受限 auto 委托"));
-    assert!(delegated_prompt.contains("medium 风险的配置备份/编辑"));
+    assert!(delegated_prompt.contains("medium 风险的配置备份、编辑与整文件写入"));
     assert!(delegated_prompt.contains("备份清理、恢复、重启、包安装"));
 }
 
@@ -259,6 +259,44 @@ fn task_guardrails_are_normalized_and_have_a_bounded_window() {
     assert!(task_time_window_error(&expired_task).is_err());
     expired_task.guardrails.expires_at = None;
     assert!(task_time_window_error(&expired_task).is_ok());
+}
+
+#[test]
+fn guardrail_counts_and_window_accept_their_new_upper_bound() {
+    // ADR 0075 raised the tool / path-prefix caps to 128 and the window to three years.
+    let tools: Vec<String> = (0..128).map(|index| format!("tool.{index}")).collect();
+    let prefixes: Vec<String> = (0..128).map(|index| format!("/srv/path{index}")).collect();
+    let guardrails = validate_guardrails(Some(InvestigationTaskGuardrails {
+        not_before_at: Some("2026-01-01T00:00:00Z".into()),
+        expires_at: Some("2028-12-30T00:00:00Z".into()),
+        forbidden_tools: tools.clone(),
+        forbidden_path_prefixes: prefixes.clone(),
+    }))
+    .expect("128 of each and a three-year window are inside the bound");
+    assert_eq!(guardrails.forbidden_tools.len(), 128);
+    assert_eq!(guardrails.forbidden_path_prefixes.len(), 128);
+
+    let mut too_many_tools = tools;
+    too_many_tools.push("tool.128".into());
+    assert!(validate_guardrails(Some(InvestigationTaskGuardrails {
+        forbidden_tools: too_many_tools,
+        ..Default::default()
+    }))
+    .is_err());
+    let mut too_many_prefixes = prefixes;
+    too_many_prefixes.push("/srv/one-too-many".into());
+    assert!(validate_guardrails(Some(InvestigationTaskGuardrails {
+        forbidden_path_prefixes: too_many_prefixes,
+        ..Default::default()
+    }))
+    .is_err());
+    // 2026-01-01 to 2029-01-01 is 1096 days, one over the 1095-day bound.
+    assert!(validate_guardrails(Some(InvestigationTaskGuardrails {
+        not_before_at: Some("2026-01-01T00:00:00Z".into()),
+        expires_at: Some("2029-01-01T00:00:00Z".into()),
+        ..Default::default()
+    }))
+    .is_err());
 }
 
 #[test]

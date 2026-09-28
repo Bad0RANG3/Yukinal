@@ -3,10 +3,11 @@
  *
  * The split of responsibility is the point of this file:
  *
- * - the **host** decides which servers exist, that they are running, and what their tools are
- *   called (it owns the processes);
- * - the **agent** decides what a discovered tool means — its risk, its local input contract,
- *   and its provenance — and registers it.
+ * - the **host** decides which servers exist, that they are running, what their tools are
+ *   called, and each tool's *effective risk* (it owns the processes and the annotation-trust
+ *   decision, ADR 0074);
+ * - the **agent** turns a discovered tool into a local declaration — its input contract and
+ *   its provenance — using the host's risk, never the server's own annotations.
  *
  * Nothing here starts a server, retries a dead one, or promotes a tool's trust. A failure is
  * reported with the server id and the host's own message, because "MCP is unavailable" without

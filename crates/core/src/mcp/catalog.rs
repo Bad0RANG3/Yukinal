@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use yukinal_database::models::McpServerConfig;
+use yukinal_database::models::{McpAnnotationTrust, McpServerConfig};
 use yukinal_database::Database;
 use yukinal_net::OutboundProxy;
 
@@ -29,7 +29,8 @@ use crate::supervisor::RestartRecord;
 
 use super::config::{McpTransportConfig, DEFAULT_REQUEST_TIMEOUT};
 use super::descriptor::{
-    internal_tool_name, is_segment, McpExitRecord, McpToolDescriptor, MCP_NAMESPACE,
+    internal_tool_name, is_segment, McpExitRecord, McpToolAnnotations, McpToolDescriptor,
+    MCP_NAMESPACE,
 };
 use super::error::McpError;
 use super::oauth::{McpOAuthSourceConfig, McpOAuthTokenSource};
@@ -152,6 +153,29 @@ pub struct McpCatalogTool {
     pub remote_name: Option<String>,
     pub description: String,
     pub input_schema: Value,
+    /// 宿主解析出的有效风险档位（ADR 0074）。sidecar 只读这个值，不自己看注解。
+    pub risk: &'static str,
+}
+
+/// 宿主把「服务器信任 + 注解」映射成有界档位。
+///
+/// 这是整个 MCP 风险规则的唯一出处：sidecar 拿到的只是这里算出的结果，服务器自己的说法
+/// 从不直接生效。`None` 永远得到 `critical`（默认不采信）；显式信任后才允许 `readOnlyHint`
+/// 降到 `low`、`destructiveHint == false` 降到 `medium`，其余仍为 `high`。
+#[must_use]
+pub fn effective_risk(trust: McpAnnotationTrust, annotations: &McpToolAnnotations) -> &'static str {
+    match trust {
+        McpAnnotationTrust::None => "critical",
+        McpAnnotationTrust::Trusted => {
+            if annotations.read_only_hint == Some(true) {
+                "low"
+            } else if annotations.destructive_hint == Some(false) {
+                "medium"
+            } else {
+                "high"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -443,6 +467,7 @@ fn catalog_server(
                 remote_name: descriptor.remote_name.clone(),
                 description: descriptor.description.clone(),
                 input_schema: descriptor.input_schema.clone(),
+                risk: effective_risk(row.annotation_trust, &descriptor.annotations),
             }),
             // `internal_tool_name` 只在长度预算被打爆时失败，而那个预算在导入时就已经由
             // `SEGMENT_MAX_LENGTH` 保证过。走到这里意味着某处不变量破了：跳过这个工具并如实
@@ -612,6 +637,7 @@ mod tests {
             enabled,
             allowed_tools: vec!["echo".to_string(), "explode".to_string()],
             trust_level: "unreviewed".to_string(),
+            annotation_trust: McpAnnotationTrust::None,
         }
     }
 
@@ -753,6 +779,60 @@ mod tests {
         assert_eq!(split_mcp_tool_name("mcp.mcp-1.echo.read"), None);
         assert_eq!(split_mcp_tool_name("mcp..echo"), None);
         assert_eq!(split_mcp_tool_name("mcp.mcp-1."), None);
+    }
+
+    #[test]
+    fn effective_risk_is_bounded_and_defaults_to_critical() {
+        let silent = McpToolAnnotations::default();
+        let read_only = McpToolAnnotations {
+            read_only_hint: Some(true),
+            ..Default::default()
+        };
+        let non_destructive = McpToolAnnotations {
+            destructive_hint: Some(false),
+            ..Default::default()
+        };
+        let destructive = McpToolAnnotations {
+            destructive_hint: Some(true),
+            ..Default::default()
+        };
+
+        // Without explicit trust, even a supposedly read-only tool is critical.
+        assert_eq!(
+            effective_risk(McpAnnotationTrust::None, &silent),
+            "critical"
+        );
+        assert_eq!(
+            effective_risk(McpAnnotationTrust::None, &read_only),
+            "critical"
+        );
+
+        assert_eq!(
+            effective_risk(McpAnnotationTrust::Trusted, &read_only),
+            "low"
+        );
+        assert_eq!(
+            effective_risk(McpAnnotationTrust::Trusted, &non_destructive),
+            "medium"
+        );
+        // `readOnlyHint` wins over `destructiveHint: false`.
+        assert_eq!(
+            effective_risk(
+                McpAnnotationTrust::Trusted,
+                &McpToolAnnotations {
+                    read_only_hint: Some(true),
+                    destructive_hint: Some(false),
+                    ..Default::default()
+                }
+            ),
+            "low"
+        );
+        // A silent, destructive or otherwise unknown tool stays high, never low.
+        assert_eq!(effective_risk(McpAnnotationTrust::Trusted, &silent), "high");
+        assert_eq!(
+            effective_risk(McpAnnotationTrust::Trusted, &destructive),
+            "high"
+        );
     }
 
     /* ── 已经存在的 http 行 ───────────────────────────────────────────────── */
@@ -1030,6 +1110,7 @@ mod tests {
                 enabled: true,
                 allowed_tools: Vec::new(),
                 trust_level: "unreviewed".to_string(),
+                annotation_trust: McpAnnotationTrust::None,
             },
         );
 

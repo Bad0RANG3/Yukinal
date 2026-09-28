@@ -5,7 +5,7 @@
  * skipped — it must never take the process down.
  */
 
-import { NdjsonDecoder, RPC_ERROR, encodeFrame, type JsonRpcFailure, type JsonRpcRequest } from "@yukinal/shared";
+import { NdjsonDecoder, RPC_ERROR, encodeFrame, MAX_SIDECAR_FRAME_BYTES, type JsonRpcFailure, type JsonRpcRequest } from "@yukinal/shared";
 
 import type { AgentLogger } from "../config.js";
 import { RpcFailure } from "../errors.js";
@@ -27,15 +27,15 @@ export function startStdioRpc(deps: {
   // 通知（agent.stream / agent.log）走 stdout 协议帧（ADR 0006）。
   const decoder = new NdjsonDecoder((line, error) => {
     deps.log.warn("dropped malformed frame", { head: line.slice(0, 120), error: String(error) });
-  });
+  }, MAX_SIDECAR_FRAME_BYTES);
 
   // 上行通知（agent.stream）也是协议帧；desktop 从 stdout 读。
   deps.router.attachNotifications((method, params) => {
-    process.stdout.write(encodeFrame({ jsonrpc: "2.0", method, params }));
+    process.stdout.write(encodeFrame({ jsonrpc: "2.0", method, params }, MAX_SIDECAR_FRAME_BYTES));
   });
 
   const write = (frame: JsonRpcFailure | { jsonrpc: "2.0"; id: number; result: unknown }): void => {
-    process.stdout.write(encodeFrame(frame));
+    process.stdout.write(encodeFrame(frame, MAX_SIDECAR_FRAME_BYTES));
   };
 
   // 响应帧在 handler 结算时才写出。于是「会等待的」handler（`delivery: "sync"` 的

@@ -535,6 +535,171 @@ pub(super) async fn filesystem_backup_list(
     ))
 }
 
+/// Hard bound on how many `available` rows one retention scan reads. This is a planning
+/// read, not a cleanup: it must return promptly even on a long-lived ledger.
+const MAX_RETENTION_SCAN: usize = 512;
+/// The retention result never lists more than this many candidates at once.
+const MAX_RETENTION_CANDIDATES: usize = 32;
+
+/// Plan a cross-task backup rotation without touching the remote target (ADR 0076).
+///
+/// This is `filesystem.backup.retention`: a read-only, host-owned ledger query. It returns
+/// the exact backups that a `backup_rotation` step would remove; it never deletes, and it
+/// never probes the remote sibling, so a candidate is a plan input, not a proof.
+pub(super) async fn filesystem_backup_retention(
+    state: &AppState,
+    server_id: &str,
+    input: &Value,
+    _request_context: &HostToolExecuteRequest,
+) -> Result<Value, String> {
+    let input = match serde_json::from_value::<FilesystemBackupRetentionInput>(input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("filesystem.backup.retention input is invalid: {error}"),
+                false,
+                None,
+            ))
+        }
+    };
+    if input.keep_latest.is_none() && input.older_than_days.is_none() {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.retention requires keepLatest or olderThanDays",
+            false,
+            None,
+        ));
+    }
+    if input
+        .keep_latest
+        .is_some_and(|keep| !(1..=64).contains(&keep))
+    {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.retention keepLatest must be between 1 and 64",
+            false,
+            None,
+        ));
+    }
+    if input
+        .older_than_days
+        .is_some_and(|days| !(1..=3650).contains(&days))
+    {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.retention olderThanDays must be between 1 and 3650",
+            false,
+            None,
+        ));
+    }
+    if let Some(prefix) = input.path_prefix.as_deref() {
+        if let Err(error) = validate_remote_path(prefix) {
+            return Ok(failed("invalid_input", error, false, None));
+        }
+    }
+    let (records, scan_truncated) = match state
+        .database
+        .filesystem_backups()
+        .list_available_for_server_with_path_prefix(
+            server_id,
+            input.path_prefix.as_deref(),
+            MAX_RETENTION_SCAN,
+        ) {
+        Ok(result) => result,
+        Err(DatabaseError::Validation(error)) => {
+            return Ok(failed("invalid_input", error, false, None))
+        }
+        Err(error) => return Ok(failed("internal", error.to_string(), false, None)),
+    };
+    let filtered: Vec<_> = records
+        .into_iter()
+        .filter(|record| {
+            input
+                .path_prefix
+                .as_deref()
+                .is_none_or(|prefix| record.path.starts_with(prefix))
+        })
+        .collect();
+    let scanned_count = filtered.len();
+    let (mut candidates, kept_count) = retention_candidates(
+        filtered,
+        input.keep_latest,
+        input.older_than_days,
+        yukinal_time::now_epoch_seconds(),
+    );
+    let candidate_truncated = candidates.len() > MAX_RETENTION_CANDIDATES;
+    if candidate_truncated {
+        candidates.truncate(MAX_RETENTION_CANDIDATES);
+    }
+    let candidates = candidates
+        .into_iter()
+        .map(|backup| FilesystemBackupRetentionCandidateResult {
+            path: backup.path,
+            backup_path: backup.backup_path,
+            revision: backup.revision,
+            task_id: backup.task_id,
+            created_at: backup.created_at,
+            bytes_backed_up: backup.bytes_backed_up,
+        })
+        .collect();
+    Ok(success(
+        serde_json::to_value(FilesystemBackupRetentionResult {
+            candidates,
+            truncated: scan_truncated || candidate_truncated,
+            kept_count,
+            scanned_count,
+        })
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+/// Newest-first per original path, then keep/delete selection. Pure, so the table can be
+/// tested without a database or a target. When both filters are given a record must satisfy
+/// **both** (intersection), which is the conservative reading of "keep N and also require
+/// age".
+pub(super) fn retention_candidates(
+    mut records: Vec<FilesystemBackupRecord>,
+    keep_latest: Option<usize>,
+    older_than_days: Option<u64>,
+    now_epoch_seconds: u64,
+) -> (Vec<FilesystemBackupRecord>, usize) {
+    records.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| right.created_at.cmp(&left.created_at))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    let cutoff =
+        older_than_days.map(|days| now_epoch_seconds.saturating_sub(days.saturating_mul(86_400)));
+    let mut candidates = Vec::new();
+    let mut index_in_path = 0usize;
+    let mut previous_path: Option<&str> = None;
+    for record in &records {
+        if previous_path != Some(record.path.as_str()) {
+            previous_path = Some(record.path.as_str());
+            index_in_path = 0;
+        }
+        let beyond_keep = keep_latest.is_some_and(|limit| index_in_path >= limit);
+        let old_enough = cutoff.is_some_and(|cutoff| {
+            yukinal_time::parse_iso8601_utc(&record.created_at)
+                .is_some_and(|created| created < cutoff)
+        });
+        let is_candidate = match (keep_latest.is_some(), older_than_days.is_some()) {
+            (true, true) => beyond_keep && old_enough,
+            (true, false) => beyond_keep,
+            (false, true) => old_enough,
+            (false, false) => false,
+        };
+        if is_candidate {
+            candidates.push(record.clone());
+        }
+        index_in_path += 1;
+    }
+    let kept = records.len().saturating_sub(candidates.len());
+    (candidates, kept)
+}
+
 pub(super) async fn filesystem_backup(
     state: &AppState,
     server_id: &str,
@@ -635,6 +800,24 @@ pub(super) async fn filesystem_backup_cleanup(
             ))
         }
     };
+    match input.resolve() {
+        Ok(BackupCleanupRequest::Single(item)) => {
+            filesystem_backup_cleanup_single(state, server_id, item, cancel, request_context).await
+        }
+        Ok(BackupCleanupRequest::Batch(items)) => {
+            filesystem_backup_cleanup_batch(state, server_id, items, cancel, request_context).await
+        }
+        Err(error) => Ok(failed("invalid_input", error, false, None)),
+    }
+}
+
+async fn filesystem_backup_cleanup_single(
+    state: &AppState,
+    server_id: &str,
+    input: FilesystemBackupCleanupItemInput,
+    cancel: &CancellationToken,
+    request_context: &HostToolExecuteRequest,
+) -> Result<Value, String> {
     let request = match AgentCleanupBackupRequest::check(
         &input.path,
         &input.backup_path,
@@ -724,6 +907,237 @@ pub(super) async fn filesystem_backup_cleanup(
         })
         .map_err(|error| error.to_string())?,
     ))
+}
+
+/// One batch item's outcome. `removed` is only ever produced after a verified remote delete
+/// and a consumed ledger row; everything else is explicit.
+fn cleanup_item_removed(
+    item: &FilesystemBackupCleanupItemInput,
+    revision: &str,
+    bytes_deleted: usize,
+) -> FilesystemBackupCleanupBatchItemResult {
+    FilesystemBackupCleanupBatchItemResult {
+        path: item.path.clone(),
+        backup_path: item.backup_path.clone(),
+        outcome: "removed".to_string(),
+        revision: Some(revision.to_string()),
+        bytes_deleted: Some(bytes_deleted),
+        reason: None,
+    }
+}
+
+fn cleanup_item_not_removed(
+    item: &FilesystemBackupCleanupItemInput,
+    outcome: &str,
+    reason: impl Into<String>,
+) -> FilesystemBackupCleanupBatchItemResult {
+    FilesystemBackupCleanupBatchItemResult {
+        path: item.path.clone(),
+        backup_path: item.backup_path.clone(),
+        outcome: outcome.to_string(),
+        revision: None,
+        bytes_deleted: None,
+        reason: Some(reason.into()),
+    }
+}
+
+/// A batch cleanup walks its items in order, re-reading the ledger for each one.
+///
+/// Cross-task deletion is allowed only when the current plan step is an approved
+/// `backup_rotation` step that bound this exact item. Between items the cancellation token
+/// is checked; once cancelled, the remaining items are reported as skipped rather than
+/// silently omitted. Partial success is always visible in `partial`.
+async fn filesystem_backup_cleanup_batch(
+    state: &AppState,
+    server_id: &str,
+    items: Vec<FilesystemBackupCleanupItemInput>,
+    cancel: &CancellationToken,
+    request_context: &HostToolExecuteRequest,
+) -> Result<Value, String> {
+    // Validate every item before touching anything: one malformed item must not let the
+    // earlier items run and then fail the whole call.
+    let mut requests = Vec::with_capacity(items.len());
+    for item in &items {
+        match AgentCleanupBackupRequest::check(
+            &item.path,
+            &item.backup_path,
+            &item.expected_revision,
+        ) {
+            Ok(request) => requests.push(request),
+            Err(error) => return Ok(filesystem_failure(error, cancel)),
+        }
+    }
+
+    let mut results = Vec::with_capacity(items.len());
+    let mut session_ready = false;
+    for (index, item) in items.iter().enumerate() {
+        if cancel.is_cancelled() {
+            results.push(cleanup_item_not_removed(item, "skipped", "cancelled"));
+            continue;
+        }
+        let backup = match state.database.filesystem_backups().find_available(
+            server_id,
+            &item.path,
+            &item.backup_path,
+        ) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                results.push(cleanup_item_not_removed(
+                    item,
+                    "skipped",
+                    "no available host ledger record for this server and backup path",
+                ));
+                continue;
+            }
+            Err(error) => {
+                results.push(cleanup_item_not_removed(
+                    item,
+                    "failed",
+                    format!("could not read the filesystem backup ledger: {error}"),
+                ));
+                continue;
+            }
+        };
+        let cross_task = !backup_owner_matches_request(&backup, request_context);
+        if cross_task && !cross_task_cleanup_is_plan_bound(state, request_context, item) {
+            results.push(cleanup_item_not_removed(
+                item,
+                "skipped",
+                "owned by another investigation task and not bound by the approved rotation step",
+            ));
+            continue;
+        }
+        if !backup
+            .revision
+            .eq_ignore_ascii_case(&item.expected_revision)
+        {
+            results.push(cleanup_item_not_removed(
+                item,
+                "failed",
+                "expectedRevision does not match the revision recorded for this backup",
+            ));
+            continue;
+        }
+        if !session_ready {
+            if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+                // One transport failure is very likely to repeat for every remaining item,
+                // so stop and mark the rest explicitly instead of hammering a dead target.
+                results.push(cleanup_item_not_removed(item, "failed", error));
+                for remaining in items.iter().skip(index + 1) {
+                    results.push(cleanup_item_not_removed(
+                        remaining,
+                        "skipped",
+                        "transport failed for an earlier item",
+                    ));
+                }
+                break;
+            }
+            session_ready = true;
+        }
+        let service = remote_file_service(state);
+        let cleanup = tokio::select! {
+            result = service.agent_cleanup_backup(server_id, &requests[index]) => match result {
+                Ok(cleanup) => cleanup,
+                Err(error) => {
+                    results.push(cleanup_item_not_removed(
+                        item,
+                        "failed",
+                        format!("{error}"),
+                    ));
+                    continue;
+                }
+            },
+            _ = cancel.cancelled() => {
+                results.push(cleanup_item_not_removed(item, "skipped", "cancelled"));
+                continue;
+            }
+        };
+        if let Err(error) = state.database.filesystem_backups().mark_deleted(
+            server_id,
+            &cleanup.path,
+            &cleanup.backup_path,
+            &yukinal_core::sidecar::iso8601_now(),
+        ) {
+            results.push(cleanup_item_not_removed(
+                item,
+                "failed",
+                format!(
+                    "removed the remote backup but could not consume its ledger entry: {error}"
+                ),
+            ));
+            continue;
+        }
+        results.push(cleanup_item_removed(
+            item,
+            &cleanup.revision,
+            cleanup.bytes_deleted,
+        ));
+    }
+
+    let partial = results.iter().any(|item| item.outcome != "removed");
+    Ok(success(
+        serde_json::to_value(FilesystemBackupCleanupBatchResult {
+            items: results,
+            partial,
+        })
+        .map_err(|error| error.to_string())?,
+    ))
+}
+
+/// Whether an approved rotation step bound this exact cross-task item.
+///
+/// The generic plan check already compares the whole `items` binding before execution; this
+/// is the execution-time re-check, so a forged IPC request cannot delete another task's
+/// backup by omitting the plan binding.
+pub(super) fn cross_task_cleanup_is_plan_bound(
+    state: &AppState,
+    request_context: &HostToolExecuteRequest,
+    item: &FilesystemBackupCleanupItemInput,
+) -> bool {
+    let (Some(task_id), Some(plan_id), Some(step_id)) = (
+        request_context.task_id.as_deref(),
+        request_context.plan_id.as_deref(),
+        request_context.plan_step_id.as_deref(),
+    ) else {
+        return false;
+    };
+    let Ok(Some(plan)) = state.database.investigations().latest_plan(task_id) else {
+        return false;
+    };
+    if plan.id != plan_id {
+        return false;
+    }
+    let Some(step) = plan.steps.iter().find(|step| step.id == step_id) else {
+        return false;
+    };
+    if step.kind != PlanStepKind::Action
+        || !step.requires_approval
+        || !step
+            .allowed_tools
+            .iter()
+            .any(|tool| tool == FILESYSTEM_BACKUP_CLEANUP)
+    {
+        return false;
+    }
+    let Some(expected) = step
+        .input_bindings
+        .as_ref()
+        .and_then(|bindings| bindings.get("items"))
+    else {
+        return false;
+    };
+    let Ok(expected_items) =
+        serde_json::from_str::<Vec<FilesystemBackupCleanupItemInput>>(expected)
+    else {
+        return false;
+    };
+    expected_items.iter().any(|candidate| {
+        candidate.path == item.path
+            && candidate.backup_path == item.backup_path
+            && candidate
+                .expected_revision
+                .eq_ignore_ascii_case(&item.expected_revision)
+    })
 }
 
 pub(super) async fn filesystem_restore(

@@ -4,7 +4,7 @@ import test from "node:test";
 import type { Evidence, ToolTarget } from "@yukinal/shared";
 
 import { ToolFailure, type ToolContext } from "../tool.js";
-import { investigationEvidenceTriageTool } from "./investigation-evidence-triage.js";
+import { investigationEvidenceTriageInputSchema, investigationEvidenceTriageTool } from "./investigation-evidence-triage.js";
 
 const target: ToolTarget = { host: "remote", serverId: "srv_triage", environment: "staging" };
 const hash = "a".repeat(64);
@@ -138,4 +138,36 @@ test("evidence triage requires a durable task and at least one retrievable item"
     tool.execute({ evidenceIds: ["ev_missing"] }, context()),
     (error: unknown) => error instanceof ToolFailure && error.code === "not_found",
   );
+});
+
+test("evidence triage accepts up to 32 ids and refuses the 33rd before fetching", () => {
+  const ids = Array.from({ length: 33 }, (_, index) => `ev_${index}`);
+  assert.equal(investigationEvidenceTriageInputSchema.safeParse({ evidenceIds: ids.slice(0, 32) }).success, true);
+  assert.equal(investigationEvidenceTriageInputSchema.safeParse({ evidenceIds: ids }).success, false);
+});
+
+test("evidence triage fetches at most 8 items concurrently", async () => {
+  const rows = new Map<string, Evidence>();
+  for (let index = 0; index < 32; index += 1) {
+    const id = `ev_${index}`;
+    rows.set(id, evidence(id, "server.logs", "log", { lines: [] }));
+  }
+  let active = 0;
+  let peak = 0;
+  const tool = investigationEvidenceTriageTool({
+    fetchEvidence: async ({ evidenceId }) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active -= 1;
+      const row = rows.get(evidenceId);
+      return row ? { status: "success", evidence: row } : { status: "not_found" };
+    },
+  });
+
+  const result = await tool.execute({ evidenceIds: [...rows.keys()] }, context());
+
+  assert.equal(result.evaluatedEvidence, 32);
+  assert.ok(peak > 1, "the fetches must actually overlap, or this proves nothing");
+  assert.ok(peak <= 8, `the fan-out must stay bounded at 8, saw ${peak}`);
 });

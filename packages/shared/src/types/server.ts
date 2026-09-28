@@ -35,6 +35,14 @@ export interface HostCertificateAuthority {
   revocationListSigners?: string[];
 }
 
+/**
+ * Maximum number of independent keys trusted to sign the host-certificate revocation list.
+ *
+ * ADR 0075 raised this from 8 to 16. The Rust side has the same bound in
+ * `yukinal_ssh::MAX_KRL_SIGNERS`; this is the contract's own copy for the schema below.
+ */
+export const MAX_KRL_SIGNERS = 16;
+
 export interface ServerConnection {
   host: string;
   port: number;

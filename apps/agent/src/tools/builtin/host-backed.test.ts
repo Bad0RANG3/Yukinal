@@ -7,6 +7,7 @@ import { dockerPsTool } from "./docker-ps.js";
 import { dockerRestartTool } from "./docker-restart.js";
 import { filesystemBackupTool } from "./filesystem-backup.js";
 import { filesystemBackupListTool } from "./filesystem-backup-list.js";
+import { filesystemBackupRetentionTool } from "./filesystem-backup-retention.js";
 import { filesystemBackupCleanupTool } from "./filesystem-backup-cleanup.js";
 import { filesystemEditTool } from "./filesystem-edit.js";
 import { filesystemReadTool } from "./filesystem-read.js";
@@ -464,8 +465,47 @@ test("filesystem backup creates a bounded recovery copy and restore is high-risk
     expectedRevision: REVISION,
   }, context);
   assert.equal(cleanup.risk, "medium");
+  assert.ok(!("items" in cleaned), "a single-item cleanup returns the single-item output");
   assert.equal(cleaned.bytesDeleted, 10);
   assert.deepEqual(seen.map((request) => request.toolName), ["filesystem.backup", "filesystem.restore", "filesystem.backup.cleanup"]);
+});
+
+test("filesystem.backup.retention is read-only and reports batch cleanup output", async () => {
+  const retention = filesystemBackupRetentionTool(
+    fakeHost({
+      status: "success",
+      output: { candidates: [], truncated: false, keptCount: 0, scannedCount: 0 },
+    }),
+  );
+  assert.equal(retention.risk, "read");
+  assert.notEqual(retention.effectful, true);
+  const plan = await retention.execute({ olderThanDays: 30 }, context);
+  assert.deepEqual(plan, { candidates: [], truncated: false, keptCount: 0, scannedCount: 0 });
+
+  const cleanup = filesystemBackupCleanupTool(
+    fakeHost({
+      status: "success",
+      output: {
+        items: [
+          { path: "/etc/app.env", backupPath: "/etc/.b1", outcome: "removed", revision: "a".repeat(64), bytesDeleted: 3 },
+          { path: "/etc/app.env", backupPath: "/etc/.b2", outcome: "skipped", reason: "owned by another task" },
+        ],
+        partial: true,
+      },
+    }),
+  );
+  const batch = await cleanup.execute(
+    {
+      items: [
+        { path: "/etc/app.env", backupPath: "/etc/.b1", expectedRevision: "a".repeat(64) },
+        { path: "/etc/app.env", backupPath: "/etc/.b2", expectedRevision: "a".repeat(64) },
+      ],
+    },
+    context,
+  );
+  assert.ok("items" in batch);
+  assert.equal(batch.partial, true);
+  assert.equal(batch.items.length, 2);
 });
 
 test("a host refusal that cannot be retried keeps its own code", async () => {

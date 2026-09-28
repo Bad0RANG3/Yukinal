@@ -840,6 +840,7 @@ async fn protected_resource_metadata_discovers_the_issuer() {
             enabled: true,
             allowed_tools: Vec::new(),
             trust_level: "unreviewed".to_string(),
+            annotation_trust: Default::default(),
         })
         .expect("insert automatic OAuth row");
     let credentials = Arc::new(MemoryCredentialStore::new());
@@ -908,6 +909,7 @@ async fn dynamic_registration_supplies_a_public_client_id() {
             enabled: true,
             allowed_tools: Vec::new(),
             trust_level: "unreviewed".to_string(),
+            annotation_trust: Default::default(),
         })
         .expect("insert dynamic-registration OAuth row");
     let credentials = Arc::new(MemoryCredentialStore::new());
@@ -1004,6 +1006,7 @@ async fn authorization_code_pkce_is_stored_and_refreshed() {
             enabled: true,
             allowed_tools: Vec::new(),
             trust_level: "unreviewed".to_string(),
+            annotation_trust: Default::default(),
         })
         .expect("insert OAuth row");
     let credentials = Arc::new(MemoryCredentialStore::new());
@@ -1128,6 +1131,7 @@ fn insert_row(
         enabled: true,
         allowed_tools: Vec::new(),
         trust_level: "unreviewed".to_string(),
+        annotation_trust: Default::default(),
     };
     database
         .mcp_servers()
@@ -1196,6 +1200,7 @@ fn insert_dpop_row(
         enabled: true,
         allowed_tools: Vec::new(),
         trust_level: "unreviewed".to_string(),
+        annotation_trust: Default::default(),
     };
     database
         .mcp_servers()
@@ -1412,6 +1417,7 @@ fn a_missing_dpop_key_refuses_instead_of_falling_back_to_bearer() {
         enabled: true,
         allowed_tools: Vec::new(),
         trust_level: "unreviewed".to_string(),
+        annotation_trust: Default::default(),
     };
     database.mcp_servers().upsert(&row).expect("insert row");
 

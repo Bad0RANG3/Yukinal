@@ -49,6 +49,16 @@ export interface McpToolDescriptor {
   description: string;
   inputSchema: unknown;
   outputSchema?: unknown;
+  /** The server's own hints, still untrusted; the host maps them to `risk` (ADR 0074). */
+  annotations?: McpToolAnnotations;
+}
+
+/** The optional MCP `annotations` object, parsed leniently by the host. */
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
 }
 
 /** A process exit, kept so "why did it die" survives the restart that fixed it. */
@@ -120,6 +130,11 @@ export interface McpServerSaveInput {
   httpAuthHeaders?: McpHttpAuthHeaderInput[];
   oauth?: McpOAuthInput;
   enabled: boolean;
+  /**
+   * Whether to trust this server's own tool annotations (ADR 0074). Absent preserves the
+   * stored value; a new server defaults to `none`.
+   */
+  annotationTrust?: "none" | "trusted";
 }
 
 /** One write-only static header entry from the settings form. */
@@ -178,6 +193,8 @@ export interface McpServerReviewInput {
   serverId: string;
   allowedTools: string[];
   trustLevel: "reviewed" | "unreviewed";
+  /** Absent preserves the stored value (ADR 0074). */
+  annotationTrust?: "none" | "trusted";
 }
 
 export interface McpServerDeleteResponse {

@@ -29,12 +29,12 @@
 
 **通信方式。** Rust 启动 sidecar 并持有句柄，双方通过 stdin/stdout 传 NDJSON 编码的 JSON-RPC 2.0，每行一个完整帧，协议版本常量 `1.0`（`packages/shared/src/protocol/jsonrpc.ts` 与 `crates/core/src/sidecar/mod.rs` 各有一份，必须一致）。`initialize` 必须是第一条请求，握手成功后 Rust 还会调用 `system.describe`，协议版本不匹配或报告存在工具名冲突时**拒绝发布这个 sidecar**。反向请求复用同一条流：`host.tool.execute`、`host.context.fetch`、`host.tool.cancel`、`host.mcp.catalog` 都由 Rust 处理。
 
-sidecar 的 stdout 只承载协议帧，**所有日志写 stderr**——一条走错位置的 `console.log` 就会破坏协议。单帧上限 8 MiB，超限帧被丢弃并记录；畸形帧不会杀死进程，只会被报告并跳过；`agent.run.start` 的响应帧必须先于该次运行的任何通知发出，否则界面会先看到事件后拿到 `runId`；带 `messageId` 的 `run.start` 记入一张最多 256 条的受理表，同消息重发且内容一致返回同一个 `runId`（`duplicate: true`），已有受理记录不会被淘汰。宿主侧还有第二道闸门：只转发白名单事件类型、要求 `runId` 非空且不超过 256 字符、单个负载限制 1 MB（比传输层更紧）。
+sidecar 的 stdout 只承载协议帧，**所有日志写 stderr**——一条走错位置的 `console.log` 就会破坏协议。host 与 sidecar 之间的单帧上限是 24 MiB（多模态附件的 base64 可能很大；MCP 自己的帧上限仍是 8 MiB），超限帧被丢弃并记录；畸形帧不会杀死进程，只会被报告并跳过；`agent.run.start` 的响应帧必须先于该次运行的任何通知发出，否则界面会先看到事件后拿到 `runId`；带 `messageId` 的 `run.start` 记入一张最多 256 条的受理表，同消息重发且内容一致返回同一个 `runId`（`duplicate: true`），已有受理记录不会被淘汰。宿主侧还有第二道闸门：只转发白名单事件类型、要求 `runId` 非空且不超过 256 字符、单个负载限制 1 MB（比传输层更紧）。
 
 **分层的实际约束。** 这些边界一旦被跨过，就会同时破坏可解释性和可测试性；改动它们需要先写一条新的 ADR。
 
 - **React 只能使用 `packages/shared` 声明的 Tauri IPC 命令与事件。** `IPC_COMMANDS` 与 `EVENT_NAMES` 是白名单：不在其中的原生能力对界面不存在，界面也不能自己启动进程、建立 SSH 连接或读取凭据。契约的两半都有运行期闸门，都在 `apps/desktop/src/lib/ipc.ts`：命令走 `callDesktop()`（参数与返回值用 `IPC_SCHEMAS` 解析），事件走 `listenDesktop()`（负载用 `EVENT_SCHEMAS` 解析）。两者都是解析而不是类型断言——`terminal.data` 携带的是远端主机读回来的字节，正是不能靠断言的地方。事件是通知而非请求，负载校验失败只能丢弃并留下一次警告，不能被「重新请求」。
-- **Rust 拥有原生资源，且只做参数编组。** SSH 会话、PTY、SQLite、操作系统凭据库、sidecar 与 MCP 子进程句柄都由 Rust 持有。`apps/desktop/src-tauri` 只做参数编组与事件转发，逻辑落在 `crates/*`，这样不打开窗口也能测试——`yukinal-core` 里没有 Tauri 类型，sidecar 的启动、监督、崩溃与状态路径都能单测覆盖。
+- **Rust 拥有原生资源，Tauri 命令层只做宿主编排。** SSH 会话、PTY、SQLite、操作系统凭据库、sidecar 与 MCP 子进程句柄都由 Rust 持有。`apps/desktop/src-tauri` 负责 IPC 参数校验、数据库与资源管理器之间的编排以及事件转发；可复用的协议、传输和领域算法落在 `crates/*`，这样不打开窗口也能测试——`yukinal-core` 里没有 Tauri 类型，sidecar 的启动、监督、崩溃与状态路径都能单测覆盖。
 - **`packages/shared` 是跨语言契约的唯一来源。** 类型、Zod schema、IPC 映射、事件名、JSON-RPC 协议、工具命名规则都在这里；`packages/shared/fixtures/ipc/` 下的 JSON 被 Rust（`include_str!`）和 TypeScript 同时解析，这是防止两侧静默漂移的机制——类型只保证编译期一致，fixture 保证运行时一致。本地门禁的第一步就是构建这些契约库（消费方导入它们的 `dist/*.d.ts`），顺序不能颠倒。
 - **ToolRegistry 是唯一的执行入口，Permission Engine 是唯一的授权决策入口。** 详见 [执行与授权模型](./execution-model.md#执行与授权模型)。
 - **Agent 不直接执行远程操作。** sidecar 通过 `host.tool.execute` 向宿主提出请求，宿主会重新校验目标服务器 ID、环境、工作区归属和文件路径策略，然后才执行；副作用工具还必须带完整的 durable `taskId`、`planId`、`planStepId`，普通聊天不能降级成自动写入。sidecar 自己不连 SSH、不访问 SQLite 与凭据库。交互式终端是独立的用户人工路径，不是 Agent 工具。

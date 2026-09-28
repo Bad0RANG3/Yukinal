@@ -24,7 +24,7 @@
 
 - 不写 `risk` 的工具按 `read` 处理（`apps/agent/src/tools/builtin/host-backed.ts:27` 的 `spec.risk ?? "read"`），这也是 `docker.ps`、`docker.logs`、`docker.inspect`、`server.info`、`filesystem.read` 的实际取值。
 - `system.echo` 显式声明 `risk: "read"`（`apps/agent/src/tools/builtin/system-echo.ts:21`）。
-- 没有任何 MCP 工具在这一档：每个 MCP 工具声明 `critical`（见 [`dangerous`](./dangerous.md)）。
+- 默认没有 MCP 工具在这一档：未信任服务器的工具按 `critical` 处理；用户显式信任服务器注解后，`readOnlyHint === true` 的工具可映射为 `low`，并进入这一档（见 [`dangerous`](./dangerous.md) 和 [外部工具（MCP）](../boundaries/mcp.md)）。
 
 ## 各环境策略表里的取值
 

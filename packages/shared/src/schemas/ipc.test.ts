@@ -563,19 +563,19 @@ test("Agent run params accept bounded inline images and reject unbounded or misl
     );
   }
   assert.equal(
-    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [clip, clip, clip] }).success,
+    run.safeParse({ sessionId: "ses_1", prompt: "", parts: [clip, clip, clip, clip, clip] }).success,
     false,
-    "a third clip exceeds the per-message count",
+    "a fifth clip exceeds the per-message count",
   );
-  // 与图片、PDF **共用**同一个 5 MiB 原始字节预算：一张 4 MiB 上限的图片再加一段 1.2 MiB
+  // 与图片、PDF **共用**同一个 12 MiB 原始字节预算：一张 5 MiB 上限的图片再加一段 7.5 MiB
   // 的音频就已经超过了，而两者各自都还在自己的上限内。
   const biggestImage = {
     type: "image",
     mediaType: "image/png",
-    // 5_592_404 base64 字符 = 4_194_303 解码字节，刚好在单图上限之内。
-    data: "A".repeat(5_592_404),
+    // 6_990_508 base64 字符 = 5_242_881 解码字节，刚好在单图上限（5 MiB）之内。
+    data: "A".repeat(6_990_508),
   };
-  const bigClip = { ...clip, data: "A".repeat(1_677_216) };
+  const bigClip = { ...clip, data: "A".repeat(10_485_760) };
   assert.equal(
     run.safeParse({ sessionId: "ses_1", prompt: "", parts: [biggestImage] }).success,
     true,
@@ -612,7 +612,7 @@ test("Agent run params accept bounded inline images and reject unbounded or misl
     run.safeParse({
       sessionId: "ses_1",
       prompt: "",
-      parts: [file, file, file, file, file],
+      parts: [file, file, file, file, file, file, file, file, file],
     }).success,
     false,
   );
@@ -669,7 +669,7 @@ test("Agent run params accept bounded PDF documents and reject mislabeled or exc
     run.safeParse({
       sessionId: "ses_1",
       prompt: "",
-      parts: Array.from({ length: 3 }, (_, index) => ({
+      parts: Array.from({ length: 5 }, (_, index) => ({
         ...document,
         name: `guide-${index}.pdf`,
       })),

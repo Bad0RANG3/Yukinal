@@ -31,13 +31,15 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 use yukinal_core::mcp::{
-    catalog_with_credentials, McpContentBlock, McpCredentialResolver, McpError, McpFailureCode,
-    McpHttpAuthHeader, McpOAuthSourceConfig, McpOAuthTokenSource, McpServerStatus, McpSupervisor,
-    McpToolDescriptor, McpTransportConfig, DEFAULT_REQUEST_TIMEOUT, MCP_NAMESPACE,
+    catalog_with_credentials, effective_risk, McpContentBlock, McpCredentialResolver, McpError,
+    McpFailureCode, McpHttpAuthHeader, McpOAuthSourceConfig, McpOAuthTokenSource, McpServerStatus,
+    McpSupervisor, McpToolAnnotations, McpToolDescriptor, McpTransportConfig,
+    DEFAULT_REQUEST_TIMEOUT, MCP_NAMESPACE,
 };
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{
-    McpHttpAuthHeaderConfig, McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow, McpServerConfig,
+    McpAnnotationTrust, McpHttpAuthHeaderConfig, McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow,
+    McpServerConfig,
 };
 use yukinal_database::{Database, DatabaseError};
 use yukinal_net::OutboundProxy;
@@ -164,6 +166,10 @@ pub struct McpServerSaveInput {
     pub oauth: Option<McpOAuthInput>,
     #[serde(default)]
     pub enabled: bool,
+    /// Trust this server's own tool annotations (ADR 0074). Absent preserves the stored
+    /// value; a new server defaults to `none` (annotations are not evidence).
+    #[serde(default)]
+    pub annotation_trust: Option<McpAnnotationTrust>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -251,6 +257,9 @@ pub struct McpServerReviewInput {
     pub server_id: String,
     pub allowed_tools: Vec<String>,
     pub trust_level: String,
+    /// 是否信任这台服务器自述的工具注解（ADR 0074）。缺省保留原值。
+    #[serde(default)]
+    pub annotation_trust: Option<McpAnnotationTrust>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -556,13 +565,20 @@ pub async fn mcp_server_review(
     state: State<'_, AppState>,
     input: McpServerReviewInput,
 ) -> Result<McpServerView, String> {
-    let row = save_review(&state.database, &state.mcp, input).await?;
+    let row = save_review(
+        &state.database,
+        &state.mcp,
+        state.credentials.clone(),
+        input,
+    )
+    .await?;
     Ok(view(&state.mcp, row).await)
 }
 
 async fn save_review(
     database: &Database,
     supervisor: &McpSupervisor,
+    credentials: Arc<dyn CredentialStore>,
     input: McpServerReviewInput,
 ) -> Result<McpServerConfig, String> {
     let mut row = load(database, &input.server_id)?;
@@ -576,6 +592,7 @@ async fn save_review(
             input.trust_level
         ));
     }
+    let previous_annotation_trust = row.annotation_trust;
     let advertised_tools = supervisor.tools(&input.server_id).await;
     let advertised: HashSet<&str> = advertised_tools
         .iter()
@@ -594,10 +611,27 @@ async fn save_review(
     }
     row.allowed_tools = input.allowed_tools;
     row.trust_level = input.trust_level;
+    if let Some(annotation_trust) = input.annotation_trust {
+        row.annotation_trust = annotation_trust;
+    }
     database
         .mcp_servers()
         .upsert(&row)
         .map_err(|error| format!("保存 MCP 工具审核失败：{error}"))?;
+    if status.running && previous_annotation_trust != row.annotation_trust {
+        // The running process owns the old `tools/list` snapshot. Rebuild it before returning
+        // so the next catalog request cannot observe a stale risk mapping after the user flips
+        // the trust switch.
+        supervisor.shutdown(&row.id).await;
+        let mut config = McpTransportConfig::from_server_config(&row, DEFAULT_REQUEST_TIMEOUT)
+            .map_err(|error| format!("MCP 注解信任已保存，但重新启动服务器失败：{error}"))?;
+        apply_http_auth(&row, &mut config, database, credentials)
+            .map_err(|error| format!("MCP 注解信任已保存，但重新启动服务器失败：{error}"))?;
+        supervisor
+            .start_transport(&config)
+            .await
+            .map_err(|error| format!("MCP 注解信任已保存，但重新启动服务器失败：{error}"))?;
+    }
     Ok(row)
 }
 
@@ -742,6 +776,32 @@ async fn server_for_segment(supervisor: &McpSupervisor, segment: &str) -> Result
 // ---------------------------------------------------------------------------
 // 纯逻辑（可测）
 
+/// 宿主对一次 MCP 工具调用的有效风险判定。
+///
+/// 返回 `None` 表示「无法判定」——服务器没跑、名字对不上、行读不出来等等。调用方**必须**
+/// 按 effectful 处理（失败关闭），绝不能因为判不出来就当它是只读的。
+///
+/// 这是唯一允许把服务器注解变成档位的地方；sidecar 只读结果，不自己看注解（ADR 0074）。
+pub(crate) async fn tool_effective_risk(state: &AppState, tool_name: &str) -> Option<&'static str> {
+    let (segment, tool_segment) = split_mcp_tool_name(tool_name)?;
+    let server_id = server_for_segment(&state.mcp, segment).await.ok()?;
+    let row = state.database.mcp_servers().get(&server_id).ok()?;
+    let annotations = if row.annotation_trust == McpAnnotationTrust::Trusted {
+        let handle = state.mcp.handle(&server_id).await?;
+        if !handle.is_running() {
+            return None;
+        }
+        handle
+            .tools()
+            .into_iter()
+            .find(|tool| tool.name == tool_segment)
+            .map(|tool| tool.annotations)?
+    } else {
+        McpToolAnnotations::default()
+    };
+    Some(effective_risk(row.annotation_trust, &annotations))
+}
+
 /// 保存一行。`Err(String)` 是**给用户看**的拒绝理由，所以它必须能照原样显示。
 pub(crate) fn save(
     database: &Database,
@@ -781,6 +841,10 @@ pub(crate) fn save(
         None
     };
     let existing = database.mcp_servers().get(id).ok();
+    let annotation_trust = input
+        .annotation_trust
+        .or_else(|| existing.as_ref().map(|row| row.annotation_trust))
+        .unwrap_or_default();
     let requested_headers = input.http_auth_headers.unwrap_or_default();
     if !is_http && !requested_headers.is_empty() {
         return Err("HTTP authentication settings require the HTTP transport".to_string());
@@ -843,6 +907,7 @@ pub(crate) fn save(
                 .map(|row| row.trust_level.clone())
                 .unwrap_or_else(|| "unreviewed".to_string())
         },
+        annotation_trust,
     };
 
     if let Err(error) = check_transport(&config) {

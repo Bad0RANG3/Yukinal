@@ -10,13 +10,16 @@ use yukinal_ssh::SshBackend;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
-const LOG_DISCOVERY_COMMAND: &str = r#"if command -v journalctl >/dev/null 2>&1; then journalctl -n 120 --no-pager -o short-iso 2>/dev/null; if [ $? -eq 0 ]; then printf '\n__YUKINAL_SOURCE__=journalctl\n'; exit 0; fi; fi; for file in /var/log/syslog /var/log/messages; do if [ -r "$file" ]; then tail -n 120 "$file"; if [ $? -eq 0 ]; then case "$file" in /var/log/syslog) printf '\n__YUKINAL_SOURCE__=syslog\n' ;; /var/log/messages) printf '\n__YUKINAL_SOURCE__=messages\n' ;; esac; exit 0; fi; fi; done; printf '__YUKINAL_SOURCE__=unavailable\n'"#;
 const SOURCE_PREFIX: &str = "__YUKINAL_SOURCE__=";
-const MAX_LOG_LINES: usize = 120;
-const MAX_LOG_SINCE_SECONDS: u32 = 86_400;
+/// Lines requested from `journalctl`/`tail`, and the parse cap. ADR 0075 raised this
+/// from 120 so a real incident is not cut off before its first error.
+const MAX_LOG_LINES: usize = 500;
+/// The widest time window `server.logs` accepts: 7 days (ADR 0075; was 24 hours).
+const MAX_LOG_SINCE_SECONDS: u32 = 604_800;
 
-pub(crate) fn log_discovery_command() -> &'static str {
-    LOG_DISCOVERY_COMMAND
+pub(crate) fn log_discovery_command() -> String {
+    log_discovery_command_for(&ServerLogsInput::default())
+        .expect("the filter-free discovery command is always valid")
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -29,9 +32,6 @@ pub(crate) struct ServerLogsInput {
 /// Build the fixed read-only probe with optional numeric/unit filters. The values are
 /// validated before interpolation; no model-provided shell fragment reaches the command.
 pub(crate) fn log_discovery_command_for(input: &ServerLogsInput) -> Result<String, String> {
-    if input.since_seconds.is_none() && input.unit.is_none() {
-        return Ok(LOG_DISCOVERY_COMMAND.to_string());
-    }
     if input
         .since_seconds
         .is_some_and(|seconds| !(1..=MAX_LOG_SINCE_SECONDS).contains(&seconds))
@@ -54,8 +54,10 @@ pub(crate) fn log_discovery_command_for(input: &ServerLogsInput) -> Result<Strin
         .as_deref()
         .map(|value| format!(" --unit '{}'", shell_single_quote(value)))
         .unwrap_or_default();
+    // The line count is interpolated from the constant in both places; a literal `120`
+    // here used to drift away from `MAX_LOG_LINES`.
     Ok(format!(
-        "if command -v journalctl >/dev/null 2>&1; then journalctl -n 120 --no-pager -o short-iso{since}{unit} 2>/dev/null; if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=journalctl\\n'; exit 0; fi; fi; for file in /var/log/syslog /var/log/messages; do if [ -r \"$file\" ]; then tail -n 120 \"$file\"; if [ $? -eq 0 ]; then case \"$file\" in /var/log/syslog) printf '\\n__YUKINAL_SOURCE__=syslog\\n' ;; /var/log/messages) printf '\\n__YUKINAL_SOURCE__=messages\\n' ;; esac; exit 0; fi; fi; done; printf '__YUKINAL_SOURCE__=unavailable\\n'"
+        "if command -v journalctl >/dev/null 2>&1; then journalctl -n {MAX_LOG_LINES} --no-pager -o short-iso{since}{unit} 2>/dev/null; if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=journalctl\\n'; exit 0; fi; fi; for file in /var/log/syslog /var/log/messages; do if [ -r \"$file\" ]; then tail -n {MAX_LOG_LINES} \"$file\"; if [ $? -eq 0 ]; then case \"$file\" in /var/log/syslog) printf '\\n__YUKINAL_SOURCE__=syslog\\n' ;; /var/log/messages) printf '\\n__YUKINAL_SOURCE__=messages\\n' ;; esac; exit 0; fi; fi; done; printf '__YUKINAL_SOURCE__=unavailable\\n'"
     ))
 }
 
@@ -113,7 +115,8 @@ pub struct ServerLogsResponse {
     pub message: Option<String>,
 }
 
-/// `server_logs`: connect if necessary, then read only the most recent 120 lines.
+/// `server_logs`: connect if necessary, then read only the most recent
+/// [`MAX_LOG_LINES`] lines.
 #[tauri::command]
 pub async fn server_logs(
     state: State<'_, AppState>,
@@ -124,11 +127,12 @@ pub async fn server_logs(
         .terminals
         .cached_session(&server_id)
         .map_err(|error| error.to_string())?;
+    let command = log_discovery_command();
     let output = state
         .ssh
         .execute(
             &session,
-            log_discovery_command(),
+            &command,
             Some(Duration::from_secs(10)),
             &CancellationToken::new(),
         )
@@ -245,8 +249,16 @@ mod tests {
         .expect("filtered command");
         assert!(command.contains("--since '-3600 seconds'"));
         assert!(command.contains("--unit 'nginx.service'"));
+        assert!(
+            command.contains("-n 500"),
+            "the journal line count comes from MAX_LOG_LINES"
+        );
+        assert!(
+            command.contains("tail -n 500"),
+            "the syslog tail count comes from MAX_LOG_LINES"
+        );
         assert!(log_discovery_command_for(&ServerLogsInput {
-            since_seconds: Some(86_401),
+            since_seconds: Some(604_801),
             unit: None,
         })
         .is_err());

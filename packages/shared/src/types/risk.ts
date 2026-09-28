@@ -72,6 +72,34 @@ export function isReadOnlyRunMode(mode: AgentRunMode): boolean {
 /** The unconstrained mode: the run may do anything the policy and approvals allow. */
 export const DEFAULT_AGENT_RUN_MODE: AgentRunMode = "goal";
 
+/**
+ * Environments where a dangerous-tier (`high`) action may be remembered for the rest of
+ * one run (ADR 0072). Production and unknown targets are deliberately absent: there a
+ * restart or restore still needs one click per call.
+ */
+export const SESSION_GRANTABLE_DANGEROUS_ENVIRONMENTS: readonly Environment[] = ["development", "staging"];
+
+/**
+ * Whether "approve for this run" may be remembered for this decision.
+ *
+ * `critical` is never remembered anywhere: it is the tier for actions whose side effects
+ * this repository cannot bound (untrusted MCP tools). A `high` action may be remembered
+ * only on a development or staging target, and — like every session grant — only for the
+ * exact same tool, target and input fingerprint.
+ */
+export function isSessionGrantable(decision: {
+  tier: PermissionTier;
+  finalRisk: RiskLevel;
+  target: { host: "local" | "remote"; environment: Environment };
+}): boolean {
+  if (decision.finalRisk === "critical") return false;
+  if (decision.tier !== "dangerous") return true;
+  return (
+    decision.target.host === "remote" &&
+    SESSION_GRANTABLE_DANGEROUS_ENVIRONMENTS.includes(decision.target.environment)
+  );
+}
+
 /** The authority that made an automatic execution possible. */
 export const PERMISSION_APPROVAL_SOURCES = ["user", "policy", "agent"] as const;
 export type PermissionApprovalSource = (typeof PERMISSION_APPROVAL_SOURCES)[number];

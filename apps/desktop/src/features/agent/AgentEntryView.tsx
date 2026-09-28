@@ -142,6 +142,9 @@ export function AgentEntryView({
           </div>
           <p>{entry.approval.reason}</p>
           <p className="approval-target">{targetLabel(entry.approval.target)}</p>
+          {entry.approval.sessionGrantable === false ? (
+            <p className="approval-note">此操作每次都需要单独批准，不能记住到本次运行。</p>
+          ) : null}
           {approvalStatus ? (
             <p className="approval-resolved" role="status">{approvalStatus}</p>
           ) : (
@@ -152,9 +155,11 @@ export function AgentEntryView({
               <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_once")}>
                 批准一次
               </button>
-              <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_session")}>
-                本次运行批准
-              </button>
+              {entry.approval.sessionGrantable !== false ? (
+                <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_session")}>
+                  本次运行批准
+                </button>
+              ) : null}
             </div>
           )}
         </div>

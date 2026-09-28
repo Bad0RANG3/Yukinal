@@ -287,6 +287,41 @@ test("investigation.playbook adds a separately approved backup cleanup with a le
   assert.deepEqual(plan.steps[4]?.inputBindings, { path: "/etc/yukinal/app.env", status: "available" });
 });
 
+test("investigation.playbook compiles a batch backup rotation into one always-approved step", async () => {
+  const seen: InvestigationPlan[] = [];
+  const items = [
+    {
+      path: "/etc/yukinal/app.env",
+      backupPath: "/etc/.yukinal-backup-0123456789abcdef-0123456789abcdef0123456789abcdef",
+      expectedRevision: "a".repeat(64),
+    },
+    {
+      path: "/etc/yukinal/db.env",
+      backupPath: "/etc/.yukinal-backup-fedcba9876543210-fedcba9876543210fedcba9876543210",
+      expectedRevision: "b".repeat(64),
+    },
+  ];
+  const plan = await investigationPlaybookTool(hostThatRecords(seen)).execute(
+    { template: "backup_rotation", items },
+    context(),
+  );
+
+  assert.deepEqual(plan.steps.map((step) => step.allowedTools), [
+    ["filesystem.backup.retention"],
+    ["investigation.finding"],
+    ["investigation.brief"],
+    ["filesystem.backup.cleanup"],
+    ["filesystem.backup.list"],
+  ]);
+  const action = plan.steps[3];
+  assert(action);
+  assert.equal(action.kind, "action");
+  assert.equal(action.riskLevel, "medium");
+  assert.equal(action.requiresApproval, true);
+  assert.deepEqual(action.inputBindings, { items: JSON.stringify(items) });
+  assert.equal(seen.length, 1);
+});
+
 test("investigation.playbook attaches a host-owned observation window to final verification", async () => {
   const seen: InvestigationPlan[] = [];
   const plan = await investigationPlaybookTool(hostThatRecords(seen)).execute(
@@ -361,6 +396,12 @@ test("investigation.playbook rejects template parameters that would be ambiguous
   assert.equal(tool.input.safeParse({ template: "deploy_sequence", steps: [{ operation: "install_package", manager: "apt", package: "nginx;id" }] }).success, false);
   assert.equal(tool.input.safeParse({ template: "readonly_health", path: "/tmp/x" }).success, false);
   assert.equal(tool.input.safeParse({ template: "config_edit", steps: [{ operation: "edit_file", path: "/tmp/x" }] }).success, false);
+  assert.equal(tool.input.safeParse({ template: "backup_rotation" }).success, false);
+  assert.equal(tool.input.safeParse({ template: "backup_rotation", items: [] }).success, false);
+  assert.equal(tool.input.safeParse({ template: "backup_rotation", items: [{ path: "relative", backupPath: "/etc/.b", expectedRevision: "a".repeat(64) }] }).success, false);
+  assert.equal(tool.input.safeParse({ template: "backup_rotation", items: [{ path: "/etc/a", backupPath: "/etc/.b", expectedRevision: "bad" }] }).success, false);
+  assert.equal(tool.input.safeParse({ template: "readonly_health", items: [{ path: "/etc/a", backupPath: "/etc/.b", expectedRevision: "a".repeat(64) }] }).success, false);
+  assert.equal(tool.input.safeParse({ template: "backup_rotation", items: [{ path: "/etc/a", backupPath: "/etc/.b", expectedRevision: "a".repeat(64) }, { path: "/etc/a", backupPath: "/etc/.b", expectedRevision: "a".repeat(64) }] }).success, false);
   assert.equal(tool.input.safeParse({ template: "container_restart", container: "api;rm -rf /" }).success, false);
   assert.equal(tool.input.safeParse({ template: "readonly_health", service: "nginx.service" }).success, false);
   assert.equal(

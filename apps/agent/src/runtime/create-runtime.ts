@@ -22,6 +22,7 @@ import { dockerRestartTool } from "../tools/builtin/docker-restart.js";
 import { filesystemEditTool } from "../tools/builtin/filesystem-edit.js";
 import { filesystemBackupTool } from "../tools/builtin/filesystem-backup.js";
 import { filesystemBackupListTool } from "../tools/builtin/filesystem-backup-list.js";
+import { filesystemBackupRetentionTool } from "../tools/builtin/filesystem-backup-retention.js";
 import { filesystemBackupCleanupTool } from "../tools/builtin/filesystem-backup-cleanup.js";
 import { filesystemReadTool } from "../tools/builtin/filesystem-read.js";
 import { filesystemRestoreTool } from "../tools/builtin/filesystem-restore.js";
@@ -87,6 +88,7 @@ export function createRuntime(
     declarations.push(registry.register(filesystemWriteTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemBackupTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemBackupListTool(options.hostToolClient)));
+    declarations.push(registry.register(filesystemBackupRetentionTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemBackupCleanupTool(options.hostToolClient)));
     declarations.push(registry.register(filesystemRestoreTool(options.hostToolClient)));
     // 读-改-写是**独立**的一项能力，不是 write 的开关：write 覆盖整个文件，edit 要求

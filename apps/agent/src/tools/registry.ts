@@ -11,6 +11,7 @@
 import { z } from "zod";
 
 import {
+  isSessionGrantable,
   isValidInternalToolName,
   type AgentPermissionMode,
   type AgentRunMode,
@@ -305,7 +306,14 @@ export function checkTicket(
       retryable: false,
     };
   }
-  if (decision.tier === "dangerous" && ticket.kind !== "user_approved") {
+  // Dangerous and critical work needs a direct user click: either an approval of this
+  // very call, or — for a `high` action on development/staging only (ADR 0072) — a
+  // session grant the user gave for the identical fingerprinted action earlier in the run.
+  if (
+    decision.tier === "dangerous" &&
+    ticket.kind !== "user_approved" &&
+    !(ticket.kind === "session_auto" && isSessionGrantable(decision))
+  ) {
     return {
       code: "denied_by_policy",
       message: "Dangerous and critical actions require an explicit user approval",
@@ -330,16 +338,25 @@ export function checkTicket(
   }
   if (
     ticket.kind === "agent_auto" &&
-    (decision.tier !== "write" || (decision.target.environment !== "development" && decision.target.environment !== "staging"))
+    (decision.tier !== "write" ||
+      decision.target.host !== "remote" ||
+      (decision.target.environment !== "development" && decision.target.environment !== "staging"))
   ) {
     return {
       code: "denied_by_policy",
-      message: "Agent auto approval is limited to write-tier development and staging targets",
+      message: "Agent auto approval is limited to write-tier remote development and staging targets",
       retryable: false,
     };
   }
   if (ticket.kind === "session_auto" && decision.approvedBy !== "user") {
     return { code: "denied_by_policy", message: "Session auto ticket has no user session approval", retryable: false };
+  }
+  if (ticket.kind === "session_auto" && !isSessionGrantable(decision)) {
+    return {
+      code: "denied_by_policy",
+      message: "This action cannot be approved for the whole run; it needs an approval per call",
+      retryable: false,
+    };
   }
   if (ticket.kind === "user_approved" && decision.approvalId !== ticket.approvalId) {
     return { code: "denied_by_policy", message: "Approval id does not match the pending decision", retryable: false };

@@ -8,7 +8,7 @@
 import { z } from "zod";
 
 import { ENVIRONMENTS, RISK_LEVELS } from "../types/risk.js";
-import { SERVER_STATUSES } from "../types/server.js";
+import { SERVER_STATUSES, MAX_KRL_SIGNERS } from "../types/server.js";
 
 export const EnvironmentSchema = z.enum(ENVIRONMENTS);
 export const RiskLevelSchema = z.enum(RISK_LEVELS);
@@ -44,7 +44,7 @@ export const HostCertificateAuthoritySchema = z.strictObject({
   revocationListUrl: z.string().trim().min(1).max(2_048).optional(),
   revocationListSigners: z
     .array(z.string().trim().min(1).max(16_384))
-    .max(8)
+    .max(MAX_KRL_SIGNERS)
     .optional(),
 }).superRefine((authority, context) => {
   if (authority.revocationListPath && authority.revocationListUrl) {

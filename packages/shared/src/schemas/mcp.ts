@@ -93,11 +93,14 @@ export const McpServerConfigSchema = z.strictObject({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   url: z.string().optional(),
-  httpAuthHeaders: z.array(McpHttpAuthHeaderConfigSchema).max(16),
+  httpAuthHeaders: z.array(McpHttpAuthHeaderConfigSchema).max(32),
   oauth: McpOAuthConfigSchema.optional(),
   enabled: z.boolean(),
   allowedTools: z.array(z.string()),
   trustLevel: z.enum(["reviewed", "unreviewed"]),
+  // Defaulted rather than optional so an older host that does not send it still parses;
+  // the default is the strict one (`none`).
+  annotationTrust: z.enum(["none", "trusted"]).default("none"),
 }) satisfies z.ZodType<McpServerConfig>;
 
 export const McpExitRecordSchema = z.strictObject({
@@ -123,6 +126,13 @@ export const McpServerStatusSchema = z.strictObject({
   diagnostics: z.array(z.string()),
 }) satisfies z.ZodType<McpServerStatus>;
 
+export const McpToolAnnotationsSchema = z.strictObject({
+  readOnlyHint: z.boolean().optional(),
+  destructiveHint: z.boolean().optional(),
+  idempotentHint: z.boolean().optional(),
+  openWorldHint: z.boolean().optional(),
+});
+
 export const McpToolDescriptorSchema = z.strictObject({
   name: z.string(),
   remoteName: z.string().optional(),
@@ -130,6 +140,8 @@ export const McpToolDescriptorSchema = z.strictObject({
   description: z.string().max(8_192),
   inputSchema: z.unknown(),
   outputSchema: z.unknown().optional(),
+  // The server's own hints, already parsed leniently by the host (ADR 0074).
+  annotations: McpToolAnnotationsSchema.optional(),
 }) satisfies z.ZodType<McpToolDescriptor>;
 
 export const McpServerUnavailableSchema = z.strictObject({
@@ -163,9 +175,10 @@ export const McpServerSaveInputSchema = z.strictObject({
   command: z.string().max(1_024).optional(),
   args: z.array(z.string().max(1_024)).max(64).optional(),
   url: z.string().max(2_048).optional(),
-  httpAuthHeaders: z.array(McpHttpAuthHeaderInputSchema).max(16).optional(),
+  httpAuthHeaders: z.array(McpHttpAuthHeaderInputSchema).max(32).optional(),
   oauth: McpOAuthInputSchema.optional(),
   enabled: z.boolean(),
+  annotationTrust: z.enum(["none", "trusted"]).optional(),
 }) satisfies z.ZodType<McpServerSaveInput>;
 
 export const McpOAuthConnectResponseSchema = z.strictObject({
@@ -183,6 +196,7 @@ export const McpServerReviewInputSchema = z.strictObject({
   serverId: IdSchema,
   allowedTools: z.array(z.string().trim().min(1).max(256)).max(512),
   trustLevel: z.enum(["reviewed", "unreviewed"]),
+  annotationTrust: z.enum(["none", "trusted"]).optional(),
 }) satisfies z.ZodType<McpServerReviewInput>;
 
 export const McpServerDeleteResponseSchema = z.strictObject({

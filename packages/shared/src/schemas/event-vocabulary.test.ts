@@ -172,6 +172,36 @@ test("each channel uses its own member schema, and the union is built from the s
   );
 });
 
+test("the waiting_approval payload makes session grantability explicit and typed", () => {
+  const base = {
+    type: "agent.waiting_approval",
+    runId: "run_1",
+    approval: {
+      approvalId: "apr_1",
+      runId: "run_1",
+      toolName: "docker.restart",
+      input: {},
+      reason: "why",
+      factsSummary: [],
+      target: { host: "remote", serverId: "srv_abc", environment: "staging" },
+      expiresAt: "2026-01-01T00:01:00Z",
+    },
+    at: "2026-01-01T00:00:00Z",
+  };
+  const schema = AGENT_EVENT_MEMBER_SCHEMAS["agent.waiting_approval"];
+  // An older sidecar omits the field, so the omission must keep parsing (fail-open on
+  // the *shape*, not on the permission: the UI keeps the button until told otherwise).
+  assert.equal(schema.safeParse(base).success, true);
+  for (const sessionGrantable of [true, false]) {
+    assert.equal(schema.safeParse({ ...base, approval: { ...base.approval, sessionGrantable } }).success, true);
+  }
+  assert.equal(
+    schema.safeParse({ ...base, approval: { ...base.approval, sessionGrantable: "yes" } }).success,
+    false,
+    "a truthy string must not be accepted as a boolean",
+  );
+});
+
 test("a tool result reports a finished status, not a lifecycle status", () => {
   // `TOOL_RESULT_STATUSES` is deliberately a *subset* of `TOOL_EXECUTION_STATUSES`,
   // and this is the test that keeps the distinction honest. Sharing the six-value

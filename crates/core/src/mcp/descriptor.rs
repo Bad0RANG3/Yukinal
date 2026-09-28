@@ -240,6 +240,53 @@ pub struct McpToolDescriptor {
     /// 同上，`outputSchema` 也只是翻译来源；远端没声明时为空。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
+    /// 服务器自己声明的注解。仍然是**不可信数据**：默认不参与风险判定，只有用户显式为
+    /// 某台服务器开启信任后，宿主才会用它映射出有界档位（ADR 0074）。
+    #[serde(default, skip_serializing_if = "McpToolAnnotations::is_empty")]
+    pub annotations: McpToolAnnotations,
+}
+
+/// 服务器对某个工具的自述（MCP `annotations`）。
+///
+/// 四个提示都是可选的；未知键、类型不对的键都按「未声明」处理，绝不因为一份坏注解拒绝
+/// 整个工具（ADR 0074）。类型是 `Option<bool>` 而不是 `bool`，因为「没声明」和「声明为
+/// false」在风险映射里是两件事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolAnnotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
+impl McpToolAnnotations {
+    /// 从不可信的 `annotations` 值里读出提示。
+    ///
+    /// 不是对象、缺键、或者某个键不是布尔值，都退化成 `None`（未声明）：远端不能靠一段
+    /// 形状异常的注解让整个工具导入失败。
+    #[must_use]
+    pub fn from_json(value: Option<&Value>) -> Self {
+        let Some(object) = value.and_then(Value::as_object) else {
+            return Self::default();
+        };
+        let hint = |key: &str| object.get(key).and_then(Value::as_bool);
+        Self {
+            read_only_hint: hint("readOnlyHint"),
+            destructive_hint: hint("destructiveHint"),
+            idempotent_hint: hint("idempotentHint"),
+            open_world_hint: hint("openWorldHint"),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl McpToolDescriptor {
@@ -485,6 +532,7 @@ mod tests {
             description: "reads a file".to_string(),
             input_schema: json!({ "type": "object" }),
             output_schema: None,
+            annotations: McpToolAnnotations::default(),
         };
         assert!(descriptor.renamed());
         assert_eq!(
@@ -496,6 +544,40 @@ mod tests {
             descriptor.internal_name("srv-a").expect("legal"),
             "mcp.srv-a.read-file"
         );
+    }
+
+    #[test]
+    fn tool_annotations_parse_leniently_and_never_reject_a_tool() {
+        // 缺注解、非对象、错类型、未知键：全部退化成「未声明」，而不是导入失败。
+        assert_eq!(
+            McpToolAnnotations::from_json(None),
+            McpToolAnnotations::default()
+        );
+        assert_eq!(
+            McpToolAnnotations::from_json(Some(&json!("readonly"))),
+            McpToolAnnotations::default()
+        );
+        assert_eq!(
+            McpToolAnnotations::from_json(Some(&json!({ "readOnlyHint": "yes" }))),
+            McpToolAnnotations::default(),
+            "a wrong type must be treated as absent, not as true"
+        );
+        assert_eq!(
+            McpToolAnnotations::from_json(Some(&json!({ "unknownHint": true }))),
+            McpToolAnnotations::default()
+        );
+        let parsed = McpToolAnnotations::from_json(Some(&json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": "nope",
+            "openWorldHint": true
+        })));
+        assert_eq!(parsed.read_only_hint, Some(true));
+        assert_eq!(parsed.destructive_hint, Some(false));
+        assert_eq!(parsed.idempotent_hint, None, "wrong type is absent");
+        assert_eq!(parsed.open_world_hint, Some(true));
+        assert!(!parsed.is_empty());
+        assert!(McpToolAnnotations::default().is_empty());
     }
 
     #[test]

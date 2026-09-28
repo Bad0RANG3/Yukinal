@@ -45,8 +45,9 @@ pub const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
 pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A bounded number of static headers per HTTP endpoint. More than this is not
-/// useful authentication configuration; it is an accidental data dump.
-pub const MAX_HTTP_AUTH_HEADERS: usize = 16;
+/// useful authentication configuration; it is an accidental data dump. ADR 0075
+/// raised this from 16 to 32.
+pub const MAX_HTTP_AUTH_HEADERS: usize = 32;
 
 /// stdio 服务允许的参数个数上限。真实服务的参数是「程序 + 若干开关 + 路径」，不是数据通道。
 pub const MAX_STDIO_ARGS: usize = 256;
@@ -760,6 +761,7 @@ mod tests {
             // 但记录里有，就直接收下。
             allowed_tools: Vec::new(),
             trust_level: "unreviewed".to_string(),
+            annotation_trust: Default::default(),
         }
     }
 

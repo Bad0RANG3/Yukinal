@@ -55,21 +55,21 @@ pub enum PromptPart {
     },
 }
 
-const MAX_PROMPT_PARTS: usize = 10;
-const MAX_PROMPT_IMAGES: usize = 4;
-const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_TOTAL_INLINE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PROMPT_PARTS: usize = 25;
+const MAX_PROMPT_IMAGES: usize = 8;
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_TOTAL_INLINE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_PROMPT_TEXT_CHARS: usize = 100_000;
 const MAX_IMAGE_NAME_CHARS: usize = 128;
-const MAX_PROMPT_FILES: usize = 4;
-const MAX_FILE_BYTES: usize = 256 * 1024;
-const MAX_TOTAL_FILE_BYTES: usize = 512 * 1024;
+const MAX_PROMPT_FILES: usize = 8;
+const MAX_FILE_BYTES: usize = 512 * 1024;
+const MAX_TOTAL_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_FILE_NAME_CHARS: usize = 128;
-const MAX_PROMPT_DOCUMENTS: usize = 2;
-const MAX_DOCUMENT_BYTES: usize = 3 * 1024 * 1024;
+const MAX_PROMPT_DOCUMENTS: usize = 4;
+const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DOCUMENT_NAME_CHARS: usize = 128;
-const MAX_PROMPT_AUDIOS: usize = 2;
-const MAX_AUDIO_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROMPT_AUDIOS: usize = 4;
+const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
 const MAX_AUDIO_NAME_CHARS: usize = 128;
 
 pub(crate) fn validate_prompt_parts(parts: &[PromptPart]) -> Result<(), String> {
@@ -253,7 +253,7 @@ pub(crate) fn validate_prompt_parts(parts: &[PromptPart]) -> Result<(), String> 
                 inline_bytes = inline_bytes.saturating_add(decoded);
                 if inline_bytes > MAX_TOTAL_INLINE_BYTES {
                     return Err(format!(
-                        "images and PDF documents may total at most {MAX_TOTAL_INLINE_BYTES} decoded bytes"
+                        "images, PDF documents and audio clips may total at most {MAX_TOTAL_INLINE_BYTES} decoded bytes"
                     ));
                 }
                 let name = name.trim();
@@ -1204,9 +1204,19 @@ mod tests {
                 data: "UklGRgAAAABXQVZFAA==".into(),
                 name: None,
             },
+            PromptPart::Audio {
+                media_type: "audio/wav".into(),
+                data: "UklGRgAAAABXQVZFAA==".into(),
+                name: None,
+            },
+            PromptPart::Audio {
+                media_type: "audio/wav".into(),
+                data: "UklGRgAAAABXQVZFAA==".into(),
+                name: None,
+            },
         ])
         .is_err());
-        // 单段上限是换算后的字节数，而不是 base64 字符数：这份 ~4.05 MiB 的字节必须被拒绝。
+        // 单段上限是换算后的字节数，而不是 base64 字符数：这份超过 MAX_AUDIO_BYTES 的字节必须被拒绝。
         let oversize = "A".repeat((MAX_AUDIO_BYTES / 3 + 1) * 4);
         assert!(validate_prompt_parts(&[PromptPart::Audio {
             media_type: "audio/flac".into(),
@@ -1214,12 +1224,12 @@ mod tests {
             name: None,
         }])
         .is_err());
-        // 与图片共用一个总预算：一张贴着单图上限的图片再加一段超过 1 MiB 的音频就超了，
+        // 与图片共用一个总预算：一张贴着单图上限的图片再加一段超过 7 MiB 的音频就超了，
         // 而两者各自都还在自己的上限之内。
-        // `(MAX_IMAGE_BYTES / 3) * 4` 个 base64 字符解码出 4_194_303 字节：刚好在单图上限
+        // `(MAX_IMAGE_BYTES / 3) * 4` 个 base64 字符解码出约 5 MiB：刚好在单图上限
         // 之内，而且长度天然是 4 的倍数（base64 的形状要求）。
         let biggest_image = "A".repeat((MAX_IMAGE_BYTES / 3) * 4);
-        let bulky_clip = "A".repeat((1_200_000 / 3 + 1) * 4);
+        let bulky_clip = "A".repeat((8_000_000 / 3 + 1) * 4);
         assert!(validate_prompt_parts(&[PromptPart::Image {
             media_type: "image/png".into(),
             data: biggest_image.clone(),

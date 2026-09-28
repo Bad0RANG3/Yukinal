@@ -22,6 +22,7 @@ const PLAYBOOK_TEMPLATES = [
   "package_install",
   "deploy_sequence",
   "backup_cleanup",
+  "backup_rotation",
 ] as const;
 
 const packageManager = z.enum(["apt", "dnf"]);
@@ -50,6 +51,22 @@ const observationWindow = z
       });
     }
   });
+
+const rotationItem = z.strictObject({
+  path: z
+    .string()
+    .trim()
+    .min(1)
+    .max(4096)
+    .refine((value) => value.startsWith("/"), "backup_rotation items require absolute paths"),
+  backupPath: z
+    .string()
+    .trim()
+    .min(1)
+    .max(4096)
+    .refine((value) => value.startsWith("/"), "backup_rotation items require absolute backup paths"),
+  expectedRevision: contentRevision,
+});
 
 const deploymentOperation = z.discriminatedUnion("operation", [
   z.strictObject({
@@ -84,6 +101,7 @@ const input = z
     backupPath: z.string().trim().min(1).max(4096).optional(),
     expectedRevision: contentRevision.optional(),
     steps: z.array(deploymentOperation).min(1).max(4).optional(),
+    items: z.array(rotationItem).min(1).max(32).optional(),
     observationWindow: observationWindow.optional(),
   })
   .superRefine((request, context) => {
@@ -137,6 +155,23 @@ const input = z
     }
     if (request.template !== "deploy_sequence" && request.steps !== undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["steps"], message: "steps is only valid for deploy_sequence" });
+    }
+    if (request.template === "backup_rotation" && request.items === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["items"], message: "backup_rotation requires the exact ledger items to clean up" });
+    }
+    if (request.template !== "backup_rotation" && request.items !== undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["items"], message: "items is only valid for backup_rotation" });
+    }
+    if (request.template === "backup_rotation" && request.items) {
+      const seen = new Set<string>();
+      for (const item of request.items) {
+        const key = `${item.path}\u0000${item.backupPath}`;
+        if (seen.has(key)) {
+          context.addIssue({ code: z.ZodIssueCode.custom, path: ["items"], message: "backup_rotation items must be unique by path and backupPath" });
+          break;
+        }
+        seen.add(key);
+      }
     }
   });
 
@@ -511,6 +546,63 @@ function buildSteps(
         ),
       ];
     }
+    case "backup_rotation": {
+      const items = request.items ?? [];
+      const serializedItems = JSON.stringify(items);
+      return [
+        evidenceStep(
+          0,
+          target,
+          "Inspect backup retention",
+          "Read the host-owned backup ledger across tasks for this server and confirm the rotation candidates before proposing deletion.",
+          "filesystem.backup.retention",
+          "The host returns bounded retention candidates and never deletes from this step.",
+          now,
+        ),
+        findingStep(
+          1,
+          target,
+          "Classify rotation candidates",
+          `Confirm that the ${items.length} selected recovery copies are observed ledger rows, not inferred from remote existence.`,
+          now,
+        ),
+        briefStep(
+          2,
+          target,
+          "Prepare backup rotation decision",
+          "Explain the impact and irreversibility of deleting these recovery copies, and state that a new backup would be required for future recovery.",
+          now,
+        ),
+        actionStep(
+          3,
+          target,
+          "Rotate host-owned backups",
+          `Delete ${items.length} verified host-owned recovery copies after explicit approval; each item is re-checked against the ledger and its revision before it is removed.`,
+          "filesystem.backup.cleanup",
+          "medium",
+          "conditional",
+          [
+            "filesystem.backup.retention must still list every item as an available ledger row.",
+            "Each item's recorded revision must remain the exact expectedRevision.",
+          ],
+          `Preview only: verify and delete ${items.length} host-owned sibling backups; no arbitrary remote path is accepted.`,
+          "Rotation is irreversible. If future recovery is needed, create a new backup after re-reading the target files.",
+          "Every verified recovery copy is removed and its host ledger row is consumed.",
+          now,
+          { items: serializedItems },
+          true,
+        ),
+        verificationStep(
+          4,
+          target,
+          "Verify backup rotation",
+          "Re-read the available backup ledger and confirm the rotated copies are no longer available.",
+          "filesystem.backup.list",
+          "The rotated backups no longer appear as available rows.",
+          now,
+        ),
+      ];
+    }
     case "deploy_sequence": {
       const operations = request.steps ?? [];
       const steps: InvestigationPlanStep[] = [];
@@ -756,8 +848,10 @@ export function investigationPlaybookTool(host: HostRpcClient): Tool<PlaybookInp
     description:
       "Generate a bounded, host-owned playbook for a supported maintenance shape. The tool only records " +
       "an ordered dry-run plan; it never performs a remote write. Choose readonly_health, config_edit, " +
-      "container_restart, systemd_restart, package_install, backup_cleanup or deploy_sequence on a resolved remote server target. backup_cleanup " +
-      "requires an exact path, backupPath and ledger revision; it only deletes one host-owned backup after approval. deploy_sequence accepts " +
+      "container_restart, systemd_restart, package_install, backup_cleanup, backup_rotation or deploy_sequence on a resolved remote server target. backup_cleanup " +
+      "requires an exact path, backupPath and ledger revision; it only deletes one host-owned backup after approval. backup_rotation takes the exact " +
+      "ledger items (at most 32) from filesystem.backup.retention and turns them into one always-approved filesystem.backup.cleanup step that " +
+      "re-checks each item; it never auto-approves and is not part of the restricted auto delegation. deploy_sequence accepts " +
       "only bounded edit_file, restart_container, restart_service and install_package operations, and expands them into evidence, decision, " +
       "approved action and verification steps. Action steps include a baseline requirement, preview, " +
       "verification, rollback text and explicit approval, and still pass through the normal host plan and " +

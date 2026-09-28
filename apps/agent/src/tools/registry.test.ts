@@ -195,7 +195,7 @@ test("checkTicket refuses an auto ticket whose provenance does not match its kin
   assert.equal(checkTicket(declaration, request, { kind: "agent_auto", decision: userDecision })?.message, "Agent auto ticket has no Agent delegation");
 });
 
-test("checkTicket limits Agent delegation to write-tier development and staging", () => {
+test("checkTicket limits Agent delegation to write-tier remote development and staging", () => {
   const registry = new ToolRegistry();
   const declaration = registry.register(echoTool({ name: "test.write", risk: "medium" }));
   const request = { callId: "c", traceId: "t", toolName: "test.write", input: { text: "x" }, target: { host: "remote", serverId: "srv_prd01", environment: "production" } as ToolTarget };
@@ -207,6 +207,23 @@ test("checkTicket limits Agent delegation to write-tier development and staging"
   const error = checkTicket(declaration, request, { kind: "agent_auto", decision });
   assert.equal(error?.code, "denied_by_policy");
   assert.match(error?.message ?? "", /explicit user approval|limited to write-tier/);
+});
+
+test("checkTicket refuses an Agent delegation ticket on the local machine", () => {
+  const registry = new ToolRegistry();
+  const declaration = registry.register(echoTool({ name: "test.write", risk: "medium" }));
+  const localDevelopment: ToolTarget = { host: "local", environment: "development" };
+  const request = { callId: "c", traceId: "t", toolName: "test.write", input: { text: "x" }, target: localDevelopment };
+  // The engine no longer produces this decision (see permission-engine.test.ts), but a
+  // forged ticket must be refused too: the host plan check requires a remote target.
+  const decision = {
+    ...new PermissionEngine().evaluate({ declaration, target: localDevelopment, input: { text: "x" } }),
+    outcome: "auto" as const,
+    approvedBy: "agent" as const,
+  };
+  const error = checkTicket(declaration, request, { kind: "agent_auto", decision });
+  assert.equal(error?.code, "denied_by_policy");
+  assert.match(error?.message ?? "", /limited to write-tier/);
 });
 
 test("checkTicket binds a user_approved ticket to its own approval id", () => {
@@ -465,7 +482,7 @@ test("a session grant on a dangerous-tier target asks, and the engine says so to
   assert.match(forged.error?.message ?? "", /explicit user approval/);
 });
 
-test("a session grant never covers an intrinsically dangerous tool", () => {
+test("a session grant never covers an intrinsically dangerous tool on the local machine", () => {
   const registry = new ToolRegistry();
   registry.register(echoTool({ name: "test.danger", risk: "high" }));
   const local: ToolTarget = { host: "local", environment: "development" };
@@ -477,8 +494,54 @@ test("a session grant never covers an intrinsically dangerous tool", () => {
 
   engine.grantSession(engine.evaluate(request));
   const second = engine.evaluate(request);
-  assert.equal(second.outcome, "ask", "a dangerous tool must re-ask every time");
+  assert.equal(second.outcome, "ask", "a dangerous tool on the local machine must re-ask every time");
   assert.equal(second.approvedBy, undefined);
+});
+
+/**
+ * ADR 0072: a `high` action on a remote development/staging target may be remembered
+ * for the run. The engine, the ticket and the execution chokepoint must agree — a
+ * production target must still refuse a forged `session_auto` ticket even though the
+ * engine could have been tricked into reporting `auto`.
+ */
+test("a session grant covers an exact high-risk action on a remote staging target end to end", async () => {
+  const registry = new ToolRegistry();
+  registry.register(echoTool({ name: "test.danger", risk: "high" }));
+  const staging: ToolTarget = { host: "remote", serverId: "srv_stg01", environment: "staging" };
+  const declaration = registry.declaration("test.danger");
+  assert.ok(declaration);
+
+  const engine = new PermissionEngine();
+  const request = { declaration, target: staging, input: { text: "x" } };
+
+  const first = engine.evaluate(request);
+  assert.equal(first.tier, "dangerous");
+  assert.equal(first.outcome, "ask", "the first call still needs a click");
+
+  engine.grantSession(first);
+  assert.equal(engine.grantCount, 1, "a high action on remote staging may be remembered for the run");
+
+  const second = engine.evaluate(request);
+  assert.equal(second.outcome, "auto");
+  assert.equal(second.approvedBy, "user");
+
+  const result = await registry.execute(
+    { callId: "c", traceId: "t", toolName: "test.danger", input: { text: "x" }, target: staging },
+    { kind: "session_auto", decision: second },
+  );
+  assert.equal(result.status, "success");
+  assert.equal(result.error, undefined);
+
+  // A production target is not session-grantable, so a forged ticket must be refused.
+  const production: ToolTarget = { host: "remote", serverId: "srv_prd01", environment: "production" };
+  const prodDecision = engine.evaluate({ declaration, target: production, input: { text: "x" } });
+  const forged = await registry.execute(
+    { callId: "c", traceId: "t", toolName: "test.danger", input: { text: "x" }, target: production },
+    { kind: "session_auto", decision: { ...prodDecision, outcome: "auto", approvedBy: "user" } },
+  );
+  assert.equal(forged.status, "failed");
+  assert.equal(forged.error?.code, "denied_by_policy");
+  assert.match(forged.error?.message ?? "", /cannot be approved for the whole run|explicit user approval/);
 });
 
 test("clearing grants makes the next call ask again", () => {

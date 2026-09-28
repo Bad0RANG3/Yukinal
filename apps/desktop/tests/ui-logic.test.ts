@@ -588,7 +588,7 @@ test("PDF attachments are sniffed, normalized and bounded", async () => {
   );
   await assert.rejects(
     readDocumentAttachment(
-      new File([new Uint8Array(3 * 1024 * 1024 + 1)], "large.pdf", {
+      new File([new Uint8Array(8 * 1024 * 1024 + 1)], "large.pdf", {
         type: "application/pdf",
       }),
       [],
@@ -666,7 +666,7 @@ test("audio attachments are sniffed by magic bytes and bounded", async () => {
   );
   await assert.rejects(
     readAudioAttachment(
-      new File([new Uint8Array(4 * 1024 * 1024 + 1)], "large.wav", { type: "audio/wav" }),
+      new File([new Uint8Array(8 * 1024 * 1024 + 1)], "large.wav", { type: "audio/wav" }),
       [],
     ),
     /MiB/,
@@ -674,21 +674,21 @@ test("audio attachments are sniffed by magic bytes and bounded", async () => {
   await assert.rejects(
     readAudioAttachment(
       new File([wav], "third.wav", { type: "audio/wav" }),
-      [audio, audio],
+      [audio, audio, audio, audio],
     ),
     /最多/,
   );
-  // 总预算与图片、PDF 共用：一份贴着单图上限的图片再加一段 1.2 MiB 的音频就超了
+  // 总预算与图片、PDF 共用：一份贴着单图上限的图片再加一段 7.5 MiB 的音频就超了
   // （两者各自都还在自己的上限之内，所以拒绝的理由只能是那个共享预算）。
   const biggestImage = {
     type: "image" as const,
     mediaType: "image/png" as const,
-    data: "A".repeat(5_592_404),
+    data: "A".repeat(6_990_508),
   };
   const bulkyClip = {
     type: "audio" as const,
     mediaType: "audio/ogg" as const,
-    data: "A".repeat(1_677_216),
+    data: "A".repeat(10_485_760),
   };
   await assert.rejects(
     readAudioAttachment(new File([wav], "note.wav", { type: "audio/wav" }), [
@@ -737,7 +737,7 @@ test("text files are decoded as bounded UTF-8 attachments", async () => {
   );
   await assert.rejects(
     readTextFileAttachment(
-      new File([new Uint8Array(256 * 1024 + 1)], "large.txt", { type: "text/plain" }),
+      new File([new Uint8Array(512 * 1024 + 1)], "large.txt", { type: "text/plain" }),
       [],
     ),
     /KiB/,

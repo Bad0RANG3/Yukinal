@@ -202,10 +202,11 @@ async fn parse_trusted_host_ca(
             "host certificate principals must be non-empty and at most 253 characters".into(),
         ));
     }
-    if authority.revocation_list_signers.len() > 8 {
-        return Err(Error::Configuration(
-            "host certificate KRL may trust at most 8 independent signing keys".into(),
-        ));
+    if authority.revocation_list_signers.len() > crate::MAX_KRL_SIGNERS {
+        return Err(Error::Configuration(format!(
+            "host certificate KRL may trust at most {} independent signing keys",
+            crate::MAX_KRL_SIGNERS
+        )));
     }
     let mut revocation_signers = vec![key.clone()];
     for signer in &authority.revocation_list_signers {
@@ -714,12 +715,12 @@ mod tests {
         );
 
         let error = parse_trusted_host_ca(
-            Some(&authority(vec![signer_public_key; 9])),
+            Some(&authority(vec![signer_public_key; 17])),
             &OutboundProxy::default(),
         )
         .await
         .expect_err("the signer list must be bounded");
-        assert!(error.to_string().contains("at most 8"), "{error}");
+        assert!(error.to_string().contains("at most 16"), "{error}");
     }
 
     /// `RequireMatch` 下未钉过的主机：拒绝，而且是**在 TCP 之前**拒绝。

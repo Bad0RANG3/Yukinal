@@ -633,6 +633,10 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_investigation_schedules_baseline
         ON investigation_schedules (baseline_run_id);
     "#,
+    // 35 — per-server trust of MCP tool annotations (ADR 0074). Default 'none' so
+    // existing rows and unknown peers keep the pre-relaxation behaviour: every MCP
+    // tool stays critical until a user explicitly trusts that one server.
+    r#"ALTER TABLE mcp_servers ADD COLUMN annotation_trust TEXT NOT NULL DEFAULT 'none';"#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

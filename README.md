@@ -61,7 +61,7 @@ Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务
 - 支持 OpenAI-compatible（Chat Completions / Responses）、Anthropic Messages 和 Gemini `generateContent` 三类协议。
 - 支持模型目录、SSE 文本增量、工具调用增量、取消、超时和安全的错误摘要。
 - 支持 stdio 与 Streamable HTTP MCP 服务器；HTTP 端点可使用静态认证头或 OAuth，凭据仍由系统凭据库持有。
-- MCP 工具进入和内置工具相同的执行链路，但默认按 `critical` 处理，必须逐项审批，并且 Agent 调用必须绑定 durable task/ChangePlan 步骤；交互式终端仍是用户直接操作的人工旁路。
+- MCP 工具进入和内置工具相同的执行链路；默认按 `critical` 处理并逐项审批，用户显式信任服务器注解后，自称只读的工具可按只读档执行，其余 effectful 调用仍需 durable task/ChangePlan 步骤；交互式终端仍是用户直接操作的人工旁路。
 
 ### 安全边界
 

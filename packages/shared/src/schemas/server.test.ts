@@ -216,7 +216,18 @@ test("host certificate authority is explicit and clearable without accepting bot
       ...agentAdd,
       hostCertificateAuthority: {
         ...authority,
-        revocationListSigners: Array.from({ length: 9 }, (_, index) => `key-${index}`),
+        revocationListSigners: Array.from({ length: 16 }, (_, index) => `key-${index}`),
+      },
+    }).success,
+    true,
+    "ADR 0075 raises the bound to 16",
+  );
+  assert.equal(
+    AddServerInputSchema.safeParse({
+      ...agentAdd,
+      hostCertificateAuthority: {
+        ...authority,
+        revocationListSigners: Array.from({ length: 17 }, (_, index) => `key-${index}`),
       },
     }).success,
     false,

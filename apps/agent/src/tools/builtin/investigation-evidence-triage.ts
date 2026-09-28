@@ -14,7 +14,11 @@ import { z } from "zod";
 import { ToolFailure, type Tool } from "../tool.js";
 import type { HostRpcClient } from "../../transport/host-client.js";
 
-const MAX_EVIDENCE = 16;
+const MAX_EVIDENCE = 32;
+/// At most this many host fetches are in flight at once. The old `Promise.all`
+/// opened one request per id; with the cap raised to 32 (ADR 0075) that is a burst
+/// the host and the sidecar transport should not have to absorb in one tick.
+const EVIDENCE_FETCH_CONCURRENCY = 8;
 const MAX_SIGNALS = 64;
 const MAX_HYPOTHESES = 8;
 const MAX_WARNINGS = 16;
@@ -82,7 +86,7 @@ export function investigationEvidenceTriageTool(
   return {
     name: "investigation.evidence.triage",
     description:
-      "Analyze up to 16 already persisted and host-redacted evidence items with bounded " +
+      "Analyze up to 32 already persisted and host-redacted evidence items with bounded " +
       "read-only heuristics. It returns warning signals and low-confidence candidate hypotheses, " +
       "never raw bodies, new samples, causal proof, plan progress or write authorization.",
     risk: "read",
@@ -95,13 +99,16 @@ export function investigationEvidenceTriageTool(
         throw new ToolFailure("investigation.evidence.triage requires a durable task", "invalid_input", false);
       }
 
-      const fetched = await Promise.all(
-        request.evidenceIds.map(async (evidenceId) => {
+      const fetched = await mapWithConcurrency(
+        request.evidenceIds,
+        EVIDENCE_FETCH_CONCURRENCY,
+        async (evidenceId) => {
           const response = await host.fetchEvidence({ taskId: context.taskId!, evidenceId }, context.signal);
           if (response.status === "success") return { evidenceId, evidence: EvidenceSchema.parse(response.evidence) };
           if (response.status === "not_found") return { evidenceId, error: "evidence not found in the current task" };
           return { evidenceId, error: response.error.message };
-        }),
+        },
+        context.signal,
       );
       const evidence = fetched.flatMap((item) => ("evidence" in item && item.evidence ? [item.evidence] : []));
       if (evidence.length === 0) {
@@ -117,6 +124,33 @@ export function investigationEvidenceTriageTool(
       return output.parse(result);
     },
   };
+}
+
+/**
+ * Run `worker` over `items` with at most `limit` in flight, preserving result order.
+ *
+ * No dependency was added for this: the tool only needs an ordered, bounded fan-out,
+ * and an abort stops scheduling new work and rejects through the worker's own signal.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+  signal?: AbortSignal,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const width = Math.max(1, Math.min(limit, items.length));
+  const runners = Array.from({ length: width }, async () => {
+    while (!signal?.aborted) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index] as T);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 function triageEvidence(

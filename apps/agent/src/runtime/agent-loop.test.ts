@@ -785,6 +785,7 @@ test("an MCP call is emitted with its server as origin", async () => {
 
   // 第三方工具永远要用户批准：这一条在 catalog.test.ts 里从权限引擎那一侧也钉了一次。
   const request = await approval;
+  assert.equal(request.sessionGrantable, false, "critical MCP tools cannot be remembered for the run (ADR 0072)");
   assert.equal(loop.respondApproval({ approvalId: request.approvalId, runId: "run_mcp", decision: "approve_once", respondedAt: new Date().toISOString() }), true);
   const result = await run;
   assert.equal(result.state, "completed", JSON.stringify(result));
@@ -797,4 +798,112 @@ test("an MCP call is emitted with its server as origin", async () => {
   assert.deepEqual(toolResult.origin, { kind: "mcp", serverId: "mcp_1" });
   assert.equal(call.toolName, "mcp.mcp-1.echo", "审计行上的名字必须带得出服务器段");
   assert.equal(call.toolName.startsWith("mcp."), true);
+});
+
+/**
+ * ADR 0072: a session grant the user gave on an exact high-risk action satisfies a
+ * plan step that says `requiresApproval: true` — it is the user's own click, just
+ * remembered for this run. Policy and Agent delegation still cannot satisfy such a
+ * step, and a different input fingerprint must ask again.
+ */
+test("a session grant satisfies a requires-approval plan step for the identical action, and nothing else", async () => {
+  const registry = new ToolRegistry();
+  let executions = 0;
+  registry.register({
+    name: "config.write",
+    description: "Write a configuration file",
+    risk: "high",
+    timeoutMs: 1_000,
+    cancellable: true,
+    retry: { maxAttempts: 1, backoffMs: 0 },
+    input: z.strictObject({ path: z.string() }),
+    execute: async () => {
+      executions += 1;
+      return { ok: true };
+    },
+  });
+
+  const loop = new AgentLoop({
+    registry,
+    permission: new PermissionEngine(),
+    context: new ContextEngine(createEmptyContextSource()),
+    checkPlan: async () => ({
+      status: "allowed",
+      planId: "plan_grant",
+      stepId: "step_grant",
+      stepKind: "action",
+      evidenceIds: [],
+      requiresApproval: true,
+    }),
+  });
+
+  let turn = 0;
+  const provider: LLMProvider = {
+    id: "test-provider",
+    model: "test-model",
+    async listModels() {
+      return [];
+    },
+    async *stream() {
+      turn += 1;
+      if (turn === 1) {
+        yield { type: "tool_call", call: { id: "call_grant_1", name: "config__write", arguments: { path: "/etc/a" } } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else if (turn === 2) {
+        yield { type: "tool_call", call: { id: "call_grant_2", name: "config__write", arguments: { path: "/etc/a" } } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else if (turn === 3) {
+        yield { type: "tool_call", call: { id: "call_grant_3", name: "config__write", arguments: { path: "/etc/b" } } };
+        yield { type: "done", finishReason: "tool_calls" };
+      } else {
+        yield { type: "text_delta", text: "done" };
+        yield { type: "done", finishReason: "stop" };
+      }
+    },
+  };
+
+  const runId = "run_plan_grant";
+  const events: AgentStreamEvent[] = [];
+  const approvals: Extract<AgentStreamEvent, { type: "agent.waiting_approval" }>["approval"][] = [];
+  const run = loop.start(
+    {
+      runId,
+      sessionId: "ses_plan_grant",
+      taskId: "task_plan_grant",
+      prompt: "write the config",
+      target: { host: "remote", serverId: "srv_grant", environment: "staging" },
+    },
+    {
+      emit: (event) => {
+        events.push(event);
+        if (event.type !== "agent.waiting_approval") return;
+        approvals.push(event.approval);
+        const approvalId = event.approval.approvalId;
+        const decision = approvals.length === 1 ? "approve_session" : "approve_once";
+        // The run registers its waiter synchronously right after `emit` returns, so a
+        // microtask is the earliest safe moment to answer it.
+        queueMicrotask(() => {
+          loop.respondApproval({ approvalId, runId, decision, respondedAt: new Date().toISOString() });
+        });
+      },
+    },
+    provider,
+  );
+
+  const result = await run;
+  assert.equal(result.state, "completed", JSON.stringify(result));
+
+  // The first call and the different-input third call each ask; the identical second
+  // call is covered by the run-scoped grant.
+  assert.equal(approvals.length, 2, "only the first and the changed input wait for approval");
+  assert.equal(approvals[0]?.sessionGrantable, true, "a high action on staging may be remembered for the run");
+  assert.equal(approvals[1]?.sessionGrantable, true);
+  assert.equal(executions, 3, "all three calls executed");
+
+  const calls = events.filter((event): event is Extract<AgentStreamEvent, { type: "agent.tool_call" }> => event.type === "agent.tool_call");
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0]?.decision, "ask");
+  assert.equal(calls[1]?.decision, "auto", "the identical fingerprinted action is auto-approved by the session grant");
+  assert.equal(calls[1]?.approvedBy, "user");
+  assert.equal(calls[2]?.decision, "ask", "a different input must ask again");
 });

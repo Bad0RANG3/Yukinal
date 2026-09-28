@@ -8,7 +8,7 @@ export type LogSource = (typeof LOG_SOURCES)[number];
 
 /** Optional bounded query for the host's read-only journal probe. */
 export interface ServerLogsInput {
-  /** Read at most this many seconds into the past; the host caps it at 24 hours. */
+  /** Read at most this many seconds into the past; the host caps it at 7 days. */
   sinceSeconds?: number;
   /** Restrict journalctl to one validated systemd service unit. */
   unit?: string;

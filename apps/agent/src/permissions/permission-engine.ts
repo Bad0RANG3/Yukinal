@@ -18,6 +18,7 @@ import {
   DEFAULT_AGENT_RUN_MODE,
   defaultPolicyFor,
   isReadOnlyRunMode,
+  isSessionGrantable,
   maxRisk,
   tierOf,
   type AgentPermissionMode,
@@ -153,11 +154,15 @@ export class PermissionEngine {
     }
 
     // `auto` is intentionally narrow. It may cover ordinary write-tier work on a
-    // resolved development or staging target, but it must never waive a human
+    // resolved remote development or staging target, but it must never waive a human
     // confirmation for local, unknown, production, high-risk, or critical work.
+    // The remote restriction matches the host's plan-side check (ADR 0073): a local
+    // `development` target is still the machine the user is sitting at.
     // Policy denial remains absolute in every mode.
     const agentMayAutoApprove =
-      tier === "write" && (target.environment === "development" || target.environment === "staging");
+      tier === "write" &&
+      target.host === "remote" &&
+      (target.environment === "development" || target.environment === "staging");
     if (request.permissionMode === "auto" && outcome !== "deny" && agentMayAutoApprove) {
       outcome = "auto";
       approvedBy = "agent";
@@ -176,24 +181,18 @@ export class PermissionEngine {
       reason = `${declaration.name} on ${describeTarget(target)} is waiting for user approval because Agent mode is "ask"`;
     }
 
-    // Session grants widen non-dangerous actions only: anything that reaches the
-    // dangerous tier — an intrinsically dangerous tool (docker.stop, rm -rf), or a
-    // routine write the environment escalated (production or unlabelled) — re-asks
-    // every time. A session grant is still a single click of consent, so it must
-    // not stand in for the direct approval the dangerous tier requires.
-    //
-    // The test is `tier` (final risk), not `tierOf(intrinsicRisk)`, because `tier`
-    // is what the execution chokepoint enforces and what the escalation block above
-    // already acts on. Reading only the intrinsic risk let this branch re-open the
-    // invariant at "dangerous or critical action cannot be auto-approved", so the
-    // engine reported `auto`/`user` for a call `ToolRegistry.checkTicket()` then
-    // always denied. The engine must never advertise an approval that execution
-    // will refuse: a wrong `auto` here is invisible, whereas the safe failure — one
-    // extra prompt — is not.
+    // Session grants remember one exact action (tool + target + input fingerprint) for
+    // the rest of the run. Before ADR 0072 they widened non-dangerous actions only; they
+    // may now also cover a `high` action on a development or staging target, because the
+    // grant is still a direct user click on that exact call and the fingerprint stops it
+    // from being replayed to another container, unit or package. `critical`, and
+    // dangerous-tier work on production, unknown or local targets, still re-asks every
+    // time: `isSessionGrantable` is the single rule, shared with `grantSession`, the
+    // registry and the approval card, so the engine never advertises an approval that
+    // execution will refuse.
     if (
       outcome === "ask" &&
-      tier !== "dangerous" &&
-      finalRisk !== "critical" &&
+      isSessionGrantable({ tier, finalRisk, target }) &&
       this.#grants.has(grantKey(declaration.name, target, actionFingerprint(input)))
     ) {
       outcome = "auto";
@@ -229,16 +228,16 @@ export class PermissionEngine {
 
   /**
    * Called when the user chooses "approve for this run". `approve_once` must not
-   * call this. Dangerous tier is never granted for a session.
+   * call this. A decision `isSessionGrantable` rejects (critical anywhere, dangerous
+   * tier outside development/staging) is never recorded.
    *
-   * "Dangerous tier" is judged on `decision.tier`, the final risk after
-   * environment escalation, because that is the field the execution chokepoint
+   * The rule is judged on `decision.tier` / `decision.finalRisk`, the values after
+   * environment escalation, because those are what the execution chokepoint
    * enforces. Recording a grant the registry will always refuse would leave a dead
    * entry in the grant set and make the engine's own decisions misleading.
    */
   grantSession(decision: PermissionDecision): void {
-    if (decision.tier === "dangerous") return;
-    if (decision.finalRisk === "critical") return;
+    if (!isSessionGrantable(decision)) return;
     this.#grants.add(grantKey(decision.toolName, decision.target, decision.inputFingerprint));
   }
 

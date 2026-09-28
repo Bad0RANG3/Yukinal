@@ -12,7 +12,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
 use super::descriptor::{
-    McpContentBlock, McpToolDescriptor, McpToolResult, TOOL_DESCRIPTION_MAX_CHARS,
+    McpContentBlock, McpToolAnnotations, McpToolDescriptor, McpToolResult,
+    TOOL_DESCRIPTION_MAX_CHARS,
 };
 use super::{redacted, truncated, truncated_to, McpError};
 
@@ -322,6 +323,7 @@ fn parse_tool(server_id: &str, entry: &Value) -> Result<McpToolDescriptor, McpEr
         description,
         input_schema,
         output_schema,
+        annotations: McpToolAnnotations::from_json(entry.get("annotations")),
     })
 }
 
@@ -521,7 +523,8 @@ mod tests {
                 {
                     "name": "read_file",
                     "description": "reads a file",
-                    "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } } }
+                    "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } } },
+                    "annotations": { "readOnlyHint": true, "destructiveHint": "nope" }
                 },
                 { "name": "no-args" }
             ]
@@ -539,6 +542,10 @@ mod tests {
         // 没声明 inputSchema 的工具 = 没有入参的工具。
         assert_eq!(tools[1].input_schema, json!({ "type": "object" }));
         assert_eq!(tools[1].description, "");
+        // 注解按宽松规则解析：布尔提示收下，错类型当作未声明，缺注解就是空。
+        assert_eq!(tools[0].annotations.read_only_hint, Some(true));
+        assert_eq!(tools[0].annotations.destructive_hint, None);
+        assert!(tools[1].annotations.is_empty());
 
         let (_, cursor) =
             parse_tools_page("mcp-1", &json!({ "tools": [], "nextCursor": "page-2" }))

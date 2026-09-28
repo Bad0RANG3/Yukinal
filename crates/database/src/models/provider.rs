@@ -121,6 +121,41 @@ pub struct McpServerConfig {
     pub allowed_tools: Vec<String>,
     /// "reviewed" | "unreviewed"
     pub trust_level: String,
+    /// Whether this server's own tool annotations may lower the effective risk of its
+    /// tools (ADR 0074). `#[serde(default)]` keeps older configurations and unknown
+    /// peers at `none`, the pre-relaxation behaviour where every MCP tool is critical.
+    #[serde(default)]
+    pub annotation_trust: McpAnnotationTrust,
+}
+
+/// Whether to trust the `annotations` a server publishes for its tools.
+///
+/// `None` is the default and the only safe value for a server nobody has vetted: an
+/// annotation is the server's own claim about itself, not evidence. `Trusted` lets the
+/// *host* map the bounded hints into a risk tier, never the server directly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAnnotationTrust {
+    #[default]
+    None,
+    Trusted,
+}
+
+impl McpAnnotationTrust {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Trusted => "trusted",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "none" => Some(Self::None),
+            "trusted" => Some(Self::Trusted),
+            _ => None,
+        }
+    }
 }
 
 /// One ordered static HTTP authentication header. The name is public; the

@@ -187,6 +187,82 @@ impl<'a> FilesystemBackupsRepository<'a> {
         })
     }
 
+    /// Every `available` backup for one server, across tasks, newest first.
+    ///
+    /// Used by the retention planner (ADR 0076): deciding what is safe to rotate needs the
+    /// whole server's picture, not one task's slice. Metadata only — it never probes the
+    /// remote target, so an `available` row is not proof that the sibling still exists.
+    pub fn list_available_for_server(
+        &self,
+        server_id: &str,
+        limit: usize,
+    ) -> Result<(Vec<FilesystemBackupRecord>, bool)> {
+        self.list_available_for_server_with_path_prefix(server_id, None, limit)
+    }
+
+    /// Every `available` backup for one server, optionally restricted before the bounded scan.
+    ///
+    /// Applying the prefix in SQL is important: filtering after taking the first `limit` rows
+    /// could hide an older matching path behind unrelated backups and make retention silently
+    /// miss a candidate.
+    pub fn list_available_for_server_with_path_prefix(
+        &self,
+        server_id: &str,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<FilesystemBackupRecord>, bool)> {
+        if server_id.trim().is_empty() {
+            return Err(DatabaseError::Validation(
+                "filesystem backup listing requires a server".into(),
+            ));
+        }
+        if limit == 0 || limit > 512 {
+            return Err(DatabaseError::Validation(
+                "filesystem backup retention scan limit must be between 1 and 512".into(),
+            ));
+        }
+        if path_prefix
+            .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+        {
+            return Err(DatabaseError::Validation(
+                "filesystem backup retention path prefix is empty or contains control characters"
+                    .into(),
+            ));
+        }
+        let like_prefix = path_prefix.map(|prefix| {
+            format!(
+                "{}%",
+                prefix
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
+        self.db.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+                        path, backup_path, revision, bytes_backed_up, status, created_at,
+                        updated_at, restored_at, deleted_at
+                 FROM filesystem_backups
+                 WHERE server_id = ?1 AND status = 'available'
+                   AND (?2 IS NULL OR path LIKE ?2 ESCAPE '\\')
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?3",
+            )?;
+            let requested = i64::try_from(limit + 1).map_err(|_| {
+                DatabaseError::Validation("filesystem backup scan limit is too large".into())
+            })?;
+            let rows =
+                statement.query_map(params![server_id, like_prefix, requested], row_to_record)?;
+            let mut records = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            let truncated = records.len() > limit;
+            if truncated {
+                records.truncate(limit);
+            }
+            Ok((records, truncated))
+        })
+    }
+
     /// Consume a backup after a successful guarded restore.  The conditional
     /// update prevents two independent restore requests from both treating the
     /// same recovery copy as available.
@@ -423,5 +499,95 @@ mod tests {
         assert!(filtered
             .iter()
             .all(|row| row.task_id.as_deref() == Some("task_1")));
+    }
+
+    #[test]
+    fn server_scan_lists_available_rows_across_tasks_newest_first() {
+        let db = Database::in_memory().expect("database");
+        let repository = db.filesystem_backups();
+
+        let mut newest = record(FilesystemBackupStatus::Available);
+        newest.id = "backup_newest".into();
+        newest.task_id = Some("task_a".into());
+        newest.path = "/etc/a".into();
+        newest.created_at = "2026-09-20T00:03:00Z".into();
+        repository.insert(&newest).expect("insert newest");
+
+        let mut middle = record(FilesystemBackupStatus::Available);
+        middle.id = "backup_middle".into();
+        middle.task_id = Some("task_b".into());
+        middle.path = "/etc/a".into();
+        middle.backup_path.push('b');
+        middle.created_at = "2026-09-20T00:02:00Z".into();
+        repository.insert(&middle).expect("insert middle");
+
+        let mut oldest = record(FilesystemBackupStatus::Available);
+        oldest.id = "backup_oldest".into();
+        oldest.task_id = Some("task_a".into());
+        oldest.path = "/etc/b".into();
+        oldest.backup_path.push('c');
+        oldest.created_at = "2026-09-20T00:01:00Z".into();
+        repository.insert(&oldest).expect("insert oldest");
+
+        let mut consumed = record(FilesystemBackupStatus::Restored);
+        consumed.id = "backup_restored".into();
+        consumed.path = "/etc/c".into();
+        consumed.backup_path.push('d');
+        consumed.created_at = "2026-09-20T00:04:00Z".into();
+        repository.insert(&consumed).expect("insert restored");
+
+        let (rows, truncated) = repository
+            .list_available_for_server("srv_1", 8)
+            .expect("scan");
+        assert!(!truncated);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["backup_newest", "backup_middle", "backup_oldest"],
+            "the scan is cross-task and newest first"
+        );
+        assert!(rows
+            .iter()
+            .all(|row| row.status == FilesystemBackupStatus::Available));
+
+        let (limited, truncated) = repository
+            .list_available_for_server("srv_1", 1)
+            .expect("scan");
+        assert!(truncated);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, "backup_newest");
+
+        assert!(repository
+            .list_available_for_server("srv_other", 8)
+            .expect("scan")
+            .0
+            .is_empty());
+        assert!(repository.list_available_for_server("srv_1", 0).is_err());
+    }
+
+    #[test]
+    fn server_scan_applies_path_prefix_before_the_bounded_limit() {
+        let db = Database::in_memory().expect("database");
+        let repository = db.filesystem_backups();
+
+        for index in 0..4 {
+            let mut unrelated = record(FilesystemBackupStatus::Available);
+            unrelated.id = format!("backup_unrelated_{index}");
+            unrelated.path = format!("/var/log/file_{index}");
+            unrelated.backup_path = format!("/var/log/.backup_{index}");
+            unrelated.created_at = format!("2026-09-20T00:0{}:00Z", 4 - index);
+            repository.insert(&unrelated).expect("insert unrelated");
+        }
+        let mut matching = record(FilesystemBackupStatus::Available);
+        matching.id = "backup_matching".into();
+        matching.path = "/etc/target.conf".into();
+        matching.created_at = "2026-09-20T00:00:00Z".into();
+        repository.insert(&matching).expect("insert matching");
+
+        let (rows, truncated) = repository
+            .list_available_for_server_with_path_prefix("srv_1", Some("/etc/"), 1)
+            .expect("prefix scan");
+        assert!(!truncated);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "backup_matching");
     }
 }

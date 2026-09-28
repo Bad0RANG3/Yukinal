@@ -752,6 +752,7 @@ async fn an_http_row_is_dispatched_to_the_http_transport_not_stdio() {
         enabled: true,
         allowed_tools: Vec::new(),
         trust_level: "unreviewed".to_string(),
+        annotation_trust: Default::default(),
     };
 
     let error = McpStdioConfig::from_server_config(&row, TEST_TIMEOUT)

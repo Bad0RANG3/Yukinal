@@ -21,6 +21,7 @@ import type {
 
 import { registerCatalog, loadCatalogFromHost, MCP_CATALOG_BUDGET_MS } from "./catalog.js";
 import { describeMcpTool, MCP_TOOL_RISK, MCP_TOOL_TIMEOUT_MS, mcpToolFromCatalog } from "./tool.js";
+import { PermissionEngine } from "../permissions/permission-engine.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { ToolFailure, type ToolContext } from "../tools/tool.js";
 
@@ -79,14 +80,32 @@ test("an MCP tool is declared critical and carries its server as origin", () => 
     mcpToolFromCatalog(catalogTool(), { executeOnHost: host.executeOnHost }),
   );
 
-  // A server cannot lower its own risk: `McpToolDescriptor` has no risk field, and this
-  // adapter does not read one. `critical` is the tier the engine never auto-approves.
+  // With no `risk` in the catalog entry (an older host), this adapter fails closed to
+  // `critical` — the tier the engine never auto-approves. The host is the only source of
+  // a lower tier now (ADR 0074), and it defaults to this same value.
   assert.equal(declaration.risk, MCP_TOOL_RISK);
   assert.equal(declaration.risk, "critical");
   assert.deepEqual(declaration.origin, { kind: "mcp", serverId: "mcp_1" });
   assert.equal(declaration.timeoutMs, MCP_TOOL_TIMEOUT_MS);
   assert.equal(declaration.retry.maxAttempts, 1);
   assert.equal(declaration.effectful, true);
+});
+
+test("the host's effective risk is honoured, and anything unknown fails closed", () => {
+  const host = fakeHost({ status: "success", output: { serverId: "mcp_1", tool: "echo", isError: false, text: "", content: [] } });
+  const make = (risk: HostMcpCatalogTool["risk"]) =>
+    mcpToolFromCatalog(catalogTool({ risk }), { executeOnHost: host.executeOnHost });
+
+  for (const risk of ["low", "medium", "high", "critical"] as const) {
+    const tool = make(risk);
+    assert.equal(tool.risk, risk);
+    assert.equal(tool.effectful, risk !== "low", `${risk} is effectful unless it is low`);
+  }
+  // A missing value or one this build does not recognise must stay critical.
+  assert.equal(make(undefined).risk, "critical");
+  const unknown = make("trusted" as unknown as HostMcpCatalogTool["risk"]);
+  assert.equal(unknown.risk, "critical");
+  assert.equal(unknown.effectful, true);
 });
 
 test("the permission engine always asks for an MCP tool, whatever the run mode claims", async () => {
@@ -196,6 +215,40 @@ test("a call goes to the host under the internal name and comes back as the tool
   assert.deepEqual(host.seen[0]?.input, { text: "hi" });
   assert.deepEqual(host.seen[0]?.target, target);
   assert.equal((result.output as { text: string }).text, "echo: hi");
+});
+
+test("a host-resolved low MCP tool runs without a durable plan, even in readonly mode", async () => {
+  const registry = new ToolRegistry();
+  const host = fakeHost({
+    status: "success",
+    output: { serverId: "mcp_1", tool: "echo", isError: false, text: "ok", content: [] },
+  });
+  const declaration = registry.register(
+    mcpToolFromCatalog(catalogTool({ risk: "low" }), { executeOnHost: host.executeOnHost }),
+  );
+  assert.notEqual(declaration.effectful, true, "a low tool is not effectful");
+
+  // A read-only run may execute it on a target whose environment floor stays read-tier
+  // (local/development); the policy auto ticket then needs no plan or approval.
+  const localTarget: ToolTarget = { host: "local", environment: "local" };
+  const decision = new PermissionEngine().evaluate({
+    declaration,
+    target: localTarget,
+    input: { text: "hi" },
+    mode: "readonly",
+  });
+  assert.equal(decision.outcome, "auto");
+  assert.equal(decision.approvedBy, "policy");
+
+  const result = await registry.execute(
+    { callId: "call_low", traceId: "trace_low", toolName: "mcp.mcp-1.echo", input: { text: "hi" }, target: localTarget },
+    { kind: "policy_auto", decision },
+  );
+  assert.equal(result.status, "success");
+
+  // A `critical` sibling still needs the durable plan and a user approval.
+  const critical = mcpToolFromCatalog(catalogTool({ risk: "critical" }), { executeOnHost: host.executeOnHost });
+  assert.equal(critical.effectful, true);
 });
 
 test("a tool-level error becomes a ToolFailure that keeps the server's words", async () => {

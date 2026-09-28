@@ -145,7 +145,7 @@ pub(super) fn handle_plan_record(state: &AppState, params: Value) -> Result<Valu
             return Ok(record_failure(
                 "denied_by_policy",
                 format!(
-                    "action step `{}` may omit approval only for an auto executable goal on a remote development or staging target, and only at medium risk",
+                    "action step `{}` may omit approval only for an auto executable goal on a remote development or staging target, and only for a medium-risk action using one of {{filesystem.backup, filesystem.edit, filesystem.write}} (or the backup+write pair)",
                     step.id
                 ),
                 false,
@@ -1049,7 +1049,102 @@ pub(super) fn validate_playbook_step(
             step.id
         ));
     }
+    if let Some(error) = validate_backup_rotation_step(step) {
+        return Some(error);
+    }
     None
+}
+
+/// Validate the structural binding produced by the `backup_rotation` playbook.  This check
+/// belongs at plan-record time so an invalid rotation cannot sit in an approved-looking plan
+/// and fail only after the user has approved it.
+fn validate_backup_rotation_step(
+    step: &yukinal_database::models::InvestigationPlanStep,
+) -> Option<String> {
+    let bindings = step.input_bindings.as_ref()?;
+    let serialized_items = bindings.get("items")?;
+    if step.allowed_tools != [FILESYSTEM_BACKUP_CLEANUP.to_string()] {
+        return Some(format!(
+            "backup rotation step `{}` must allow only filesystem.backup.cleanup",
+            step.id
+        ));
+    }
+    if step.risk_level != Some(RiskLevel::Medium) || !step.requires_approval {
+        return Some(format!(
+            "backup rotation step `{}` must be medium risk and require approval",
+            step.id
+        ));
+    }
+    let items =
+        match serde_json::from_str::<Vec<FilesystemBackupCleanupItemInput>>(serialized_items) {
+            Ok(items) => items,
+            Err(error) => {
+                return Some(format!(
+                    "backup rotation step `{}` has invalid items binding: {error}",
+                    step.id
+                ))
+            }
+        };
+    if items.is_empty() || items.len() > 32 {
+        return Some(format!(
+            "backup rotation step `{}` must bind between 1 and 32 items",
+            step.id
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for item in &items {
+        if let Err(error) = validate_remote_path(&item.path) {
+            return Some(format!(
+                "backup rotation step `{}` has an invalid path: {error}",
+                step.id
+            ));
+        }
+        if let Err(error) = validate_remote_path(&item.backup_path) {
+            return Some(format!(
+                "backup rotation step `{}` has an invalid backupPath: {error}",
+                step.id
+            ));
+        }
+        if let Err(error) =
+            AgentCleanupBackupRequest::check(&item.path, &item.backup_path, &item.expected_revision)
+        {
+            return Some(format!(
+                "backup rotation step `{}` has an invalid cleanup item: {error}",
+                step.id
+            ));
+        }
+        if !seen.insert((item.path.as_str(), item.backup_path.as_str())) {
+            return Some(format!(
+                "backup rotation step `{}` contains duplicate path and backupPath",
+                step.id
+            ));
+        }
+    }
+    None
+}
+
+/// Tools a `medium`-risk action step may use with `requires_approval: false` on an
+/// auto/goal/execute task targeting a remote development or staging server (ADR 0073).
+/// Deliberately excludes deletions (`filesystem.backup.cleanup`), restore, restarts
+/// and package installs: those stay high-risk and are approved per call.
+pub(super) const AUTO_MEDIUM_TOOLS: &[&str] =
+    &[FILESYSTEM_BACKUP, FILESYSTEM_EDIT, FILESYSTEM_WRITE];
+
+/// Exactly one allowed medium tool, or the common "back up before writing" pair.
+/// Any wider or different set stays behind a per-step approval.
+fn auto_medium_tools_allowed(tools: &[String]) -> bool {
+    let allowed = |name: &str| AUTO_MEDIUM_TOOLS.contains(&name);
+    if tools.len() == 1 {
+        return allowed(tools[0].as_str());
+    }
+    if tools.len() == 2 {
+        let has_backup = tools.iter().any(|tool| tool == FILESYSTEM_BACKUP);
+        let has_write = tools
+            .iter()
+            .any(|tool| tool == FILESYSTEM_WRITE || tool == FILESYSTEM_EDIT);
+        return has_backup && has_write && tools.iter().all(|tool| allowed(tool.as_str()));
+    }
+    false
 }
 
 pub(super) fn task_allows_auto_medium_action(
@@ -1057,11 +1152,6 @@ pub(super) fn task_allows_auto_medium_action(
     step: &yukinal_database::models::InvestigationPlanStep,
 ) -> bool {
     let target = step.target.as_ref().unwrap_or(&task.scope);
-    let protected_config_action = step.allowed_tools.len() == 1
-        && matches!(
-            step.allowed_tools[0].as_str(),
-            FILESYSTEM_BACKUP | FILESYSTEM_EDIT
-        );
     task.permission_mode == InvestigationPermissionMode::Auto
         && task.mode == InvestigationRunMode::Goal
         && task.automation_level == TaskAutomationLevel::Execute
@@ -1071,7 +1161,7 @@ pub(super) fn task_allows_auto_medium_action(
             Environment::Development | Environment::Staging
         )
         && step.risk_level == Some(RiskLevel::Medium)
-        && protected_config_action
+        && auto_medium_tools_allowed(&step.allowed_tools)
 }
 
 pub(super) fn validate_input_bindings(
@@ -1088,7 +1178,7 @@ pub(super) fn validate_input_bindings(
         key.trim().is_empty()
             || key.chars().count() > 64
             || value.is_empty()
-            || value.chars().count() > 4_096
+            || value.chars().count() > 16_384
     }) {
         return Some(format!(
             "plan step `{}` has an invalid input binding",
@@ -1274,7 +1364,13 @@ pub(super) fn validate_task_guardrails_for_plan_step(
         let input = Value::Object(
             bindings
                 .iter()
-                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .map(|(key, value)| {
+                    let parsed = serde_json::from_str::<Value>(value)
+                        .ok()
+                        .filter(|candidate| candidate.is_array() || candidate.is_object())
+                        .unwrap_or_else(|| Value::String(value.clone()));
+                    (key.clone(), parsed)
+                })
                 .collect(),
         );
         if let Some(violation) = task_guardrail_violation(task, "plan.binding", &input) {
@@ -1293,10 +1389,16 @@ pub(super) fn input_path_values(input: &Value) -> Vec<&str> {
     let Some(object) = input.as_object() else {
         return Vec::new();
     };
-    ["path", "backupPath"]
+    let mut paths = ["path", "backupPath"]
         .into_iter()
         .filter_map(|key| object.get(key).and_then(Value::as_str))
-        .collect()
+        .collect::<Vec<_>>();
+    if let Some(items) = object.get("items").and_then(Value::as_array) {
+        for item in items {
+            paths.extend(input_path_values(item));
+        }
+    }
+    paths
 }
 
 pub(super) fn path_is_under_prefix(path: &str, prefix: &str) -> bool {
@@ -1611,10 +1713,23 @@ pub(super) fn input_bindings_match(
         return false;
     };
     bindings.iter().all(|(key, expected)| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|actual| actual == expected)
+        let Some(actual) = object.get(key) else {
+            return false;
+        };
+        // A string binding is an exact string comparison, as it always was. A binding whose
+        // input is an array or object is the canonical JSON of that value: `backup_rotation`
+        // binds its whole item list this way (ADR 0076). Comparing `serde_json::Value`
+        // equality keeps object key order out of the comparison while still pinning every
+        // path, backup path and revision.
+        if let Some(actual_str) = actual.as_str() {
+            return actual_str == expected;
+        }
+        if actual.is_array() || actual.is_object() {
+            if let Ok(expected_value) = serde_json::from_str::<Value>(expected) {
+                return &expected_value == actual;
+            }
+        }
+        false
     })
 }
 

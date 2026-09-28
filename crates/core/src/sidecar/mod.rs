@@ -38,7 +38,17 @@ use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 
 mod config;
 
-use crate::mcp::{read_frame, FrameRead, MAX_FRAME_BYTES};
+use crate::mcp::{read_frame, FrameRead};
+
+/// NDJSON frame limit for the host <-> sidecar transport.
+///
+/// This is deliberately larger than the MCP frame limit (8 MiB, kept in
+/// `crate::mcp::wire`) because the sidecar carries multimodal prompt parts: one frame may
+/// hold the base64 of every image/PDF/audio plus the text attachments. The worst-case
+/// budget is worked out in `packages/shared/src/types/chat.ts`; it must stay under this
+/// number. The MCP limit is unchanged because an MCP server is a third party we do not
+/// trust with a frame that big.
+pub const MAX_SIDECAR_FRAME_BYTES: usize = 24 * 1024 * 1024;
 
 /// 启动配置仍从这里导出 —— 路径与拆分类名前一致，调用方无需知道它换了文件。
 pub use config::SidecarConfig;
@@ -334,13 +344,15 @@ impl Inner {
 
 /// 拒绝写出一个超过 NDJSON 帧上限的载荷。
 ///
-/// 上限与 `@yukinal/shared` 的 `MAX_FRAME_BYTES` 是同一个数（由 `crate::mcp` 提供）：
+/// 上限与 `@yukinal/shared` 的 `MAX_SIDECAR_FRAME_BYTES` 是同一个数：
 /// 编码端不设限时，一条超大的 `run.start` 会被序列化成 JSON 再交给管道，在 Node 侧才被
 /// 丢弃 —— 内存已经分配过了。在写出之前拒绝，才是「读取前上限」的另一半。
+///
+/// 它比 MCP 的帧上限大，因为帧里要放多模态提示词；MCP 保持 8 MiB。
 fn ensure_frame_size(payload: &[u8]) -> Result<(), SidecarError> {
-    if payload.len() > MAX_FRAME_BYTES {
+    if payload.len() > MAX_SIDECAR_FRAME_BYTES {
         return Err(SidecarError::Frame(format!(
-            "refusing to write a {}-byte frame; the NDJSON frame limit is {MAX_FRAME_BYTES} bytes",
+            "refusing to write a {}-byte frame; the NDJSON frame limit is {MAX_SIDECAR_FRAME_BYTES} bytes",
             payload.len()
         )));
     }
@@ -414,7 +426,7 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     tokio::spawn(async move {
         let mut inside_private_key = false;
         loop {
-            match read_frame(&mut input, MAX_FRAME_BYTES).await {
+            match read_frame(&mut input, MAX_SIDECAR_FRAME_BYTES).await {
                 Ok(FrameRead::Line(line)) => {
                     let line = line.trim();
                     if line.is_empty() {
@@ -458,7 +470,7 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     tokio::spawn(async move {
         let mut inside_private_key = false;
         loop {
-            match read_frame(&mut err_reader, MAX_FRAME_BYTES).await {
+            match read_frame(&mut err_reader, MAX_SIDECAR_FRAME_BYTES).await {
                 Ok(FrameRead::Line(line)) => {
                     let Some(logger) = logger.upgrade() else {
                         break;
@@ -711,12 +723,12 @@ mod tests {
     #[test]
     fn a_frame_over_the_limit_is_refused_before_it_is_written() {
         assert!(ensure_frame_size(&[0u8; 16]).is_ok());
-        // 边界值本身合法：8 MiB 帧按协议是允许的，只是不能再大。
+        // 边界值本身合法：24 MiB 帧按协议是允许的，只是不能再大。
         assert!(
-            ensure_frame_size(&vec![0u8; MAX_FRAME_BYTES]).is_ok(),
+            ensure_frame_size(&vec![0u8; MAX_SIDECAR_FRAME_BYTES]).is_ok(),
             "the limit is inclusive"
         );
-        let oversized = vec![0u8; MAX_FRAME_BYTES + 1];
+        let oversized = vec![0u8; MAX_SIDECAR_FRAME_BYTES + 1];
         let error = ensure_frame_size(&oversized).expect_err("over the frame limit");
         assert!(matches!(error, SidecarError::Frame(_)), "{error:?}");
     }

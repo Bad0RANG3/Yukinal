@@ -8,8 +8,8 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use super::decode::decode_error;
 use crate::models::{
-    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpHttpAuthHeaderConfig,
-    McpServerConfig, ProviderModelOption,
+    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpAnnotationTrust,
+    McpHttpAuthHeaderConfig, McpServerConfig, ProviderModelOption,
 };
 use crate::{optional_json, Database, DatabaseError, Result};
 
@@ -295,7 +295,7 @@ fn optional_json_string(
 /// One statement, so `list` and `get` cannot drift apart in column order.
 const SELECT_ALL: &str =
     "SELECT id, label, transport, command, args, url, http_auth_header, http_credential_ref,
-            enabled, allowed_tools, trust_level, http_auth_headers, oauth
+            enabled, allowed_tools, trust_level, http_auth_headers, oauth, annotation_trust
      FROM mcp_servers ORDER BY label";
 
 fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServerConfig> {
@@ -340,6 +340,8 @@ fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServerConfig> {
         allowed_tools: serde_json::from_str(&row.get::<_, String>(9)?)
             .map_err(|error| decode_error(9, error))?,
         trust_level: row.get(10)?,
+        annotation_trust: McpAnnotationTrust::parse(&row.get::<_, String>(13)?)
+            .ok_or_else(|| decode_error(13, "unknown MCP annotation trust"))?,
     })
 }
 
@@ -365,13 +367,14 @@ impl<'a> McpServersRepository<'a> {
             connection.execute(
                 "INSERT INTO mcp_servers (id, label, transport, command, args, url,
                                          http_auth_header, http_credential_ref, enabled,
-                                         allowed_tools, trust_level, http_auth_headers, oauth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                         allowed_tools, trust_level, http_auth_headers, oauth,
+                                         annotation_trust)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET
                     label = ?2, transport = ?3, command = ?4, args = ?5, url = ?6,
                     http_auth_header = ?7, http_credential_ref = ?8, enabled = ?9,
                     allowed_tools = ?10, trust_level = ?11, http_auth_headers = ?12,
-                    oauth = ?13",
+                    oauth = ?13, annotation_trust = ?14",
                 params![
                     config.id,
                     config.label,
@@ -395,6 +398,7 @@ impl<'a> McpServersRepository<'a> {
                         .as_ref()
                         .map(serde_json::to_string)
                         .transpose()?,
+                    config.annotation_trust.as_str(),
                 ],
             )?;
             Ok(())
@@ -425,7 +429,7 @@ impl<'a> McpServersRepository<'a> {
                 .query_row(
                     "SELECT id, label, transport, command, args, url, http_auth_header,
                             http_credential_ref, enabled, allowed_tools, trust_level,
-                            http_auth_headers, oauth
+                            http_auth_headers, oauth, annotation_trust
                      FROM mcp_servers WHERE id = ?1",
                     params![id],
                     row_to_mcp,

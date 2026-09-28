@@ -253,6 +253,11 @@ export interface HostMcpCatalogTool {
   remoteName?: string;
   description: string;
   inputSchema: unknown;
+  /**
+   * The host-owned effective risk (ADR 0074). Optional because an older host does not
+   * send it; the agent then keeps every MCP tool at `critical`.
+   */
+  risk?: "low" | "medium" | "high" | "critical";
 }
 
 export interface HostMcpCatalogServer {

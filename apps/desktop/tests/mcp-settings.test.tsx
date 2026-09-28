@@ -376,6 +376,7 @@ test("a running server exposes the explicit tool review surface", () => {
   assert.match(html, /当前允许 1 个/);
   assert.match(html, /保存工具审核/);
   assert.match(html, /每次调用仍按 critical 逐项批准/);
+  assert.match(html, /信任此服务器声明的只读\/破坏性注解/);
   assert.match(html, /type="checkbox"/);
 });
 

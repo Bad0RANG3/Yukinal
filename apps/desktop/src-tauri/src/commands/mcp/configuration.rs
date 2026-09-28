@@ -480,6 +480,9 @@ pub(super) fn requires_restart(previous: &McpServerConfig, next: &McpServerConfi
         || previous.url != next.url
         || previous.http_auth_headers != next.http_auth_headers
         || previous.oauth != next.oauth
+        // Changing what is trusted changes which annotations the host may honour, so the
+        // running process must re-list its tools and the catalog must be rebuilt (ADR 0074).
+        || previous.annotation_trust != next.annotation_trust
 }
 
 /// 一次「为什么它没在跑」的视图。

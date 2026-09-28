@@ -41,11 +41,13 @@ const DEFAULT_SCHEDULE_LIMIT: usize = 100;
 const DEFAULT_RETENTION_DAYS: u64 = 30;
 const DEFAULT_RETENTION_LIMIT: usize = 64;
 const MAX_RETENTION_LIMIT: usize = 128;
-const MAX_GUARDRAIL_TOOLS: usize = 64;
-const MAX_GUARDRAIL_PATH_PREFIXES: usize = 64;
+const MAX_GUARDRAIL_TOOLS: usize = 128;
+const MAX_GUARDRAIL_PATH_PREFIXES: usize = 128;
 const MAX_GUARDRAIL_NAME_CHARS: usize = 256;
 const MAX_GUARDRAIL_PATH_CHARS: usize = 4_096;
-const MAX_GUARDRAIL_WINDOW_SECONDS: u64 = 365 * 86_400;
+/// Three years (ADR 0075; was one year). A long-running task may legitimately need a
+/// window that spans a slow migration, while still remaining a finite bound.
+const MAX_GUARDRAIL_WINDOW_SECONDS: u64 = 1095 * 86_400;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

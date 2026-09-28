@@ -37,11 +37,11 @@ export interface LLMProvider {
 
 `ChatRequest` 里有 `model`、`messages`、可选的 `tools`、`temperature`、`maxOutputTokens`，以及两个必须被认真对待的字段：`signal`（取消）与 `timeoutMs`（不许挂死）。`StreamEvent` 是判别联合：`text_delta`、`reasoning_delta`、`tool_call`、`usage`、`done`、`error`。`ProviderError` 携带 `retryable` 与可选状态码，让上层不必解析错误文本。消息在边界内侧使用中立形状 `LlmMessage`，由 Provider 负责转换成上游形状。
 
-**图片 part。** 用户消息可携带内联 PNG、JPEG、WebP 或 GIF：`LlmMessage` 只保留 `{mediaType, data, name?}`，`data` 是不带 data URL 前缀的规范 base64。OpenAI-compatible 的 `chat` 方言转成 `image_url` data URL，`responses` 方言转成 `input_image`；Anthropic 转成 `{type:"image", source:{type:"base64", ...}}`；Gemini 转成 `inlineData`。翻译留在适配器内，agent loop 不按 Provider 身份分支。输入上限由共享契约统一约束：单张原图 4 MiB、每条消息总计 5 MiB、最多 4 张；base64 展开后连同 JSON 与文本仍须低于 sidecar 的 8 MiB 单帧上限。
+**图片 part。** 用户消息可携带内联 PNG、JPEG、WebP 或 GIF：`LlmMessage` 只保留 `{mediaType, data, name?}`，`data` 是不带 data URL 前缀的规范 base64。OpenAI-compatible 的 `chat` 方言转成 `image_url` data URL，`responses` 方言转成 `input_image`；Anthropic 转成 `{type:"image", source:{type:"base64", ...}}`；Gemini 转成 `inlineData`。翻译留在适配器内，agent loop 不按 Provider 身份分支。输入上限由共享契约统一约束：单张原图 5 MiB、每条消息图片/PDF/音频合计 12 MiB、最多 8 张；base64 展开后连同 JSON 与文本仍须低于 host↔sidecar 的 24 MiB 单帧上限（MCP 帧仍是 8 MiB）。
 
-**PDF part。** 用户消息还可携带内联 `application/pdf`，中立形状是 `{mediaType, data, name}`。OpenAI-compatible 的 `chat` 方言转成 `file` + `file_data` data URL，`responses` 方言转成 `input_file`；Anthropic 转成 `{type:"document", source:{type:"base64", ...}}`；Gemini 继续使用 `inlineData`。共享契约限制单个 PDF 3 MiB、最多 2 个，并且它与图片共享 5 MiB 原始字节预算。
+**PDF part。** 用户消息还可携带内联 `application/pdf`，中立形状是 `{mediaType, data, name}`。OpenAI-compatible 的 `chat` 方言转成 `file` + `file_data` data URL，`responses` 方言转成 `input_file`；Anthropic 转成 `{type:"document", source:{type:"base64", ...}}`；Gemini 继续使用 `inlineData`。共享契约限制单个 PDF 8 MiB、最多 4 个，并且它与图片、音频共享 12 MiB 原始字节预算。
 
-**音频 part。** 用户消息还可携带内联 WAV、MP3、OGG 或 FLAC（`audio/wav`、`audio/mpeg`、`audio/ogg`、`audio/flac`），中立形状是 `{mediaType, data, name?}`，字节同样来自附件的**魔数**校验而不是扩展名。共享契约限制单段 4 MiB、最多 2 段，并且它与图片、PDF 共享同一个 5 MiB 原始字节预算。
+**音频 part。** 用户消息还可携带内联 WAV、MP3、OGG 或 FLAC（`audio/wav`、`audio/mpeg`、`audio/ogg`、`audio/flac`），中立形状是 `{mediaType, data, name?}`，字节同样来自附件的**魔数**校验而不是扩展名。共享契约限制单段 8 MiB、最多 4 段，并且它与图片、PDF 共享同一个 12 MiB 原始字节预算。
 
 - **OpenAI-compatible `chat`**：`{type:"input_audio", input_audio:{data, format}}`，`format` 只接受 `wav` 与 `mp3`（这两个值是 OpenAI 的词汇表，不是 MIME 的别名）。OGG 与 FLAC 会**抛错**而不是被丢掉：请求在发出去之前就失败，测试断言 `fetch` 没有被调用。
 - **OpenAI-compatible `responses`**：同一形状的 `input_audio` part，与 `input_image` / `input_file` 并列。**这个形状未经真实 API 确认**（与整个适配器一样），是本仓库按文档写下的假设；如果上游改了 part 名，这里就是唯一需要改的地方。

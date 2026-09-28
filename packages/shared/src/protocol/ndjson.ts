@@ -8,15 +8,33 @@ export const NDJSON_DELIMITER = "\n";
 /** A frame larger than this is a bug or an attack, not a slow day. */
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Frame limit for the host <-> sidecar transport.
+ *
+ * Larger than [`MAX_FRAME_BYTES`] because one sidecar frame may carry every multimodal
+ * prompt part (base64 images/PDFs/audio). The worst-case budget is documented in
+ * `types/chat.ts` and must stay under this number; the MCP limit is unchanged.
+ */
+export const MAX_SIDECAR_FRAME_BYTES = 24 * 1024 * 1024;
+
 export class FrameTooLargeError extends Error {
-  constructor(byteLength: number) {
-    super(`NDJSON frame of ${byteLength} bytes exceeds the ${MAX_FRAME_BYTES} byte limit`);
+  constructor(byteLength: number, limit: number = MAX_FRAME_BYTES) {
+    super(`NDJSON frame of ${byteLength} bytes exceeds the ${limit} byte limit`);
     this.name = "FrameTooLargeError";
   }
 }
 
-export function encodeFrame(payload: unknown): string {
-  return `${JSON.stringify(payload)}${NDJSON_DELIMITER}`;
+/**
+ * Serialize one frame, refusing to produce a line the reader would drop.
+ *
+ * The check is on UTF-8 bytes, not JavaScript string length, because the reader's
+ * limit is bytes.
+ */
+export function encodeFrame(payload: unknown, maxFrameBytes: number = MAX_FRAME_BYTES): string {
+  const encoded = `${JSON.stringify(payload)}${NDJSON_DELIMITER}`;
+  const bytes = Buffer.byteLength(encoded, "utf8");
+  if (bytes > maxFrameBytes) throw new FrameTooLargeError(bytes, maxFrameBytes);
+  return encoded;
 }
 
 /**
@@ -28,7 +46,10 @@ export class NdjsonDecoder {
   #buffer = "";
   #bytesInBuffer = 0;
 
-  constructor(private readonly onMalformed?: (rawLine: string, error: unknown) => void) {}
+  constructor(
+    private readonly onMalformed?: (rawLine: string, error: unknown) => void,
+    private readonly maxFrameBytes: number = MAX_FRAME_BYTES,
+  ) {}
 
   push(chunk: string): unknown[] {
     const frames: unknown[] = [];
@@ -39,12 +60,22 @@ export class NdjsonDecoder {
       this.#append(chunk.slice(start, newline));
       start = newline + 1;
       const line = this.#take();
-      if (line.length > 0) this.#decodeInto(line, frames);
+      if (line.length > 0) {
+        const frameBytes = Buffer.byteLength(line, "utf8");
+        if (frameBytes > this.maxFrameBytes) {
+          this.onMalformed?.(
+            `<oversized ${frameBytes}b>`,
+            new FrameTooLargeError(frameBytes, this.maxFrameBytes),
+          );
+        } else {
+          this.#decodeInto(line, frames);
+        }
+      }
     }
     this.#append(chunk.slice(start));
-    if (this.#bytesInBuffer > MAX_FRAME_BYTES) {
+    if (this.#bytesInBuffer > this.maxFrameBytes) {
       const dropped = this.#take();
-      this.onMalformed?.(`<oversized ${dropped.length}b>`, new FrameTooLargeError(dropped.length));
+      this.onMalformed?.(`<oversized ${dropped.length}b>`, new FrameTooLargeError(dropped.length, this.maxFrameBytes));
     }
     return frames;
   }
@@ -53,7 +84,17 @@ export class NdjsonDecoder {
   end(): unknown[] {
     const frames: unknown[] = [];
     const rest = this.#take();
-    if (rest.length > 0) this.#decodeInto(rest, frames);
+    if (rest.length > 0) {
+      const frameBytes = Buffer.byteLength(rest, "utf8");
+      if (frameBytes > this.maxFrameBytes) {
+        this.onMalformed?.(
+          `<oversized ${frameBytes}b>`,
+          new FrameTooLargeError(frameBytes, this.maxFrameBytes),
+        );
+      } else {
+        this.#decodeInto(rest, frames);
+      }
+    }
     return frames;
   }
 

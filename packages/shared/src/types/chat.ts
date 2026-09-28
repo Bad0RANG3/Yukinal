@@ -124,32 +124,40 @@ export const AGENT_AUDIO_MEDIA_TYPES = [
 export type AgentAudioMediaType = (typeof AGENT_AUDIO_MEDIA_TYPES)[number];
 
 export const AGENT_PROMPT_LIMITS = {
-  maxParts: 10,
-  maxTextChars: 100_000,
-  maxImages: 4,
-  /** Raw decoded image bytes, before base64 expansion. */
-  maxImageBytes: 4 * 1024 * 1024,
   /**
-   * Raw bytes across every image, PDF **and audio clip** in one message. Base64 expands
-   * this to about 6.7 MiB, leaving room under the sidecar's 8 MiB frame bound for text
-   * and JSON syntax. One shared budget rather than three: the bound that matters is the
-   * frame, and per-kind budgets that could sum past it would be a bound in name only.
+   * Total parts in one message. With the ADR 0075 budgets this must be at least
+   * 8 + 4 + 4 + 8 = 24 attachments plus the prompt's own text part.
    */
-  maxTotalInlineBytes: 5 * 1024 * 1024,
+  maxParts: 25,
+  maxTextChars: 100_000,
+  maxImages: 8,
+  /** Raw decoded image bytes, before base64 expansion. */
+  maxImageBytes: 5 * 1024 * 1024,
+  /**
+   * Raw bytes across every image, PDF **and audio clip** in one message.
+   *
+   * One shared budget rather than three: the bound that matters is the sidecar frame.
+   * Worst-case encoded size, which must stay under `MAX_SIDECAR_FRAME_BYTES` (24 MiB):
+   * 12 MiB raw -> `4 * ceil(12 MiB / 3)` = 16 MiB base64, plus 2 MiB of text files
+   * JSON-escaped at worst ~4 MiB, plus the prompt/part envelope < 0.6 MiB, for a total
+   * just under 21 MiB. Per-kind budgets that could sum past the frame would be a bound
+   * in name only.
+   */
+  maxTotalInlineBytes: 12 * 1024 * 1024,
   maxImageNameChars: 128,
-  maxDocuments: 2,
+  maxDocuments: 4,
   /** Raw PDF bytes before base64 expansion. */
-  maxDocumentBytes: 3 * 1024 * 1024,
+  maxDocumentBytes: 8 * 1024 * 1024,
   maxDocumentNameChars: 128,
-  maxAudios: 2,
+  maxAudios: 4,
   /** Raw audio bytes before base64 expansion. */
-  maxAudioBytes: 4 * 1024 * 1024,
+  maxAudioBytes: 8 * 1024 * 1024,
   maxAudioNameChars: 128,
-  maxFiles: 4,
+  maxFiles: 8,
   /** Raw UTF-8 bytes in one attached text file. */
-  maxFileBytes: 256 * 1024,
+  maxFileBytes: 512 * 1024,
   /** Raw UTF-8 bytes across every attached text file in one message. */
-  maxTotalFileBytes: 512 * 1024,
+  maxTotalFileBytes: 2 * 1024 * 1024,
   maxFileNameChars: 128,
 } as const;
 
@@ -301,6 +309,11 @@ export interface ApprovalRequest {
   factsSummary: string[];
   target: ToolTarget;
   expiresAt: string;
+  /**
+   * Whether "approve for this run" would actually be remembered (ADR 0072). Omitted by an
+   * older sidecar; the UI then keeps offering the button, as it always did.
+   */
+  sessionGrantable?: boolean;
 }
 
 /**

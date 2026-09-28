@@ -99,17 +99,45 @@ export interface FilesystemRestoreOutput {
 }
 
 /** Delete a host-owned backup only when its bytes still match the recorded revision. */
-export interface FilesystemBackupCleanupInput {
+export interface FilesystemBackupCleanupItem {
   path: string;
   backupPath: string;
   expectedRevision: string;
 }
+
+/**
+ * Delete one exact backup, or a bounded batch produced by an approved `backup_rotation`
+ * step. The single-item object is the shape every existing caller already sends, so it is
+ * kept as one branch of the union rather than a breaking change.
+ */
+export type FilesystemBackupCleanupInput =
+  | FilesystemBackupCleanupItem
+  | { items: FilesystemBackupCleanupItem[] };
 
 export interface FilesystemBackupCleanupOutput {
   path: string;
   backupPath: string;
   revision: string;
   bytesDeleted: number;
+}
+
+/** One item's fate in a batch cleanup. Never reports `removed` without a verified delete. */
+export interface FilesystemBackupCleanupBatchItem {
+  path: string;
+  backupPath: string;
+  outcome: "removed" | "skipped" | "failed";
+  revision?: string;
+  bytesDeleted?: number;
+  reason?: string;
+}
+
+/**
+ * A batch cleanup's result. `partial` is true whenever any requested item was not removed,
+ * so a partially successful batch can never be read as a full success.
+ */
+export interface FilesystemBackupCleanupBatchOutput {
+  items: FilesystemBackupCleanupBatchItem[];
+  partial: boolean;
 }
 
 export const FILESYSTEM_BACKUP_STATUSES = ["available", "restored", "deleted"] as const;
@@ -140,4 +168,36 @@ export interface FilesystemBackupLedgerItem {
 export interface FilesystemBackupListOutput {
   backups: FilesystemBackupLedgerItem[];
   truncated: boolean;
+}
+
+/**
+ * Plan a cross-task backup rotation without touching the remote target. Both filters are
+ * optional, but at least one must be given; `keepLatest` counts newest-first per original
+ * path, `olderThanDays` is an absolute age cutoff, and when both are given a record must
+ * satisfy **both** (intersection) to become a candidate.
+ */
+export interface FilesystemBackupRetentionInput {
+  pathPrefix?: string;
+  keepLatest?: number;
+  olderThanDays?: number;
+}
+
+/** One backup the host would delete if a `backup_rotation` step were approved. */
+export interface FilesystemBackupRetentionCandidate {
+  path: string;
+  backupPath: string;
+  revision: string;
+  taskId?: string;
+  createdAt: string;
+  bytesBackedUp: number;
+}
+
+export interface FilesystemBackupRetentionOutput {
+  candidates: FilesystemBackupRetentionCandidate[];
+  /** True when the scan hit its row bound or the candidate list was capped. */
+  truncated: boolean;
+  /** Available records that are not candidates. */
+  keptCount: number;
+  /** Available records that matched the request (before grouping/candidate selection). */
+  scannedCount: number;
 }

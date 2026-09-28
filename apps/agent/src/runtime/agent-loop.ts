@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   RPC_ERROR,
+  isSessionGrantable,
   type AgentRunRequest,
   type AgentRunResult,
   type AgentStreamEvent,
@@ -558,7 +559,15 @@ export class AgentLoop {
             decision.approvalId = undefined;
             decision.reason = `${declaration.name} requires a durable task, ChangePlan, and plan step before execution (${decision.reason})`;
           }
-          if (planCheck?.status === "allowed" && planCheck.requiresApproval && decision.outcome === "auto") {
+          // A plan step that requires approval is satisfied only by a user: a click on this
+          // call, or a session grant the user gave for this exact fingerprinted action
+          // earlier in the run (ADR 0072). Policy and Agent delegation never satisfy it.
+          if (
+            planCheck?.status === "allowed" &&
+            planCheck.requiresApproval &&
+            decision.outcome === "auto" &&
+            decision.approvedBy !== "user"
+          ) {
             decision.outcome = "ask";
             decision.approvedBy = undefined;
             decision.approvalId = undefined;
@@ -668,6 +677,7 @@ export class AgentLoop {
               reason: decision.reason,
               factsSummary: decision.facts.map((fact) => fact.note ?? "").filter(Boolean),
               target,
+              sessionGrantable: isSessionGrantable(decision),
               expiresAt: new Date(Date.now() + this.approvalTtlMs).toISOString(),
             };
             trace.requireApproval(decision, stepId);

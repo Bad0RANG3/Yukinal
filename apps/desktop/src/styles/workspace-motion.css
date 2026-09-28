@@ -70,7 +70,7 @@
 .agent-suggestions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .agent-notice { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); padding: 9px; line-height: 1.45; }
 .agent-notice-error { display: block; margin-top: 6px; color: var(--danger); overflow-wrap: anywhere; }
-.agent-retry { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); padding: 9px 10px; color: var(--muted); font-size: 11px; }.approval-target { overflow-wrap: anywhere; font-size: 11px; }
+.agent-retry { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); padding: 9px 10px; color: var(--muted); font-size: 11px; }.approval-target { overflow-wrap: anywhere; font-size: 11px; }.approval-note { color: var(--muted); font-size: 11px; }
 .approval-resolved { color: var(--muted); font-size: 12px; }
 
 @container (max-width: 760px) {

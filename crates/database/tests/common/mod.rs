@@ -24,12 +24,12 @@ pub use yukinal_database::models::{
     InvestigationPlanStep, InvestigationRun, InvestigationRunMode, InvestigationRunStatus,
     InvestigationSchedule, InvestigationScheduleComparisonStatus, InvestigationScheduleRunStatus,
     InvestigationScheduleStatus, InvestigationStep, InvestigationStepKind, InvestigationStepStatus,
-    InvestigationTarget, InvestigationTargetHost, InvestigationTask, McpHttpAuthHeaderConfig,
-    McpServerConfig, PermissionMode, PlanApprovalSource, PlanApprovalStatus, PlanStepKind,
-    PlanStepStatus, RiskLevel, Server, ServerCapabilities, ServerConnection, ServerMetadata,
-    ServerSnapshot, ServerStatus, TaskArtifactKind, TaskArtifactStatus, TaskAutomationLevel,
-    TaskBudget, TaskFailureCode, TaskPhase, TaskStatus, ToolExecutionRecord, ToolExecutionStatus,
-    Workspace, WorkspaceRepository,
+    InvestigationTarget, InvestigationTargetHost, InvestigationTask, McpAnnotationTrust,
+    McpHttpAuthHeaderConfig, McpServerConfig, PermissionMode, PlanApprovalSource,
+    PlanApprovalStatus, PlanStepKind, PlanStepStatus, RiskLevel, Server, ServerCapabilities,
+    ServerConnection, ServerMetadata, ServerSnapshot, ServerStatus, TaskArtifactKind,
+    TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
+    ToolExecutionRecord, ToolExecutionStatus, Workspace, WorkspaceRepository,
 };
 pub use yukinal_database::{
     repositories::{

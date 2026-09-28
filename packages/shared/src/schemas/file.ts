@@ -89,17 +89,45 @@ export const FilesystemRestoreOutputSchema = z.strictObject({
   bytesAfter: z.number().int().nonnegative(),
 });
 
-export const FilesystemBackupCleanupInputSchema = z.strictObject({
+export const FilesystemBackupCleanupItemSchema = z.strictObject({
   path: RemoteAbsolutePathSchema,
   backupPath: RemoteAbsolutePathSchema,
   expectedRevision: ContentRevisionSchema,
 });
+
+/**
+ * One exact cleanup, or a bounded batch from an approved rotation step.
+ *
+ * A union rather than a widened object keeps the single-item callers unchanged and makes
+ * "both a single item and an items array" unrepresentable.
+ */
+export const FilesystemBackupCleanupInputSchema = z.union([
+  FilesystemBackupCleanupItemSchema,
+  z.strictObject({
+    items: z.array(FilesystemBackupCleanupItemSchema).min(1).max(32),
+  }),
+]);
 
 export const FilesystemBackupCleanupOutputSchema = z.strictObject({
   path: RemoteAbsolutePathSchema,
   backupPath: RemoteAbsolutePathSchema,
   revision: ContentRevisionSchema,
   bytesDeleted: z.number().int().nonnegative(),
+});
+
+export const FilesystemBackupCleanupBatchItemSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  outcome: z.enum(["removed", "skipped", "failed"]),
+  revision: ContentRevisionSchema.optional(),
+  bytesDeleted: z.number().int().nonnegative().optional(),
+  reason: z.string().min(1).max(1_024).optional(),
+});
+
+export const FilesystemBackupCleanupBatchOutputSchema = z.strictObject({
+  items: z.array(FilesystemBackupCleanupBatchItemSchema).max(32),
+  /** True whenever any requested item was not removed, so partial success is visible. */
+  partial: z.boolean(),
 });
 
 const FilesystemBackupStatusSchema = z.enum(["available", "restored", "deleted"]);
@@ -128,4 +156,36 @@ export const FilesystemBackupLedgerItemSchema = z.strictObject({
 export const FilesystemBackupListOutputSchema = z.strictObject({
   backups: z.array(FilesystemBackupLedgerItemSchema).max(128),
   truncated: z.boolean(),
+});
+
+export const FilesystemBackupRetentionCandidateSchema = z.strictObject({
+  path: RemoteAbsolutePathSchema,
+  backupPath: RemoteAbsolutePathSchema,
+  revision: ContentRevisionSchema,
+  taskId: z.string().trim().min(1).max(256).optional(),
+  createdAt: z.string().trim().min(1).max(80),
+  bytesBackedUp: z.number().int().nonnegative().max(1024 * 1024),
+});
+
+export const FilesystemBackupRetentionInputSchema = z
+  .strictObject({
+    pathPrefix: RemoteAbsolutePathSchema.optional(),
+    keepLatest: z.number().int().min(1).max(64).optional(),
+    olderThanDays: z.number().int().min(1).max(3650).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.keepLatest === undefined && value.olderThanDays === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["keepLatest"],
+        message: "keepLatest or olderThanDays is required",
+      });
+    }
+  });
+
+export const FilesystemBackupRetentionOutputSchema = z.strictObject({
+  candidates: z.array(FilesystemBackupRetentionCandidateSchema).max(32),
+  truncated: z.boolean(),
+  keptCount: z.number().int().nonnegative(),
+  scannedCount: z.number().int().nonnegative(),
 });

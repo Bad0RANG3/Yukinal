@@ -236,6 +236,8 @@ export const HostMcpCatalogToolSchema = z.strictObject({
   remoteName: z.string().min(1).max(160).optional(),
   description: z.string().max(4096),
   inputSchema: z.unknown(),
+  // Optional so an older host keeps parsing; the agent then treats the tool as critical.
+  risk: z.enum(["low", "medium", "high", "critical"]).optional(),
 });
 
 export const HostMcpCatalogServerSchema = z.strictObject({

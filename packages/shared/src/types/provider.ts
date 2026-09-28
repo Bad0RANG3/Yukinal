@@ -187,6 +187,12 @@ export interface McpServerConfig {
   allowedTools: string[];
   /** Every MCP tool starts at >= "medium" until reviewed. */
   trustLevel: "reviewed" | "unreviewed";
+  /**
+   * Whether this server's own tool annotations may lower the effective risk of its
+   * tools (ADR 0074). `none` is the default: annotations are the server's own claim,
+   * not evidence. Optional on the wire so an older host keeps the strict behaviour.
+   */
+  annotationTrust?: "none" | "trusted";
 }
 
 /** One stored static HTTP authentication header. */

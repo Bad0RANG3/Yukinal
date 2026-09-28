@@ -277,7 +277,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
                     spellCheck={false}
                   />
                   <p className="form-hint">
-                    最多 8 把 OpenSSH 公钥。Host CA 始终受信；KRL 含有有效签名时，必须至少由 CA
+                    最多 16 把 OpenSSH 公钥。Host CA 始终受信；KRL 含有有效签名时，必须至少由 CA
                     或其中一把签名。轮换期间可同时列出旧、新密钥。
                   </p>
                 </div>

@@ -168,7 +168,7 @@ pub(super) fn autonomous_task_prompt(task: &InvestigationTask) -> String {
                 yukinal_database::models::Environment::Development
                     | yukinal_database::models::Environment::Staging
             ) => {
-            "按宿主保存的计划逐步推进；本任务已明确启用受限 auto 委托，medium 风险的配置备份/编辑可在宿主复核后自动推进；备份清理、恢复、重启、包安装及其他高风险或未明确授权的动作必须停下等待用户审批。"
+            "按宿主保存的计划逐步推进；本任务已明确启用受限 auto 委托，medium 风险的配置备份、编辑与整文件写入（可先备份再写）可在宿主复核后自动推进；备份清理、恢复、重启、包安装及其他高风险或未明确授权的动作必须停下等待用户审批。"
         }
         InvestigationRunMode::Goal => {
             "按宿主保存的计划逐步推进；高风险或未明确授权的动作必须停下等待用户审批。"
@@ -246,7 +246,7 @@ pub(super) fn validate_guardrails(
             return Err("guardrails.expiresAt must be later than guardrails.notBeforeAt".into());
         }
         if end.saturating_sub(start) > MAX_GUARDRAIL_WINDOW_SECONDS {
-            return Err("guardrails time window cannot exceed 365 days".into());
+            return Err("guardrails time window cannot exceed 1095 days".into());
         }
     }
     Ok(guardrails)

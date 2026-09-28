@@ -8,7 +8,7 @@ const SystemdUnitSchema = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\.service$/, "invalid systemd service unit");
 
 export const ServerLogsInputSchema = z.strictObject({
-  sinceSeconds: z.number().int().min(1).max(86_400).optional(),
+  sinceSeconds: z.number().int().min(1).max(604_800).optional(),
   unit: SystemdUnitSchema.optional(),
 });
 

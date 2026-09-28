@@ -5,12 +5,12 @@
  * this point is the ordinary path — permission engine, ticket, registry timeout, trace,
  * audit — and nothing here may shorten it. Three rules decide how it is written:
  *
- * 1. **The remote server does not get to say how dangerous it is.** `McpToolDescriptor`
- *    carries no risk field at all, and this adapter does not accept one: MCP has tool
- *    *annotations*, and honouring them would let a server lower its own risk tier by
- *    declaring itself read-only. A server's self-description is not evidence, so every MCP
- *    tool is declared `risk: "critical"` — the one tier the engine never auto-approves, never
- *    remembers for the session, and refuses outright in `plan` / `readonly` runs.
+ * 1. **The remote server does not get to say how dangerous it is.** The host owns the
+ *    effective risk and sends it as `risk` (ADR 0074). By default the host does not trust
+ *    the server's annotations and maps every MCP tool to `critical`; a user may explicitly
+ *    trust one server, and then the host maps that server's bounded hints to `low`/`medium`/
+ *    `high`. This adapter only reads the host's answer — it never looks at `annotations`
+ *    itself — and treats a missing or unrecognised value as `critical`.
  * 2. **The remote server does not get to define the input contract.** The local Zod schema is
  *    a record of unknown values; the server's `inputSchema` is appended to the *description*
  *    as untrusted documentation the model can read. Validating model input against a document
@@ -26,6 +26,7 @@ import {
   type HostMcpCatalogTool,
   type HostMcpToolCallOutput,
   type HostToolExecuteResponse,
+  type RiskLevel,
   type ToolOrigin,
   type ToolTarget,
 } from "@yukinal/shared";
@@ -33,13 +34,26 @@ import {
 import { ToolFailure, type Tool } from "../tools/tool.js";
 
 /**
- * Every MCP tool is declared critical.
+ * The value used when the host does not send a risk, or sends one this build does not know.
  *
- * Not a placeholder and not a floor to be raised later by a review flow that does not exist:
- * it is the *current* honest value for "a third-party process whose side effects this repo
- * has no way to bound". See the module doc, rule 1.
+ * Not a placeholder: it is the honest value for "a third-party process whose side effects
+ * this repo has no way to bound", and the value the host itself sends for an untrusted
+ * server (ADR 0074). See the module doc, rule 1.
  */
 export const MCP_TOOL_RISK = "critical" as const;
+
+const MCP_TOOL_RISKS: readonly RiskLevel[] = ["low", "medium", "high", "critical"];
+
+/**
+ * The host's effective risk, bounded to the four tiers this build understands.
+ *
+ * A missing field (older host) or an unknown value fails closed to `critical`. The string
+ * comparison is deliberate: the field crosses a JSON boundary, so it is `string` until it is
+ * checked here.
+ */
+export function resolveMcpRisk(risk: string | undefined): RiskLevel {
+  return MCP_TOOL_RISKS.find((candidate) => candidate === risk) ?? MCP_TOOL_RISK;
+}
 
 /**
  * MCP calls are allowed to run longer than built-in ones (the host's own per-request ceiling
@@ -145,15 +159,18 @@ export function mcpToolFromCatalog(tool: HostMcpCatalogTool, options: McpToolOpt
   }
   const origin: ToolOrigin = { kind: "mcp", serverId: tool.serverId };
   const description = describeMcpTool(tool);
+  const risk = resolveMcpRisk(tool.risk);
 
   return {
     name: tool.name,
     description,
-    risk: MCP_TOOL_RISK,
+    risk,
     timeoutMs: MCP_TOOL_TIMEOUT_MS,
     cancellable: true,
     retry: { ...MCP_TOOL_RETRY },
-    effectful: true,
+    // Only a host-resolved `low` tool is treated as non-effectful. Everything else keeps the
+    // durable-plan and ledger requirements (ADR 0074).
+    effectful: risk !== "low",
     origin,
     input: MCP_TOOL_INPUT,
     async execute(input, context) {

@@ -114,6 +114,7 @@ const FILESYSTEM_WRITE: &str = "filesystem.write";
 const FILESYSTEM_EDIT: &str = "filesystem.edit";
 const FILESYSTEM_BACKUP: &str = "filesystem.backup";
 const FILESYSTEM_BACKUP_LIST: &str = "filesystem.backup.list";
+const FILESYSTEM_BACKUP_RETENTION: &str = "filesystem.backup.retention";
 const FILESYSTEM_BACKUP_CLEANUP: &str = "filesystem.backup.cleanup";
 const FILESYSTEM_RESTORE: &str = "filesystem.restore";
 const MAX_HOST_TOOL_REPLAY_CACHE: usize = 256;
@@ -160,12 +161,13 @@ enum HostToolCallDecision {
 /// logical sample must not be sent to the target twice before the plan can
 /// decide whether it produced new evidence. MCP is guarded wholesale because
 /// a third-party tool may mutate state and its annotations do not define a
-/// trustworthy risk tier (ADR 0014).
-fn requires_host_tool_idempotency(
+/// trustworthy risk tier unless the user explicitly trusts that one server (ADR 0014,
+/// revised by ADR 0074).
+async fn requires_host_tool_idempotency(
     state: &AppState,
     request: &HostToolExecuteRequest,
 ) -> Result<bool, String> {
-    if is_effectful_host_tool(&request.tool_name) {
+    if is_effectful_host_tool(state, &request.tool_name).await {
         return Ok(true);
     }
     let is_planned_observation = request.task_id.is_some()
@@ -211,8 +213,15 @@ fn plan_allows_repeated_observation(plan: &InvestigationPlan, plan_step_id: &str
             .is_some_and(|window| window.status == ObservationWindowStatus::Running)
 }
 
-fn is_effectful_host_tool(tool_name: &str) -> bool {
-    matches!(
+/// Whether this host tool needs the durable idempotency ledger and a ChangePlan.
+///
+/// Built-in state-changing tools are effectful by name. MCP tools are effectful unless
+/// the host can resolve one of them to `low` (ADR 0074): the default is still
+/// `critical`, and anything the host cannot resolve — a stopped server, a name that no
+/// running catalog provides, a read that fails — stays effectful. This fails closed
+/// where the old wholesale rule (ADR 0014) was simply always-true.
+async fn is_effectful_host_tool(state: &AppState, tool_name: &str) -> bool {
+    if matches!(
         tool_name,
         DOCKER_RESTART
             | SYSTEMD_RESTART
@@ -222,7 +231,15 @@ fn is_effectful_host_tool(tool_name: &str) -> bool {
             | FILESYSTEM_BACKUP
             | FILESYSTEM_BACKUP_CLEANUP
             | FILESYSTEM_RESTORE
-    ) || mcp::is_mcp_tool_name(tool_name)
+    ) {
+        return true;
+    }
+    if mcp::is_mcp_tool_name(tool_name) {
+        // Only a host-resolved `low` tool is non-effectful. Everything else — including
+        // `None` ("cannot resolve") and `high`/`critical` — is effectful.
+        return mcp::tool_effective_risk(state, tool_name).await != Some("low");
+    }
+    false
 }
 
 /// Every Agent-side effectful call must carry all three durable identifiers.
@@ -230,8 +247,11 @@ fn is_effectful_host_tool(tool_name: &str) -> bool {
 /// The interactive terminal is deliberately outside this function: it is a user-operated
 /// manual session, not an Agent tool, and therefore cannot become an accidental autonomous
 /// write path by omitting plan metadata.
-fn effectful_tool_requires_durable_plan(request: &HostToolExecuteRequest) -> bool {
-    is_effectful_host_tool(&request.tool_name)
+async fn effectful_tool_requires_durable_plan(
+    state: &AppState,
+    request: &HostToolExecuteRequest,
+) -> bool {
+    is_effectful_host_tool(state, &request.tool_name).await
         && !(request
             .task_id
             .as_deref()
@@ -259,6 +279,7 @@ fn is_plan_bound_observation_tool(tool_name: &str) -> bool {
             | PACKAGE_INSPECT
             | FILESYSTEM_READ
             | FILESYSTEM_BACKUP_LIST
+            | FILESYSTEM_BACKUP_RETENTION
     )
 }
 
@@ -305,11 +326,11 @@ fn host_tool_action_fingerprint(request: &HostToolExecuteRequest) -> Result<Stri
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn prepare_host_tool_call(
+async fn prepare_host_tool_call(
     state: &AppState,
     request: &HostToolExecuteRequest,
 ) -> Result<HostToolCallDecision, String> {
-    if !requires_host_tool_idempotency(state, request)? {
+    if !requires_host_tool_idempotency(state, request).await? {
         return Ok(HostToolCallDecision::Execute(None));
     }
     if request.call_id.trim().is_empty() || request.trace_id.trim().is_empty() {
@@ -901,10 +922,83 @@ struct FilesystemBackupListInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FilesystemBackupCleanupInput {
+struct FilesystemBackupRetentionInput {
+    path_prefix: Option<String>,
+    keep_latest: Option<usize>,
+    older_than_days: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesystemBackupCleanupItemInput {
     path: String,
     backup_path: String,
     expected_revision: String,
+}
+
+/// The single-item shape and the batch shape share one struct so the dispatcher can tell
+/// them apart and reject a call that mixes both (ADR 0076). A union is enforced here rather
+/// than in serde so the error message can name the problem.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesystemBackupCleanupInput {
+    path: Option<String>,
+    backup_path: Option<String>,
+    expected_revision: Option<String>,
+    items: Option<Vec<FilesystemBackupCleanupItemInput>>,
+}
+
+#[derive(Debug)]
+enum BackupCleanupRequest {
+    Single(FilesystemBackupCleanupItemInput),
+    Batch(Vec<FilesystemBackupCleanupItemInput>),
+}
+
+impl FilesystemBackupCleanupInput {
+    fn resolve(self) -> Result<BackupCleanupRequest, String> {
+        match self {
+            Self {
+                items: Some(items),
+                path: None,
+                backup_path: None,
+                expected_revision: None,
+            } => {
+                if items.is_empty() || items.len() > 32 {
+                    return Err(
+                        "filesystem.backup.cleanup items must contain between 1 and 32 entries"
+                            .to_string(),
+                    );
+                }
+                let mut seen = BTreeSet::new();
+                for item in &items {
+                    if !seen.insert((item.path.as_str(), item.backup_path.as_str())) {
+                        return Err(
+                            "filesystem.backup.cleanup items must be unique by path and backupPath"
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok(BackupCleanupRequest::Batch(items))
+            }
+            Self {
+                items: None,
+                path: Some(path),
+                backup_path: Some(backup_path),
+                expected_revision: Some(expected_revision),
+            } => Ok(BackupCleanupRequest::Single(
+                FilesystemBackupCleanupItemInput {
+                    path,
+                    backup_path,
+                    expected_revision,
+                },
+            )),
+            _ => Err(
+                "filesystem.backup.cleanup accepts either one exact backup (path, backupPath, \
+                 expectedRevision) or a bounded items array, never both"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -974,6 +1068,49 @@ struct FilesystemBackupLedgerItemResult {
 struct FilesystemBackupListResult {
     backups: Vec<FilesystemBackupLedgerItemResult>,
     truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemBackupRetentionCandidateResult {
+    path: String,
+    backup_path: String,
+    revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+    created_at: String,
+    bytes_backed_up: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemBackupRetentionResult {
+    candidates: Vec<FilesystemBackupRetentionCandidateResult>,
+    truncated: bool,
+    kept_count: usize,
+    scanned_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemBackupCleanupBatchItemResult {
+    path: String,
+    backup_path: String,
+    /// `removed` | `skipped` | `failed`.
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_deleted: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemBackupCleanupBatchResult {
+    items: Vec<FilesystemBackupCleanupBatchItemResult>,
+    partial: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1056,7 +1193,7 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
     let request = serde_json::from_value::<HostToolExecuteRequest>(params)
         .map_err(|error| format!("invalid host tool request: {error}"))?;
 
-    if effectful_tool_requires_durable_plan(&request) {
+    if effectful_tool_requires_durable_plan(state, &request).await {
         return Ok(failed(
             "denied_by_policy",
             "effectful host tools require a durable task, ChangePlan, and plan step before execution",
@@ -1116,7 +1253,7 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
     // match 在目标校验之后，那时候 `mcp.<server>.<tool>` 已经被「remote host tools require
     // a concrete serverId」拒掉了。其余工具的那条路一个字节都没变。
     if mcp::is_mcp_tool_name(&request.tool_name) {
-        let token = match prepare_host_tool_call(state, &request)? {
+        let token = match prepare_host_tool_call(state, &request).await? {
             HostToolCallDecision::Respond(response) => return Ok(response),
             HostToolCallDecision::Execute(token) => token,
         };
@@ -1180,7 +1317,7 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
         }
     }
 
-    let token = match prepare_host_tool_call(state, &request)? {
+    let token = match prepare_host_tool_call(state, &request).await? {
         HostToolCallDecision::Respond(response) => return Ok(response),
         HostToolCallDecision::Execute(token) => token,
     };
@@ -1201,6 +1338,9 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
         FILESYSTEM_EDIT => filesystem_edit(state, server_id, &request.input, &cancel).await,
         FILESYSTEM_BACKUP_LIST => {
             filesystem_backup_list(state, server_id, &request.input, &request).await
+        }
+        FILESYSTEM_BACKUP_RETENTION => {
+            filesystem_backup_retention(state, server_id, &request.input, &request).await
         }
         FILESYSTEM_BACKUP => {
             filesystem_backup(state, server_id, &request.input, &cancel, &request).await

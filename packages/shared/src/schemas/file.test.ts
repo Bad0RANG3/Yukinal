@@ -8,6 +8,8 @@ import {
   FilesystemBackupListInputSchema,
   FilesystemBackupListOutputSchema,
   FilesystemBackupOutputSchema,
+  FilesystemBackupRetentionInputSchema,
+  FilesystemBackupRetentionOutputSchema,
   FilesystemRestoreInputSchema,
   FilesystemRestoreOutputSchema,
 } from "./file.js";
@@ -53,6 +55,69 @@ test("filesystem restore requires a revision guard and rejects drifted output", 
       revision: REVISION,
       bytesBefore: 14,
       bytesAfter: 13,
+      extra: true,
+    }).success,
+    false,
+  );
+});
+
+test("filesystem backup cleanup accepts one exact item or a bounded batch", () => {
+  const item = { path: "/etc/yukinal.conf", backupPath: BACKUP, expectedRevision: REVISION };
+  assert.equal(FilesystemBackupCleanupInputSchema.safeParse(item).success, true);
+  assert.equal(
+    FilesystemBackupCleanupInputSchema.safeParse({
+      items: [item, { ...item, backupPath: `${BACKUP}b` }],
+    }).success,
+    true,
+  );
+  assert.equal(FilesystemBackupCleanupInputSchema.safeParse({ items: [] }).success, false);
+  // The two forms are a strict union: neither may carry the other shape's fields.
+  assert.equal(FilesystemBackupCleanupInputSchema.safeParse({ ...item, items: [item] }).success, false);
+  assert.equal(
+    FilesystemBackupCleanupInputSchema.safeParse({
+      items: Array.from({ length: 33 }, (_, index) => ({ ...item, backupPath: `${BACKUP}${index}` })),
+    }).success,
+    false,
+  );
+  assert.equal(
+    FilesystemBackupCleanupOutputSchema.safeParse({
+      path: item.path,
+      backupPath: item.backupPath,
+      revision: REVISION,
+      bytesDeleted: 12,
+    }).success,
+    true,
+  );
+});
+
+test("filesystem backup retention requires a filter and bounds its output", () => {
+  assert.equal(FilesystemBackupRetentionInputSchema.safeParse({}).success, false);
+  assert.equal(FilesystemBackupRetentionInputSchema.safeParse({ keepLatest: 3 }).success, true);
+  assert.equal(FilesystemBackupRetentionInputSchema.safeParse({ olderThanDays: 30 }).success, true);
+  assert.equal(FilesystemBackupRetentionInputSchema.safeParse({ keepLatest: 65 }).success, false);
+  assert.equal(FilesystemBackupRetentionInputSchema.safeParse({ olderThanDays: 0 }).success, false);
+  const candidate = {
+    path: "/etc/yukinal.conf",
+    backupPath: BACKUP,
+    revision: REVISION,
+    createdAt: "2026-01-01T00:00:00Z",
+    bytesBackedUp: 12,
+  };
+  assert.equal(
+    FilesystemBackupRetentionOutputSchema.safeParse({
+      candidates: [candidate],
+      truncated: false,
+      keptCount: 1,
+      scannedCount: 2,
+    }).success,
+    true,
+  );
+  assert.equal(
+    FilesystemBackupRetentionOutputSchema.safeParse({
+      candidates: [],
+      truncated: false,
+      keptCount: 0,
+      scannedCount: 0,
       extra: true,
     }).success,
     false,

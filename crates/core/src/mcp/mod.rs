@@ -76,18 +76,18 @@ mod transport;
 mod wire;
 
 pub use catalog::{
-    catalog, catalog_with_credentials, describe_dead, is_mcp_tool_name, split_mcp_tool_name,
-    McpCatalogFailure, McpCatalogResponse, McpCatalogServer, McpCatalogTool, McpCredentialResolver,
-    McpFailureCode, CATALOG_START_BUDGET,
+    catalog, catalog_with_credentials, describe_dead, effective_risk, is_mcp_tool_name,
+    split_mcp_tool_name, McpCatalogFailure, McpCatalogResponse, McpCatalogServer, McpCatalogTool,
+    McpCredentialResolver, McpFailureCode, CATALOG_START_BUDGET,
 };
 pub use config::{
     validate_oauth_url, McpHttpAuthHeader, McpHttpConfig, McpStdioConfig, McpTransportConfig,
     DEFAULT_REQUEST_TIMEOUT, MAX_HTTP_AUTH_HEADERS, MAX_REQUEST_TIMEOUT, MIN_REQUEST_TIMEOUT,
 };
 pub use descriptor::{
-    internal_tool_name, is_segment, McpContentBlock, McpExitRecord, McpToolDescriptor,
-    McpToolResult, NameRejection, MCP_NAMESPACE, PROVIDER_TOOL_NAME_MAX_LENGTH, SEGMENT_MAX_LENGTH,
-    SEGMENT_PATTERN, TOOL_DESCRIPTION_MAX_CHARS,
+    internal_tool_name, is_segment, McpContentBlock, McpExitRecord, McpToolAnnotations,
+    McpToolDescriptor, McpToolResult, NameRejection, MCP_NAMESPACE, PROVIDER_TOOL_NAME_MAX_LENGTH,
+    SEGMENT_MAX_LENGTH, SEGMENT_PATTERN, TOOL_DESCRIPTION_MAX_CHARS,
 };
 pub use error::McpError;
 pub use handle::{McpServerInfo, McpServerStart, McpServerStatus, McpStdioHandle, ShutdownReport};
@@ -102,7 +102,7 @@ pub use transport::McpServerHandle;
 pub use wire::{McpInitialize, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 
 /// 有界的一行帧读取：MCP 与 sidecar 共用同一份实现（`crate::sidecar` 也从这里取）。
-pub(crate) use wire::{read_frame, FrameRead, MAX_FRAME_BYTES};
+pub(crate) use wire::{read_frame, FrameRead};
 pub use yukinal_net::{
     NetworkProxy, NetworkProxyMode, OutboundProxy, ProxyCredential, ProxySource,
 };

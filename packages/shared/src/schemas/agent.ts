@@ -20,6 +20,7 @@ const ApprovalRequestSchema = z.strictObject({
   factsSummary: z.array(z.string().max(1_000)).max(32),
   target: ToolTargetSchema,
   expiresAt: TimestampSchema,
+  sessionGrantable: z.boolean().optional(),
 });
 
 const TokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

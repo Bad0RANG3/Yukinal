@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use serde_json::json;
 use yukinal_credentials::memory::MemoryCredentialStore;
@@ -49,6 +50,7 @@ fn save_input(id: &str, transport: &str, enabled: bool) -> McpServerSaveInput {
         http_auth_headers: None,
         oauth: None,
         enabled,
+        annotation_trust: None,
     }
 }
 
@@ -147,6 +149,7 @@ fn fixture_row(id: &str, mode: &str, enabled: bool) -> McpServerConfig {
         enabled,
         allowed_tools: vec!["echo".to_string(), "explode".to_string()],
         trust_level: "unreviewed".to_string(),
+        annotation_trust: Default::default(),
     }
 }
 
@@ -269,10 +272,12 @@ async fn tool_review_accepts_only_currently_advertised_names() {
     let saved = save_review(
         &db,
         &supervisor,
+        Arc::new(MemoryCredentialStore::new()),
         McpServerReviewInput {
             server_id: "mcp_1".into(),
             allowed_tools: vec!["echo".into()],
             trust_level: "reviewed".into(),
+            annotation_trust: None,
         },
     )
     .await
@@ -280,13 +285,31 @@ async fn tool_review_accepts_only_currently_advertised_names() {
     assert_eq!(saved.allowed_tools, vec!["echo".to_string()]);
     assert_eq!(saved.trust_level, "reviewed");
 
+    let trusted = save_review(
+        &db,
+        &supervisor,
+        Arc::new(MemoryCredentialStore::new()),
+        McpServerReviewInput {
+            server_id: "mcp_1".into(),
+            allowed_tools: vec!["echo".into()],
+            trust_level: "reviewed".into(),
+            annotation_trust: Some(McpAnnotationTrust::Trusted),
+        },
+    )
+    .await
+    .expect("changing annotation trust restarts the running server");
+    assert_eq!(trusted.annotation_trust, McpAnnotationTrust::Trusted);
+    assert!(supervisor.status("mcp_1").await.running);
+
     let error = save_review(
         &db,
         &supervisor,
+        Arc::new(MemoryCredentialStore::new()),
         McpServerReviewInput {
             server_id: "mcp_1".into(),
             allowed_tools: vec!["invented".into()],
             trust_level: "reviewed".into(),
+            annotation_trust: None,
         },
     )
     .await

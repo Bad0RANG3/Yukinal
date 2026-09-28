@@ -17,7 +17,7 @@ use yukinal_database::models::{
 };
 use yukinal_database::UpdateServerInput;
 use yukinal_database::{AddServerInput, AuthenticationInput};
-use yukinal_ssh::validate_host_ca_public_key;
+use yukinal_ssh::{validate_host_ca_public_key, MAX_KRL_SIGNERS};
 
 /// 身份写入与回收的 keychain 侧（需要 `CredentialStore` 句柄，所以住不进 `crates/core`）。
 mod identity;
@@ -440,8 +440,10 @@ fn validate_host_certificate_authority(
             "host certificate principals must be non-empty and at most 253 characters".into(),
         );
     }
-    if authority.revocation_list_signers.len() > 8 {
-        return Err("host certificate KRL may trust at most 8 independent signing keys".into());
+    if authority.revocation_list_signers.len() > MAX_KRL_SIGNERS {
+        return Err(format!(
+            "host certificate KRL may trust at most {MAX_KRL_SIGNERS} independent signing keys"
+        ));
     }
     let mut signers = HashSet::new();
     for signer in &authority.revocation_list_signers {

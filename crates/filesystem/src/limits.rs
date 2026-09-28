@@ -35,9 +35,13 @@ pub const MAX_AGENT_EDIT_BYTES: usize = MAX_AGENT_WRITE_BYTES;
 
 /// Agent `filesystem.backup` / `filesystem.restore` copy cap.
 ///
-/// A backup must be complete because its revision is used as the recovery source. Keep the cap
-/// equal to the guarded edit cap so restore uses the same bounded atomic replacement primitive.
-pub const MAX_AGENT_BACKUP_BYTES: usize = MAX_AGENT_EDIT_BYTES;
+/// A backup must be complete because its revision is used as the recovery source. This was
+/// previously tied to the guarded edit cap; ADR 0075 decouples it so a whole 1 MiB file can be
+/// backed up and restored even though `write`/`edit` stay at 512 KiB.
+///
+/// The cap must stay within `MAX_AGENT_READ_BYTES`: a backup is captured from one bounded read,
+/// and a backup larger than what `filesystem.read` can return in full could never be captured.
+pub const MAX_AGENT_BACKUP_BYTES: usize = 1024 * 1024;
 
 /// The host-generated hexadecimal suffix used in a backup path.
 pub const BACKUP_TOKEN_CHARS: usize = 32;
@@ -99,7 +103,7 @@ mod tests {
         assert_eq!(MAX_AGENT_READ_BYTES, 1_048_576);
         assert_eq!(MAX_AGENT_WRITE_BYTES, 524_288);
         assert_eq!(MAX_AGENT_EDIT_BYTES, 524_288);
-        assert_eq!(MAX_AGENT_BACKUP_BYTES, 524_288);
+        assert_eq!(MAX_AGENT_BACKUP_BYTES, 1_048_576);
         assert_eq!(BACKUP_TOKEN_CHARS, 32);
         assert_eq!(BROWSER_READ_BYTES, 1_048_576);
     }
@@ -118,6 +122,9 @@ mod tests {
         const { assert!(MAX_AGENT_EDIT_BYTES <= MAX_AGENT_READ_BYTES) };
         // 一次编辑写回去的内容同样不能超过 `write` 的上限：否则编辑就成了绕过写入上限的路。
         const { assert!(MAX_AGENT_EDIT_BYTES <= MAX_AGENT_WRITE_BYTES) };
+        // A backup is captured from one bounded read, so it may not exceed the read cap either
+        // (ADR 0075 raised the backup cap to 1 MiB without raising the read cap above it).
+        const { assert!(MAX_AGENT_BACKUP_BYTES <= MAX_AGENT_READ_BYTES) };
     }
 
     #[test]

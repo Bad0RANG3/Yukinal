@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEVELOPMENT_POLICY,
   PRODUCTION_POLICY,
   STAGING_POLICY,
   type CommandRiskFact,
@@ -125,7 +126,7 @@ test("ask mode pauses before writes while keeping reads automatic", () => {
   assert.equal(read.approvedBy, "policy");
 });
 
-test("auto mode delegates only a write-tier action on development or staging", () => {
+test("auto mode delegates only a write-tier action on remote development or staging", () => {
   const engine = new PermissionEngine();
   const delegated = engine.evaluate({
     declaration: declaration({ name: "filesystem.write", risk: "medium" }),
@@ -136,6 +137,18 @@ test("auto mode delegates only a write-tier action on development or staging", (
   });
   assert.equal(delegated.outcome, "auto");
   assert.equal(delegated.approvedBy, "agent");
+
+  // ADR 0073: the local machine is not a delegated target even when its environment
+  // label says development. The host plan check requires a remote target, so the
+  // engine must refuse to advertise an auto approval the host would reject.
+  const localDevelopment = engine.evaluate({
+    declaration: declaration({ name: "filesystem.write", risk: "medium" }),
+    target: { host: "local", environment: "development" },
+    input: {},
+    permissionMode: "auto",
+  });
+  assert.equal(localDevelopment.outcome, "ask");
+  assert.equal(localDevelopment.approvedBy, undefined);
 
   const production = engine.evaluate({
     declaration: declaration({ name: "filesystem.write", risk: "medium" }),
@@ -184,23 +197,36 @@ test("a session grant covers a write-tier action", () => {
   assert.equal(differentInput.outcome, "ask", "a session grant must not cover a different path");
 });
 
-test("a session grant never covers the dangerous tier, however it was reached", () => {
+test("a session grant covers an exact high-risk action on staging, and nothing wider", () => {
   const engine = new PermissionEngine();
-
-  // (a) intrinsically dangerous: docker.stop is high risk.
   const intrinsic = {
-    declaration: declaration({ name: "docker.stop", risk: "high" }),
+    declaration: declaration({ name: "docker.restart", risk: "high" }),
     target: target("staging"),
-    input: {},
+    input: { container: "api" },
     policy: STAGING_POLICY,
   };
-  engine.grantSession(engine.evaluate(intrinsic));
-  assert.equal(engine.evaluate(intrinsic).outcome, "ask", "an intrinsically dangerous tool re-asks");
-  assert.equal(engine.grantCount, 0, "and nothing was recorded as granted");
+  const first = engine.evaluate(intrinsic);
+  assert.equal(first.tier, "dangerous");
+  assert.equal(first.outcome, "ask", "the first call still needs a click");
 
-  // (b) escalated by the environment: a medium write on production, whose floor is
-  // "high". This is the case that used to be advertised as auto-approved and then
-  // denied at execution; the engine must not promise what checkTicket will refuse.
+  engine.grantSession(first);
+  assert.equal(engine.grantCount, 1);
+  const second = engine.evaluate(intrinsic);
+  assert.equal(second.outcome, "auto", "the identical call is remembered for the run (ADR 0072)");
+  assert.equal(second.approvedBy, "user");
+
+  const otherContainer = engine.evaluate({ ...intrinsic, input: { container: "db" } });
+  assert.equal(otherContainer.outcome, "ask", "the grant is bound to the input fingerprint");
+
+  engine.clearGrants();
+  assert.equal(engine.evaluate(intrinsic).outcome, "ask", "and it never outlives the run");
+});
+
+test("a session grant never covers dangerous work on production/unknown, nor critical anywhere", () => {
+  const engine = new PermissionEngine();
+
+  // (a) escalated by the environment: a medium write on production, whose floor is
+  // "high". The engine must not promise what checkTicket will refuse.
   const escalated = {
     declaration: declaration({ name: "filesystem.write", risk: "medium" }),
     target: target("production"),
@@ -209,12 +235,32 @@ test("a session grant never covers the dangerous tier, however it was reached", 
   };
   const decision = engine.evaluate(escalated);
   assert.equal(decision.tier, "dangerous", "production escalates this to the dangerous tier");
-
   engine.grantSession(decision);
-  assert.equal(engine.grantCount, 0, "a dangerous-tier decision must not be recorded as granted");
+  assert.equal(engine.grantCount, 0, "a production dangerous-tier decision must not be recorded as granted");
   const second = engine.evaluate(escalated);
   assert.equal(second.outcome, "ask", "so the next identical call still asks");
   assert.equal(second.approvedBy, undefined);
+
+  // (b) intrinsically high on an unknown target.
+  const unknown = {
+    declaration: declaration({ name: "docker.restart", risk: "high" }),
+    target: target("unknown"),
+    input: { container: "api" },
+  };
+  engine.grantSession(engine.evaluate(unknown));
+  assert.equal(engine.grantCount, 0);
+  assert.equal(engine.evaluate(unknown).outcome, "ask");
+
+  // (c) critical stays per-call even on development.
+  const critical = {
+    declaration: declaration({ name: "mcp.some_server.tool", risk: "critical" }),
+    target: target("development"),
+    input: {},
+    policy: DEVELOPMENT_POLICY,
+  };
+  engine.grantSession(engine.evaluate(critical));
+  assert.equal(engine.grantCount, 0, "critical is never remembered");
+  assert.equal(engine.evaluate(critical).outcome, "ask");
 });
 
 test("grants are scoped per server, so one host cannot unlock another", () => {

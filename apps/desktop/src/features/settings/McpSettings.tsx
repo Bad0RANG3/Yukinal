@@ -863,10 +863,14 @@ function McpToolReview({
     serverId: string;
     allowedTools: string[];
     trustLevel: "reviewed" | "unreviewed";
+    annotationTrust: "none" | "trusted";
   }) => void;
 }) {
   const [selected, setSelected] = useState<string[]>(view.config.allowedTools);
   const [reviewed, setReviewed] = useState(view.config.trustLevel === "reviewed");
+  const [trustAnnotations, setTrustAnnotations] = useState(
+    view.config.annotationTrust === "trusted",
+  );
   return (
     <details className="settings-storage-note">
       <summary>审核工具（当前允许 {view.config.allowedTools.length} 个）</summary>
@@ -894,7 +898,21 @@ function McpToolReview({
           <input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />
           <span>
             <strong>已完成审核</strong>
-            <small>只控制这些工具是否注册；每次调用仍按 critical 逐项批准。</small>
+            <small>只控制这些工具是否注册；默认每次调用仍按 critical 逐项批准。</small>
+          </span>
+        </label>
+        <label className="settings-check-row">
+          <input
+            type="checkbox"
+            checked={trustAnnotations}
+            onChange={(event) => setTrustAnnotations(event.target.checked)}
+          />
+          <span>
+            <strong>信任此服务器声明的只读/破坏性注解</strong>
+            <small>
+              开启后，服务器自称只读的工具会像内置只读工具一样自动执行，自称非破坏性的工具按写入档位审批。
+              只对你信任的服务器开启——注解是服务器自己的说法，不是证据。
+            </small>
           </span>
         </label>
         <button
@@ -906,6 +924,7 @@ function McpToolReview({
               serverId: view.config.id,
               allowedTools: selected,
               trustLevel: reviewed ? "reviewed" : "unreviewed",
+              annotationTrust: trustAnnotations ? "trusted" : "none",
             })
           }
         >

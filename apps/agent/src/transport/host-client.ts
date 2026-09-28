@@ -30,6 +30,7 @@ import {
   HostArtifactRecordRequestSchema,
   HostArtifactRecordResponseSchema,
   HOST_METHODS,
+  MAX_SIDECAR_FRAME_BYTES,
   HostMcpCatalogResponseSchema,
   HostToolExecuteRequestSchema,
   HostToolExecuteResponseSchema,
@@ -303,7 +304,7 @@ export class HostRpcClient {
       signal?.addEventListener("abort", onAbort, { once: true });
 
       try {
-        this.send(encodeFrame({ jsonrpc: "2.0", id, method, params }));
+        this.send(encodeFrame({ jsonrpc: "2.0", id, method, params }, MAX_SIDECAR_FRAME_BYTES));
       } catch (error) {
         this.#pending.delete(id);
         signal?.removeEventListener("abort", onAbort);
@@ -352,7 +353,7 @@ export class HostRpcClient {
         id: this.#nextId++,
         method: HOST_METHODS.toolCancel,
         params,
-      }));
+      }, MAX_SIDECAR_FRAME_BYTES));
     } catch {
       // The original request is already cancelled from the Agent's point of
       // view. A dead host cannot be made more cancelled by surfacing another

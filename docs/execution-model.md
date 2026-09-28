@@ -46,7 +46,7 @@ Rust 宿主在已解析的目标上执行受限操作（SSH 命令 / SFTP / Dock
 | --- | --- | --- | --- |
 | `read` | `read`、`low` | 只有环境策略（四张内建策略表在这一栏都是 `auto`）；`plan` / `readonly` 运行也放行它 | [权限档位：read](./risk-tiers/read.md) |
 | `write` | `medium` | 策略自动、运行级委托（限开发与预发布）、会话授权、逐项批准四种都可能；`ask` 批准方式与只读运行会挡住它 | [权限档位：write](./risk-tiers/write.md) |
-| `dangerous` | `high`、`critical` | **只有逐项批准**：策略说 `auto` 也会被改回 `ask`，闸口拒绝其余三种票据，会话授权既不记也不覆盖它 | [权限档位：dangerous](./risk-tiers/dangerous.md) |
+| `dangerous` | `high`、`critical` | 策略与 Agent 委托都不能自动批准；`critical` 和生产/未知/本机目标仍需逐项批准，远程开发/预发布上的精确 `high` 动作可由用户会话授权记住本次运行 | [权限档位：dangerous](./risk-tiers/dangerous.md) |
 
 三档共享的规则留在这里，它们是同一条链路的不同段。
 

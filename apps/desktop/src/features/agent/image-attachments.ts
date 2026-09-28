@@ -42,7 +42,7 @@ export async function readImageAttachment(
     AGENT_PROMPT_LIMITS.maxTotalInlineBytes
   ) {
     throw new Error(
-      `本条消息的图片与 PDF 总大小不能超过 ${formatBytes(AGENT_PROMPT_LIMITS.maxTotalInlineBytes)}。`,
+      `本条消息的图片、PDF 与音频总大小不能超过 ${formatBytes(AGENT_PROMPT_LIMITS.maxTotalInlineBytes)}。`,
     );
   }
 
@@ -115,7 +115,7 @@ export async function readDocumentAttachment(
     AGENT_PROMPT_LIMITS.maxTotalInlineBytes
   ) {
     throw new Error(
-      `本条消息的图片与 PDF 总大小不能超过 ${formatBytes(AGENT_PROMPT_LIMITS.maxTotalInlineBytes)}。`,
+      `本条消息的图片、PDF 与音频总大小不能超过 ${formatBytes(AGENT_PROMPT_LIMITS.maxTotalInlineBytes)}。`,
     );
   }
   const name = sanitizeDocumentName(file.name);

@@ -95,8 +95,9 @@ pub use investigation::{
     MAX_ARTIFACT_SERIALIZED_BYTES, MAX_EVIDENCE_SERIALIZED_BYTES,
 };
 pub use provider::{
-    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpHttpAuthHeaderConfig,
-    McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow, McpServerConfig, ProviderModelOption,
+    AiProviderConfig, AiProviderKind, InfrastructureProviderConfig, McpAnnotationTrust,
+    McpHttpAuthHeaderConfig, McpOAuthClientAuth, McpOAuthConfig, McpOAuthFlow, McpServerConfig,
+    ProviderModelOption,
 };
 pub use schedules::{
     InvestigationNotificationPolicy, InvestigationSchedule, InvestigationScheduleComparison,

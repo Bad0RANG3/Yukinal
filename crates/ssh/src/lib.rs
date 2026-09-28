@@ -49,6 +49,13 @@ use tokio_util::sync::CancellationToken;
 /// 出站代理（远端 KRL 下载用它）。定义在 `yukinal-net`，因为 MCP 与 OAuth 用的是同一个值。
 pub use yukinal_net::OutboundProxy;
 
+/// Maximum number of independent keys that may sign the host-certificate revocation list.
+///
+/// ADR 0075 raised this from 8 to 16. The bound is defined here, once, and used by both
+/// the SSH KRL parser and the desktop's configuration validation so the two cannot drift
+/// apart (they used to be two bare `8` literals).
+pub const MAX_KRL_SIGNERS: usize = 16;
+
 use crate::conn::SessionHandle;
 
 pub type Result<T> = std::result::Result<T, Error>;

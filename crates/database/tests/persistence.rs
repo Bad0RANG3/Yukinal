@@ -1145,6 +1145,7 @@ fn mcp_server_round_trip() {
         enabled: false,
         allowed_tools: vec![],
         trust_level: "unreviewed".into(),
+        annotation_trust: McpAnnotationTrust::Trusted,
     })
     .expect("upsert mcp");
 
@@ -1152,6 +1153,11 @@ fn mcp_server_round_trip() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].args.as_ref().expect("args").len(), 2);
     assert!(!list[0].enabled);
+    assert_eq!(
+        list[0].annotation_trust,
+        McpAnnotationTrust::Trusted,
+        "the new column must round-trip; older rows default to none"
+    );
 }
 
 #[test]
@@ -1190,6 +1196,7 @@ fn mcp_http_auth_headers_round_trip_and_read_the_legacy_single_header() {
             enabled: true,
             allowed_tools: Vec::new(),
             trust_level: "unreviewed".into(),
+            annotation_trust: Default::default(),
         })
         .expect("upsert HTTP authentication headers");
     drop(db);

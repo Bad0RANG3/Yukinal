@@ -8,7 +8,8 @@
     "httpAuthHeaders": [],
     "enabled": true,
     "allowedTools": [],
-    "trustLevel": "unreviewed"
+    "trustLevel": "unreviewed",
+    "annotationTrust": "none"
   },
   "status": {
     "serverId": "mcp_time",

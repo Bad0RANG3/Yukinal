@@ -48,7 +48,7 @@ export function LogsPane() {
   }
 
   if (logsQuery.isLoading) {
-    return <LoadingPanel title="正在读取最近日志" hint="SSH · 最多 120 行 · 预计几秒完成" />;
+    return <LoadingPanel title="正在读取最近日志" hint="SSH · 最多 500 行 · 预计几秒完成" />;
   }
 
   if (logsQuery.isError || !logsQuery.data) {
@@ -72,7 +72,7 @@ export function LogsPane() {
         <div>
           <p className="eyebrow">远端日志</p>
           <h2>日志</h2>
-          <p>保留原始行，最多读取最近 120 行，便于快速定位问题。</p>
+          <p>保留原始行，最多读取最近 500 行，便于快速定位问题。</p>
         </div>
         <button type="button" className="button-secondary" onClick={() => void logsQuery.refetch()} disabled={logsQuery.isFetching} title="刷新日志" aria-label="刷新日志">
           <Icon name="refresh" size="sm" /> {logsQuery.isFetching ? "读取中" : "刷新"}
