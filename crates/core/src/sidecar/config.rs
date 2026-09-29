@@ -45,12 +45,15 @@ impl SidecarConfig {
     /// Resolution order for a **packaged** app:
     /// 1. `YUKINAL_AGENT_COMMAND` (+ optional `YUKINAL_AGENT_ARGS`, `;`-separated)
     /// 2. `YUKINAL_AGENT_ENTRY` (+ optional `YUKINAL_NODE`)
-    /// 3. `<resources>/agent/index.js` — where `tauri.conf.json` puts the bundle
+    /// 3. `<resources>/agent/index.js` — where `tauri.conf.json` puts the bundle;
+    ///    `<resources>/runtime/node[.exe]` is preferred for the executable
     /// 4. dev fallback: nearest `apps/agent/dist/index.js` walking up from `cwd`
     ///
     /// The packaged path outranks the dev one on purpose: an installed app has no repo
     /// checkout to walk up from, while a dev run has no staged resources, so each order
     /// picks the right answer in the case that matters and neither can shadow the other.
+    /// If a bundled runtime exists beside the packaged resources, it is used by default;
+    /// `YUKINAL_NODE` remains an explicit override for diagnostics and development.
     ///
     /// `resources` is the Tauri resource directory. It is a parameter rather than an
     /// `env!`-style constant because only the caller knows where it is, and the crate must
@@ -126,8 +129,16 @@ impl SidecarConfig {
                 // entry」显示 `\\?\C:\...\agent\index.js`：一段 Node 读不懂、也从来没被
                 // 真正执行过的路径，而用户就是靠这一行确认「到底跑了哪个文件」。
                 let entry = for_command_line(path);
+                let runtime_override = lookup("YUKINAL_NODE").map(PathBuf::from);
+                let bundled_runtime = resources
+                    .map(packaged_runtime)
+                    .filter(|candidate| candidate.is_file());
                 Ok(Self {
-                    program: node_program(None),
+                    program: for_command_line(
+                        runtime_override
+                            .or(bundled_runtime)
+                            .unwrap_or_else(|| node_program(None)),
+                    ),
                     args: vec![entry.clone().into_os_string()],
                     env: Vec::new(),
                     request_timeout,
@@ -172,20 +183,19 @@ impl SidecarConfig {
 
     /// Turn a failed `Command::spawn` into something the user can act on.
     ///
-    /// A packaged app does not ship a Node runtime, so "no Node installed" is the first
-    /// failure a new user is likely to hit, and the bare OS error — `program not found` —
-    /// names neither the prerequisite nor a way out. That case gets a real message; every
-    /// other spawn failure keeps the plain `program: error` form, because inventing advice
-    /// for a permissions error or a bad interpreter would be worse than saying nothing.
+    /// A packaged app normally uses its bundled runtime. If that file is missing, resolution
+    /// falls back to PATH so developer builds still work; make the likely packaging problem
+    /// actionable without claiming Node is always an end-user prerequisite. Other spawn
+    /// failures keep the plain `program: error` form.
     ///
     #[must_use]
     pub fn launch_error(&self, error: &std::io::Error) -> SidecarError {
         if error.kind() == std::io::ErrorKind::NotFound && self.resolved_through_path() {
             return SidecarError::Launch(format!(
-                "Node.js was not found on PATH (`{}`). This build does not bundle a Node \
-                 runtime, so Node.js {REQUIRED_NODE_MAJOR} or newer must be installed \
-                 (https://nodejs.org), or set YUKINAL_NODE to an absolute path to the \
-                 executable",
+                "Node.js was not found on PATH (`{}`). The packaged app normally includes \
+                 its own runtime; reinstall it if the bundled runtime is missing. For a \
+                 development build, install Node.js {REQUIRED_NODE_MAJOR} or newer \
+                 (https://nodejs.org), or set YUKINAL_NODE to an absolute executable path",
                 self.program.display()
             ));
         }
@@ -229,13 +239,10 @@ fn default_client_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// The Node major the agent bundle is built for.
+/// The Node major the agent bundle is built for and that developers need locally.
 ///
-/// The installer does **not** ship a Node runtime (ADR 0013), so this is a prerequisite the
-/// user's machine has to satisfy. It is duplicated from three places that must agree, and a
-/// test below pins it against the first of them: `engines.node` in the root `package.json`,
-/// the `--target` in the agent's esbuild step, and the text of the error a user sees when
-/// Node is missing.
+/// The installed app carries a pinned Node runtime. This floor is duplicated from the root
+/// `package.json` `engines.node` and the agent's esbuild target; tests keep those in sync.
 pub const REQUIRED_NODE_MAJOR: u32 = 24;
 
 fn node_program(override_path: Option<&str>) -> PathBuf {
@@ -303,6 +310,14 @@ fn find_dev_bundle(cwd: &Path) -> Option<PathBuf> {
 #[must_use]
 pub fn packaged_entry(resources: &Path) -> PathBuf {
     resources.join("agent").join("index.js")
+}
+
+/// The application-bundled Node.js executable, staged from the verified official archive.
+#[must_use]
+pub fn packaged_runtime(resources: &Path) -> PathBuf {
+    resources
+        .join("runtime")
+        .join(if cfg!(windows) { "node.exe" } else { "node" })
 }
 
 fn ancestors(start: &Path) -> impl Iterator<Item = PathBuf> {
@@ -441,6 +456,29 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn the_staged_node_runtime_is_used_for_a_packaged_agent() {
+        let _guard = env_guard();
+        let root = temp_tagged_dir("packaged-runtime");
+        let resources = root.join("resources");
+        let staged_agent = packaged_entry(&resources);
+        let staged_runtime = packaged_runtime(&resources);
+        std::fs::create_dir_all(staged_agent.parent().expect("agent parent"))
+            .expect("create staged agent dir");
+        std::fs::create_dir_all(staged_runtime.parent().expect("runtime parent"))
+            .expect("create staged runtime dir");
+        std::fs::write(&staged_agent, "console.log('packaged')").expect("write bundle");
+        std::fs::write(&staged_runtime, "runtime fixture").expect("write runtime fixture");
+
+        let config = SidecarConfig::from_env_with_resources(&root, Some(&resources))
+            .expect("packaged agent resolves");
+        assert_eq!(config.program, staged_runtime);
+        assert_eq!(config.args, vec![staged_agent.into_os_string()]);
+        assert!(config.requires_node);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Windows 上 `resource_dir()` 是规范化路径，带 `\\?\` 前缀。设置页显示的入口必须
     /// 与真正交给 Node 的那条命令一致 —— 前缀段是 Node 读不懂、也从没被执行过的字。
     #[cfg(windows)]
@@ -550,8 +588,8 @@ mod tests {
             "program not found",
         ));
         let message = error.to_string();
-        // The version has to be in the message: "install Node" without a floor sends the
-        // user to a download page that may hand them something too old to run the bundle.
+        // Keep the Node floor visible for developer builds, without claiming end users must
+        // install Node when packaged applications normally carry the runtime.
         assert!(
             message.contains(&format!("Node.js {REQUIRED_NODE_MAJOR}")),
             "{message}"
@@ -619,10 +657,8 @@ mod tests {
         );
     }
 
-    /// The Node floor is stated in four places that cannot import each other: this constant,
-    /// the root `package.json` `engines.node`, the agent's esbuild `--target`, and the
-    /// installed-app docs. They are only allowed to agree, and this is the one pair a test
-    /// can actually check, so it is checked rather than trusted.
+    /// The Node floor is stated in three places that cannot import each other: this constant,
+    /// the root `package.json` `engines.node`, and the agent's esbuild `--target`.
     #[test]
     fn the_node_floor_matches_the_declared_engine_range() {
         let manifest = include_str!("../../../../package.json");

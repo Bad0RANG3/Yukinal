@@ -135,6 +135,105 @@ async fn ordinary_effectful_host_request_is_rejected_before_target_resolution() 
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+#[tokio::test]
+async fn evidence_record_host_rpc_survives_host_restart_and_remains_fetchable() {
+    let directory = std::env::temp_dir().join(format!(
+        "yukinal-host-rpc-evidence-restart-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir(&directory).expect("create isolated SQLite directory");
+    let state = AppState::bootstrap(&directory).expect("bootstrap host state");
+    let task = lifecycle_task();
+    state
+        .database
+        .investigations()
+        .create_task(&task)
+        .expect("create durable investigation task");
+    state
+        .database
+        .investigations()
+        .create_run(&InvestigationRun {
+            id: "run_lifecycle".into(),
+            task_id: task.id.clone(),
+            session_id: None,
+            message_id: None,
+            trace_id: Some("trace_host_rpc_restart".into()),
+            attempt: 1,
+            phase: TaskPhase::Execution,
+            status: InvestigationRunStatus::Running,
+            started_at: yukinal_time::iso8601_utc(yukinal_time::now_epoch_seconds()),
+            updated_at: yukinal_time::iso8601_utc(yukinal_time::now_epoch_seconds()),
+            ended_at: None,
+            checkpoint: None,
+            failure: None,
+        })
+        .expect("create active investigation run");
+
+    let content = json!({ "hostname": "fixture-host", "status": "reachable" });
+    let evidence = Evidence {
+        id: "ev_host_rpc_restart".into(),
+        task_id: task.id.clone(),
+        // The host must replace sidecar-supplied run attribution with its active run.
+        run_id: Some("run_from_agent".into()),
+        scope: task.scope.clone(),
+        kind: EvidenceKind::Snapshot,
+        source_tool: SERVER_INFO.into(),
+        collected_at: yukinal_time::iso8601_utc(yukinal_time::now_epoch_seconds()),
+        input_summary: "server.info".into(),
+        content_type: EvidenceContentType::Json,
+        content_hash: format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&content).unwrap())
+        ),
+        content,
+        truncated: false,
+        redaction_status: EvidenceRedactionStatus::Clean,
+    };
+    let recorded = handle_sidecar_request_with_cancel(
+        &state,
+        "host.investigation.evidence.record",
+        json!({ "evidence": evidence }),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("record evidence over the host RPC protocol");
+    assert_eq!(
+        recorded,
+        json!({
+            "recorded": true,
+            "evidenceId": "ev_host_rpc_restart",
+            "reused": false,
+        })
+    );
+
+    // Reopening AppState closes the first SQLite connection and exercises the same host
+    // request boundary used by the sidecar, rather than querying the database as a side channel.
+    drop(state);
+    let reopened = AppState::bootstrap(&directory).expect("reopen host state");
+    let fetched = handle_sidecar_request_with_cancel(
+        &reopened,
+        "host.investigation.evidence.fetch",
+        json!({
+            "taskId": "task_lifecycle",
+            "evidenceId": "ev_host_rpc_restart",
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("fetch persisted evidence over the host RPC protocol");
+    assert_eq!(fetched["status"], json!("success"));
+    assert_eq!(fetched["evidence"]["id"], json!("ev_host_rpc_restart"));
+    assert_eq!(fetched["evidence"]["runId"], json!("run_lifecycle"));
+    assert_eq!(
+        fetched["evidence"]["content"],
+        json!({ "hostname": "fixture-host", "status": "reachable" })
+    );
+
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 #[test]
 fn evidence_freshness_is_host_clocked_and_explicit_at_each_boundary() {
     let now = yukinal_time::parse_iso8601_utc("2026-09-20T00:00:00Z").unwrap();

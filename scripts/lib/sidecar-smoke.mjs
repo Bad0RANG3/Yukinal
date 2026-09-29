@@ -1,7 +1,7 @@
 /**
  * The sidecar protocol smoke, as a reusable routine (ADR 0001 / ADR 0006).
  *
- * Spawns a sidecar entry exactly the way Rust does -- `node <entry>`, speaking NDJSON
+ * Spawns a sidecar entry exactly the way Rust does -- `<runtime> <entry>`, speaking NDJSON
  * on stdin/stdout -- and asserts the protocol behaves as contracted, including the real
  * agent admission path and survival of a malformed frame.
  *
@@ -26,13 +26,14 @@ const assert = (condition, message) => {
 
 /**
  * @param {string} entry absolute path to a runnable sidecar entry file
- * @param {{ env?: Record<string, string>, label?: string }} [options]
+ * @param {{ env?: Record<string, string>, label?: string, program?: string }} [options]
  */
 export async function runSidecarSmoke(entry, options = {}) {
   const label = options.label ?? entry;
-  console.log(`── sidecar smoke: node ${label}`);
+  const program = options.program ?? process.execPath;
+  console.log(`── sidecar smoke: ${program} ${label}`);
 
-  const child = spawn(process.execPath, [entry], {
+  const child = spawn(program, [entry], {
     env: { ...process.env, YUKINAL_LOG_LEVEL: "warn", YUKINAL_DATA_DIR: "/tmp/yukinal-smoke", ...options.env },
     stdio: ["pipe", "pipe", "pipe"],
   });

@@ -16,7 +16,7 @@
   "dependencies": {
     "@yukinal/shared": "workspace:*",
     "@tanstack/react-query": "^5.102.8",
-    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/api": "^2.12.0",
     "@tauri-apps/plugin-opener": "^2.5.5",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
@@ -26,7 +26,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/cli": "^2.12.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.1",

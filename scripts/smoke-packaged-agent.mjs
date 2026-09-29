@@ -21,7 +21,7 @@
  * means the two cannot disagree again.
  */
 
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -47,6 +47,7 @@ if (resources === null || typeof resources !== "object" || Array.isArray(resourc
 
 const staged = await mkdtemp(join(tmpdir(), "yukinal-packaged-"));
 const entry = join(staged, "agent", "index.js");
+const bundledNode = join(staged, "runtime", process.platform === "win32" ? "node.exe" : "node");
 
 try {
   for (const [source, destination] of Object.entries(resources)) {
@@ -59,10 +60,19 @@ try {
       process.exit(2);
     }
     await mkdir(dirname(to), { recursive: true });
-    await copyFile(from, to);
+    if ((await stat(from)).isDirectory()) await cp(from, to, { recursive: true });
+    else await copyFile(from, to);
   }
 
-  await runSidecarSmoke(entry, { label: `${entry} (resource layout, no node_modules)` });
+  if (process.env.YUKINAL_REQUIRE_PACKAGED_NODE === "1" && !existsSync(bundledNode)) {
+    console.error(`✗ bundled Node.js is required for this smoke but was not staged (${bundledNode})`);
+    process.exit(2);
+  }
+  const program = existsSync(bundledNode) ? bundledNode : process.execPath;
+  await runSidecarSmoke(entry, {
+    program,
+    label: `${entry} (resource layout, no node_modules)`,
+  });
 } finally {
   await rm(staged, { recursive: true, force: true });
 }

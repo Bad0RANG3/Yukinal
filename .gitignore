@@ -10,6 +10,10 @@ dist/
 build/
 out/
 target/
+apps/desktop/src-tauri/resources/runtime/node
+apps/desktop/src-tauri/resources/runtime/node.exe
+apps/desktop/src-tauri/resources/runtime/LICENSE
+apps/desktop/src-tauri/resources/runtime/*.new
 *.tsbuildinfo
 .vite/
 coverage/

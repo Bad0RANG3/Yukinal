@@ -76,7 +76,7 @@ pub async fn agent_logs(state: State<'_, AppState>) -> Result<AgentLogsResponse,
 /// path for both shapes is still the point — it is what makes the installed case the
 /// exercised one instead of a `cfg!(debug_assertions)` branch nothing runs.
 ///
-/// Whatever this returns hands Node a path that went through
+/// Whatever this returns hands the bundled Node executable a path that went through
 /// `SidecarConfig::for_command_line`: `resource_dir()` is canonicalised, and Node cannot
 /// resolve a `\\?\` path — it dies with `EISDIR` on `lstat('C:')` before running the agent.
 fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {

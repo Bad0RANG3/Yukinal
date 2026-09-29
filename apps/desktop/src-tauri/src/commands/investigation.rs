@@ -847,11 +847,11 @@ pub(crate) fn recover_investigation_task(
     let mut failure = task.last_failure.clone().unwrap_or(InvestigationFailure {
         code: TaskFailureCode::Unknown,
         message: "任务由用户请求恢复，上一轮运行被标记为中断".into(),
-        retryable: true,
+        retryable: TaskFailureCode::Unknown.retryable(),
         attempt: 1,
         at: now.clone(),
         detail: None,
-        options: Some(super::failure_options(TaskFailureCode::Unknown, true)),
+        options: Some(super::failure_options(TaskFailureCode::Unknown)),
     });
     failure.attempt = failure.attempt.saturating_add(1);
     failure.at = now.clone();

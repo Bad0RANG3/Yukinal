@@ -7,18 +7,15 @@
  * the user. Three of these facts are only true at once or not at all:
  *
  *   1. `apps/desktop/src-tauri/tauri.conf.json` stages the agent as `agent/index.js`
- *      inside the resource directory.
- *   2. `crates/core/src/sidecar/config.rs` resolves `<resources>/agent/index.js` and
- *      nothing else; a rename on one side alone is invisible until an installed user
- *      starts the app.
+ *      and the pinned Node runtime as `runtime/node[.exe]` inside the resource directory.
+ *   2. `crates/core/src/sidecar/config.rs` resolves the staged agent and its adjacent
+ *      runtime; a rename on one side alone is invisible until an installed user starts it.
  *   3. `apps/agent`'s build emits exactly one file, `dist/index.js`, with no bare or
  *      relative imports left for `node_modules` to satisfy -- the packaged app has none.
- *   4. The bundler's icons and targets are configured, because `bundle.active: true`
+ *   4. The bundled Node archive version, architecture list and SHA-256 pins are explicit.
+ *   5. The bundler's icons and targets are configured, because `bundle.active: true`
  *      without them fails the build rather than producing an installer.
- *   5. The esbuild target and the repository's declared Node floor (`engines.node`) are
- *      the same number. The installed app runs the *user's* Node, so a target below the
- *      documented floor ships a bundle whose supported range contradicts what we tell
- *      users, and one above it silently raises the floor nobody agreed to.
+ *   6. The esbuild target, bundled runtime major and development `engines.node` agree.
  *
  * Run after `pnpm --filter @yukinal/agent build`; `pnpm check` orders it that way.
  */
@@ -117,6 +114,59 @@ if (resources === null || typeof resources !== "object" || Array.isArray(resourc
   }
 }
 
+const runtimeEntries =
+  resources !== null && typeof resources === "object" && !Array.isArray(resources)
+    ? Object.entries(resources).filter(([, destination]) =>
+        String(destination).replace(/\\/g, "/").replace(/\/+$/, "") === "runtime",
+      )
+    : [];
+if (runtimeEntries.length !== 1) {
+  fail(`bundle.resources must map one runtime directory to runtime/, found ${runtimeEntries.length}`);
+} else {
+  const [source] = runtimeEntries[0];
+  const resolved = resolve(tauriDir, source);
+  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+    fail(`bundled runtime source "${source}" must be an existing directory`);
+  }
+  if (!existsSync(join(resolved, ".gitkeep"))) {
+    fail(`bundled runtime source "${source}" must remain present in a fresh checkout`);
+  }
+}
+
+const runtimeManifestPath = join(root, "scripts", "node-runtime.json");
+let runtimeManifest;
+try {
+  runtimeManifest = JSON.parse(read(runtimeManifestPath));
+} catch (error) {
+  fail(`Node runtime manifest is not valid JSON: ${error.message}`);
+}
+const requiredRuntimePlatforms = [
+  "win32-x64",
+  "win32-arm64",
+  "darwin-x64",
+  "darwin-arm64",
+  "linux-x64",
+  "linux-arm64",
+];
+if (runtimeManifest) {
+  if (!/^24\.\d+\.\d+$/.test(runtimeManifest.version ?? "")) {
+    fail(`bundled Node runtime version must be a pinned Node 24 patch release, got ${runtimeManifest.version}`);
+  }
+  for (const platform of requiredRuntimePlatforms) {
+    const build = runtimeManifest.platforms?.[platform];
+    if (!build) {
+      fail(`Node runtime manifest is missing ${platform}`);
+      continue;
+    }
+    if (!/^[a-f0-9]{64}$/.test(build.sha256 ?? "")) {
+      fail(`Node runtime checksum for ${platform} must be a SHA-256 hex digest`);
+    }
+    if (!String(build.archive).includes(runtimeManifest.version)) {
+      fail(`Node runtime archive for ${platform} does not match pinned version ${runtimeManifest.version}`);
+    }
+  }
+}
+
 // Icons: the bundler refuses to run without them, and each platform needs its own format.
 const REQUIRED_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
 const icons = bundle.icon;
@@ -157,7 +207,7 @@ if (targets === "all") {
 // A release build that ships a stale agent is a silent breakage, so the ordering of the
 // hook is part of the contract: contract libs -> agent bundle -> frontend bundle.
 const beforeBuild = conf.build?.beforeBuildCommand ?? "";
-const order = ["build:libs", "@yukinal/agent", "@yukinal/desktop"];
+const order = ["prepare-node-runtime.mjs", "build:libs", "@yukinal/agent", "@yukinal/desktop"];
 let cursor = -1;
 for (const token of order) {
   const index = beforeBuild.indexOf(token);
@@ -226,6 +276,9 @@ if (packagedEntryAt === -1) {
     }
   }
 }
+if (!configSource.includes("pub fn packaged_runtime") || !configSource.includes('"runtime"')) {
+  fail(`${configRs}: bundled runtime path must be resolved from <resources>/runtime`);
+}
 
 // ───────────────────────────────────────── 3. the bundle is one self-contained file
 const agentManifest = JSON.parse(read(join(root, "apps", "agent", "package.json")));
@@ -250,7 +303,7 @@ if (agentManifest.type !== "module") {
   fail('apps/agent/package.json is not "type": "module" — dist/index.js would be read as CommonJS');
 }
 
-// The compile target and the documented floor must be one number (see the header).
+// The compile target, development floor and bundled runtime major must agree.
 const enginesNode = JSON.parse(read(join(root, "package.json"))).engines?.node ?? "";
 const targetMajor = /--target=node(\d+)/.exec(buildScript)?.[1];
 const floorMajor = /(\d+)/.exec(enginesNode)?.[1];
@@ -261,8 +314,13 @@ if (!targetMajor) {
 } else if (targetMajor !== floorMajor) {
   fail(
     `esbuild --target=node${targetMajor} contradicts engines.node "${enginesNode}" — ` +
-      "the installed app runs the user's Node, so the compile target and the documented floor must agree",
+      "the development Node floor and the bundled runtime must match the compile target",
   );
+}
+
+const runtimeMajor = /^(\d+)\./.exec(runtimeManifest?.version ?? "")?.[1];
+if (targetMajor && runtimeMajor && targetMajor !== runtimeMajor) {
+  fail(`esbuild target node${targetMajor} does not match bundled runtime ${runtimeManifest.version}`);
 }
 
 if (!existsSync(agentBundle)) {

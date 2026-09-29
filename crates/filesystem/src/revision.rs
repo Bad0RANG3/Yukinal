@@ -141,10 +141,10 @@ fn sha256(input: &[u8]) -> [u32; 8] {
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
     let mut state = INITIAL_STATE;
-    // 按 `step_by` 切而不是 `chunks_exact`：后者的常量分组会被 clippy 建议改用
-    // `as_chunks`，而那是比本 crate 声明的 MSRV（1.85）更新的 API。
-    for block_start in (0..padded.len()).step_by(BLOCK_BYTES) {
-        let block = &padded[block_start..block_start + BLOCK_BYTES];
+    // 填充过程保证总长度是完整分组的整数倍。
+    let (blocks, remainder) = padded.as_chunks::<BLOCK_BYTES>();
+    debug_assert!(remainder.is_empty());
+    for block in blocks {
         let schedule = message_schedule(block);
         compress(&mut state, &schedule);
     }

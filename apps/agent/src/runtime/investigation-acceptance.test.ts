@@ -55,6 +55,9 @@ interface Fixture {
   readonly findings: Finding[];
   readonly briefs: DecisionBrief[];
   readonly artifacts: InvestigationArtifact[];
+  fileContent: string;
+  fileRevision: string;
+  backupContent?: { backupPath: string; content: string; revision: string };
   backupAvailable: boolean;
   plan?: InvestigationPlan;
 }
@@ -164,6 +167,9 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
     findings: [],
     briefs: [],
     artifacts: [],
+    fileContent: "MODE=managed\n",
+    fileRevision: REVISION,
+    backupContent: undefined,
     backupAvailable: true,
   };
   let host!: HostRpcClient;
@@ -178,6 +184,11 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
     }
     if (sent.method === "host.investigation.plan.record") {
       const plan = clone(sent.params.plan as InvestigationPlan);
+      if (state.plan) {
+        plan.revision = plan.id === state.plan.id ? state.plan.revision : state.plan.revision + 1;
+      } else {
+        plan.revision = 1;
+      }
       state.plan = plan;
       answer(host, sent.id, { recorded: true, plan });
       return;
@@ -230,6 +241,9 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
     }
     if (sent.method === "host.tool.execute") {
       const toolName = String(sent.params.toolName);
+      const input = sent.params.input && typeof sent.params.input === "object" && !Array.isArray(sent.params.input)
+        ? sent.params.input as Record<string, unknown>
+        : {};
       state.executions.push(sent.params);
       if (toolName === "server.info") {
         serverInfoReads += 1;
@@ -277,7 +291,7 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
       }
       if (toolName === "filesystem.read") {
         const step = currentStep(state as Fixture);
-        if (scenario === "verification_failure" && step?.kind === "verification") {
+        if (scenario === "verification_failure" && step?.kind === "verification" && state.fileRevision !== REVISION) {
           answer(host, sent.id, {
             status: "failed",
             error: { code: "execution_failed", message: "fixture verification found MODE=legacy", retryable: false },
@@ -285,19 +299,34 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
         } else {
           answer(host, sent.id, {
             status: "success",
-            output: { path: CONFIG_PATH, content: "MODE=managed\n", truncated: false, revision: REVISION },
+            output: { path: CONFIG_PATH, content: state.fileContent, truncated: false, revision: state.fileRevision },
           });
         }
         return;
       }
       if (toolName === "filesystem.backup") {
+        state.backupContent = {
+          backupPath: BACKUP_PATH,
+          content: state.fileContent,
+          revision: state.fileRevision,
+        };
         answer(host, sent.id, {
           status: "success",
-          output: { path: CONFIG_PATH, backupPath: BACKUP_PATH, revision: REVISION, bytesBackedUp: 13 },
+          output: {
+            path: CONFIG_PATH,
+            backupPath: BACKUP_PATH,
+            revision: state.fileRevision,
+            bytesBackedUp: state.fileContent.length,
+          },
         });
         return;
       }
       if (toolName === "filesystem.backup.list") {
+        const backup = state.backupContent ?? {
+          backupPath: BACKUP_PATH,
+          content: "MODE=managed\n",
+          revision: REVISION,
+        };
         answer(host, sent.id, {
           status: "success",
           output: {
@@ -306,9 +335,9 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
               serverId: "srv_fixture",
               taskId,
               path: CONFIG_PATH,
-              backupPath: BACKUP_PATH,
-              revision: REVISION,
-              bytesBackedUp: 13,
+              backupPath: backup.backupPath,
+              revision: backup.revision,
+              bytesBackedUp: backup.content.length,
               status: "available",
               createdAt: NOW,
               updatedAt: NOW,
@@ -320,6 +349,7 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
       }
       if (toolName === "filesystem.backup.cleanup") {
         state.backupAvailable = false;
+        state.backupContent = undefined;
         answer(host, sent.id, {
           status: "success",
           output: { path: CONFIG_PATH, backupPath: BACKUP_PATH, revision: REVISION, bytesDeleted: 13 },
@@ -327,16 +357,60 @@ function createFixture(taskId: string, scenario: Scenario): Fixture {
         return;
       }
       if (toolName === "filesystem.edit") {
+        const expectedRevision = String(input.expectedRevision ?? "");
+        const oldString = String(input.oldString ?? "");
+        const newString = String(input.newString ?? "");
+        if (
+          expectedRevision !== state.fileRevision ||
+          oldString.length === 0 ||
+          state.fileContent.indexOf(oldString) < 0 ||
+          state.fileContent.indexOf(oldString) !== state.fileContent.lastIndexOf(oldString)
+        ) {
+          answer(host, sent.id, {
+            status: "failed",
+            error: { code: "revision_mismatch", message: "fixture refused an edit against a stale revision", retryable: false },
+          });
+          return;
+        }
+        const bytesBefore = state.fileContent.length;
+        const linesBefore = state.fileContent.match(/\n/g)?.length ?? 0;
+        state.fileContent = state.fileContent.replace(oldString, newString);
+        state.fileRevision = "b".repeat(64);
+        const linesAfter = state.fileContent.match(/\n/g)?.length ?? 0;
         answer(host, sent.id, {
           status: "success",
-          output: { path: CONFIG_PATH, revision: "b".repeat(64), bytesBefore: 13, bytesAfter: 14, lineDelta: 0 },
+          output: {
+            path: CONFIG_PATH,
+            revision: state.fileRevision,
+            bytesBefore,
+            bytesAfter: state.fileContent.length,
+            lineDelta: linesAfter - linesBefore,
+          },
         });
         return;
       }
       if (toolName === "filesystem.restore") {
+        const backupPath = String(input.backupPath ?? "");
+        const expectedRevision = String(input.expectedRevision ?? "");
+        if (!state.backupAvailable || state.backupContent?.backupPath !== backupPath || expectedRevision !== state.fileRevision) {
+          answer(host, sent.id, {
+            status: "failed",
+            error: { code: "revision_mismatch", message: "fixture refused a stale target or unowned backup", retryable: false },
+          });
+          return;
+        }
+        const bytesBefore = state.fileContent.length;
+        state.fileContent = state.backupContent.content;
+        state.fileRevision = state.backupContent.revision;
         answer(host, sent.id, {
           status: "success",
-          output: { path: CONFIG_PATH, backupPath: BACKUP_PATH, revision: REVISION, bytesBefore: 14, bytesAfter: 13 },
+          output: {
+            path: CONFIG_PATH,
+            backupPath,
+            revision: state.fileRevision,
+            bytesBefore,
+            bytesAfter: state.fileContent.length,
+          },
         });
         return;
       }
@@ -943,6 +1017,92 @@ test("acceptance fixture: rejecting a separately planned guarded restore never r
   assert.equal(rejected.status, "failed");
   assert.equal(rejected.approvedBy, undefined);
   assert.match(result.text, /用户拒绝回退/);
+});
+
+test("acceptance fixture: approving a guarded restore after failed verification restores the original file", async () => {
+  const fixture = createFixture("task_fixture_rollback_approved", "verification_failure");
+  const failedDeployment = await runFixture(fixture, configEditScript(), "fixture verification failed; waiting for a decision");
+
+  assert.equal(failedDeployment.result.state, "completed", JSON.stringify(failedDeployment.result));
+  assert.equal(fixture.fileContent, "MODE=managed\n# fixture deployment\n");
+  assert.equal(fixture.fileRevision, "b".repeat(64));
+  assert.equal(fixture.backupContent?.content, "MODE=managed\n");
+  assert.equal(fixture.backupContent?.revision, REVISION);
+  assert.equal(fixture.plan?.steps.at(-1)?.status, "blocked");
+  assert.equal(fixture.artifacts.some((artifact) => artifact.kind === "failure" && artifact.status === "failed"), true);
+
+  const rollbackPlan: ScriptItem = {
+    name: "investigation.plan",
+    input: {
+      steps: [
+        {
+          kind: "action",
+          title: "Restore the verified recovery point",
+          purpose: "Return the configuration to the host-owned backup after failed verification",
+          allowedTools: ["filesystem.restore"],
+          inputBindings: { path: CONFIG_PATH, backupPath: BACKUP_PATH },
+          idempotency: "conditional",
+          riskLevel: "high",
+          requiresBaseline: false,
+          preconditions: ["The target must still match the post-edit revision.", "The recovery point must be bound to this file."],
+          verificationCriteria: ["The original configuration content is restored"],
+          preview: "Restore the exact host-owned sibling backup for this path",
+          rollback: "Stop and ask the user for a new plan",
+          evidenceIds: [],
+          successCriteria: ["The guarded restore is accepted by the host"],
+          requiresApproval: true,
+          maxAttempts: 1,
+        },
+        {
+          kind: "verification",
+          title: "Verify restored configuration",
+          purpose: "Read the file again after restoration",
+          allowedTools: ["filesystem.read"],
+          inputBindings: { path: CONFIG_PATH },
+          idempotency: "safe",
+          riskLevel: "low",
+          requiresBaseline: false,
+          preconditions: ["The restore step must have completed."],
+          verificationCriteria: ["The file content equals the original configuration"],
+          preview: "Read only the restored configuration path",
+          rollback: "No remote write occurs during verification",
+          evidenceIds: [],
+          successCriteria: ["The restored bytes and revision are reported"],
+          requiresApproval: false,
+          maxAttempts: 1,
+        },
+      ],
+    },
+  };
+  const restoreScript: ScriptItem[] = [
+    rollbackPlan,
+    {
+      name: "filesystem.restore",
+      input: {
+        path: CONFIG_PATH,
+        backupPath: BACKUP_PATH,
+        expectedRevision: "b".repeat(64),
+      },
+    },
+    { name: "filesystem.read", input: { path: CONFIG_PATH } },
+  ];
+  const restored = await runFixture(fixture, restoreScript, "fixture recovery restored and verified the original file");
+
+  assert.equal(restored.result.state, "completed", JSON.stringify(restored.result));
+  assert.equal(fixture.plan?.status, "completed");
+  assert.equal(fixture.plan?.revision, 2);
+  assert.equal(fixture.fileContent, "MODE=managed\n");
+  assert.equal(fixture.fileRevision, REVISION);
+  assert.deepEqual(fixture.stepResults.slice(-2).map(({ status }) => status), ["success", "success"]);
+  assert.deepEqual(
+    fixture.executions.slice(-2).map(({ toolName }) => toolName),
+    ["filesystem.restore", "filesystem.read"],
+  );
+  const restoreResult = restored.events.find((event) => event.type === "agent.tool_result" && event.toolName === "filesystem.restore");
+  assert(restoreResult && restoreResult.type === "agent.tool_result");
+  assert.equal(restoreResult.approvedBy, "user");
+  assert.equal(restoreResult.status, "success");
+  assert.match(restored.result.text, /fixture recovery restored and verified/);
 });
 
 test("acceptance fixture: a bounded deployment sequence edits then restarts and verifies", async () => {

@@ -362,7 +362,7 @@ pub(crate) fn persist_investigation_event_state(
                 run.failure = Some(InvestigationFailure {
                     code: TaskFailureCode::Cancelled,
                     message: "运行被用户停止".into(),
-                    retryable: true,
+                    retryable: TaskFailureCode::Cancelled.retryable(),
                     attempt: run.attempt,
                     at: params
                         .get("at")
@@ -370,7 +370,7 @@ pub(crate) fn persist_investigation_event_state(
                         .map(|value| bounded_audit_text(value, 80))
                         .unwrap_or_else(yukinal_core::sidecar::iso8601_now),
                     detail: None,
-                    options: Some(failure_options(TaskFailureCode::Cancelled, true)),
+                    options: Some(failure_options(TaskFailureCode::Cancelled)),
                 });
             }
         }
@@ -839,16 +839,20 @@ fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailu
             .map(|value| bounded_audit_text(value, 80))
             .unwrap_or_else(yukinal_core::sidecar::iso8601_now),
         detail: None,
-        options: Some(failure_options(code, code.retryable())),
+        options: Some(failure_options(code)),
     })
 }
 
-pub(crate) fn failure_options(
-    code: TaskFailureCode,
-    retryable: bool,
-) -> Vec<InvestigationFailureOption> {
+/// Build user-visible recovery choices from the canonical failure code.
+///
+/// `InvestigationFailure.retryable` is persisted for display and historical
+/// records, but it is derived data. Taking a separate boolean here previously
+/// allowed a caller to offer a retry for a non-retryable code, or omit it for a
+/// retryable one. Keep the single host-owned rule on `TaskFailureCode` all the
+/// way through the user-facing affordance.
+pub(crate) fn failure_options(code: TaskFailureCode) -> Vec<InvestigationFailureOption> {
     let mut options = Vec::new();
-    if retryable {
+    if code.retryable() {
         options.push(InvestigationFailureOption {
             id: "retry".into(),
             action: FailureOptionAction::Retry,

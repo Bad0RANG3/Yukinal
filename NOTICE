@@ -13,3 +13,9 @@ https://github.com/JetBrains/JetBrainsMono for the upstream project.
 
 The remaining dependencies are governed by the license files and notices
 provided by their respective authors and package distributions.
+
+The packaged desktop application includes the official Node.js v24.21.0 runtime.
+Its distribution license is included beside the executable as
+`$RESOURCE/runtime/LICENSE`. The runtime is downloaded from nodejs.org during the
+package build and checked against the SHA-256 value recorded in
+`scripts/node-runtime.json`.
