@@ -41,11 +41,13 @@ on:
 
 jobs:
   installer:
-    if: ${{ github.event_name != 'pull_request' || matrix.os == 'windows-latest' }}
     name: installer (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
+        # PRs validate the Windows installer paths; release tags and manual dispatches
+        # build every platform. Matrix values must be selected before the job is expanded.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","macos-latest","ubuntu-22.04"]') }}
         include:
           - os: windows-latest
             artifact: windows
