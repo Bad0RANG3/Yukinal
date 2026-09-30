@@ -6,14 +6,14 @@
 
 - 重新梳理产品定位、三条核心任务、安全边界和发布验收标准。
 - 将固定版本且按 SHA-256 校验的 Node.js 运行时纳入桌面安装包；本机 Windows NSIS/MSI 构建成功，当前 MSI 管理员映像载荷启动/关闭冒烟通过。针对早先 NSIS 卸载曾删除数据目录的风险，明确维持产品规则：卸载永远保留数据库、设置和凭据；即使 Tauri 确认页的删数复选框被勾选，hook 也会阻止递归删除并在交互卸载时解释如何卸载后手动清理，静默与升级路径同样保留。
-- 补强 NSIS 卸载回归保护：静态检查锁定 hook 存在、用户勾选后的说明提示、复选框状态清零、Roaming/LocalAppData 两条且仅两条删除语句仍受保护 hook 与非更新条件约束，并拒绝缺失状态捕获和额外无条件删除。Windows UI smoke 从 Tauri 生成脚本提取真实回调，操作原生 checkbox，验证默认未选、勾选提示、勾选与未勾选时 canary 均保留，更新模式也保留；另在 `/S` 静默模式通过测试专用参数预置“已勾选”状态，确认卸载正常退出且 canary 保留。所有破坏性验证只发生在临时 fixture。GitHub Windows package run `36664162122` 已通过对应的 NSIS 卸载 UI smoke；新增真实 `/UPDATE` 就地更新冒烟由后续提交 `ea7828a` 加入，等待当前 CI 验证。
-- 扩展 NSIS 安装生命周期冒烟：在隔离目录真实安装后，以 `/UPDATE` 对同一安装执行就地更新，先移除再核实安装包恢复 `NOTICE` 文件，并验证 Roaming/LocalAppData canary 跨更新和卸载均未改变；本机已通过静态回归、PowerShell 解析和完整 `pnpm check`，更新生命周期需由 Windows CI 实际执行确认。
+- 补强 NSIS 卸载回归保护：静态检查锁定 hook 存在、用户勾选后的说明提示、复选框状态清零、Roaming/LocalAppData 两条且仅两条删除语句仍受保护 hook 与非更新条件约束，并拒绝缺失状态捕获和额外无条件删除。Windows UI smoke 从 Tauri 生成脚本提取真实回调，操作原生 checkbox，验证默认未选、勾选提示、勾选与未勾选时 canary 均保留，更新模式也保留；另在 `/S` 静默模式通过测试专用参数预置“已勾选”状态，确认卸载正常退出且 canary 保留。所有破坏性验证只发生在临时 fixture。真实 native checkbox UI smoke 已在 GitHub Windows package run `36667041840` 通过；同一 run 也通过实际 `/UPDATE` 安装器重跑和数据保留断言。
+- 扩展 NSIS 安装生命周期冒烟：在隔离目录真实安装后，以 `/UPDATE` 对同一安装执行就地更新，先移除再核实安装包恢复 `NOTICE` 文件且 SHA-256 与更新前一致，并验证 Roaming/LocalAppData canary 跨更新和卸载均未改变；GitHub Windows package run `36667041840` 已通过此更新生命周期、manifest 校验和产物上传。
 - 修正两个 macOS Node.js `.tar.gz` 校验值与归档名错配的问题；打包前新增六平台官方 SHASUMS 全量校验，当前六个 pin 均已核对通过，Windows 打包前置流程与 Tauri release 编译（`--no-bundle`）通过。
 - 为跨平台安装包产物生成 SHA-256 与构建来源清单；CI 上传前复核，并由门禁确保上传规则覆盖所有清单支持的安装包后缀。
-- 新增受限的 MSI 安装/冒烟/卸载验收脚本和 NSIS 生命周期脚本，并在安装前拒绝触碰既有 Yukinal 数据目录。GitHub Windows package run `36664162122` 已通过 MSI 与 NSIS 的真实隔离安装、启动、关闭和静默卸载/数据保留步骤；runner 本身装有 Node，因此应用侧以受限 PATH 验证随包运行时，但仍缺整机完全未安装 Node 的复验。当前提交 `ea7828a` 把 NSIS `/UPDATE` 就地更新加入同一隔离生命周期，CI 验证进行中。
+- 新增受限的 MSI 安装/冒烟/卸载验收脚本和 NSIS 生命周期脚本，并在安装前拒绝触碰既有 Yukinal 数据目录。GitHub Windows package run `36667041840` 已通过 MSI 与 NSIS 的真实隔离安装、启动、关闭和静默卸载/数据保留步骤；runner 本身装有 Node，因此应用侧以受限 PATH 验证随包运行时，但仍缺整机完全未安装 Node 的复验。
 - 扩展 Windows 包冒烟支持在 Agent 就绪后强制终止应用父进程；最新 MSI 提取载荷的正常关窗 1 次、强制终止 3 次均未遗留 sidecar。
 - 为可选真实 Provider 验收补上 OpenAI 兼容 Chat Completions 与 Responses 两种 live 测试入口；真实服务调用仍待测试账号和端点。
-- 本机 `pnpm check` 全套门禁通过；PR #2 提交 `0746188` 的三平台代码检查与依赖审计通过，Windows package run `36664162122` 的打包、生命周期、release manifest 和产物上传主要步骤通过。`ea7828a` 后续加入的 NSIS 实际更新用例尚待新一轮 CI 结束。整机无 Node 的安装验收、macOS/Linux 实际安装、真实 SSH/Provider/MCP 场景仍待完成。
+- 本机 `pnpm check` 全套门禁通过；PR #2 最新提交 `a3dbb71` 的三平台代码检查、依赖审计及 Windows package run `36667041840` 全部成功，Windows 包含实际 MSI/NSIS 安装器生命周期和 NSIS `/UPDATE` 数据/文件恢复检查。整机无 Node 的安装验收、macOS/Linux 实际安装、真实 SSH/Provider/MCP 场景仍待完成。
 - 三条核心用户路径的可重置真实环境端到端验证仍待完成。
 
 ## 1.0.0 — 2026-09-13
