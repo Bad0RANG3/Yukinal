@@ -189,6 +189,18 @@ test("installed package Agent smoke checks the pinned bundled runtime and requir
   assert.ok(protocolSmoke.includes("options.dataDir"), "shared sidecar smoke must pass its isolated data directory to the Agent");
 });
 
+test("package build runs the generated NSIS policy check only on Windows", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const packageScript = await readFile(path.join(root, "scripts", "package.mjs"), "utf8");
+  const guardAt = packageScript.indexOf('if (process.platform === "win32")');
+  const nsisCheckAt = packageScript.indexOf('console.log("\\n── generated NSIS uninstall policy")');
+  const manifestAt = packageScript.indexOf('console.log("\\n── release artifact manifest")');
+
+  assert.ok(guardAt !== -1, "package script must identify the Windows-only NSIS platform");
+  assert.ok(nsisCheckAt > guardAt && manifestAt > nsisCheckAt, "NSIS validation must be guarded while manifest generation remains afterward");
+  assert.ok(packageScript.slice(guardAt, manifestAt).includes('"scripts/check-nsis-uninstall.mjs"'));
+});
+
 test("installer-sensitive pull requests run the Windows lifecycle gate without packaging macOS or Linux", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");

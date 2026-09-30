@@ -66,14 +66,16 @@ for (const step of steps) {
 // Keep the checksum/provenance files in lockstep with the just-built installer. A compile-
 // only invocation may leave older bundles in target/release, so it must not refresh them.
 if (!process.argv.slice(2).includes("--no-bundle")) {
-  console.log("\n── generated NSIS uninstall policy");
-  const nsisCheck = spawnCommandSync(process.execPath, ["scripts/check-nsis-uninstall.mjs"], {
-    cwd: root,
-    stdio: "inherit",
-  });
-  if (nsisCheck.status !== 0) {
-    console.error(`\n✗ generated NSIS uninstall policy failed (exit ${nsisCheck.status})`);
-    process.exit(nsisCheck.status ?? 1);
+  if (process.platform === "win32") {
+    console.log("\n── generated NSIS uninstall policy");
+    const nsisCheck = spawnCommandSync(process.execPath, ["scripts/check-nsis-uninstall.mjs"], {
+      cwd: root,
+      stdio: "inherit",
+    });
+    if (nsisCheck.status !== 0) {
+      console.error(`\n✗ generated NSIS uninstall policy failed (exit ${nsisCheck.status})`);
+      process.exit(nsisCheck.status ?? 1);
+    }
   }
 
   console.log("\n── release artifact manifest");
