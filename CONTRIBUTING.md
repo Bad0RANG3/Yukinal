@@ -4,14 +4,14 @@
 
 ## 开始之前
 
-1. 阅读 [文档索引](./docs/README.md)、[架构总览](./docs/architecture.md) 和[执行与授权模型](./docs/execution-model.md)。
-2. 要改权限、目标解析、IPC、sidecar 协议或 MCP 时，先确认现有 ADR 和边界文档；改变已记录的决策应新增 ADR，而不是静默改写行为。
+1. 阅读 [文档索引](./docs/README.md)、[产品定义](./docs/product.md) 和[安全与数据边界](./docs/security.md)。
+2. 要改权限、目标解析、IPC、sidecar 协议或 MCP 时，先说明现有行为与拟改变的信任边界，并在代码、测试和安全文档中保持一致。
 3. 不要在公开 Issue、提交、日志或测试 fixture 中放入真实密钥、令牌、私钥、主机凭据或机器专属路径。
 4. 发现安全漏洞时不要开公开 Issue，按 [安全策略](./SECURITY.md) 私下报告。
 
 ## 开发环境
 
-前置条件、系统依赖、启动方式和首次使用引导见 [开始开发](./docs/development.md)。最短路径：
+前置条件、系统依赖、启动方式见[交付与发布](./docs/release.md#开发和本地验证)。最短路径：
 
 ```bash
 pnpm install --frozen-lockfile
@@ -30,7 +30,7 @@ pnpm check
 - Rust 拥有的进程、文件系统、SQLite、凭据与 SSH 形状不得下放到 WebView。
 - Agent 只能提出工具调用；执行授权只由 Permission Engine 决策。不要通过提示词绕过权限规则。
 - MCP 远端描述和 schema 始终是不可信数据，只可展示或交给模型，不可当作指令执行。
-- 文档中的每项能力都必须能在实现或测试中找到依据；已知缺口写入 [当前限制](./docs/limitations.md)，补完后删除对应条目。
+- 文档中的每项能力都必须能在实现或实际验收中找到依据；未验证的交付条件写入[交付与发布](./docs/release.md)，补完后更新状态。
 
 ## 验证门禁
 
@@ -41,7 +41,7 @@ pnpm check
 git diff --check
 ```
 
-`pnpm check` 已覆盖文档链接、密钥扫描、跨语言契约、类型检查、单元测试、sidecar 冒烟、打包契约、Rust 格式、Clippy 与 Rust 测试。修改打包或发布流程时还要按 [打包与分发](./docs/packaging.md) 验证安装包。
+`pnpm check` 已覆盖文档链接、密钥扫描、跨语言契约、类型检查、单元测试、sidecar 冒烟、打包契约、Rust 格式、Clippy 与 Rust 测试。修改打包或发布流程时还要按[交付与发布](./docs/release.md#发布验收)验证安装包。
 
 ## Pull Request
 
@@ -50,7 +50,7 @@ PR 描述应回答：
 - 改变了什么用户可见行为，为什么需要它？
 - 触碰了哪些边界、契约或安全不变量？
 - 如何验证？列出实际执行的命令与结果。
-- 更新了哪些文档、ADR 或限制条目？
+- 更新了哪些产品、安全或交付文档？
 - 有哪些仍未验证的平台、网络或硬件条件？
 
 审查通过以一扇绿色的 `pnpm check` 为下限；测试通过不替代对权限、数据边界和失败路径的审查。

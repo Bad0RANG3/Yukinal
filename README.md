@@ -2,163 +2,56 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![CI](https://github.com/Bad0RANG3/Yukinal/actions/workflows/check.yml/badge.svg)](https://github.com/Bad0RANG3/Yukinal/actions/workflows/check.yml)
-[![Release](https://img.shields.io/badge/release-1.0.0-blue.svg)](./docs/changelog.md)
 
-> 把 SSH、服务器状态和可审批的 AI Agent 放进一个桌面工作区。
+> 面向独立开发者和小型技术团队的安全 AI 服务器运维工作台。
 
-Yukinal 面向需要管理远程开发环境和基础设施的人。它把服务器连接、健康快照、终端、远程文件、服务与日志、活动记录，以及 Agent 对话放在同一个窗口里。
+Yukinal 把 SSH 服务器状态、终端、远程文件、服务日志和 AI 排查放进一个桌面工作区。遇到故障时，你可以先收集有来源的只读证据，再让 Agent 提出变更计划；执行前查看目标和风险，批准后复核结果，并从活动记录追溯过程。
 
-它的核心取舍很简单：Agent 可以提出操作，但不能直接碰服务器。每次工具调用都要经过 Permission Engine；Rust 宿主会在已经解析和校验过的目标上执行操作，并把请求、授权和结果记录下来。
+## 适合做什么
 
-### 界面预览
+1. **看清问题：**连接服务器并核验主机身份，查看健康快照、服务与日志，让 Agent 给出带证据的诊断建议。
+2. **控制变更：**查看 Agent 拟执行的工具、目标与输入，按风险批准或拒绝，执行后核对验证结果。
+3. **保留退路：**对受限远程文件修改保留备份；出现问题时查看备份和恢复入口，恢复仍需单独授权。
 
-下面三张截图来自本地 Vite 的 `?fixture=1` 演示模式，用于展示完整工作区的视觉状态。服务器名、地址、资源指标、文件名、审计项和 Agent 对话均为虚构 fixture 数据；不包含真实服务器、凭据、模型配置或远程输出。
+这些是项目要完成真实环境验收的三条核心路径，详见[产品定义](./docs/product.md)。目前已有对应实现及大量本地、回环和模拟测试；干净安装后的三条完整路径仍需验证。
 
-| 概览与只读 Agent 对话 | 审计动态 | 文件与对话记录 |
-| --- | --- | --- |
-| ![Yukinal 概览与虚构 Agent 对话](./docs/assets/screenshots/fixture-overview-agent.png) | ![Yukinal 虚构审计动态](./docs/assets/screenshots/fixture-activity-audit.png) | ![Yukinal 文件浏览与虚构对话记录](./docs/assets/screenshots/fixture-files-history.png) |
-
-第一张展示服务器健康快照和 Agent 的只读排查对话；第二张展示失败、成功和取消的审计动态；第三张展示 SFTP 文件浏览布局与已保存会话。它们是 UI 视觉验收和文档演示素材，不能证明对任何真实主机完成了连接、读取或执行。
-
-下方两张截图来自真实 Yukinal Tauri 窗口，使用临时空白数据目录生成，同样不包含个人服务器、凭据或模型配置。
-
-| 工作区与 Agent | 终端工作区 |
-| --- | --- |
-| ![Yukinal 首次使用工作区](./docs/assets/screenshots/yukinal-workspace.png) | ![Yukinal 终端页空状态](./docs/assets/screenshots/yukinal-terminal.png) |
-
-左图展示首次使用引导和 Agent 面板；右图展示终端页的 PTY 工作区布局。没有选择服务器时，终端会明确提示下一步，而不会伪造远程 shell 输出。
-
-## 项目状态
-
-当前版本为 `1.0.0`，作为首个稳定的跨层接口基线。版本号唯一来源是 [`packages/shared/src/version.ts`](./packages/shared/src/version.ts)，跨 TypeScript、Rust、Tauri 配置和 IPC fixture 的版本一致性由测试守护。
-
-当前状态需要注意：
-
-- Windows 安装包已经可以构建，但目前未签名，也没有完成安装后的启动验收。
-- macOS 与 Linux 安装包需要在对应平台构建；本机尚未对它们做真实产物验证。
-- Provider、MCP、多模态输入、文件并发修改等边界仍有明确限制，完整清单见[当前限制](./docs/limitations.md#当前限制)。
-
-## 今天真正可用的能力
-
-### 服务器工作区
-
-- 管理多台 SSH 服务器，保存连接配置，并在首次连接时处理主机指纹；密码、私钥和其他 secret 交给操作系统凭据库保存。
-- 查看 OS、CPU、内存、运行时长、磁盘、网络和 Docker 等健康快照。
-- 使用多会话 PTY 终端、SFTP 远程文件浏览，以及有上限的文本读取。
-- 查看服务和日志；探测不到时明确返回 `unavailable`，不会用假数据填充界面。
-- 记录连接、配置变更和 Agent 工具执行，方便回看一次操作是如何发生的。
-
-### Agent 工作流
-
-- 使用 Node.js sidecar 执行完整的 agent loop：组装上下文、调用模型、请求授权、执行工具、回灌结果，再进入下一轮。
-- 内置服务器信息、Docker、受限文件读写/编辑、宿主生成备份与守卫恢复等工具；真正的 SSH、SFTP、SQLite、凭据和进程资源由 Rust 宿主持有。
-- 运行模式与批准方式分开控制：`goal`、`plan`、`readonly` 决定允许改变什么，`ask`、`auto` 决定由谁确认。
-- 支持流式回答、工具调用卡片、逐项审批、停止运行、模型选择、会话历史和活动追踪。
-- 支持图片、PDF、UTF-8 文本文件与音频附件，并按内容特征和大小上限校验；具体 Provider 的输入能力仍以[当前限制](./docs/limitations.md#当前限制)为准。
-
-### Provider 与 MCP
-
-- 支持 OpenAI-compatible（Chat Completions / Responses）、Anthropic Messages 和 Gemini `generateContent` 三类协议。
-- 支持模型目录、SSE 文本增量、工具调用增量、取消、超时和安全的错误摘要。
-- 支持 stdio 与 Streamable HTTP MCP 服务器；HTTP 端点可使用静态认证头或 OAuth，凭据仍由系统凭据库持有。
-- MCP 工具进入和内置工具相同的执行链路；默认按 `critical` 处理并逐项审批，用户显式信任服务器注解后，自称只读的工具可按只读档执行，其余 effectful 调用仍需 durable task/ChangePlan 步骤；交互式终端仍是用户直接操作的人工旁路。
-
-### 安全边界
-
-Yukinal 把模型当作“提议者”，而不是拥有 shell 的操作者：
+## 工作方式
 
 ```text
-React 界面
-    │ 白名单 Tauri IPC
-    ▼
-Rust 宿主 ── SSH / SFTP / PTY ──► 远程服务器
-    │
-    └── NDJSON JSON-RPC ──► Node.js Agent ── HTTPS / SSE ──► 模型 Provider
-                              │
-                              └── Permission Engine：决定执行、询问或拒绝
+React 桌面界面 ──白名单 IPC──► Rust 宿主 ──SSH/SFTP/PTY──► 你的服务器
+                            │
+                            ├── SQLite、系统凭据库、活动记录
+                            └── Node.js Agent sidecar ──HTTPS──► 模型 Provider
+                                      │
+                                      └── 提出工具调用，由权限引擎和宿主复核
 ```
 
-执行前会综合工具风险、命令风险和目标环境；危险动作不能通过提示词或长期授权绕过逐项审批。凭据、主机身份、数据边界和权限档位的完整规则放在 [`docs/`](./docs/README.md) 中，而不是重复写在这里。
+模型、远端输出和 MCP 工具描述都作为不可信输入。Agent 不直接持有 SSH 连接或凭据；终端是用户主动操作的独立入口。审批、自动委托、停止和恢复的具体含义见[安全与数据边界](./docs/security.md)。
 
-## 快速开始
+## 当前状态
 
-### 前置条件
+代码版本为 `1.0.0`。打包流程会下载并校验固定版本的官方 Node.js，再将运行时随应用分发，最终用户不需要另装 Node.js。卸载始终保留数据库、设置和凭据；即使 NSIS 确认页的“删除应用数据”复选框被勾选，卸载 hook 也会阻止删除，并提示如何在卸载后手动清理。静默卸载和更新同样保留数据；PR #2 的 Windows CI 已对 MSI/NSIS 执行真实隔离安装、启动、关闭与卸载，并验证 `/UPDATE` 就地更新后恢复文件内容哈希且保留数据标记。最新包 run `36667041840` 和跨平台/依赖门禁 `36667041930` 均通过。测试机装有 Node，因此仍未证明整台系统完全没有 Node 时可安装；macOS/Linux 真实安装、代码签名、公证、真实 Provider/MCP 与 SSH 运维组合也尚未全部验收。完整交付状态见[交付与发布](./docs/release.md)。
 
-- Node.js `>= 24`
-- pnpm `11.8.0`
-- Rust `1.85+`，并包含 `rustfmt` 与 `clippy`
-- 当前平台所需的 Tauri 2 系统依赖
+## 开始开发
 
-完整环境清单见[开始开发](./docs/development.md#开始开发)。
-
-### 安装与校验
+需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+ 和当前平台的 Tauri 2 系统依赖。在仓库根目录运行：
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm check
-```
-
-`pnpm check` 是本地和 CI 共用的门禁，包含文档链接、凭据扫描、跨层契约、类型检查、单元测试、sidecar 冒烟、打包契约以及 Rust 检查。
-
-### 启动
-
-启动完整桌面应用：
-
-```bash
 pnpm --filter @yukinal/desktop tauri dev
 ```
 
-只预览 React 界面：
+只预览 React 界面可运行 `pnpm desktop:dev`。浏览器预览不提供 SSH、SQLite、PTY 或系统凭据库。构建安装包运行 `pnpm package`；输出目录为 `target/release/bundle/`。
 
-```bash
-pnpm desktop:dev
-# http://127.0.0.1:1420/
-```
+仓库结构：`apps/desktop` 是界面与 Tauri 外壳，`apps/agent` 是模型与工具运行时，`packages/shared` 管理跨层契约，`crates/` 持有 SSH、文件、数据库和其他宿主能力。
 
-浏览器预览只用于界面开发，不提供 SQLite、SSH、PTY、系统凭据库、MCP 子进程或 Agent 原生能力。
+## 文档与参与
 
-首次打开桌面应用后，按「使用引导」完成三步：
+- [文档索引](./docs/README.md)：阅读顺序和维护规则
+- [产品定义](./docs/product.md)：用户、三条核心任务和优先级
+- [安全与数据边界](./docs/security.md)：审批、凭据、信任与限制
+- [交付与发布](./docs/release.md)：验证方式、安装包状态和发布标准
+- [变更记录](./docs/changelog.md) · [贡献指南](./CONTRIBUTING.md) · [安全策略](./SECURITY.md)
 
-1. 在「设置 → Provider」中保存并测试模型连接。
-2. 添加服务器，核验主机身份后连接 SSH。
-3. 让 Agent 生成一次只读健康巡检草稿，确认内容后再发送。
-
-### 构建安装包
-
-```bash
-pnpm package
-```
-
-安装包输出到 `target/release/bundle/`。当前实际跑通过的是 Windows NSIS 与 MSI；签名、公证、自动更新和跨平台安装后的验收仍不在本版本承诺内，详见[打包与分发](./docs/packaging.md#打包与分发)。
-
-## 项目结构
-
-```text
-apps/desktop/       React 19 + Vite 界面，以及 Tauri Rust 外壳
-apps/agent/         Node.js Agent loop、工具、权限引擎和 Provider
-packages/shared/    TypeScript/Rust 共用的 IPC、事件、协议与 schema 契约
-packages/*-sdk/     Provider 与 Agent SDK
-crates/             SSH、PTY、采集、SQLite、凭据、文件系统和宿主核心
-docs/               架构、权限、安全边界、限制、开发和发布文档
-scripts/            校验、冒烟、打包和桌面窗口辅助脚本
-```
-
-## 文档
-
-| 文档 | 用途 |
-| --- | --- |
-| [文档索引](./docs/README.md) | 阅读顺序与文档治理规则 |
-| [架构总览](./docs/architecture.md) | 分层边界、运行链路和仓库地图 |
-| [执行与授权模型](./docs/execution-model.md) | 风险事实、授权票据和 Agent 执行流程 |
-| [安全与数据边界](./docs/security.md) | 凭据、主机身份、数据上限和审计 |
-| [当前限制](./docs/limitations.md) | 已知缺口与有意保留的安全边界 |
-| [下一阶段实施计划](./docs/implementation-plan.md) | 可继续实施的边界、优先级、工作包和验收条件 |
-| [历史审计与计划](./docs/history/README.md) | 旧审查、三轮审计及已完成的限制放宽手册 |
-| [开始开发](./docs/development.md) | 环境、启动方式、首次使用和验证命令 |
-| [打包与分发](./docs/packaging.md) | 安装包、sidecar 资源和平台状态 |
-| [Provider 边界](./docs/boundaries/provider.md) · [MCP 边界](./docs/boundaries/mcp.md) | 接入协议与跨模块约束 |
-| [贡献指南](./CONTRIBUTING.md) · [安全策略](./SECURITY.md) | 参与项目与报告安全问题 |
-
-## 许可证
-
-项目原创代码与文档以 [MIT License](./LICENSE) 发布。第三方依赖和随仓库分发的字体仍受各自许可证约束，详见 [NOTICE](./NOTICE)。
+项目原创代码与文档采用 [MIT License](./LICENSE)；第三方依赖与随仓库分发的素材见 [NOTICE](./NOTICE)。

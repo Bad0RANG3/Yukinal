@@ -1,42 +1,29 @@
 # 安全与数据边界
 
-## 凭据
+本页说明 Yukinal 当前设计的信任边界。发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
-- 服务器密码、SSH 私钥、私钥口令和 Provider API key 只写入操作系统凭据库（macOS Keychain、Windows Credential Manager、Linux Secret Service，经由 `keyring`），SQLite 只保存 `keychain://<service>/<account>` 形式的引用（`crates/credentials`）。带口令的私钥把口令存成**第二个**凭据条目（同一个 account 加 `-passphrase` 后缀），连接时才解析。OpenSSH 用户证书是公开文件，证书路径与可选私钥路径作为普通元数据落库。
-- RustSec 会忽略 `RUSTSEC-2023-0071`（`rsa` 的 Marvin 时序侧信道）：截至 2026-09-16 没有修复版本，而 SSH 兼容性仍要求 RSA 主机/用户密钥。风险主要在恶意服务端反复测量本机 RSA 签名时延；高价值密钥应优先使用 Ed25519、硬件密钥或 ssh-agent，项目会在上游发布修复版本后立即升级并删除例外。
-- Provider 的 key 在 Rust 侧于使用点解析，随 `agent.run.start` 的一次性参数交给 sidecar。它不写入 Agent 配置文件、不写入日志、不写入活动记录。Agent 的进程配置只有 `YUKINAL_DATA_DIR`、`YUKINAL_LOG_LEVEL`、`YUKINAL_MAX_RUN_MS`。
-- ssh-agent 是第三种认证方式，它只发送 `{method:"agent"}`，**不带任何秘密**（有一条测试专门钉住「agent 不允许夹带密码」）。口令与 agent 两条路径都没有对真实服务器跑过 —— 本环境既没有 ssh-agent 也没有可连的服务器。
-- MCP Streamable HTTP 的 URL 由宿主校验：远程端点必须 HTTPS，明文 HTTP 只允许回环地址；URL 不接受内嵌用户名/密码、查询参数或 fragment，HTTP 客户端不跟随 redirect。最多 32 条有序静态认证头只保存 header 名与各自的 `keychain://` 引用，secret 存在操作系统凭据库并只在实际请求时解析。OAuth 有两条流程：授权码 + PKCE S256（`state` 与 verifier 随机生成，callback 只绑定 `127.0.0.1` 临时端口），或 RFC 8628 设备码（`device_code` 只存在于这一次请求的内存与轮询表单里，界面只拿到公开的 `user_code`、验证链接与到期时间；验证页面在系统浏览器里打开，用户在那一页输入的内容不经过 Yukinal）。设备码的轮询按服务器给的 `interval` 进行（`slow_down` 加 5 秒），受 `expires_in` 与轮询次数上限约束：取消会立刻停止，即使等待它的窗口已经不在了，它也不会活得比 `expires_in` 更久；服务器没声明 `device_authorization_endpoint` 时直接拒绝而不是回退到浏览器回调。客户端认证可以是 `none`（公共客户端）、`client_secret_post`（密钥走请求体）或 `client_secret_basic`（`Authorization: Basic`，凭据不重复出现在请求体）；手填的 client secret 只进系统凭据库，SQLite 里只有引用，界面不回填、日志与 Debug 输出里没有它，缺失时连接在发出任何 token 请求之前就带着「去哪里补」的说明停下，Rust 侧运行时每次请求才从凭据库读出并只在该请求内存活。issuer 可手填，也可从受校验的 `WWW-Authenticate` 或 RFC 9728 protected-resource metadata 自动发现。client id 可手填；留空时只向 RFC 8414 元数据中的 registration endpoint 发送 RFC 7591 注册请求，要求返回 `token_endpoint_auth_method: none` 且不得返回 client secret（返回了就拒绝整次注册，不降级）。access/refresh token bundle 只进系统凭据库，SQLite 仅保存 issuer、公开 client id、流程、客户端认证方式、scope、token endpoint 与凭据引用。token 在过期前自动刷新，服务器返回 401 时会强制刷新并仅重试一次。**DPoP（RFC 9449，发送方约束令牌）可选**（[ADR 0018](./adr.md#adr-0018mcp-的-oauth-令牌可以绑定到本机密钥dpop但默认仍然只是-bearer)）：开启后每台服务器一把 Ed25519 密钥，私钥只在系统凭据库里（配置里只有引用），每个请求 —— POST、GET 事件流、DELETE 与 token 端点请求 —— 都带一个 `dpop+jwt` proof：`jti` 每次重新随机、`iat` 取本机时钟、`htm`/`htu` 绑定方法与去掉 query 的 URL，带 access token 的请求另有 `ath`（token 的 SHA-256）。服务器用 `DPoP-Nonce` 挑战时按 origin 记住它并用新 proof 重试**恰好一次**，加上「刷新 token 后重试一次」，一次请求最多发三次；token 响应的 `token_type` 必须是 `DPoP`，否则整次连接失败而不是降级成 bearer；私钥读不出来时报「需要重新授权」并回收令牌。开关与 issuer、client id、scopes、流程一样属于身份：改动会让已存令牌失效。自定义的按请求动态签名仍不支持（见 [当前限制](./limitations.md#当前限制)）。
-- 自定义请求头只允许非敏感的网关元数据与协议开关（`Referer`、`Origin`、`User-Agent`、`X-App-Name`、`Anthropic-Beta`、OpenAI organization/project 等），且值不能是 `Bearer`/`Basic` 凭据；`Authorization` 在任何情况下都会被凭据库里的 key 覆盖（`crates/core/src/provider.rs` 的 `sanitize_custom_headers`）。
-- 审计输入按键名脱敏（`apiKey`、`password`、`content`、`oldString`、`newString` 等），`filesystem.read` 的文件正文不写入审计，输出摘要命中敏感标记时整体替换为「已省略」。sidecar 诊断日志在离开进程边界前会清理凭据和多行私钥块（`crates/core` 的脱敏模块与 `apps/agent/src/security/`）。
+## 谁能做决定
 
-- 应用级出站网络设置默认直连，也可显式选择系统代理；MCP Streamable HTTP、OAuth discovery/token 请求和远端 KRL 下载共用同一份解析结果。系统代理只读取静态环境变量或平台设置，不执行 PAC；`NO_PROXY` / `ProxyOverride` 交给 HTTP 客户端匹配。代理凭据只写入操作系统凭据库，SQLite 只保存引用，设置响应只返回是否存在，并且只以 Basic `Proxy-Authorization` 发给代理。代理错误会标明代理地址与来源，直连错误会标明直连路径；这不改变 endpoint 的 HTTPS、TLS、redirect 或认证策略。
+React 界面通过白名单 Tauri IPC 请求本地 Rust 宿主。宿主持有 SSH/SFTP、PTY、SQLite、操作系统凭据库和本地子进程；Node.js Agent sidecar 负责模型会话、工具提议与权限判断。模型输出、远端日志、文件内容和 MCP 描述都按不可信数据处理。
 
-## 依赖告警
+Agent 工具调用须经权限引擎和宿主复核：目标由本地解析，输入、风险、任务计划和授权票据要匹配。副作用工具绑定持久任务及计划步骤；危险操作不能仅靠提示词或模型声明获得授权。用户直接输入的终端命令是单独的人工操作入口，不作为 Agent 自动工具开放。
 
-- 2026-09-20 的 `cargo audit` 未发现漏洞级 advisory，但有 8 条上游 warning：Tauri 2.11.5 的 GTK 链带入 1 条 `proc-macro-error` unmaintained（`RUSTSEC-2024-0370`）、5 条 `unic-*` unmaintained（`RUSTSEC-2025-0075`、`RUSTSEC-2025-0080`、`RUSTSEC-2025-0081`、`RUSTSEC-2025-0098`、`RUSTSEC-2025-0100`）和 `glib 0.18.5` 的 `VariantStrIter` unsound（`RUSTSEC-2024-0429`）；SSH 链带入被 yank 的 `wnaf 0.14.0`（`russh 0.63.1 -> p256/p384/p521 0.14.0 -> primeorder 0.14.0`）。这些 warning 没有被加入忽略清单。
-- 当前代码没有直接调用 `glib::VariantStrIter`，GTK/WebKit 由 Tauri 管理；`wnaf` 也没有对应 advisory。升级会同时替换 Tauri 的 GTK 版本或 RustCrypto 的曲线实现，不能只改应用锁文件而假装消除风险。后续在 Tauri 或 `russh` 发布包含修复/替代依赖的版本后升级，并重新运行 `cargo audit`；在此之前保留 warning，避免用 suppress 隐藏供应链状态。
+## 用户批准意味着什么
 
-## 主机指纹
+- `readonly` 和 `plan` 运行模式阻止 Agent 产生副作用；`goal` 才可能进入执行路径。
+- `ask` 与 `auto` 是批准方式，不改变运行模式或宿主硬边界。自动批准只适用于明确委托、符合环境和风险条件的操作。
+- 审批应显示具体服务器、操作、输入摘要和风险。同一运行内的授权只覆盖允许的精确输入；高风险或关键操作仍按策略逐项询问。
+- 拒绝或停止不会回滚已经完成的远端操作。结果未知时应进入待核对状态，不能显示“成功”。
 
-- 首次成功认证后把主机指纹按 `host:port` 记录到数据目录下的 `known_hosts`（自有格式 `v1:host:port:SHA256:…`，指纹写法与 OpenSSH 一致）；之后指纹不一致即拒绝连接，并且错误里同时给出**已钉住的**与**服务器出示的**两个指纹 —— 两个都看得见，才谈得上判断。
-- 服务器编辑页提供状态、探针、信任、遗忘四个动作：探针只报告服务器出示的指纹、不写入任何东西，并由 Rust 侧签发一枚绑定 `serverId`、当前主机、端口、指纹和短 TTL 的一次性票据；「信任此指纹」必须同时匹配票据、当前端点和指纹，因此探针后修改主机或端口不能复用旧结果。界面不会提供任何「忽略 / 仍然继续」的出口。pin 按 `host:port` 关联而不是按 server id，所以同一台机器在两个条目下共用一条信任状态。
-- 服务器可选用受信 host CA：CA 公钥、允许的 principal 模式、可选本地路径或 HTTPS URL 的 KRL，以及最多 16 把独立 KRL 签名公钥保存在服务器配置中；启用后客户端要求 host certificate，并验证证书类型、CA 签名、配置的 CA 公钥、有效期、critical options、principal 与 KRL 撤销状态，普通 host key 会被拒绝。在线 KRL 不跟随重定向、按应用级出站网络设置（默认直连）连接、拒绝 URL 内嵌凭据/query/fragment，并流式限制在 16 MiB；下载或解析失败会使连接失败关闭。KRL 解析支持证书序列号列表/范围/位图、key ID、CA、显式公钥及 SHA-1/SHA-256 指纹；带 `KRL_SECTION_SIGNATURE` 的 KRL 必须让每条签名都通过自身公钥验证，并至少有一条由 host CA 或配置的独立 signer 签署，否则整份 KRL 失败关闭。独立 signer 必须有效且互不重复，多把并存用于轮换。未知关键扩展同样失败关闭。未配置 CA 时，探针和 pin 使用证书内公钥的 SHA-256 指纹，这条兼容路径不验证签名链或 principals。
-- **未配置 CA 时，连接路径要求已知指纹（`RequireMatch`）。** 未知主机在建立 TCP 之前就被拒绝，桌面端的终端、文件、SFTP、日志、服务与概览采集都走这一条；同一个 `ensure_session` 不会再按入口给出不同答案。会建立连接的面板上直接提供核验闸门：`server_host_key_status` 是本地查询，未钉住时渲染探针/信任面板，钉住后才放行面板内容，因此「用户找不到核验入口」不再需要靠自动信任来回避。显式 host CA 的服务器以证书链为准，不要求叶子 pin。新增 pin 仍然只能来自用户确认过的探针结果（[ADR 0071](./adr.md#adr-0071桌面端-ssh-首连不再自动信任主机密钥) 取代了早先「桌面端首连自动信任」的行为）。
+## 凭据、数据和外部连接
 
-## Agent 能碰什么
+SSH、Provider 与 MCP secret 交给操作系统凭据库；配置和数据库只保存必要的引用与任务元数据。跨机器复制数据库不能代替重新绑定系统凭据。主机指纹首次连接必须由用户通过可信渠道核验；指纹变化应拒绝连接并提示核查。
 
-- **副作用工具必须先进入 durable 任务计划。** Agent registry 和 Rust host dispatcher 都把 `taskId + planId + planStepId` 当成副作用调用的必要绑定；缺一个就返回 `durable_plan_required`，不会因为普通聊天带了用户批准票据而绕过。`mcp.*` 同样按副作用处理。交互式终端是独立的人工 UI 会话，不在 Agent 工具目录、自动票据或 ChangePlan 执行链中；它的写入只能由用户在终端里直接输入，因此不能被描述为 Agent 自动维护或自动审计。
-- **会话批准绑定具体输入。** Permission Engine 对规范化工具输入计算 SHA-256 指纹，决策和 session grant 都携带它，registry 在目标、工具名之外再次比对指纹。改变文件路径、容器/服务、包版本或其他参数会重新要求批准；哈希只用于绑定，不把输入原文落入授权记录。
-- 宿主工具只接受 `host: "remote"` 且 `serverId` 以 `srv_` 开头的目标，并会核对目标环境与该服务器注册的环境是否一致、工作区是否真的挂在该服务器上；不一致直接拒绝。
-- 文件工具的路径必须是绝对路径、不含控制字符，且在宿主侧按三类规则被拒绝（大小写不敏感）：路径中包含 `/.ssh/`、`/.kube/`、`/.aws/`、`/.azure/`、`/.config/gcloud/`、`/proc/`、`/run/secrets/`、`/var/run/secrets/` 之一；文件名为 `shadow`、`gshadow`、`sudoers`、`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`、`.env` 与除 `.env.example`/`.env.sample`/`.env.template` 之外的 `.env.*`、`credentials`/`credentials.json`/`secrets`/`secrets.json`；或后缀为 `.pem`、`.key`、`.p12`、`.pfx`、`.jks`。这条封锁在宿主侧生效，被攻破的 sidecar 也无法绕过。
-- 服务器名、日志内容、命令输出和远端文件正文都当作不可信数据：系统提示词明确要求不要把远端内容当指令，工具输出在回传模型、界面和审计之前会做敏感值清理。
-- **`filesystem.edit` 的替换是有守卫的，而且拒绝时什么都不写**（[ADR 0017](./adr.md#adr-0017filesystemedit-的替换阶段有守卫但仍不是-compare-and-swap)）。它先读全文、比对内容摘要、要求 `oldString` 恰好出现一次，然后取一次 `stat` 作为守卫，把结果写进同目录 staging 文件（带上目标的 `mode`、`mtime`、`owner`、`group`），逐项复核 staging 的属性，再在 rename 之前重新比对守卫，rename 之后再确认发布出来的就是我们写进去的那一份。`symlink`、`nlink > 1`、远端不报告链接数、服务器拒绝 rename、staging 建不出来、或任何一项 metadata 保不住，都会返回明确的失败（`unsupported`，并在 detail 里点名缺了哪项 metadata），**不会**退回原位写、也不会留下半成品；并发修改返回 `invalid_input` 并把「重新读再试」写进文案。ACL 与 xattr 既不能保留也不能通过 SFTP v3 检测，所以不在承诺范围内。
-- **文件备份与恢复同样由宿主收口**（[ADR 0043](./adr.md#adr-0043文件备份与守卫恢复只由宿主决定路径)）。`filesystem.backup` 不接受模型提供的目标路径，只为不超过 1 MiB 的普通单链接文件派生同目录路径并以 `CREATE|EXCLUDE` 独占创建，读取前后复核 `stat`，失败时删除不完整副本；成功后只把服务器、目标路径、revision、任务归属和生命周期写入 SQLite，不保存远端原文。`filesystem.restore` 必须命中这条宿主账本、属于同一任务（或同一无任务会话），再通过当前 `expectedRevision` 和受保护替换；成功后账本把备份标为已消费。`filesystem.backup.list` 只允许当前调查任务读取该账本的 bounded metadata，并明确说明 `available` 不是远端存在证明。只读的 `filesystem.backup.retention` 跨任务盘点同一服务器的可用备份（按原路径分组，`keepLatest` 与 `olderThanDays` 取交集），只输出候选，不删除也不访问远端。`filesystem.backup.cleanup` 只允许在账本中存在的备份仍与记录 revision 一致时删除，并在成功后标记 `deleted`；批量模式（`items` 1–32）逐项重新读账本、每项之间检查取消，任何一项未删除就带 `partial: true`，跨任务删除只在批量模式且该项被已批准计划步骤绑定时允许。`backup_cleanup` playbook 会先列账本、形成摘要和单项计划，`backup_rotation` playbook 会把 retention 的精确 items 变成一个始终 `requiresApproval: true` 的批量步骤，两者都等待用户批准后宿主才做远端内容复核并复查账本。备份清理是 medium-risk，备份本身也是 medium-risk，恢复是 high-risk，三者都进入调用幂等账本；没有后台自动轮换，验证失败不会自动恢复。
-- 外部动作都有上限：host↔sidecar 帧单帧 24 MiB（MCP 帧 8 MiB）、远程命令输出 4 MiB、界面文件读取 1 MiB、Agent 文件读取默认 128 KiB（上限 1 MiB）、文件写入与编辑 512 KiB、备份/恢复 1 MiB、日志 500 行、服务 200 条、活动与执行审计每次最多 100 条、工具输出摘要 4000 字符、模型文本 20 万字符。
-- Agent 附件按内容而非扩展名识别。图片支持 PNG、JPEG、WebP 与 GIF，单张原图最多 5 MiB、最多 8 张；PDF 必须带 `%PDF-` 魔数，单文件最多 8 MiB、最多 4 个；音频支持 WAV、MP3、OGG 与 FLAC，单段最多 8 MiB、最多 4 段；图片、PDF 与音频的原始字节合计最多 12 MiB，并限制 base64 展开后的单帧大小（host↔sidecar 帧上限 24 MiB）。文本附件只接受有效 UTF-8、无二进制控制字符，单文件最多 512 KiB、总计 2 MiB、最多 8 个。附件都会随用户消息写入本地 `chat_messages`，因此与文本提示具有相同的远端传输与本地留存边界；当前不接受任意二进制文件。
-- SSH keyboard-interactive 的第二因素提示由服务器提供、经共享事件契约校验后才显示；响应只通过内存 oneshot 回送当前协议轮次。挑战最多 8 回合、每轮 16 个提示，120 秒后过期；认证响应不写 SQLite、keychain、活动审计或日志。
-- **审计。** 每次工具执行都会由宿主写成 `tool_executions` 行，并额外生成一条 `activities` 记录。自动执行的来源会被如实记录为 `policy`、`agent` 或 `user`：Agent 自主批准不会伪装成用户批准。只有一个**终态**结果可以被落库（`pending`/`running`/`waiting_approval` 会被拒绝），所以审计里不会出现「已结束但还在跑」的行。
-- **调查上下文与调度预算。** `host.context.fetch` 给 sidecar 的调查行只含证据元数据和阶段工件摘要，`investigation.evidence.search` 也只返回来源、目标、时间、哈希和截断状态等有界元数据；`investigation.evidence.correlate` 只能在当前任务、同一目标范围内按宿主运行 ID，或最多 3600 秒时间窗，对齐摘要，返回匹配方式、来源集合和警告，不返回正文，也不声称根因；`investigation.evidence.compare` 只能比较当前任务同一目标范围内的两条证据，返回有界 JSON 路径或文本行数，不返回原始值。正文必须用真实 `evidenceId` 通过只读 `investigation.evidence` 单条取回，避免把整份日志、配置或工件内容自动塞进提示词。宿主同时附加按主机时钟计算的 `freshness`：`default-v1` 在 15 分钟后标为 `stale`、24 小时后标为 `expired`，解析失败或时间在未来标为 `unknown`，并返回评估时刻和策略边界。该字段是响应投影而非可写授权，旧行不会被自动清理；Agent 面对 stale/expired 只能把它当历史资料并重新取样。调度规则的每项预算由宿主与任务预算取小值，永远不能扩大任务的步数、墙钟时间或尝试次数。
-- **异常复核仍然是只读路径。** 调度器在上一轮比较为 `changed` 时，只向下一次 sidecar 运行注入“检索相邻证据、比较无正文差异、再收集新样本”的有界提示；提示不会改变任务目标、工具目录、预算或 Permission Engine 结果。若新样本仍支持变化，宿主才保存新的 Finding/决策材料；差异本身永远不构成写入、重启或删除授权。
-- **决策摘要的自动续接是白名单且默认关闭。** `investigation_brief_select` 只返回宿主从已保存选项读取的 `continuation`；缺失字段归一化为 `wait_user`。桌面端仅对 `continue_readonly`/`start_plan` 调用既有 `investigation_task_start`；`stop` 由宿主复用 sidecar 取消和 durable fence，任务详情页的 `investigation_task_stop` 也不能绕过这条路径；无活动 run 时才按状态机封存任务，不会由标题、说明或模型文本推断继续动作或停止动作。计划审批、逐项高风险批准、目标范围和调用幂等账本仍照常生效，`stop` 也不会误批准关联计划。
+远端读取、日志、附件和 IPC 帧有大小或数量限制。提供给模型的内容必须受限并脱敏；审计记录应保留操作与结果的可追溯信息，避免写入凭据、完整远端正文和不必要的模型上下文。连接外部 Provider 或 MCP 服务器前，用户应知道相关数据会离开本机；MCP 自报的描述、schema 和风险注解不能单独成为授权依据。
+
+## 明确的限制
+
+- SFTP 文件变更没有跨系统原子 compare-and-swap；即使有修订检查，检查与写入之间仍可能竞态。
+- 模型结论不能替代人对生产变更的判断；服务器、MCP 或模型服务也可能在调用后才失败。
+- 应用退出时不承诺后台巡检继续运行；停止 sidecar 不保证撤销外部系统已接受的操作。
+- 安装包当前未签名，真实安装与真实端点的验收状态见[交付与发布](./release.md)。

@@ -16,6 +16,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { spawnCommandSync } from "./lib/commands.mjs";
 import { fileURLToPath } from "node:url";
 
 const hasCargo = spawnSync("cargo", ["--version"], { stdio: "ignore" }).status === 0;
@@ -23,6 +24,9 @@ const hasCargo = spawnSync("cargo", ["--version"], { stdio: "ignore" }).status =
 const steps = [
   { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
   { name: "secret scan", command: process.execPath, args: ["scripts/check-secrets.mjs"], required: true },
+  { name: "cross-platform command runner tests", command: process.execPath, args: ["--test", "scripts/lib/commands.test.mjs"], required: true },
+  { name: "NSIS uninstall data-policy tests", command: process.execPath, args: ["--test", "scripts/nsis-uninstall-policy.test.mjs"], required: true },
+  { name: "release artifact manifest tests", command: process.execPath, args: ["--test", "scripts/release-manifest.test.mjs"], required: true },
   // Documentation links are load-bearing now that the rules live in a tree: a
   // section that moves takes its anchors with it, and only the renderer notices.
   { name: "docs links", command: process.execPath, args: ["scripts/check-docs-links.mjs"], required: true },
@@ -79,11 +83,8 @@ for (const step of steps) {
     continue;
   }
   console.log(`\n── ${step.name}`);
-  // pnpm resolves through a .cmd shim on Windows, so it needs a shell; node/cargo are
-  // real executables and a shell would mangle paths that contain spaces.
-  const result = spawnSync(step.command, step.args, {
+  const result = spawnCommandSync(step.command, step.args, {
     stdio: "inherit",
-    shell: step.command === "pnpm" && process.platform === "win32",
     env: step.env ? { ...process.env, ...step.env } : process.env,
   });
   if (result.status !== 0) {

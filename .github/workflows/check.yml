@@ -8,30 +8,42 @@ name: check
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
   gate:
-    name: pnpm check (${{ matrix.os }})
+    name: pnpm check (${{ matrix.os }} / Rust ${{ matrix.rust }})
+    # Release package.yml runs this full matrix for tags; keep the tag-triggered
+    # check workflow focused on dependency advisory audits.
+    if: github.event_name != 'push' || github.ref_type != 'tag'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Keep the full Linux/GTK dependency graph honest at the declared MSRV.
+          - os: ubuntu-latest
+            rust: 1.90.0
+          - os: windows-latest
+            rust: stable
+          - os: macos-latest
+            rust: stable
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # No `version:` here: package.json already pins `packageManager: pnpm@11.8.0`,
-      # and action-setup v4 fails when both are present.
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 11.8.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # pinned action
         with:
+          toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
 
       - name: Install Linux system deps (Tauri / webkit2gtk)
@@ -48,10 +60,30 @@ jobs:
       - run: pnpm check
 
   advisory:
-    name: rust advisory audit
+    name: dependency advisory audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+      # The job runs package install scripts; do not persist checkout credentials in .git/config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      # Keep network-backed package audits out of the deterministic local/OS gate.
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 11.8.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Audit JavaScript dependencies
+        run: pnpm audit
+
+      - name: Install pinned cargo-audit CLI
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit Rust dependencies
+        run: cargo audit

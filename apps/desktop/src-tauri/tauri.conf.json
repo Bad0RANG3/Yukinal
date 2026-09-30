@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm -w run build:libs && pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop build",
+    "beforeBuildCommand": "pnpm -w exec node scripts/prepare-node-runtime.mjs && pnpm -w run build:libs && pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -39,9 +39,16 @@
     ],
     "resources": {
       "../../agent/dist/index.js": "agent/index.js",
-      "resources/agent-package.json": "agent/package.json"
+      "resources/agent-package.json": "agent/package.json",
+      "resources/runtime/": "runtime/",
+      "../../../NOTICE": "NOTICE"
     },
     "category": "DeveloperTool",
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis/installer-hooks.nsh"
+      }
+    },
     "linux": {
       "deb": {
         "depends": [

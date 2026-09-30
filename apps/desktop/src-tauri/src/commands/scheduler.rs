@@ -348,7 +348,7 @@ fn close_admitted_launch_failure(
             error,
             failure_code,
             retryable,
-            super::failure_options(failure_code, retryable),
+            super::failure_options(failure_code),
             outcome,
             &yukinal_core::sidecar::iso8601_now(),
         )

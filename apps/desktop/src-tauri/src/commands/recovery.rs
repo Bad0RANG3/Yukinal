@@ -156,7 +156,10 @@ pub(crate) fn should_auto_recover(task: &InvestigationTask) -> bool {
             task.scope.environment,
             Environment::Development | Environment::Staging
         )
-        && failure.retryable
+        // `retryable` is a persisted projection for display/audit. The code is
+        // the authoritative policy input: a legacy or damaged row must never
+        // turn a non-retryable failure into an autonomous retry.
+        && failure.code.retryable()
         && failure.attempt < task.budget.max_attempts
 }
 
@@ -177,10 +180,7 @@ fn fail_recovered_start(state: &AppState, task: &InvestigationTask, error: &str)
         attempt,
         at: now.clone(),
         detail: None,
-        options: Some(crate::commands::failure_options(
-            TaskFailureCode::Internal,
-            false,
-        )),
+        options: Some(crate::commands::failure_options(TaskFailureCode::Internal)),
     };
     if let Err(update_error) =
         state
@@ -285,8 +285,17 @@ mod tests {
         production.scope.environment = Environment::Production;
         assert!(!should_auto_recover(&production));
 
+        // `retryable` is derived data. A stale false marker must not make a
+        // transport failure ineligible, and a stale true marker must not
+        // elevate an internal failure into an autonomous retry.
+        let mut stale_display_flag = delegated_task();
+        stale_display_flag.last_failure.as_mut().unwrap().retryable = false;
+        assert!(should_auto_recover(&stale_display_flag));
+
         let mut non_retryable = delegated_task();
-        non_retryable.last_failure.as_mut().unwrap().retryable = false;
+        let failure = non_retryable.last_failure.as_mut().unwrap();
+        failure.code = TaskFailureCode::Internal;
+        failure.retryable = true;
         assert!(!should_auto_recover(&non_retryable));
 
         let mut exhausted = delegated_task();

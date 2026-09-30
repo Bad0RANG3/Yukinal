@@ -518,7 +518,6 @@ pub(super) fn handle_plan_step_result(state: &AppState, params: Value) -> Result
                 })),
                 options: Some(crate::commands::failure_options(
                     TaskFailureCode::CommandFailed,
-                    false,
                 )),
             };
             let failure_artifact = InvestigationArtifact {
@@ -704,7 +703,7 @@ pub(super) fn handle_plan_step_result(state: &AppState, params: Value) -> Result
                 .unwrap_or("计划步骤未完成，等待用户决定下一步"),
             8_192,
         );
-        let mut failure_options = crate::commands::failure_options(failure_code, false);
+        let mut failure_options = crate::commands::failure_options(failure_code);
         if step_kind == PlanStepKind::Action
             && plan.steps[step_index]
                 .rollback

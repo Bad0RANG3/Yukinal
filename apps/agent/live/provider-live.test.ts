@@ -5,15 +5,17 @@ import type { ChatRequest, LLMProvider, ProviderToolSpec, StreamEvent } from "@y
 
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { GeminiProvider } from "../src/providers/gemini.js";
+import { OpenAiCompatibleProvider } from "../src/providers/openai-compatible.js";
 
-type LiveProviderName = "anthropic" | "gemini";
+type LiveProviderName = "openai-chat" | "openai-responses" | "anthropic" | "gemini";
 
 interface LiveProviderConfig {
   name: LiveProviderName;
   model: string;
-  apiKey: string;
+  apiKey?: string;
   baseUrl: string;
   apiVersion?: string;
+  wireApi?: "chat" | "responses";
 }
 
 const LIVE_FLAG = "YUKINAL_LIVE_PROVIDER_TESTS";
@@ -27,13 +29,18 @@ const selectedProviders = new Set(
     .filter(Boolean),
 );
 
-const allProviderNames = new Set<LiveProviderName>(["anthropic", "gemini"]);
+const allProviderNames = new Set<LiveProviderName>([
+  "openai-chat",
+  "openai-responses",
+  "anthropic",
+  "gemini",
+]);
 const unknownProviders = [...selectedProviders].filter(
   (provider): provider is string => !allProviderNames.has(provider as LiveProviderName),
 );
 
 if (liveEnabled && selectedProviders.size === 0) {
-  throw new Error(`set ${LIVE_PROVIDERS}=anthropic,gemini to select live providers`);
+  throw new Error(`set ${LIVE_PROVIDERS}=openai-chat,openai-responses,anthropic,gemini to select live providers`);
 }
 if (unknownProviders.length > 0) {
   throw new Error(`unknown live providers: ${unknownProviders.join(",")}`);
@@ -46,6 +53,15 @@ function requiredEnv(name: string): string {
 }
 
 function configFor(name: LiveProviderName): LiveProviderConfig {
+  if (name === "openai-chat" || name === "openai-responses") {
+    return {
+      name,
+      apiKey: process.env.YUKINAL_OPENAI_API_KEY?.trim() || undefined,
+      model: requiredEnv("YUKINAL_OPENAI_MODEL"),
+      baseUrl: process.env.YUKINAL_OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1",
+      wireApi: name === "openai-chat" ? "chat" : "responses",
+    };
+  }
   if (name === "anthropic") {
     return {
       name,
@@ -70,6 +86,15 @@ for (const name of liveEnabled ? selectedProviders : []) {
 }
 
 function providerFor(config: LiveProviderConfig): LLMProvider {
+  if (config.name === "openai-chat" || config.name === "openai-responses") {
+    return new OpenAiCompatibleProvider({
+      baseUrl: config.baseUrl,
+      model: config.model,
+      apiKey: config.apiKey,
+      wireApi: config.wireApi,
+      timeoutMs: 90_000,
+    });
+  }
   if (config.name === "anthropic") {
     return new AnthropicProvider({
       baseUrl: config.baseUrl,
@@ -145,7 +170,7 @@ function config(name: LiveProviderName): LiveProviderConfig {
   return value;
 }
 
-for (const name of ["anthropic", "gemini"] as const) {
+for (const name of ["openai-chat", "openai-responses", "anthropic", "gemini"] as const) {
   test(`${name} live text streaming and usage`, liveOptions(name), async () => {
     const current = config(name);
     const provider = providerFor(current);
@@ -241,6 +266,8 @@ if (liveEnabled && selectedProviders.size > 0) {
       model: current.model,
       baseUrl: current.baseUrl,
       apiVersion: current.apiVersion ?? "adapter default",
+      wireApi: current.wireApi ?? "native",
+      authentication: current.apiKey ? "configured" : "none",
       date: new Date().toISOString().slice(0, 10),
     }));
     assert.ok(recorded.every((entry) => entry.model && entry.baseUrl));

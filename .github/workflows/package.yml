@@ -1,8 +1,10 @@
 name: package
 
-# Installer builds, deliberately NOT part of the three-OS gate in check.yml.
+# Installer builds are not part of the fast three-OS compiler gate in check.yml. Windows
+# lifecycle acceptance does run on installer-sensitive pull requests; all package targets
+# run on release tags or an explicit dispatch.
 #
-# Why separate (the short version; the docs/packaging.md's 「打包与分发」 has the full
+# Why separate (the short version; docs/release.md has the release criteria; the
 # one): bundling is not a compiler check. It downloads platform toolchains it does not ship -- WiX and NSIS on
 # Windows, the appimage/dpkg tooling on Linux -- and it builds the whole Rust workspace in
 # release mode with `lto = "thin"` before it copies a single resource. That is minutes per
@@ -18,6 +20,24 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/package.yml
+      - Cargo.lock
+      - Cargo.toml
+      - apps/desktop/src-tauri/Cargo.toml
+      - apps/desktop/src-tauri/tauri.conf.json
+      - apps/desktop/src-tauri/nsis/**
+      - package.json
+      - pnpm-lock.yaml
+      - scripts/check-nsis-uninstall.mjs
+      - scripts/check-desktop-window.ps1
+      - scripts/nsis-uninstall-policy.test.mjs
+      - scripts/package.mjs
+      - scripts/smoke-installed-windows.ps1
+      - scripts/smoke-msi-install-windows.ps1
+      - scripts/smoke-nsis-install-windows.ps1
+      - scripts/smoke-nsis-checkbox-ui-windows.ps1
 
 jobs:
   installer:
@@ -25,24 +45,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            artifact: windows
-          - os: macos-latest
-            artifact: macos
-          # Not ubuntu-latest like the gate: an artifact's glibc baseline is the runner it
-          # was built on, and 22.04 keeps the .deb/AppImage installable on older distros.
-          - os: ubuntu-22.04
-            artifact: linux
+        # PRs validate the Windows installer paths; release tags and manual dispatches
+        # build every platform. Matrix values must be selected before the job is expanded.
+        # Keep Linux release artifacts on 22.04 for compatibility with older glibc baselines.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","macos-latest","ubuntu-22.04"]') }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # No `version:` here: package.json pins `packageManager: pnpm@11.8.0`, and
-      # action-setup v4 fails when both are present.
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: 11.8.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
@@ -62,19 +77,103 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The release workflow also runs on tags/manual dispatch, independently of check.yml.
+      # Audit the shared lockfile once per release rather than once per OS matrix leg.
+      - name: Audit JavaScript dependencies before release
+        if: matrix.os == 'ubuntu-22.04'
+        run: pnpm audit
+
       # The gate, unchanged: contract libs -> typecheck -> agent bundle -> packaging
       # contract -> tests -> vite build -> both sidecar smokes -> cargo.
       - run: pnpm check
 
-      # Contract libs, agent bundle, packaging contract, then `tauri build`. The agent
-      # bundle is rebuilt by `beforeBuildCommand` inside the same command, so the file that
-      # gets staged as <resources>/agent/index.js is never stale.
+      # Verify all six runtime pins against official SHASUMS, then prepare the target runtime,
+      # contract libs, agent bundle, strict installed-layout smoke,
+      # packaging contract, then `tauri build`. The runtime and agent are prepared again by
+      # `beforeBuildCommand`, so the staged resource layout matches a direct Tauri build too.
       - run: pnpm run package
+
+      # Reuse Tauri's generated confirmation callbacks and checkbox label. Exercise both
+      # checkbox states plus the update guard with real native controls and isolated canaries.
+      - name: Smoke NSIS uninstall data preservation and update policy
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./scripts/smoke-nsis-checkbox-ui-windows.ps1
+
+      - name: Upload NSIS checkbox UI diagnostics
+        if: failure() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: yukinal-windows-nsis-checkbox-ui-diagnostics
+          if-no-files-found: ignore
+          path: target/release/nsis-checkbox-ui-smoke/**/*.log
+
+      # Exercise the packaged native window and its accessible navigation before installer
+      # lifecycle tests. The script isolates SQLite and WebView2 data in a temporary folder.
+      - name: Smoke packaged Windows UI rendering
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./scripts/check-desktop-window.ps1
+
+      # Windows hosted runners are disposable and elevated but include a system Node.js.
+      # The MSI test explicitly permits that host runtime while the app smoke launches Yukinal
+      # with a restricted PATH, proving it uses its packaged Node. This checks MSI lifecycle;
+      # it is not a substitute for a clean image with Node.js genuinely absent.
+      - name: Smoke MSI install, packaged launch, shutdown, and uninstall
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/smoke-msi-install-windows.ps1 -AllowInstalledNodeForPathIsolationSmoke
+
+      - name: Upload MSI lifecycle diagnostics
+        if: failure() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: yukinal-windows-msi-smoke-diagnostics
+          if-no-files-found: ignore
+          path: |
+            target/release/msi-install-smoke/**/*.log
+            target/release/installer-smoke/**/*.log
+
+      - name: Smoke NSIS install, update, sidecar startup, and uninstall data preservation
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/smoke-nsis-install-windows.ps1
+
+      - name: Upload NSIS lifecycle diagnostics
+        if: failure() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: yukinal-windows-nsis-smoke-diagnostics
+          if-no-files-found: ignore
+          path: |
+            target/release/nsis-install-smoke/**/*.log
+            target/release/installer-smoke/**/*.log
 
       # Unsigned on purpose: no signing identity or certificate exists in this repository,
       # so these artifacts are for local installation and review, not for release.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Verify checksums and build provenance manifest
+        run: node scripts/write-release-manifest.mjs --verify
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: yukinal-${{ matrix.artifact }}
+          name: yukinal-${{ matrix.os == 'windows-latest' && 'windows' || (matrix.os == 'macos-latest' && 'macos' || 'linux') }}
           if-no-files-found: error
-          path: target/release/bundle/**
+          path: |
+            target/release/bundle/**/*.exe
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.pkg
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.rpm
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.appimage
+            target/release/bundle/**/*.zip
+            target/release/bundle/**/*.tar.gz
+            target/release/bundle/**/*.tar.xz
+            target/release/bundle/**/*.tar.zst
+            target/release/bundle/SHA256SUMS.txt
+            target/release/bundle/release-manifest.json

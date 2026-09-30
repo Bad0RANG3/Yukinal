@@ -3,15 +3,15 @@
 //! 从 `commands/mod.rs` 拆出来只为可读性：这里覆盖 IPC 事件名映射与命令层的纯规则。
 
 use super::{
-    is_current_investigation_run, is_stable_server_id, is_terminal_investigation_run,
-    is_terminal_result_status, next_investigation_status, persist_investigation_event_state,
-    safe_audit_summary, sanitize_audit_input, sync_investigation_task_status_state,
-    task_failure_code_from_tool_error, tauri_event_name,
+    failure_options, is_current_investigation_run, is_stable_server_id,
+    is_terminal_investigation_run, is_terminal_result_status, next_investigation_status,
+    persist_investigation_event_state, safe_audit_summary, sanitize_audit_input,
+    sync_investigation_task_status_state, task_failure_code_from_tool_error, tauri_event_name,
 };
 use crate::state::AppState;
 use serde_json::json;
 use yukinal_database::models::{
-    Environment, ErrorCategory, InvestigationPermissionMode, InvestigationRun,
+    Environment, ErrorCategory, FailureOptionAction, InvestigationPermissionMode, InvestigationRun,
     InvestigationRunMode, InvestigationRunStatus, InvestigationTarget, InvestigationTargetHost,
     InvestigationTask, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
     ToolExecutionStatus,
@@ -283,6 +283,25 @@ fn tool_failure_codes_keep_recovery_categories_structured() {
         Some(TaskFailureCode::CommandFailed)
     );
     assert_eq!(task_failure_code_from_tool_error("unknown_code"), None);
+}
+
+#[test]
+fn recovery_options_derive_retryability_from_the_failure_code() {
+    let transport = failure_options(TaskFailureCode::Transport);
+    assert!(transport
+        .iter()
+        .any(|option| option.action == FailureOptionAction::Retry));
+
+    // Cancellation and unknown failures remain visible/recoverable through
+    // explicit user choices, but must not offer a generic automatic retry.
+    for code in [TaskFailureCode::Cancelled, TaskFailureCode::Unknown] {
+        assert!(
+            !failure_options(code)
+                .iter()
+                .any(|option| option.action == FailureOptionAction::Retry),
+            "{code:?} must not have a retry affordance"
+        );
+    }
 }
 
 /// The Rust tool-error mapping is part of the shared taxonomy: every wire code in

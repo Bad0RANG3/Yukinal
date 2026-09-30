@@ -427,10 +427,7 @@ fn interrupt_stale_investigation_run(
         attempt: run.attempt,
         at: now.clone(),
         detail: None,
-        options: Some(super::failure_options(
-            TaskFailureCode::Transport,
-            TaskFailureCode::Transport.retryable(),
-        )),
+        options: Some(super::failure_options(TaskFailureCode::Transport)),
     };
     run.status = InvestigationRunStatus::Interrupted;
     run.updated_at = now.clone();
@@ -468,7 +465,7 @@ pub(crate) fn fail_admitted_investigation_run(
         attempt: run.attempt,
         at: now.clone(),
         detail: None,
-        options: Some(super::failure_options(code, retryable)),
+        options: Some(super::failure_options(code)),
     };
     run.status = InvestigationRunStatus::Failed;
     run.updated_at = now.clone();
