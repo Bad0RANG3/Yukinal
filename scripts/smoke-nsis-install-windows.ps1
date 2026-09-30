@@ -153,6 +153,7 @@ try {
   # packaged, non-executable file proves the updater rewrites the existing installation;
   # both profile canaries must survive the in-place update as well as final uninstall.
   $updateProbePath = Join-Path $installDir 'NOTICE'
+  $updateProbeHash = (Get-FileHash -LiteralPath $updateProbePath -Algorithm SHA256).Hash
   Remove-Item -LiteralPath $updateProbePath -Force
   $updateProcess = Start-Process -FilePath $InstallerPath -ArgumentList @('/S', '/UPDATE', "/D=$installDir") -PassThru -WindowStyle Hidden
   if (-not $updateProcess.WaitForExit(180000)) {
@@ -163,6 +164,10 @@ try {
   if ($updateExitCode -ne 0) { throw "NSIS update-mode reinstall exited with code $updateExitCode." }
   if (-not (Test-Path -LiteralPath $updateProbePath -PathType Leaf)) {
     throw 'NSIS update-mode reinstall did not restore the missing packaged NOTICE file.'
+  }
+  $restoredUpdateProbeHash = (Get-FileHash -LiteralPath $updateProbePath -Algorithm SHA256).Hash
+  if ($restoredUpdateProbeHash -ne $updateProbeHash) {
+    throw 'NSIS update-mode reinstall restored NOTICE with unexpected content.'
   }
 
   $productKey = Get-Item -LiteralPath $productRegistryPath -ErrorAction SilentlyContinue
