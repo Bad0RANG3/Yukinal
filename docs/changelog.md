@@ -13,7 +13,8 @@
 - 新增受限的 MSI 安装/冒烟/卸载验收脚本和 NSIS 生命周期脚本，并在安装前拒绝触碰既有 Yukinal 数据目录。GitHub Windows package run `36667041840` 已通过 MSI 与 NSIS 的真实隔离安装、启动、关闭和静默卸载/数据保留步骤；runner 本身装有 Node，因此应用侧以受限 PATH 验证随包运行时，但仍缺整机完全未安装 Node 的复验。
 - 扩展 Windows 包冒烟支持在 Agent 就绪后强制终止应用父进程；最新 MSI 提取载荷的正常关窗 1 次、强制终止 3 次均未遗留 sidecar。
 - 为可选真实 Provider 验收补上 OpenAI 兼容 Chat Completions 与 Responses 两种 live 测试入口；真实服务调用仍待测试账号和端点。
-- 本机 `pnpm check` 全套门禁通过；PR #2 最新提交 `a3dbb71` 的三平台代码检查、依赖审计及 Windows package run `36667041840` 全部成功，Windows 包含实际 MSI/NSIS 安装器生命周期和 NSIS `/UPDATE` 数据/文件恢复检查。整机无 Node 的安装验收、macOS/Linux 实际安装、真实 SSH/Provider/MCP 场景仍待完成。
+- 补上 Host RPC 连接关闭时对全部挂起请求的拒绝与在途工具取消回归；交付文档现区分已自动覆盖的故障分支与仍需真实远端/完整 UI 环境验收的边界。
+- 本机 `pnpm check` 全套门禁通过；PR #2 安装器代码提交 `a3dbb71` 的三平台代码检查、依赖审计及 Windows package run `36667041840` 全部成功，Windows 包含实际 MSI/NSIS 安装器生命周期和 NSIS `/UPDATE` 数据/文件恢复检查。整机无 Node 的安装验收、macOS/Linux 实际安装、真实 SSH/Provider/MCP 场景仍待完成。
 - 三条核心用户路径的可重置真实环境端到端验证仍待完成。
 
 ## 1.0.0 — 2026-09-13

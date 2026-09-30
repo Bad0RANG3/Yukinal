@@ -427,3 +427,38 @@ test("aborting a host request removes it and rejects promptly", async () => {
   assert.deepEqual(cancelFrame.params, { requestId: requestFrame.id });
   assert.equal(client.handleIncoming({ jsonrpc: "2.0", id: requestFrame.id, result: { status: "success" } }), true);
 });
+
+test("closing the host client rejects every in-flight request after disconnect", async () => {
+  const frames: string[] = [];
+  const client = new HostRpcClient((frame) => frames.push(frame));
+  const controller = new AbortController();
+  const toolPending = client.execute(request, controller.signal);
+  const catalogPending = client.fetchMcpCatalog();
+  const toolFrame = JSON.parse(frames[0] ?? "{}") as { id: number; method: string };
+  const catalogFrame = JSON.parse(frames[1] ?? "{}") as { id: number; method: string };
+
+  client.close();
+
+  await Promise.all([
+    assert.rejects(toolPending, /host connection closed/),
+    assert.rejects(catalogPending, /host connection closed/),
+  ]);
+  assert.equal(toolFrame.method, HOST_METHODS.toolExecute);
+  assert.equal(catalogFrame.method, HOST_METHODS.mcpCatalog);
+
+  const cancelFrame = JSON.parse(frames[2] ?? "{}") as {
+    id: number;
+    method: string;
+    params: unknown;
+  };
+  assert.equal(cancelFrame.method, HOST_METHODS.toolCancel);
+  assert.deepEqual(cancelFrame.params, { requestId: toolFrame.id });
+
+  // Closing detaches abort listeners and makes any late host response harmless.
+  controller.abort();
+  assert.equal(frames.length, 3);
+  assert.equal(
+    client.handleIncoming({ jsonrpc: "2.0", id: toolFrame.id, result: { status: "success" } }),
+    true,
+  );
+});
