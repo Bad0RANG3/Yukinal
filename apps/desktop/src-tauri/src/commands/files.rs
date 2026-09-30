@@ -184,6 +184,7 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
                 yukinal_ssh::SftpReplaceGuard {
                     size: guard.size,
                     modified: guard.modified,
+                    content_digest: guard.content_digest,
                 },
                 data,
             )

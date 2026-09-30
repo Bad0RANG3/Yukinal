@@ -73,7 +73,6 @@ impl russh::server::Server for SftpServer {
 #[derive(Clone)]
 struct ConcurrentMutation {
     remote_path: String,
-    trigger_lstat: usize,
     replacement: Vec<u8>,
 }
 
@@ -292,6 +291,7 @@ impl RemoteFileTransport for SftpFileTransport<'_> {
                 SftpReplaceGuard {
                     size: guard.size,
                     modified: guard.modified,
+                    content_digest: guard.content_digest,
                 },
                 data,
             )
@@ -329,7 +329,6 @@ struct DirectoryCursor {
 struct SftpFilesystem {
     root: PathBuf,
     mutation: Option<ConcurrentMutation>,
-    target_lstat_count: usize,
     handles: HashMap<String, OpenFile>,
     directories: HashMap<String, DirectoryCursor>,
     metadata: HashMap<String, FileAttributes>,
@@ -341,7 +340,6 @@ impl SftpFilesystem {
         Self {
             root,
             mutation,
-            target_lstat_count: 0,
             handles: HashMap::new(),
             directories: HashMap::new(),
             metadata: HashMap::new(),
@@ -452,27 +450,48 @@ impl SftpFilesystem {
         Ok(self.file_attributes(remote_path, &metadata))
     }
 
+    async fn staging_sibling_exists(&self, remote_path: &str) -> Result<bool, StatusCode> {
+        let (parent, _) = remote_path.rsplit_once('/').ok_or(StatusCode::Failure)?;
+        let parent = if parent.is_empty() { "/" } else { parent };
+        let (_, local_parent) = self.resolve(parent)?;
+        let mut entries = tokio::fs::read_dir(local_parent)
+            .await
+            .map_err(status_from_io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(status_from_io)? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".yukinal-write-")
+                && name.ends_with(".tmp")
+                && entry.file_type().await.map_err(status_from_io)?.is_file()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn maybe_mutate_before_lstat(&mut self, remote_path: &str) -> Result<(), StatusCode> {
         let should_mutate = self
             .mutation
             .as_ref()
             .is_some_and(|mutation| mutation.remote_path == remote_path);
-        if !should_mutate {
+        if !should_mutate || !self.staging_sibling_exists(remote_path).await? {
             return Ok(());
         }
 
-        self.target_lstat_count += 1;
-        let trigger = self
-            .mutation
-            .as_ref()
-            .is_some_and(|mutation| self.target_lstat_count == mutation.trigger_lstat);
-        if trigger {
-            let mutation = self.mutation.take().expect("mutation plan still exists");
-            let (_, local_path) = self.resolve(&mutation.remote_path)?;
-            tokio::fs::write(local_path, mutation.replacement)
-                .await
-                .map_err(status_from_io)?;
-        }
+        let mutation = self.mutation.take().expect("mutation plan still exists");
+        let (_, local_path) = self.resolve(&mutation.remote_path)?;
+        let original_modified = std::fs::metadata(&local_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(status_from_io)?;
+        std::fs::write(&local_path, mutation.replacement).map_err(status_from_io)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&local_path)
+            .and_then(|file| {
+                file.set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            })
+            .map_err(status_from_io)?;
         Ok(())
     }
 }
@@ -1116,7 +1135,7 @@ async fn file_service_backup_edit_and_restore_use_guarded_sftp_operations() {
 #[tokio::test]
 async fn concurrent_sftp_edit_during_staging_is_preserved_and_staging_is_removed() {
     const ORIGINAL: &[u8] = b"before config\n";
-    const CONCURRENT: &[u8] = b"concurrent writer changed this file\n";
+    const CONCURRENT: &[u8] = b"BEFORE config\n";
     let remote_root = tempfile::tempdir().expect("isolated remote fixture");
     let remote_etc = remote_root.path().join("etc");
     std::fs::create_dir_all(&remote_etc).expect("create fixture directory");
@@ -1127,9 +1146,8 @@ async fn concurrent_sftp_edit_during_staging_is_preserved_and_staging_is_removed
         remote_root.path(),
         Some(ConcurrentMutation {
             remote_path: "/etc/yukinal.conf".into(),
-            // RemoteFileService checks the target after reading; guarded SFTP replacement then
-            // checks once before staging and again immediately before rename.
-            trigger_lstat: 3,
+            // Mutate only after the same-directory staging sibling exists; this is the last
+            // target check before rename. Restore mtime so size and second-resolution mtime match.
             replacement: CONCURRENT.to_vec(),
         }),
     )
@@ -1167,6 +1185,10 @@ async fn concurrent_sftp_edit_during_staging_is_preserved_and_staging_is_removed
         client: &sftp,
         session: &session,
     });
+    let stat_before = backend
+        .sftp_stat(&sftp, "/etc/yukinal.conf")
+        .await
+        .expect("stat the original fixture");
     let request = AgentEditRequest::check(
         "/etc/yukinal.conf",
         &content_revision(ORIGINAL),
@@ -1188,6 +1210,12 @@ async fn concurrent_sftp_edit_during_staging_is_preserved_and_staging_is_removed
         CONCURRENT,
         "the concurrent writer's bytes must not be overwritten by the staged edit"
     );
+    let stat_after = backend
+        .sftp_stat(&sftp, "/etc/yukinal.conf")
+        .await
+        .expect("stat the preserved concurrent file");
+    assert_eq!(stat_before.size, stat_after.size);
+    assert_eq!(stat_before.modified, stat_after.modified);
     let remaining_entries = std::fs::read_dir(&remote_etc)
         .expect("inspect staging cleanup")
         .map(|entry| entry.expect("read fixture entry").file_name())

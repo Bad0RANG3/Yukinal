@@ -21,11 +21,12 @@ pub enum RemoteEntryKind {
     Other,
 }
 
-/// 替换前记下来的守卫：读取**之后**测到的大小与 mtime。
+/// 替换前记下来的守卫：读取**之后**测到的大小、mtime 与内容 SHA-256。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplaceGuard {
     pub size: u64,
     pub modified: Option<u32>,
+    pub content_digest: [u8; 32],
 }
 
 /// 替换发布之后实测到的属性。调用方要拿它复核「发布出来的就是我们写进去的那一份」。
@@ -136,11 +137,14 @@ pub trait RemoteFileTransport: Send + Sync {
     ) -> impl std::future::Future<Output = TransportResult<Option<u64>>> + Send;
 
     /// Replace a regular file through a same-directory staging file and a rename (ADR 0017).
+    /// Implementations must compare the target's current bytes with `guard.content_digest`
+    /// immediately before publication, in addition to the metadata guard.
     ///
     /// There is deliberately **no** fallback to an in-place write: a transport that cannot
     /// stage, verify metadata, or rename reports [`ReplaceError::Unsupported`]. The `guard` is
-    /// the metadata recorded right after the read; implementations must re-check it immediately
-    /// before the rename and report [`ReplaceError::ConcurrentChange`] instead of overwriting.
+    /// the metadata and content digest recorded right after the read; implementations must
+    /// re-check both immediately before the rename and report
+    /// [`ReplaceError::ConcurrentChange`] instead of overwriting.
     fn replace_guarded(
         &self,
         server_id: &str,

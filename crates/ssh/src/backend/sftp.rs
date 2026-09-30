@@ -11,6 +11,7 @@ use super::error::map_send_err;
 use super::{retry_transport_async, RusshBackend};
 use crate::conn::SftpHandle;
 use crate::{Error, Result, Session, SftpClient};
+use sha2::{Digest, Sha256};
 
 /// SFTP 属性里能读到的、编辑需要知道的那几件事。
 ///
@@ -35,11 +36,12 @@ pub enum SftpEntryKind {
     Other,
 }
 
-/// 替换前记录下来的元数据守卫：`size` 与 `mtime`。
+/// 替换前记录下来的目标守卫：属性以及读取时的内容摘要。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SftpReplaceGuard {
     pub size: u64,
     pub modified: Option<u32>,
+    pub content_digest: [u8; 32],
 }
 
 /// 发布之后的实测属性。调用方要拿它复核「发布出来的就是我们写进去的那一份」。
@@ -220,8 +222,8 @@ impl RusshBackend {
     /// 更弱的写法继续」会让「原子」这句话在失败路径上变成假话，也把一次可能被覆盖的改写从可检测
     /// 变成不可检测。
     ///
-    /// 守卫是 `size` + `mtime`（秒）：窗口没有被消除，只是被缩到 `stat → rename` 之间，并且窗口
-    /// 里的改动会变成一条错误。同一秒内、同样大小的改写仍不可检测——这一点写在 ADR 与文档里。
+    /// 守卫复核同时比较 `size`、`mtime`（秒）和内容 SHA-256，因此 staging 期间同秒、同长度
+    /// 的改写也会被拒绝。SFTP 没有 CAS；最后一次内容读取与 rename 之间仍有一个很窄的窗口。
     pub async fn sftp_replace_file_guarded(
         &self,
         client: &SftpClient,
@@ -347,15 +349,65 @@ impl RusshBackend {
             });
         }
 
-        // 守卫复核：staging 已经写好，rename 之前的最后一次确认。
+        // 守卫复核：staging 已经写好，rename 之前的最后一次确认。内容摘要补上 SFTP mtime
+        // 只有秒级粒度造成的盲区；远端协议没有 CAS，读取摘要后到 rename 之间的窗口仍存在。
         match sftp.symlink_metadata(path).await {
             Ok(metadata) => {
                 let now = stat_from_attributes(&metadata);
-                if now.size != guard.size || now.modified != guard.modified {
+                if now.kind != SftpEntryKind::File
+                    || now.size != guard.size
+                    || now.modified != guard.modified
+                {
                     let _ = sftp.remove_file(&temp_path).await;
                     return Err(SftpReplaceError::ConcurrentChange(format!(
-                        "the file changed while the edit was being staged (size {} → {}, mtime {:?} → {:?})",
-                        guard.size, now.size, guard.modified, now.modified
+                        "the file changed while the edit was being staged (kind {:?}, size {} → {}, mtime {:?} → {:?})",
+                        now.kind, guard.size, now.size, guard.modified, now.modified
+                    )));
+                }
+            }
+            Err(error) => {
+                let _ = sftp.remove_file(&temp_path).await;
+                return Err(SftpReplaceError::Transport(Error::Channel(
+                    error.to_string(),
+                )));
+            }
+        }
+
+        let current_digest = match sftp_content_digest(&sftp, path, guard.size).await {
+            Ok(Some(digest)) => digest,
+            Ok(None) => {
+                let _ = sftp.remove_file(&temp_path).await;
+                return Err(SftpReplaceError::ConcurrentChange(
+                    "the file size changed while its content was being verified".to_string(),
+                ));
+            }
+            Err(error) => {
+                let _ = sftp.remove_file(&temp_path).await;
+                return Err(SftpReplaceError::Transport(error));
+            }
+        };
+        if current_digest != guard.content_digest {
+            let _ = sftp.remove_file(&temp_path).await;
+            return Err(SftpReplaceError::ConcurrentChange(
+                "the file content changed while the edit was being staged, even though its SFTP metadata did not".to_string(),
+            ));
+        }
+
+        match sftp.symlink_metadata(path).await {
+            Ok(metadata) => {
+                let after_digest = stat_from_attributes(&metadata);
+                if after_digest.kind != SftpEntryKind::File
+                    || after_digest.size != guard.size
+                    || after_digest.modified != guard.modified
+                {
+                    let _ = sftp.remove_file(&temp_path).await;
+                    return Err(SftpReplaceError::ConcurrentChange(format!(
+                        "the file metadata changed during the content check (kind {:?}, size {} → {}, mtime {:?} → {:?})",
+                        after_digest.kind,
+                        guard.size,
+                        after_digest.size,
+                        guard.modified,
+                        after_digest.modified
                     )));
                 }
             }
@@ -388,6 +440,56 @@ impl RusshBackend {
             size: published.size,
             modified: published.modified,
         })
+    }
+}
+
+async fn sftp_content_digest(
+    session: &russh_sftp::client::SftpSession,
+    path: &str,
+    expected_size: u64,
+) -> Result<Option<[u8; 32]>> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::AsyncReadExt;
+
+    let mut file = session
+        .open_with_flags(path, OpenFlags::READ)
+        .await
+        .map_err(|error| Error::Channel(error.to_string()))?;
+    let read_result = async {
+        let mut digest = Sha256::new();
+        let mut buffer = [0; 16 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let remaining = expected_size.saturating_sub(total);
+            let read_limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+            let read = file
+                .read(&mut buffer[..read_limit])
+                .await
+                .map_err(|error| Error::Channel(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            total = total.saturating_add(read as u64);
+            if total > expected_size {
+                return Ok(None);
+            }
+            digest.update(&buffer[..read]);
+        }
+        if total == expected_size {
+            Ok(Some(digest.finalize().into()))
+        } else {
+            Ok(None)
+        }
+    }
+    .await;
+    let close_result = file
+        .close()
+        .await
+        .map_err(|error| Error::Channel(error.to_string()));
+
+    match (read_result, close_result) {
+        (Ok(digest), Ok(())) => Ok(digest),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
 }
 

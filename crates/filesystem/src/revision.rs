@@ -36,6 +36,19 @@ pub fn content_revision(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// 计算同一内容 revision 对应的原始 SHA-256 摘要字节，供传输层在发布前复核远端内容。
+#[must_use]
+pub fn content_digest(bytes: &[u8]) -> [u8; 32] {
+    let words = sha256(bytes);
+    let mut digest = [0; 32];
+    let (chunks, remainder) = digest.as_chunks_mut::<4>();
+    debug_assert!(remainder.is_empty());
+    for (chunk, word) in chunks.iter_mut().zip(words) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
 /// revision 的合法形状：64 个十六进制字符（大小写都收，比较时按 ASCII 忽略大小写）。
 ///
 /// 校验形状是为了让「Agent 传了半截字符串」报成 `invalid_input`（可修）而不是「文件变了」

@@ -4,7 +4,7 @@
 
 ## 未发布
 
-- 新增进程内 SSH 回环协议验收，验证主机密钥 pin、命令 stdout/stderr 与非零退出码、输出限额、超时和取消；隔离临时目录的真实 SFTP 子系统验收除底层读写外，还通过 `RemoteFileService` 覆盖备份碰撞防覆盖、多链接/未知链接数拒绝、revision 守卫编辑、过期恢复拒绝、有效恢复与校验后清理。新增并发写入故障注入，在编辑 staging 完成后的 rename 前复核处改写目标，确认旧编辑被拒绝、并发内容保留且临时 staging 文件清除。它们补足协议和文件服务组合证据，但不替代 OpenSSH 兼容性、真实目标机、桌面 IPC/AppState 或 UI 业务路径验收。
+- 新增进程内 SSH 回环协议验收，验证主机密钥 pin、命令 stdout/stderr 与非零退出码、输出限额、超时和取消；隔离临时目录的真实 SFTP 子系统验收除底层读写外，还通过 `RemoteFileService` 覆盖备份碰撞防覆盖、多链接/未知链接数拒绝、revision 守卫编辑、过期恢复拒绝、有效恢复与校验后清理。替换前复核增加内容 SHA-256；故障注入将目标改成相同长度并恢复原 mtime，确认 rename 前仍以 `ConcurrentChange` 拒绝、并发内容保留且 staging 临时文件清除。SFTP 仍不是 CAS，最后一次内容复核后到 rename 的窗口仍存在。它们补足协议和文件服务组合证据，但不替代 OpenSSH 兼容性、真实目标机、桌面 IPC/AppState 或 UI 业务路径验收。
 - 重新梳理产品定位、三条核心任务、安全边界和发布验收标准。
 - 将固定版本且按 SHA-256 校验的 Node.js 运行时纳入桌面安装包；本机 Windows NSIS/MSI 构建成功，当前 MSI 管理员映像载荷启动/关闭冒烟通过。针对早先 NSIS 卸载曾删除数据目录的风险，明确维持产品规则：卸载永远保留数据库、设置和凭据；即使 Tauri 确认页的删数复选框被勾选，hook 也会阻止递归删除并在交互卸载时解释如何卸载后手动清理，静默与升级路径同样保留。
 - 补强 NSIS 卸载回归保护：静态检查锁定 hook 存在、用户勾选后的说明提示、复选框状态清零、Roaming/LocalAppData 两条且仅两条删除语句仍受保护 hook 与非更新条件约束，并拒绝缺失状态捕获和额外无条件删除。Windows UI smoke 从 Tauri 生成脚本提取真实回调，操作原生 checkbox，验证默认未选、勾选提示、勾选与未勾选时 canary 均保留，更新模式也保留；另在 `/S` 静默模式通过测试专用参数预置“已勾选”状态，确认卸载正常退出且 canary 保留。所有破坏性验证只发生在临时 fixture。真实 native checkbox UI smoke 已在 GitHub Windows package run `36667041840` 通过；同一 run 也通过实际 `/UPDATE` 安装器重跑和数据保留断言。

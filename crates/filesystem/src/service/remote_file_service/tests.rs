@@ -11,7 +11,7 @@ use crate::limits::{
     MAX_AGENT_WRITE_BYTES,
 };
 use crate::policy::AGENT_PATH_POLICY_MESSAGE;
-use crate::revision::content_revision;
+use crate::revision::{content_digest, content_revision};
 use crate::service::{
     AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest, AgentReadRequest,
     AgentRestoreRequest, AgentWriteRequest, Error, ListedEntry, RemoteEntryKind, RemoteFileService,
@@ -214,11 +214,20 @@ impl RemoteFileTransport for FakeTransport {
         &self,
         server_id: &str,
         path: &str,
-        _guard: &ReplaceGuard,
+        guard: &ReplaceGuard,
         data: &[u8],
     ) -> std::result::Result<ReplacedFile, ReplaceError> {
         self.log
             .record(format!("replace {server_id} {path} {}b", data.len()));
+        let current = self.file();
+        if current.len() as u64 != guard.size
+            || self.modified != guard.modified
+            || content_digest(&current) != guard.content_digest
+        {
+            return Err(ReplaceError::ConcurrentChange(
+                "the file changed before the guarded replacement".to_string(),
+            ));
+        }
         match self.replace {
             ReplaceBehaviour::Publish => {
                 *self.file.lock().expect("file lock") = data.to_vec();

@@ -1,7 +1,7 @@
 //! `RemoteFileService`：策略 + 上限 + 有界解码，套在一个 `RemoteFileTransport` 外面。
 
 use crate::limits::{BROWSER_READ_BYTES, MAX_AGENT_BACKUP_BYTES, MAX_AGENT_EDIT_BYTES};
-use crate::revision::content_revision;
+use crate::revision::{content_digest, content_revision};
 
 use super::error::{Error, Result};
 use super::helpers::{byte_match_offsets, count_lines, join_remote_path, read_result};
@@ -155,6 +155,7 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
                 actual,
             });
         }
+        let target_digest = content_digest(&target_bytes);
         let target_after = self.transport.stat(server_id, &request.path).await?;
         if target_before.size != target_after.size
             || target_before.modified != target_after.modified
@@ -198,6 +199,7 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
                 &ReplaceGuard {
                     size: target_before.size,
                     modified: target_before.modified,
+                    content_digest: target_digest,
                 },
                 &backup_bytes,
             )
@@ -287,8 +289,9 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
     ///
     /// # 它不保证什么（必须说清楚）
     /// **替换阶段是原子的，但整条守卫仍不是比较并交换**（ADR 0017）。SFTP 没有 CAS，所以：
-    /// - 检查与 rename 之间仍有一个窗口，它被缩到「读取后的 stat → rename」这一段，并且窗口
-    ///   里的改动会变成 [`Error::ConcurrentChange`]；但同一秒内、同样大小的改写无法区分；
+    /// - 检查与 rename 之间仍有一个窗口；rename 前会复核大小、mtime 和内容 SHA-256，因此
+    ///   同一秒、同样大小的改写也会拒绝。SFTP 没有 CAS，最后一次内容复核之后到 rename 之间
+    ///   仍有一个很窄的窗口；
     /// - metadata 必须逐项保留，保不住就整次失败并点名（[`Error::MetadataNotPreserved`]）；
     /// - symlink、硬链接、以及**无法确认硬链接**的远端一律拒绝（[`Error::UnsafeRemoteWrite`]），
     ///   而不是换一种更弱的写法继续。
@@ -317,6 +320,7 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
                 actual,
             });
         }
+        let original_digest = content_digest(&bytes);
 
         let old = request.old_string.as_bytes();
         let start = match byte_match_offsets(&bytes, old).as_slice() {
@@ -398,6 +402,7 @@ impl<T: RemoteFileTransport> RemoteFileService<T> {
                 &ReplaceGuard {
                     size: target.size,
                     modified: target.modified,
+                    content_digest: original_digest,
                 },
                 &updated,
             )

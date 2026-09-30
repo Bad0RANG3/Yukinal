@@ -34,8 +34,9 @@
 //! # 编辑的保证边界（诚实版本）
 //! `edit` 的前置条件是「文件的内容还是我读过的那一份」，它拦得住的是：读完之后别人改过、
 //! 模型拿着过期内容写回、`oldString` 指不到唯一一处。普通文件的替换阶段会先写同目录临时
-//! 文件再 rename，因此读者不会看到半写状态；但整条守卫仍是 check-then-replace，不是
-//! compare-and-swap，检查与替换之间的并发写入仍可能被覆盖。两份内容大于读上限的文件根本不允许编辑（
+//! 文件再 rename，因此读者不会看到半写状态；rename 前的内容 SHA-256 复核也能发现同秒同长度
+//! 的写入。但整条守卫仍是 check-then-replace，不是 compare-and-swap，最后一次内容复核之后、
+//! rename 之前的并发写入仍可能被覆盖。两份内容大于读上限的文件根本不允许编辑（
 //! [`MAX_AGENT_EDIT_BYTES`]），因为截断读取的 revision 只描述前缀，而写回前缀就是截断用户的
 //! 文件：那条规则是数据丢失的防线，不是可调参数。
 //!
@@ -70,7 +71,7 @@ pub use limits::{
     MAX_REMOTE_PATH_CHARS,
 };
 pub use policy::{is_agent_blocked_path, validate_remote_path, AGENT_PATH_POLICY_MESSAGE};
-pub use revision::{content_revision, is_content_revision};
+pub use revision::{content_digest, content_revision, is_content_revision};
 pub use service::{
     AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest, AgentReadRequest,
     AgentRestoreRequest, AgentWriteRequest, Error, ListedEntry, RemoteBackup, RemoteBackupCleanup,
