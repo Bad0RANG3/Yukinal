@@ -19,14 +19,23 @@ use russh_sftp::protocol::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
+use yukinal_filesystem::{
+    backup_path_for, content_revision, AgentBackupRequest, AgentCleanupBackupRequest,
+    AgentEditRequest, AgentRestoreRequest, Error as FileServiceError, ListedEntry, RemoteEntryKind,
+    RemoteFileService, RemoteFileTransport, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile,
+    TransportError, TransportResult,
+};
 use yukinal_ssh::{
-    Authentication, ConnectionSecrets, Error, KnownHostsPolicy, OutboundProxy, RusshBackend,
-    SshBackend, SshConfig,
+    link_count_probe_command, parse_link_count, Authentication, ConnectionSecrets, Error,
+    KnownHostsPolicy, OutboundProxy, RusshBackend, Session, SftpClient, SftpEntryKind,
+    SftpReplaceError, SftpReplaceGuard, SshBackend, SshConfig,
 };
 
 const AUTH_USER: &str = "yukinal-sftp-test";
 const AUTH_PASSWORD: &str = "not-a-real-secret";
+const SERVER_ID: &str = "srv_sftp_test";
 
 type SshChannels = Arc<Mutex<HashMap<ChannelId, Channel<russh::server::Msg>>>>;
 
@@ -96,6 +105,47 @@ impl russh::server::Handler for SftpSshHandler {
         Ok(())
     }
 
+    async fn exec_request(
+        &mut self,
+        channel_id: ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data).into_owned();
+        let is_link_count_probe =
+            command.starts_with("stat -c %h ") || command.starts_with("stat -f %l ");
+        session.channel_success(channel_id)?;
+        let handle = session.handle();
+        tokio::spawn(async move {
+            let (stdout, stderr, exit_status) = if is_link_count_probe {
+                let link_count = if command.contains("hardlinked.conf") {
+                    b"2\n".as_slice()
+                } else if command.contains("unknown-link-count.conf") {
+                    b"not a number\n".as_slice()
+                } else {
+                    b"1\n".as_slice()
+                };
+                (link_count.to_vec(), Vec::new(), 0)
+            } else {
+                (
+                    Vec::new(),
+                    b"unsupported command in SFTP fixture\n".to_vec(),
+                    127,
+                )
+            };
+            if !stdout.is_empty() && handle.data(channel_id, stdout).await.is_err() {
+                return;
+            }
+            if !stderr.is_empty() && handle.extended_data(channel_id, 1, stderr).await.is_err() {
+                return;
+            }
+            let _ = handle.exit_status_request(channel_id, exit_status).await;
+            let _ = handle.eof(channel_id).await;
+            let _ = handle.close(channel_id).await;
+        });
+        Ok(())
+    }
+
     async fn subsystem_request(
         &mut self,
         channel_id: ChannelId,
@@ -115,6 +165,143 @@ impl russh::server::Handler for SftpSshHandler {
         )
         .await;
         Ok(())
+    }
+}
+
+struct SftpFileTransport<'a> {
+    backend: &'a RusshBackend,
+    client: &'a SftpClient,
+    session: &'a Session,
+}
+
+impl RemoteFileTransport for SftpFileTransport<'_> {
+    async fn list(&self, _server_id: &str, path: &str) -> TransportResult<Vec<ListedEntry>> {
+        self.backend
+            .sftp_list_dir_detailed(self.client, path)
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|(name, file_type, size)| ListedEntry {
+                        name,
+                        file_type,
+                        size,
+                    })
+                    .collect()
+            })
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn read_bounded(
+        &self,
+        _server_id: &str,
+        path: &str,
+        max_bytes: usize,
+    ) -> TransportResult<Vec<u8>> {
+        self.backend
+            .sftp_read_file_bounded(self.client, path, max_bytes)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn write(&self, _server_id: &str, path: &str, data: &[u8]) -> TransportResult<()> {
+        self.backend
+            .sftp_write_file(self.client, path, data)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn create_exclusive(
+        &self,
+        _server_id: &str,
+        path: &str,
+        data: &[u8],
+    ) -> TransportResult<()> {
+        self.backend
+            .sftp_create_file_exclusive(self.client, path, data)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn remove_file(&self, _server_id: &str, path: &str) -> TransportResult<()> {
+        self.backend
+            .sftp_remove_file(self.client, path)
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn stat(&self, _server_id: &str, path: &str) -> TransportResult<RemoteStat> {
+        self.backend
+            .sftp_stat(self.client, path)
+            .await
+            .map(|stat| RemoteStat {
+                kind: match stat.kind {
+                    SftpEntryKind::File => RemoteEntryKind::File,
+                    SftpEntryKind::Directory => RemoteEntryKind::Directory,
+                    SftpEntryKind::Symlink => RemoteEntryKind::Symlink,
+                    SftpEntryKind::Other => RemoteEntryKind::Other,
+                },
+                size: stat.size,
+                modified: stat.modified,
+            })
+            .map_err(|error| TransportError::new(error.to_string()))
+    }
+
+    async fn link_count(&self, _server_id: &str, path: &str) -> TransportResult<Option<u64>> {
+        let Some(command) = link_count_probe_command(path) else {
+            return Ok(None);
+        };
+        match self
+            .backend
+            .execute(
+                self.session,
+                &command,
+                Some(Duration::from_secs(2)),
+                &CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(result) => Ok(parse_link_count(&result.stdout, result.exit_code)),
+            // Match TerminalService: a failed probe means "unknown", so the file service refuses.
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn replace_guarded(
+        &self,
+        _server_id: &str,
+        path: &str,
+        guard: &ReplaceGuard,
+        data: &[u8],
+    ) -> Result<ReplacedFile, ReplaceError> {
+        match self
+            .backend
+            .sftp_replace_file_guarded(
+                self.client,
+                path,
+                SftpReplaceGuard {
+                    size: guard.size,
+                    modified: guard.modified,
+                },
+                data,
+            )
+            .await
+        {
+            Ok(replaced) => Ok(ReplacedFile {
+                size: replaced.size,
+                modified: replaced.modified,
+            }),
+            Err(SftpReplaceError::ConcurrentChange(detail)) => {
+                Err(ReplaceError::ConcurrentChange(detail))
+            }
+            Err(SftpReplaceError::Unsupported(detail)) => Err(ReplaceError::Unsupported(detail)),
+            Err(SftpReplaceError::MetadataNotPreserved { message, missing }) => {
+                Err(ReplaceError::MetadataNotPreserved { message, missing })
+            }
+            Err(SftpReplaceError::Transport(error)) => Err(ReplaceError::Transport(
+                TransportError::new(error.to_string()),
+            )),
+        }
     }
 }
 
@@ -642,5 +829,239 @@ async fn sftp_subsystem_lists_reads_writes_exclusive_backups_and_removes_files()
     );
 
     drop(sftp);
+    backend.close(&session).await.expect("close SSH session");
+}
+
+#[tokio::test]
+async fn file_service_backup_edit_and_restore_use_guarded_sftp_operations() {
+    const ORIGINAL: &[u8] = b"before config\n";
+    const EDITED: &[u8] = b"bad config\n";
+    const LATER_CHANGE: &[u8] = b"changed after restore\n";
+    let remote_root = tempfile::tempdir().expect("isolated remote fixture");
+    let remote_etc = remote_root.path().join("etc");
+    std::fs::create_dir_all(&remote_etc).expect("create fixture directory");
+    let source_path = remote_etc.join("yukinal.conf");
+    std::fs::write(&source_path, ORIGINAL).expect("create source file");
+    std::fs::write(remote_etc.join("hardlinked.conf"), b"shared bytes\n")
+        .expect("create hard-link probe fixture");
+    std::fs::write(
+        remote_etc.join("unknown-link-count.conf"),
+        b"unknown bytes\n",
+    )
+    .expect("create unknown-link-count fixture");
+
+    let server = start_server(remote_root.path()).await;
+    let app_data = tempfile::tempdir().expect("isolated local SSH data");
+    let backend = RusshBackend::from_data_dir(app_data.path()).expect("SSH backend");
+    backend
+        .trust_host("127.0.0.1", server.address.port(), &server.fingerprint)
+        .expect("pin generated test server key");
+    let session = backend
+        .connect(
+            SshConfig {
+                server_id: SERVER_ID.into(),
+                host: "127.0.0.1".into(),
+                port: server.address.port(),
+                username: AUTH_USER.into(),
+                authentication: Authentication::Password {
+                    credential_ref: "keychain://ssh/sftp-test".into(),
+                },
+                host_certificate_authority: None,
+                known_hosts_policy: KnownHostsPolicy::RequireMatch,
+                outbound_proxy: OutboundProxy::default(),
+                keepalive_interval_secs: 0,
+            },
+            ConnectionSecrets {
+                password: Some(AUTH_PASSWORD.into()),
+                ..ConnectionSecrets::empty()
+            },
+        )
+        .await
+        .expect("authenticate to pinned loopback server");
+    let sftp = backend.sftp(&session).await.expect("start SFTP subsystem");
+    let service = RemoteFileService::new(SftpFileTransport {
+        backend: &backend,
+        client: &sftp,
+        session: &session,
+    });
+    let target_path = "/etc/yukinal.conf";
+
+    for (path, token) in [
+        ("/etc/hardlinked.conf", "11111111111111111111111111111111"),
+        (
+            "/etc/unknown-link-count.conf",
+            "22222222222222222222222222222222",
+        ),
+    ] {
+        let request = AgentBackupRequest::check(path, token).expect("valid safety probe request");
+        let refusal = service
+            .agent_backup(SERVER_ID, &request)
+            .await
+            .expect_err("backup must fail closed unless exactly one link is confirmed");
+        assert!(
+            matches!(refusal, FileServiceError::UnsafeRemoteWrite(_)),
+            "got {refusal:?} for {path}"
+        );
+        let derived_path = backup_path_for(path, token).expect("derived backup path");
+        assert!(
+            backend.sftp_stat(&sftp, &derived_path).await.is_err(),
+            "a refused backup must not create {derived_path}"
+        );
+    }
+
+    for (path, contents, old_string) in [
+        (
+            "/etc/hardlinked.conf",
+            b"shared bytes\n".as_slice(),
+            "shared",
+        ),
+        (
+            "/etc/unknown-link-count.conf",
+            b"unknown bytes\n".as_slice(),
+            "unknown",
+        ),
+    ] {
+        let request = AgentEditRequest::check(
+            path,
+            &content_revision(contents),
+            old_string.into(),
+            "edited".into(),
+        )
+        .expect("valid safety probe edit request");
+        let refusal = service
+            .agent_edit(SERVER_ID, &request)
+            .await
+            .expect_err("edit must fail closed unless exactly one link is confirmed");
+        assert!(
+            matches!(refusal, FileServiceError::UnsafeRemoteWrite(_)),
+            "got {refusal:?} for {path}"
+        );
+        assert_eq!(
+            backend
+                .sftp_read_file(&sftp, path)
+                .await
+                .expect("read refused target"),
+            contents,
+            "a refused edit must leave {path} unchanged"
+        );
+    }
+
+    let backup_request = AgentBackupRequest::check(target_path, "0123456789abcdef0123456789abcdef")
+        .expect("valid backup request");
+
+    let backup = service
+        .agent_backup(SERVER_ID, &backup_request)
+        .await
+        .expect("create a real SFTP backup");
+    assert_eq!(backup.revision, content_revision(ORIGINAL));
+    assert_eq!(backup.bytes_backed_up, ORIGINAL.len());
+    assert_eq!(
+        backend
+            .sftp_read_file(&sftp, &backup.backup_path)
+            .await
+            .expect("read host-owned backup"),
+        ORIGINAL
+    );
+
+    let collision = service
+        .agent_backup(SERVER_ID, &backup_request)
+        .await
+        .expect_err("the same backup token must not overwrite an existing recovery copy");
+    assert!(
+        matches!(collision, FileServiceError::Transport(_)),
+        "got {collision:?}"
+    );
+    assert_eq!(
+        backend
+            .sftp_read_file(&sftp, &backup.backup_path)
+            .await
+            .expect("verify the original recovery copy survived"),
+        ORIGINAL
+    );
+
+    let edit_request =
+        AgentEditRequest::check(target_path, &backup.revision, "before".into(), "bad".into())
+            .expect("valid guarded edit request");
+    let edit = service
+        .agent_edit(SERVER_ID, &edit_request)
+        .await
+        .expect("publish edit through staging and SFTP rename");
+    assert_eq!(edit.bytes_before, ORIGINAL.len());
+    assert_eq!(edit.bytes_after, EDITED.len());
+    assert_eq!(edit.revision, content_revision(EDITED));
+    assert_eq!(
+        std::fs::read(&source_path).expect("read edited remote fixture"),
+        EDITED
+    );
+
+    let stale_restore =
+        AgentRestoreRequest::check(target_path, &backup.backup_path, &backup.revision)
+            .expect("well-formed but stale restore");
+    let stale_error = service
+        .agent_restore(SERVER_ID, &stale_restore)
+        .await
+        .expect_err("the pre-edit revision must not authorize a restore over the edit");
+    assert!(
+        matches!(stale_error, FileServiceError::RevisionMismatch { .. }),
+        "got {stale_error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&source_path).expect("stale restore left the target alone"),
+        EDITED
+    );
+
+    let restore_request =
+        AgentRestoreRequest::check(target_path, &backup.backup_path, &edit.revision)
+            .expect("restore request uses the current edited revision");
+    let restored = service
+        .agent_restore(SERVER_ID, &restore_request)
+        .await
+        .expect("restore through a guarded SFTP replacement");
+    assert_eq!(restored.revision, backup.revision);
+    assert_eq!(restored.bytes_before, EDITED.len());
+    assert_eq!(restored.bytes_after, ORIGINAL.len());
+    assert_eq!(
+        std::fs::read(&source_path).expect("verify restored remote file"),
+        ORIGINAL
+    );
+
+    let write_request = yukinal_filesystem::AgentWriteRequest::check(
+        target_path,
+        String::from_utf8_lossy(LATER_CHANGE).into_owned(),
+    )
+    .expect("valid later change");
+    service
+        .agent_write(SERVER_ID, &write_request)
+        .await
+        .expect("simulate a later external write");
+    let stale_after_restore =
+        AgentRestoreRequest::check(target_path, &backup.backup_path, &backup.revision)
+            .expect("well-formed stale revision");
+    let stale_error = service
+        .agent_restore(SERVER_ID, &stale_after_restore)
+        .await
+        .expect_err("a later write must invalidate the previous restore authorization");
+    assert!(
+        matches!(stale_error, FileServiceError::RevisionMismatch { .. }),
+        "got {stale_error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&source_path).expect("later change survived the stale restore"),
+        LATER_CHANGE
+    );
+
+    let cleanup =
+        AgentCleanupBackupRequest::check(target_path, &backup.backup_path, &backup.revision)
+            .expect("cleanup is bound to the original backup revision");
+    service
+        .agent_cleanup_backup(SERVER_ID, &cleanup)
+        .await
+        .expect("clean up only the verified host-owned backup");
+    assert!(backend.sftp_stat(&sftp, &backup.backup_path).await.is_err());
+    assert_eq!(
+        std::fs::read(&source_path).expect("cleanup does not alter the target"),
+        LATER_CHANGE
+    );
+
     backend.close(&session).await.expect("close SSH session");
 }
