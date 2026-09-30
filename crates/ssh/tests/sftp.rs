@@ -55,6 +55,7 @@ impl Drop for TestServer {
 struct SftpServer {
     root: PathBuf,
     channels: SshChannels,
+    mutation: Option<ConcurrentMutation>,
 }
 
 impl russh::server::Server for SftpServer {
@@ -64,13 +65,22 @@ impl russh::server::Server for SftpServer {
         SftpSshHandler {
             root: self.root.clone(),
             channels: Arc::clone(&self.channels),
+            mutation: self.mutation.clone(),
         }
     }
+}
+
+#[derive(Clone)]
+struct ConcurrentMutation {
+    remote_path: String,
+    trigger_lstat: usize,
+    replacement: Vec<u8>,
 }
 
 struct SftpSshHandler {
     root: PathBuf,
     channels: SshChannels,
+    mutation: Option<ConcurrentMutation>,
 }
 
 impl SftpSshHandler {
@@ -161,7 +171,7 @@ impl russh::server::Handler for SftpSshHandler {
         session.channel_success(channel_id)?;
         russh_sftp::server::run(
             channel.into_stream(),
-            SftpFilesystem::new(self.root.clone()),
+            SftpFilesystem::new(self.root.clone(), self.mutation.clone()),
         )
         .await;
         Ok(())
@@ -318,6 +328,8 @@ struct DirectoryCursor {
 
 struct SftpFilesystem {
     root: PathBuf,
+    mutation: Option<ConcurrentMutation>,
+    target_lstat_count: usize,
     handles: HashMap<String, OpenFile>,
     directories: HashMap<String, DirectoryCursor>,
     metadata: HashMap<String, FileAttributes>,
@@ -325,9 +337,11 @@ struct SftpFilesystem {
 }
 
 impl SftpFilesystem {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: PathBuf, mutation: Option<ConcurrentMutation>) -> Self {
         Self {
             root,
+            mutation,
+            target_lstat_count: 0,
             handles: HashMap::new(),
             directories: HashMap::new(),
             metadata: HashMap::new(),
@@ -436,6 +450,30 @@ impl SftpFilesystem {
             .await
             .map_err(status_from_io)?;
         Ok(self.file_attributes(remote_path, &metadata))
+    }
+
+    async fn maybe_mutate_before_lstat(&mut self, remote_path: &str) -> Result<(), StatusCode> {
+        let should_mutate = self
+            .mutation
+            .as_ref()
+            .is_some_and(|mutation| mutation.remote_path == remote_path);
+        if !should_mutate {
+            return Ok(());
+        }
+
+        self.target_lstat_count += 1;
+        let trigger = self
+            .mutation
+            .as_ref()
+            .is_some_and(|mutation| self.target_lstat_count == mutation.trigger_lstat);
+        if trigger {
+            let mutation = self.mutation.take().expect("mutation plan still exists");
+            let (_, local_path) = self.resolve(&mutation.remote_path)?;
+            tokio::fs::write(local_path, mutation.replacement)
+                .await
+                .map_err(status_from_io)?;
+        }
+        Ok(())
     }
 }
 
@@ -629,6 +667,7 @@ impl russh_sftp::server::Handler for SftpFilesystem {
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         let remote_path = self.resolve(&path)?.0;
+        self.maybe_mutate_before_lstat(&remote_path).await?;
         Ok(Attrs {
             id,
             attrs: self.attributes_for(&remote_path).await?,
@@ -682,6 +721,13 @@ fn status_from_io(error: std::io::Error) -> StatusCode {
 }
 
 async fn start_server(root: &Path) -> TestServer {
+    start_server_with_mutation(root, None).await
+}
+
+async fn start_server_with_mutation(
+    root: &Path,
+    mutation: Option<ConcurrentMutation>,
+) -> TestServer {
     let host_key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
         .expect("generate test host key");
     let fingerprint = host_key
@@ -706,6 +752,7 @@ async fn start_server(root: &Path) -> TestServer {
         let mut server = SftpServer {
             root: server_root,
             channels,
+            mutation,
         };
         let running = server.run_on_socket(config, &listener);
         ready_tx.send(running.handle()).ok();
@@ -1063,5 +1110,94 @@ async fn file_service_backup_edit_and_restore_use_guarded_sftp_operations() {
         LATER_CHANGE
     );
 
+    backend.close(&session).await.expect("close SSH session");
+}
+
+#[tokio::test]
+async fn concurrent_sftp_edit_during_staging_is_preserved_and_staging_is_removed() {
+    const ORIGINAL: &[u8] = b"before config\n";
+    const CONCURRENT: &[u8] = b"concurrent writer changed this file\n";
+    let remote_root = tempfile::tempdir().expect("isolated remote fixture");
+    let remote_etc = remote_root.path().join("etc");
+    std::fs::create_dir_all(&remote_etc).expect("create fixture directory");
+    let source_path = remote_etc.join("yukinal.conf");
+    std::fs::write(&source_path, ORIGINAL).expect("create source file");
+
+    let server = start_server_with_mutation(
+        remote_root.path(),
+        Some(ConcurrentMutation {
+            remote_path: "/etc/yukinal.conf".into(),
+            // RemoteFileService checks the target after reading; guarded SFTP replacement then
+            // checks once before staging and again immediately before rename.
+            trigger_lstat: 3,
+            replacement: CONCURRENT.to_vec(),
+        }),
+    )
+    .await;
+    let app_data = tempfile::tempdir().expect("isolated local SSH data");
+    let backend = RusshBackend::from_data_dir(app_data.path()).expect("SSH backend");
+    backend
+        .trust_host("127.0.0.1", server.address.port(), &server.fingerprint)
+        .expect("pin generated test server key");
+    let session = backend
+        .connect(
+            SshConfig {
+                server_id: SERVER_ID.into(),
+                host: "127.0.0.1".into(),
+                port: server.address.port(),
+                username: AUTH_USER.into(),
+                authentication: Authentication::Password {
+                    credential_ref: "keychain://ssh/sftp-test".into(),
+                },
+                host_certificate_authority: None,
+                known_hosts_policy: KnownHostsPolicy::RequireMatch,
+                outbound_proxy: OutboundProxy::default(),
+                keepalive_interval_secs: 0,
+            },
+            ConnectionSecrets {
+                password: Some(AUTH_PASSWORD.into()),
+                ..ConnectionSecrets::empty()
+            },
+        )
+        .await
+        .expect("authenticate to pinned loopback server");
+    let sftp = backend.sftp(&session).await.expect("start SFTP subsystem");
+    let service = RemoteFileService::new(SftpFileTransport {
+        backend: &backend,
+        client: &sftp,
+        session: &session,
+    });
+    let request = AgentEditRequest::check(
+        "/etc/yukinal.conf",
+        &content_revision(ORIGINAL),
+        "before".into(),
+        "after".into(),
+    )
+    .expect("valid guarded edit request");
+
+    let error = service
+        .agent_edit(SERVER_ID, &request)
+        .await
+        .expect_err("the final pre-rename stat must detect the concurrent writer");
+    assert!(
+        matches!(error, FileServiceError::ConcurrentChange(_)),
+        "got {error:?}"
+    );
+    assert_eq!(
+        std::fs::read(&source_path).expect("read concurrent writer's content"),
+        CONCURRENT,
+        "the concurrent writer's bytes must not be overwritten by the staged edit"
+    );
+    let remaining_entries = std::fs::read_dir(&remote_etc)
+        .expect("inspect staging cleanup")
+        .map(|entry| entry.expect("read fixture entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining_entries,
+        vec![std::ffi::OsString::from("yukinal.conf")],
+        "a rejected staged replacement must remove its temporary file"
+    );
+
+    drop(sftp);
     backend.close(&session).await.expect("close SSH session");
 }
