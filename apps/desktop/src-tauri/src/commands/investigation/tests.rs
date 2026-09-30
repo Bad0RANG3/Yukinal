@@ -20,7 +20,7 @@ use yukinal_database::models::{
     InvestigationPlanApproval, InvestigationPlanStep, InvestigationScheduleStatus,
     InvestigationTaskGuardrails, ObservationWindowStatus, PlanApprovalSource, PlanApprovalStatus,
     PlanStatus, PlanStepKind, PlanStepStatus, TaskArtifactKind, TaskArtifactStatus,
-    TaskFailureCode,
+    TaskCommandGrant, TaskFailureCode,
 };
 
 #[test]
@@ -200,6 +200,7 @@ fn task_guardrails_are_normalized_and_have_a_bounded_window() {
         expires_at: Some("2026-09-20T02:00:00.500Z".into()),
         forbidden_tools: vec![" docker.restart ".into(), "docker.restart".into()],
         forbidden_path_prefixes: vec!["/srv/app/private/".into(), "/srv/app/private".into()],
+        command_grant: None,
     }))
     .expect("valid task guardrails");
     assert_eq!(
@@ -262,6 +263,31 @@ fn task_guardrails_are_normalized_and_have_a_bounded_window() {
 }
 
 #[test]
+fn renderer_cannot_inject_a_host_issued_task_command_grant() {
+    let supplied = InvestigationTaskGuardrails {
+        command_grant: Some(TaskCommandGrant {
+            grant_id: "cmdgrant_forged".into(),
+            task_id: "task_forged".into(),
+            server_id: "srv_forged".into(),
+            environment: Environment::Staging,
+            granted_by: "user".into(),
+            granted_at: "2026-09-30T00:00:00Z".into(),
+            expires_at: "2026-10-01T00:00:00Z".into(),
+            max_calls: 12,
+            calls_used: 0,
+            max_total_duration_ms: 900_000,
+            total_duration_ms: 0,
+            max_total_output_bytes: 1_048_576,
+            total_output_bytes: 0,
+        }),
+        ..InvestigationTaskGuardrails::default()
+    };
+
+    let validated = validate_guardrails(Some(supplied)).expect("valid non-authority guardrails");
+    assert!(validated.command_grant.is_none());
+}
+
+#[test]
 fn guardrail_counts_and_window_accept_their_new_upper_bound() {
     // ADR 0075 raised the tool / path-prefix caps to 128 and the window to three years.
     let tools: Vec<String> = (0..128).map(|index| format!("tool.{index}")).collect();
@@ -271,6 +297,7 @@ fn guardrail_counts_and_window_accept_their_new_upper_bound() {
         expires_at: Some("2028-12-30T00:00:00Z".into()),
         forbidden_tools: tools.clone(),
         forbidden_path_prefixes: prefixes.clone(),
+        command_grant: None,
     }))
     .expect("128 of each and a three-year window are inside the bound");
     assert_eq!(guardrails.forbidden_tools.len(), 128);

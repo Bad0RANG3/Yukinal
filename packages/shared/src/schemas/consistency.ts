@@ -51,7 +51,10 @@ import type {
   HostEvidenceCompareResponse,
   HostEvidenceSearchRequest,
   HostEvidenceSearchResponse,
+  HostToolExecuteRequest,
+  HostToolExecuteResponse,
 } from "../types/host.js";
+import type { ServerExecInput, ServerExecInterruption, ServerExecResult, TaskCommandGrant } from "../types/server-exec.js";
 import type { InvestigationContext } from "../types/investigation.js";
 import type { ToolDeclaration } from "../types/tool.js";
 import type { PermissionDecision } from "../types/risk.js";
@@ -100,7 +103,15 @@ import type {
   HostEvidenceCompareResponseSchema,
   HostEvidenceSearchRequestSchema,
   HostEvidenceSearchResponseSchema,
+  HostToolExecuteRequestSchema,
+  HostToolExecuteResponseSchema,
 } from "./host.js";
+import type {
+  ServerExecInputSchema,
+  ServerExecInterruptionSchema,
+  ServerExecResultSchema,
+  TaskCommandGrantSchema,
+} from "./server-exec.js";
 import { InvestigationContextSchema } from "./investigation.js";
 import type {
   AgentRunRequestSchema,
@@ -186,6 +197,12 @@ export type _HostEvidenceCorrelationRequestContract = Expect<Assignable<typeof H
 export type _HostEvidenceCorrelationResponseContract = Expect<Assignable<typeof HostEvidenceCorrelationResponseSchema, HostEvidenceCorrelationResponse>>;
 export type _HostEvidenceCompareRequestContract = Expect<Assignable<typeof HostEvidenceCompareRequestSchema, HostEvidenceCompareRequest>>;
 export type _HostEvidenceCompareResponseContract = Expect<Assignable<typeof HostEvidenceCompareResponseSchema, HostEvidenceCompareResponse>>;
+export type _HostToolExecuteRequestContract = Expect<Assignable<typeof HostToolExecuteRequestSchema, HostToolExecuteRequest>>;
+export type _HostToolExecuteResponseContract = Expect<Assignable<typeof HostToolExecuteResponseSchema, HostToolExecuteResponse>>;
+export type _ServerExecInputContract = Expect<Assignable<typeof ServerExecInputSchema, ServerExecInput>>;
+export type _ServerExecResultContract = Expect<Assignable<typeof ServerExecResultSchema, ServerExecResult>>;
+export type _ServerExecInterruptionContract = Expect<Assignable<typeof ServerExecInterruptionSchema, ServerExecInterruption>>;
+export type _TaskCommandGrantContract = Expect<Assignable<typeof TaskCommandGrantSchema, TaskCommandGrant>>;
 export type _InvestigationContextContract = Expect<Assignable<typeof InvestigationContextSchema, InvestigationContext>>;
 export type _PermissionDecisionContract = Expect<Assignable<typeof PermissionDecisionSchema, PermissionDecision>>;
 export type _ToolDeclarationContract = Expect<Assignable<typeof ToolDeclarationSchema, ToolDeclaration>>;
@@ -224,6 +241,17 @@ export type _IpcParamsContracts = {
   server_host_key_forget: Expect<Assignable<ParamsOf<"server_host_key_forget">, IpcCommandMap["server_host_key_forget"]["params"]>>;
   remote_file_list: Expect<Assignable<ParamsOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["params"]>>;
   remote_file_read: Expect<Assignable<ParamsOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["params"]>>;
+  remote_file_preview: Expect<Assignable<ParamsOf<"remote_file_preview">, IpcCommandMap["remote_file_preview"]["params"]>>;
+  file_prepare_remote_drag: Expect<Assignable<ParamsOf<"file_prepare_remote_drag">, IpcCommandMap["file_prepare_remote_drag"]["params"]>>;
+  file_drag_out_start: Expect<Assignable<ParamsOf<"file_drag_out_start">, IpcCommandMap["file_drag_out_start"]["params"]>>;
+  local_file_preview: Expect<Assignable<ParamsOf<"local_file_preview">, IpcCommandMap["local_file_preview"]["params"]>>;
+  local_path_pick: Expect<Assignable<ParamsOf<"local_path_pick">, IpcCommandMap["local_path_pick"]["params"]>>;
+  file_transfer_upload: Expect<Assignable<ParamsOf<"file_transfer_upload">, IpcCommandMap["file_transfer_upload"]["params"]>>;
+  file_transfer_download: Expect<Assignable<ParamsOf<"file_transfer_download">, IpcCommandMap["file_transfer_download"]["params"]>>;
+  file_transfer_list: Expect<Assignable<ParamsOf<"file_transfer_list">, IpcCommandMap["file_transfer_list"]["params"]>>;
+  file_transfer_get: Expect<Assignable<ParamsOf<"file_transfer_get">, IpcCommandMap["file_transfer_get"]["params"]>>;
+  file_transfer_cancel: Expect<Assignable<ParamsOf<"file_transfer_cancel">, IpcCommandMap["file_transfer_cancel"]["params"]>>;
+  file_transfer_resolve_conflict: Expect<Assignable<ParamsOf<"file_transfer_resolve_conflict">, IpcCommandMap["file_transfer_resolve_conflict"]["params"]>>;
   activity_list: Expect<Assignable<ParamsOf<"activity_list">, IpcCommandMap["activity_list"]["params"]>>;
   tool_execution_list: Expect<Assignable<ParamsOf<"tool_execution_list">, IpcCommandMap["tool_execution_list"]["params"]>>;
   terminal_open: Expect<Assignable<ParamsOf<"terminal_open">, IpcCommandMap["terminal_open"]["params"]>>;
@@ -305,6 +333,17 @@ export type _IpcResponseContracts = {
   >;
   remote_file_list: Expect<Assignable<ResponseOf<"remote_file_list">, IpcCommandMap["remote_file_list"]["response"]>>;
   remote_file_read: Expect<Assignable<ResponseOf<"remote_file_read">, IpcCommandMap["remote_file_read"]["response"]>>;
+  remote_file_preview: Expect<Assignable<ResponseOf<"remote_file_preview">, IpcCommandMap["remote_file_preview"]["response"]>>;
+  file_prepare_remote_drag: Expect<Assignable<ResponseOf<"file_prepare_remote_drag">, IpcCommandMap["file_prepare_remote_drag"]["response"]>>;
+  file_drag_out_start: Expect<Assignable<ResponseOf<"file_drag_out_start">, IpcCommandMap["file_drag_out_start"]["response"]>>;
+  local_file_preview: Expect<Assignable<ResponseOf<"local_file_preview">, IpcCommandMap["local_file_preview"]["response"]>>;
+  local_path_pick: Expect<Assignable<ResponseOf<"local_path_pick">, IpcCommandMap["local_path_pick"]["response"]>>;
+  file_transfer_upload: Expect<Assignable<ResponseOf<"file_transfer_upload">, IpcCommandMap["file_transfer_upload"]["response"]>>;
+  file_transfer_download: Expect<Assignable<ResponseOf<"file_transfer_download">, IpcCommandMap["file_transfer_download"]["response"]>>;
+  file_transfer_list: Expect<Assignable<ResponseOf<"file_transfer_list">, IpcCommandMap["file_transfer_list"]["response"]>>;
+  file_transfer_get: Expect<Assignable<ResponseOf<"file_transfer_get">, IpcCommandMap["file_transfer_get"]["response"]>>;
+  file_transfer_cancel: Expect<Assignable<ResponseOf<"file_transfer_cancel">, IpcCommandMap["file_transfer_cancel"]["response"]>>;
+  file_transfer_resolve_conflict: Expect<Assignable<ResponseOf<"file_transfer_resolve_conflict">, IpcCommandMap["file_transfer_resolve_conflict"]["response"]>>;
   activity_list: Expect<Assignable<ResponseOf<"activity_list">, IpcCommandMap["activity_list"]["response"]>>;
   tool_execution_list: Expect<Assignable<ResponseOf<"tool_execution_list">, IpcCommandMap["tool_execution_list"]["response"]>>;
   terminal_open: Expect<Assignable<ResponseOf<"terminal_open">, IpcCommandMap["terminal_open"]["response"]>>;

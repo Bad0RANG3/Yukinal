@@ -1,4 +1,94 @@
 import { z } from "zod";
+import { TRANSFER_CONFLICT_ACTIONS, TRANSFER_DIRECTIONS, TRANSFER_STATUSES } from "../types/file.js";
+
+const BoundedByteCountSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const TransferRenameNameSchema = z.string().trim().min(1).max(255).refine(
+  (name) => name !== "." && name !== ".." && !/[\\/\u0000-\u001f\u007f]/.test(name),
+  "rename must be a single safe file name",
+);
+
+export const LocalPathHandleSchema = z.strictObject({
+  handleId: z.string().trim().min(16).max(128),
+  name: z.string().min(1).max(512),
+  kind: z.enum(["file", "directory"]),
+  size: BoundedByteCountSchema.optional(),
+});
+
+export const LocalFileDropEventSchema = z.strictObject({
+  handles: z.array(LocalPathHandleSchema).max(256),
+  rejectedCount: z.number().int().nonnegative().max(256),
+});
+
+export const FilePreviewResponseSchema = z.strictObject({
+  name: z.string().min(1).max(1_024),
+  size: BoundedByteCountSchema,
+  kind: z.enum(["text", "image", "binary"]),
+  truncated: z.boolean(),
+  text: z.string().max(1024 * 1024).nullable(),
+  dataUrl: z.string().max(2 * 1024 * 1024).nullable(),
+}).superRefine((preview, context) => {
+  if (preview.kind === "text" && preview.text === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["text"], message: "text previews require text" });
+  }
+  if (preview.kind === "image" && preview.dataUrl === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["dataUrl"], message: "image previews require a data URL" });
+  }
+  if (preview.kind === "binary" && (preview.text !== null || preview.dataUrl !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "binary previews carry metadata only" });
+  }
+});
+
+export const PreparedRemoteDragSchema = z.strictObject({
+  dragId: z.string().regex(/^remote_drag_[a-f0-9]{64}$/),
+  name: z.string().min(1).max(1_024),
+  size: BoundedByteCountSchema,
+});
+
+export const TransferConflictRequestSchema = z.strictObject({
+  itemIndex: z.number().int().nonnegative(),
+  sourceName: z.string().min(1).max(1_024),
+  targetName: z.string().min(1).max(1_024),
+  existingSize: BoundedByteCountSchema,
+  incomingSize: BoundedByteCountSchema,
+  existingModifiedEpochSeconds: z.number().int().nonnegative().nullable(),
+  allowedActions: z.array(z.enum(TRANSFER_CONFLICT_ACTIONS)).min(1).max(3),
+});
+
+export const TransferConflictActionSchema = z.discriminatedUnion("action", [
+  z.strictObject({ action: z.literal("skip") }),
+  z.strictObject({ action: z.literal("overwrite") }),
+  z.strictObject({ action: z.literal("rename"), name: TransferRenameNameSchema }),
+]);
+
+export const TransferItemFailureSchema = z.strictObject({
+  itemIndex: z.number().int().nonnegative().optional(),
+  item: z.string().min(1).max(1_024),
+  kind: z.enum(["invalidInput", "localIo", "remoteIo", "verification", "unsupported"]),
+  message: z.string().min(1).max(2_048),
+  stagingResidue: z.string().max(4_096).optional(),
+});
+
+export const TransferSnapshotSchema = z.strictObject({
+  transferId: z.string().trim().min(1).max(128),
+  serverId: z.string().trim().min(1).max(256),
+  direction: z.enum(TRANSFER_DIRECTIONS),
+  status: z.enum(TRANSFER_STATUSES),
+  startedAtEpochMs: BoundedByteCountSchema,
+  updatedAtEpochMs: BoundedByteCountSchema,
+  totalFiles: BoundedByteCountSchema.nullable(),
+  completedFiles: BoundedByteCountSchema,
+  skippedFiles: BoundedByteCountSchema,
+  totalBytes: BoundedByteCountSchema.nullable(),
+  transferredBytes: BoundedByteCountSchema,
+  currentItem: z.string().max(1_024).nullable(),
+  currentItemBytes: BoundedByteCountSchema,
+  currentItemTotalBytes: BoundedByteCountSchema.nullable(),
+  activeConflict: TransferConflictRequestSchema.nullable(),
+  verifiedFiles: BoundedByteCountSchema,
+  unverifiedFiles: BoundedByteCountSchema,
+  failures: z.array(TransferItemFailureSchema).max(1_024),
+  stagingResidue: z.array(z.string().min(1).max(4_096)).max(1_024),
+});
 
 const RemoteAbsolutePathSchema = z
   .string()

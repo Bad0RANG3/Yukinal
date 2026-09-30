@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::{InvestigationTaskGuardrails, TaskCommandGrant};
 
 impl<'a> InvestigationsRepository<'a> {
     pub fn create_task(&self, task: &InvestigationTask) -> Result<()> {
@@ -58,6 +59,86 @@ impl<'a> InvestigationsRepository<'a> {
                 .optional()
                 .map_err(DatabaseError::from)?
                 .ok_or(DatabaseError::NotFound)
+        })
+    }
+
+    /// Atomically reserve one remote command's declared time and output budget.
+    /// The reservation happens before SSH execution, so cancellation or a lost SSH
+    /// reply cannot make the same task budget available for an automatic replay.
+    pub fn reserve_task_command_budget(
+        &self,
+        reservation: super::TaskCommandBudgetReservation<'_>,
+    ) -> Result<TaskCommandGrant> {
+        let now_epoch = yukinal_time::now_epoch_seconds();
+        self.db.with(|connection| {
+            let tx = connection.unchecked_transaction()?;
+            let raw: String = tx
+                .query_row(
+                    "SELECT guardrails FROM investigation_tasks WHERE id = ?1",
+                    params![reservation.task_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(DatabaseError::NotFound)?;
+            let mut guardrails: InvestigationTaskGuardrails = serde_json::from_str(&raw)?;
+            let grant = guardrails.command_grant.as_mut().ok_or_else(|| {
+                DatabaseError::Validation("task has no command delegation".into())
+            })?;
+            if grant.grant_id != reservation.grant_id
+                || grant.task_id != reservation.task_id
+                || grant.server_id != reservation.server_id
+                || grant.environment != reservation.environment
+            {
+                return Err(DatabaseError::Validation(
+                    "command delegation does not match this task and server".into(),
+                ));
+            }
+            let expiry = yukinal_time::parse_iso8601_utc(&grant.expires_at).ok_or_else(|| {
+                DatabaseError::Validation("command delegation expiry is invalid".into())
+            })?;
+            if now_epoch >= expiry {
+                return Err(DatabaseError::Validation(
+                    "command delegation has expired".into(),
+                ));
+            }
+            if grant.calls_used >= grant.max_calls {
+                return Err(DatabaseError::Validation(
+                    "command delegation call budget is exhausted".into(),
+                ));
+            }
+            let duration_after = grant
+                .total_duration_ms
+                .checked_add(reservation.duration_ms)
+                .ok_or_else(|| {
+                    DatabaseError::Validation("command delegation duration budget overflow".into())
+                })?;
+            if duration_after > grant.max_total_duration_ms {
+                return Err(DatabaseError::Validation(
+                    "command delegation duration budget is exhausted".into(),
+                ));
+            }
+            let output_after = grant
+                .total_output_bytes
+                .checked_add(reservation.output_bytes)
+                .ok_or_else(|| {
+                    DatabaseError::Validation("command delegation output budget overflow".into())
+                })?;
+            if output_after > grant.max_total_output_bytes {
+                return Err(DatabaseError::Validation(
+                    "command delegation output budget is exhausted".into(),
+                ));
+            }
+            grant.calls_used += 1;
+            grant.total_duration_ms = duration_after;
+            grant.total_output_bytes = output_after;
+            let reserved = grant.clone();
+            let encoded = serde_json::to_string(&guardrails)?;
+            tx.execute(
+                "UPDATE investigation_tasks SET guardrails = ?2, updated_at = ?3 WHERE id = ?1",
+                params![reservation.task_id, encoded, reservation.updated_at],
+            )?;
+            tx.commit()?;
+            Ok(reserved)
         })
     }
 
@@ -448,6 +529,103 @@ impl<'a> InvestigationsRepository<'a> {
         })
     }
 
+    /// Return the greatest persisted ordinal for a task without loading its timeline.
+    ///
+    /// Investigation timelines can contain far more rows than a UI page. Event
+    /// projection must still append after every existing row, even when it is
+    /// creating a row beyond the first page.
+    pub fn max_step_ordinal(&self, task_id: &str) -> Result<Option<u32>> {
+        self.db.with(|connection| {
+            let ordinal: Option<i64> = connection.query_row(
+                "SELECT MAX(ordinal) FROM investigation_steps WHERE task_id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )?;
+            ordinal
+                .map(|value| {
+                    u32::try_from(value).map_err(|_| {
+                        DatabaseError::Validation(
+                            "investigation step ordinal is outside the supported range".into(),
+                        )
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    /// Find one timeline row by its full task/run/step identity.
+    pub fn get_step_for_run(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        step_id: &str,
+    ) -> Result<InvestigationStep> {
+        self.db.with(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name,
+                            plan_id, plan_step_id, target, input_summary, output_summary, evidence_ids,
+                            started_at, ended_at, failure
+                     FROM investigation_steps
+                     WHERE task_id = ?1 AND run_id = ?2 AND id = ?3",
+                    params![task_id, run_id, step_id],
+                    row_to_step,
+                )
+                .optional()
+                .map_err(DatabaseError::from)?
+                .ok_or(DatabaseError::NotFound)
+        })
+    }
+
+    /// Return open steps for one run. This is used by restart recovery, where an
+    /// active action after a long timeline must not be hidden by a page limit.
+    pub fn list_active_steps_for_run(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<InvestigationStep>> {
+        self.db.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name,
+                        plan_id, plan_step_id, target, input_summary, output_summary, evidence_ids,
+                        started_at, ended_at, failure
+                 FROM investigation_steps
+                 WHERE task_id = ?1 AND run_id = ?2 AND status IN ('pending','running','waiting_user')
+                 ORDER BY ordinal ASC, id ASC",
+            )?;
+            let rows = statement.query_map(params![task_id, run_id], row_to_step)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(DatabaseError::from)
+        })
+    }
+
+    /// Find a matching failure in one run without scanning another run's history
+    /// or imposing an arbitrary timeline page boundary.
+    pub fn find_failure_step_for_run(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        code: crate::models::TaskFailureCode,
+    ) -> Result<Option<InvestigationStep>> {
+        self.db.with(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name,
+                        plan_id, plan_step_id, target, input_summary, output_summary, evidence_ids,
+                        started_at, ended_at, failure
+                 FROM investigation_steps
+                 WHERE task_id = ?1 AND run_id = ?2 AND failure IS NOT NULL
+                 ORDER BY ordinal ASC, id ASC",
+            )?;
+            let rows = statement.query_map(params![task_id, run_id], row_to_step)?;
+            let steps = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(steps.into_iter().find(|step| {
+                step.failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.code == code)
+            }))
+        })
+    }
+
     pub fn recover_task(
         &self,
         task_id: &str,
@@ -457,6 +635,20 @@ impl<'a> InvestigationsRepository<'a> {
         let failure_json = serde_json::to_string(failure)?;
         self.db.with(|connection| {
             let tx = connection.unchecked_transaction()?;
+            let guardrails_json: String = tx.query_row(
+                "SELECT guardrails FROM investigation_tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )?;
+            let mut guardrails: InvestigationTaskGuardrails =
+                serde_json::from_str(&guardrails_json)?;
+            if failure.code == TaskFailureCode::OutcomeUnknown {
+                // A command may have taken effect before the connection was lost.
+                // Retire the broad task grant so the next run must get fresh,
+                // per-call approval after the operator checks the target state.
+                guardrails.command_grant = None;
+            }
+            let guardrails_json = serde_json::to_string(&guardrails)?;
             // Close every step that was still open when the run was interrupted. A
             // recovered task must not leave a phantom in-flight step in its timeline:
             // active/waiting steps are failed with the durable interruption reason,
@@ -491,9 +683,10 @@ impl<'a> InvestigationsRepository<'a> {
             let task_changed = tx.execute(
                 "UPDATE investigation_tasks
                     SET status = 'investigating', phase = 'recovery', active_run_id = NULL,
-                        last_failure = ?2, updated_at = ?3, completed_at = NULL
+                        last_failure = ?2, updated_at = ?3, completed_at = NULL,
+                        guardrails = ?4
                   WHERE id = ?1 AND status NOT IN ('completed','expired')",
-                params![task_id, failure_json, updated_at],
+                params![task_id, failure_json, updated_at, guardrails_json],
             )?;
             if task_changed == 0 {
                 return Err(DatabaseError::NotFound);

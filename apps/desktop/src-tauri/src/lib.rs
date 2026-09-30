@@ -18,6 +18,7 @@ use yukinal_terminal::TerminalAppEvent;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 数据目录：SQLite、known_hosts、终端服务都挂在这里（全部由 Rust 侧装配）。
             // Keep native state and the sidecar's YUKINAL_DATA_DIR aligned for
@@ -25,6 +26,16 @@ pub fn run() {
             let data_dir = configured_data_dir(app)?;
             let app_state = AppState::bootstrap(&data_dir)?;
             app.manage(app_state);
+            app.manage(commands::files::LocalPathHandles::default());
+            app.manage(
+                commands::files::transfer::FileTransferState::open(app.handle().clone())
+                    .map_err(std::io::Error::other)?,
+            );
+            app.manage(
+                commands::files::drag_out::NativeRemoteDrags::open(app.handle())
+                    .map_err(std::io::Error::other)?,
+            );
+            commands::files::drag_out::start_cleanup_loop(app.handle().clone());
 
             // Durable read-only investigation schedules recover claimed rows and
             // start their own bounded loop. The scheduler never stores provider
@@ -35,6 +46,7 @@ pub fn run() {
             commands::recovery::start_auto_recovery(app.handle().clone());
 
             forward_terminal_events(app.handle().clone());
+            commands::files::transfer::forward_transfer_updates(app.handle().clone());
             forward_auth_challenges(app.handle().clone());
             // Once per window, before anything can start the agent: the forwarder has to
             // outlive an agent crash so the restarted process is still reported, and it must
@@ -99,6 +111,17 @@ pub fn run() {
             commands::host_key::server_host_key_forget,
             commands::files::remote_file_list,
             commands::files::remote_file_read,
+            commands::files::remote_file_preview,
+            commands::files::drag_out::file_prepare_remote_drag,
+            commands::files::drag_out::file_drag_out_start,
+            commands::files::local_file_preview,
+            commands::files::local_paths::local_path_pick,
+            commands::files::transfer::file_transfer_upload,
+            commands::files::transfer::file_transfer_download,
+            commands::files::transfer::file_transfer_list,
+            commands::files::transfer::file_transfer_get,
+            commands::files::transfer::file_transfer_cancel,
+            commands::files::transfer::file_transfer_resolve_conflict,
             commands::provider::provider_list,
             commands::provider::provider_save,
             commands::provider::provider_activate,
@@ -142,9 +165,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to start Yukinal")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }),
+                ..
+            } if label == "main" => commands::files::emit_local_drop(app_handle, paths),
+            tauri::RunEvent::ExitRequested { .. } => {
                 let state = app_handle.state::<AppState>();
+                let transfers = app_handle.state::<commands::files::transfer::FileTransferState>();
                 state.shutdown.cancel();
                 if let Ok(mut replays) = state.host_tool_replays.lock() {
                     replays.clear();
@@ -152,6 +181,7 @@ pub fn run() {
                 tauri::async_runtime::block_on(async move {
                     // Close host-owned resources first so no terminal or SSH
                     // operation can race the sidecar/MCP teardown that follows.
+                    transfers.shutdown().await;
                     state.terminals.shutdown().await;
                     state.auth.cancel_all().await;
                     state.oauth.cancel_all();
@@ -162,6 +192,7 @@ pub fn run() {
                     let _ = state.mcp.shutdown_all().await;
                 });
             }
+            _ => {}
         });
 }
 

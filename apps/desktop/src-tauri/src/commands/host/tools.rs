@@ -10,6 +10,49 @@
 //! 协议分发与共享类型，这里只放执行体。
 
 use super::*;
+use crate::state::{ServerExecExecutionBinding, ServerExecTicketError};
+use yukinal_database::repositories::TaskCommandBudgetReservation;
+
+const SERVER_EXEC_MAX_COMMAND_CHARS: usize = 16_384;
+const SERVER_EXEC_MAX_PURPOSE_CHARS: usize = 512;
+const SERVER_EXEC_MAX_TIMEOUT_MS: u64 = 120_000;
+const SERVER_EXEC_MAX_OUTPUT_BYTES: usize = 65_536;
+const SERVER_EXEC_MAX_ENV_VARS: usize = 16;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServerExecInput {
+    command: String,
+    purpose: String,
+    timeout_ms: u64,
+    max_output_bytes: usize,
+    workdir: Option<String>,
+    env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerExecResult {
+    state: &'static str,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerExecInterruption {
+    state: &'static str,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    duration_ms: u64,
+}
 
 async fn ensure_session_with_cancel(
     state: &AppState,
@@ -31,6 +74,455 @@ fn transport_or_cancel(error: impl std::fmt::Display, cancel: &CancellationToken
     } else {
         failed("transport", error.to_string(), true, None)
     }
+}
+
+pub(super) async fn server_exec(
+    state: &AppState,
+    server_id: &str,
+    request: &HostToolExecuteRequest,
+    cancel: &CancellationToken,
+) -> Result<Value, String> {
+    let input = match serde_json::from_value::<ServerExecInput>(request.input.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return Ok(failed(
+                "invalid_input",
+                format!("server.exec input is invalid: {error}"),
+                true,
+                None,
+            ));
+        }
+    };
+    if let Err(message) = validate_server_exec_input(&input) {
+        return Ok(failed("invalid_input", message, true, None));
+    }
+    if request.task_id.as_deref().is_none_or(str::is_empty) {
+        return Ok(failed(
+            "denied_by_policy",
+            "server.exec requires a durable task and approved plan step",
+            false,
+            None,
+        ));
+    }
+    let task_id = request.task_id.as_deref().unwrap_or_default();
+    let task = match state.database.investigations().get_task(task_id) {
+        Ok(task) => task,
+        Err(error) => {
+            return Ok(failed(
+                "not_found",
+                format!("investigation task is unavailable: {error}"),
+                false,
+                None,
+            ));
+        }
+    };
+    let server = match state.database.servers().get(server_id) {
+        Ok(server) => server,
+        Err(error) => {
+            return Ok(failed(
+                "not_found",
+                format!("target server is unavailable: {error}"),
+                false,
+                None,
+            ));
+        }
+    };
+    if task.scope.host != InvestigationTargetHost::Remote
+        || task.scope.server_id.as_deref() != Some(server_id)
+        || task.scope.environment != request.target.environment
+        || server.metadata.environment != request.target.environment
+    {
+        return Ok(failed(
+            "denied_by_policy",
+            "server.exec target no longer matches the task scope and registered server environment",
+            false,
+            None,
+        ));
+    }
+    if let Some(violation) = task_guardrail_violation(&task, SERVER_EXEC, &request.input) {
+        return Ok(failed("denied_by_policy", violation.message, false, None));
+    }
+    let command_is_critical = is_critical_server_command(&input.command);
+    let grant = task.guardrails.command_grant.as_ref().filter(|grant| {
+        task.last_failure
+            .as_ref()
+            .is_none_or(|failure| failure.code != TaskFailureCode::OutcomeUnknown)
+            && task.mode == InvestigationRunMode::Goal
+            && task.permission_mode == InvestigationPermissionMode::Auto
+            && task.automation_level == TaskAutomationLevel::Execute
+            && grant.granted_by == task.created_by
+            && grant.granted_by == "user"
+            && grant.task_id == task.id
+            && grant.server_id == server_id
+            && grant.environment == request.target.environment
+            && matches!(
+                grant.environment,
+                Environment::Development | Environment::Staging
+            )
+            && yukinal_time::parse_iso8601_utc(&grant.expires_at)
+                .is_some_and(|expiry| yukinal_time::now_epoch_seconds() < expiry)
+    });
+    // Automatic task grants remain a separate, bounded authorization path. If the
+    // caller carries an approval id, it must use that exact one-time host ticket; a
+    // grant must never turn a forged or mismatched approval id into an allowed call.
+    let using_task_grant = grant.is_some() && !command_is_critical && request.approval_id.is_none();
+    if !using_task_grant {
+        let Some(approval_id) = request.approval_id.as_deref() else {
+            return Ok(failed(
+                "denied_by_policy",
+                if command_is_critical {
+                    "critical command patterns cannot use a task command grant and require approval for this exact input"
+                } else {
+                    "server.exec requires either this task's valid command grant or approval for this exact input"
+                },
+                false,
+                Some(json!({ "criticalPatternMatched": command_is_critical })),
+            ));
+        };
+        if cancel.is_cancelled() {
+            return Ok(cancelled_failure());
+        }
+        let input_fingerprint = match server_exec_input_fingerprint(&request.input) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return Ok(failed("internal", error, false, None)),
+        };
+        let execution_binding = ServerExecExecutionBinding {
+            approval_id,
+            run_id: request.run_id.as_deref(),
+            trace_id: &request.trace_id,
+            call_id: &request.call_id,
+            tool_name: &request.tool_name,
+            input_fingerprint: &input_fingerprint,
+            target_host: &request.target.host,
+            server_id: request.target.server_id.as_deref(),
+            workspace_id: request.target.workspace_id.as_deref(),
+            environment: request.target.environment.as_str(),
+            task_id: request.task_id.as_deref(),
+            plan_id: request.plan_id.as_deref(),
+            plan_step_id: request.plan_step_id.as_deref(),
+            evidence_ids: request.evidence_ids.clone(),
+        };
+        if let Err(error) = state
+            .server_exec_approvals
+            .consume(execution_binding, yukinal_time::now_epoch_seconds)
+            .await
+        {
+            let message = match error {
+                ServerExecTicketError::Missing => {
+                    "server.exec has no host-issued approval ticket for this call"
+                }
+                ServerExecTicketError::Expired => "server.exec approval ticket has expired",
+                ServerExecTicketError::Mismatch => {
+                    "server.exec request does not match the approved run, call, tool, target, plan, or input"
+                }
+                ServerExecTicketError::NotApproved => {
+                    "server.exec approval has not been accepted by the host"
+                }
+            };
+            return Ok(failed(
+                "denied_by_policy",
+                message,
+                false,
+                Some(json!({ "code": "approval_ticket" })),
+            ));
+        }
+    }
+    if cancel.is_cancelled() {
+        return Ok(cancelled_failure());
+    }
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
+    }
+    let session = match state.terminals.cached_session(server_id) {
+        Ok(session) => session,
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    };
+    if let (true, Some(grant)) = (using_task_grant, grant) {
+        match state.database.investigations().reserve_task_command_budget(
+            TaskCommandBudgetReservation {
+                task_id,
+                grant_id: &grant.grant_id,
+                server_id,
+                environment: request.target.environment,
+                duration_ms: input.timeout_ms,
+                output_bytes: input.max_output_bytes as u64,
+                updated_at: &yukinal_core::sidecar::iso8601_now(),
+            },
+        ) {
+            Ok(_) => {}
+            Err(error) => {
+                return Ok(failed(
+                    "denied_by_policy",
+                    format!("task command delegation refused this call: {error}"),
+                    false,
+                    Some(json!({ "code": "task_command_budget" })),
+                ));
+            }
+        }
+    }
+
+    let remote_command = server_exec_command(&input);
+    let started = std::time::Instant::now();
+    let result = state
+        .ssh
+        .execute_bounded_once(
+            &session,
+            &remote_command,
+            Some(std::time::Duration::from_millis(input.timeout_ms)),
+            input.max_output_bytes,
+            cancel,
+        )
+        .await;
+    let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let result = match result {
+        Ok(result) if result.exit_code >= 0 => result,
+        Ok(result) => {
+            let output = ServerExecInterruption {
+                state: "result_unknown",
+                exit_code: None,
+                stdout: result.stdout_lossy(),
+                stderr: result.stderr_lossy(),
+                stdout_truncated: result.stdout_truncated,
+                stderr_truncated: result.stderr_truncated,
+                duration_ms,
+            };
+            return Ok(failed(
+                "execution_failed",
+                "remote command returned without an exit status; its effect is unknown",
+                false,
+                Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+            ));
+        }
+        Err(yukinal_ssh::Error::Timeout) => {
+            let output = server_exec_interruption("timed_out", duration_ms);
+            return Ok(failed(
+                "timeout",
+                "remote command exceeded its host-enforced timeout; its effect may have occurred",
+                false,
+                Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+            ));
+        }
+        Err(yukinal_ssh::Error::Cancelled) if cancel.is_cancelled() => {
+            let output = server_exec_interruption("cancelled", duration_ms);
+            return Ok(failed(
+                "cancelled",
+                "remote command was cancelled; its effect may have occurred",
+                false,
+                Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+            ));
+        }
+        Err(error) => {
+            let output = server_exec_interruption("result_unknown", duration_ms);
+            return Ok(failed(
+                "transport",
+                format!("SSH command result is unavailable: {error}; its effect may have occurred"),
+                false,
+                Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+            ));
+        }
+    };
+
+    let output = ServerExecResult {
+        state: "completed",
+        exit_code: result.exit_code,
+        stdout: result.stdout_lossy(),
+        stderr: result.stderr_lossy(),
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+        duration_ms,
+    };
+    let output_value = serde_json::to_value(output).map_err(|error| error.to_string())?;
+    if result.exit_code != 0 {
+        return Ok(failed(
+            "execution_failed",
+            format!("remote command exited with status {}", result.exit_code),
+            false,
+            Some(output_value),
+        ));
+    }
+    Ok(success(output_value))
+}
+
+fn server_exec_interruption(state: &'static str, duration_ms: u64) -> ServerExecInterruption {
+    ServerExecInterruption {
+        state,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        duration_ms,
+    }
+}
+
+fn validate_server_exec_input(input: &ServerExecInput) -> std::result::Result<(), String> {
+    if input.command.trim().is_empty()
+        || input.command.chars().count() > SERVER_EXEC_MAX_COMMAND_CHARS
+        || input.command.contains('\0')
+    {
+        return Err(format!(
+            "command must contain 1 to {SERVER_EXEC_MAX_COMMAND_CHARS} characters and no NUL"
+        ));
+    }
+    if input.purpose.trim().is_empty()
+        || input.purpose.chars().count() > SERVER_EXEC_MAX_PURPOSE_CHARS
+        || input.purpose.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "purpose must contain 1 to {SERVER_EXEC_MAX_PURPOSE_CHARS} printable characters"
+        ));
+    }
+    if input.timeout_ms == 0 || input.timeout_ms > SERVER_EXEC_MAX_TIMEOUT_MS {
+        return Err(format!(
+            "timeoutMs must be between 1 and {SERVER_EXEC_MAX_TIMEOUT_MS}"
+        ));
+    }
+    if input.max_output_bytes == 0 || input.max_output_bytes > SERVER_EXEC_MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "maxOutputBytes must be between 1 and {SERVER_EXEC_MAX_OUTPUT_BYTES}"
+        ));
+    }
+    if let Some(workdir) = input.workdir.as_deref() {
+        if workdir.len() > 4_096
+            || !workdir.starts_with('/')
+            || workdir.contains('\0')
+            || workdir.chars().any(char::is_control)
+            || workdir.split('/').any(|part| part == "." || part == "..")
+        {
+            return Err("workdir must be a bounded absolute POSIX path without dot traversal or control characters".into());
+        }
+    }
+    if let Some(env) = input.env.as_ref() {
+        if env.len() > SERVER_EXEC_MAX_ENV_VARS {
+            return Err(format!(
+                "env may contain at most {SERVER_EXEC_MAX_ENV_VARS} variables"
+            ));
+        }
+        for (key, value) in env {
+            if !matches!(
+                key.as_str(),
+                "LANG"
+                    | "LC_ALL"
+                    | "LC_CTYPE"
+                    | "LC_MESSAGES"
+                    | "LC_TIME"
+                    | "LC_NUMERIC"
+                    | "LC_COLLATE"
+                    | "TZ"
+                    | "TERM"
+            ) || value.len() > 256
+                || value.chars().any(char::is_control)
+            {
+                return Err(format!(
+                    "environment variable `{key}` is not on the non-sensitive allowlist or has an invalid value"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn server_exec_command(input: &ServerExecInput) -> String {
+    let mut command = String::new();
+    if let Some(workdir) = input.workdir.as_deref() {
+        command.push_str("cd ");
+        command.push_str(&shell_quote(workdir));
+        command.push_str(" && ");
+    }
+    if let Some(env) = input.env.as_ref().filter(|env| !env.is_empty()) {
+        command.push_str("env");
+        for (key, value) in env {
+            command.push(' ');
+            command.push_str(key);
+            command.push('=');
+            command.push_str(&shell_quote(value));
+        }
+        command.push_str(" /bin/sh -c ");
+    } else {
+        command.push_str("/bin/sh -c ");
+    }
+    // SSH exec carries a shell command string. Quoting this inner shell invocation only
+    // preserves boundaries for workdir/env wrappers; it does not make arbitrary remote
+    // shell text safe or equivalent to an argv vector.
+    command.push_str(&shell_quote(&input.command));
+    command
+}
+
+fn is_critical_server_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let words = lower.split_whitespace().collect::<Vec<_>>();
+    let has_recursive_force_delete = words.iter().enumerate().any(|(index, word)| {
+        if word.trim_matches(|character: char| !character.is_ascii_alphanumeric()) != "rm" {
+            return false;
+        }
+        let arguments = words
+            .iter()
+            .skip(index + 1)
+            .take_while(|argument| !matches!(**argument, ";" | "&&" | "||" | "|" | "&"));
+        let mut has_recursive_or_force = false;
+        let mut deletes_root = false;
+        for argument in arguments {
+            let argument = argument.trim_matches(|character: char| {
+                matches!(character, '\'' | '"' | '`' | '(' | ')' | ';' | '&' | '|')
+            });
+            if argument.starts_with('-')
+                && (argument
+                    .chars()
+                    .skip(1)
+                    .any(|flag| matches!(flag, 'r' | 'f'))
+                    || matches!(argument, "--recursive" | "--force"))
+            {
+                has_recursive_or_force = true;
+            }
+            if matches!(argument, "/" | "/*" | "/.") || argument.starts_with("/*/") {
+                deletes_root = true;
+            }
+        }
+        has_recursive_or_force || deletes_root
+    });
+    let mut sql_without_comments = String::new();
+    let mut remaining_sql = lower.as_str();
+    while let Some(comment_start) = remaining_sql.find("/*") {
+        sql_without_comments.push_str(&remaining_sql[..comment_start]);
+        let comment = &remaining_sql[comment_start + 2..];
+        let Some(comment_end) = comment.find("*/") else {
+            remaining_sql = "";
+            break;
+        };
+        remaining_sql = &comment[comment_end + 2..];
+        sql_without_comments.push(' ');
+    }
+    sql_without_comments.push_str(remaining_sql);
+    let sql_tokens = sql_without_comments
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let no_whitespace = lower
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    has_recursive_force_delete
+        || words.iter().any(|word| word.starts_with("mkfs"))
+        || sql_tokens
+            .windows(2)
+            .any(|pair| pair == ["drop", "database"])
+        || no_whitespace.contains("of=/dev/")
+        || ["sd", "nvme", "hd", "vd"]
+            .iter()
+            .any(|device| no_whitespace.contains(&format!(">/dev/{device}")))
+        || words.iter().enumerate().any(|(index, word)| {
+            word.trim_matches(|character: char| !character.is_ascii_alphanumeric()) == "chmod"
+                && words.iter().skip(index + 1).any(|argument| {
+                    argument.starts_with('-') && argument.to_ascii_lowercase().contains('r')
+                })
+                && words.iter().skip(index + 1).any(|argument| {
+                    matches!(
+                        argument
+                            .trim_matches(|character: char| matches!(character, '\'' | '"' | '`')),
+                        "/" | "/*"
+                    )
+                })
+        })
 }
 
 /// File-capability failure → the host tool result's failure code.
@@ -144,7 +636,7 @@ pub(super) async fn server_logs(
                 format!("server.logs input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     let command = match log_discovery_command_for(&input) {
@@ -179,7 +671,7 @@ pub(super) async fn server_logs(
                 format!("server.logs returned an invalid response: {error}"),
                 false,
                 Some(json!({ "exitCode": result.exit_code })),
-            ))
+            ));
         }
     };
     if (input.since_seconds.is_some() || input.unit.is_some())
@@ -211,7 +703,7 @@ pub(super) async fn server_services(
                 format!("server.services input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
@@ -242,7 +734,7 @@ pub(super) async fn server_services(
                 format!("server.services returned an invalid response: {error}"),
                 false,
                 Some(json!({ "exitCode": result.exit_code })),
-            ))
+            ));
         }
     };
     if let Err(error) = filter_services(&mut parsed, &input) {
@@ -267,7 +759,7 @@ pub(super) async fn filesystem_read(
                 format!("filesystem.read input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     // Path policy and the byte cap are checked before anything else, cancellation included:
@@ -314,7 +806,7 @@ pub(super) async fn filesystem_write(
                 format!("filesystem.write input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     let request = match AgentWriteRequest::check(&input.path, input.content) {
@@ -360,7 +852,7 @@ pub(super) async fn filesystem_edit(
                 format!("filesystem.edit input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     let request = match AgentEditRequest::check(
@@ -440,7 +932,7 @@ pub(super) async fn filesystem_backup_list(
                 format!("filesystem.backup.list input is invalid: {error}"),
                 false,
                 None,
-            ))
+            ));
         }
     };
     let Some(task_id) = request_context.task_id.as_deref() else {
@@ -459,7 +951,7 @@ pub(super) async fn filesystem_backup_list(
                 format!("investigation task `{task_id}` was not found"),
                 false,
                 None,
-            ))
+            ));
         }
         Err(error) => return Ok(failed("internal", error.to_string(), false, None)),
     };
@@ -486,7 +978,7 @@ pub(super) async fn filesystem_backup_list(
                     "filesystem.backup.list status must be available, restored, or deleted",
                     false,
                     None,
-                ))
+                ));
             }
         },
     };
@@ -508,7 +1000,7 @@ pub(super) async fn filesystem_backup_list(
     ) {
         Ok(result) => result,
         Err(DatabaseError::Validation(error)) => {
-            return Ok(failed("invalid_input", error, false, None))
+            return Ok(failed("invalid_input", error, false, None));
         }
         Err(error) => return Ok(failed("internal", error.to_string(), false, None)),
     };
@@ -560,7 +1052,7 @@ pub(super) async fn filesystem_backup_retention(
                 format!("filesystem.backup.retention input is invalid: {error}"),
                 false,
                 None,
-            ))
+            ));
         }
     };
     if input.keep_latest.is_none() && input.older_than_days.is_none() {
@@ -608,7 +1100,7 @@ pub(super) async fn filesystem_backup_retention(
         ) {
         Ok(result) => result,
         Err(DatabaseError::Validation(error)) => {
-            return Ok(failed("invalid_input", error, false, None))
+            return Ok(failed("invalid_input", error, false, None));
         }
         Err(error) => return Ok(failed("internal", error.to_string(), false, None)),
     };
@@ -715,7 +1207,7 @@ pub(super) async fn filesystem_backup(
                 format!("filesystem.backup input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     let request = match AgentBackupRequest::check(&input.path, &backup_token()) {
@@ -742,7 +1234,7 @@ pub(super) async fn filesystem_backup(
                 "filesystem backup byte count exceeded the local ledger range",
                 false,
                 None,
-            ))
+            ));
         }
     };
     let record = FilesystemBackupRecord {
@@ -797,7 +1289,7 @@ pub(super) async fn filesystem_backup_cleanup(
                 format!("filesystem.backup.cleanup input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     match input.resolve() {
@@ -826,11 +1318,11 @@ async fn filesystem_backup_cleanup_single(
         Ok(request) => request,
         Err(error) => return Ok(filesystem_failure(error, cancel)),
     };
-    let backup = match state
-        .database
-        .filesystem_backups()
-        .find_available(server_id, &input.path, &input.backup_path)
-    {
+    let backup = match state.database.filesystem_backups().find_available(
+        server_id,
+        &input.path,
+        &input.backup_path,
+    ) {
         Ok(Some(record)) => record,
         Ok(None) => {
             return Ok(failed(
@@ -838,7 +1330,7 @@ async fn filesystem_backup_cleanup_single(
                 "filesystem.backup.cleanup requires an available backup previously created by this host for the same server and target path",
                 false,
                 None,
-            ))
+            ));
         }
         Err(error) => {
             return Ok(failed(
@@ -846,7 +1338,7 @@ async fn filesystem_backup_cleanup_single(
                 format!("could not read the filesystem backup ledger: {error}"),
                 false,
                 None,
-            ))
+            ));
         }
     };
     if !backup_owner_matches_request(&backup, request_context) {
@@ -1155,7 +1647,7 @@ pub(super) async fn filesystem_restore(
                 format!("filesystem.restore input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     let request =
@@ -1164,11 +1656,11 @@ pub(super) async fn filesystem_restore(
             Ok(request) => request,
             Err(error) => return Ok(filesystem_failure(error, cancel)),
         };
-    let backup = match state
-        .database
-        .filesystem_backups()
-        .find_available(server_id, &input.path, &input.backup_path)
-    {
+    let backup = match state.database.filesystem_backups().find_available(
+        server_id,
+        &input.path,
+        &input.backup_path,
+    ) {
         Ok(Some(record)) => record,
         Ok(None) => {
             return Ok(failed(
@@ -1176,7 +1668,7 @@ pub(super) async fn filesystem_restore(
                 "filesystem.restore requires an available backup previously created by this host for the same server and target path",
                 false,
                 None,
-            ))
+            ));
         }
         Err(error) => {
             return Ok(failed(
@@ -1184,7 +1676,7 @@ pub(super) async fn filesystem_restore(
                 format!("could not read the filesystem backup ledger: {error}"),
                 false,
                 None,
-            ))
+            ));
         }
     };
     if !backup_owner_matches_request(&backup, request_context) {
@@ -1248,7 +1740,7 @@ pub(super) async fn docker_ps(
                 format!("docker.ps input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
@@ -1301,7 +1793,7 @@ pub(super) async fn docker_logs(
                 format!("docker.logs input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_safe_container_ref(&input.container) {
@@ -1382,7 +1874,7 @@ pub(super) async fn docker_inspect(
                 format!("docker.inspect input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_safe_container_ref(&input.container) {
@@ -1451,7 +1943,7 @@ pub(super) async fn docker_restart(
                 format!("docker.restart input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_safe_container_ref(&input.container) {
@@ -1526,7 +2018,7 @@ pub(super) async fn systemd_inspect(
                 format!("systemd.inspect input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_safe_systemd_service_ref(&input.service) {
@@ -1595,7 +2087,7 @@ pub(super) async fn systemd_restart(
                 format!("systemd.restart input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_safe_systemd_service_ref(&input.service) {
@@ -1672,7 +2164,7 @@ pub(super) async fn package_inspect(
                 format!("package.inspect input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_supported_package_manager(&input.manager) {
@@ -1755,7 +2247,7 @@ pub(super) async fn package_install(
                 format!("package.install input is invalid: {error}"),
                 true,
                 None,
-            ))
+            ));
         }
     };
     if !is_supported_package_manager(&input.manager) {
@@ -1844,4 +2336,76 @@ pub(super) async fn package_install(
 
 fn is_empty_object(value: &Value) -> bool {
     value.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+#[cfg(test)]
+mod server_exec_tests {
+    use super::{
+        is_critical_server_command, server_exec_command, validate_server_exec_input,
+        ServerExecInput,
+    };
+    use std::collections::BTreeMap;
+
+    fn valid_input() -> ServerExecInput {
+        ServerExecInput {
+            command: "printf '%s' hello".into(),
+            purpose: "verify command quoting".into(),
+            timeout_ms: 1_000,
+            max_output_bytes: 4_096,
+            workdir: Some("/srv/app".into()),
+            env: Some(BTreeMap::from([("LANG".into(), "C.UTF-8".into())])),
+        }
+    }
+
+    #[test]
+    fn host_validation_rejects_path_traversal_secrets_and_unbounded_limits() {
+        let mut input = valid_input();
+        input.workdir = Some("/srv/../etc".into());
+        assert!(validate_server_exec_input(&input).is_err());
+
+        let mut input = valid_input();
+        input.env = Some(BTreeMap::from([(
+            "LD_PRELOAD".into(),
+            "/tmp/evil.so".into(),
+        )]));
+        assert!(validate_server_exec_input(&input).is_err());
+
+        let mut input = valid_input();
+        input.max_output_bytes = super::SERVER_EXEC_MAX_OUTPUT_BYTES + 1;
+        assert!(validate_server_exec_input(&input).is_err());
+    }
+
+    #[test]
+    fn host_wrapper_quotes_optional_directory_and_environment_values() {
+        let mut input = valid_input();
+        input.workdir = Some("/srv/app with 'quote'".into());
+        input.env = Some(BTreeMap::from([("LANG".into(), "C 'UTF-8'".into())]));
+        let command = server_exec_command(&input);
+        assert!(command.starts_with("cd "));
+        assert!(command.contains(" && env LANG="));
+        assert!(
+            command.contains("'\\''"),
+            "single quotes must be escaped by the host wrapper"
+        );
+        assert!(command.ends_with("hello'"));
+    }
+
+    #[test]
+    fn host_command_scanner_keeps_known_critical_patterns_out_of_task_grants() {
+        for command in [
+            "rm /",
+            "sudo rm --recursive /tmp/cache",
+            "mkfs.ext4 /dev/sda1",
+            "DROP /* comment */ DATABASE app",
+            "dd if=/dev/zero of=/dev/nvme0n1",
+            "echo bad > /dev/vda",
+            "chmod -R /",
+        ] {
+            assert!(
+                is_critical_server_command(command),
+                "expected critical match for: {command}"
+            );
+        }
+        assert!(!is_critical_server_command("systemctl restart api"));
+    }
 }

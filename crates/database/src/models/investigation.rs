@@ -13,8 +13,8 @@ enum_as_str!(TaskPhase, Investigating => "investigating", Decision => "decision"
 enum_as_str!(InvestigationRunStatus, Admitted => "admitted", Running => "running", WaitingUser => "waiting_user", Completed => "completed", Failed => "failed", Cancelled => "cancelled", Interrupted => "interrupted");
 enum_as_str!(InvestigationStepKind, Plan => "plan", Evidence => "evidence", Decision => "decision", Action => "action", Verification => "verification", Recovery => "recovery");
 enum_as_str!(InvestigationStepStatus, Pending => "pending", Running => "running", WaitingUser => "waiting_user", Succeeded => "succeeded", Failed => "failed", Skipped => "skipped");
-enum_as_str!(TaskFailureCode, BudgetExhausted => "budget_exhausted", Timeout => "timeout", Cancelled => "cancelled", ApprovalRequired => "approval_required", ApprovalRejected => "approval_rejected", Authentication => "authentication", Transport => "transport", TargetNotFound => "target_not_found", PermissionDenied => "permission_denied", InvalidInput => "invalid_input", PlanDeviation => "plan_deviation", CommandFailed => "command_failed", OutputTruncated => "output_truncated", EvidenceMissing => "evidence_missing", StaleTarget => "stale_target", Unsupported => "unsupported", Internal => "internal", Unknown => "unknown");
-enum_as_str!(ErrorCategory, Input => "input", Permission => "permission", Approval => "approval", Authentication => "authentication", Transport => "transport", Timeout => "timeout", Cancelled => "cancelled", Budget => "budget", NotFound => "not_found", Unsupported => "unsupported", RemoteFailure => "remote_failure", Output => "output", Evidence => "evidence", Stale => "stale", Plan => "plan", Internal => "internal", Unknown => "unknown");
+enum_as_str!(TaskFailureCode, BudgetExhausted => "budget_exhausted", Timeout => "timeout", Cancelled => "cancelled", ApprovalRequired => "approval_required", ApprovalRejected => "approval_rejected", Authentication => "authentication", Transport => "transport", TargetNotFound => "target_not_found", PermissionDenied => "permission_denied", InvalidInput => "invalid_input", PlanDeviation => "plan_deviation", CommandFailed => "command_failed", OutcomeUnknown => "outcome_unknown", OutputTruncated => "output_truncated", EvidenceMissing => "evidence_missing", StaleTarget => "stale_target", Unsupported => "unsupported", Internal => "internal", Unknown => "unknown");
+enum_as_str!(ErrorCategory, Input => "input", Permission => "permission", Approval => "approval", Authentication => "authentication", Transport => "transport", Timeout => "timeout", OutcomeUnknown => "outcome_unknown", Cancelled => "cancelled", Budget => "budget", NotFound => "not_found", Unsupported => "unsupported", RemoteFailure => "remote_failure", Output => "output", Evidence => "evidence", Stale => "stale", Plan => "plan", Internal => "internal", Unknown => "unknown");
 enum_as_str!(FailureOptionAction, Retry => "retry", Replan => "replan", WaitUser => "wait_user", Inspect => "inspect", Stop => "stop", Resume => "resume", Rollback => "rollback");
 enum_as_str!(EvidenceKind, Snapshot => "snapshot", Log => "log", Service => "service", Container => "container", File => "file", ToolResult => "tool_result", Failure => "failure");
 enum_as_str!(EvidenceContentType, Json => "json", Text => "text");
@@ -121,6 +121,7 @@ pub enum TaskFailureCode {
     InvalidInput,
     PlanDeviation,
     CommandFailed,
+    OutcomeUnknown,
     OutputTruncated,
     EvidenceMissing,
     StaleTarget,
@@ -144,6 +145,7 @@ pub enum ErrorCategory {
     Authentication,
     Transport,
     Timeout,
+    OutcomeUnknown,
     Cancelled,
     Budget,
     NotFound,
@@ -169,6 +171,7 @@ impl TaskFailureCode {
             Self::ApprovalRequired | Self::ApprovalRejected => ErrorCategory::Approval,
             Self::Authentication => ErrorCategory::Authentication,
             Self::Transport => ErrorCategory::Transport,
+            Self::OutcomeUnknown => ErrorCategory::OutcomeUnknown,
             Self::TargetNotFound => ErrorCategory::NotFound,
             Self::PermissionDenied => ErrorCategory::Permission,
             Self::InvalidInput => ErrorCategory::Input,
@@ -421,6 +424,27 @@ pub struct InvestigationTaskGuardrails {
     pub forbidden_tools: Vec<String>,
     #[serde(default)]
     pub forbidden_path_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_grant: Option<TaskCommandGrant>,
+}
+
+/// Persisted host-issued budget for free-form `server.exec` calls in one task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCommandGrant {
+    pub grant_id: String,
+    pub task_id: String,
+    pub server_id: String,
+    pub environment: Environment,
+    pub granted_by: String,
+    pub granted_at: String,
+    pub expires_at: String,
+    pub max_calls: u32,
+    pub calls_used: u32,
+    pub max_total_duration_ms: u64,
+    pub total_duration_ms: u64,
+    pub max_total_output_bytes: u64,
+    pub total_output_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

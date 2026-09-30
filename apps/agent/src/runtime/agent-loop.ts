@@ -48,6 +48,7 @@ import { buildEvidence } from "../context/evidence.js";
 import { PermissionEngine } from "../permissions/permission-engine.js";
 import { resolveRequestedPolicy } from "../permissions/policy-registry.js";
 import { RpcFailure } from "../errors.js";
+import { actionFingerprint } from "../security/action-fingerprint.js";
 import { redactSensitiveText, redactSensitiveValue } from "../security/sensitive-data.js";
 import { TraceRecorder } from "../trace/trace-recorder.js";
 import { ToolRegistry, toolStepTitle, type ExecutionTicket } from "../tools/registry.js";
@@ -67,7 +68,7 @@ import {
   summarize,
   waitForObservationSample,
 } from "./agent-loop-helpers.js";
-import { createToolEventEmitter } from "./tool-event-emitter.js";
+import { createToolEventEmitter, serverExecInterruptionState } from "./tool-event-emitter.js";
 import { SYSTEM_PROMPT, renderPermissionGuidance, renderRunModeGuidance } from "./prompts.js";
 
 export { shouldAdvancePlan, shouldCheckPlan } from "./agent-loop-helpers.js";
@@ -540,6 +541,8 @@ export class AgentLoop {
             input: call.call.arguments,
             permissionMode: request.permissionMode,
             mode: request.mode,
+            taskId: request.taskId,
+            taskCommandGrant: bundle.investigation?.task.guardrails.commandGrant,
             // `undefined` (no policy named in the request) keeps the engine's own
             // environment -> policy default; a named policy was resolved above and is
             // the same one for every call of this run.
@@ -672,12 +675,22 @@ export class AgentLoop {
             const approval: ApprovalRequest = {
               approvalId,
               runId,
+              traceId,
+              callId: call.call.id,
+              inputFingerprint: decision.inputFingerprint ?? actionFingerprint(call.call.arguments),
               toolName: internalName,
               input: redactSensitiveValue(call.call.arguments),
               reason: decision.reason,
               factsSummary: decision.facts.map((fact) => fact.note ?? "").filter(Boolean),
               target,
-              sessionGrantable: isSessionGrantable(decision),
+              ...(planCheck?.status === "allowed"
+                ? {
+                    planId: planCheck.planId,
+                    planStepId: planCheck.stepId,
+                    evidenceIds: planCheck.evidenceIds,
+                  }
+                : {}),
+              sessionGrantable: internalName !== "server.exec" && isSessionGrantable(decision),
               expiresAt: new Date(Date.now() + this.approvalTtlMs).toISOString(),
             };
             trace.requireApproval(decision, stepId);
@@ -787,6 +800,7 @@ export class AgentLoop {
           const result = await this.deps.registry.execute(
             {
               callId: call.call.id,
+              runId,
               traceId,
               toolName: internalName,
               input: call.call.arguments,
@@ -956,6 +970,7 @@ export class AgentLoop {
                 : undefined,
             );
           }
+          const executionState = serverExecInterruptionState(internalName, result.error?.detail);
           emitToolResult({
             traceId,
             stepId,
@@ -979,6 +994,7 @@ export class AgentLoop {
             outputSummary: redactSensitiveText(result.outputSummary ?? summarize(result.output)),
             error: result.error?.message === undefined ? undefined : redactSensitiveText(result.error.message),
             errorCode: result.error?.code,
+            ...(executionState ? { executionState } : {}),
             startedAt: result.startedAt || startedAt,
             endedAt: result.endedAt,
             durationMs: result.durationMs,
@@ -1037,7 +1053,8 @@ export class AgentLoop {
       pushToolMessage("(cancelled)");
       return;
     }
-    pushToolMessage(`工具失败：${redactSensitiveText(result.error?.message ?? "unknown")}（code ${result.error?.code ?? "?"}）`);
+    const detail = result.error?.detail === undefined ? "" : `\n受限结果：${redactSensitiveText(JSON.stringify(result.error.detail)).slice(0, 4_000)}`;
+    pushToolMessage(`工具失败：${redactSensitiveText(result.error?.message ?? "unknown")}（code ${result.error?.code ?? "?"}）${detail}`);
   }
 
   #finishInterrupted(

@@ -4,12 +4,15 @@
  * collection failures remain actionable errors.
  */
 
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   HEALTH_THRESHOLDS,
   IPC_COMMANDS,
   healthClass,
+  type Activity,
   type HealthClass,
+  type CollectorSample,
   type Server,
   type ServerSnapshot,
 } from "@yukinal/shared";
@@ -18,7 +21,7 @@ import { errorMessage, formatBytes } from "../../lib/format.js";
 import { EnvBadge } from "../../components/EnvBadge.js";
 import { EmptyPanel, ErrorPanel, LoadingPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
 
@@ -35,6 +38,87 @@ const HEALTH_LABEL: Record<HealthClass | "unknown", string> = {
   critical: "严重",
   unknown: "未知",
 };
+
+const SNAPSHOT_STALE_AFTER_MS = 45_000;
+
+const COLLECTORS = [
+  { id: "os", label: "系统信息" },
+  { id: "cpu", label: "CPU" },
+  { id: "memory", label: "内存" },
+  { id: "disk", label: "磁盘" },
+  { id: "uptime", label: "运行时间" },
+  { id: "network", label: "网络" },
+  { id: "docker", label: "Docker" },
+] as const;
+
+function normalizeCollectorId(collectorId: string): string {
+  return collectorId.startsWith("collector.") ? collectorId.slice("collector.".length) : collectorId;
+}
+
+function sampleFor(snapshot: ServerSnapshot, collectorId: string): CollectorSample | undefined {
+  return snapshot.collectors?.find((sample) => normalizeCollectorId(sample.collectorId) === collectorId);
+}
+
+function formatTimestamp(timestamp: string): string {
+  const value = new Date(timestamp);
+  if (Number.isNaN(value.getTime())) return "时间格式无效";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(value);
+}
+
+function formatAge(timestamp: string, now: number): { kind: "fresh" | "stale" | "unknown"; label: string } {
+  const collectedAt = Date.parse(timestamp);
+  if (!Number.isFinite(collectedAt)) return { kind: "unknown", label: "采集时间无效" };
+  const age = now - collectedAt;
+  if (age < 0) return { kind: "unknown", label: "采集时间晚于本机时钟" };
+  if (age > SNAPSHOT_STALE_AFTER_MS) {
+    const minutes = Math.floor(age / 60_000);
+    const hours = Math.floor(age / 3_600_000);
+    const days = Math.floor(age / 86_400_000);
+    const label = days > 0 ? days + " 天前" : hours > 0 ? hours + " 小时前" : minutes > 0 ? minutes + " 分钟前" : "超过 45 秒";
+    return { kind: "stale", label };
+  }
+  const seconds = Math.floor(age / 1_000);
+  return { kind: "fresh", label: seconds < 10 ? "刚刚" : seconds + " 秒前" };
+}
+
+function collectorSummary(snapshot: ServerSnapshot) {
+  const samples = snapshot.collectors;
+  const sampleMap = new Map((samples ?? []).map((sample) => [normalizeCollectorId(sample.collectorId), sample]));
+  const missing = COLLECTORS.filter((collector) => !sampleMap.has(collector.id));
+  const failed = COLLECTORS.filter((collector) => sampleMap.get(collector.id)?.ok === false);
+  const reported = COLLECTORS.length - missing.length;
+  const kind = samples === undefined || samples.length === 0
+    ? "unknown"
+    : failed.length === COLLECTORS.length
+      ? "failed"
+      : failed.length > 0
+        ? "partial"
+        : missing.length > 0
+          ? "incomplete"
+          : "complete";
+  const label = kind === "failed"
+    ? "所有采集器均失败"
+    : kind === "partial"
+      ? "部分采集失败"
+      : kind === "incomplete"
+        ? "采集状态不完整"
+        : kind === "unknown"
+          ? "采集状态未知"
+          : "采集完成";
+  const description = samples === undefined || samples.length === 0
+    ? "此快照没有提供采集器状态明细。"
+    : reported + "/" + COLLECTORS.length + " 个采集器报告状态" +
+      (failed.length > 0 ? " · " + failed.length + " 个失败" : "") +
+      (missing.length > 0 ? " · " + missing.length + " 个未报告" : "");
+  return { kind, label, description, sampleMap };
+}
 
 /**
  * 未取到读数时是 `unknown`，有读数时一律交给 `healthClass`。
@@ -104,6 +188,8 @@ export function ServerOverview() {
     refetchInterval: 15_000,
     enabled: Boolean(selectedServerId) && shell && server?.status === "connected" && !busy,
   });
+  const snapshot = snapshotQuery.data?.serverId === server?.id ? snapshotQuery.data : undefined;
+  const snapshotServerMismatch = Boolean(snapshotQuery.data && !snapshot);
 
   if (!shell) return <WelcomePanel />;
 
@@ -111,7 +197,7 @@ export function ServerOverview() {
     return <EmptyPanel icon="servers" title="选择一台服务器" body="从左侧列表选择目标环境，查看实时健康状态与运行中的容器。" />;
   }
 
-  if (server.status !== "connected") {
+  if (server.status !== "connected" && !snapshot) {
     return <div className="empty-state page-empty connection-empty">
       <span className="empty-icon"><Icon name="connect" size="xxl" /></span>
       <EnvBadge environment={server.metadata.environment} serverName={server.name} />
@@ -127,12 +213,12 @@ export function ServerOverview() {
     return <LoadingPanel title="正在连接并采集" hint="SSH · 7 个采集器 · 预计几秒完成" />;
   }
 
-  if (!snapshotQuery.data) {
+  if (!snapshot) {
     return (
       <ErrorPanel
         showIcon
         title="无法读取服务器状态"
-        message={errorMessage(snapshotQuery.error)}
+        message={snapshotServerMismatch ? "收到的快照属于另一台服务器，已拒绝显示。请重试采集。" : errorMessage(snapshotQuery.error)}
         onRetry={() => void snapshotQuery.refetch()}
         retryLabel="重试采集"
       />
@@ -140,8 +226,16 @@ export function ServerOverview() {
   }
 
   return <>
-    {snapshotQuery.isError ? <p className="settings-notice" role="alert">最近一次刷新失败，以下保留上次采集结果。{snapshotQuery.error.message}</p> : null}
-    <OverviewContent server={server} snapshot={snapshotQuery.data} refreshing={snapshotQuery.isFetching} onRefresh={() => void snapshotQuery.refetch()} />
+    {snapshotQuery.isError ? <p className="settings-notice" role="alert">最近一次刷新失败，当前仍显示上次成功采集的快照。{errorMessage(snapshotQuery.error)}</p> : null}
+    <OverviewContent
+      server={server}
+      snapshot={snapshot}
+      refreshing={snapshotQuery.isFetching}
+      onRefresh={() => void snapshotQuery.refetch()}
+      onConnect={() => action.mutate({ type: "connect", serverId: server.id })}
+      connecting={busy || server.status === "connecting"}
+      connectionError={action.isError ? action.error.message : undefined}
+    />
   </>;
 }
 
@@ -150,25 +244,73 @@ function OverviewContent({
   snapshot,
   refreshing,
   onRefresh,
+  onConnect,
+  connecting,
+  connectionError,
 }: {
   server: Server;
   snapshot: ServerSnapshot;
   refreshing: boolean;
   onRefresh: () => void;
+  onConnect: () => void;
+  connecting: boolean;
+  connectionError?: string;
 }) {
+  const [now, setNow] = useState(() => Date.now());
+  const setServerPage = useWorkspaceStore((state) => state.setServerPage);
+  const setPrimary = useWorkspaceStore((state) => state.setPrimary);
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 10_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   const health = snapshot.health;
-  const cpu = snapshot.cpu;
-  const memory = snapshot.memory;
-  const disks = snapshot.disks ?? [];
-  const docker = snapshot.docker;
+  const osSample = sampleFor(snapshot, "os");
+  const os = osSample?.ok === false ? undefined : snapshot.os;
+  const cpuSample = sampleFor(snapshot, "cpu");
+  const memorySample = sampleFor(snapshot, "memory");
+  const diskSample = sampleFor(snapshot, "disk");
+  const cpu = cpuSample?.ok === false ? undefined : snapshot.cpu;
+  const memory = memorySample?.ok === false ? undefined : snapshot.memory;
+  const disks = diskSample?.ok === false ? [] : snapshot.disks ?? [];
+  const uptime = sampleFor(snapshot, "uptime")?.ok === false ? undefined : snapshot.uptimeSeconds;
+  const docker = sampleFor(snapshot, "docker")?.ok === false ? undefined : snapshot.docker;
   const diskUsage = disks.length > 0 ? Math.max(...disks.map((disk) => disk.usagePercent)) : undefined;
+  const collection = collectorSummary(snapshot);
+  const age = formatAge(snapshot.collectedAt, now);
+  const connected = server.status === "connected";
+  const freshnessKind = connected ? age.kind : "offline";
+  const freshnessLabel = connected
+    ? age.kind === "stale" ? "快照已过期" : age.kind === "unknown" ? "新鲜度未知" : "采集较新"
+    : "缓存快照";
+  const connectionLabel = server.status === "connected"
+    ? "SSH 已连接"
+    : server.status === "connecting"
+      ? "正在连接"
+      : server.status === "error"
+        ? "连接异常"
+        : "未连接";
 
   return (
     <div className="overview-page">
+      {!connected ? (
+        <section className={"overview-connection-notice overview-connection-" + server.status} role={server.status === "error" ? "alert" : "status"}>
+          <div>
+            <strong>{server.status === "connecting" ? "正在连接服务器" : server.status === "error" ? "服务器连接异常" : "服务器当前未连接"}</strong>
+            <p>{server.status === "connecting" ? "下方保留最近一次快照；连接完成后才会重新采集。" : "下方数据来自缓存快照，不能代表主机当前状态。重新连接后会开始采集。"}</p>
+            {connectionError ? <p className="overview-connection-error">{connectionError}</p> : null}
+          </div>
+          <button type="button" className="button-secondary" onClick={onConnect} disabled={connecting}>
+            <Icon name="connect" size="sm" />{connecting ? "正在连接…" : "重新连接"}
+          </button>
+        </section>
+      ) : null}
+
       <section className="overview-hero">
         <div>
           <div className="identity-line">
             <EnvBadge environment={server.metadata.environment} serverName={server.name} region={server.metadata.region} />
+            <span className={"overview-connection-label overview-connection-label-" + server.status}>{connectionLabel}</span>
             <span className={`health-label health-label-${health}`}>
               <span className={`health-dot ${HEALTH_DOT[health]}`} />
               {HEALTH_LABEL[health]}
@@ -182,25 +324,73 @@ function OverviewContent({
               h1 独占，下面的小节这才好落在 h2 上。 */}
           <p className="overview-title">{server.name}</p>
           <p className="overview-subtitle">
-            {snapshot.os ? `${snapshot.os.distribution} ${snapshot.os.version}` : "操作系统未知"} · {server.connection.username}@{server.connection.host}
+            {os ? os.distribution + " " + os.version : "操作系统未知"} · {server.connection.username}@{server.connection.host}
           </p>
         </div>
-        <button type="button" className="button-secondary refresh-button" onClick={onRefresh} disabled={refreshing} title="刷新服务器状态" aria-label="刷新服务器状态">
-          <Icon name="refresh" size="sm" /> {refreshing ? "采集中" : "刷新状态"}
+        <button type="button" className="button-secondary refresh-button" onClick={onRefresh} disabled={!connected || refreshing} title={connected ? "刷新服务器状态" : "重新连接后才能刷新"} aria-label={connected ? "刷新服务器状态" : "重新连接后才能刷新"}>
+          <Icon name="refresh" size="sm" /> {refreshing ? "采集中" : connected ? "刷新状态" : "连接后刷新"}
         </button>
       </section>
+
+      <section className={"overview-observation overview-observation-" + collection.kind} aria-label="状态数据来源和采集情况">
+        <div className="overview-observation-heading">
+          <span className={"overview-freshness overview-freshness-" + freshnessKind}><span aria-hidden="true" />{freshnessLabel}</span>
+          <strong>{collection.label}</strong>
+          <span>来源：SSH 远端采集器</span>
+        </div>
+        <p>
+          最后采集：<time dateTime={snapshot.collectedAt} title={"本地时间 " + formatTimestamp(snapshot.collectedAt)}>{formatTimestamp(snapshot.collectedAt)}（{age.label}）</time>
+          {!connected ? " · 当前显示缓存数据" : " · 每 15 秒自动采集"}
+        </p>
+        <p className="overview-collector-summary">{collection.description}</p>
+        {refreshing ? <p className="overview-refreshing" role="status">正在采集新快照；页面仍显示最近一次已完成的结果。</p> : null}
+        <details className="overview-collector-details">
+          <summary>查看采集器明细</summary>
+          <ul>
+            {COLLECTORS.map((collector) => {
+              const sample = collection.sampleMap.get(collector.id);
+              const state = sample ? sample.ok ? "success" : "failure" : "unknown";
+              const stateLabel = sample ? sample.ok ? "成功" : "失败" : "未报告";
+              return (
+                <li key={collector.id}>
+                  <span>{collector.label}</span>
+                  <span className={"overview-collector-state overview-collector-state-" + state}>{stateLabel}</span>
+                  {sample ? <time dateTime={sample.collectedAt}>{formatTimestamp(sample.collectedAt)}</time> : <span>本次快照无状态记录</span>}
+                </li>
+              );
+            })}
+            {(snapshot.collectors ?? [])
+              .filter((sample) => !COLLECTORS.some((collector) => collector.id === normalizeCollectorId(sample.collectorId)))
+              .map((sample, index) => (
+                <li key={sample.collectorId + "-" + index}>
+                  <span>{sample.collectorId}</span>
+                  <span className={"overview-collector-state overview-collector-state-" + (sample.ok ? "success" : "failure")}>{sample.ok ? "成功" : "失败"}</span>
+                  <time dateTime={sample.collectedAt}>{formatTimestamp(sample.collectedAt)}</time>
+                </li>
+              ))}
+          </ul>
+        </details>
+      </section>
+
+      <nav className="overview-shortcuts" aria-label="服务器运维入口">
+        <button type="button" className="button-primary" onClick={() => setPrimary("tasks")} aria-label={`让 AI 在 ${server.name} 上完成目标`}><Icon name="agent" size="sm" />让 AI 处理目标</button>
+        <button type="button" className="button-secondary" onClick={() => setServerPage("services")}><Icon name="services" size="sm" />查看服务</button>
+        <button type="button" className="button-secondary" onClick={() => setServerPage("logs")}><Icon name="logs" size="sm" />查看日志</button>
+        <button type="button" className="button-secondary" onClick={() => setServerPage("files")}><Icon name="file" size="sm" />浏览文件</button>
+        <button type="button" className="button-secondary" onClick={() => setServerPage("activity")}><Icon name="activity" size="sm" />活动记录</button>
+      </nav>
 
       <dl className="server-facts">
         <div><dt>区域</dt><dd>{server.metadata.region ?? "未设置"}</dd></div>
         <div><dt>计算</dt><dd>{cpu?.cores === undefined ? "—" : `${cpu.cores} 核 CPU`}</dd></div>
         <div><dt>内存</dt><dd>{formatBytes(memory?.totalBytes)}</dd></div>
-        <div><dt>运行时间</dt><dd>{formatUptime(snapshot.uptimeSeconds)}</dd></div>
+        <div><dt>运行时间</dt><dd>{formatUptime(uptime)}</dd></div>
       </dl>
 
       <section className="section-block">
         <div className="section-heading">
           <div><p className="eyebrow">资源概况</p><h2>系统健康</h2></div>
-          <span className="section-note">每 15 秒更新</span>
+          <span className="section-note">{connected ? "每 15 秒自动采集" : "连接后恢复自动采集"}</span>
         </div>
         <div className="metric-grid">
           <MetricCard label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} hint={`${cpu?.cores ?? "—"} 核处理器`} />
@@ -227,11 +417,48 @@ function OverviewContent({
             </ul>
           )}
         </div>
-        <div className="section-block section-block-flex">
-          <div className="section-heading"><div><p className="eyebrow">审计流</p><h2>最近动态</h2></div><span className="section-note">暂无数据</span></div>
-          <div className="activity-empty"><Icon name="activity" size="lg" /><p>活动历史接入后，这里会显示部署、登录与服务变更。</p></div>
-        </div>
+        <RecentServerActivity serverId={server.id} />
       </section>
+    </div>
+  );
+}
+
+function RecentServerActivity({ serverId }: { serverId: string }) {
+  const queryClient = useQueryClient();
+  const setServerPage = useWorkspaceStore((state) => state.setServerPage);
+  const activities = useQuery({
+    queryKey: ["activities", serverId],
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.activityList, { serverId, limit: 50 })).activities,
+  });
+
+  useEffect(() => {
+    const subscription = subscribeDesktop("activity.created", (activity) => {
+      if (activity.serverId !== serverId) return;
+      queryClient.setQueryData<Activity[]>(["activities", serverId], (current) => {
+        if (!current) return current;
+        return [activity, ...current.filter((item) => item.id !== activity.id)].slice(0, 50);
+      });
+    });
+    return subscription.stop;
+  }, [queryClient, serverId]);
+
+  const rows = activities.data?.slice(0, 3) ?? [];
+  return (
+    <div className="section-block section-block-flex">
+      <div className="section-heading">
+        <div><p className="eyebrow">审计流</p><h2>最近动态</h2></div>
+        <button type="button" className="button-secondary" onClick={() => setServerPage("activity")}>全部活动</button>
+      </div>
+      {activities.isLoading ? <p className="muted-copy" role="status">正在读取服务器动态…</p> : null}
+      {activities.isError ? <p className="error-copy" role="alert">无法读取服务器动态：{errorMessage(activities.error)}</p> : null}
+      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="activity-empty"><Icon name="activity" size="lg" /><p>暂无动态；连接、配置和 Agent 操作会记录在这里。</p></div> : null}
+      {rows.length ? <ul className="overview-activity-list">{rows.map((activity) => (
+        <li key={activity.id}>
+          <strong>{activity.title}</strong>
+          {activity.description || activity.reason ? <span>{activity.description ?? activity.reason}</span> : null}
+          <time dateTime={activity.createdAt}>{formatTimestamp(activity.createdAt)}</time>
+        </li>
+      ))}</ul> : null}
     </div>
   );
 }

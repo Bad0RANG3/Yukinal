@@ -11,6 +11,95 @@ export interface RemoteFileEntry {
 export interface RemoteFileListResponse { path: string; entries: RemoteFileEntry[]; }
 export interface RemoteFileReadResponse { path: string; content: string; truncated: boolean; }
 
+export type FilePreviewKind = "text" | "image" | "binary";
+
+/** Preview bytes are separately capped; this is never used for full file transfer. */
+export interface FilePreviewResponse {
+  name: string;
+  size: number;
+  kind: FilePreviewKind;
+  truncated: boolean;
+  text: string | null;
+  dataUrl: string | null;
+}
+
+/** Opaque host-owned staging ticket for starting an OS-native remote file drag. */
+export interface PreparedRemoteDrag {
+  dragId: string;
+  name: string;
+  size: number;
+}
+
+/** Opaque, short-lived reference to a path selected or dropped in the native shell. */
+export interface LocalPathHandle {
+  handleId: string;
+  name: string;
+  kind: "file" | "directory";
+  size?: number;
+}
+
+export interface LocalFileDropEvent {
+  handles: LocalPathHandle[];
+  rejectedCount: number;
+}
+
+export const TRANSFER_DIRECTIONS = ["upload", "download"] as const;
+export type TransferDirection = (typeof TRANSFER_DIRECTIONS)[number];
+
+export const TRANSFER_STATUSES = [
+  "queued", "running", "waitingConflict", "completed", "partial", "failed", "cancelled", "interrupted",
+] as const;
+export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
+
+export const TRANSFER_CONFLICT_ACTIONS = ["skip", "overwrite", "rename"] as const;
+export type TransferConflictActionName = (typeof TRANSFER_CONFLICT_ACTIONS)[number];
+
+export interface TransferConflictRequest {
+  itemIndex: number;
+  sourceName: string;
+  targetName: string;
+  existingSize: number;
+  incomingSize: number;
+  existingModifiedEpochSeconds: number | null;
+  allowedActions: TransferConflictActionName[];
+}
+
+export type TransferConflictAction =
+  | { action: "skip" }
+  | { action: "overwrite" }
+  | { action: "rename"; name: string };
+
+export interface TransferItemFailure {
+  itemIndex?: number;
+  item: string;
+  kind: "invalidInput" | "localIo" | "remoteIo" | "verification" | "unsupported";
+  message: string;
+  stagingResidue?: string;
+}
+
+/** Progress contains metadata only; file bytes and absolute local paths stay in Rust. */
+export interface TransferSnapshot {
+  transferId: string;
+  serverId: string;
+  direction: TransferDirection;
+  status: TransferStatus;
+  startedAtEpochMs: number;
+  updatedAtEpochMs: number;
+  totalFiles: number | null;
+  completedFiles: number;
+  skippedFiles: number;
+  totalBytes: number | null;
+  transferredBytes: number;
+  currentItem: string | null;
+  currentItemBytes: number;
+  currentItemTotalBytes: number | null;
+  activeConflict: TransferConflictRequest | null;
+  verifiedFiles: number;
+  unverifiedFiles: number;
+  failures: TransferItemFailure[];
+  stagingResidue: string[];
+}
+
 /** Agent-facing remote file tools. The host enforces the same bounds again. */
 export interface FilesystemReadInput {
   path: string;

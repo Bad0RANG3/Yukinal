@@ -33,6 +33,19 @@ pub struct TaskProgressUpdate<'a> {
     pub completed_at: Option<&'a str>,
 }
 
+/// One host-authorized command's budget request. Keeping the target, grant and
+/// reservation amounts together prevents callers from swapping scalar arguments.
+#[derive(Debug, Clone)]
+pub struct TaskCommandBudgetReservation<'a> {
+    pub task_id: &'a str,
+    pub grant_id: &'a str,
+    pub server_id: &'a str,
+    pub environment: crate::models::Environment,
+    pub duration_ms: u64,
+    pub output_bytes: u64,
+    pub updated_at: &'a str,
+}
+
 /// Host-validated filters for bounded evidence search. The query remains scoped to
 /// one task; `scope` is an exact target match, never a way to widen that task.
 #[derive(Debug, Clone, Default)]

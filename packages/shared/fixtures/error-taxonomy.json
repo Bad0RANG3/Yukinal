@@ -12,6 +12,7 @@
     { "code": "invalid_input", "category": "input", "retryable": false },
     { "code": "plan_deviation", "category": "plan", "retryable": false },
     { "code": "command_failed", "category": "remote_failure", "retryable": false },
+    { "code": "outcome_unknown", "category": "outcome_unknown", "retryable": false },
     { "code": "output_truncated", "category": "output", "retryable": false },
     { "code": "evidence_missing", "category": "evidence", "retryable": false },
     { "code": "stale_target", "category": "stale", "retryable": false },

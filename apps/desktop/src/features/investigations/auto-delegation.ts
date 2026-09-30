@@ -25,6 +25,34 @@ export function canDelegateAgentAuto(input: {
 }
 
 /**
+ * The primary-form opt-in is one task-level decision: it enables both the
+ * bounded host-issued server.exec grant and eligible automatic tool approval.
+ * A stale opt-in becomes ask/no-grant as soon as its scope or run mode changes.
+ */
+export function resolveTaskDelegation(input: {
+  requested: boolean;
+  scope: Pick<ToolTarget, "host" | "environment"> | undefined;
+  mode: AgentRunMode;
+  automationLevel: TaskAutomationLevel;
+}): {
+  eligible: boolean;
+  permissionMode: AgentPermissionMode;
+  grantTaskCommands: boolean;
+} {
+  const eligible = Boolean(input.scope && canDelegateAgentAuto({
+    scope: input.scope,
+    mode: input.mode,
+    automationLevel: input.automationLevel,
+  }));
+  const granted = input.requested && eligible;
+  return {
+    eligible,
+    permissionMode: granted ? "auto" : "ask",
+    grantTaskCommands: granted,
+  };
+}
+
+/**
  * A stale UI selection must never widen the request after the target or mode
  * changes. The host/engine remain the final authority, but normalising here
  * keeps the persisted task honest and the explanation visible to the user.

@@ -45,6 +45,8 @@ export interface ContextBundle {
   layers: ContextLayerName[];
   server?: ServerContext;
   workspace?: Pick<Workspace, "id" | "name" | "defaultEnvironment">;
+  /** Host-read task and plan context; never supplied by the model. */
+  investigation?: InvestigationContext;
   /** Text handed to the model as the system/context block (shape). */
   rendered: string;
   /** Truncation must be visible, not silent. */
@@ -104,6 +106,7 @@ export class ContextEngine {
       layers,
       server: serverContext,
       workspace: workspaceContext,
+      investigation,
       rendered: truncated ? rendered.slice(0, this.#maxRenderedChars) : rendered,
       truncated,
     };
@@ -174,6 +177,12 @@ function render(parts: {
       }
     }
     lines.push(`Evidence collected: ${evidence.length}; findings: ${findings.length}; artifacts: ${artifacts.length}`);
+    const commandGrant = task.guardrails.commandGrant;
+    if (commandGrant) {
+      lines.push(
+        `User-delegated server.exec scope: ${commandGrant.serverId} (${commandGrant.environment}), remaining calls=${Math.max(0, commandGrant.maxCalls - commandGrant.callsUsed)}, duration=${Math.max(0, commandGrant.maxTotalDurationMs - commandGrant.totalDurationMs)}ms, output=${Math.max(0, commandGrant.maxTotalOutputBytes - commandGrant.totalOutputBytes)} bytes, expires=${commandGrant.expiresAt}; known critical patterns still require direct approval.`,
+      );
+    }
     const freshnessCounts = evidence.reduce<Record<string, number>>((counts, item) => {
       const status = item.freshness?.status ?? "unknown";
       counts[status] = (counts[status] ?? 0) + 1;

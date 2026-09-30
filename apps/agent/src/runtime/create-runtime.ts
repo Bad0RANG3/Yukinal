@@ -43,6 +43,7 @@ import { packageInstallTool } from "../tools/builtin/package-install.js";
 import { serverInfoTool } from "../tools/builtin/server-info.js";
 import { serverLogsTool } from "../tools/builtin/server-logs.js";
 import { serverServicesTool } from "../tools/builtin/server-services.js";
+import { serverExecTool } from "../tools/builtin/server-exec.js";
 import { systemEchoTool } from "../tools/builtin/system-echo.js";
 import { systemdInspectTool } from "../tools/builtin/systemd-inspect.js";
 import { systemdRestartTool } from "../tools/builtin/systemd-restart.js";
@@ -76,6 +77,7 @@ export function createRuntime(
     declarations.push(registry.register(serverInfoTool(options.hostToolClient)));
     declarations.push(registry.register(serverLogsTool(options.hostToolClient)));
     declarations.push(registry.register(serverServicesTool(options.hostToolClient)));
+    declarations.push(registry.register(serverExecTool(options.hostToolClient)));
     declarations.push(registry.register(dockerPsTool(options.hostToolClient)));
     declarations.push(registry.register(dockerLogsTool(options.hostToolClient)));
     declarations.push(registry.register(dockerInspectTool(options.hostToolClient)));

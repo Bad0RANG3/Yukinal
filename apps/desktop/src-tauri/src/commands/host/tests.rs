@@ -4,12 +4,21 @@
 //! 证据比较）与真实 SQLite fixture 上的证据/工具落库路径，与被测代码放在同一个模块树里。
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use russh::keys::{ssh_key, HashAlg};
+use russh::server::{Auth, RunningServerHandle, Server as _};
+use russh::{Channel, ChannelId};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use yukinal_filesystem::Error as FilesystemError;
+use yukinal_ssh::{
+    Authentication, ConnectionSecrets, KnownHostsPolicy, OutboundProxy, SshBackend, SshConfig,
+};
 
 use super::{
     backup_owner_matches_request, backup_record_id, baseline_artifact_matches_plan,
@@ -19,12 +28,13 @@ use super::{
     host_tool_call_status, input_bindings_match, is_effectful_host_tool, merge_plan_runtime,
     normalize_new_plan_runtime, observation_configuration_matches,
     plan_allows_repeated_observation, plan_binding_matches, plan_definition,
-    prepare_host_tool_call, reset_observation_window, success, task_allows_auto_medium_action,
-    task_guardrail_violation, validate_observation_window, validate_playbook_step,
-    BackupCleanupRequest, FilesystemBackupCleanupInput, FilesystemBackupCleanupItemInput,
-    HostCancellationRegistry, HostToolCallDecision, HostToolExecuteRequest, HostToolTarget,
-    DOCKER_LOGS, FILESYSTEM_BACKUP, FILESYSTEM_BACKUP_CLEANUP, FILESYSTEM_EDIT, FILESYSTEM_RESTORE,
-    FILESYSTEM_WRITE, HOST_TOOL_EXECUTE, SERVER_INFO,
+    prepare_host_tool_call, reset_observation_window, server_exec_input_fingerprint, success,
+    task_allows_auto_medium_action, task_guardrail_violation, validate_observation_window,
+    validate_playbook_step, BackupCleanupRequest, FilesystemBackupCleanupInput,
+    FilesystemBackupCleanupItemInput, HostCancellationRegistry, HostToolCallDecision,
+    HostToolExecuteRequest, HostToolTarget, DOCKER_LOGS, FILESYSTEM_BACKUP,
+    FILESYSTEM_BACKUP_CLEANUP, FILESYSTEM_EDIT, FILESYSTEM_RESTORE, FILESYSTEM_WRITE,
+    HOST_TOOL_EXECUTE, SERVER_INFO,
 };
 use super::{cross_task_cleanup_is_plan_bound, filesystem_backup_retention, retention_candidates};
 use crate::state::AppState;
@@ -35,13 +45,618 @@ use yukinal_database::models::{
     InvestigationRunMode, InvestigationRunStatus, InvestigationTarget, InvestigationTargetHost,
     InvestigationTask, InvestigationTaskGuardrails, ObservationWindowStatus, PlanApprovalSource,
     PlanApprovalStatus, PlanIdempotency, PlanStatus, PlanStepKind, PlanStepStatus, RiskLevel,
-    TaskArtifactKind, TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskPhase, TaskStatus,
+    Server, ServerCapabilities, ServerConnection, ServerMetadata, ServerStatus, TaskArtifactKind,
+    TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskCommandGrant, TaskPhase, TaskStatus,
 };
-use yukinal_database::repositories::{FilesystemBackupRecord, FilesystemBackupStatus};
+use yukinal_database::repositories::{
+    FilesystemBackupRecord, FilesystemBackupStatus, HostToolCallClaim, HostToolCallStatus,
+};
+
+const E2E_SSH_USER: &str = "yukinal-host-e2e";
+const E2E_SSH_PASSWORD: &str = "loopback-only";
+
+#[derive(Clone, Default)]
+struct ExecServerObservations {
+    commands: Arc<Mutex<Vec<String>>>,
+}
+
+struct LoopbackExecServer {
+    address: SocketAddr,
+    fingerprint: String,
+    observed: ExecServerObservations,
+    shutdown: RunningServerHandle,
+}
+
+impl Drop for LoopbackExecServer {
+    fn drop(&mut self) {
+        self.shutdown
+            .shutdown("desktop host server.exec test complete".into());
+    }
+}
+
+#[derive(Clone)]
+struct LoopbackExecServerHandler {
+    observed: ExecServerObservations,
+}
+
+struct LoopbackExecChannelHandler {
+    observed: ExecServerObservations,
+}
+
+impl russh::server::Server for LoopbackExecServerHandler {
+    type Handler = LoopbackExecChannelHandler;
+
+    fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> Self::Handler {
+        LoopbackExecChannelHandler {
+            observed: self.observed.clone(),
+        }
+    }
+}
+
+impl russh::server::Handler for LoopbackExecChannelHandler {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        Ok(if user == E2E_SSH_USER && password == E2E_SSH_PASSWORD {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<russh::server::Msg>,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data).into_owned();
+        self.observed
+            .commands
+            .lock()
+            .expect("loopback command observations")
+            .push(command.clone());
+        session.channel_success(channel)?;
+        let handle = session.handle();
+        tokio::spawn(async move {
+            if command.contains("drop-after-request") {
+                // The request reached the server, but there is no exit status to
+                // tell the host whether its side effect completed.
+                let _ = handle.close(channel).await;
+                return;
+            }
+            let stdout = if command.contains("server-exec-e2e") {
+                b"verified:server-exec-e2e\n".to_vec()
+            } else {
+                b"loopback-command-received\n".to_vec()
+            };
+            if handle.data(channel, stdout).await.is_err() {
+                return;
+            }
+            let _ = handle.exit_status_request(channel, 0).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+        });
+        Ok(())
+    }
+}
+
+async fn start_loopback_exec_server() -> LoopbackExecServer {
+    let host_key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
+        .expect("generate ephemeral loopback host key");
+    let fingerprint = host_key
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
+    let config = Arc::new(russh::server::Config {
+        keys: vec![host_key],
+        auth_rejection_time: Duration::from_millis(10),
+        inactivity_timeout: None,
+        ..Default::default()
+    });
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback SSH server");
+    let address = listener.local_addr().expect("loopback SSH address");
+    let observed = ExecServerObservations::default();
+    let server_observed = observed.clone();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut server = LoopbackExecServerHandler {
+            observed: server_observed,
+        };
+        let running = server.run_on_socket(config, &listener);
+        let _ = ready_tx.send(running.handle());
+        let _ = running.await;
+    });
+    let shutdown = ready_rx.await.expect("loopback SSH server startup");
+    LoopbackExecServer {
+        address,
+        fingerprint,
+        observed,
+        shutdown,
+    }
+}
+
+fn task_for_server_exec(
+    task_id: &str,
+    server_id: &str,
+    run_id: &str,
+    grant: Option<TaskCommandGrant>,
+) -> InvestigationTask {
+    let mut task = lifecycle_task();
+    task.id = task_id.into();
+    task.server_id = Some(server_id.into());
+    task.scope = InvestigationTarget {
+        host: InvestigationTargetHost::Remote,
+        server_id: Some(server_id.into()),
+        workspace_id: None,
+        environment: Environment::Staging,
+    };
+    task.created_by = "user".into();
+    task.active_run_id = Some(run_id.into());
+    task.guardrails = InvestigationTaskGuardrails {
+        command_grant: grant,
+        ..Default::default()
+    };
+    task
+}
+
+fn seed_server_exec_plan(state: &AppState, task: &InvestigationTask, plan_id: &str, step_id: &str) {
+    state
+        .database
+        .investigations()
+        .create_task(task)
+        .expect("create durable server.exec task");
+    let run_id = task.active_run_id.as_deref().expect("active run id");
+    state
+        .database
+        .investigations()
+        .create_run(&InvestigationRun {
+            id: run_id.into(),
+            task_id: task.id.clone(),
+            session_id: None,
+            message_id: Some(format!("message_{run_id}")),
+            trace_id: Some(format!("trace_{run_id}")),
+            attempt: 1,
+            phase: TaskPhase::Execution,
+            status: InvestigationRunStatus::Running,
+            started_at: "2026-09-30T00:00:00Z".into(),
+            updated_at: "2026-09-30T00:00:00Z".into(),
+            ended_at: None,
+            checkpoint: None,
+            failure: None,
+        })
+        .expect("create durable server.exec run");
+    state
+        .database
+        .investigations()
+        .save_plan(&InvestigationPlan {
+            id: plan_id.into(),
+            task_id: task.id.clone(),
+            revision: 1,
+            status: PlanStatus::Active,
+            created_at: "2026-09-30T00:00:00Z".into(),
+            updated_at: "2026-09-30T00:00:00Z".into(),
+            current_step_id: Some(step_id.into()),
+            approval: Some(InvestigationPlanApproval {
+                status: PlanApprovalStatus::Approved,
+                source: Some(PlanApprovalSource::User),
+                option_id: None,
+                approved_at: Some("2026-09-30T00:00:00Z".into()),
+                note: Some("approved for this local integration fixture".into()),
+            }),
+            observation_window: None,
+            steps: vec![InvestigationPlanStep {
+                id: step_id.into(),
+                ordinal: 0,
+                kind: PlanStepKind::Action,
+                title: "Run a bounded server command".into(),
+                purpose: "Prove the host SSH command path".into(),
+                allowed_tools: vec!["server.exec".into()],
+                input_bindings: None,
+                idempotency: Some(PlanIdempotency::Unsafe),
+                risk_level: Some(RiskLevel::High),
+                requires_baseline: Some(false),
+                preconditions: None,
+                verification_criteria: Some(vec!["the fixture result is returned".into()]),
+                preview: Some("run exactly one fixture command".into()),
+                rollback: None,
+                target: None,
+                evidence_ids: vec![],
+                success_criteria: vec!["the command result is bounded and recorded".into()],
+                requires_approval: true,
+                max_attempts: 1,
+                attempts: 0,
+                status: PlanStepStatus::Running,
+                started_at: Some("2026-09-30T00:00:00Z".into()),
+                ended_at: None,
+                last_deviation: None,
+            }],
+        })
+        .expect("save approved action plan");
+}
+
+fn server_exec_rpc_request(
+    task_id: Option<&str>,
+    run_id: &str,
+    trace_id: &str,
+    call_id: &str,
+    plan_id: Option<&str>,
+    plan_step_id: Option<&str>,
+    command: &str,
+) -> serde_json::Value {
+    let mut request = json!({
+        "callId": call_id,
+        "runId": run_id,
+        "traceId": trace_id,
+        "toolName": "server.exec",
+        "input": {
+            "command": command,
+            "purpose": "verify the desktop host executes a bounded command once",
+            "timeoutMs": 5_000,
+            "maxOutputBytes": 4_096
+        },
+        "target": {
+            "host": "remote",
+            "serverId": "srv_host_e2e",
+            "environment": "staging"
+        },
+        "evidenceIds": []
+    });
+    if let Some(task_id) = task_id {
+        request["taskId"] = json!(task_id);
+    }
+    if let Some(plan_id) = plan_id {
+        request["planId"] = json!(plan_id);
+    }
+    if let Some(plan_step_id) = plan_step_id {
+        request["planStepId"] = json!(plan_step_id);
+    }
+    request
+}
+
+#[tokio::test]
+async fn desktop_host_rpc_executes_server_command_once_and_persists_unknown_outcome() {
+    let directory = tempfile::tempdir().expect("isolated host data directory");
+    let state = AppState::bootstrap(directory.path()).expect("bootstrap host state");
+    let ssh_server = start_loopback_exec_server().await;
+    let server_id = "srv_host_e2e";
+    let now = yukinal_time::now_epoch_seconds();
+    let expires_at = yukinal_time::iso8601_utc(now + 3_600);
+    state
+        .database
+        .servers()
+        .insert(&Server {
+            id: server_id.into(),
+            name: "loopback server.exec fixture".into(),
+            connection: ServerConnection {
+                host: "127.0.0.1".into(),
+                port: ssh_server.address.port(),
+                username: E2E_SSH_USER.into(),
+                identity_id: None,
+                host_certificate_authority: None,
+            },
+            group_id: None,
+            capabilities: ServerCapabilities::default(),
+            status: ServerStatus::Disconnected,
+            metadata: ServerMetadata {
+                environment: Environment::Staging,
+                region: None,
+                hostname: Some("localhost".into()),
+                os: Some("test fixture".into()),
+                tags: None,
+                workspace_ids: None,
+            },
+            created_at: "2026-09-30T00:00:00Z".into(),
+            updated_at: "2026-09-30T00:00:00Z".into(),
+        })
+        .expect("register loopback SSH server");
+    state
+        .ssh
+        .trust_host(
+            "127.0.0.1",
+            ssh_server.address.port(),
+            &ssh_server.fingerprint,
+        )
+        .expect("pin ephemeral SSH server key");
+    let session = state
+        .ssh
+        .connect(
+            SshConfig {
+                server_id: server_id.into(),
+                host: "127.0.0.1".into(),
+                port: ssh_server.address.port(),
+                username: E2E_SSH_USER.into(),
+                authentication: Authentication::Password {
+                    credential_ref: "keychain://test-only".into(),
+                },
+                host_certificate_authority: None,
+                known_hosts_policy: KnownHostsPolicy::RequireMatch,
+                outbound_proxy: OutboundProxy::default(),
+                keepalive_interval_secs: 0,
+            },
+            ConnectionSecrets {
+                password: Some(E2E_SSH_PASSWORD.into()),
+                ..ConnectionSecrets::empty()
+            },
+        )
+        .await
+        .expect("authenticate over the real SSH protocol");
+    state.terminals.cache_session(server_id, session);
+
+    let denied_task = task_for_server_exec(
+        "task_host_e2e_denied",
+        server_id,
+        "run_host_e2e_denied",
+        None,
+    );
+    seed_server_exec_plan(
+        &state,
+        &denied_task,
+        "plan_host_e2e_denied",
+        "step_host_e2e_denied",
+    );
+    let denied = handle_sidecar_request_with_cancel(
+        &state,
+        HOST_TOOL_EXECUTE,
+        server_exec_rpc_request(
+            Some(&denied_task.id),
+            "run_host_e2e_denied",
+            "trace_host_e2e_denied",
+            "call_host_e2e_denied",
+            Some("plan_host_e2e_denied"),
+            Some("step_host_e2e_denied"),
+            "printf 'must-not-run\\n'",
+        ),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("denied command returns structured host response");
+    assert_eq!(denied["status"], "failed");
+    assert_eq!(denied["error"]["code"], "denied_by_policy");
+    assert!(
+        ssh_server
+            .observed
+            .commands
+            .lock()
+            .expect("command observations")
+            .is_empty(),
+        "missing user command delegation must stop before SSH"
+    );
+
+    let successful_grant = TaskCommandGrant {
+        grant_id: "cmdgrant_host_e2e_success".into(),
+        task_id: "task_host_e2e_success".into(),
+        server_id: server_id.into(),
+        environment: Environment::Staging,
+        granted_by: "user".into(),
+        granted_at: yukinal_time::iso8601_utc(now),
+        expires_at: expires_at.clone(),
+        max_calls: 2,
+        calls_used: 0,
+        max_total_duration_ms: 20_000,
+        total_duration_ms: 0,
+        max_total_output_bytes: 8_192,
+        total_output_bytes: 0,
+    };
+    let successful_task = task_for_server_exec(
+        "task_host_e2e_success",
+        server_id,
+        "run_host_e2e_success",
+        Some(successful_grant),
+    );
+    seed_server_exec_plan(
+        &state,
+        &successful_task,
+        "plan_host_e2e_success",
+        "step_host_e2e_success",
+    );
+    let successful_request = server_exec_rpc_request(
+        Some(&successful_task.id),
+        "run_host_e2e_success",
+        "trace_host_e2e_success",
+        "call_host_e2e_success",
+        Some("plan_host_e2e_success"),
+        Some("step_host_e2e_success"),
+        "printf 'server-exec-e2e\\n'",
+    );
+    let successful = handle_sidecar_request_with_cancel(
+        &state,
+        HOST_TOOL_EXECUTE,
+        successful_request.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("authorized command returns host response");
+    assert_eq!(successful["status"], "success");
+    assert_eq!(successful["output"]["state"], "completed");
+    assert_eq!(successful["output"]["exitCode"], 0);
+    assert_eq!(successful["output"]["stdout"], "verified:server-exec-e2e\n");
+    let captured = ssh_server
+        .observed
+        .commands
+        .lock()
+        .expect("command observations")
+        .clone();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].starts_with("/bin/sh -c "));
+    assert!(captured[0].contains("server-exec-e2e"));
+    let grant_after_success = state
+        .database
+        .investigations()
+        .get_task(&successful_task.id)
+        .expect("read updated grant")
+        .guardrails
+        .command_grant
+        .expect("persisted command grant");
+    assert_eq!(grant_after_success.calls_used, 1);
+    assert_eq!(grant_after_success.total_duration_ms, 5_000);
+    assert_eq!(grant_after_success.total_output_bytes, 4_096);
+    let replayed = handle_sidecar_request_with_cancel(
+        &state,
+        HOST_TOOL_EXECUTE,
+        successful_request,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("duplicate host RPC has a bounded process-local replay");
+    assert_eq!(replayed, successful);
+    assert_eq!(
+        ssh_server
+            .observed
+            .commands
+            .lock()
+            .expect("command observations")
+            .len(),
+        1,
+        "a duplicate host RPC must not execute the remote command twice"
+    );
+
+    let uncertain_grant = TaskCommandGrant {
+        grant_id: "cmdgrant_host_e2e_unknown".into(),
+        task_id: "task_host_e2e_unknown".into(),
+        server_id: server_id.into(),
+        environment: Environment::Staging,
+        granted_by: "user".into(),
+        granted_at: yukinal_time::iso8601_utc(now),
+        expires_at,
+        max_calls: 2,
+        calls_used: 0,
+        max_total_duration_ms: 20_000,
+        total_duration_ms: 0,
+        max_total_output_bytes: 8_192,
+        total_output_bytes: 0,
+    };
+    let uncertain_task = task_for_server_exec(
+        "task_host_e2e_unknown",
+        server_id,
+        "run_host_e2e_unknown",
+        Some(uncertain_grant),
+    );
+    seed_server_exec_plan(
+        &state,
+        &uncertain_task,
+        "plan_host_e2e_unknown",
+        "step_host_e2e_unknown",
+    );
+    let uncertain_request = server_exec_rpc_request(
+        Some(&uncertain_task.id),
+        "run_host_e2e_unknown",
+        "trace_host_e2e_unknown",
+        "call_host_e2e_unknown",
+        Some("plan_host_e2e_unknown"),
+        Some("step_host_e2e_unknown"),
+        "drop-after-request",
+    );
+    let uncertain = handle_sidecar_request_with_cancel(
+        &state,
+        HOST_TOOL_EXECUTE,
+        uncertain_request.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("lost remote exit status returns structured response");
+    assert_eq!(uncertain["status"], "failed");
+    assert_eq!(uncertain["error"]["code"], "execution_failed");
+    assert_eq!(uncertain["error"]["detail"]["state"], "result_unknown");
+    let call_claim = state
+        .database
+        .host_tool_calls()
+        .claim(yukinal_database::repositories::HostToolCallInput {
+            trace_id: "trace_host_e2e_unknown",
+            call_id: "call_host_e2e_unknown",
+            task_id: Some(&uncertain_task.id),
+            plan_id: Some("plan_host_e2e_unknown"),
+            plan_step_id: Some("step_host_e2e_unknown"),
+            tool_name: "server.exec",
+            request_fingerprint: "not-used-for-existing-action",
+            action_fingerprint: None,
+            started_at: "2026-09-30T00:00:00Z",
+        })
+        .expect("read durable command call status");
+    assert!(matches!(
+        call_claim,
+        HostToolCallClaim::Existing {
+            status: HostToolCallStatus::Uncertain,
+            ..
+        }
+    ));
+    let unknown_grant_after = state
+        .database
+        .investigations()
+        .get_task(&uncertain_task.id)
+        .expect("read consumed unknown grant")
+        .guardrails
+        .command_grant
+        .expect("unknown command retains its retired but inspectable grant budget");
+    assert_eq!(unknown_grant_after.calls_used, 1);
+    let mut replay_with_new_call_id = uncertain_request;
+    replay_with_new_call_id["callId"] = json!("call_host_e2e_unknown_retry");
+    let replay_blocked = handle_sidecar_request_with_cancel(
+        &state,
+        HOST_TOOL_EXECUTE,
+        replay_with_new_call_id,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("uncertain logical action is blocked before a second SSH request");
+    assert_eq!(replay_blocked["status"], "failed");
+    assert_eq!(replay_blocked["error"]["code"], "plan_deviation");
+    assert_eq!(replay_blocked["error"]["detail"]["code"], "duplicate_call");
+    assert_eq!(
+        ssh_server
+            .observed
+            .commands
+            .lock()
+            .expect("command observations")
+            .len(),
+        2,
+        "a lost exit status must never cause an automatic logical replay"
+    );
+
+    state
+        .ssh
+        .close(
+            &state
+                .terminals
+                .cached_session(server_id)
+                .expect("cached session"),
+        )
+        .await
+        .expect("close loopback SSH session");
+    drop(state);
+}
+
+#[test]
+fn server_exec_input_fingerprint_matches_agent_canonical_json() {
+    let input = json!({
+        "command": "printf '%s' hello",
+        "env": { "LC_ALL": "C", "LANG": "C.UTF-8" },
+        "maxOutputBytes": 4_096,
+        "purpose": "verify fingerprint",
+        "timeoutMs": 1_000,
+    });
+    assert_eq!(
+        server_exec_input_fingerprint(&input).expect("canonical fingerprint"),
+        "6a3e1291bf14b90df757000da0a3c14545d82fe1563bd795f40499c2d0e52fda"
+    );
+}
 
 fn guarded_write_request(content: &str) -> HostToolExecuteRequest {
     HostToolExecuteRequest {
         call_id: "call_guarded_write".into(),
+        run_id: Some("run_guarded_write".into()),
         trace_id: "trace_guarded_write".into(),
         tool_name: FILESYSTEM_WRITE.into(),
         input: json!({ "path": "/etc/app.env", "content": content }),
@@ -55,6 +670,7 @@ fn guarded_write_request(content: &str) -> HostToolExecuteRequest {
         plan_id: Some("plan_fixture".into()),
         plan_step_id: Some("step_fixture".into()),
         evidence_ids: Some(vec!["ev_fixture".into()]),
+        approval_id: None,
     }
 }
 
@@ -277,6 +893,7 @@ fn task_guardrails_block_forbidden_tools_paths_and_outside_windows() {
             expires_at: None,
             forbidden_tools: vec![FILESYSTEM_WRITE.into()],
             forbidden_path_prefixes: vec!["/srv/app/private".into()],
+            command_grant: None,
         },
         mode: InvestigationRunMode::Goal,
         permission_mode: InvestigationPermissionMode::Ask,
@@ -619,6 +1236,7 @@ async fn planned_read_replay_is_refused_before_a_second_remote_execution() {
     let state = AppState::bootstrap(&directory).expect("bootstrap host state");
     let request = HostToolExecuteRequest {
         call_id: "call_server_info_1".into(),
+        run_id: Some("run_server_info_1".into()),
         trace_id: "trace_server_info".into(),
         tool_name: SERVER_INFO.into(),
         input: json!({}),
@@ -632,6 +1250,7 @@ async fn planned_read_replay_is_refused_before_a_second_remote_execution() {
         plan_id: Some("plan_read_fence".into()),
         plan_step_id: Some("step_read_fence".into()),
         evidence_ids: Some(vec![]),
+        approval_id: None,
     };
 
     let token = match prepare_host_tool_call(&state, &request)
@@ -1430,6 +2049,7 @@ fn lifecycle_task() -> InvestigationTask {
 fn lifecycle_request(tool_name: &str) -> HostToolExecuteRequest {
     HostToolExecuteRequest {
         call_id: "call_lifecycle".into(),
+        run_id: Some("run_lifecycle".into()),
         trace_id: "trace_lifecycle".into(),
         tool_name: tool_name.into(),
         input: json!({}),
@@ -1443,6 +2063,7 @@ fn lifecycle_request(tool_name: &str) -> HostToolExecuteRequest {
         plan_id: None,
         plan_step_id: None,
         evidence_ids: Some(vec![]),
+        approval_id: None,
     }
 }
 

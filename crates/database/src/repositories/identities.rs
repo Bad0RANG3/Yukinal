@@ -11,8 +11,7 @@ use crate::{Database, DatabaseError, Result};
 /// mapper all read the same column order, so adding a column cannot leave one of
 /// them behind (which is exactly how `passphrase_ref` would have gone missing from
 /// `list` while `get` returned it).
-const IDENTITY_COLUMNS: &str =
-    "id, label, method, credential_ref, passphrase_ref, private_key_path, certificate_path, created_at";
+const IDENTITY_COLUMNS: &str = "id, label, method, credential_ref, passphrase_ref, private_key_path, certificate_path, created_at";
 
 pub struct IdentitiesRepository<'a> {
     db: &'a Database,

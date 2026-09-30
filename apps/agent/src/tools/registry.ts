@@ -202,11 +202,13 @@ export class ToolRegistry {
           const running = tool.execute(parsed.data, {
             callId: request.callId,
             traceId: request.traceId,
+            runId: request.runId,
             target: request.target,
             taskId: request.taskId,
             planId: request.planId,
             planStepId: request.planStepId,
             evidenceIds: request.evidenceIds,
+            ...(ticket.kind === "user_approved" ? { approvalId: ticket.approvalId } : {}),
             permissionMode: options.permissionMode,
             mode: options.mode,
             signal: controller.signal,
@@ -447,7 +449,7 @@ function failure(
     startedAt,
     endedAt: new Date(endedAtMs).toISOString(),
     durationMs: endedAtMs - Date.parse(startedAt),
-    outputSummary: error.message,
+    outputSummary: error.detail === undefined ? error.message : summarize(error.detail),
   };
 }
 

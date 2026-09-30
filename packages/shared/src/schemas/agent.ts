@@ -14,13 +14,30 @@ const AgentRunStateSchema = z.enum(["idle", "thinking", "running_tool", "waiting
 const ApprovalRequestSchema = z.strictObject({
   approvalId: z.string().trim().min(1).max(256),
   runId: RunIdSchema,
+  traceId: RunIdSchema.optional(),
+  callId: RunIdSchema.optional(),
+  inputFingerprint: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   toolName: z.string().trim().min(1).max(256),
   input: z.unknown(),
   reason: z.string().max(4_000),
   factsSummary: z.array(z.string().max(1_000)).max(32),
   target: ToolTargetSchema,
   expiresAt: TimestampSchema,
+  planId: RunIdSchema.optional(),
+  planStepId: RunIdSchema.optional(),
+  evidenceIds: z.array(RunIdSchema).max(256).optional(),
   sessionGrantable: z.boolean().optional(),
+}).superRefine((approval, context) => {
+  if (approval.toolName !== "server.exec") return;
+  for (const field of ["traceId", "callId", "inputFingerprint", "planId", "planStepId"] as const) {
+    if (approval[field] === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: [field],
+        message: `server.exec approval requires ${field} for host ticket binding`,
+      });
+    }
+  }
 });
 
 const TokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -132,6 +149,7 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     planStepId: z.string().trim().min(1).max(256).optional(),
     evidenceIds: z.array(z.string().trim().min(1).max(256)).max(256).optional(),
     errorCode: z.enum(TOOL_ERROR_CODES).optional(),
+    executionState: z.enum(["timed_out", "cancelled", "result_unknown"]).optional(),
     status: z.enum(TOOL_RESULT_STATUSES),
     outputSummary: z.string().max(4_000),
     error: z.string().max(4_000).optional(),

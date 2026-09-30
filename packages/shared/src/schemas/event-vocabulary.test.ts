@@ -44,6 +44,8 @@ const SUBSCRIBABLE = [
   "mcp.oauth_device_code",
   "activity.created",
   "investigation.schedule_notification",
+  "file.local_dropped",
+  "file.transfer_updated",
 ] as const;
 
 /**
@@ -200,6 +202,28 @@ test("the waiting_approval payload makes session grantability explicit and typed
     false,
     "a truthy string must not be accepted as a boolean",
   );
+
+  const serverExecApproval = {
+    ...base,
+    approval: {
+      ...base.approval,
+      toolName: "server.exec",
+      traceId: "trace_1",
+      callId: "call_1",
+      inputFingerprint: "a".repeat(64),
+      planId: "plan_1",
+      planStepId: "step_1",
+    },
+  };
+  assert.equal(schema.safeParse(serverExecApproval).success, true);
+  assert.equal(
+    schema.safeParse({
+      ...serverExecApproval,
+      approval: { ...serverExecApproval.approval, inputFingerprint: undefined },
+    }).success,
+    false,
+    "server.exec approval cards need the host binding fields",
+  );
 });
 
 test("a tool result reports a finished status, not a lifecycle status", () => {
@@ -229,6 +253,16 @@ test("a tool result reports a finished status, not a lifecycle status", () => {
   for (const status of TOOL_RESULT_STATUSES) {
     assert.equal(schema.safeParse({ ...base, status }).success, true, `a real result may be ${status}`);
   }
+  assert.equal(
+    schema.safeParse({ ...base, status: "failed", executionState: "result_unknown" }).success,
+    true,
+    "server.exec may report a bounded unknown outcome state",
+  );
+  assert.equal(
+    schema.safeParse({ ...base, status: "failed", executionState: "completed" }).success,
+    false,
+    "executionState is limited to known interruption states",
+  );
   for (const status of ["pending", "running", "waiting_approval"]) {
     assert.equal(
       schema.safeParse({ ...base, status }).success,

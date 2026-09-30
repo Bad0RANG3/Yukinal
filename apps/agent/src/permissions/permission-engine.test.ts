@@ -8,6 +8,7 @@ import {
   type CommandRiskFact,
   type ToolDeclaration,
   type ToolTarget,
+  type TaskCommandGrant,
 } from "@yukinal/shared";
 
 import { PermissionEngine, grantKey } from "./permission-engine.js";
@@ -101,6 +102,119 @@ test("critical actions always require a direct user approval", () => {
   });
   assert.equal(delegated.outcome, "ask");
   assert.equal(delegated.approvedBy, undefined);
+});
+
+test("a task command grant covers only bounded high-risk server.exec calls in its task and target", () => {
+  const engine = new PermissionEngine({ now: () => "2026-09-30T00:00:00.000Z" });
+  const grant: TaskCommandGrant = {
+    grantId: "cmdgrant_1",
+    taskId: "task_1",
+    serverId: "srv_01abc",
+    environment: "staging",
+    grantedBy: "user",
+    grantedAt: "2026-09-29T00:00:00.000Z",
+    expiresAt: "2026-10-01T00:00:00.000Z",
+    maxCalls: 1,
+    callsUsed: 0,
+    maxTotalDurationMs: 60_000,
+    totalDurationMs: 0,
+    maxTotalOutputBytes: 16_384,
+    totalOutputBytes: 0,
+  };
+  const request = {
+    declaration: declaration({ name: "server.exec", risk: "high" }),
+    target: target("staging"),
+    input: {
+      command: "systemctl status api",
+      purpose: "inspect the service state",
+      timeoutMs: 10_000,
+      maxOutputBytes: 4_096,
+    },
+    permissionMode: "auto" as const,
+    mode: "goal" as const,
+    taskId: "task_1",
+    taskCommandGrant: grant,
+  };
+
+  const covered = engine.evaluate(request);
+  assert.equal(covered.outcome, "auto");
+  assert.equal(covered.approvedBy, "user");
+
+  const overCallBudget = engine.evaluate(request);
+  assert.equal(overCallBudget.outcome, "ask", "the in-process reservation prevents optimistic overuse");
+  assert.equal(engine.evaluate({ ...request, target: target("staging", "srv_other") }).outcome, "ask");
+  assert.equal(engine.evaluate({ ...request, taskId: "task_other" }).outcome, "ask");
+});
+
+test("server.exec does not accept a run-wide session grant in place of a host task grant", () => {
+  const engine = new PermissionEngine();
+  const request = {
+    declaration: declaration({ name: "server.exec", risk: "high" }),
+    target: target("staging"),
+    input: {
+      command: "systemctl restart api",
+      purpose: "restart after an approved plan",
+      timeoutMs: 5_000,
+      maxOutputBytes: 4_096,
+    },
+    mode: "goal" as const,
+    permissionMode: "auto" as const,
+  };
+  const first = engine.evaluate(request);
+  assert.equal(first.outcome, "ask");
+  engine.grantSession(first);
+  assert.equal(engine.evaluate(request).outcome, "ask");
+});
+
+test("task command grants never cover critical commands, production, expiry, or exhausted byte/time budgets", () => {
+  const engine = new PermissionEngine({ now: () => "2026-09-30T00:00:00.000Z" });
+  const grant: TaskCommandGrant = {
+    grantId: "cmdgrant_2",
+    taskId: "task_2",
+    serverId: "srv_01abc",
+    environment: "staging",
+    grantedBy: "user",
+    grantedAt: "2026-09-29T00:00:00.000Z",
+    expiresAt: "2026-10-01T00:00:00.000Z",
+    maxCalls: 12,
+    callsUsed: 0,
+    maxTotalDurationMs: 10_000,
+    totalDurationMs: 0,
+    maxTotalOutputBytes: 1_024,
+    totalOutputBytes: 0,
+  };
+  const request = {
+    declaration: declaration({ name: "server.exec", risk: "high" }),
+    target: target("staging"),
+    input: {
+      command: "systemctl status api",
+      purpose: "inspect the service state",
+      timeoutMs: 1_000,
+      maxOutputBytes: 512,
+    },
+    permissionMode: "auto" as const,
+    mode: "goal" as const,
+    taskId: "task_2",
+    taskCommandGrant: grant,
+  };
+
+  assert.equal(engine.evaluate({
+    ...request,
+    input: { ...request.input, command: "rm -rf /tmp/old-cache" },
+  }).outcome, "ask");
+  assert.equal(engine.evaluate({ ...request, target: target("production") }).outcome, "ask");
+  assert.equal(engine.evaluate({
+    ...request,
+    taskCommandGrant: { ...grant, expiresAt: "2026-09-29T23:59:59.000Z" },
+  }).outcome, "ask");
+  assert.equal(engine.evaluate({
+    ...request,
+    input: { ...request.input, timeoutMs: 10_001 },
+  }).outcome, "ask");
+  assert.equal(engine.evaluate({
+    ...request,
+    input: { ...request.input, maxOutputBytes: 1_025 },
+  }).outcome, "ask");
 });
 
 test("ask mode pauses before writes while keeping reads automatic", () => {

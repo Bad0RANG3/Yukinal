@@ -502,6 +502,191 @@ button:disabled {
   overflow: auto;
 }
 
+.overview-connection-notice,
+.overview-observation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  background: var(--surface-2);
+  padding: 12px 14px;
+}
+
+.overview-connection-notice {
+  margin-bottom: 18px;
+  border-color: var(--warn-line);
+  background: var(--warn-surface);
+}
+
+.overview-connection-notice strong {
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.overview-connection-notice p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.overview-connection-notice .overview-connection-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.overview-connection-label,
+.overview-freshness {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 4px 8px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.overview-connection-label-connected,
+.overview-collector-state-success,
+.overview-freshness-fresh {
+  color: var(--success);
+}
+
+.overview-connection-label-error,
+.overview-collector-state-failure,
+.overview-freshness-stale {
+  color: var(--danger);
+}
+
+.overview-connection-label-connecting,
+.overview-freshness-unknown {
+  color: var(--warning);
+}
+
+.overview-freshness-offline {
+  color: var(--faint);
+}
+
+.overview-freshness > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.overview-observation {
+  align-items: flex-start;
+  margin-top: 18px;
+}
+
+.overview-observation-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.overview-observation-heading strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.overview-observation-partial .overview-observation-heading strong,
+.overview-observation-incomplete .overview-observation-heading strong {
+  color: var(--warning);
+}
+
+.overview-observation-failed .overview-observation-heading strong {
+  color: var(--danger);
+}
+
+.overview-observation-complete .overview-observation-heading strong {
+  color: var(--success);
+}
+
+.overview-observation-unknown .overview-observation-heading strong {
+  color: var(--faint);
+}
+
+.overview-observation > p {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.overview-observation .overview-collector-summary,
+.overview-observation .overview-refreshing {
+  width: 100%;
+}
+
+.overview-refreshing {
+  color: var(--accent) !important;
+}
+
+.overview-collector-details {
+  width: 100%;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.overview-collector-details summary {
+  width: fit-content;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.overview-collector-details ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 7px 14px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overview-collector-details li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.overview-collector-details li > span:first-child {
+  color: var(--text);
+}
+
+.overview-collector-details time,
+.overview-collector-details li > span:last-child {
+  color: var(--faint);
+}
+
+.overview-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.overview-shortcuts .button-secondary,
+.overview-shortcuts .button-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
 
 .overview-hero {
   display: flex;

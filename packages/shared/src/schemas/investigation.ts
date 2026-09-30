@@ -35,6 +35,7 @@ import {
   TASK_STATUSES,
 } from "../types/investigation.js";
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, RISK_LEVELS } from "../types/risk.js";
+import { TaskCommandGrantSchema } from "./server-exec.js";
 import { ToolTargetSchema } from "./server.js";
 
 const OPAQUE_ID = z.string().trim().min(1).max(256);
@@ -220,6 +221,7 @@ export const InvestigationTaskSchema = z.strictObject({
       forbiddenPathPrefixes: z
         .array(z.string().trim().min(1).max(INVESTIGATION_LIMITS.maxGuardrailPathChars))
         .max(INVESTIGATION_LIMITS.maxGuardrailPathPrefixes),
+      commandGrant: TaskCommandGrantSchema.optional(),
     })
     .default({ forbiddenTools: [], forbiddenPathPrefixes: [] }),
   mode: z.enum(AGENT_RUN_MODES),
@@ -434,6 +436,7 @@ export const InvestigationTaskCreateInputSchema = z.strictObject({
   permissionMode: z.enum(AGENT_PERMISSION_MODES),
   automationLevel: z.enum(TASK_AUTOMATION_LEVELS),
   budget: TaskBudgetSchema.optional(),
+  grantTaskCommands: z.boolean().optional(),
 });
 
 export const InvestigationTaskListInputSchema = z.strictObject({

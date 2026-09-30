@@ -28,13 +28,15 @@ pub use yukinal_database::models::{
     McpHttpAuthHeaderConfig, McpServerConfig, PermissionMode, PlanApprovalSource,
     PlanApprovalStatus, PlanStepKind, PlanStepStatus, RiskLevel, Server, ServerCapabilities,
     ServerConnection, ServerMetadata, ServerSnapshot, ServerStatus, TaskArtifactKind,
-    TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
-    ToolExecutionRecord, ToolExecutionStatus, Workspace, WorkspaceRepository,
+    TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskCommandGrant, TaskFailureCode,
+    TaskPhase, TaskStatus, ToolExecutionRecord, ToolExecutionStatus, Workspace,
+    WorkspaceRepository,
 };
 pub use yukinal_database::{
     repositories::{
         EvidenceSearchQuery, HostToolCallClaim, HostToolCallInput, HostToolCallStatus,
-        InvestigationRetentionKind, InvestigationRetentionRequestItem, TaskProgressUpdate,
+        InvestigationRetentionKind, InvestigationRetentionRequestItem,
+        TaskCommandBudgetReservation, TaskProgressUpdate,
     },
     Database, DatabaseError,
 };

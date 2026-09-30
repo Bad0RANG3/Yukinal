@@ -18,7 +18,7 @@ pub(super) fn handle_plan_record(state: &AppState, params: Value) -> Result<Valu
                 "invalid_input",
                 format!("invalid investigation plan: {error}"),
                 false,
-            ))
+            ));
         }
     };
     let task = match state.database.investigations().get_task(&plan.task_id) {
@@ -28,7 +28,7 @@ pub(super) fn handle_plan_record(state: &AppState, params: Value) -> Result<Valu
                 "not_found",
                 "investigation task was not found",
                 false,
-            ))
+            ));
         }
         Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
     };
@@ -177,14 +177,14 @@ pub(super) fn handle_plan_record(state: &AppState, params: Value) -> Result<Valu
                             step.id
                         ),
                         false,
-                    ))
+                    ));
                 }
                 Err(DatabaseError::NotFound) => {
                     return Ok(record_failure(
                         "evidence_missing",
                         format!("evidence `{evidence_id}` was not found",),
                         true,
-                    ))
+                    ));
                 }
                 Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
             }
@@ -395,7 +395,7 @@ pub(super) fn handle_plan_step_result(state: &AppState, params: Value) -> Result
                 "not_found",
                 "investigation plan was not found",
                 false,
-            ))
+            ));
         }
         Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
     };
@@ -413,7 +413,7 @@ pub(super) fn handle_plan_step_result(state: &AppState, params: Value) -> Result
                 "not_found",
                 "investigation task was not found",
                 false,
-            ))
+            ));
         }
         Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
     };
@@ -687,7 +687,7 @@ pub(super) fn handle_plan_step_result(state: &AppState, params: Value) -> Result
     match state.database.investigations().save_plan(&plan) {
         Ok(()) => {}
         Err(DatabaseError::Validation(message)) => {
-            return Ok(record_failure("invalid_input", message, false))
+            return Ok(record_failure("invalid_input", message, false));
         }
         Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
     }
@@ -818,7 +818,7 @@ pub(super) fn handle_artifact_record(state: &AppState, params: Value) -> Result<
                 "invalid_input",
                 format!("invalid investigation artifact: {error}"),
                 false,
-            ))
+            ));
         }
     };
     let mut artifact = request.artifact;
@@ -834,7 +834,7 @@ pub(super) fn handle_artifact_record(state: &AppState, params: Value) -> Result<
                 "not_found",
                 "investigation task was not found",
                 false,
-            ))
+            ));
         }
         Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
     };
@@ -909,14 +909,14 @@ pub(super) fn handle_artifact_record(state: &AppState, params: Value) -> Result<
                     "denied_by_policy",
                     "baseline plan does not belong to the current investigation task",
                     false,
-                ))
+                ));
             }
             Err(DatabaseError::NotFound) => {
                 return Ok(record_failure(
                     "not_found",
                     "baseline plan was not found",
                     false,
-                ))
+                ));
             }
             Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
         };
@@ -955,14 +955,14 @@ pub(super) fn handle_artifact_record(state: &AppState, params: Value) -> Result<
                     "denied_by_policy",
                     "artifact run does not belong to the current investigation task",
                     false,
-                ))
+                ));
             }
             Err(DatabaseError::NotFound) => {
                 return Ok(record_failure(
                     "not_found",
                     "artifact run was not found",
                     false,
-                ))
+                ));
             }
             Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
         }
@@ -975,14 +975,14 @@ pub(super) fn handle_artifact_record(state: &AppState, params: Value) -> Result<
                     "denied_by_policy",
                     "artifact references evidence from another task",
                     false,
-                ))
+                ));
             }
             Err(DatabaseError::NotFound) => {
                 return Ok(record_failure(
                     "evidence_missing",
                     format!("evidence `{evidence_id}` was not found"),
                     true,
-                ))
+                ));
             }
             Err(error) => return Ok(record_failure("internal", error.to_string(), false)),
         }
@@ -1081,7 +1081,7 @@ fn validate_backup_rotation_step(
                 return Some(format!(
                     "backup rotation step `{}` has invalid items binding: {error}",
                     step.id
-                ))
+                ));
             }
         };
     if items.is_empty() || items.len() > 32 {
@@ -1388,7 +1388,7 @@ pub(super) fn input_path_values(input: &Value) -> Vec<&str> {
     let Some(object) = input.as_object() else {
         return Vec::new();
     };
-    let mut paths = ["path", "backupPath"]
+    let mut paths = ["path", "backupPath", "workdir"]
         .into_iter()
         .filter_map(|key| object.get(key).and_then(Value::as_str))
         .collect::<Vec<_>>();
@@ -1455,15 +1455,17 @@ pub(super) fn check_plan_for_tool(
         .map_err(|error| error.to_string())?
     {
         Some(plan) => plan,
-        None => return Ok(Err(plan_deviation(
-            PlanDeviationCode::MissingPlan,
-            PlanDeviationAction::Replan,
-            "durable task has no active plan; create investigation.plan before using a task tool",
-            tool_name,
-            at,
-            None,
-            None,
-        ))),
+        None => {
+            return Ok(Err(plan_deviation(
+                PlanDeviationCode::MissingPlan,
+                PlanDeviationAction::Replan,
+                "durable task has no active plan; create investigation.plan before using a task tool",
+                tool_name,
+                at,
+                None,
+                None,
+            )));
+        }
     };
     let Some(current_step_id) = plan.current_step_id.as_deref() else {
         return Ok(Err(plan_deviation(
@@ -1487,6 +1489,17 @@ pub(super) fn check_plan_for_tool(
             Some(current_step_id.to_string()),
         )));
     };
+    if tool_name == SERVER_EXEC && step.kind != PlanStepKind::Action {
+        return Ok(Err(plan_deviation(
+            PlanDeviationCode::ToolNotAllowed,
+            PlanDeviationAction::Deny,
+            "server.exec is available only in an action plan step",
+            tool_name,
+            at,
+            Some(plan.id),
+            Some(step.id.clone()),
+        )));
+    }
     if !plan_binding_matches(
         &plan,
         step,
@@ -1562,7 +1575,7 @@ pub(super) fn check_plan_for_tool(
                     at,
                     Some(plan.id),
                     Some(step.id.clone()),
-                )))
+                )));
             }
             TaskAutomationLevel::Propose
                 if plan.approval.as_ref().map(|approval| approval.status)
@@ -1576,7 +1589,7 @@ pub(super) fn check_plan_for_tool(
                     at,
                     Some(plan.id),
                     Some(step.id.clone()),
-                )))
+                )));
             }
             TaskAutomationLevel::Propose | TaskAutomationLevel::Execute => {}
         }
@@ -1652,7 +1665,7 @@ pub(super) fn check_plan_for_tool(
                     at,
                     Some(plan.id),
                     Some(step.id.clone()),
-                )))
+                )));
             }
             Err(error) => return Err(error.to_string()),
         }

@@ -26,6 +26,7 @@ use tauri::{AppHandle, Manager};
 use yukinal_core::sidecar::iso8601_now;
 use yukinal_database::models::{
     Environment, InvestigationFailure, InvestigationPermissionMode, InvestigationRunMode,
+    InvestigationRunStatus, InvestigationStepKind, InvestigationStepStatus,
     InvestigationTargetHost, InvestigationTask, TaskAutomationLevel, TaskFailureCode, TaskPhase,
     TaskStatus,
 };
@@ -39,12 +40,16 @@ use crate::state::AppState;
 const SIDECAR_WAIT_ATTEMPTS: u32 = 60;
 const SIDECAR_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 const RECOVERY_SCAN_LIMIT: usize = 64;
+const INTERRUPTED_SCAN_LIMIT: usize = 512;
 
 /// Start the one-shot startup recovery. Safe to call once from `setup`.
 pub(crate) fn start_auto_recovery(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         let shutdown = state.shutdown.clone();
+        if let Err(error) = reconcile_interrupted_tasks(&state) {
+            eprintln!("[yukinal] interrupted task reconciliation failed: {error}");
+        }
         if !wait_for_sidecar(&state, &shutdown).await {
             return;
         }
@@ -55,6 +60,127 @@ pub(crate) fn start_auto_recovery(app: AppHandle) {
             eprintln!("[yukinal] startup task recovery failed: {error}");
         }
     });
+}
+
+/// Seal every run that was still attached to a task when the desktop process
+/// exited. An action step without a terminal result is outcome-unknown and must
+/// never enter delegated automatic retry.
+fn reconcile_interrupted_tasks(state: &AppState) -> Result<(), String> {
+    let tasks = state
+        .database
+        .investigations()
+        .list_tasks(None, INTERRUPTED_SCAN_LIMIT)
+        .map_err(|error| error.to_string())?;
+    for task in tasks.into_iter().filter(|task| {
+        task.active_run_id.is_some()
+            && !matches!(
+                task.status,
+                TaskStatus::Completed | TaskStatus::Expired | TaskStatus::Stopped
+            )
+    }) {
+        let run_id = task.active_run_id.as_deref().unwrap_or_default();
+        let run = match state.database.investigations().get_run(run_id) {
+            Ok(run) => Some(run),
+            Err(yukinal_database::DatabaseError::NotFound) => None,
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect active run {run_id} for task {}: {error}",
+                    task.id
+                ));
+            }
+        };
+        let steps = state
+            .database
+            .investigations()
+            .list_active_steps_for_run(&task.id, run_id)
+            .map_err(|error| error.to_string())?;
+        let unfinished_action_ids: Vec<String> = steps
+            .iter()
+            .filter(|step| {
+                step.kind == InvestigationStepKind::Action
+                    && matches!(
+                        step.status,
+                        InvestigationStepStatus::Running | InvestigationStepStatus::WaitingUser
+                    )
+            })
+            .map(|step| step.id.clone())
+            .collect();
+        let had_unknown_action = state
+            .database
+            .investigations()
+            .find_failure_step_for_run(&task.id, run_id, TaskFailureCode::OutcomeUnknown)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|step| step.kind == InvestigationStepKind::Action);
+        let waiting_for_approval = run
+            .as_ref()
+            .is_some_and(|run| run.status == InvestigationRunStatus::WaitingUser);
+        // A tool call is persisted before approval and execution. Once an
+        // action step is still open at process exit, the host cannot tell
+        // whether it was awaiting approval or had already reached the remote
+        // server. Prefer inspection over any retry in both cases.
+        let may_have_changed_target =
+            run.is_none() || had_unknown_action || !unfinished_action_ids.is_empty();
+        let now = iso8601_now();
+        let failure = if may_have_changed_target {
+            InvestigationFailure {
+                code: TaskFailureCode::OutcomeUnknown,
+                message: "应用退出时有行动步骤没有最终结果；目标状态可能已经改变。先核对现场，不要直接重试。".into(),
+                retryable: false,
+                attempt: run.as_ref().map(|run| run.attempt).unwrap_or(1),
+                at: now.clone(),
+                detail: Some(serde_json::json!({
+                    "requiresFreshBaseline": true,
+                    "uncertainStepIds": unfinished_action_ids,
+                    "runId": run_id,
+                })),
+                options: Some(crate::commands::failure_options(TaskFailureCode::OutcomeUnknown)),
+            }
+        } else if waiting_for_approval {
+            InvestigationFailure {
+                code: TaskFailureCode::ApprovalRequired,
+                message: "应用退出时任务正在等待批准；旧审批已失效，请检查计划后重新批准。".into(),
+                retryable: false,
+                attempt: run.as_ref().map(|run| run.attempt).unwrap_or(1),
+                at: now.clone(),
+                detail: None,
+                options: Some(crate::commands::failure_options(
+                    TaskFailureCode::ApprovalRequired,
+                )),
+            }
+        } else if let Some(failure) = run.as_ref().and_then(|run| run.failure.clone()) {
+            failure
+        } else {
+            let code = match run.as_ref().map(|run| run.status) {
+                Some(InvestigationRunStatus::Cancelled) => TaskFailureCode::Cancelled,
+                Some(InvestigationRunStatus::Completed | InvestigationRunStatus::Failed) => {
+                    TaskFailureCode::Unknown
+                }
+                _ => TaskFailureCode::Transport,
+            };
+            InvestigationFailure {
+                code,
+                message: "上一轮 Agent 任务未能保存完整终态，当前运行已关闭；请检查记录后继续。"
+                    .into(),
+                retryable: code.retryable(),
+                attempt: run.as_ref().map(|run| run.attempt).unwrap_or(1),
+                at: now.clone(),
+                detail: None,
+                options: Some(crate::commands::failure_options(code)),
+            }
+        };
+
+        state
+            .database
+            .investigations()
+            .recover_task(&task.id, &now, &failure)
+            .map_err(|error| format!("failed to seal interrupted task {}: {error}", task.id))?;
+        state
+            .database
+            .investigations()
+            .update_task_status(&task.id, TaskStatus::Failed, &now, Some(&now))
+            .map_err(|error| format!("failed to expose interrupted task {}: {error}", task.id))?;
+    }
+    Ok(())
 }
 
 async fn wait_for_sidecar(
@@ -205,12 +331,14 @@ fn fail_recovered_start(state: &AppState, task: &InvestigationTask, error: &str)
 
 #[cfg(test)]
 mod tests {
+    use super::reconcile_interrupted_tasks;
     use super::should_auto_recover;
     use crate::state::AppState;
     use yukinal_database::models::{
         Environment, InvestigationFailure, InvestigationPermissionMode, InvestigationRun,
-        InvestigationRunMode, InvestigationRunStatus, InvestigationTarget, InvestigationTargetHost,
-        InvestigationTask, InvestigationTaskGuardrails, TaskAutomationLevel, TaskBudget,
+        InvestigationRunMode, InvestigationRunStatus, InvestigationStep, InvestigationStepKind,
+        InvestigationStepStatus, InvestigationTarget, InvestigationTargetHost, InvestigationTask,
+        InvestigationTaskGuardrails, TaskAutomationLevel, TaskBudget, TaskCommandGrant,
         TaskFailureCode, TaskPhase, TaskStatus,
     };
 
@@ -305,6 +433,120 @@ mod tests {
         let mut live = delegated_task();
         live.active_run_id = Some("run_live".into());
         assert!(!should_auto_recover(&live));
+    }
+
+    #[test]
+    fn startup_interruption_with_running_action_is_unknown_and_revokes_the_command_grant() {
+        let directory = std::env::temp_dir().join(format!(
+            "yukinal-unknown-interrupted-task-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let state = AppState::bootstrap(&directory).expect("bootstrap interruption fixture");
+        let mut task = delegated_task();
+        task.status = TaskStatus::Executing;
+        task.phase = TaskPhase::Execution;
+        task.completed_at = None;
+        task.active_run_id = Some("run_interrupted_action".into());
+        task.last_failure = None;
+        task.guardrails.command_grant = Some(TaskCommandGrant {
+            grant_id: "grant_interrupted".into(),
+            task_id: task.id.clone(),
+            server_id: "srv_1".into(),
+            environment: Environment::Staging,
+            granted_by: "user".into(),
+            granted_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            max_calls: 12,
+            calls_used: 1,
+            max_total_duration_ms: 900_000,
+            total_duration_ms: 60_000,
+            max_total_output_bytes: 1_048_576,
+            total_output_bytes: 4_096,
+        });
+        state
+            .database
+            .investigations()
+            .create_task(&task)
+            .expect("create task");
+        state
+            .database
+            .investigations()
+            .create_run(&InvestigationRun {
+                id: "run_interrupted_action".into(),
+                task_id: task.id.clone(),
+                session_id: Some("session_interrupted".into()),
+                message_id: Some("message_interrupted".into()),
+                trace_id: Some("trace_interrupted".into()),
+                attempt: 1,
+                phase: TaskPhase::Execution,
+                status: InvestigationRunStatus::WaitingUser,
+                started_at: "2026-09-30T00:00:00Z".into(),
+                updated_at: "2026-09-30T00:00:00Z".into(),
+                ended_at: None,
+                checkpoint: None,
+                failure: None,
+            })
+            .expect("create active run");
+        state
+            .database
+            .investigations()
+            .upsert_step(&InvestigationStep {
+                id: "step_interrupted_action".into(),
+                task_id: task.id.clone(),
+                run_id: "run_interrupted_action".into(),
+                ordinal: 1,
+                kind: InvestigationStepKind::Action,
+                title: "server.exec".into(),
+                status: InvestigationStepStatus::Running,
+                attempt: 1,
+                tool_name: Some("server.exec".into()),
+                plan_id: Some("plan_interrupted".into()),
+                plan_step_id: Some("step_plan_action".into()),
+                target: Some(task.scope.clone()),
+                input_summary: Some("{\"purpose\":\"restart service\"}".into()),
+                output_summary: None,
+                evidence_ids: Vec::new(),
+                started_at: Some("2026-09-30T00:00:01Z".into()),
+                ended_at: None,
+                failure: None,
+            })
+            .expect("record in-flight action");
+
+        reconcile_interrupted_tasks(&state).expect("reconcile interrupted task");
+        let recovered = state
+            .database
+            .investigations()
+            .get_task(&task.id)
+            .expect("read recovered task");
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert_eq!(
+            recovered.last_failure.as_ref().unwrap().code,
+            TaskFailureCode::OutcomeUnknown
+        );
+        assert!(recovered.guardrails.command_grant.is_none());
+        assert!(!should_auto_recover(&recovered));
+        let run = state
+            .database
+            .investigations()
+            .get_run("run_interrupted_action")
+            .expect("read interrupted run");
+        assert_eq!(run.status, InvestigationRunStatus::Interrupted);
+        assert_eq!(
+            run.failure.as_ref().unwrap().code,
+            TaskFailureCode::OutcomeUnknown
+        );
+        let step = state
+            .database
+            .investigations()
+            .list_steps(&task.id, 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(step.status, InvestigationStepStatus::Failed);
+        assert_eq!(step.failure.unwrap().code, TaskFailureCode::OutcomeUnknown);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The host-owned recovery transaction seals a still-open run and clears the

@@ -131,6 +131,28 @@ const PREVIEW_CHAT_MESSAGES = [
   },
 ];
 
+const PREVIEW_TRANSFER = {
+  transferId: "transfer_preview",
+  serverId: "srv_previewdb",
+  direction: "upload",
+  status: "completed",
+  startedAtEpochMs: Date.parse(AT),
+  updatedAtEpochMs: Date.parse(AT),
+  totalFiles: 1,
+  completedFiles: 1,
+  skippedFiles: 0,
+  totalBytes: 8192,
+  transferredBytes: 8192,
+  currentItem: null,
+  currentItemBytes: 8192,
+  currentItemTotalBytes: 8192,
+  activeConflict: null,
+  verifiedFiles: 1,
+  unverifiedFiles: 0,
+  failures: [],
+  stagingResidue: [],
+};
+
 function paramString(params: unknown, name: string, fallback: string): string {
   if (typeof params !== "object" || params === null) return fallback;
   const value = Reflect.get(params, name);
@@ -257,6 +279,24 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
         content: "services:\n  api:\n    image: ghcr.io/example/api:2026.09\n    restart: unless-stopped\n  postgres:\n    image: postgres:16.4\n",
         truncated: false,
       };
+    case IPC_COMMANDS.remoteFilePreview:
+      return { name: "docker-compose.yml", size: 135, kind: "text", truncated: false, text: "services:\n  api:\n    image: ghcr.io/example/api:2026.09\n    restart: unless-stopped\n", dataUrl: null };
+    case IPC_COMMANDS.filePrepareRemoteDrag:
+      return { dragId: "remote_drag_0000000000000000000000000000000000000000000000000000000000000000", name: "docker-compose.yml", size: 135 };
+    case IPC_COMMANDS.fileDragOutStart:
+      return {};
+    case IPC_COMMANDS.localFilePreview:
+      return { name: "local-config.yml", size: 64, kind: "text", truncated: false, text: "service:\n  port: 8080\n  environment: staging\n", dataUrl: null };
+    case IPC_COMMANDS.localPathPick:
+      return { handles: [{ handleId: "fixture-local-config", name: "local-config.yml", kind: "file", size: 64 }] };
+    case IPC_COMMANDS.fileTransferUpload:
+    case IPC_COMMANDS.fileTransferDownload:
+    case IPC_COMMANDS.fileTransferCancel:
+    case IPC_COMMANDS.fileTransferResolveConflict:
+    case IPC_COMMANDS.fileTransferGet:
+      return { transfer: PREVIEW_TRANSFER };
+    case IPC_COMMANDS.fileTransferList:
+      return { transfers: [] };
     case IPC_COMMANDS.activityList:
       return {
         activities: [

@@ -86,6 +86,14 @@ import {
   InvestigationRetentionPruneResponseSchema,
 } from "./retention.js";
 import { INVESTIGATION_NOTIFICATION_POLICIES } from "../types/schedule.js";
+import {
+  LocalFileDropEventSchema,
+  LocalPathHandleSchema,
+  FilePreviewResponseSchema,
+  PreparedRemoteDragSchema,
+  TransferConflictActionSchema,
+  TransferSnapshotSchema,
+} from "./file.js";
 
 /** "This command takes no params / returns no payload" <> `Record<string, never>`. */
 export const EMPTY_PAYLOAD = z.record(z.string(), z.never());
@@ -282,6 +290,61 @@ export const IPC_SCHEMAS = {
   remote_file_read: {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
     response: z.strictObject({ path: z.string().min(1), content: z.string(), truncated: z.boolean() }),
+  },
+  remote_file_preview: {
+    params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1).max(4_096).regex(/^\//) }),
+    response: FilePreviewResponseSchema,
+  },
+  file_prepare_remote_drag: {
+    params: z.strictObject({
+      serverId: IpcServerIdSchema,
+      path: z.string().min(1).max(4_096).regex(/^\//),
+    }),
+    response: PreparedRemoteDragSchema,
+  },
+  file_drag_out_start: {
+    params: z.strictObject({ dragId: z.string().regex(/^remote_drag_[a-f0-9]{64}$/) }),
+    response: EMPTY_PAYLOAD,
+  },
+  local_file_preview: {
+    params: z.strictObject({ handleId: z.string().trim().min(16).max(128) }),
+    response: FilePreviewResponseSchema,
+  },
+  local_path_pick: {
+    params: z.strictObject({ kind: z.enum(["uploadFiles", "uploadDirectory", "downloadDirectory"]) }),
+    response: z.strictObject({ handles: z.array(LocalPathHandleSchema).max(256) }),
+  },
+  file_transfer_upload: {
+    params: z.strictObject({
+      serverId: IpcServerIdSchema,
+      remoteDirectory: z.string().min(1).max(4_096).regex(/^\//),
+      sourceHandleIds: z.array(z.string().trim().min(16).max(128)).min(1).max(256),
+    }),
+    response: z.strictObject({ transfer: TransferSnapshotSchema }),
+  },
+  file_transfer_download: {
+    params: z.strictObject({
+      serverId: IpcServerIdSchema,
+      remotePaths: z.array(z.string().min(1).max(4_096).regex(/^\//)).min(1).max(256),
+      destinationHandleId: z.string().trim().min(16).max(128),
+    }),
+    response: z.strictObject({ transfer: TransferSnapshotSchema }),
+  },
+  file_transfer_list: {
+    params: z.strictObject({ serverId: IpcServerIdSchema.optional() }),
+    response: z.strictObject({ transfers: z.array(TransferSnapshotSchema).max(256) }),
+  },
+  file_transfer_get: {
+    params: z.strictObject({ transferId: z.string().trim().min(1).max(128) }),
+    response: z.strictObject({ transfer: TransferSnapshotSchema }),
+  },
+  file_transfer_cancel: {
+    params: z.strictObject({ transferId: z.string().trim().min(1).max(128) }),
+    response: z.strictObject({ transfer: TransferSnapshotSchema }),
+  },
+  file_transfer_resolve_conflict: {
+    params: z.strictObject({ transferId: z.string().trim().min(1).max(128), action: TransferConflictActionSchema }),
+    response: z.strictObject({ transfer: TransferSnapshotSchema }),
   },
   activity_list: {
     params: z.strictObject({
@@ -642,6 +705,8 @@ export const EVENT_SCHEMAS = {
     verificationUriComplete: z.string().min(1).max(2_048).optional(),
     expiresAt: z.string().min(1).max(80),
   }),
+  "file.local_dropped": LocalFileDropEventSchema,
+  "file.transfer_updated": z.strictObject({ transfer: TransferSnapshotSchema }),
   "activity.created": ActivitySchema,
   "investigation.schedule_notification": z.strictObject({
     scheduleId: z.string().trim().min(1).max(256),

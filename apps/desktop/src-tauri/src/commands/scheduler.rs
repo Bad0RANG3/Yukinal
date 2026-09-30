@@ -607,6 +607,7 @@ mod tests {
                 expires_at: Some("1970-01-01T00:00:01Z".into()),
                 forbidden_tools: Vec::new(),
                 forbidden_path_prefixes: Vec::new(),
+                command_grant: None,
             },
             mode: InvestigationRunMode::Readonly,
             permission_mode: InvestigationPermissionMode::Ask,

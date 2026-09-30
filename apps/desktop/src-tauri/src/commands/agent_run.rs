@@ -959,10 +959,21 @@ pub async fn agent_approval_respond(
     run_id: String,
     decision: String,
 ) -> Result<ApprovalRespondResponse, String> {
+    if !matches!(
+        decision.as_str(),
+        "approve_once" | "approve_session" | "reject"
+    ) {
+        return Err("approval decision is invalid".into());
+    }
+    let now = yukinal_time::now_epoch_seconds();
+    let response_token =
+        state
+            .server_exec_approvals
+            .begin_response(&approval_id, &run_id, &decision, now)?;
     let response = tokio::select! {
         biased;
         _ = state.shutdown.cancelled() => {
-            return Err("application shutdown cancelled the Agent approval response".into());
+            Err("application shutdown cancelled the Agent approval response".to_string())
         }
         response = state.supervisor.request(
             "agent.approval.respond",
@@ -973,15 +984,45 @@ pub async fn agent_approval_respond(
                 "respondedAt": yukinal_core::sidecar::iso8601_now(),
             }),
             std::time::Duration::from_secs(10),
-        ) => response,
+        ) => response.map_err(|error| error.to_string()),
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(token) = response_token {
+                let _ = state.server_exec_approvals.finish_response(
+                    token,
+                    false,
+                    yukinal_time::now_epoch_seconds(),
+                );
+            }
+            return Err(error);
+        }
+    };
+    let accepted = match response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(accepted) => accepted,
+        None => {
+            if let Some(token) = response_token {
+                let _ = state.server_exec_approvals.finish_response(
+                    token,
+                    false,
+                    yukinal_time::now_epoch_seconds(),
+                );
+            }
+            return Err("agent sidecar returned an invalid approval response".into());
+        }
+    };
+    if let Some(token) = response_token {
+        state.server_exec_approvals.finish_response(
+            token,
+            accepted,
+            yukinal_time::now_epoch_seconds(),
+        )?;
     }
-    .map_err(|error| error.to_string())?;
-    Ok(ApprovalRespondResponse {
-        accepted: response
-            .get("accepted")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| "agent sidecar returned an invalid approval response".to_string())?,
-    })
+    Ok(ApprovalRespondResponse { accepted })
 }
 
 #[cfg(test)]

@@ -53,6 +53,8 @@ export interface ToolTarget {
 
 export interface ToolCallRequest {
   callId: string;
+  /** Run identity lets the Rust host bind one-shot approvals across the RPC boundary. */
+  runId?: string;
   /** The run this call belongs to; every call must be traceable (-R8). */
   traceId: string;
   /** Internal name (`docker.ps`), not the LLM-facing name. */

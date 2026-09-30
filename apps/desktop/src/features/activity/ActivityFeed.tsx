@@ -156,7 +156,7 @@ function ActivityRow({ activity, serverName }: { activity: Activity; serverName?
 }
 
 function ExecutionStep({ execution }: { execution: ToolExecutionRecord }) {
-  const output = execution.error ?? executionOutput(execution);
+  const output = executionOutput(execution);
   const approval = execution.approvedBy ? approvalSourceLabel(execution.approvedBy) : null;
   return (
     <div className="activity-trace-step">
@@ -175,13 +175,20 @@ function ExecutionStep({ execution }: { execution: ToolExecutionRecord }) {
         {execution.durationMs !== undefined ? <><span>·</span><span>{execution.durationMs}ms</span></> : null}
       </div>
       <code className="activity-trace-step-input">输入：<KeywordText text={formatAuditValue(execution.input, 240)} /></code>
-      <code className={`activity-trace-step-output${execution.error ? " activity-trace-step-error" : ""}`}>{execution.error ? "错误" : "结果"}：<KeywordText text={formatAuditValue(output, 400)} /></code>
+      {execution.error ? <code className="activity-trace-step-output activity-trace-step-error">错误：<KeywordText text={formatAuditValue(execution.error, 400)} /></code> : null}
+      <code className="activity-trace-step-output">结果：<KeywordText text={formatAuditValue(output, 400)} /></code>
     </div>
   );
 }
 
 function executionOutput(execution: ToolExecutionRecord): unknown {
-  if (isRecord(execution.output) && typeof execution.output.summary === "string") return execution.output.summary;
+  if (isRecord(execution.output) && typeof execution.output.summary === "string") {
+    const state = execution.output.executionState;
+    if (state === "result_unknown") return `执行结果未知\n${execution.output.summary}`;
+    if (state === "timed_out") return `执行超时，效果可能已发生\n${execution.output.summary}`;
+    if (state === "cancelled") return `执行已取消，效果可能已发生\n${execution.output.summary}`;
+    return execution.output.summary;
+  }
   return execution.output ?? "无摘要";
 }
 

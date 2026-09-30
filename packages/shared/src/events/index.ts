@@ -13,6 +13,7 @@ import type { Activity } from "../types/activity.js";
 import type { AgentStreamEvent } from "../types/chat.js";
 import type { ServerStatus } from "../types/server.js";
 import type { InvestigationNotificationPolicy } from "../types/schedule.js";
+import type { LocalFileDropEvent, TransferSnapshot } from "../types/file.js";
 
 export const EVENT_NAMES = [
   "server.connected",
@@ -36,6 +37,8 @@ export const EVENT_NAMES = [
   "terminal.output_lost",
   "activity.created",
   "investigation.schedule_notification",
+  "file.local_dropped",
+  "file.transfer_updated",
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -155,6 +158,12 @@ export interface InvestigationScheduleNotificationEvent {
   at: string;
 }
 
+export type { LocalFileDropEvent };
+
+export interface FileTransferUpdatedEvent {
+  transfer: TransferSnapshot;
+}
+
 /** UI-facing envelope: every event on the wire is one of these. */
 export type YukinalEvent =
   | { name: "server.connected"; payload: ServerConnectedEvent }
@@ -168,4 +177,6 @@ export type YukinalEvent =
   | { name: "terminal.output_lost"; payload: TerminalOutputLostEvent }
   | { name: "activity.created"; payload: Activity }
   | { name: "investigation.schedule_notification"; payload: InvestigationScheduleNotificationEvent }
+  | { name: "file.local_dropped"; payload: LocalFileDropEvent }
+  | { name: "file.transfer_updated"; payload: FileTransferUpdatedEvent }
   | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

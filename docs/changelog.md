@@ -4,8 +4,11 @@
 
 ## 未发布
 
+- 按“AI 目标执行、运维状态可视化、本机↔远端文件拖放/预览/传输”重订产品目标，增加跨模块施工顺序和 A/O/F/R 逐项验收标准；这是后续实施文档，不代表这些能力已经交付。
+- 未发布施工分支已加入 `server.exec` 受控命令链及开发/预发布任务级预算委托、概览来源与新鲜度显示、流式文件传输内核与任务 UI、本机路径句柄/预览及原生拖入事件。新目标上传接入协商的 `hardlink@openssh.com:1` no-replace 发布，项目回环 SFTP 测试验证目标碰撞不覆盖、缺少扩展时失败关闭，以及发布后的 staging 清理残留记录；覆盖上传仍 fail-closed。真实 OpenSSH、远端拖出到系统文件管理器、崩溃后任务恢复、真实 Provider/MCP/服务器及三平台安装后 GUI 验收未完成。详见[目标架构与施工交接](./architecture-and-build-plan.md)中的工作树快照。
+- 目标任务入口改为直接填写用户目标并显式选择服务器或本机；远程开发/预发布任务可主动勾选一次有限期/预算命令委托，默认逐项询问，切换到生产、未知、本机或非目标执行模式时不能携带该授权。新增桌面 Host RPC→SSH 回环验证和 SFTP `TransferManager` 发布回归；第 513 步时间线不会被前 512 条截断。验证覆盖本地授权/重放边界，不代表真实 Provider、MCP 或 OpenSSH 验收。
 - 新增进程内 SSH 回环协议验收，验证主机密钥 pin、命令 stdout/stderr 与非零退出码、输出限额、超时和取消；隔离临时目录的真实 SFTP 子系统验收除底层读写外，还通过 `RemoteFileService` 覆盖备份碰撞防覆盖、多链接/未知链接数拒绝、revision 守卫编辑、过期恢复拒绝、有效恢复与校验后清理。替换前复核增加内容 SHA-256；故障注入将目标改成相同长度并恢复原 mtime，确认 rename 前仍以 `ConcurrentChange` 拒绝、并发内容保留且 staging 临时文件清除。SFTP 仍不是 CAS，最后一次内容复核后到 rename 的窗口仍存在。它们补足协议和文件服务组合证据，但不替代 OpenSSH 兼容性、真实目标机、桌面 IPC/AppState 或 UI 业务路径验收。
-- 重新梳理产品定位、三条核心任务、安全边界和发布验收标准。
+- 此前阶段曾按“只读诊断、受控变更、文件恢复”梳理产品与发布验收；本轮目标定义已以上述新三条路径取代其产品验收口径，原回归仍保留。
 - 将固定版本且按 SHA-256 校验的 Node.js 运行时纳入桌面安装包；本机 Windows NSIS/MSI 构建成功，当前 MSI 管理员映像载荷启动/关闭冒烟通过。针对早先 NSIS 卸载曾删除数据目录的风险，明确维持产品规则：卸载永远保留数据库、设置和凭据；即使 Tauri 确认页的删数复选框被勾选，hook 也会阻止递归删除并在交互卸载时解释如何卸载后手动清理，静默与升级路径同样保留。
 - 补强 NSIS 卸载回归保护：静态检查锁定 hook 存在、用户勾选后的说明提示、复选框状态清零、Roaming/LocalAppData 两条且仅两条删除语句仍受保护 hook 与非更新条件约束，并拒绝缺失状态捕获和额外无条件删除。Windows UI smoke 从 Tauri 生成脚本提取真实回调，操作原生 checkbox，验证默认未选、勾选提示、勾选与未勾选时 canary 均保留，更新模式也保留；另在 `/S` 静默模式通过测试专用参数预置“已勾选”状态，确认卸载正常退出且 canary 保留。所有破坏性验证只发生在临时 fixture。真实 native checkbox UI smoke 已在 GitHub Windows package run `36667041840` 通过；同一 run 也通过实际 `/UPDATE` 安装器重跑和数据保留断言。
 - 扩展 NSIS 安装生命周期冒烟：在隔离目录真实安装后，以 `/UPDATE` 对同一安装执行就地更新，先移除再核实安装包恢复 `NOTICE` 文件且 SHA-256 与更新前一致，并验证 Roaming/LocalAppData canary 跨更新和卸载均未改变；GitHub Windows package run `36667041840` 已通过此更新生命周期、manifest 校验和产物上传。
@@ -15,8 +18,9 @@
 - 扩展 Windows 包冒烟支持在 Agent 就绪后强制终止应用父进程；最新 MSI 提取载荷的正常关窗 1 次、强制终止 3 次均未遗留 sidecar。
 - 为可选真实 Provider 验收补上 OpenAI 兼容 Chat Completions 与 Responses 两种 live 测试入口；真实服务调用仍待测试账号和端点。
 - 补上 Host RPC 连接关闭时对全部挂起请求的拒绝与在途工具取消回归；交付文档现区分已自动覆盖的故障分支与仍需真实远端/完整 UI 环境验收的边界。
-- 本机 `pnpm check` 全套门禁通过；PR #2 安装器代码提交 `a3dbb71` 的三平台代码检查、依赖审计及 Windows package run `36667041840` 全部成功，Windows 包含实际 MSI/NSIS 安装器生命周期和 NSIS `/UPDATE` 数据/文件恢复检查。整机无 Node 的安装验收、macOS/Linux 实际安装、真实 SSH/Provider/MCP 场景仍待完成。
-- 三条核心用户路径的可重置真实环境端到端验证仍待完成。
+- 本机 `pnpm check` 全套门禁通过；PR #3 的三平台代码门禁、依赖审计和发布包 run `36674149301` 均成功。发布包验收覆盖 Windows MSI/NSIS 生命周期与数据保留、Ubuntu `.deb` 安装/purge、macOS DMG 挂载/复制，以及三平台随包 Agent 握手。Windows runner 安装了系统 Node；干净无 Node 主机验收、代码签名/公证、真实 SSH/Provider/MCP 运维流程及完整桌面 UI 工作流仍未完成。
+- A/O/F/R 新产品路径在可重置真实环境及三平台安装版上的端到端验证仍待完成。
+- 2026-09-30 本轮工作树 `pnpm check` 全绿，`pnpm package` 成功生成当前 dirty 工作树的 unsigned Windows MSI/NSIS 包，并通过 manifest 与 NSIS 生成脚本检查；本轮未实际安装新包。自动门禁和构建结果不替代真实 Provider/MCP/SSH、三平台原生文件操作和安装后业务验收。
 
 ## 1.0.0 — 2026-09-13
 

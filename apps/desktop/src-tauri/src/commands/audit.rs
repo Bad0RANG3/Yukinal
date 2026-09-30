@@ -19,6 +19,7 @@ struct AgentToolResultEvent {
     approved_by: Option<AgentApprovalSource>,
     status: ToolExecutionStatus,
     output_summary: String,
+    execution_state: Option<String>,
     error: Option<String>,
     error_code: Option<String>,
     started_at: String,
@@ -107,11 +108,18 @@ pub(crate) fn persist_agent_tool_result(app: &AppHandle, params: &Value) {
                 .map(|code| format!("tool error: {code}"))
         })
         .or_else(|| (event.decision == PermissionMode::Deny).then(|| summary.clone()));
-    let output = if event.status == ToolExecutionStatus::Success {
-        Some(json!({ "summary": summary.clone() }))
-    } else {
-        None
-    };
+    // Failed calls also carry a bounded, redacted output summary. This is where
+    // server.exec keeps its exit/result state when the run ends before a final
+    // task-level event can explain it.
+    let mut output = json!({ "summary": summary.clone() });
+    if let Some(execution_state) = event
+        .execution_state
+        .as_deref()
+        .filter(|state| matches!(*state, "timed_out" | "cancelled" | "result_unknown"))
+    {
+        output["executionState"] = json!(execution_state);
+    }
+    let output = Some(output);
     let outcome = match event.status {
         ToolExecutionStatus::Success => ActivityOutcome::Success,
         ToolExecutionStatus::Cancelled => ActivityOutcome::Cancelled,

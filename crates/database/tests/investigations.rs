@@ -7,6 +7,106 @@ mod common;
 use common::*;
 
 #[test]
+fn task_command_grant_budget_is_persistently_reserved_before_execution() {
+    let (path, db) = temp_db("task-command-grant");
+    let mut task = sample_task("task_command_grant");
+    task.guardrails.command_grant = Some(TaskCommandGrant {
+        grant_id: "cmdgrant_1".into(),
+        task_id: task.id.clone(),
+        server_id: "srv_demo".into(),
+        environment: Environment::Staging,
+        granted_by: "user".into(),
+        granted_at: "2026-01-01T00:00:00Z".into(),
+        expires_at: "2099-01-01T00:00:00Z".into(),
+        max_calls: 1,
+        calls_used: 0,
+        max_total_duration_ms: 10_000,
+        total_duration_ms: 0,
+        max_total_output_bytes: 2_048,
+        total_output_bytes: 0,
+    });
+    db.investigations().create_task(&task).expect("create task");
+
+    let reserved = db
+        .investigations()
+        .reserve_task_command_budget(TaskCommandBudgetReservation {
+            task_id: &task.id,
+            grant_id: "cmdgrant_1",
+            server_id: "srv_demo",
+            environment: Environment::Staging,
+            duration_ms: 5_000,
+            output_bytes: 1_024,
+            updated_at: "2026-01-01T00:00:01Z",
+        })
+        .expect("reserve command budget");
+    assert_eq!(reserved.calls_used, 1);
+    assert_eq!(reserved.total_duration_ms, 5_000);
+    assert_eq!(reserved.total_output_bytes, 1_024);
+    assert!(
+        db.investigations()
+            .reserve_task_command_budget(TaskCommandBudgetReservation {
+                task_id: &task.id,
+                grant_id: "cmdgrant_1",
+                server_id: "srv_demo",
+                environment: Environment::Staging,
+                duration_ms: 1,
+                output_bytes: 1,
+                updated_at: "2026-01-01T00:00:02Z",
+            })
+            .is_err(),
+        "an exhausted one-call grant cannot be reused"
+    );
+    let persisted = db.investigations().get_task(&task.id).expect("read task");
+    assert_eq!(persisted.guardrails.command_grant.unwrap().calls_used, 1);
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn unknown_remote_outcome_retires_the_task_command_grant() {
+    let (path, db) = temp_db("unknown-command-outcome");
+    let mut task = sample_task("task_unknown_outcome");
+    task.guardrails.command_grant = Some(TaskCommandGrant {
+        grant_id: "cmdgrant_unknown".into(),
+        task_id: task.id.clone(),
+        server_id: "srv_demo".into(),
+        environment: Environment::Staging,
+        granted_by: "user".into(),
+        granted_at: "2026-01-01T00:00:00Z".into(),
+        expires_at: "2099-01-01T00:00:00Z".into(),
+        max_calls: 12,
+        calls_used: 1,
+        max_total_duration_ms: 900_000,
+        total_duration_ms: 60_000,
+        max_total_output_bytes: 1_048_576,
+        total_output_bytes: 4_096,
+    });
+    db.investigations().create_task(&task).expect("create task");
+
+    let failure = InvestigationFailure {
+        code: TaskFailureCode::OutcomeUnknown,
+        message: "command result unknown".into(),
+        retryable: false,
+        attempt: 1,
+        at: "2026-01-01T00:02:00Z".into(),
+        detail: Some(json!({ "executionState": "result_unknown", "requiresFreshBaseline": true })),
+        options: None,
+    };
+    let recovered = db
+        .investigations()
+        .recover_task(&task.id, "2026-01-01T00:02:00Z", &failure)
+        .expect("recover unknown task");
+    assert_eq!(
+        recovered.last_failure.as_ref().unwrap().code,
+        TaskFailureCode::OutcomeUnknown
+    );
+    assert!(recovered.guardrails.command_grant.is_none());
+
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
 fn investigation_objects_round_trip_and_task_status_updates() {
     let (path, db) = temp_db("investigation");
     let task = sample_task("task_1");

@@ -63,6 +63,7 @@ pub mod limits;
 pub mod policy;
 pub mod revision;
 pub mod service;
+pub mod transfer;
 
 pub use backup::{backup_path_for, is_backup_path_for, is_safe_backup_token, BACKUP_MARKER};
 pub use limits::{

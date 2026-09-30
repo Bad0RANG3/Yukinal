@@ -99,6 +99,7 @@ const HOST_ARTIFACT_RECORD: &str = "host.investigation.artifact.record";
 pub(crate) const HOST_MCP_CATALOG: &str = "host.mcp.catalog";
 pub(crate) const HOST_TOOL_CANCEL: &str = "host.tool.cancel";
 const SERVER_INFO: &str = "server.info";
+const SERVER_EXEC: &str = "server.exec";
 const SERVER_LOGS: &str = "server.logs";
 const SERVER_SERVICES: &str = "server.services";
 const DOCKER_PS: &str = "docker.ps";
@@ -134,6 +135,7 @@ const EVIDENCE_FRESHNESS_POLICY: &str = "default-v1";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostToolExecuteRequest {
     call_id: String,
+    run_id: Option<String>,
     trace_id: String,
     tool_name: String,
     input: Value,
@@ -142,6 +144,7 @@ struct HostToolExecuteRequest {
     plan_id: Option<String>,
     plan_step_id: Option<String>,
     evidence_ids: Option<Vec<String>>,
+    approval_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +227,7 @@ async fn is_effectful_host_tool(state: &AppState, tool_name: &str) -> bool {
     if matches!(
         tool_name,
         DOCKER_RESTART
+            | SERVER_EXEC
             | SYSTEMD_RESTART
             | PACKAGE_INSTALL
             | FILESYSTEM_WRITE
@@ -285,6 +289,7 @@ fn is_plan_bound_observation_tool(tool_name: &str) -> bool {
 
 fn host_tool_request_fingerprint(request: &HostToolExecuteRequest) -> Result<String, String> {
     let canonical = json!({
+        "runId": request.run_id,
         "traceId": request.trace_id,
         "callId": request.call_id,
         "toolName": request.tool_name,
@@ -301,6 +306,31 @@ fn host_tool_request_fingerprint(request: &HostToolExecuteRequest) -> Result<Str
         "evidenceIds": request.evidence_ids,
     });
     let bytes = serde_json::to_vec(&canonical).map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Match the sidecar's `actionFingerprint` for JSON inputs. `serde_json::Map`
+/// uses lexicographically ordered keys, as does the Agent's UTF-8 canonicalizer.
+pub(super) fn server_exec_input_fingerprint(input: &Value) -> Result<String, String> {
+    fn canonicalize(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
+            Value::Object(fields) => {
+                let mut ordered = serde_json::Map::new();
+                let mut keys = fields.keys().collect::<Vec<_>>();
+                keys.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                for key in keys {
+                    if let Some(value) = fields.get(key) {
+                        ordered.insert(key.clone(), canonicalize(value));
+                    }
+                }
+                Value::Object(ordered)
+            }
+            scalar => scalar.clone(),
+        }
+    }
+
+    let bytes = serde_json::to_vec(&canonicalize(input)).map_err(|error| error.to_string())?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -1323,6 +1353,7 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
     };
     let response = match request.tool_name.as_str() {
         SERVER_INFO => server_info(state, server_id, &request.input, &cancel).await,
+        SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
         SERVER_LOGS => server_logs(state, server_id, &request.input, &cancel).await,
         SERVER_SERVICES => server_services(state, server_id, &request.input, &cancel).await,
         DOCKER_PS => docker_ps(state, server_id, &request.input, &cancel).await,

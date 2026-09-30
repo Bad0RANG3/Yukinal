@@ -24,6 +24,8 @@ export interface ToolLogger {
 export interface ToolContext {
   callId: string;
   traceId: string;
+  /** Current Agent run, passed to the host for one-time approval binding. */
+  runId?: string;
   /** Resolved, stable target. A tool must never re-guess the server. */
   target: ToolTarget;
   /** Durable investigation scope, when this call belongs to a task. */
@@ -32,6 +34,8 @@ export interface ToolContext {
   planId?: string;
   planStepId?: string;
   evidenceIds?: string[];
+  /** Set only for an exact action approved by the user in this run. */
+  approvalId?: string;
   /** Run-level delegation, copied from the host-admitted request for plan generation. */
   permissionMode?: AgentPermissionMode;
   /** Run scope, used to avoid generating an auto-delegated plan for a read-only run. */

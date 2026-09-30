@@ -637,6 +637,29 @@ const MIGRATIONS: &[&str] = &[
     // existing rows and unknown peers keep the pre-relaxation behaviour: every MCP
     // tool stays critical until a user explicitly trusts that one server.
     r#"ALTER TABLE mcp_servers ADD COLUMN annotation_trust TEXT NOT NULL DEFAULT 'none';"#,
+    // 36 — host-owned file-transfer history. Snapshots contain metadata only; staging
+    // records are private host data and are never returned to WebView/IPC. The row is
+    // deliberately size-bounded so a pathological directory cannot grow the database
+    // without limit through per-item failure details.
+    r#"
+    CREATE TABLE file_transfers (
+        transfer_id         TEXT PRIMARY KEY,
+        server_id           TEXT NOT NULL,
+        direction           TEXT NOT NULL CHECK (direction IN ('upload','download')),
+        status              TEXT NOT NULL CHECK (status IN (
+                                'queued','running','waitingConflict','completed','partial',
+                                'failed','cancelled','interrupted'
+                            )),
+        started_at_epoch_ms INTEGER NOT NULL CHECK (started_at_epoch_ms >= 0),
+        updated_at_epoch_ms INTEGER NOT NULL CHECK (updated_at_epoch_ms >= 0),
+        snapshot_json       TEXT NOT NULL CHECK (length(snapshot_json) <= 524288),
+        staging_json        TEXT NOT NULL CHECK (length(staging_json) <= 65536)
+    );
+    CREATE INDEX idx_file_transfers_server_updated
+        ON file_transfers (server_id, updated_at_epoch_ms DESC, transfer_id DESC);
+    CREATE INDEX idx_file_transfers_status_updated
+        ON file_transfers (status, updated_at_epoch_ms DESC);
+    "#,
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

@@ -63,6 +63,8 @@ pub struct InvestigationTaskCreateInput {
     pub permission_mode: InvestigationPermissionMode,
     pub automation_level: TaskAutomationLevel,
     pub budget: Option<TaskBudget>,
+    #[serde(default)]
+    pub grant_task_commands: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -842,6 +844,14 @@ pub(crate) fn recover_investigation_task(
         Some(yukinal_database::models::FailureOptionAction::Inspect)
     ) {
         return Ok(task);
+    }
+    if task
+        .last_failure
+        .as_ref()
+        .is_some_and(|failure| failure.code == TaskFailureCode::OutcomeUnknown)
+        && option_id.is_none()
+    {
+        return Err("the previous remote action may have taken effect; inspect the target and choose an explicit recovery action".into());
     }
     let now = yukinal_core::sidecar::iso8601_now();
     let mut failure = task.last_failure.clone().unwrap_or(InvestigationFailure {

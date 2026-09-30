@@ -26,6 +26,23 @@ impl RusshBackend {
         timeout: Option<std::time::Duration>,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<CommandResult> {
+        self.execute_bounded_once(session, command, timeout, MAX_COMMAND_OUTPUT_BYTES, cancel)
+            .await
+    }
+
+    /// Execute once with a caller-selected combined stdout/stderr output budget.
+    ///
+    /// The budget is enforced while SSH channel frames arrive, before bytes are retained in
+    /// memory. An effectful command must use this no-retry entry point: a lost reply cannot
+    /// safely replay a command whose remote effect may already have happened.
+    pub async fn execute_bounded_once(
+        &self,
+        session: &Session,
+        command: &str,
+        timeout: Option<std::time::Duration>,
+        max_output_bytes: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<CommandResult> {
         if session.inner.is_closed() {
             return Err(Error::Channel("session is closed".into()));
         }
@@ -34,7 +51,7 @@ impl RusshBackend {
             command,
             timeout,
             cancel,
-            MAX_COMMAND_OUTPUT_BYTES,
+            max_output_bytes.min(MAX_COMMAND_OUTPUT_BYTES),
         )
         .await
     }
@@ -68,13 +85,24 @@ async fn run_command(
     let body = async {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let mut output_remaining = max_output_bytes;
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
         let mut exit_code = None;
         while let Some(message) = channel.wait().await {
             match message {
-                ChannelMsg::Data { data } => append_bounded(&mut stdout, &data, max_output_bytes),
-                ChannelMsg::ExtendedData { data, ext: 1 } => {
-                    append_bounded(&mut stderr, &data, max_output_bytes)
-                }
+                ChannelMsg::Data { data } => append_bounded(
+                    &mut stdout,
+                    &data,
+                    &mut output_remaining,
+                    &mut stdout_truncated,
+                ),
+                ChannelMsg::ExtendedData { data, ext: 1 } => append_bounded(
+                    &mut stderr,
+                    &data,
+                    &mut output_remaining,
+                    &mut stderr_truncated,
+                ),
                 ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
                 ChannelMsg::Close | ChannelMsg::Eof => break,
                 _ => {}
@@ -84,6 +112,8 @@ async fn run_command(
             exit_code: exit_code.unwrap_or(-1),
             stdout,
             stderr,
+            stdout_truncated,
+            stderr_truncated,
         })
     };
 
@@ -99,7 +129,34 @@ async fn run_command(
     }
 }
 
-fn append_bounded(output: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) {
-    let remaining = max_bytes.saturating_sub(output.len());
-    output.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+fn append_bounded(output: &mut Vec<u8>, chunk: &[u8], remaining: &mut usize, truncated: &mut bool) {
+    let take = chunk.len().min(*remaining);
+    output.extend_from_slice(&chunk[..take]);
+    *remaining -= take;
+    if take < chunk.len() {
+        *truncated = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_bounded;
+
+    #[test]
+    fn combined_stdout_and_stderr_share_the_requested_budget_and_report_truncation() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut remaining = 5;
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
+
+        append_bounded(&mut stdout, b"abc", &mut remaining, &mut stdout_truncated);
+        append_bounded(&mut stderr, b"def", &mut remaining, &mut stderr_truncated);
+
+        assert_eq!(stdout, b"abc");
+        assert_eq!(stderr, b"de");
+        assert_eq!(remaining, 0);
+        assert!(!stdout_truncated);
+        assert!(stderr_truncated);
+    }
 }

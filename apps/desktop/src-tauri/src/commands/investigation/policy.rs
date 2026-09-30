@@ -94,7 +94,7 @@ pub(super) fn validate_create_input(
         workspace_id,
         environment: input.scope.environment,
     };
-    let guardrails = validate_guardrails(input.guardrails)?;
+    let mut guardrails = validate_guardrails(input.guardrails)?;
     if input.mode == InvestigationRunMode::Readonly
         && input.automation_level != TaskAutomationLevel::Readonly
     {
@@ -104,6 +104,51 @@ pub(super) fn validate_create_input(
         && input.automation_level == TaskAutomationLevel::Execute
     {
         return Err("plan mode can propose a change but cannot authorize execution".into());
+    }
+    if input.grant_task_commands {
+        if input.mode != InvestigationRunMode::Goal
+            || input.permission_mode != InvestigationPermissionMode::Auto
+            || input.automation_level != TaskAutomationLevel::Execute
+            || scope.host != InvestigationTargetHost::Remote
+            || !matches!(
+                scope.environment,
+                yukinal_database::models::Environment::Development
+                    | yukinal_database::models::Environment::Staging
+            )
+        {
+            return Err("task command delegation is available only for remote development/staging goal tasks configured to execute".into());
+        }
+        let server_id = scope
+            .server_id
+            .as_deref()
+            .ok_or_else(|| "task command delegation requires a resolved server".to_string())?;
+        let server = state
+            .database
+            .servers()
+            .get(server_id)
+            .map_err(|error| format!("server scope is not available: {error}"))?;
+        if server.metadata.environment != scope.environment {
+            return Err(
+                "task command delegation environment does not match the registered server".into(),
+            );
+        }
+        let granted_at = yukinal_core::sidecar::iso8601_now();
+        let expires_at = command_grant_expiry(&granted_at, guardrails.expires_at.as_deref())?;
+        guardrails.command_grant = Some(yukinal_database::models::TaskCommandGrant {
+            grant_id: crate::commands::server::next_id("cmdgrant"),
+            task_id: id.clone(),
+            server_id: server_id.to_string(),
+            environment: scope.environment,
+            granted_by: "user".into(),
+            granted_at,
+            expires_at,
+            max_calls: 12,
+            calls_used: 0,
+            max_total_duration_ms: 900_000,
+            total_duration_ms: 0,
+            max_total_output_bytes: 1_048_576,
+            total_output_bytes: 0,
+        });
     }
     let budget = input.budget.unwrap_or(TaskBudget {
         max_steps: DEFAULT_MAX_STEPS,
@@ -145,6 +190,24 @@ pub(super) fn validate_create_input(
     })
 }
 
+fn command_grant_expiry(granted_at: &str, task_expiry: Option<&str>) -> Result<String, String> {
+    let now = yukinal_time::parse_iso8601_utc(granted_at).ok_or_else(|| {
+        "host clock could not issue a valid command delegation timestamp".to_string()
+    })?;
+    let grant_expiry = now.saturating_add(4 * 60 * 60);
+    let task_expiry = task_expiry
+        .map(|value| {
+            yukinal_time::parse_iso8601_utc(value)
+                .ok_or_else(|| "task expiresAt must be a valid UTC timestamp".to_string())
+        })
+        .transpose()?;
+    let expires = task_expiry.map_or(grant_expiry, |value| value.min(grant_expiry));
+    if expires <= now {
+        return Err("task command delegation would already be expired".into());
+    }
+    Ok(yukinal_time::iso8601_utc(expires))
+}
+
 pub(super) fn autonomous_task_prompt(task: &InvestigationTask) -> String {
     let criteria = task
         .success_criteria
@@ -160,21 +223,40 @@ pub(super) fn autonomous_task_prompt(task: &InvestigationTask) -> String {
         InvestigationRunMode::Plan => {
             "先调查并生成宿主可验证的 dry-run 计划；没有用户选择和审批时不要执行行动步骤。"
         }
-        InvestigationRunMode::Goal if task.permission_mode == InvestigationPermissionMode::Auto
-            && task.automation_level == TaskAutomationLevel::Execute
-            && task.scope.host == InvestigationTargetHost::Remote
-            && matches!(
-                task.scope.environment,
-                yukinal_database::models::Environment::Development
-                    | yukinal_database::models::Environment::Staging
-            ) => {
+        InvestigationRunMode::Goal
+            if task.permission_mode == InvestigationPermissionMode::Auto
+                && task.automation_level == TaskAutomationLevel::Execute
+                && task.scope.host == InvestigationTargetHost::Remote
+                && matches!(
+                    task.scope.environment,
+                    yukinal_database::models::Environment::Development
+                        | yukinal_database::models::Environment::Staging
+                ) =>
+        {
             "按宿主保存的计划逐步推进；本任务已明确启用受限 auto 委托，medium 风险的配置备份、编辑与整文件写入（可先备份再写）可在宿主复核后自动推进；备份清理、恢复、重启、包安装及其他高风险或未明确授权的动作必须停下等待用户审批。"
         }
         InvestigationRunMode::Goal => {
             "按宿主保存的计划逐步推进；高风险或未明确授权的动作必须停下等待用户审批。"
         }
     };
-    let recovery_instruction = if rollback_requested(task) {
+    let command_grant_instruction = task.guardrails.command_grant.as_ref().map_or_else(
+        String::new,
+        |grant| format!(
+            "\n\n用户已为本任务授权 server.exec 在这台开发/预发布服务器执行非关键危险命令；命令预算为已用 {}/{} 次、剩余总时长 {}ms、剩余输出 {} 字节，授权截止 {}。仍须先建立 ChangePlan 并按步骤调用工具。关键危险命令仍需逐次批准。",
+            grant.calls_used,
+            grant.max_calls,
+            grant.max_total_duration_ms.saturating_sub(grant.total_duration_ms),
+            grant.max_total_output_bytes.saturating_sub(grant.total_output_bytes),
+            grant.expires_at,
+        ),
+    );
+    let recovery_instruction = if task
+        .last_failure
+        .as_ref()
+        .is_some_and(|failure| failure.code == TaskFailureCode::OutcomeUnknown)
+    {
+        "\n\n上一轮远端命令或变更的结果未知，可能已经生效。旧命令授权已撤销。先只调用只读工具重新采样目标状态，结合实际执行记录判断变更是否发生；证据明确前禁止重放、补发或改写同一行动。需要继续时，先生成新的计划并让用户逐项批准高风险命令。"
+    } else if rollback_requested(task) {
         "\n\n用户选择了“先规划回退”。这不是对旧回退文本或旧工具调用的授权：请只生成一份新的、独立的回退 dry-run 计划，重新校验当前基线、目标范围和精确参数绑定；涉及写入时仍须取得本轮审批，禁止直接重放旧动作。"
     } else if fresh_baseline_required(task) {
         "\n\n这是一次中断后的恢复运行：旧计划审批、旧变更前基线和正在进行的观察窗口已经失效。请先重新校验目标身份、收集新的只读证据并生成/确认新的计划；在新基线和本轮审批完成前不要重放旧行动。"
@@ -183,8 +265,13 @@ pub(super) fn autonomous_task_prompt(task: &InvestigationTask) -> String {
     };
     let guardrail_instruction = format_guardrails_for_prompt(&task.guardrails);
     format!(
-        "你正在自主推进一项由用户创建的可恢复运维任务。\n\n目标：\n{}\n\n完成标准：\n{}\n\n边界：\n{}{}{}\n\n先调用 investigation.plan 声明有序步骤；如果目标属于只读健康检查、受保护配置编辑、容器重启、systemd 服务重启、明确的 apt/dnf 包安装或受限 deploy_sequence，可以调用 investigation.playbook 生成宿主拥有的 dry-run 计划。playbook 只记录计划，不直接执行写入。之后按计划收集证据、记录 Finding 和决策摘要。每个事实都要引用证据；证据不足时明确停在等待用户，而不是猜测已经完成。",
-        task.objective, criteria, mode_instruction, recovery_instruction, guardrail_instruction
+        "你正在自主推进一项由用户创建的可恢复运维任务。\n\n目标：\n{}\n\n完成标准：\n{}\n\n边界：\n{}{}{}{}\n\n先调用 investigation.plan 声明有序步骤；如果目标属于只读健康检查、受保护配置编辑、容器重启、systemd 服务重启、明确的 apt/dnf 包安装或受限 deploy_sequence，可以调用 investigation.playbook 生成宿主拥有的 dry-run 计划。playbook 只记录计划，不直接执行写入。之后按计划收集证据、记录 Finding 和决策摘要。每个事实都要引用证据；证据不足时明确停在等待用户，而不是猜测已经完成。",
+        task.objective,
+        criteria,
+        mode_instruction,
+        command_grant_instruction,
+        recovery_instruction,
+        guardrail_instruction
     )
 }
 
@@ -192,6 +279,10 @@ pub(super) fn validate_guardrails(
     raw: Option<InvestigationTaskGuardrails>,
 ) -> Result<InvestigationTaskGuardrails, String> {
     let mut guardrails = raw.unwrap_or_default();
+    // Renderer-supplied task output must never be able to forge a host-issued ticket.
+    // `validate_create_input` installs one only after checking the explicit top-level
+    // user choice and the registered target server.
+    guardrails.command_grant = None;
     guardrails.not_before_at =
         normalize_guardrail_timestamp(guardrails.not_before_at, "notBeforeAt")?;
     guardrails.expires_at = normalize_guardrail_timestamp(guardrails.expires_at, "expiresAt")?;

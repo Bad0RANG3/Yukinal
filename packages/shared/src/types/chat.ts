@@ -9,6 +9,7 @@ import type { RuntimeProviderConfig } from "./provider.js";
 import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolError, ToolOrigin, ToolTarget } from "./tool.js";
 import type { TaskBudget } from "./investigation.js";
+import type { ServerExecInterruption } from "./server-exec.js";
 
 export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
 
@@ -302,6 +303,10 @@ export interface AgentRunResult {
 export interface ApprovalRequest {
   approvalId: string;
   runId: string;
+  /** Host-side approval ledger binding; optional only for older sidecars. */
+  traceId?: string;
+  callId?: string;
+  inputFingerprint?: string;
   toolName: string;
   input: unknown;
   reason: string;
@@ -309,6 +314,10 @@ export interface ApprovalRequest {
   factsSummary: string[];
   target: ToolTarget;
   expiresAt: string;
+  /** Host-validated plan call binding for one-time server.exec approvals. */
+  planId?: string;
+  planStepId?: string;
+  evidenceIds?: string[];
   /**
    * Whether "approve for this run" would actually be remembered (ADR 0072). Omitted by an
    * older sidecar; the UI then keeps offering the button, as it always did.
@@ -391,6 +400,8 @@ export type AgentStreamEvent =
       planStepId?: string;
       evidenceIds?: string[];
       errorCode?: ToolError["code"];
+      /** Safe state-only projection of a server.exec interruption. */
+      executionState?: ServerExecInterruption["state"];
       status: ToolResultStatus;
       outputSummary: string;
       error?: string;

@@ -234,6 +234,10 @@ impl Database {
         repositories::FilesystemBackupsRepository::new(self)
     }
 
+    pub fn file_transfers(&self) -> repositories::FileTransfersRepository<'_> {
+        repositories::FileTransfersRepository::new(self)
+    }
+
     pub fn activities(&self) -> repositories::ActivitiesRepository<'_> {
         repositories::ActivitiesRepository::new(self)
     }

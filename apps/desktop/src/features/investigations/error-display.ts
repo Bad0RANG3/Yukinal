@@ -24,6 +24,7 @@ const CATEGORY_DISPLAY: Record<ErrorCategory, FailureDisplay> = {
   authentication: { label: "认证失败", nextStep: "重新绑定该服务器的凭据，再重试。" },
   transport: { label: "连接中断", nextStep: "检查网络与 sidecar 状态，可直接重试。" },
   timeout: { label: "等待超时", nextStep: "确认目标是否仍可用，缩小范围后可重试。" },
+  outcome_unknown: { label: "远端结果未知", nextStep: "命令或变更可能已经生效。先查看实际执行记录并重新采集只读证据，不要直接重试。" },
   cancelled: { label: "已被取消", nextStep: "查看现场证据，确认后决定是否恢复。" },
   budget: { label: "预算耗尽", nextStep: "调整任务范围或预算上限后重新规划。" },
   not_found: { label: "目标不存在", nextStep: "重新确认服务器、路径或服务名后重试。" },

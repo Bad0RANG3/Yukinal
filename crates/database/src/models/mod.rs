@@ -92,7 +92,7 @@ pub use investigation::{
     InvestigationTaskGuardrails, ObservationWindowStatus, PlanApprovalSource, PlanApprovalStatus,
     PlanDeviationAction, PlanDeviationCode, PlanIdempotency, PlanStatus, PlanStepKind,
     PlanStepStatus, TaskArtifactKind, TaskArtifactStatus, TaskAutomationLevel, TaskBudget,
-    TaskFailureCode, TaskPhase, TaskStatus, MAX_ARTIFACT_SERIALIZED_BYTES,
+    TaskCommandGrant, TaskFailureCode, TaskPhase, TaskStatus, MAX_ARTIFACT_SERIALIZED_BYTES,
     MAX_EVIDENCE_SERIALIZED_BYTES,
 };
 pub use provider::{

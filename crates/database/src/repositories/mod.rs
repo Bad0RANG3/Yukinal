@@ -8,6 +8,7 @@ mod chat;
 mod credential_cleanup;
 mod decode;
 mod executions;
+mod file_transfers;
 mod filesystem_backups;
 mod host_tool_calls;
 mod identities;
@@ -23,6 +24,7 @@ pub use activities::ActivitiesRepository;
 pub use chat::ChatRepository;
 pub use credential_cleanup::CredentialCleanupRepository;
 pub use executions::ToolExecutionsRepository;
+pub use file_transfers::{FileTransferRecord, FileTransfersRepository, MAX_FILE_TRANSFER_PAGE};
 pub use filesystem_backups::{
     FilesystemBackupRecord, FilesystemBackupStatus, FilesystemBackupsRepository,
 };
@@ -30,7 +32,9 @@ pub use host_tool_calls::{
     HostToolCallClaim, HostToolCallInput, HostToolCallStatus, HostToolCallsRepository,
 };
 pub use identities::IdentitiesRepository;
-pub use investigations::{EvidenceSearchQuery, InvestigationsRepository, TaskProgressUpdate};
+pub use investigations::{
+    EvidenceSearchQuery, InvestigationsRepository, TaskCommandBudgetReservation, TaskProgressUpdate,
+};
 pub use providers::{McpServersRepository, ProviderConfigsRepository};
 pub use retention::{
     InvestigationRetentionItem, InvestigationRetentionKind, InvestigationRetentionPreview,

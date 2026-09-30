@@ -50,6 +50,15 @@ test("server selection opens its workspace without resetting the current server'
   assert.equal(useWorkspaceStore.getState().serverPage, "overview");
 });
 
+test("opening the task workspace from a selected server keeps that server available as the goal target", () => {
+  const workspace = useWorkspaceStore.getState();
+  workspace.selectServer("srv_goal_target");
+  workspace.setPrimary("tasks");
+
+  assert.equal(useWorkspaceStore.getState().primary, "tasks");
+  assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
+});
+
 test("server form commands match the Rust input argument; other commands stay flat", async () => {
   const calls: unknown[] = [];
   const server = {

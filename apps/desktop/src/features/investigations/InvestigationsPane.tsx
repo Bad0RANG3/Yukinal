@@ -17,7 +17,6 @@ import type {
   InvestigationRetentionPreview,
   InvestigationRetentionPruneInput,
   InvestigationNotificationPolicy,
-  AgentPermissionMode,
   AgentRunMode,
   TaskAutomationLevel,
   TaskStatus,
@@ -30,9 +29,10 @@ import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, subscribeDesktop, type DesktopEventPayload } from "../../lib/ipc.js";
 import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { canDelegateAgentAuto, effectiveTaskPermissionMode, shouldAutoStartCreatedTask } from "./auto-delegation.js";
+import { resolveTaskDelegation } from "./auto-delegation.js";
 import { describeInvestigationFailure } from "./error-display.js";
 import { shouldAutoStartRecoveredTask } from "./recovery.js";
+import { LOCAL_TASK_TARGET, resolveInvestigationTaskTarget } from "./task-target.js";
 import {
   INVESTIGATION_NOTIFICATION_POLICIES,
   notificationPolicyLabel,
@@ -61,6 +61,24 @@ const OBSERVATION_STATUS_LABEL: Record<NonNullable<InvestigationPlan["observatio
   cancelled: "已取消",
 };
 
+const STEP_STATUS_LABEL: Record<InvestigationStep["status"], string> = {
+  pending: "待开始",
+  running: "执行中",
+  waiting_user: "等待批准",
+  succeeded: "成功",
+  failed: "失败",
+  skipped: "跳过",
+};
+
+const STEP_KIND_LABEL: Record<InvestigationStep["kind"], string> = {
+  plan: "计划",
+  evidence: "取证",
+  decision: "判断",
+  action: "行动",
+  verification: "验证",
+  recovery: "恢复",
+};
+
 export function InvestigationsPane() {
   const shell = isDesktopShell();
   const queryClient = useQueryClient();
@@ -69,11 +87,12 @@ export function InvestigationsPane() {
   const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const servers = useServers({ enabled: shell });
+  const [targetSelection, setTargetSelection] = useState(selectedServerId ?? "");
   const [objective, setObjective] = useState("");
-  const [criteria, setCriteria] = useState("确认服务状态与近期日志是否存在同一异常\n给出只读证据和下一步选择");
-  const [taskMode, setTaskMode] = useState<AgentRunMode>("readonly");
-  const [automationLevel, setAutomationLevel] = useState<TaskAutomationLevel>("readonly");
-  const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("ask");
+  const [criteria, setCriteria] = useState("");
+  const [taskMode, setTaskMode] = useState<AgentRunMode>("goal");
+  const [automationLevel, setAutomationLevel] = useState<TaskAutomationLevel>("execute");
+  const [boundedDelegationRequested, setBoundedDelegationRequested] = useState(false);
   const [notBeforeAt, setNotBeforeAt] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [forbiddenTools, setForbiddenTools] = useState("");
@@ -137,18 +156,19 @@ export function InvestigationsPane() {
     mutationFn: (input: InvestigationTaskCreateInput) => callDesktop("investigation_task_create", { input }),
     onSuccess: (response) => {
       setObjective("");
-      setTaskMode("readonly");
-      setAutomationLevel("readonly");
-      setPermissionMode("ask");
+      setCriteria("");
+      setTaskMode("goal");
+      setAutomationLevel("execute");
+      setBoundedDelegationRequested(false);
       setNotBeforeAt("");
       setExpiresAt("");
       setForbiddenTools("");
       setForbiddenPathPrefixes("");
       void queryClient.invalidateQueries({ queryKey: ["investigationTasks"] });
       selectTask(response.task.id);
-      // Readonly tasks and an explicitly delegated executable goal can start
-      // immediately. Plan/ask-mode goals remain an explicit user action.
-      if (shouldAutoStartCreatedTask(response.task)) startTask.mutate(response.task.id);
+      // The create button is an explicit request for Yukinal to start the goal now.
+      // Tool-level permission checks still pause for approval before any gated action.
+      startTask.mutate(response.task.id);
     },
   });
   const selectBrief = useMutation({
@@ -204,22 +224,24 @@ export function InvestigationsPane() {
     },
   });
 
-  const selectedServer = servers.data?.find((server) => server.id === selectedServerId);
+  const serverRows = servers.data ?? [];
   const scope = useMemo(
-    () => selectedServer
-      ? { host: "remote" as const, serverId: selectedServer.id, environment: selectedServer.metadata.environment }
-      : { host: "local" as const, environment: "local" as const },
-    [selectedServer],
+    () => resolveInvestigationTaskTarget(targetSelection, serverRows),
+    [serverRows, targetSelection],
   );
-  const autoDelegationEligible = canDelegateAgentAuto({
+  const selectedServer = scope?.host === "remote"
+    ? serverRows.find((server) => server.id === scope.serverId)
+    : undefined;
+  const taskDelegation = resolveTaskDelegation({
+    requested: boundedDelegationRequested,
     scope,
     mode: taskMode,
     automationLevel,
   });
 
   useEffect(() => {
-    if (!autoDelegationEligible) setPermissionMode("ask");
-  }, [autoDelegationEligible]);
+    if (!taskDelegation.eligible) setBoundedDelegationRequested(false);
+  }, [taskDelegation.eligible]);
 
   if (!shell) return <PreviewEmpty icon="agent" body="排查任务和证据只在 Tauri 桌面壳中可用，浏览器预览不会伪造远端数据。" />;
   if (tasks.isLoading) return <LoadingPanel title="正在读取排查任务" hint="从本地数据库加载任务与状态" />;
@@ -234,7 +256,7 @@ export function InvestigationsPane() {
         <div>
           <p className="eyebrow">证据驱动的自动化</p>
           <h2>排查任务</h2>
-          <p>先让 Agent 收集可复核证据，再把风险、选项和下一步交给你决定。</p>
+          <p>描述目标，AI 会生成计划、调用已配置工具并验证结果；只在缺少信息或需要授权时暂停。</p>
         </div>
         <button type="button" className="button-secondary" onClick={() => void tasks.refetch()} disabled={tasks.isFetching}>
           <Icon name="refresh" size="sm" /> {tasks.isFetching ? "读取中" : "刷新"}
@@ -254,136 +276,193 @@ export function InvestigationsPane() {
       <section className="investigation-create-card" aria-labelledby="investigation-create-title">
         <div>
           <p className="eyebrow">新目标</p>
-          <h3 id="investigation-create-title">创建一个可恢复目标</h3>
+          <h3 id="investigation-create-title">告诉 AI 要完成什么</h3>
         </div>
+        <label className="field-label" htmlFor="investigation-server">目标服务器 / 运行范围</label>
+        <select
+          id="investigation-server"
+          className="text-input investigation-server-select"
+          value={targetSelection}
+          onChange={(event) => {
+            setTargetSelection(event.target.value);
+            setBoundedDelegationRequested(false);
+          }}
+          aria-describedby="investigation-server-hint"
+        >
+          <option value="">请选择已添加的服务器</option>
+          {serverRows.map((server) => (
+            <option key={server.id} value={server.id}>
+              {server.name} · {server.connection.host}:{server.connection.port} · {server.metadata.environment}
+            </option>
+          ))}
+          <option value={LOCAL_TASK_TARGET}>本机范围（不连接远端）</option>
+        </select>
+        <div className="investigation-target" id="investigation-server-hint" role="status">
+          <span>本次任务范围</span>
+          <strong>
+            {selectedServer
+              ? `${selectedServer.name} · ${selectedServer.connection.host}:${selectedServer.connection.port} · ${selectedServer.metadata.environment}`
+              : scope?.host === "local"
+                ? "本机（不会调用远端服务器）"
+                : servers.isLoading
+                  ? "正在读取服务器列表…"
+                  : servers.isError
+                    ? "服务器列表读取失败，请重试或重新选择"
+                    : "请选择服务器；不会默认把目标发送到本机或其他服务器"}
+          </strong>
+        </div>
+        {servers.isError ? <p className="form-error" role="alert">无法读取服务器列表：{errorMessage(servers.error)}</p> : null}
         <label className="field-label" htmlFor="investigation-objective">目标</label>
         <textarea
           id="investigation-objective"
           className="text-input investigation-objective"
           value={objective}
           onChange={(event) => setObjective(event.target.value)}
-          placeholder="例如：确认 staging API 延迟升高的原因"
+          placeholder="例如：检查 staging API 的 502 错误，修复配置并验证服务恢复"
           rows={2}
         />
-        <label className="field-label" htmlFor="investigation-criteria">完成标准（每行一条）</label>
-        <textarea
-          id="investigation-criteria"
-          className="text-input investigation-criteria"
-          value={criteria}
-          onChange={(event) => setCriteria(event.target.value)}
-          rows={3}
-        />
-        <div className="investigation-create-options">
-          <div>
-            <label className="field-label" htmlFor="investigation-mode">运行边界</label>
-            <select id="investigation-mode" className="text-input" value={taskMode} onChange={(event) => {
-              const next = event.target.value as AgentRunMode;
-              setTaskMode(next);
-              if (next === "readonly") setAutomationLevel("readonly");
-            }}>
-              <option value="readonly">只读排查</option>
-              <option value="plan">计划 / dry-run</option>
-              <option value="goal">目标执行</option>
-            </select>
-          </div>
-          <div>
-            <label className="field-label" htmlFor="investigation-automation">任务自动化级别</label>
-            <select id="investigation-automation" className="text-input" value={automationLevel} disabled={taskMode === "readonly"} onChange={(event) => setAutomationLevel(event.target.value as TaskAutomationLevel)}>
-              <option value="readonly">只采集，不执行变更</option>
-              <option value="propose">先给方案，选择后执行</option>
-              <option value="execute">按计划推进，变更仍受审批</option>
-            </select>
-          </div>
-          <div>
-            <label className="field-label" htmlFor="investigation-permission">动作授权方式</label>
-            <select
-              id="investigation-permission"
-              className="text-input"
-              value={permissionMode}
-              onChange={(event) => setPermissionMode(event.target.value as AgentPermissionMode)}
-            >
-              <option value="ask">逐项询问</option>
-              <option value="auto" disabled={!autoDelegationEligible}>受限自动推进</option>
-            </select>
-            <small className="project-muted">
-              {autoDelegationEligible
-                ? "仅开发/预发布的 write 档位可由 Agent 自动批准；危险动作仍逐项询问。"
-                : "只有远程开发/预发布的目标执行任务可开启；当前仍逐项询问。"}
+        <p className="investigation-goal-hint">
+          AI 会生成计划、调用已配置工具、验证并汇报；只有缺少必要信息或需要授权时才会暂停询问。
+        </p>
+        <label className="investigation-task-delegation">
+          <input
+            type="checkbox"
+            checked={taskDelegation.grantTaskCommands}
+            disabled={!taskDelegation.eligible}
+            onChange={(event) => setBoundedDelegationRequested(event.target.checked)}
+          />
+          <span>
+            <strong>授权 AI 在本次任务中受限自动推进</strong>
+            <small>
+              {taskDelegation.eligible
+                ? "勾选后，AI 可按计划自动执行本任务范围内的普通结构化变更和命令，仅限所选开发/预发布服务器。远端命令最多 12 次、累计超时 15 分钟、总输出 1 MiB，授权最长 4 小时；关键危险操作仍逐项审批。不勾选时，需要授权的操作会逐项询问。"
+                : "仅适用于远程开发/预发布服务器的“目标执行 + 按计划推进”任务；当前范围或设置不符合条件。"}
             </small>
-          </div>
-        </div>
-        <div className="investigation-guardrails-editor">
-          <div>
-            <span className="field-label">允许的时间窗（可选）</span>
-            <div className="investigation-time-window">
-              <label>
-                <span className="project-muted">开始</span>
-                <input
-                  type="datetime-local"
-                  className="text-input"
-                  value={notBeforeAt}
-                  onChange={(event) => setNotBeforeAt(event.target.value)}
-                  aria-label="任务时间窗开始"
-                />
-              </label>
-              <label>
-                <span className="project-muted">截止</span>
-                <input
-                  type="datetime-local"
-                  className="text-input"
-                  value={expiresAt}
-                  onChange={(event) => setExpiresAt(event.target.value)}
-                  aria-label="任务时间窗截止"
-                />
-              </label>
+          </span>
+        </label>
+        <details className="investigation-advanced">
+          <summary>执行与验证选项 <span>默认逐项询问；可在上方显式开启受限委托</span></summary>
+          <div className="investigation-advanced-content">
+            <label className="field-label" htmlFor="investigation-criteria">自定义完成标准（可选，每行一条）</label>
+            <textarea
+              id="investigation-criteria"
+              className="text-input investigation-criteria"
+              value={criteria}
+              onChange={(event) => setCriteria(event.target.value)}
+              placeholder="留空时由 AI 根据目标生成并验证完成标准"
+              rows={2}
+            />
+            <div className="investigation-create-options">
+              <div>
+                <label className="field-label" htmlFor="investigation-mode">运行边界</label>
+                <select id="investigation-mode" className="text-input" value={taskMode} onChange={(event) => {
+                  const next = event.target.value as AgentRunMode;
+                  setTaskMode(next);
+                  setBoundedDelegationRequested(false);
+                  if (next === "readonly") setAutomationLevel("readonly");
+                }}>
+                  <option value="readonly">只读排查</option>
+                  <option value="plan">计划 / dry-run</option>
+                  <option value="goal">目标执行</option>
+                </select>
+              </div>
+              <div>
+                <label className="field-label" htmlFor="investigation-automation">任务自动化级别</label>
+                <select id="investigation-automation" className="text-input" value={automationLevel} disabled={taskMode === "readonly"} onChange={(event) => {
+                  setAutomationLevel(event.target.value as TaskAutomationLevel);
+                  setBoundedDelegationRequested(false);
+                }}>
+                  <option value="readonly">只采集，不执行变更</option>
+                  <option value="propose">先给方案，选择后执行</option>
+                  <option value="execute">按计划推进，变更仍受审批</option>
+                </select>
+              </div>
             </div>
-            <small className="project-muted">宿主按 UTC 记录并在每次运行前复核；留空表示不额外限制时间。</small>
+            <div className="investigation-guardrails-editor">
+              <div>
+                <span className="field-label">允许的时间窗（可选）</span>
+                <div className="investigation-time-window">
+                  <label>
+                    <span className="project-muted">开始</span>
+                    <input
+                      type="datetime-local"
+                      className="text-input"
+                      value={notBeforeAt}
+                      onChange={(event) => setNotBeforeAt(event.target.value)}
+                      aria-label="任务时间窗开始"
+                    />
+                  </label>
+                  <label>
+                    <span className="project-muted">截止</span>
+                    <input
+                      type="datetime-local"
+                      className="text-input"
+                      value={expiresAt}
+                      onChange={(event) => setExpiresAt(event.target.value)}
+                      aria-label="任务时间窗截止"
+                    />
+                  </label>
+                </div>
+                <small className="project-muted">宿主按 UTC 记录并在每次运行前复核；留空表示不额外限制时间。</small>
+              </div>
+              <div className="investigation-guardrail-lists">
+                <label>
+                  <span className="field-label">禁止工具（每行一个内部名）</span>
+                  <textarea
+                    className="text-input"
+                    value={forbiddenTools}
+                    onChange={(event) => setForbiddenTools(event.target.value)}
+                    placeholder="例如：docker.restart\npackage.install"
+                    rows={2}
+                  />
+                </label>
+                <label>
+                  <span className="field-label">禁止路径前缀（每行一个绝对路径）</span>
+                  <textarea
+                    className="text-input"
+                    value={forbiddenPathPrefixes}
+                    onChange={(event) => setForbiddenPathPrefixes(event.target.value)}
+                    placeholder="例如：/srv/app/private\n/etc/production"
+                    rows={2}
+                  />
+                </label>
+              </div>
+            </div>
           </div>
-          <div className="investigation-guardrail-lists">
-            <label>
-              <span className="field-label">禁止工具（每行一个内部名）</span>
-              <textarea
-                className="text-input"
-                value={forbiddenTools}
-                onChange={(event) => setForbiddenTools(event.target.value)}
-                placeholder="例如：docker.restart\npackage.install"
-                rows={2}
-              />
-            </label>
-            <label>
-              <span className="field-label">禁止路径前缀（每行一个绝对路径）</span>
-              <textarea
-                className="text-input"
-                value={forbiddenPathPrefixes}
-                onChange={(event) => setForbiddenPathPrefixes(event.target.value)}
-                placeholder="例如：/srv/app/private\n/etc/production"
-                rows={2}
-              />
-            </label>
-          </div>
-        </div>
+        </details>
         <div className="investigation-create-footer">
-          <span className="project-muted">范围：{selectedServer ? `${selectedServer.name} · ${automationLevel === "execute" ? "可按计划执行" : "先观察/提案"}` : "本机 · 只读"}</span>
+          <span className="project-muted">
+            {selectedServer
+              ? `${selectedServer.name} · ${automationLevel === "execute" ? "按目标推进，变更受权限约束" : "先观察或生成方案"}`
+              : scope?.host === "local"
+                ? "本机范围 · 不会连接远端服务器"
+                : "先选择目标服务器，再开始 AI 任务"}
+          </span>
           <button
             type="button"
             className="button-primary"
-            disabled={!objective.trim() || !criteria.trim() || createTask.isPending}
-            onClick={() => createTask.mutate({
-              objective: objective.trim(),
-              successCriteria: criteria.split("\n").map((line) => line.trim()).filter(Boolean),
-              scope,
-              guardrails: {
-                notBeforeAt: localInputToIso(notBeforeAt),
-                expiresAt: localInputToIso(expiresAt),
-                forbiddenTools: splitLines(forbiddenTools),
-                forbiddenPathPrefixes: splitLines(forbiddenPathPrefixes),
-              },
-              mode: taskMode,
-              permissionMode: effectiveTaskPermissionMode(permissionMode, { scope, mode: taskMode, automationLevel }),
-              automationLevel,
-            })}
+            disabled={!objective.trim() || !scope || createTask.isPending || startTask.isPending}
+            onClick={() => {
+              if (!scope) return;
+              const customCriteria = criteria.split("\n").map((line) => line.trim()).filter(Boolean);
+              createTask.mutate({
+                objective: objective.trim(),
+                successCriteria: customCriteria.length > 0 ? customCriteria : ["目标已通过可复核的证据验证"],
+                scope,
+                guardrails: {
+                  notBeforeAt: localInputToIso(notBeforeAt),
+                  expiresAt: localInputToIso(expiresAt),
+                  forbiddenTools: splitLines(forbiddenTools),
+                  forbiddenPathPrefixes: splitLines(forbiddenPathPrefixes),
+                },
+                mode: taskMode,
+                permissionMode: taskDelegation.permissionMode,
+                automationLevel,
+                grantTaskCommands: taskDelegation.grantTaskCommands,
+              });
+            }}
           >
-            <Icon name="plus" size="sm" /> {createTask.isPending ? "创建中" : "创建任务"}
+            <Icon name="agent" size="sm" /> {createTask.isPending || startTask.isPending ? "启动中" : "开始 AI 任务"}
           </button>
         </div>
         {createTask.isError ? <p className="form-error" role="alert">{errorMessage(createTask.error)}</p> : null}
@@ -534,7 +613,8 @@ function InvestigationDetail({
   selectingOptionId?: string;
   selectionError?: string;
 }) {
-  const canRecover = task.status === "failed" || task.status === "stopped" || Boolean(task.lastFailure);
+  const canRecover = (task.status === "failed" || task.status === "stopped" || Boolean(task.lastFailure))
+    && task.lastFailure?.code !== "outcome_unknown";
   const canSchedule = task.mode === "readonly" && task.automationLevel === "readonly" && !["completed", "failed", "stopped", "expired"].includes(task.status);
   const canStart = (task.status === "pending" || task.status === "waiting_user") && !task.activeRunId;
   const canStop = !["completed", "failed", "stopped", "expired"].includes(task.status);
@@ -623,6 +703,11 @@ function InvestigationDetail({
         <small className="project-muted">
           禁止路径：{task.guardrails.forbiddenPathPrefixes.length ? task.guardrails.forbiddenPathPrefixes.join(", ") : "无"}
         </small>
+        {task.guardrails.commandGrant ? (
+          <small className="project-muted">
+            命令授权：{task.guardrails.commandGrant.callsUsed}/{task.guardrails.commandGrant.maxCalls} 次 · 剩余时长 {Math.max(0, task.guardrails.commandGrant.maxTotalDurationMs - task.guardrails.commandGrant.totalDurationMs)} ms · 剩余输出 {Math.max(0, task.guardrails.commandGrant.maxTotalOutputBytes - task.guardrails.commandGrant.totalOutputBytes)} 字节 · 截止 {task.guardrails.commandGrant.expiresAt}
+          </small>
+        ) : null}
       </div>
       {plan ? (
         <div className="investigation-plan">
@@ -654,6 +739,7 @@ function InvestigationDetail({
       ) : (
         <p className="project-muted">当前还没有活动计划；Agent 必须先声明计划才能继续使用任务工具。</p>
       )}
+      {steps.length > 0 ? <InvestigationExecutionTimeline steps={steps} /> : null}
       <div className="investigation-schedules">
         <span className="project-card-label">持续巡检</span>
         {scheduleError ? <p className="form-error" role="alert">持续巡检设置失败：{scheduleError}</p> : null}
@@ -832,6 +918,36 @@ function InvestigationDetail({
           {selectionError ? <p className="form-error" role="alert">记录选择失败：{selectionError}</p> : null}
         </div>
       ) : <p className="project-muted">Agent 完成证据整理后，这里会出现可比较的处理选项。</p>}
+    </section>
+  );
+}
+
+function InvestigationExecutionTimeline({ steps }: { steps: InvestigationStep[] }) {
+  return (
+    <section className="investigation-execution-timeline">
+      <span className="project-card-label">实际执行记录 · {steps.length} 步</span>
+      <ol>
+        {steps.slice(-40).map((step) => (
+          <li key={`${step.runId}:${step.id}`} className={`investigation-execution-step investigation-execution-step-${step.status}`}>
+            <div className="investigation-execution-heading">
+              <strong>{step.ordinal + 1}. {step.toolName ?? step.title}</strong>
+              <span>{STEP_STATUS_LABEL[step.status]} · {STEP_KIND_LABEL[step.kind]}</span>
+            </div>
+            <small>
+              {step.target?.serverId ? `目标 ${step.target.serverId} · ` : ""}
+              {step.startedAt ?? "开始时间未知"}{step.endedAt ? ` → ${step.endedAt}` : ""}
+              {step.planStepId ? ` · 计划步骤 ${step.planStepId}` : ""}
+            </small>
+            {step.failure?.code === "outcome_unknown" ? (
+              <p className="investigation-unknown-outcome" role="status">命令或变更可能已经生效。先核对远端状态，不要直接重试。</p>
+            ) : null}
+            {step.inputSummary ? <details><summary>实际输入摘要</summary><pre>{step.inputSummary}</pre></details> : null}
+            {step.outputSummary ? <details open={step.status === "failed"}><summary>实际结果摘要</summary><pre>{step.outputSummary}</pre></details> : null}
+            {step.failure && step.failure.code !== "outcome_unknown" ? <p className="investigation-step-failure">{step.failure.message}</p> : null}
+          </li>
+        ))}
+      </ol>
+      {steps.length > 40 ? <small className="project-muted">仅显示最近 40 步；完整活动记录保存在任务历史中。</small> : null}
     </section>
   );
 }

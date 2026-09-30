@@ -30,6 +30,7 @@ export * from "./types/investigation.js";
 export * from "./types/errors.js";
 export * from "./types/retention.js";
 export * from "./types/schedule.js";
+export * from "./types/server-exec.js";
 
 export * from "./schemas/server.js";
 export * from "./schemas/activity.js";
@@ -52,6 +53,7 @@ export * from "./schemas/investigation.js";
 export * from "./schemas/errors.js";
 export * from "./schemas/retention.js";
 export * from "./schemas/schedule.js";
+export * from "./schemas/server-exec.js";
 
 export * from "./events/index.js";
 export * from "./ipc/index.js";

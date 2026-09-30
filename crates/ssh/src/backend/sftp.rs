@@ -69,6 +69,125 @@ pub enum SftpReplaceError {
 }
 
 impl RusshBackend {
+    /// SFTP `lstat` with a distinct missing-path result. Symbolic links are reported as links.
+    pub async fn sftp_lstat_optional(
+        &self,
+        client: &SftpClient,
+        path: &str,
+    ) -> Result<Option<SftpFileStat>> {
+        let sftp = lock_sftp(client).await?;
+        match sftp.symlink_metadata(path).await {
+            Ok(metadata) => Ok(Some(stat_from_attributes(&metadata))),
+            Err(russh_sftp::client::error::Error::Status(status))
+                if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(Error::Channel(error.to_string())),
+        }
+    }
+
+    /// One directory listing with `lstat` metadata for transfer traversal.
+    pub async fn sftp_list_dir_stat(
+        &self,
+        client: &SftpClient,
+        path: &str,
+    ) -> Result<Vec<(String, SftpFileStat)>> {
+        let sftp = lock_sftp(client).await?;
+        let directory = sftp
+            .read_dir(path)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        Ok(directory
+            .map(|entry| (entry.file_name(), stat_from_attributes(&entry.metadata())))
+            .collect())
+    }
+
+    /// Open a remote file as an owned read stream. The caller must lstat and reject symlinks first;
+    /// SFTP v3 has no portable `O_NOFOLLOW` flag for opening the path.
+    pub async fn sftp_open_read_stream(
+        &self,
+        client: &SftpClient,
+        path: &str,
+    ) -> Result<crate::SftpReader> {
+        use russh_sftp::protocol::OpenFlags;
+        let sftp = lock_sftp(client).await?;
+        let file = sftp
+            .open_with_flags(path, OpenFlags::READ)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        Ok(Box::new(file))
+    }
+
+    /// Exclusively create a remote staging file and return its stream. Existing files and
+    /// symbolic links are never opened or truncated.
+    pub async fn sftp_create_exclusive_stream(
+        &self,
+        client: &SftpClient,
+        path: &str,
+    ) -> Result<crate::SftpWriter> {
+        use russh_sftp::protocol::OpenFlags;
+        let sftp = lock_sftp(client).await?;
+        let file = sftp
+            .open_with_flags(
+                path,
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+            )
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?;
+        Ok(Box::new(file))
+    }
+
+    /// Create one remote directory. The caller verifies its lstat shape and parent chain.
+    pub async fn sftp_create_dir(&self, client: &SftpClient, path: &str) -> Result<()> {
+        let sftp = lock_sftp(client).await?;
+        sftp.create_dir(path)
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))
+    }
+
+    /// Publish a new destination through the negotiated OpenSSH hard-link extension.
+    ///
+    /// This creates a second name for the fully-written sibling staging file. The source is
+    /// intentionally left in place for the transfer manager to remove after it verifies the
+    /// published destination. `link()` fails atomically if the destination already exists; a
+    /// server without `hardlink@openssh.com` version 1 is rejected without falling back to
+    /// SFTP v3 `RENAME`.
+    pub async fn sftp_publish_no_replace(
+        &self,
+        client: &SftpClient,
+        source: &str,
+        destination: &str,
+    ) -> Result<()> {
+        let sftp = lock_sftp(client).await?;
+        match sftp
+            .hardlink(source.to_string(), destination.to_string())
+            .await
+            .map_err(|error| Error::Channel(error.to_string()))?
+        {
+            true => Ok(()),
+            false => Err(Error::Configuration(
+                "the SFTP server did not negotiate hardlink@openssh.com version 1 for no-replace publication".to_string(),
+            )),
+        }
+    }
+
+    /// Request an in-place SFTP rename over an existing path. Servers that do not support safe
+    /// same-directory replacement return an error; the caller must not fall back to remove+rename.
+    pub async fn sftp_rename_replace(
+        &self,
+        _client: &SftpClient,
+        _source: &str,
+        _destination: &str,
+    ) -> Result<()> {
+        // russh-sftp currently exposes only the legacy SFTP v3 RENAME request. It does not
+        // negotiate or issue `posix-rename@openssh.com`, so it cannot promise atomic replacement.
+        // Keep overwrite fail-closed instead of deleting the target and creating a loss window.
+        Err(Error::Configuration(
+            "the SFTP backend does not support an explicit atomic overwrite rename".to_string(),
+        ))
+    }
+
     /// SFTP 冒烟操作（文件工具落地前证明子系统真实可用）：远端目录清单。
     pub async fn sftp_list_dir(&self, client: &SftpClient, path: &str) -> Result<Vec<String>> {
         let sftp = lock_sftp(client).await?;

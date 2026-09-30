@@ -7,20 +7,26 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use russh::keys::{ssh_key, HashAlg};
 use russh::server::{Auth, RunningServerHandle, Server as _};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Attrs, Data, File as SftpEntry, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
+    Attrs, Data, File as SftpEntry, FileAttributes, Handle, Name, OpenFlags, Packet, Status,
+    StatusCode, Version,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use yukinal_filesystem::transfer::{
+    ConflictPolicy, RemoteTransferBackend, RemoteTransferEntry, TransferError, TransferFailureKind,
+    TransferFuture, TransferManager, TransferReader, TransferSnapshot, TransferStatus,
+    TransferWriter,
+};
 use yukinal_filesystem::{
     backup_path_for, content_revision, AgentBackupRequest, AgentCleanupBackupRequest,
     AgentEditRequest, AgentRestoreRequest, Error as FileServiceError, ListedEntry, RemoteEntryKind,
@@ -56,6 +62,7 @@ struct SftpServer {
     root: PathBuf,
     channels: SshChannels,
     mutation: Option<ConcurrentMutation>,
+    advertise_hardlink: bool,
 }
 
 impl russh::server::Server for SftpServer {
@@ -66,6 +73,7 @@ impl russh::server::Server for SftpServer {
             root: self.root.clone(),
             channels: Arc::clone(&self.channels),
             mutation: self.mutation.clone(),
+            advertise_hardlink: self.advertise_hardlink,
         }
     }
 }
@@ -80,6 +88,7 @@ struct SftpSshHandler {
     root: PathBuf,
     channels: SshChannels,
     mutation: Option<ConcurrentMutation>,
+    advertise_hardlink: bool,
 }
 
 impl SftpSshHandler {
@@ -170,7 +179,11 @@ impl russh::server::Handler for SftpSshHandler {
         session.channel_success(channel_id)?;
         russh_sftp::server::run(
             channel.into_stream(),
-            SftpFilesystem::new(self.root.clone(), self.mutation.clone()),
+            SftpFilesystem::new(
+                self.root.clone(),
+                self.mutation.clone(),
+                self.advertise_hardlink,
+            ),
         )
         .await;
         Ok(())
@@ -329,6 +342,7 @@ struct DirectoryCursor {
 struct SftpFilesystem {
     root: PathBuf,
     mutation: Option<ConcurrentMutation>,
+    advertise_hardlink: bool,
     handles: HashMap<String, OpenFile>,
     directories: HashMap<String, DirectoryCursor>,
     metadata: HashMap<String, FileAttributes>,
@@ -336,10 +350,11 @@ struct SftpFilesystem {
 }
 
 impl SftpFilesystem {
-    fn new(root: PathBuf, mutation: Option<ConcurrentMutation>) -> Self {
+    fn new(root: PathBuf, mutation: Option<ConcurrentMutation>, advertise_hardlink: bool) -> Self {
         Self {
             root,
             mutation,
+            advertise_hardlink,
             handles: HashMap::new(),
             directories: HashMap::new(),
             metadata: HashMap::new(),
@@ -501,6 +516,38 @@ impl russh_sftp::server::Handler for SftpFilesystem {
 
     fn unimplemented(&self) -> Self::Error {
         StatusCode::OpUnsupported
+    }
+
+    async fn init(
+        &mut self,
+        _version: u32,
+        _extensions: HashMap<String, String>,
+    ) -> Result<Version, Self::Error> {
+        let mut version = Version::new();
+        if self.advertise_hardlink {
+            version
+                .extensions
+                .insert("hardlink@openssh.com".into(), "1".into());
+        }
+        Ok(version)
+    }
+
+    async fn extended(
+        &mut self,
+        id: u32,
+        request: String,
+        data: Vec<u8>,
+    ) -> Result<Packet, Self::Error> {
+        if request != "hardlink@openssh.com" || !self.advertise_hardlink {
+            return Err(StatusCode::OpUnsupported);
+        }
+        let (oldpath, newpath) = decode_hardlink_request(&data)?;
+        let (_, old_local) = self.resolve(&oldpath)?;
+        let (_, new_local) = self.resolve(&newpath)?;
+        tokio::fs::hard_link(old_local, new_local)
+            .await
+            .map_err(status_from_io)?;
+        Ok(Packet::Status(ok_status(id)))
     }
 
     async fn open(
@@ -722,6 +769,31 @@ impl russh_sftp::server::Handler for SftpFilesystem {
     }
 }
 
+fn decode_hardlink_request(data: &[u8]) -> Result<(String, String), StatusCode> {
+    fn take_string(data: &mut &[u8]) -> Result<String, StatusCode> {
+        if data.len() < 4 {
+            return Err(StatusCode::Failure);
+        }
+        let length =
+            u32::from_be_bytes(data[..4].try_into().map_err(|_| StatusCode::Failure)?) as usize;
+        *data = &data[4..];
+        if data.len() < length {
+            return Err(StatusCode::Failure);
+        }
+        let (value, rest) = data.split_at(length);
+        *data = rest;
+        String::from_utf8(value.to_vec()).map_err(|_| StatusCode::Failure)
+    }
+
+    let mut remaining = data;
+    let oldpath = take_string(&mut remaining)?;
+    let newpath = take_string(&mut remaining)?;
+    if !remaining.is_empty() {
+        return Err(StatusCode::Failure);
+    }
+    Ok((oldpath, newpath))
+}
+
 fn ok_status(id: u32) -> Status {
     Status {
         id,
@@ -746,6 +818,18 @@ async fn start_server(root: &Path) -> TestServer {
 async fn start_server_with_mutation(
     root: &Path,
     mutation: Option<ConcurrentMutation>,
+) -> TestServer {
+    start_server_with_capabilities(root, mutation, true).await
+}
+
+async fn start_server_without_hardlink(root: &Path) -> TestServer {
+    start_server_with_capabilities(root, None, false).await
+}
+
+async fn start_server_with_capabilities(
+    root: &Path,
+    mutation: Option<ConcurrentMutation>,
+    advertise_hardlink: bool,
 ) -> TestServer {
     let host_key = ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
         .expect("generate test host key");
@@ -772,6 +856,7 @@ async fn start_server_with_mutation(
             root: server_root,
             channels,
             mutation,
+            advertise_hardlink,
         };
         let running = server.run_on_socket(config, &listener);
         ready_tx.send(running.handle()).ok();
@@ -785,25 +870,18 @@ async fn start_server_with_mutation(
     }
 }
 
-#[tokio::test]
-async fn sftp_subsystem_lists_reads_writes_exclusive_backups_and_removes_files() {
-    let remote_root = tempfile::tempdir().expect("isolated remote fixture");
-    let remote_etc = remote_root.path().join("etc");
-    std::fs::create_dir_all(&remote_etc).expect("create fixture directory");
-    let source_path = remote_etc.join("yukinal.conf");
-    let source_bytes = b"before config\n";
-    std::fs::write(&source_path, source_bytes).expect("create source file");
-
-    let server = start_server(remote_root.path()).await;
-    let app_data = tempfile::tempdir().expect("isolated local SSH data");
-    let backend = RusshBackend::from_data_dir(app_data.path()).expect("SSH backend");
+async fn connect_test_server(
+    backend: &RusshBackend,
+    server: &TestServer,
+    server_id: &str,
+) -> Session {
     backend
         .trust_host("127.0.0.1", server.address.port(), &server.fingerprint)
         .expect("pin generated test server key");
-    let session = backend
+    backend
         .connect(
             SshConfig {
-                server_id: "srv_sftp_test".into(),
+                server_id: server_id.into(),
                 host: "127.0.0.1".into(),
                 port: server.address.port(),
                 username: AUTH_USER.into(),
@@ -821,7 +899,221 @@ async fn sftp_subsystem_lists_reads_writes_exclusive_backups_and_removes_files()
             },
         )
         .await
-        .expect("authenticate to pinned loopback server");
+        .expect("authenticate to pinned loopback server")
+}
+
+/// Exercises the filesystem transfer service against the same SSH/SFTP operations used by the
+/// desktop adapter. The Tauri adapter adds session lookup and this same error mapping around these
+/// calls; this test keeps the service + wire-protocol boundary covered without a desktop runtime.
+struct TestSftpTransferAdapter {
+    backend: Arc<RusshBackend>,
+    client: SftpClient,
+    server_id: String,
+    remote_root: PathBuf,
+    race_target: StdMutex<Option<(String, Vec<u8>)>>,
+}
+
+impl TestSftpTransferAdapter {
+    fn check_server(&self, server_id: &str) -> Result<(), TransferError> {
+        if self.server_id != server_id || self.client.server_id != server_id {
+            return Err(TransferError::InvalidInput(
+                "test transfer adapter received a different server id".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RemoteTransferBackend for TestSftpTransferAdapter {
+    fn lstat<'a>(
+        &'a self,
+        server_id: &'a str,
+        path: &'a str,
+    ) -> TransferFuture<'a, Option<RemoteStat>> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            self.backend
+                .sftp_lstat_optional(&self.client, path)
+                .await
+                .map(|stat| {
+                    stat.map(|stat| RemoteStat {
+                        kind: match stat.kind {
+                            SftpEntryKind::File => RemoteEntryKind::File,
+                            SftpEntryKind::Directory => RemoteEntryKind::Directory,
+                            SftpEntryKind::Symlink => RemoteEntryKind::Symlink,
+                            SftpEntryKind::Other => RemoteEntryKind::Other,
+                        },
+                        size: stat.size,
+                        modified: stat.modified,
+                    })
+                })
+                .map_err(|error| TransferError::Remote(error.to_string()))
+        })
+    }
+
+    fn list_dir<'a>(
+        &'a self,
+        server_id: &'a str,
+        path: &'a str,
+    ) -> TransferFuture<'a, Vec<RemoteTransferEntry>> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            let entries = self
+                .backend
+                .sftp_list_dir_stat(&self.client, path)
+                .await
+                .map_err(|error| TransferError::Remote(error.to_string()))?;
+            Ok(entries
+                .into_iter()
+                .map(|(name, stat)| RemoteTransferEntry {
+                    name,
+                    stat: RemoteStat {
+                        kind: match stat.kind {
+                            SftpEntryKind::File => RemoteEntryKind::File,
+                            SftpEntryKind::Directory => RemoteEntryKind::Directory,
+                            SftpEntryKind::Symlink => RemoteEntryKind::Symlink,
+                            SftpEntryKind::Other => RemoteEntryKind::Other,
+                        },
+                        size: stat.size,
+                        modified: stat.modified,
+                    },
+                })
+                .collect())
+        })
+    }
+
+    fn open_read<'a>(
+        &'a self,
+        server_id: &'a str,
+        path: &'a str,
+    ) -> TransferFuture<'a, TransferReader> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            self.backend
+                .sftp_open_read_stream(&self.client, path)
+                .await
+                .map_err(|error| TransferError::Remote(error.to_string()))
+        })
+    }
+
+    fn create_exclusive<'a>(
+        &'a self,
+        server_id: &'a str,
+        path: &'a str,
+    ) -> TransferFuture<'a, TransferWriter> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            self.backend
+                .sftp_create_exclusive_stream(&self.client, path)
+                .await
+                .map_err(|error| TransferError::Remote(error.to_string()))
+        })
+    }
+
+    fn create_dir<'a>(&'a self, server_id: &'a str, path: &'a str) -> TransferFuture<'a, ()> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            self.backend
+                .sftp_create_dir(&self.client, path)
+                .await
+                .map_err(|error| TransferError::Remote(error.to_string()))
+        })
+    }
+
+    fn remove_file<'a>(&'a self, server_id: &'a str, path: &'a str) -> TransferFuture<'a, ()> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            self.backend
+                .sftp_remove_file(&self.client, path)
+                .await
+                .map_err(|error| TransferError::Remote(error.to_string()))
+        })
+    }
+
+    fn publish_no_replace<'a>(
+        &'a self,
+        server_id: &'a str,
+        source: &'a str,
+        destination: &'a str,
+    ) -> TransferFuture<'a, ()> {
+        Box::pin(async move {
+            self.check_server(server_id)?;
+            let race_target = {
+                let mut configured = self
+                    .race_target
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if configured
+                    .as_ref()
+                    .is_some_and(|(path, _)| path == destination)
+                {
+                    configured.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((race_path, bytes)) = race_target {
+                let relative_path = race_path.strip_prefix('/').ok_or_else(|| {
+                    TransferError::InvalidInput("race target must be an absolute test path".into())
+                })?;
+                std::fs::write(self.remote_root.join(relative_path), bytes)
+                    .map_err(|error| TransferError::Remote(error.to_string()))?;
+            }
+            self.backend
+                .sftp_publish_no_replace(&self.client, source, destination)
+                .await
+                .map_err(|error| match error {
+                    Error::Configuration(message) => TransferError::Unsupported(message),
+                    error => TransferError::Remote(error.to_string()),
+                })
+        })
+    }
+
+    fn rename_replace<'a>(
+        &'a self,
+        _server_id: &'a str,
+        _source: &'a str,
+        _destination: &'a str,
+    ) -> TransferFuture<'a, ()> {
+        Box::pin(async {
+            Err(TransferError::Unsupported(
+                "test adapter does not offer overwrite publication".into(),
+            ))
+        })
+    }
+}
+
+async fn wait_for_transfer(
+    manager: &TransferManager<TestSftpTransferAdapter>,
+    transfer_id: &yukinal_filesystem::transfer::TransferId,
+) -> TransferSnapshot {
+    for _ in 0..500 {
+        let snapshot = manager
+            .get_result(transfer_id)
+            .await
+            .expect("read transfer snapshot")
+            .expect("transfer snapshot exists");
+        if snapshot.status.is_terminal() {
+            return snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("transfer did not reach a terminal state")
+}
+
+#[tokio::test]
+async fn sftp_subsystem_lists_reads_writes_exclusive_backups_and_removes_files() {
+    let remote_root = tempfile::tempdir().expect("isolated remote fixture");
+    let remote_etc = remote_root.path().join("etc");
+    std::fs::create_dir_all(&remote_etc).expect("create fixture directory");
+    let source_path = remote_etc.join("yukinal.conf");
+    let source_bytes = b"before config\n";
+    std::fs::write(&source_path, source_bytes).expect("create source file");
+
+    let server = start_server(remote_root.path()).await;
+    let app_data = tempfile::tempdir().expect("isolated local SSH data");
+    let backend = RusshBackend::from_data_dir(app_data.path()).expect("SSH backend");
+    let session = connect_test_server(&backend, &server, "srv_sftp_test").await;
     let sftp = backend.sftp(&session).await.expect("start SFTP subsystem");
 
     let listing = backend
@@ -884,6 +1176,101 @@ async fn sftp_subsystem_lists_reads_writes_exclusive_backups_and_removes_files()
         b"generated\n"
     );
 
+    // The transfer path uses owned SFTP streams. Exercise bytes larger than the text preview
+    // limit over the real russh/SFTP loopback protocol, and verify that the file remains binary.
+    let streamed_bytes = (0..(2 * 1024 * 1024 + 37))
+        .map(|index| ((index * 19 + 3) % 256) as u8)
+        .collect::<Vec<_>>();
+    let mut streamed_writer = backend
+        .sftp_create_exclusive_stream(&sftp, "/etc/.streamed.part")
+        .await
+        .expect("create an exclusive streaming staging file");
+    streamed_writer
+        .write_all(&streamed_bytes)
+        .await
+        .expect("stream binary bytes to SFTP");
+    streamed_writer
+        .shutdown()
+        .await
+        .expect("close and flush streamed SFTP writes");
+    let streamed_stat = backend
+        .sftp_lstat_optional(&sftp, "/etc/.streamed.part")
+        .await
+        .expect("lstat streamed staging file")
+        .expect("streamed file exists");
+    assert_eq!(streamed_stat.kind, SftpEntryKind::File);
+    assert_eq!(streamed_stat.size, streamed_bytes.len() as u64);
+    let mut streamed_reader = backend
+        .sftp_open_read_stream(&sftp, "/etc/.streamed.part")
+        .await
+        .expect("open streaming SFTP reader");
+    let mut streamed_readback = Vec::new();
+    streamed_reader
+        .read_to_end(&mut streamed_readback)
+        .await
+        .expect("read streamed binary bytes");
+    assert_eq!(streamed_readback, streamed_bytes);
+    backend
+        .sftp_publish_no_replace(&sftp, "/etc/.streamed.part", "/etc/published.bin")
+        .await
+        .expect("publish by negotiated no-replace hard link");
+    assert_eq!(
+        backend
+            .sftp_read_file(&sftp, "/etc/published.bin")
+            .await
+            .expect("read published hard link"),
+        streamed_bytes
+    );
+    assert_eq!(
+        backend
+            .sftp_read_file(&sftp, "/etc/.streamed.part")
+            .await
+            .expect("staging source remains until manager cleanup"),
+        streamed_bytes
+    );
+
+    backend
+        .sftp_write_file(&sftp, "/etc/streamed.bin", b"destination must stay intact")
+        .await
+        .expect("seed destination for a publish race/collision");
+    let collision = backend
+        .sftp_publish_no_replace(&sftp, "/etc/.streamed.part", "/etc/streamed.bin")
+        .await
+        .expect_err("hardlink publication must fail when the target already exists");
+    assert!(matches!(collision, Error::Channel(_)), "got {collision:?}");
+    assert_eq!(
+        backend
+            .sftp_read_file(&sftp, "/etc/streamed.bin")
+            .await
+            .expect("existing collision target remains intact"),
+        b"destination must stay intact"
+    );
+    let collision = backend
+        .sftp_publish_no_replace(&sftp, "/etc/generated.conf", "/etc/streamed.bin")
+        .await
+        .expect_err("a colliding source must not replace the existing target");
+    assert!(matches!(collision, Error::Channel(_)), "got {collision:?}");
+    let replace = backend
+        .sftp_rename_replace(&sftp, "/etc/generated.conf", "/etc/streamed.bin")
+        .await
+        .expect_err("plain SFTP v3 rename must not claim atomic overwrite support");
+    assert!(
+        matches!(replace, Error::Configuration(_)),
+        "got {replace:?}"
+    );
+    backend
+        .sftp_remove_file(&sftp, "/etc/.streamed.part")
+        .await
+        .expect("remove the staging stream fixture");
+    backend
+        .sftp_remove_file(&sftp, "/etc/published.bin")
+        .await
+        .expect("remove published hard-link fixture");
+    backend
+        .sftp_remove_file(&sftp, "/etc/streamed.bin")
+        .await
+        .expect("remove the destination stream fixture");
+
     backend
         .sftp_remove_file(&sftp, backup_path)
         .await
@@ -893,6 +1280,108 @@ async fn sftp_subsystem_lists_reads_writes_exclusive_backups_and_removes_files()
         std::fs::read(&source_path).expect("verify source fixture was untouched"),
         source_bytes
     );
+
+    drop(sftp);
+    backend.close(&session).await.expect("close SSH session");
+}
+
+#[tokio::test]
+async fn transfer_service_publishes_through_hardlink_and_preserves_a_publish_race() {
+    let remote_root = tempfile::tempdir().expect("isolated remote fixture");
+    let remote_drop = remote_root.path().join("drop");
+    std::fs::create_dir_all(&remote_drop).expect("create upload destination");
+    let server = start_server(remote_root.path()).await;
+    let app_data = tempfile::tempdir().expect("isolated local SSH data");
+    let backend = Arc::new(RusshBackend::from_data_dir(app_data.path()).expect("SSH backend"));
+    let session = connect_test_server(&backend, &server, SERVER_ID).await;
+    let client = backend.sftp(&session).await.expect("start SFTP subsystem");
+    let preserved_race = b"created by another remote writer".to_vec();
+    let manager = TransferManager::new(TestSftpTransferAdapter {
+        backend: Arc::clone(&backend),
+        client,
+        server_id: SERVER_ID.into(),
+        remote_root: remote_root.path().to_path_buf(),
+        race_target: StdMutex::new(Some(("/drop/raced.bin".into(), preserved_race.clone()))),
+    });
+    let local_root = tempfile::tempdir().expect("isolated upload source");
+    let payload = (0..(2 * 1024 * 1024 + 37))
+        .map(|index| ((index * 47 + 19) % 256) as u8)
+        .collect::<Vec<_>>();
+    let source = local_root.path().join("verified.bin");
+    std::fs::write(&source, &payload).expect("write source payload");
+
+    let id = manager
+        .start_upload(SERVER_ID, "/drop", vec![source], ConflictPolicy::Ask)
+        .expect("start upload through transfer service");
+    let completed = wait_for_transfer(&manager, &id).await;
+    assert_eq!(completed.status, TransferStatus::Completed);
+    assert_eq!(completed.verified_files, 1);
+    assert_eq!(
+        std::fs::read(remote_drop.join("verified.bin")).expect("read published remote file"),
+        payload,
+        "the service must publish the fully verified staging inode"
+    );
+
+    let raced_source = local_root.path().join("raced.bin");
+    std::fs::write(&raced_source, b"new upload contents").expect("write raced source");
+    let raced_id = manager
+        .start_upload(SERVER_ID, "/drop", vec![raced_source], ConflictPolicy::Ask)
+        .expect("start upload whose target will appear at publication");
+    let failed = wait_for_transfer(&manager, &raced_id).await;
+    assert_eq!(failed.status, TransferStatus::Failed);
+    assert_eq!(failed.completed_files, 0);
+    assert_eq!(failed.verified_files, 0);
+    assert_eq!(failed.failures.len(), 1);
+    assert_eq!(failed.failures[0].kind, TransferFailureKind::RemoteIo);
+    assert_eq!(
+        std::fs::read(remote_drop.join("raced.bin")).expect("read racing remote target"),
+        preserved_race,
+        "the no-replace SFTP extension must preserve a destination created after preflight"
+    );
+    let remaining = std::fs::read_dir(&remote_drop)
+        .expect("list destination after uploads")
+        .map(|entry| entry.expect("read remote entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining.len(), 2, "both staging files must be cleaned up");
+    assert!(remaining.iter().any(|name| name == "verified.bin"));
+    assert!(remaining.iter().any(|name| name == "raced.bin"));
+
+    manager.shutdown().await;
+    backend.close(&session).await.expect("close SSH session");
+}
+
+#[tokio::test]
+async fn no_replace_publish_fails_closed_when_hardlink_extension_is_missing() {
+    let remote_root = tempfile::tempdir().expect("isolated remote fixture");
+    let remote_etc = remote_root.path().join("etc");
+    std::fs::create_dir_all(&remote_etc).expect("create fixture directory");
+    std::fs::write(remote_etc.join(".upload.part"), b"payload").expect("seed staging file");
+    let server = start_server_without_hardlink(remote_root.path()).await;
+    let app_data = tempfile::tempdir().expect("isolated local SSH data");
+    let backend = RusshBackend::from_data_dir(app_data.path()).expect("SSH backend");
+    let session = connect_test_server(&backend, &server, "srv_sftp_no_hardlink").await;
+    let sftp = backend.sftp(&session).await.expect("start SFTP subsystem");
+
+    let publish = backend
+        .sftp_publish_no_replace(&sftp, "/etc/.upload.part", "/etc/upload.bin")
+        .await
+        .expect_err("server without the extension must not fall back to rename");
+    assert!(
+        matches!(publish, Error::Configuration(_)),
+        "got {publish:?}"
+    );
+    assert_eq!(
+        backend
+            .sftp_read_file(&sftp, "/etc/.upload.part")
+            .await
+            .expect("staging remains for explicit cleanup"),
+        b"payload"
+    );
+    assert!(backend
+        .sftp_lstat_optional(&sftp, "/etc/upload.bin")
+        .await
+        .expect("inspect destination")
+        .is_none());
 
     drop(sftp);
     backend.close(&session).await.expect("close SSH session");

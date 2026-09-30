@@ -139,7 +139,8 @@ fn successful_migration_retains_a_previous_version_copy_with_its_rows() {
         let raw = Connection::open(&path).expect("open raw");
         raw.execute_batch(
             "ALTER TABLE mcp_servers DROP COLUMN annotation_trust;
-             PRAGMA user_version = 34;",
+             DROP TABLE file_transfers;
+             PRAGMA user_version = 35;",
         )
         .expect("rewind to the previous version");
     }
@@ -162,7 +163,7 @@ fn successful_migration_retains_a_previous_version_copy_with_its_rows() {
     let version: i64 = previous
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("backup version");
-    assert_eq!(version, 34, "the copy must be the pre-migration version");
+    assert_eq!(version, 35, "the copy must be the pre-migration version");
     let name: String = previous
         .query_row(
             "SELECT name FROM servers WHERE id = 'srv_backup'",
@@ -201,7 +202,8 @@ fn backup_includes_rows_that_exist_only_in_the_wal_sidecar() {
             .execute_batch(
                 "PRAGMA journal_mode = WAL;
                  PRAGMA wal_autocheckpoint = 0;
-                 ALTER TABLE mcp_servers DROP COLUMN annotation_trust;",
+                 ALTER TABLE mcp_servers DROP COLUMN annotation_trust;
+                 DROP TABLE file_transfers;",
             )
             .expect("prepare a WAL-only write");
         writer
@@ -211,7 +213,7 @@ fn backup_includes_rows_that_exist_only_in_the_wal_sidecar() {
             )
             .expect("write a row that stays in the WAL");
         writer
-            .pragma_update(None, "user_version", 34)
+            .pragma_update(None, "user_version", 35)
             .expect("rewind version inside the WAL");
 
         // The writer is still open, so the row above is not in the main file;

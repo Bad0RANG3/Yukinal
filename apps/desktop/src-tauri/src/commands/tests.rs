@@ -2,6 +2,7 @@
 //!
 //! 从 `commands/mod.rs` 拆出来只为可读性：这里覆盖 IPC 事件名映射与命令层的纯规则。
 
+use super::event_projection::failure_from_event;
 use super::{
     failure_options, is_current_investigation_run, is_stable_server_id,
     is_terminal_investigation_run, is_terminal_result_status, next_investigation_status,
@@ -12,9 +13,9 @@ use crate::state::AppState;
 use serde_json::json;
 use yukinal_database::models::{
     Environment, ErrorCategory, FailureOptionAction, InvestigationPermissionMode, InvestigationRun,
-    InvestigationRunMode, InvestigationRunStatus, InvestigationTarget, InvestigationTargetHost,
-    InvestigationTask, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
-    ToolExecutionStatus,
+    InvestigationRunMode, InvestigationRunStatus, InvestigationStep, InvestigationStepKind,
+    InvestigationStepStatus, InvestigationTarget, InvestigationTargetHost, InvestigationTask,
+    TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus, ToolExecutionStatus,
 };
 
 /// 三个终态放行，三个在途状态一律挡住 —— 挡住的那三个正是「崩溃中断」会留下的形状，
@@ -269,6 +270,180 @@ fn cross_layer_event_helpers_close_stop_and_reject_late_frames() {
 }
 
 #[test]
+fn event_projection_keeps_steps_after_the_first_page_and_preserves_unknown_action_outcomes() {
+    let directory = std::env::temp_dir().join(format!(
+        "yukinal-command-step-page-boundary-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let state = AppState::bootstrap(&directory).expect("bootstrap command fixture");
+    let task = InvestigationTask {
+        id: "task_step_page_boundary".into(),
+        workspace_id: None,
+        server_id: Some("srv_step_page_boundary".into()),
+        objective: "retain the full execution timeline".into(),
+        success_criteria: vec!["the newest step remains auditable".into()],
+        scope: InvestigationTarget {
+            host: InvestigationTargetHost::Remote,
+            server_id: Some("srv_step_page_boundary".into()),
+            workspace_id: None,
+            environment: Environment::Staging,
+        },
+        guardrails: Default::default(),
+        mode: InvestigationRunMode::Goal,
+        permission_mode: InvestigationPermissionMode::Ask,
+        automation_level: TaskAutomationLevel::Execute,
+        created_by: "fixture".into(),
+        phase: TaskPhase::Execution,
+        status: TaskStatus::Executing,
+        budget: TaskBudget {
+            max_steps: 10_000,
+            max_run_ms: 60_000,
+            max_attempts: 1,
+        },
+        created_at: "2026-09-30T00:00:00Z".into(),
+        updated_at: "2026-09-30T00:00:00Z".into(),
+        completed_at: None,
+        active_run_id: Some("run_step_page_boundary".into()),
+        last_failure: None,
+    };
+    state
+        .database
+        .investigations()
+        .create_task(&task)
+        .expect("create long-running task");
+    state
+        .database
+        .investigations()
+        .create_run(&InvestigationRun {
+            id: "run_step_page_boundary".into(),
+            task_id: task.id.clone(),
+            session_id: None,
+            message_id: None,
+            trace_id: Some("trace_step_page_boundary".into()),
+            attempt: 1,
+            phase: TaskPhase::Execution,
+            status: InvestigationRunStatus::Running,
+            started_at: "2026-09-30T00:00:00Z".into(),
+            updated_at: "2026-09-30T00:00:00Z".into(),
+            ended_at: None,
+            checkpoint: None,
+            failure: None,
+        })
+        .expect("create active run");
+
+    for ordinal in 0..513_u32 {
+        state
+            .database
+            .investigations()
+            .upsert_step(&InvestigationStep {
+                id: format!("step_history_{ordinal:03}"),
+                task_id: task.id.clone(),
+                run_id: "run_step_page_boundary".into(),
+                ordinal,
+                kind: InvestigationStepKind::Evidence,
+                title: format!("historical step {ordinal}"),
+                status: InvestigationStepStatus::Succeeded,
+                attempt: 1,
+                tool_name: Some("server.info".into()),
+                plan_id: None,
+                plan_step_id: None,
+                target: None,
+                input_summary: None,
+                output_summary: Some("historical result".into()),
+                evidence_ids: vec![],
+                started_at: Some("2026-09-30T00:00:00Z".into()),
+                ended_at: Some("2026-09-30T00:00:01Z".into()),
+                failure: None,
+            })
+            .expect("seed timeline history");
+    }
+
+    let tool_call = json!({
+        "taskId": task.id,
+        "runId": "run_step_page_boundary",
+        "stepId": "step_after_page_boundary",
+        "toolName": "server.exec",
+        "riskLevel": "high",
+        "target": { "host": "remote", "serverId": "srv_step_page_boundary", "environment": "staging" },
+        "input": { "command": "change a remote setting", "password": "fixture-secret" },
+        "at": "2026-09-30T00:00:02Z"
+    });
+    persist_investigation_event_state(&state, "agent.tool_call", &tool_call)
+        .expect("persist tool call beyond the first page");
+
+    let tool_result = json!({
+        "taskId": task.id,
+        "runId": "run_step_page_boundary",
+        "stepId": "step_after_page_boundary",
+        "toolName": "server.exec",
+        "status": "failed",
+        "errorCode": "transport",
+        "executionState": "result_unknown",
+        "error": "SSH command result is unavailable; its effect may have occurred",
+        "outputSummary": "result_unknown; exit status unavailable",
+        "target": { "host": "remote", "serverId": "srv_step_page_boundary", "environment": "staging" },
+        "endedAt": "2026-09-30T00:00:03Z"
+    });
+    persist_investigation_event_state(&state, "agent.tool_result", &tool_result)
+        .expect("persist tool result beyond the first page");
+
+    let step = state
+        .database
+        .investigations()
+        .get_step_for_run(
+            &task.id,
+            "run_step_page_boundary",
+            "step_after_page_boundary",
+        )
+        .expect("read the projected step by full identity");
+    assert_eq!(step.ordinal, 513, "the new step must follow all history");
+    assert_eq!(step.status, InvestigationStepStatus::Failed);
+    assert_eq!(
+        step.output_summary.as_deref(),
+        Some("result_unknown; exit status unavailable")
+    );
+    let failure = step.failure.as_ref().expect("persisted step failure");
+    assert_eq!(failure.code, TaskFailureCode::OutcomeUnknown);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.detail.as_ref().unwrap()["executionState"],
+        "result_unknown"
+    );
+
+    let failed_run = json!({
+        "taskId": task.id,
+        "runId": "run_step_page_boundary",
+        "type": "agent.failed",
+        "error": "Agent run stopped after the remote result was lost",
+        "at": "2026-09-30T00:00:04Z"
+    });
+    let run = persist_investigation_event_state(&state, "agent.failed", &failed_run)
+        .expect("persist terminal run");
+    assert_eq!(
+        run.failure.as_ref().map(|failure| failure.code),
+        Some(TaskFailureCode::OutcomeUnknown),
+        "the run must retain the exact action failure instead of a generic terminal error"
+    );
+    let failed_task = state
+        .database
+        .investigations()
+        .get_task(&task.id)
+        .expect("read finalized task");
+    assert_eq!(
+        failed_task
+            .last_failure
+            .as_ref()
+            .map(|failure| failure.code),
+        Some(TaskFailureCode::OutcomeUnknown)
+    );
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
 fn tool_failure_codes_keep_recovery_categories_structured() {
     assert_eq!(
         task_failure_code_from_tool_error("transport"),
@@ -286,6 +461,53 @@ fn tool_failure_codes_keep_recovery_categories_structured() {
 }
 
 #[test]
+fn server_exec_interruption_states_persist_as_non_retryable_unknown_outcomes() {
+    for state in ["result_unknown", "timed_out", "cancelled"] {
+        let failure = failure_from_event(
+            &json!({
+                "toolName": "server.exec",
+                "errorCode": "transport",
+                "executionState": state,
+                "error": "SSH command result is unavailable",
+                "at": "2026-09-30T00:00:00Z"
+            }),
+            2,
+        )
+        .expect("tool failure event has a summary");
+        assert_eq!(failure.code, TaskFailureCode::OutcomeUnknown);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("不要直接重试"));
+        assert_eq!(failure.detail.as_ref().unwrap()["executionState"], state);
+        assert!(failure
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|option| { option.action == FailureOptionAction::WaitUser }));
+        assert!(!failure
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|option| { option.action == FailureOptionAction::Retry }));
+    }
+
+    // The state discriminator only has special meaning on the host-owned command tool.
+    let unrelated = failure_from_event(
+        &json!({
+            "toolName": "mcp.inspect",
+            "errorCode": "transport",
+            "executionState": "result_unknown",
+            "error": "MCP unavailable"
+        }),
+        1,
+    )
+    .expect("MCP failure event has a summary");
+    assert_eq!(unrelated.code, TaskFailureCode::Transport);
+    assert!(unrelated.retryable);
+}
+
+#[test]
 fn recovery_options_derive_retryability_from_the_failure_code() {
     let transport = failure_options(TaskFailureCode::Transport);
     assert!(transport
@@ -294,7 +516,11 @@ fn recovery_options_derive_retryability_from_the_failure_code() {
 
     // Cancellation and unknown failures remain visible/recoverable through
     // explicit user choices, but must not offer a generic automatic retry.
-    for code in [TaskFailureCode::Cancelled, TaskFailureCode::Unknown] {
+    for code in [
+        TaskFailureCode::Cancelled,
+        TaskFailureCode::OutcomeUnknown,
+        TaskFailureCode::Unknown,
+    ] {
         assert!(
             !failure_options(code)
                 .iter()

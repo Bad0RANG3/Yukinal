@@ -45,6 +45,8 @@ export const HOST_METHODS = {
 
 export interface HostToolExecuteRequest {
   callId: string;
+  /** Present on current sidecars; optional for compatibility with an older sidecar. */
+  runId?: string;
   traceId: string;
   toolName: string;
   input: unknown;
@@ -53,6 +55,8 @@ export interface HostToolExecuteRequest {
   planId?: string;
   planStepId?: string;
   evidenceIds?: string[];
+  /** Per-call user approval for exact-input tools; task grants are checked host-side. */
+  approvalId?: string;
 }
 
 /** Cancels a previously sent host.tool.execute request by its JSON-RPC id. */

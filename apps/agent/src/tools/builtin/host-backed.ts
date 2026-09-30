@@ -36,6 +36,7 @@ export function hostBackedTool<TInput extends Record<string, unknown>, TOutput>(
         {
           callId: context.callId,
           traceId: context.traceId,
+          ...(context.runId ? { runId: context.runId } : {}),
           toolName: spec.name,
           input,
           target: context.target,
@@ -43,6 +44,7 @@ export function hostBackedTool<TInput extends Record<string, unknown>, TOutput>(
           ...(context.planId ? { planId: context.planId } : {}),
           ...(context.planStepId ? { planStepId: context.planStepId } : {}),
           ...(context.evidenceIds ? { evidenceIds: context.evidenceIds } : {}),
+          ...(context.approvalId ? { approvalId: context.approvalId } : {}),
         },
         context.signal,
       );

@@ -49,6 +49,17 @@ pub(crate) fn forward_agent_frame(app: &AppHandle, frame: &Value) {
     {
         return;
     }
+    if event_type == "agent.waiting_approval"
+        && params.pointer("/approval/toolName").and_then(Value::as_str) == Some("server.exec")
+    {
+        let state = app.state::<AppState>();
+        if let Err(error) = state
+            .server_exec_approvals
+            .record_waiting_event(params, yukinal_time::now_epoch_seconds())
+        {
+            eprintln!("[yukinal] server.exec approval was not recorded: {error}");
+        }
+    }
     sync_investigation_task_status(app, event_type, params);
     persist_investigation_event(app, event_type, params);
     if event_type == "agent.tool_result" {
@@ -357,26 +368,31 @@ pub(crate) fn persist_investigation_event_state(
                 _ => InvestigationRunStatus::Completed,
             };
             if matches!(run.status, InvestigationRunStatus::Failed) {
-                run.failure = failure_from_event(params, run.attempt);
+                run.failure = unknown_action_outcome_for_run(state, &run.task_id, &run.id)
+                    .or_else(|| failure_from_event(params, run.attempt));
             } else if matches!(run.status, InvestigationRunStatus::Cancelled) {
-                run.failure = Some(InvestigationFailure {
-                    code: TaskFailureCode::Cancelled,
-                    message: "运行被用户停止".into(),
-                    retryable: TaskFailureCode::Cancelled.retryable(),
-                    attempt: run.attempt,
-                    at: params
-                        .get("at")
-                        .and_then(Value::as_str)
-                        .map(|value| bounded_audit_text(value, 80))
-                        .unwrap_or_else(yukinal_core::sidecar::iso8601_now),
-                    detail: None,
-                    options: Some(failure_options(TaskFailureCode::Cancelled)),
-                });
+                run.failure =
+                    unknown_action_outcome_for_run(state, &run.task_id, &run.id).or_else(|| {
+                        Some(InvestigationFailure {
+                            code: TaskFailureCode::Cancelled,
+                            message: "运行被用户停止".into(),
+                            retryable: TaskFailureCode::Cancelled.retryable(),
+                            attempt: run.attempt,
+                            at: params
+                                .get("at")
+                                .and_then(Value::as_str)
+                                .map(|value| bounded_audit_text(value, 80))
+                                .unwrap_or_else(yukinal_core::sidecar::iso8601_now),
+                            detail: None,
+                            options: Some(failure_options(TaskFailureCode::Cancelled)),
+                        })
+                    });
             }
         }
         "agent.failed" => {
             run.status = InvestigationRunStatus::Failed;
-            run.failure = failure_from_event(params, run.attempt);
+            run.failure = unknown_action_outcome_for_run(state, &run.task_id, &run.id)
+                .or_else(|| failure_from_event(params, run.attempt));
         }
         _ => return None,
     }
@@ -644,14 +660,20 @@ fn investigation_step_from_tool_call(
     if id.is_empty() || title.is_empty() {
         return None;
     }
-    let ordinal = state
+    let ordinal = match state
         .database
         .investigations()
-        .list_steps(&run.task_id, 512)
-        .ok()
-        .and_then(|steps| steps.iter().map(|step| step.ordinal).max())
-        .unwrap_or(0)
-        .saturating_add(1);
+        .max_step_ordinal(&run.task_id)
+    {
+        Ok(max_ordinal) => max_ordinal.unwrap_or(0).saturating_add(1),
+        Err(error) => {
+            eprintln!(
+                "[yukinal] investigation step ordinal lookup failed for {}: {error}",
+                run.task_id
+            );
+            return None;
+        }
+    };
     let target = params
         .get("target")
         .cloned()
@@ -710,50 +732,56 @@ fn investigation_step_from_tool_result(
     if id.is_empty() {
         return None;
     }
-    let mut step = state
+    let existing = match state
         .database
         .investigations()
-        .list_steps(&run.task_id, 512)
-        .ok()
-        .and_then(|steps| steps.into_iter().find(|candidate| candidate.id == id))
-        .unwrap_or(InvestigationStep {
-            id: bounded_audit_text(id, 256),
-            task_id: run.task_id.clone(),
-            run_id: run.id.clone(),
-            ordinal: 0,
-            kind: InvestigationStepKind::Evidence,
-            title: bounded_audit_text(
-                params
-                    .get("toolName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool"),
-                512,
-            ),
-            status: InvestigationStepStatus::Pending,
-            attempt: 1,
-            tool_name: params
+        .get_step_for_run(&run.task_id, &run.id, id)
+    {
+        Ok(step) => Some(step),
+        Err(yukinal_database::DatabaseError::NotFound) => None,
+        Err(error) => {
+            eprintln!("[yukinal] investigation step lookup failed for {id}: {error}");
+            return None;
+        }
+    };
+    let mut step = existing.unwrap_or(InvestigationStep {
+        id: bounded_audit_text(id, 256),
+        task_id: run.task_id.clone(),
+        run_id: run.id.clone(),
+        ordinal: 0,
+        kind: InvestigationStepKind::Evidence,
+        title: bounded_audit_text(
+            params
                 .get("toolName")
                 .and_then(Value::as_str)
-                .map(|value| bounded_audit_text(value, 256)),
-            plan_id: params
-                .get("planId")
-                .and_then(Value::as_str)
-                .map(|value| bounded_audit_text(value, 256)),
-            plan_step_id: params
-                .get("planStepId")
-                .and_then(Value::as_str)
-                .map(|value| bounded_audit_text(value, 256)),
-            target: params
-                .get("target")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok()),
-            input_summary: None,
-            output_summary: None,
-            evidence_ids: plan_evidence_ids_from_event(params).unwrap_or_default(),
-            started_at: None,
-            ended_at: None,
-            failure: None,
-        });
+                .unwrap_or("tool"),
+            512,
+        ),
+        status: InvestigationStepStatus::Pending,
+        attempt: 1,
+        tool_name: params
+            .get("toolName")
+            .and_then(Value::as_str)
+            .map(|value| bounded_audit_text(value, 256)),
+        plan_id: params
+            .get("planId")
+            .and_then(Value::as_str)
+            .map(|value| bounded_audit_text(value, 256)),
+        plan_step_id: params
+            .get("planStepId")
+            .and_then(Value::as_str)
+            .map(|value| bounded_audit_text(value, 256)),
+        target: params
+            .get("target")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        input_summary: None,
+        output_summary: None,
+        evidence_ids: plan_evidence_ids_from_event(params).unwrap_or_default(),
+        started_at: None,
+        ended_at: None,
+        failure: None,
+    });
     let status = params
         .get("status")
         .and_then(Value::as_str)
@@ -809,7 +837,7 @@ fn plan_evidence_ids_from_event(params: &Value) -> Option<Vec<String>> {
     )
 }
 
-fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailure> {
+pub(crate) fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailure> {
     let message = params
         .get("error")
         .and_then(Value::as_str)
@@ -822,11 +850,24 @@ fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailu
         .or_else(|| params.get("outputSummary").and_then(Value::as_str))?
         .trim();
     let message = bounded_audit_text(message, 4_096);
-    let code = params
-        .get("errorCode")
-        .and_then(Value::as_str)
-        .and_then(task_failure_code_from_tool_error)
-        .unwrap_or_else(|| classify_task_failure(&message));
+    let execution_state = (params.get("toolName").and_then(Value::as_str) == Some("server.exec"))
+        .then(|| params.get("executionState").and_then(Value::as_str))
+        .flatten()
+        .filter(|state| matches!(*state, "timed_out" | "cancelled" | "result_unknown"));
+    let code = if execution_state.is_some() {
+        TaskFailureCode::OutcomeUnknown
+    } else {
+        params
+            .get("errorCode")
+            .and_then(Value::as_str)
+            .and_then(task_failure_code_from_tool_error)
+            .unwrap_or_else(|| classify_task_failure(&message))
+    };
+    let message = if code == TaskFailureCode::OutcomeUnknown {
+        format!("远端行动结果未知，可能已经生效；先核对目标状态，不要直接重试。{message}")
+    } else {
+        message
+    };
     Some(InvestigationFailure {
         code,
         message,
@@ -838,9 +879,23 @@ fn failure_from_event(params: &Value, attempt: u32) -> Option<InvestigationFailu
             .or_else(|| params.get("endedAt").and_then(Value::as_str))
             .map(|value| bounded_audit_text(value, 80))
             .unwrap_or_else(yukinal_core::sidecar::iso8601_now),
-        detail: None,
+        detail: execution_state
+            .map(|state| json!({ "executionState": state, "requiresFreshBaseline": true })),
         options: Some(failure_options(code)),
     })
+}
+
+fn unknown_action_outcome_for_run(
+    state: &AppState,
+    task_id: &str,
+    run_id: &str,
+) -> Option<InvestigationFailure> {
+    state
+        .database
+        .investigations()
+        .find_failure_step_for_run(task_id, run_id, TaskFailureCode::OutcomeUnknown)
+        .ok()?
+        .and_then(|step| step.failure)
 }
 
 /// Build user-visible recovery choices from the canonical failure code.
@@ -888,6 +943,15 @@ pub(crate) fn failure_options(code: TaskFailureCode) -> Vec<InvestigationFailure
                 action: FailureOptionAction::Resume,
                 title: "从检查点恢复".into(),
                 description: "重新检查连接、计划和目标后从未完成阶段继续。".into(),
+                requires_approval: false,
+            });
+        }
+        TaskFailureCode::OutcomeUnknown => {
+            options.push(InvestigationFailureOption {
+                id: "wait_user".into(),
+                action: FailureOptionAction::WaitUser,
+                title: "先核对远端状态".into(),
+                description: "命令或变更可能已经生效。先查看执行摘要并重新采集只读证据；确认现场后再手动继续任务。".into(),
                 requires_approval: false,
             });
         }

@@ -395,6 +395,8 @@ pub struct CommandResult {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 impl CommandResult {
@@ -479,6 +481,12 @@ pub struct SftpClient {
     pub server_id: String,
     pub(crate) inner: Arc<crate::conn::SftpHandle>,
 }
+
+/// Owned SFTP read stream. File contents stay on the Rust side and are consumed incrementally.
+pub type SftpReader = Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>;
+
+/// Owned SFTP write stream for a host-created staging file.
+pub type SftpWriter = Box<dyn tokio::io::AsyncWrite + Send + Unpin + 'static>;
 
 impl fmt::Debug for SftpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

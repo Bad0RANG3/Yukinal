@@ -315,13 +315,13 @@ fn row_to_mcp(row: &Row<'_>) -> rusqlite::Result<McpServerConfig> {
                 return Err(decode_error(
                     7,
                     "legacy HTTP authentication header has no credential reference",
-                ))
+                ));
             }
             (None, Some(_)) => {
                 return Err(decode_error(
                     6,
                     "legacy HTTP credential reference has no header name",
-                ))
+                ));
             }
         },
     };

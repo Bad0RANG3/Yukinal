@@ -9,9 +9,11 @@
  */
 
 import {
+  ServerExecInterruptionSchema,
   type AgentStreamEvent,
   type PermissionApprovalSource,
   type PermissionDecision,
+  type ServerExecInterruption,
   type ToolCallRequest,
   type ToolDeclaration,
   type ToolError,
@@ -42,6 +44,7 @@ export interface ToolCallEventInput extends ToolEventBase {}
 
 export interface ToolResultEventInput extends ToolEventBase {
   errorCode?: ToolError["code"];
+  executionState?: ServerExecInterruption["state"];
   status: "success" | "failed" | "cancelled";
   outputSummary: string;
   error?: string;
@@ -100,6 +103,7 @@ export function createToolEventEmitter({
       planStepId: result.planStepId,
       evidenceIds: result.evidenceIds,
       errorCode: result.errorCode,
+      executionState: result.executionState,
       status: result.status,
       outputSummary: redactSensitiveText(result.outputSummary),
       error: result.error === undefined ? undefined : redactSensitiveText(result.error),
@@ -111,4 +115,14 @@ export function createToolEventEmitter({
   };
 
   return { emitToolCall, emitToolResult };
+}
+
+/** Project only the bounded state discriminator; stdout/stderr remain in the redacted summary. */
+export function serverExecInterruptionState(
+  toolName: string,
+  detail: unknown,
+): ServerExecInterruption["state"] | undefined {
+  if (toolName !== "server.exec") return undefined;
+  const parsed = ServerExecInterruptionSchema.safeParse(detail);
+  return parsed.success ? parsed.data.state : undefined;
 }

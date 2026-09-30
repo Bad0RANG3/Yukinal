@@ -32,6 +32,7 @@ import {
   type RiskLevel,
   type ToolDeclaration,
   type ToolTarget,
+  type TaskCommandGrant,
 } from "@yukinal/shared";
 
 import { actionFingerprint } from "../security/action-fingerprint.js";
@@ -62,6 +63,9 @@ export interface PermissionRequest {
    * delegation is consulted.
    */
   mode?: AgentRunMode;
+  taskId?: string;
+  /** Fetched from the host-owned InvestigationContext. */
+  taskCommandGrant?: TaskCommandGrant;
 }
 
 /** Grants are scoped to the exact `tool + input + target` action. */
@@ -74,6 +78,7 @@ export function grantKey(toolName: string, target: ToolTarget, inputFingerprint 
 
 export class PermissionEngine {
   readonly #grants = new Set<string>();
+  readonly #taskCommandReservations = new Map<string, { calls: number; durationMs: number; outputBytes: number }>();
   readonly #now: () => string;
 
   constructor(options: { now?: () => string } = {}) {
@@ -205,6 +210,29 @@ export class PermissionEngine {
       reason = `${declaration.name} on ${describeTarget(target)} was approved for this session`;
     }
 
+    // A task command grant is a separate user-authorized capability, issued by the
+    // desktop host at task creation and independently budget-checked again by Rust
+    // before SSH. It never downgrades a known critical pattern or extends to another tool.
+    if (
+      outcome === "ask" &&
+      finalRisk === "high" &&
+      taskCommandGrantCanCover(request, this.#now(), this.#taskCommandReservations)
+    ) {
+      const grant = request.taskCommandGrant!;
+      const usage = this.#taskCommandReservations.get(grant.grantId) ?? {
+        calls: 0,
+        durationMs: 0,
+        outputBytes: 0,
+      };
+      usage.calls += 1;
+      usage.durationMs += (input as { timeoutMs: number }).timeoutMs;
+      usage.outputBytes += (input as { maxOutputBytes: number }).maxOutputBytes;
+      this.#taskCommandReservations.set(grant.grantId, usage);
+      outcome = "auto";
+      approvedBy = "user";
+      reason = `${declaration.name} is covered by the user's bounded command delegation for task ${grant.taskId}; Rust will re-check the host-issued ticket and remaining budget`;
+    }
+
     const decision: PermissionDecision = {
       outcome,
       intrinsicRisk,
@@ -237,6 +265,10 @@ export class PermissionEngine {
    * entry in the grant set and make the engine's own decisions misleading.
    */
   grantSession(decision: PermissionDecision): void {
+    // A server.exec session grant has no host-verifiable task ticket. Keep commands
+    // on one-call approvals unless the durable task's separate host-issued grant is
+    // present; that is the only path which may authorize a sequence of unknown inputs.
+    if (decision.toolName === "server.exec") return;
     if (!isSessionGrantable(decision)) return;
     this.#grants.add(grantKey(decision.toolName, decision.target, decision.inputFingerprint));
   }
@@ -250,7 +282,51 @@ export class PermissionEngine {
    */
   clearGrants(): void {
     this.#grants.clear();
+    this.#taskCommandReservations.clear();
   }
+}
+
+function taskCommandGrantCanCover(
+  request: PermissionRequest,
+  now: string,
+  reservations: Map<string, { calls: number; durationMs: number; outputBytes: number }>,
+): boolean {
+  const grant = request.taskCommandGrant;
+  if (
+    request.declaration.name !== "server.exec" ||
+    request.permissionMode !== "auto" ||
+    request.mode !== "goal" ||
+    request.target.host !== "remote" ||
+    (request.target.environment !== "development" && request.target.environment !== "staging") ||
+    !request.taskId ||
+    !grant ||
+    grant.grantedBy !== "user" ||
+    grant.taskId !== request.taskId ||
+    grant.serverId !== request.target.serverId ||
+    grant.environment !== request.target.environment ||
+    grant.callsUsed >= grant.maxCalls
+  ) {
+    return false;
+  }
+  const nowMs = Date.parse(now);
+  const expiresAt = Date.parse(grant.expiresAt);
+  if (!Number.isFinite(nowMs) || !Number.isFinite(expiresAt) || nowMs >= expiresAt) return false;
+
+  const input = request.input as { command?: unknown; timeoutMs?: unknown; maxOutputBytes?: unknown };
+  if (
+    typeof input?.command !== "string" ||
+    typeof input.timeoutMs !== "number" || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs <= 0 ||
+    typeof input.maxOutputBytes !== "number" || !Number.isSafeInteger(input.maxOutputBytes) || input.maxOutputBytes <= 0
+  ) return false;
+  const commandRisk = analyzeCommand(input.command);
+  if (commandRisk?.level === "critical") return false;
+
+  const usage = reservations.get(grant.grantId) ?? { calls: 0, durationMs: 0, outputBytes: 0 };
+  return (
+    grant.callsUsed + usage.calls < grant.maxCalls &&
+    grant.totalDurationMs + usage.durationMs + input.timeoutMs <= grant.maxTotalDurationMs &&
+    grant.totalOutputBytes + usage.outputBytes + input.maxOutputBytes <= grant.maxTotalOutputBytes
+  );
 }
 
 function describeTarget(target: ToolTarget): string {

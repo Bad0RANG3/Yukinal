@@ -19,11 +19,13 @@ use yukinal_credentials::os::OsCredentialStore;
 use yukinal_database::Database;
 use yukinal_ssh::RusshBackend;
 
+mod approval;
 mod auth;
 pub(crate) mod credential_cleanup;
 pub(crate) mod host_key;
 mod oauth;
 
+pub(crate) use approval::{HostApprovalLedger, ServerExecExecutionBinding, ServerExecTicketError};
 pub use auth::AuthChallengeBroker;
 pub use host_key::HostKeyProbeBroker;
 pub use oauth::OAuthFlowBroker;
@@ -45,6 +47,9 @@ pub struct AppState {
     /// entry is intentionally handled as a fail-closed duplicate, not a reason
     /// to execute the remote action again.
     pub(crate) host_tool_replays: HostToolReplayCache,
+    /// Process-local, one-time host tickets created only after the user approves a
+    /// concrete `server.exec` request. Automatic task grants remain in SQLite.
+    pub(crate) server_exec_approvals: HostApprovalLedger,
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
     pub ssh: Arc<RusshBackend>,
@@ -80,6 +85,7 @@ impl AppState {
             supervisor: Supervisor::new(),
             database,
             host_tool_replays: Arc::new(Mutex::new(HashMap::new())),
+            server_exec_approvals: HostApprovalLedger::default(),
             credentials,
             ssh,
             terminals,

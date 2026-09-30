@@ -32,7 +32,15 @@ import type {
 import type { ServerSnapshot } from "../types/collector.js";
 import type { ServerServicesResponse } from "../types/service.js";
 import type { ServerLogsResponse } from "../types/log.js";
-import type { RemoteFileListResponse, RemoteFileReadResponse } from "../types/file.js";
+import type {
+  LocalPathHandle,
+  FilePreviewResponse,
+  PreparedRemoteDrag,
+  RemoteFileListResponse,
+  RemoteFileReadResponse,
+  TransferConflictAction,
+  TransferSnapshot,
+} from "../types/file.js";
 import type { AddServerInput, Server, UpdateServerInput, WorkspaceListResponse } from "../types/server.js";
 import type {
   ServerHostKeyForgetResult,
@@ -115,6 +123,17 @@ export const IPC_COMMANDS = {
   serverLogs: "server_logs",
   remoteFileList: "remote_file_list",
   remoteFileRead: "remote_file_read",
+  remoteFilePreview: "remote_file_preview",
+  localFilePreview: "local_file_preview",
+  localPathPick: "local_path_pick",
+  fileTransferUpload: "file_transfer_upload",
+  fileTransferDownload: "file_transfer_download",
+  fileTransferList: "file_transfer_list",
+  fileTransferGet: "file_transfer_get",
+  fileTransferCancel: "file_transfer_cancel",
+  fileTransferResolveConflict: "file_transfer_resolve_conflict",
+  filePrepareRemoteDrag: "file_prepare_remote_drag",
+  fileDragOutStart: "file_drag_out_start",
   activityList: "activity_list",
   toolExecutionList: "tool_execution_list",
   /** Terminal byte streams leave as events, not command returns. */
@@ -246,6 +265,32 @@ export interface IpcCommandMap {
   server_logs: { params: { serverId: string }; response: ServerLogsResponse };
   remote_file_list: { params: { serverId: string; path: string }; response: RemoteFileListResponse };
   remote_file_read: { params: { serverId: string; path: string }; response: RemoteFileReadResponse };
+  remote_file_preview: { params: { serverId: string; path: string }; response: FilePreviewResponse };
+  file_prepare_remote_drag: {
+    params: { serverId: string; path: string };
+    response: PreparedRemoteDrag;
+  };
+  file_drag_out_start: { params: { dragId: string }; response: Record<string, never> };
+  local_file_preview: { params: { handleId: string }; response: FilePreviewResponse };
+  local_path_pick: {
+    params: { kind: "uploadFiles" | "uploadDirectory" | "downloadDirectory" };
+    response: { handles: LocalPathHandle[] };
+  };
+  file_transfer_upload: {
+    params: { serverId: string; remoteDirectory: string; sourceHandleIds: string[] };
+    response: { transfer: TransferSnapshot };
+  };
+  file_transfer_download: {
+    params: { serverId: string; remotePaths: string[]; destinationHandleId: string };
+    response: { transfer: TransferSnapshot };
+  };
+  file_transfer_list: { params: { serverId?: string }; response: { transfers: TransferSnapshot[] } };
+  file_transfer_get: { params: { transferId: string }; response: { transfer: TransferSnapshot } };
+  file_transfer_cancel: { params: { transferId: string }; response: { transfer: TransferSnapshot } };
+  file_transfer_resolve_conflict: {
+    params: { transferId: string; action: TransferConflictAction };
+    response: { transfer: TransferSnapshot };
+  };
   activity_list: { params: ActivityListInput; response: ActivityListResponse };
   tool_execution_list: { params: ToolExecutionListInput; response: ToolExecutionListResponse };
   terminal_open: {

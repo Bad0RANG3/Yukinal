@@ -6,7 +6,15 @@
 //! because this file is the file capability's command surface, and the Agent's host tools reach
 //! the same adapter through [`remote_file_service`] — one transport implementation, two callers.
 
+pub mod drag_out;
+pub mod local_paths;
+pub mod transfer;
+
+pub(crate) use local_paths::{emit_local_drop, LocalPathHandles};
+
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tauri::State;
 
 use crate::commands::terminal::ensure_session;
@@ -15,6 +23,27 @@ use yukinal_filesystem::{
     ListedEntry, RemoteEntryKind, RemoteFileService, RemoteFileTransport, RemoteStat, ReplaceError,
     ReplaceGuard, ReplacedFile, TransportError, TransportResult,
 };
+
+const MAX_FILE_PREVIEW_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilePreviewKind {
+    Text,
+    Image,
+    Binary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePreviewResponse {
+    pub name: String,
+    pub size: u64,
+    pub kind: FilePreviewKind,
+    pub truncated: bool,
+    pub text: Option<String>,
+    pub data_url: Option<String>,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -251,4 +280,115 @@ pub async fn remote_file_read(
         content: read.content,
         truncated: read.truncated,
     })
+}
+
+#[tauri::command]
+pub async fn local_file_preview(
+    registry: State<'_, LocalPathHandles>,
+    handle_id: String,
+) -> Result<FilePreviewResponse, String> {
+    let (name, size, bytes) = registry
+        .read_preview(&handle_id, MAX_FILE_PREVIEW_BYTES)
+        .await?;
+    Ok(make_file_preview(name, size, bytes))
+}
+
+#[tauri::command]
+pub async fn remote_file_preview(
+    state: State<'_, AppState>,
+    server_id: String,
+    path: String,
+) -> Result<FilePreviewResponse, String> {
+    yukinal_filesystem::validate_remote_path(&path).map_err(|error| error.to_string())?;
+    if path.contains('\\') || path.split('/').any(|segment| matches!(segment, "." | "..")) {
+        return Err(
+            "remote file path cannot contain traversal segments or backslashes".to_string(),
+        );
+    }
+    ensure_session(&state, &server_id).await?;
+    let stat = state
+        .terminals
+        .sftp_stat(&server_id, &path)
+        .await
+        .map_err(|error| error.to_string())?;
+    if stat.kind != yukinal_ssh::SftpEntryKind::File {
+        return Err("only regular remote files can be previewed".to_string());
+    }
+    let bytes = state
+        .terminals
+        .sftp_read_bounded(&server_id, &path, MAX_FILE_PREVIEW_BYTES)
+        .await
+        .map_err(|error| error.to_string())?;
+    let name = Path::new(&path)
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "远端文件".to_string());
+    Ok(make_file_preview(name, stat.size, bytes))
+}
+
+fn make_file_preview(name: String, size: u64, mut bytes: Vec<u8>) -> FilePreviewResponse {
+    let truncated = bytes.len() > MAX_FILE_PREVIEW_BYTES;
+    bytes.truncate(MAX_FILE_PREVIEW_BYTES);
+    if let Some(mime) = image_mime(&bytes).filter(|_| !truncated) {
+        return FilePreviewResponse {
+            name,
+            size,
+            kind: FilePreviewKind::Image,
+            truncated,
+            text: None,
+            data_url: Some(format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )),
+        };
+    }
+    if !bytes.contains(&0) {
+        match std::str::from_utf8(&bytes) {
+            Ok(text) => {
+                return FilePreviewResponse {
+                    name,
+                    size,
+                    kind: FilePreviewKind::Text,
+                    truncated,
+                    text: Some(text.to_string()),
+                    data_url: None,
+                };
+            }
+            Err(error) if error.error_len().is_none() => {
+                let text = std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default();
+                return FilePreviewResponse {
+                    name,
+                    size,
+                    kind: FilePreviewKind::Text,
+                    truncated: true,
+                    text: Some(text.to_string()),
+                    data_url: None,
+                };
+            }
+            _ => {}
+        }
+    }
+    FilePreviewResponse {
+        name,
+        size,
+        kind: FilePreviewKind::Binary,
+        truncated,
+        text: None,
+        data_url: None,
+    }
+}
+
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }

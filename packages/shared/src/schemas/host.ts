@@ -45,6 +45,7 @@ import {
 
 export const HostToolExecuteRequestSchema = z.strictObject({
   callId: z.string().min(1),
+  runId: z.string().trim().min(1).max(256).optional(),
   traceId: z.string().min(1),
   toolName: z.string().min(1),
   input: z.unknown(),
@@ -53,6 +54,7 @@ export const HostToolExecuteRequestSchema = z.strictObject({
   planId: z.string().trim().min(1).max(256).optional(),
   planStepId: z.string().trim().min(1).max(256).optional(),
   evidenceIds: z.array(z.string().trim().min(1).max(256)).max(256).optional(),
+  approvalId: z.string().trim().min(1).max(256).optional(),
 });
 
 const ToolErrorSchema = z.strictObject({

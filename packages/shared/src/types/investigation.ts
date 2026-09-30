@@ -1,4 +1,5 @@
 import type { AgentPermissionMode, AgentRunMode, Environment, RiskLevel } from "./risk.js";
+import type { TaskCommandGrant } from "./server-exec.js";
 import type { ToolTarget } from "./tool.js";
 
 /** A durable objective; one Agent run is only one attempt at a task. */
@@ -77,6 +78,7 @@ export const TASK_FAILURE_CODES = [
   "invalid_input",
   "plan_deviation",
   "command_failed",
+  "outcome_unknown",
   "output_truncated",
   "evidence_missing",
   "stale_target",
@@ -148,6 +150,8 @@ export interface InvestigationTaskGuardrails {
   expiresAt?: string;
   forbiddenTools: string[];
   forbiddenPathPrefixes: string[];
+  /** Host-issued command delegation, present only when a user explicitly enabled it. */
+  commandGrant?: TaskCommandGrant;
 }
 
 export const EVIDENCE_KINDS = ["snapshot", "log", "service", "container", "file", "tool_result", "failure"] as const;
@@ -542,6 +546,8 @@ export interface InvestigationTaskCreateInput {
   permissionMode: AgentPermissionMode;
   automationLevel: TaskAutomationLevel;
   budget?: TaskBudget;
+  /** Explicitly authorizes bounded high-risk server.exec calls for this task. */
+  grantTaskCommands?: boolean;
 }
 
 export interface InvestigationTaskListInput {
