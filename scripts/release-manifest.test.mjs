@@ -135,7 +135,7 @@ test("Windows package CI runs NSIS uninstall data-preservation smoke and preserv
   );
   assert.match(
     workflow,
-    /- name: Smoke NSIS install, sidecar startup, and uninstall data preservation[\s\S]*?if: matrix\.os == 'windows-latest'[\s\S]*?timeout-minutes: 10[\s\S]*?smoke-nsis-install-windows\.ps1/,
+    /- name: Smoke NSIS install, update, sidecar startup, and uninstall data preservation[\s\S]*?if: matrix\.os == 'windows-latest'[\s\S]*?timeout-minutes: 10[\s\S]*?smoke-nsis-install-windows\.ps1/,
   );
   assert.match(
     workflow,

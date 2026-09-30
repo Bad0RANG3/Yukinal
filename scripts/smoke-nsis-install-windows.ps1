@@ -103,9 +103,12 @@ $localDataRootCreated = $false
 $appDataCanaryCreated = $false
 $localDataCanaryCreated = $false
 $installProcess = $null
+$updateProcess = $null
 $uninstallProcess = $null
 $smokeExitCode = $null
+$updateExitCode = $null
 $uninstallExitCode = $null
+$updateCanariesPreserved = $false
 $userDataPreserved = $false
 $failure = $null
 $cleanupFailures = [System.Collections.Generic.List[string]]::new()
@@ -129,7 +132,8 @@ try {
   foreach ($required in @(
     (Join-Path $installDir 'yukinal-desktop.exe'),
     (Join-Path $installDir 'runtime/node.exe'),
-    (Join-Path $installDir 'agent/index.js')
+    (Join-Path $installDir 'agent/index.js'),
+    (Join-Path $installDir 'NOTICE')
   )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
       throw "NSIS installation is missing a required packaged file: $required"
@@ -144,6 +148,35 @@ try {
   $appDataCanaryCreated = $true
   [IO.File]::WriteAllText($localDataCanary, "nsis-$runId")
   $localDataCanaryCreated = $true
+
+  # Exercise Tauri's real update-mode path against this isolated install. Removing one
+  # packaged, non-executable file proves the updater rewrites the existing installation;
+  # both profile canaries must survive the in-place update as well as final uninstall.
+  $updateProbePath = Join-Path $installDir 'NOTICE'
+  Remove-Item -LiteralPath $updateProbePath -Force
+  $updateProcess = Start-Process -FilePath $InstallerPath -ArgumentList @('/S', '/UPDATE', "/D=$installDir") -PassThru -WindowStyle Hidden
+  if (-not $updateProcess.WaitForExit(180000)) {
+    throw 'NSIS update-mode reinstall did not finish within 180 seconds.'
+  }
+  $updateProcess.Refresh()
+  $updateExitCode = $updateProcess.ExitCode
+  if ($updateExitCode -ne 0) { throw "NSIS update-mode reinstall exited with code $updateExitCode." }
+  if (-not (Test-Path -LiteralPath $updateProbePath -PathType Leaf)) {
+    throw 'NSIS update-mode reinstall did not restore the missing packaged NOTICE file.'
+  }
+
+  $productKey = Get-Item -LiteralPath $productRegistryPath -ErrorAction SilentlyContinue
+  if ($null -eq $productKey) { throw 'NSIS update-mode reinstall removed the install-directory registration.' }
+  $registeredInstallDir = [IO.Path]::GetFullPath([string]$productKey.GetValue(''))
+  if (-not [string]::Equals($registeredInstallDir, $installDir, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "NSIS update-mode reinstall changed the isolated install directory: $registeredInstallDir"
+  }
+  $updateCanariesPreserved =
+    ([IO.File]::ReadAllText($appDataCanary) -eq "nsis-$runId") -and
+    ([IO.File]::ReadAllText($localDataCanary) -eq "nsis-$runId")
+  if (-not $updateCanariesPreserved) {
+    throw 'NSIS update-mode reinstall deleted or changed a Roaming/LocalAppData preservation canary.'
+  }
 
   $smokeRoot = Join-Path $repoRoot 'target/release/installer-smoke'
   New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
@@ -198,6 +231,8 @@ try {
 } finally {
   try { Stop-ExactProcess -Process $uninstallProcess -ExpectedPath (Join-Path $installDir 'uninstall.exe') }
   catch { $cleanupFailures.Add("Unable to stop exact NSIS uninstaller process: $($_.Exception.Message)") }
+  try { Stop-ExactProcess -Process $updateProcess -ExpectedPath $InstallerPath }
+  catch { $cleanupFailures.Add("Unable to stop exact NSIS update process: $($_.Exception.Message)") }
   try { Stop-ExactProcess -Process $installProcess -ExpectedPath $InstallerPath }
   catch { $cleanupFailures.Add("Unable to stop exact NSIS installer process: $($_.Exception.Message)") }
 
@@ -260,6 +295,8 @@ try {
   InstallDirectory = $installDir
   NodeFoundOnHost = $nodeOnHost
   InstalledAppSmokeExitCode = $smokeExitCode
+  UpdateModeReinstallExitCode = $updateExitCode
+  UserDataPreservedAcrossUpdate = $updateCanariesPreserved
   UninstallExitCode = $uninstallExitCode
   RoamingDataPreserved = [bool]($appDataCanaryCreated -and $userDataPreserved)
   LocalDataPreserved = [bool]($localDataCanaryCreated -and $userDataPreserved)
@@ -270,6 +307,8 @@ try {
 
 if ($cleanupFailures.Count -gt 0) { throw ($cleanupFailures -join ' ') }
 if ($failure) { throw $failure }
-if ($uninstallExitCode -ne 0 -or -not $userDataPreserved) { throw 'NSIS install/uninstall lifecycle smoke failed.' }
+if ($updateExitCode -ne 0 -or -not $updateCanariesPreserved -or $uninstallExitCode -ne 0 -or -not $userDataPreserved) {
+  throw 'NSIS install/update/uninstall lifecycle smoke failed.'
+}
 
-Write-Output 'Windows NSIS install/startup/shutdown/uninstall/data-preservation smoke: green.'
+Write-Output 'Windows NSIS install/update/startup/shutdown/uninstall/data-preservation smoke: green.'

@@ -141,6 +141,13 @@ test("NSIS lifecycle smoke keeps installs isolated and refuses an existing defau
   assert.match(smokeScript, /\$defaultInstallDir\s*=.*\$env:LOCALAPPDATA.*productName/is);
   assert.match(smokeScript, /Test-Path -LiteralPath \$defaultInstallDir/);
   assert.match(smokeScript, /-ArgumentList\s+@\(\s*'\/S'\s*,\s*"\/D=\$installDir"\s*\)/);
+  assert.match(
+    smokeScript,
+    /-ArgumentList\s+@\(\s*'\/S'\s*,\s*'\/UPDATE'\s*,\s*"\/D=\$installDir"\s*\)/,
+    "the lifecycle smoke must run an in-place update using the generated NSIS update path",
+  );
+  assert.match(smokeScript, /Remove-Item -LiteralPath \$updateProbePath -Force[\s\S]*?Test-Path -LiteralPath \$updateProbePath -PathType Leaf/);
+  assert.match(smokeScript, /UserDataPreservedAcrossUpdate\s*=\s*\$updateCanariesPreserved/);
   assert.match(smokeScript, /-ArgumentList\s+@\(\s*'\/S'\s*,\s*"_\?=\$installDir"\s*\)/);
   assert.match(smokeScript, /\[string\]::Equals\(\$registeredInstallDir, \$installDir,/i);
   assert.match(smokeScript, /\$remainingInstallEntries\s*=\s*@\(Get-ChildItem -LiteralPath \$installDir -Force\)/);

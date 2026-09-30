@@ -137,7 +137,7 @@ jobs:
             target/release/msi-install-smoke/**/*.log
             target/release/installer-smoke/**/*.log
 
-      - name: Smoke NSIS install, sidecar startup, and uninstall data preservation
+      - name: Smoke NSIS install, update, sidecar startup, and uninstall data preservation
         if: matrix.os == 'windows-latest'
         shell: pwsh
         timeout-minutes: 10
