@@ -31,10 +31,11 @@ const assert = (condition, message) => {
 export async function runSidecarSmoke(entry, options = {}) {
   const label = options.label ?? entry;
   const program = options.program ?? process.execPath;
+  const dataDir = options.dataDir ?? options.env?.YUKINAL_DATA_DIR ?? "/tmp/yukinal-smoke";
   console.log(`── sidecar smoke: ${program} ${label}`);
 
   const child = spawn(program, [entry], {
-    env: { ...process.env, YUKINAL_LOG_LEVEL: "warn", YUKINAL_DATA_DIR: "/tmp/yukinal-smoke", ...options.env },
+    env: { ...process.env, YUKINAL_LOG_LEVEL: "warn", ...options.env, YUKINAL_DATA_DIR: dataDir },
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -108,7 +109,7 @@ export async function runSidecarSmoke(entry, options = {}) {
   }
 
   await ask(
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "1.0", clientVersion: "smoke", dataDir: "/tmp/yukinal-smoke" } },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "1.0", clientVersion: "smoke", dataDir } },
     (frame) => assert(frame.result?.capabilities?.cancellation === true, `initialize failed: ${JSON.stringify(frame)}`),
   );
 
