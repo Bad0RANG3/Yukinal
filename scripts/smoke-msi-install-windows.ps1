@@ -134,6 +134,8 @@ if ($blockers.Count -gt 0) {
 
 $testRoot = Join-Path $repoRoot 'target/release/msi-install-smoke'
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+$installerSmokeRoot = Join-Path $repoRoot 'target/release/installer-smoke'
+New-Item -ItemType Directory -Path $installerSmokeRoot -Force | Out-Null
 $runId = [guid]::NewGuid().ToString('N')
 $installLog = Join-Path $testRoot "install-$runId.log"
 $uninstallLog = Join-Path $testRoot "uninstall-$runId.log"

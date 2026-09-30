@@ -84,6 +84,7 @@ test("CI uploads every artifact suffix accepted by the release manifest", async 
 test("Windows package CI runs MSI lifecycle smoke and preserves failure diagnostics", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
+  const lifecycleSmoke = await readFile(path.join(root, "scripts", "smoke-msi-install-windows.ps1"), "utf8");
 
   assert.match(
     workflow,
@@ -92,6 +93,11 @@ test("Windows package CI runs MSI lifecycle smoke and preserves failure diagnost
   assert.match(
     workflow,
     /- name: Upload MSI lifecycle diagnostics[\s\S]*?if: failure\(\) && matrix\.os == 'windows-latest'[\s\S]*?target\/release\/msi-install-smoke\/\*\*\/\*\.log/,
+  );
+  assert.match(
+    lifecycleSmoke,
+    /\$installerSmokeRoot\s*=\s*Join-Path \$repoRoot 'target\/release\/installer-smoke'[\s\S]*?New-Item -ItemType Directory -Path \$installerSmokeRoot -Force[\s\S]*?\$smokeProcess = Start-Process/,
+    "MSI lifecycle smoke must create the packaged-app helper's log directory before invoking it",
   );
 });
 
