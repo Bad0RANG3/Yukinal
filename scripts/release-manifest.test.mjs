@@ -101,6 +101,18 @@ test("Windows package CI runs MSI lifecycle smoke and preserves failure diagnost
   );
 });
 
+test("installed Windows smoke matches the quoted sidecar entrypoint used under Program Files", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const smoke = await readFile(path.join(root, "scripts", "smoke-installed-windows.ps1"), "utf8");
+
+  assert.ok(smoke.includes("index\\.js(?=$|[\\s\"''])"), "sidecar matcher must accept a quote after a spaced path argument");
+  assert.equal(
+    [...smoke.matchAll(/CommandLine -match \$sidecarCommandPattern/g)].length,
+    3,
+    "startup, shutdown verification, and cleanup must share the same sidecar matcher",
+  );
+});
+
 test("Windows package CI runs NSIS uninstall data-preservation smoke and preserves diagnostics", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");

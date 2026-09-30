@@ -35,6 +35,7 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
 $installDir = [IO.Path]::GetFullPath($InstallDir)
 $appPath = Join-Path $installDir 'yukinal-desktop.exe'
 $runtimePath = Join-Path $installDir 'runtime/node.exe'
+$sidecarCommandPattern = '[\\/]agent[\\/]index\.js(?=$|[\s"''])'
 
 foreach ($required in @($appPath, $runtimePath, (Join-Path $installDir 'agent/index.js'))) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
@@ -105,7 +106,7 @@ try {
     Start-Sleep -Seconds 1
     $app.Refresh()
     $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-      Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match '[\\/]agent[\\/]index\.js(?:\s|$)' } |
+      Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $sidecarCommandPattern } |
       Select-Object -First 1
     if ($sidecar) { break }
     if ($app.HasExited) { break }
@@ -149,7 +150,7 @@ try {
   if ($appExited) {
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
       $remaining = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-        Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match '[\\/]agent[\\/]index\.js(?:\s|$)' } |
+        Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $sidecarCommandPattern } |
         Select-Object -First 1
       if (-not $remaining) { $sidecarStopped = $true; break }
       Start-Sleep -Seconds 1
@@ -171,7 +172,7 @@ try {
 
     # A failed smoke must not leave the exact sidecar it launched behind.
     $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-      Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match '[\\/]agent[\\/]index\.js(?:\s|$)' }
+      Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $sidecarCommandPattern }
     foreach ($child in $children) {
       if ($child.ExecutablePath -and (Get-FileHash -LiteralPath $child.ExecutablePath -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash) {
         Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
