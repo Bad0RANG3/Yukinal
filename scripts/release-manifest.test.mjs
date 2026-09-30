@@ -138,7 +138,13 @@ test("installer-sensitive pull requests run the Windows lifecycle gate without p
   }
   assert.match(
     workflow,
-    /installer:\s*\n\s*if:\s*\$\{\{\s*github\.event_name != 'pull_request'\s*\|\|\s*matrix\.os == 'windows-latest'\s*\}\}/,
+    /os:\s*\$\{\{\s*fromJSON\(github\.event_name == 'pull_request'\s*&&\s*'\["windows-latest"\]'\s*\|\|\s*'\["windows-latest","macos-latest","ubuntu-22\.04"\]'\)\s*\}\}/,
+    "package matrix must select Windows for pull requests and all platforms otherwise",
+  );
+  assert.doesNotMatch(
+    workflow,
+    /^\s*if:\s*\$\{\{[^\n]*matrix\.os/m,
+    "job-level conditions must not reference matrix context before expansion",
   );
 });
 
