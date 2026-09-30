@@ -116,14 +116,21 @@ test("Windows packaged smoke isolates and restores the WebView2 user-data folder
   assert.match(smokeScript, /-or -not \$webViewDataIsolationVerified/);
 });
 
-test("native window smoke redirects both Yukinal and WebView2 data to its temporary directory", () => {
+test("native window smoke isolates app data and removes only its empty Tauri profile root", () => {
   const smokeScript = readFileSync(path.join(root, "scripts", "check-desktop-window.ps1"), "utf8");
 
   assert.match(smokeScript, /\$dataDirectory\s*=\s*Join-Path \(\[System\.IO\.Path\]::GetTempPath\(\)\)/);
+  assert.match(smokeScript, /Refusing to run the packaged UI smoke while another Yukinal process is using the user profile/);
   assert.match(smokeScript, /\$env:YUKINAL_DATA_DIR\s*=\s*\$dataDirectory/);
   assert.match(smokeScript, /\$webViewDirectory\s*=\s*Join-Path \$dataDirectory "webview2"/);
   assert.match(smokeScript, /\$env:WEBVIEW2_USER_DATA_FOLDER\s*=\s*\$webViewDirectory/);
   assert.match(smokeScript, /Test-Path -LiteralPath \$webViewDirectory/);
+  assert.match(smokeScript, /\$defaultAppDataExistedBefore\s*=\s*Test-Path -LiteralPath \$defaultAppDataDirectory/);
+  assert.match(smokeScript, /Tauri's default LocalAppData profile/);
+  assert.match(smokeScript, /\$profileContents\.Count -eq 0/);
+  assert.match(smokeScript, /Remove-Item -LiteralPath \$defaultAppDataDirectory/);
+  assert.match(smokeScript, /-not \$defaultAppDataExistedBefore -and \(Test-Path -LiteralPath \$defaultAppDataDirectory/);
+  assert.match(smokeScript, /\$processStillRunning -or \$otherRunningYukinal\.Count -gt 0/);
   assert.match(smokeScript, /\$env:YUKINAL_DATA_DIR\s*=\s*\$previousDataDirectory/);
   assert.match(smokeScript, /\$env:WEBVIEW2_USER_DATA_FOLDER\s*=\s*\$oldWebViewDirectory/);
 });
