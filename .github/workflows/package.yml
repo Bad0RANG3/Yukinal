@@ -156,7 +156,7 @@ jobs:
       # Unsigned on purpose: no signing identity or certificate exists in this repository,
       # so these artifacts are for local installation and review, not for release.
       - name: Verify checksums and build provenance manifest
-        run: pnpm release:manifest -- --verify
+        run: node scripts/write-release-manifest.mjs --verify
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:

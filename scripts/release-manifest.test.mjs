@@ -81,6 +81,14 @@ test("CI uploads every artifact suffix accepted by the release manifest", async 
   }
 });
 
+test("package CI invokes release manifest verification with the supported CLI argument", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
+
+  assert.match(workflow, /run: node scripts\/write-release-manifest\.mjs --verify/);
+  assert.doesNotMatch(workflow, /run: pnpm release:manifest -- --verify/);
+});
+
 test("Windows package CI runs MSI lifecycle smoke and preserves failure diagnostics", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
