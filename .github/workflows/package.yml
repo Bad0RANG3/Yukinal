@@ -47,16 +47,8 @@ jobs:
       matrix:
         # PRs validate the Windows installer paths; release tags and manual dispatches
         # build every platform. Matrix values must be selected before the job is expanded.
+        # Keep Linux release artifacts on 22.04 for compatibility with older glibc baselines.
         os: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","macos-latest","ubuntu-22.04"]') }}
-        include:
-          - os: windows-latest
-            artifact: windows
-          - os: macos-latest
-            artifact: macos
-          # Not ubuntu-latest like the gate: an artifact's glibc baseline is the runner it
-          # was built on, and 22.04 keeps the .deb/AppImage installable on older distros.
-          - os: ubuntu-22.04
-            artifact: linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -168,7 +160,7 @@ jobs:
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: yukinal-${{ matrix.artifact }}
+          name: yukinal-${{ matrix.os == 'windows-latest' && 'windows' || (matrix.os == 'macos-latest' && 'macos' || 'linux') }}
           if-no-files-found: error
           path: |
             target/release/bundle/**/*.exe
