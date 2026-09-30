@@ -33,7 +33,11 @@ on:
       - scripts/check-nsis-uninstall.mjs
       - scripts/check-desktop-window.ps1
       - scripts/nsis-uninstall-policy.test.mjs
+      - scripts/lib/sidecar-smoke.mjs
       - scripts/package.mjs
+      - scripts/smoke-installed-agent.mjs
+      - scripts/smoke-deb-install-linux.sh
+      - scripts/smoke-dmg-install-macos.sh
       - scripts/smoke-installed-windows.ps1
       - scripts/smoke-msi-install-windows.ps1
       - scripts/smoke-nsis-install-windows.ps1
@@ -92,6 +96,24 @@ jobs:
       # packaging contract, then `tauri build`. The runtime and agent are prepared again by
       # `beforeBuildCommand`, so the staged resource layout matches a direct Tauri build too.
       - run: pnpm run package
+
+      # Install the actual Debian artifact on the disposable hosted runner, verify the
+      # installed resources and bundled Node/Agent protocol, then purge only this package.
+      - name: Smoke Debian install, bundled Agent, and purge
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        timeout-minutes: 5
+        env:
+          YUKINAL_ALLOW_DEB_INSTALL_SMOKE: "1"
+        run: bash ./scripts/smoke-deb-install-linux.sh
+
+      # Mirror the documented drag-to-Applications path in a temporary directory, then
+      # launch the packaged Agent through the Node runtime embedded in the copied app.
+      - name: Smoke macOS DMG copy and bundled Agent
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        timeout-minutes: 5
+        run: bash ./scripts/smoke-dmg-install-macos.sh
 
       # Reuse Tauri's generated confirmation callbacks and checkbox label. Exercise both
       # checkbox states plus the update guard with real native controls and isolated canaries.

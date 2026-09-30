@@ -143,6 +143,64 @@ test("Windows package CI runs NSIS uninstall data-preservation smoke and preserv
   );
 });
 
+test("Linux package CI installs, checks, and purges the exact Debian artifact", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
+  const smoke = await readFile(path.join(root, "scripts", "smoke-deb-install-linux.sh"), "utf8");
+
+  assert.match(
+    workflow,
+    /- name: Smoke Debian install, bundled Agent, and purge[\s\S]*?if: matrix\.os == 'ubuntu-22\.04'[\s\S]*?YUKINAL_ALLOW_DEB_INSTALL_SMOKE: "1"[\s\S]*?smoke-deb-install-linux\.sh/,
+  );
+  assert.ok(smoke.includes('dpkg --install "$deb"'), "Linux smoke must install the built artifact");
+  assert.ok(smoke.includes("trap cleanup EXIT"), "Linux smoke must arrange package cleanup before mutation");
+  assert.ok(smoke.includes('dpkg --purge "$package"'), "Linux smoke must purge only the package it installed");
+  assert.ok(smoke.includes("smoke-installed-agent.mjs"), "Linux smoke must handshake through the installed resources");
+  assert.ok(smoke.includes("dpkg-query -W -f='${db:Status-Abbrev}'"), "Linux smoke must refuse a pre-existing package entry");
+  assert.ok(smoke.includes("YUKINAL_ALLOW_DEB_INSTALL_SMOKE"), "Linux system install must be explicitly opt-in");
+});
+
+test("macOS package CI copies the DMG app into an isolated Applications directory and smokes installed resources", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
+  const smoke = await readFile(path.join(root, "scripts", "smoke-dmg-install-macos.sh"), "utf8");
+
+  assert.match(
+    workflow,
+    /- name: Smoke macOS DMG copy and bundled Agent[\s\S]*?if: matrix\.os == 'macos-latest'[\s\S]*?smoke-dmg-install-macos\.sh/,
+  );
+  assert.ok(smoke.includes("hdiutil attach -readonly"), "macOS smoke must mount the built DMG read-only");
+  assert.ok(smoke.includes('ditto "$app_bundle" "$installed_app"'), "macOS smoke must copy the app bundle");
+  assert.ok(smoke.includes("hdiutil detach"), "macOS smoke must detach its temporary mount");
+  assert.ok(smoke.includes("smoke-installed-agent.mjs"), "macOS smoke must handshake through copied app resources");
+});
+
+test("installed package Agent smoke checks the pinned bundled runtime and required resources", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const smoke = await readFile(path.join(root, "scripts", "smoke-installed-agent.mjs"), "utf8");
+  const protocolSmoke = await readFile(path.join(root, "scripts", "lib", "sidecar-smoke.mjs"), "utf8");
+
+  assert.ok(smoke.includes('join(resourceRoot, "runtime", process.platform === "win32" ? "node.exe" : "node")'));
+  assert.ok(smoke.includes('join(resourceRoot, "agent", "index.js")'));
+  assert.ok(smoke.includes('join(resourceRoot, "runtime", "LICENSE")'));
+  assert.ok(smoke.includes('join(resourceRoot, "NOTICE")'));
+  assert.ok(smoke.includes('`v${runtimeManifest.version}`'), "installed smoke must compare the packaged runtime with the repository pin");
+  assert.ok(smoke.includes("dataDir"), "installed smoke must isolate Agent data in a temporary directory");
+  assert.ok(protocolSmoke.includes("options.dataDir"), "shared sidecar smoke must pass its isolated data directory to the Agent");
+});
+
+test("package build runs the generated NSIS policy check only on Windows", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const packageScript = await readFile(path.join(root, "scripts", "package.mjs"), "utf8");
+  const guardAt = packageScript.indexOf('if (process.platform === "win32")');
+  const nsisCheckAt = packageScript.indexOf('console.log("\\n── generated NSIS uninstall policy")');
+  const manifestAt = packageScript.indexOf('console.log("\\n── release artifact manifest")');
+
+  assert.ok(guardAt !== -1, "package script must identify the Windows-only NSIS platform");
+  assert.ok(nsisCheckAt > guardAt && manifestAt > nsisCheckAt, "NSIS validation must be guarded while manifest generation remains afterward");
+  assert.ok(packageScript.slice(guardAt, manifestAt).includes('"scripts/check-nsis-uninstall.mjs"'));
+});
+
 test("installer-sensitive pull requests run the Windows lifecycle gate without packaging macOS or Linux", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
@@ -155,6 +213,10 @@ test("installer-sensitive pull requests run the Windows lifecycle gate without p
     "scripts/check-desktop-window.ps1",
     "scripts/check-nsis-uninstall.mjs",
     "scripts/nsis-uninstall-policy.test.mjs",
+    "scripts/lib/sidecar-smoke.mjs",
+    "scripts/smoke-installed-agent.mjs",
+    "scripts/smoke-deb-install-linux.sh",
+    "scripts/smoke-dmg-install-macos.sh",
     "scripts/smoke-installed-windows.ps1",
     "scripts/smoke-msi-install-windows.ps1",
     "scripts/smoke-nsis-install-windows.ps1",
