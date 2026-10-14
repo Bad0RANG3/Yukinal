@@ -72,13 +72,18 @@ NSIS 当前构建的真实生命周期脚本为 `scripts/smoke-nsis-install-wind
 
 ## 开发和本地验证
 
-开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。最终用户使用打包后的应用不需要另装 Node.js。仓库根目录执行：
+开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发还需要 Python 3.11+ 和 `agent[agent,models]` 环境；最终用户使用打包后的应用不需要另装 Node.js。仓库根目录执行：
 
 ```bash
 pnpm install --frozen-lockfile
+python -m venv agent/.venv
+agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
 pnpm check
 pnpm --filter @yukinal/desktop tauri dev
 ```
+
+macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
+`agent/.venv/bin/python`。
 
 只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。构建当前平台安装包使用 `pnpm package`；它会先对六种受支持平台逐一核对 Node.js 官方 SHASUMS pin，再下载并校验当前平台归档，产物位于 `target/release/bundle/`。本地构建成功只证明该平台产物生成，不代替安装后的验收。
 

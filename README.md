@@ -36,21 +36,22 @@ JSON-RPC bridge to the desktop host. Python runs can execute the existing
 read-only server tools through the host and can use MCP tools the host marks
 low-risk. The Python sidecar now round-trips approvals for tools that explicitly
 require them, including reject and expiry handling; the current desktop catalog
-still exposes read-only tools. Durable task state, broader tool coverage, and
-switching the desktop launcher to Python remain in progress. The existing
-React/Tauri UI remains intact while those paths are migrated.
+still exposes read-only tools. Durable task state and broader tool coverage
+remain in progress. The existing React/Tauri UI remains intact while those
+paths are migrated.
 
-The opt-in Python development sidecar can call the C++ service for
+The Python development sidecar can call the C++ service for
 `ssh.service_status` when its token is configured. The service's `target_id`
 must match the selected desktop server ID; syncing saved server records into the
-C++ service configuration is still future work. The standard desktop and
-packaged app continue to use the existing Rust/Tauri and Node backend, so this
-milestone does not claim full product parity.
+C++ service configuration is still future work. Tauri development now uses the
+Python Agent by default. The packaged app still uses the existing Node Agent,
+so this milestone does not claim full product parity.
 
-To run the existing desktop UI with the Python Agent sidecar during development,
-create `agent/.venv`, install `agent[agent,models]`, then run
-`pnpm desktop:dev:python`. This selects Python for the sidecar while the existing
-Tauri host continues to own the process and execute host-mediated tools.
+To run the existing desktop UI with the Python Agent sidecar, create
+`agent/.venv` and install `agent[agent,models]`. Then run
+`pnpm --filter @yukinal/desktop tauri dev`. The `pnpm desktop:dev:python` command
+is an equivalent shortcut. The Tauri host continues to own the process and
+execute host-mediated tools.
 
 The new milestone boundary, API contract, build instructions, and remaining
 work are documented in [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md).
@@ -79,7 +80,7 @@ The Python client can be installed for development with:
 python -m pip install -e "agent[agent]"
 ```
 
-To use the C++ service from the existing UI through the opt-in Python sidecar,
+To use the C++ service from the existing UI through the Python sidecar,
 build the service and run it in one PowerShell session with the same token as
 the JSON config. Set the matching environment values in a second session before
 starting the Python desktop. Set the service target's `target_id` to the selected
@@ -100,7 +101,7 @@ pnpm desktop:dev:python
 ```
 
 The Tauri host forwards the SSH token only to the explicitly selected Python
-Agent sidecar. The normal Node sidecar and packaged desktop do not receive it.
+Agent sidecar. The packaged Node sidecar does not receive it.
 
 To include the Paramiko SSH mock in CTest, install the optional test extra
 before configuring CMake:
@@ -145,9 +146,14 @@ repository root, install the locked dependencies and run the checks/UI with:
 
 ```powershell
 pnpm install --frozen-lockfile
+python -m venv agent/.venv
+agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
 pnpm check
 pnpm --filter @yukinal/desktop tauri dev
 ```
+
+The packaged app still bundles Node until Python packaging and runtime parity
+are complete.
 
 The browser preview is available with `pnpm desktop:dev`; it does not connect to
 the new SSH service.

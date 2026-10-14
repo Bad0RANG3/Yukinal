@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
     "test": "tsx --test \"tests/**/*.test.ts\" \"tests/**/*.test.tsx\"",
-    "tauri": "tauri",
+    "tauri": "node ../../scripts/dev-python-agent.mjs",
     "icon": "tauri icon design/app-icon.png"
   },
   "dependencies": {

@@ -12,7 +12,7 @@
     "check": "node scripts/check.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "build:libs": "pnpm --filter \"./packages/**\" --if-present build",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm -r --if-present test && node --test scripts/lib/tauri-agent-command.test.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
     "package": "node scripts/package.mjs",
     "release:manifest": "node scripts/write-release-manifest.mjs",

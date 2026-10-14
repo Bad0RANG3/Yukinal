@@ -2,11 +2,11 @@
 
 本页说明 Yukinal 当前实现和[目标架构](./architecture-and-build-plan.md)必须保持的信任边界。目标功能尚未全部实现；发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
-当前 C++/Python 重写包含独立 SSH 服务和可选的 Python Agent 开发入口。配置服务后，Python sidecar 可发起只读 `service_status` 调用；请求目标绑定到 UI 当前选中的 `serverId`，服务再通过配置的 `target_id` 映射主机。服务只监听回环地址，调用必须带本机 bearer token；请求不能指定主机、凭证或原始命令。每次 SSH 连接都先比对配置的 OpenSSH `known_hosts` 项。标准/打包桌面仍使用旧 Node sidecar，Agent 审批、持久化审计和更广泛的宿主权限边界仍未完整迁移。
+当前 C++/Python 重写包含独立 SSH 服务和 Python Agent。Tauri 开发默认启动 Python sidecar；打包桌面仍启动旧 Node sidecar。配置 C++ 服务后，Python sidecar 可发起只读 `service_status` 调用；请求目标绑定到 UI 当前选中的 `serverId`，服务再通过配置的 `target_id` 映射主机。服务只监听回环地址，调用必须带本机 bearer token；请求不能指定主机、凭证或原始命令。每次 SSH 连接都先比对配置的 OpenSSH `known_hosts` 项。目标与凭据自动同步、持久任务恢复和更广泛的宿主权限边界仍未完整迁移。
 
 ## 谁能做决定
 
-React 界面通过白名单 Tauri IPC 请求本地 Rust 宿主。宿主持有 SSH/SFTP、PTY、SQLite、操作系统凭据库和本地子进程；Node.js Agent sidecar 负责模型会话、工具提议与权限判断。模型输出、远端日志、文件内容和 MCP 描述都按不可信数据处理。
+React 界面通过白名单 Tauri IPC 请求本地 Rust 宿主。宿主持有原生 UI 桥接、SSH/SFTP、PTY、SQLite、操作系统凭据库和本地子进程；开发态 Python Agent sidecar 与打包版 Node Agent sidecar 负责模型会话和工具提议，宿主权限检查仍是最终门禁。模型输出、远端日志、文件内容和 MCP 描述都按不可信数据处理。
 
 Agent 工具调用须经权限引擎和宿主复核：目标由本地解析，输入、风险、任务计划和授权票据要匹配。副作用工具绑定持久任务及计划步骤；危险操作不能仅靠提示词或模型声明获得授权。用户直接输入的终端命令是单独的人工操作入口。工作树中的 `server.exec` 是独立的受控 Agent 工具，必须走上述链路，不能复用终端输入通道或让 sidecar 直接握有 SSH 凭据；仍须按施工文档验收真实目标和失败边界。
 

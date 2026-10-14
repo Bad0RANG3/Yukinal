@@ -4,10 +4,10 @@
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
-> existing UI. The opt-in `desktop:dev:python` command launches the Python
-> sidecar in Tauri development. The normal desktop and packaged app still use the
-> existing Node sidecar and Rust host execution path. The Python development
-> sidecar can call the C++ `service_status` operation when configured; its
+> existing UI. Tauri development now launches the Python sidecar by default.
+> The packaged app still uses the existing Node sidecar and Rust host execution
+> path. The Python sidecar can call the C++ `service_status` operation when
+> configured; its
 > target is bound to the selected server ID, which must be present in the C++
 > allowlist. Automatic server-record synchronization and durable task/plan
 > resume remain unfinished. The Python sidecar supports approval events and
@@ -17,12 +17,13 @@
 ## Repository baseline and migration boundary
 
 The repository contains a working React/Tauri product baseline and shared
-TypeScript contracts. The previous uncommitted rewrite draft mixed SSH, SFTP,
-PTY, database, credentials, terminal, MCP, approval, Agent, and UI bridge code
-before the first SSH service had a verified end-to-end boundary. That draft was
-replaced with the narrower implementation below. The React components and their
-Tauri calls are preserved. The Rust/Tauri code remains available as a legacy
-behavior reference until replacement milestones are built and checked.
+TypeScript contracts. The previous rewrite draft mixed SSH, SFTP, PTY, database,
+credentials, terminal, MCP, approval, Agent, and UI bridge code before the first
+SSH service had a verified end-to-end boundary. The implementation below is
+being migrated in checked stages. React components and their Tauri calls are
+preserved; the Rust/Tauri host remains responsible for the native UI bridge,
+OS credential store, and final host authorization while Agent execution moves
+to Python and structured Agent SSH calls move to the C++ service.
 
 The Python runtime speaks the desktop host's bidirectional JSON-RPC protocol. It
 can execute a first set of read-only server tools through the host, load low-risk
@@ -30,9 +31,10 @@ MCP tools from the host catalog, and emit the tool-call/result events that the
 existing transcript UI displays. When the C++ service token is configured, the
 Python sidecar also registers `ssh.service_status`; it binds the call to the
 selected `host_target.serverId`, so the model cannot choose a different target.
-`pnpm desktop:dev:python` selects this runtime for Tauri development;
-`pnpm desktop:dev` remains the browser-only UI preview. The standard desktop and
-packaged launcher still use the Node sidecar.
+`pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
+development; `pnpm desktop:dev:python` is an equivalent shortcut and
+`pnpm desktop:dev` remains the browser-only UI preview. The packaged launcher
+still uses the Node sidecar.
 
 ## Processes and trust boundaries
 
@@ -236,7 +238,7 @@ Python-to-C++ HTTP tests also passed in CTest.
 
 ## Deliberately deferred
 
-- switching the standard/package desktop launcher to Python;
+- switching the packaged desktop launcher to Python;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
 - write-capable tools in the desktop catalog and durable task/plan resume;

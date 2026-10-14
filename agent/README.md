@@ -97,23 +97,25 @@ host marks low-risk. The host remains the final authorization boundary. When a
 registered tool requires approval, the sidecar emits the approval event, accepts
 the desktop's response RPC, and resumes the paused call; rejection and expiry
 stop the graph without retrying. Multimodal prompts, durable task state,
-write-capable desktop tools and the standard launcher switch are still being
+write-capable desktop tools and the packaged launcher switch are still being
 migrated.
 
 When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it also
 registers the read-only `ssh.service_status` tool backed by the C++ service. The
 tool gets its target from the selected `host_target.serverId`; `target_id` is not
 part of the model-visible input schema. Configure that exact server ID in the
-C++ service allowlist. The normal Node sidecar does not receive this token.
+C++ service allowlist. The packaged Node sidecar does not receive this token.
 
-For the desktop development launcher, create the environment from the repository
-root and install the runtime dependencies:
+Tauri development uses this runtime by default. Create the environment from the
+repository root and install the runtime dependencies:
 
 ```powershell
 python -m venv agent/.venv
 agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
-pnpm desktop:dev:python
+pnpm --filter @yukinal/desktop tauri dev
 ```
+
+`pnpm desktop:dev:python` is an equivalent shortcut.
 
 On macOS or Linux, use `agent/.venv/bin/python` for the install command. Set
 `YUKINAL_PYTHON` to another interpreter path when needed.

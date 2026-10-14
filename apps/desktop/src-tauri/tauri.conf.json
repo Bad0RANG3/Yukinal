@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "identifier": "dev.yukinal.workspace",
   "build": {
-    "beforeDevCommand": "pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop dev",
+    "beforeDevCommand": "pnpm --filter @yukinal/desktop dev",
     "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "pnpm -w exec node scripts/prepare-node-runtime.mjs && pnpm -w run build:libs && pnpm --filter @yukinal/agent build && pnpm --filter @yukinal/desktop build",
     "frontendDist": "../dist"

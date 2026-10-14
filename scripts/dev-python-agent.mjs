@@ -1,41 +1,28 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveCommandInvocation } from "./lib/commands.mjs";
+import { resolveTauriAgentCommand } from "./lib/tauri-agent-command.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const python = process.env.YUKINAL_PYTHON ?? join(
-  root,
-  "agent",
-  ".venv",
-  process.platform === "win32" ? "Scripts" : "bin",
-  process.platform === "win32" ? "python.exe" : "python",
-);
-
-if (!existsSync(python)) {
-  console.error(`Python Agent environment was not found: ${python}`);
-  console.error("Create it with: python -m venv agent/.venv");
-  console.error('Then install it with: agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"');
+let launch;
+try {
+  launch = resolveTauriAgentCommand(process.argv.slice(2), { root });
+} catch (error) {
+  console.error(error instanceof Error ? error.message : "Could not configure the Python Agent runtime");
   process.exit(2);
 }
 
-const env = {
-  ...process.env,
-  YUKINAL_AGENT_COMMAND: python,
-  YUKINAL_AGENT_ARGS: "-m;yukinal_agent.sidecar",
-};
 const invocation = resolveCommandInvocation(
   "pnpm",
-  ["--filter", "@yukinal/desktop", "exec", "tauri", "dev"],
-  { env },
+  launch.args,
+  { env: launch.env },
 );
 const child = spawn(invocation.command, invocation.args, {
   cwd: root,
-  env,
+  env: launch.env,
   stdio: "inherit",
 });
 
