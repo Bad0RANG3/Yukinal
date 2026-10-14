@@ -491,6 +491,11 @@ pub(crate) async fn open_terminal(
     columns: u16,
     rows: u16,
 ) -> Result<SshTerminalPty, TerminalOpenFailure> {
+    if !supports_cpp_target(state, server_id)? {
+        return Err(TerminalOpenFailure::Failed(
+            "the selected SSH target requires the Rust compatibility path".into(),
+        ));
+    }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
     let target = target_payload
@@ -708,6 +713,9 @@ async fn spawn_sftp_stream_worker(
     ),
     String,
 > {
+    if !supports_cpp_target(state, server_id)? {
+        return Err("the selected SSH target requires the Rust compatibility path".into());
+    }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
     let target = target_payload
@@ -1686,6 +1694,9 @@ async fn run_operation_response(
     operation: &str,
     parameters: Value,
 ) -> Result<Value, SshServiceFailure> {
+    if !supports_cpp_target(state, server_id)? {
+        return Err("the selected SSH target requires the Rust compatibility path".into());
+    }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
     run_operation_response_with_target(app, server_id, operation, parameters, target_payload).await
