@@ -6,9 +6,11 @@
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
 > existing UI. The opt-in `desktop:dev:python` command launches the Python
 > sidecar in Tauri development. The normal desktop and packaged app still use the
-> existing Node sidecar and Rust host execution path. Durable task/plan resume,
-> approval round-trips, and binding the desktop's selected SSH target to the C++
-> service configuration remain unfinished.
+> existing Node sidecar and Rust host execution path. Durable task/plan resume
+> and binding the desktop's selected SSH target to the C++ service configuration
+> remain unfinished. The Python sidecar supports approval events and response
+> RPCs for registered tools that require approval, including reject and expiry
+> handling; the current desktop catalog still exposes read-only tools.
 
 ## Repository baseline and migration boundary
 
@@ -78,8 +80,9 @@ local `read_only_tools` allowlist classifies the exact tool as read-only.
 `AgentWorkflow` is a minimal LangGraph graph that accepts explicit tool calls,
 executes them sequentially, stops on the first error, and applies per-tool,
 total-time, tool-count and output-byte limits. It compiles with an in-memory
-checkpoint saver. Model planning, durable checkpoint storage and UI approval
-round-trips remain for later milestones.
+checkpoint saver. `ModelDrivenAgent` pauses and resumes an exact approved call;
+rejection and expiry stop the graph without retrying the requested action.
+Durable checkpoint storage and task/plan resume remain for later milestones.
 
 The service currently targets Linux hosts with systemd. The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or command. The service resolves a `target_id` to a
@@ -205,24 +208,27 @@ server remains unverified.
 Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. After configuring CMake to use that interpreter, the C++ build
-completed and all five CTest targets passed on the current source revision. The Agent target passed 27 tests,
-including live stdio and Streamable HTTP MCP connections, credential-reference
-handling, schema/target rejection, parameter-bound approvals, audit redaction,
+completed and all five CTest targets passed on the current source revision. Full
+Python unittest discovery ran 42 tests: 39 passed and 3 service integration
+cases were skipped because the service binary path was not configured for that
+standalone run. The Agent suite covers live stdio and Streamable HTTP MCP
+connections, credential-reference handling, schema/target rejection,
+parameter-bound approvals, approval RPC resume/reject, audit redaction,
 tool/task/output limits, LangGraph execution, bidirectional host RPC framing,
-and redacted tool lifecycle events. The existing Paramiko SSH
-mock and Python-to-C++ HTTP tests also passed again.
+and redacted tool lifecycle events. The Paramiko SSH mock and
+Python-to-C++ HTTP tests also passed in CTest.
 
 ## Deliberately deferred
 
 - switching the standard/package desktop launcher to Python;
 - binding C++ service targets to the desktop's selected server records;
-- write-capable Agent tools, user-facing approval round-trips, and durable task/plan resume;
+- write-capable tools in the desktop catalog and durable task/plan resume;
 - arbitrary shell commands outside the existing host's separately guarded task flow;
 - SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
-The next milestone is to make the Python Agent's durable task and approval
-protocol fit the existing UI/host contract, while keeping host authorization as
-the final gate. A real SSH success against an OpenSSH server and packaged-app
-migration remain unverified. Do not mark later product requirements as
-delivered by the scaffold or documentation.
+The next milestone is to add durable task/plan state and bind the desktop's
+selected SSH target to the C++ service configuration, while keeping host
+authorization as the final gate. A real SSH success against an OpenSSH server
+and packaged-app migration remain unverified. Do not mark later product
+requirements as delivered by the scaffold or documentation.

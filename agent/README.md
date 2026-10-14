@@ -5,8 +5,9 @@ Runtime. It uses a shared Tool Registry, JSON Schema validation, tenant/user/
 target/risk policy, parameter-bound approvals, append-only audit events, MCP
 clients and a bounded LangGraph workflow. The model loop supports OpenAI
 compatible endpoints, Anthropic and Gemini through their official LangChain
-adapters. Desktop approval controls,
-durable task storage and UI wiring remain future work.
+adapters. The desktop approval response RPC is wired through the Python sidecar;
+the current desktop tool catalog remains read-only. Durable task storage and
+broader write-capable desktop tools remain future work.
 
 ## Install
 
@@ -82,13 +83,17 @@ data directory, and launch `yukinal-agent-node`. The process speaks version
 frames and diagnostics go to stderr. Frames are capped at 24 MiB. The current
 Python sidecar implements `initialize`, `system.ping`, `tools.list`,
 `system.describe`, `provider.test`, text-only `agent.run.start`, and
-`agent.run.stop`; `provider.models` returns model catalogs for all three
-providers. Over the same NDJSON connection it can request host-side tool
+`agent.run.stop`; `agent.approval.respond` resumes a pending approval, and
+`provider.models` returns model catalogs for all three providers. Over the same
+NDJSON connection it can request host-side tool
 execution and fetch the host's MCP catalog. The first integrated set contains
 read-only server, Docker, systemd, package and file tools, plus MCP tools the
-host marks low-risk. The host remains the final authorization boundary.
-Multimodal prompts, approval RPCs, durable task state, broader tool coverage
-and the desktop launcher switch are still being migrated.
+host marks low-risk. The host remains the final authorization boundary. When a
+registered tool requires approval, the sidecar emits the approval event, accepts
+the desktop's response RPC, and resumes the paused call; rejection and expiry
+stop the graph without retrying. Multimodal prompts, durable task state,
+write-capable desktop tools and the standard launcher switch are still being
+migrated.
 
 For the desktop development launcher, create the environment from the repository
 root and install the runtime dependencies:

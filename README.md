@@ -6,8 +6,9 @@ starting with a narrow C++ SSH service and a Python caller.
 
 ## Rewrite status
 
-The current rewrite implements **milestones 1 through 3** from
-[`ssh_agent_development_brief.md`](./ssh_agent_development_brief.md):
+The repository has a verified **first-stage SSH service and Python caller**
+from [`ssh_agent_development_brief.md`](./ssh_agent_development_brief.md), plus
+partial Python Agent components for later stages:
 
 - a standalone C++ service bound to `127.0.0.1`;
 - a Python caller over local HTTP/JSON;
@@ -33,9 +34,11 @@ The Python JSON-RPC layer handles initialization, health, tool catalogs,
 provider checks and model catalogs, text runs, cancellation, and a bidirectional
 JSON-RPC bridge to the desktop host. Python runs can execute the existing
 read-only server tools through the host and can use MCP tools the host marks
-low-risk. Approval RPCs, durable task state, broader tool coverage, and switching
-the desktop launcher to Python remain in progress. The existing React/Tauri UI
-remains intact while those paths are migrated.
+low-risk. The Python sidecar now round-trips approvals for tools that explicitly
+require them, including reject and expiry handling; the current desktop catalog
+still exposes read-only tools. Durable task state, broader tool coverage, and
+switching the desktop launcher to Python remain in progress. The existing
+React/Tauri UI remains intact while those paths are migrated.
 
 The C++ service is not yet connected to the desktop UI. The existing React
 components and their Tauri bridge are preserved. The existing Rust/Tauri
