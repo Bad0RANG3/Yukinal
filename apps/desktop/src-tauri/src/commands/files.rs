@@ -298,6 +298,16 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
         guard: &ReplaceGuard,
         data: &[u8],
     ) -> Result<ReplacedFile, ReplaceError> {
+        if cpp_ssh_file_operations_supported(self.state, server_id)
+            .map_err(|error| ReplaceError::Transport(TransportError::new(error)))?
+        {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_replace_guarded(
+                    app, self.state, server_id, path, guard, data,
+                )
+                .await;
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(|error| ReplaceError::Transport(TransportError::new(error)))?;

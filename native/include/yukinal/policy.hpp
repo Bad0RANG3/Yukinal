@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +18,9 @@ struct ExecRequest {
   std::string service;
   std::string path;
   std::vector<unsigned char> content;
+  std::uint64_t expected_size = 0;
+  std::optional<std::uint32_t> expected_modified;
+  std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
   int timeout_seconds = 10;
 };

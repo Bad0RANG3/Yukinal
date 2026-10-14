@@ -18,6 +18,7 @@ struct ExecResult {
   bool output_truncated = false;
   std::string error_code;
   std::string error_message;
+  std::vector<std::string> missing_metadata;
 };
 
 /// Run a fixed structured SSH operation. No raw command is accepted here.
@@ -34,6 +35,7 @@ ExecResult sftp_create_exclusive(const TargetConfig& target, const std::string& 
                                  const std::vector<unsigned char>& content, int timeout_seconds);
 ExecResult sftp_remove_file(const TargetConfig& target, const std::string& path,
                             int timeout_seconds);
+ExecResult sftp_replace_guarded(const TargetConfig& target, const ExecRequest& request);
 ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
                            int timeout_seconds);
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request);

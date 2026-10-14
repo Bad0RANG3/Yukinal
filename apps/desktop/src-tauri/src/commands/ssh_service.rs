@@ -9,9 +9,11 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use ring::rand::SecureRandom;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
-use yukinal_filesystem::{RemoteEntryKind, RemoteStat};
+use yukinal_filesystem::{
+    RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
+};
 
 use crate::state::AppState;
 
@@ -227,6 +229,75 @@ pub(crate) async fn sftp_link_count(
     Ok(result.link_count)
 }
 
+pub(crate) async fn sftp_replace_guarded(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+    guard: &ReplaceGuard,
+    data: &[u8],
+) -> Result<ReplacedFile, ReplaceError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Replacement {
+        size: u64,
+        modified: Option<u32>,
+    }
+
+    let digest = guard
+        .content_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let response = run_operation_response(
+        app,
+        state,
+        server_id,
+        "sftp_replace_guarded",
+        json!({
+            "path": path,
+            "expected_size": guard.size,
+            "expected_modified": guard.modified,
+            "expected_digest": digest,
+            "content_base64": base64::engine::general_purpose::STANDARD.encode(data),
+        }),
+    )
+    .await
+    .map_err(|error| match error.code.as_str() {
+        "concurrent_change" => ReplaceError::ConcurrentChange(error.message),
+        "replace_unsupported" => ReplaceError::Unsupported(error.message),
+        "metadata_not_preserved" => ReplaceError::MetadataNotPreserved {
+            message: error.message,
+            missing: error.missing,
+        },
+        _ => ReplaceError::Transport(TransportError::new(error.message)),
+    })?;
+    validate_operation_response(&response, server_id, "sftp_replace_guarded")
+        .map_err(|error| ReplaceError::Transport(TransportError::new(error)))?;
+    let output = response
+        .get("stdout")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReplaceError::Transport(TransportError::new(
+                "the C++ SSH service returned an invalid replacement result",
+            ))
+        })?;
+    let replacement: Replacement = serde_json::from_str(output).map_err(|_| {
+        ReplaceError::Transport(TransportError::new(
+            "the C++ SSH service returned invalid replacement metadata",
+        ))
+    })?;
+    if replacement.size != data.len() as u64 {
+        return Err(ReplaceError::ConcurrentChange(
+            "the published file size does not match the requested replacement".into(),
+        ));
+    }
+    Ok(ReplacedFile {
+        size: replacement.size,
+        modified: replacement.modified,
+    })
+}
+
 fn decode_sftp_read_output(output: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(output.as_bytes())
@@ -244,6 +315,46 @@ async fn run_operation(
     operation: &str,
     parameters: Value,
 ) -> Result<String, String> {
+    let response = run_operation_response(app, state, server_id, operation, parameters)
+        .await
+        .map_err(|error| error.message)?;
+    validate_operation_response(&response, server_id, operation)?;
+    response
+        .get("stdout")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "the C++ SSH service returned an invalid operation result".into())
+}
+
+struct SshServiceFailure {
+    code: String,
+    message: String,
+    missing: Vec<String>,
+}
+
+impl From<String> for SshServiceFailure {
+    fn from(message: String) -> Self {
+        Self {
+            code: "transport_error".into(),
+            message,
+            missing: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for SshServiceFailure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+async fn run_operation_response(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    operation: &str,
+    parameters: Value,
+) -> Result<Value, SshServiceFailure> {
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
     let target = target_payload
@@ -319,6 +430,29 @@ async fn run_operation(
     request_operation(port, &token, server_id, operation, parameters, &mut child.0).await
 }
 
+fn validate_operation_response(
+    response: &Value,
+    server_id: &str,
+    operation: &str,
+) -> Result<(), String> {
+    if response.get("status").and_then(Value::as_str) != Some("succeeded")
+        || response.get("target_id").and_then(Value::as_str) != Some(server_id)
+        || response.get("operation").and_then(Value::as_str) != Some(operation)
+        || response.get("exit_code").and_then(Value::as_i64) != Some(0)
+        || response.get("stdout").and_then(Value::as_str).is_none()
+        || response.get("stderr").and_then(Value::as_str).is_none()
+        || response
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .is_none()
+        || response.get("output_truncated").and_then(Value::as_bool) != Some(false)
+        || response.get("error") != Some(&Value::Null)
+    {
+        return Err("the C++ SSH service returned an invalid operation result".into());
+    }
+    Ok(())
+}
+
 struct ServiceChild(Child);
 
 impl Drop for ServiceChild {
@@ -337,7 +471,7 @@ async fn request_operation(
     operation: &str,
     parameters: Value,
     child: &mut std::process::Child,
-) -> Result<String, String> {
+) -> Result<Value, SshServiceFailure> {
     let base_url = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -417,29 +551,35 @@ async fn request_operation(
     let body: Value = serde_json::from_slice(&response_body)
         .map_err(|_| "the C++ SSH service returned invalid JSON".to_string())?;
     if !status.is_success() {
-        let message = body
-            .get("error")
+        let error = body.get("error");
+        let message = error
             .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
             .unwrap_or("the C++ SSH service rejected the request");
-        return Err(message.to_string());
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("ssh_error")
+            .to_owned();
+        let missing = error
+            .and_then(|error| error.get("missing"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|name| matches!(*name, "mode" | "mtime" | "owner" | "group"))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        return Err(SshServiceFailure {
+            code,
+            message: message.to_owned(),
+            missing,
+        });
     }
-    if body.get("status").and_then(Value::as_str) != Some("succeeded")
-        || body.get("target_id").and_then(Value::as_str) != Some(server_id)
-        || body.get("operation").and_then(Value::as_str) != Some(operation)
-        || body.get("exit_code").and_then(Value::as_i64) != Some(0)
-        || body.get("stdout").and_then(Value::as_str).is_none()
-        || body.get("stderr").and_then(Value::as_str).is_none()
-        || body.get("duration_ms").and_then(Value::as_u64).is_none()
-        || body.get("output_truncated").and_then(Value::as_bool) != Some(false)
-        || body.get("error") != Some(&Value::Null)
-    {
-        return Err("the C++ SSH service returned an invalid operation result".into());
-    }
-    body.get("stdout")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| "the C++ SSH service returned an invalid operation result".into())
+    Ok(body)
 }
 
 fn unused_loopback_port() -> Result<u16, String> {

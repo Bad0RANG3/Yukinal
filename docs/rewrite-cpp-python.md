@@ -8,9 +8,9 @@
 > sidecar; the old Node resources remain as a transition fallback. Rust still
 > hosts native UI IPC and some SSH paths. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
-> supported Agent file reads/writes/backups use C++ SFTP operations for
-> password/private-key identities without Host CA. Guarded atomic edit/restore,
-> transfers, PTY, and other authentication modes still use Rust. Every C++ operation resolves its `target_id` through the service
+> supported Agent file reads/writes/backups and guarded atomic edit/restore use
+> C++ SFTP operations for password/private-key identities without Host CA.
+> Transfers, PTY, and other authentication modes still use Rust. Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
 > loopback health endpoint, and stops it with the Agent process. Automatic
@@ -303,8 +303,6 @@ Python-to-C++ HTTP tests also passed in CTest.
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- migrating guarded atomic edit/restore to C++ while preserving the revision,
-  metadata, and no-follow protections;
 - arbitrary shell commands outside the existing host's separately guarded task flow;
 - SFTP transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.

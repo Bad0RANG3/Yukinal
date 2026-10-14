@@ -13,7 +13,7 @@ still in progress. Current components include:
 - a Python caller over local HTTP/JSON;
 - structured SSH operations: `service_status`, `service_inventory`, and
   bounded SFTP listing, metadata, read, write, exclusive backup creation, removal,
-  and link-count probes for supported desktop Agent identities;
+  guarded atomic replacement, and link-count probes for supported desktop Agent identities;
 - target allowlisting, strict SSH host-key verification, bounded timeouts and
   output, and credentials referenced from environment variables or private-key
   files;

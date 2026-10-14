@@ -90,6 +90,8 @@ bool authorized(const httplib::Request& request, const std::string& token) {
 int error_status(const ExecResult& result) {
   if (result.error_code == "timeout") return 504;
   if (result.error_code == "invalid_parameters") return 422;
+  if (result.error_code == "concurrent_change") return 409;
+  if (result.error_code == "replace_unsupported") return 501;
   if (result.error_code == "resolver_busy" || result.error_code == "resolver_unavailable") return 503;
   return 502;
 }
@@ -168,6 +170,7 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     }
     output["error"] = {{"code", result.error_code.empty() ? "ssh_error" : result.error_code},
                        {"message", result.error_message.empty() ? "SSH operation failed" : result.error_message}};
+    if (!result.missing_metadata.empty()) output["error"]["missing"] = result.missing_metadata;
     set_json(response, error_status(result), output);
   });
 

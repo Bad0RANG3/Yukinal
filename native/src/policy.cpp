@@ -1,6 +1,7 @@
 #include "yukinal/policy.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <regex>
 #include <set>
 #include <string_view>
@@ -117,6 +118,9 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string service;
   std::string path;
   std::vector<unsigned char> content;
+  std::uint64_t expected_size = 0;
+  std::optional<std::uint32_t> expected_modified;
+  std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
   if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
@@ -193,6 +197,81 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     path = path_it->get<std::string>();
+  } else if (operation == "sftp_replace_guarded") {
+    if (!has_only_keys(*parameters_it,
+                       {"path", "expected_size", "expected_modified", "expected_digest", "content_base64"})) {
+      set_error(error, 422, "invalid_parameters", "sftp_replace_guarded received an unexpected parameter");
+      return false;
+    }
+    const auto path_it = parameters_it->find("path");
+    const auto size_it = parameters_it->find("expected_size");
+    const auto modified_it = parameters_it->find("expected_modified");
+    const auto digest_it = parameters_it->find("expected_digest");
+    const auto content_it = parameters_it->find("content_base64");
+    if (path_it == parameters_it->end() || !path_it->is_string() ||
+        !valid_sftp_path(path_it->get<std::string>()) ||
+        path_it->get<std::string>().front() != '/' ||
+        path_it->get<std::string>().find_first_of("\r\n") != std::string::npos ||
+        size_it == parameters_it->end() ||
+        !(size_it->is_number_integer() || size_it->is_number_unsigned()) ||
+        modified_it == parameters_it->end() ||
+        !(modified_it->is_null() || modified_it->is_number_integer() || modified_it->is_number_unsigned()) ||
+        digest_it == parameters_it->end() || !digest_it->is_string() ||
+        digest_it->get_ref<const std::string&>().size() != 64 ||
+        content_it == parameters_it->end() || !content_it->is_string() ||
+        !decode_base64(content_it->get_ref<const std::string&>(), 1024 * 1024, &content)) {
+      set_error(error, 422, "invalid_parameters", "sftp_replace_guarded requires an absolute path, bounded contents, a size, optional mtime and SHA-256 digest");
+      return false;
+    }
+    if (size_it->is_number_unsigned()) {
+      expected_size = size_it->get<std::uint64_t>();
+    } else {
+      const auto signed_size = size_it->get<std::int64_t>();
+      if (signed_size < 0) {
+        set_error(error, 422, "invalid_parameters", "expected_size must be between 0 and 1048576");
+        return false;
+      }
+      expected_size = static_cast<std::uint64_t>(signed_size);
+    }
+    if (expected_size > 1024 * 1024) {
+      set_error(error, 422, "invalid_parameters", "expected_size must be between 0 and 1048576");
+      return false;
+    }
+    if (!modified_it->is_null()) {
+      std::uint64_t modified = 0;
+      if (modified_it->is_number_unsigned()) {
+        modified = modified_it->get<std::uint64_t>();
+      } else {
+        const auto signed_modified = modified_it->get<std::int64_t>();
+        if (signed_modified < 0) {
+          set_error(error, 422, "invalid_parameters", "expected_modified must be a non-negative SFTP timestamp or null");
+          return false;
+        }
+        modified = static_cast<std::uint64_t>(signed_modified);
+      }
+      if (modified > std::numeric_limits<std::uint32_t>::max()) {
+        set_error(error, 422, "invalid_parameters", "expected_modified is outside the SFTP timestamp range");
+        return false;
+      }
+      expected_modified = static_cast<std::uint32_t>(modified);
+    }
+    const auto& digest = digest_it->get_ref<const std::string&>();
+    for (std::size_t i = 0; i < expected_digest.size(); ++i) {
+      const auto hex_value = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+      };
+      const int high = hex_value(digest[i * 2]);
+      const int low = hex_value(digest[i * 2 + 1]);
+      if (high < 0 || low < 0) {
+        set_error(error, 422, "invalid_parameters", "expected_digest must be a 64-character SHA-256 hex string");
+        return false;
+      }
+      expected_digest[i] = static_cast<unsigned char>((high << 4) | low);
+    }
+    path = path_it->get<std::string>();
   } else if (operation == "sftp_remove_file" || operation == "sftp_link_count") {
     if (!has_only_keys(*parameters_it, {"path"})) {
       set_error(error, 422, "invalid_parameters", "SFTP path operations accept only a path parameter");
@@ -239,6 +318,9 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->service = std::move(service);
   request->path = std::move(path);
   request->content = std::move(content);
+  request->expected_size = expected_size;
+  request->expected_modified = expected_modified;
+  request->expected_digest = expected_digest;
   request->max_bytes = max_bytes;
   request->timeout_seconds = static_cast<int>(timeout);
   return true;

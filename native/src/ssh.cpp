@@ -23,12 +23,14 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <bcrypt.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <openssl/evp.h>
 #endif
 
 #include "ssh_network.hpp"
@@ -962,6 +964,400 @@ ExecResult sftp_write_impl(const TargetConfig& target, const std::string& path,
   return result;
 }
 
+bool compute_sha256(const std::vector<unsigned char>& bytes,
+                    std::array<unsigned char, 32>* digest) {
+  if (!digest) return false;
+#ifdef _WIN32
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  DWORD object_size = 0;
+  DWORD result_size = 0;
+  std::vector<unsigned char> object;
+  bool succeeded = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0;
+  if (succeeded) {
+    succeeded = BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                                  reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
+                                  &result_size, 0) >= 0 && object_size > 0;
+  }
+  if (succeeded) {
+    object.resize(object_size);
+    succeeded = BCryptCreateHash(algorithm, &hash, object.data(), object_size,
+                                 nullptr, 0, 0) >= 0;
+  }
+  if (succeeded && !bytes.empty()) {
+    succeeded = BCryptHashData(hash, const_cast<PUCHAR>(bytes.data()),
+                               static_cast<ULONG>(bytes.size()), 0) >= 0;
+  }
+  if (succeeded) {
+    succeeded = BCryptFinishHash(hash, digest->data(), static_cast<ULONG>(digest->size()), 0) >= 0;
+  }
+  if (hash) BCryptDestroyHash(hash);
+  if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+  return succeeded;
+#else
+  unsigned int digest_length = 0;
+  return EVP_Digest(bytes.data(), bytes.size(), digest->data(), &digest_length,
+                    EVP_sha256(), nullptr) == 1 && digest_length == digest->size();
+#endif
+}
+
+bool sftp_lstat(LIBSSH2_SFTP* sftp, const std::string& path,
+                Clock::time_point deadline, LIBSSH2_SESSION* session,
+                LIBSSH2_SFTP_ATTRIBUTES* attributes) {
+  if (!set_session_timeout(session, deadline)) return false;
+  *attributes = {};
+  return libssh2_sftp_stat_ex(sftp, path.data(), static_cast<unsigned int>(path.size()),
+                              LIBSSH2_SFTP_LSTAT, attributes) == 0;
+}
+
+bool is_regular_file(const LIBSSH2_SFTP_ATTRIBUTES& attributes) {
+  return (attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0 &&
+         LIBSSH2_SFTP_S_ISREG(attributes.permissions);
+}
+
+std::optional<std::uint32_t> modified_time(const LIBSSH2_SFTP_ATTRIBUTES& attributes) {
+  if ((attributes.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) == 0) return std::nullopt;
+  return attributes.mtime;
+}
+
+LIBSSH2_SFTP_ATTRIBUTES preserved_attributes(const LIBSSH2_SFTP_ATTRIBUTES& source) {
+  LIBSSH2_SFTP_ATTRIBUTES output{};
+  if ((source.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0) {
+    output.flags |= LIBSSH2_SFTP_ATTR_PERMISSIONS;
+    output.permissions = source.permissions;
+  }
+  if ((source.flags & LIBSSH2_SFTP_ATTR_UIDGID) != 0) {
+    output.flags |= LIBSSH2_SFTP_ATTR_UIDGID;
+    output.uid = source.uid;
+    output.gid = source.gid;
+  }
+  if ((source.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) != 0) {
+    output.flags |= LIBSSH2_SFTP_ATTR_ACMODTIME;
+    output.atime = source.atime;
+    output.mtime = source.mtime;
+  }
+  return output;
+}
+
+std::vector<std::string> unpreserved_metadata(const LIBSSH2_SFTP_ATTRIBUTES& source,
+                                              const LIBSSH2_SFTP_ATTRIBUTES& staged) {
+  std::vector<std::string> missing;
+  if ((source.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0 &&
+      ((staged.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) == 0 ||
+       source.permissions != staged.permissions)) {
+    missing.emplace_back("mode");
+  }
+  if ((source.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) != 0 &&
+      ((staged.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) == 0 || source.mtime != staged.mtime)) {
+    missing.emplace_back("mtime");
+  }
+  if ((source.flags & LIBSSH2_SFTP_ATTR_UIDGID) != 0) {
+    if ((staged.flags & LIBSSH2_SFTP_ATTR_UIDGID) == 0 || source.uid != staged.uid) {
+      missing.emplace_back("owner");
+    }
+    if ((staged.flags & LIBSSH2_SFTP_ATTR_UIDGID) == 0 || source.gid != staged.gid) {
+      missing.emplace_back("group");
+    }
+  }
+  return missing;
+}
+
+class StagingFileCleanup {
+ public:
+  StagingFileCleanup(SshResources* resources, std::string path)
+      : resources_(resources), path_(std::move(path)) {}
+  ~StagingFileCleanup() {
+    if (!resources_ || !resources_->sftp_ || !created_ || published_) return;
+    libssh2_session_set_timeout(resources_->session_, 1000);
+    libssh2_sftp_unlink_ex(resources_->sftp_, path_.data(),
+                           static_cast<unsigned int>(path_.size()));
+  }
+  void mark_created() { created_ = true; }
+  void mark_published() { published_ = true; }
+
+ private:
+  SshResources* resources_;
+  std::string path_;
+  bool created_ = false;
+  bool published_ = false;
+};
+
+ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecRequest& request) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (request.path.empty() || request.path.size() > 4096 || request.path.front() != '/' ||
+      request.path.find('\0') != std::string::npos || request.path.find_first_of("\r\n") != std::string::npos ||
+      request.expected_size > 1024 * 1024 || request.content.size() > 1024 * 1024 ||
+      request.timeout_seconds < 1 || request.timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The guarded SFTP replacement parameters are invalid");
+    return result;
+  }
+  if (request.path == "/" || request.path.back() == '/') {
+    fail(&result, "replace_unsupported", "A root or directory path cannot be replaced as a regular file");
+    return result;
+  }
+
+  static std::atomic_uint64_t stage_sequence{0};
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count() ^
+                     static_cast<std::int64_t>(stage_sequence.fetch_add(1));
+  const std::string stage_path = request.path + ".yukinal-stage-" + std::to_string(nonce);
+  if (stage_path.size() > 4096) {
+    fail(&result, "replace_unsupported", "The path is too long to place a sibling staging file safely");
+    return result;
+  }
+
+  const auto deadline = started + std::chrono::seconds(request.timeout_seconds);
+  SshResources resources;
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  LIBSSH2_SFTP_ATTRIBUTES source{};
+  if (!sftp_lstat(resources.sftp_, request.path, deadline, resources.session_, &source)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Reading the guarded SFTP target timed out" : "Could not inspect the guarded SFTP target");
+    return result;
+  }
+  if (!is_regular_file(source)) {
+    fail(&result, "replace_unsupported", "Only a regular file can be replaced atomically; symlinks and directories are refused");
+    return result;
+  }
+  const std::uint64_t source_size = (source.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0 ? source.filesize : 0;
+  if (source_size != request.expected_size || modified_time(source) != request.expected_modified) {
+    fail(&result, "concurrent_change", "The target size or mtime changed after it was read");
+    return result;
+  }
+
+  StagingFileCleanup cleanup(&resources, stage_path);
+  LIBSSH2_SFTP_ATTRIBUTES desired = preserved_attributes(source);
+  const long create_mode = (source.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0
+                               ? static_cast<long>(source.permissions)
+                               : static_cast<long>(0600);
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "Creating the guarded SFTP staging file timed out");
+    return result;
+  }
+  resources.sftp_handle_ = libssh2_sftp_open_ex(
+      resources.sftp_, stage_path.data(), static_cast<unsigned int>(stage_path.size()),
+      LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL, create_mode,
+      LIBSSH2_SFTP_OPENFILE);
+  if (!resources.sftp_handle_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "replace_unsupported",
+         timed_out ? "Creating the guarded SFTP staging file timed out"
+                   : "The server refused an exclusive sibling staging file, so nothing was published");
+    return result;
+  }
+  cleanup.mark_created();
+
+  bool stage_ok = true;
+  for (std::size_t offset = 0; offset < request.content.size();) {
+    if (!set_session_timeout(resources.session_, deadline)) {
+      fail(&result, "timeout", "Writing the guarded SFTP staging file timed out");
+      stage_ok = false;
+      break;
+    }
+    const auto count = libssh2_sftp_write(
+        resources.sftp_handle_, reinterpret_cast<const char*>(request.content.data() + offset),
+        request.content.size() - offset);
+    if (count <= 0) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "Writing the guarded SFTP staging file timed out"
+                     : "Could not write the guarded SFTP staging file");
+      stage_ok = false;
+      break;
+    }
+    offset += static_cast<std::size_t>(count);
+  }
+
+  if (stage_ok) {
+    if (!set_session_timeout(resources.session_, deadline)) {
+      fail(&result, "timeout", "Preserving SFTP file metadata timed out");
+      stage_ok = false;
+    } else {
+      const bool handle_metadata_set = desired.flags == 0 ||
+          libssh2_sftp_fsetstat(resources.sftp_handle_, &desired) == 0;
+      if (!handle_metadata_set) {
+        if (!set_session_timeout(resources.session_, deadline)) {
+          fail(&result, "timeout", "Preserving SFTP file metadata timed out");
+          stage_ok = false;
+        } else {
+          libssh2_sftp_setstat(resources.sftp_, stage_path.c_str(), &desired);
+        }
+      }
+    }
+  }
+  if (stage_ok && (!set_session_timeout(resources.session_, deadline) ||
+                   libssh2_sftp_fsync(resources.sftp_handle_) != 0)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Syncing the guarded SFTP staging file timed out"
+                   : "The SFTP server could not sync the guarded staging file");
+    stage_ok = false;
+  }
+  if (resources.sftp_handle_) {
+    LIBSSH2_SFTP_HANDLE* handle = resources.sftp_handle_;
+    resources.sftp_handle_ = nullptr;
+    if (!set_session_timeout(resources.session_, deadline)) libssh2_session_set_timeout(resources.session_, 1000);
+    if (libssh2_sftp_close_handle(handle) != 0 && stage_ok) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "Closing the guarded SFTP staging file timed out"
+                     : "Could not close the guarded SFTP staging file");
+      stage_ok = false;
+    }
+  }
+  if (!stage_ok) return result;
+
+  LIBSSH2_SFTP_ATTRIBUTES staged{};
+  if (!sftp_lstat(resources.sftp_, stage_path, deadline, resources.session_, &staged)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Verifying the SFTP staging file timed out" : "Could not verify the SFTP staging file");
+    return result;
+  }
+  result.missing_metadata = unpreserved_metadata(source, staged);
+  if (!result.missing_metadata.empty()) {
+    result.error_code = "metadata_not_preserved";
+    result.error_message = "The remote server would not preserve the file's metadata; the edit was not published";
+    return result;
+  }
+
+  LIBSSH2_SFTP_ATTRIBUTES before_read{};
+  if (!sftp_lstat(resources.sftp_, request.path, deadline, resources.session_, &before_read)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Rechecking the guarded SFTP target timed out" : "Could not recheck the guarded SFTP target");
+    return result;
+  }
+  if (!is_regular_file(before_read) ||
+      ((before_read.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0 ? before_read.filesize : 0) != request.expected_size ||
+      modified_time(before_read) != request.expected_modified) {
+    fail(&result, "concurrent_change", "The target metadata changed while the replacement was staged");
+    return result;
+  }
+
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "Opening the target for guarded content verification timed out");
+    return result;
+  }
+  LIBSSH2_SFTP_HANDLE* read_handle = libssh2_sftp_open_ex(
+      resources.sftp_, request.path.data(), static_cast<unsigned int>(request.path.size()),
+      LIBSSH2_FXF_READ, 0, LIBSSH2_SFTP_OPENFILE);
+  if (!read_handle) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Opening the target for guarded content verification timed out"
+                   : "Could not read the target for guarded content verification");
+    return result;
+  }
+  std::vector<unsigned char> current;
+  current.reserve(static_cast<std::size_t>(request.expected_size) + 1);
+  std::array<char, 32 * 1024> buffer{};
+  bool read_ok = true;
+  while (current.size() <= request.expected_size) {
+    if (!set_session_timeout(resources.session_, deadline)) {
+      fail(&result, "timeout", "Reading the target for guarded content verification timed out");
+      read_ok = false;
+      break;
+    }
+    const std::size_t remaining = static_cast<std::size_t>(request.expected_size + 1 - current.size());
+    const auto count = libssh2_sftp_read(read_handle, buffer.data(), std::min(remaining, buffer.size()));
+    if (count == 0) break;
+    if (count < 0) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "Reading the target for guarded content verification timed out"
+                     : "Could not read the target for guarded content verification");
+      read_ok = false;
+      break;
+    }
+    current.insert(current.end(), reinterpret_cast<const unsigned char*>(buffer.data()),
+                   reinterpret_cast<const unsigned char*>(buffer.data()) + static_cast<std::size_t>(count));
+  }
+  if (!set_session_timeout(resources.session_, deadline)) libssh2_session_set_timeout(resources.session_, 1000);
+  const int read_close = libssh2_sftp_close_handle(read_handle);
+  if (read_ok && read_close != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Closing guarded content verification timed out"
+                   : "Could not close guarded content verification");
+    read_ok = false;
+  }
+  if (!read_ok) return result;
+  if (current.size() != request.expected_size) {
+    fail(&result, "concurrent_change", "The target size changed while its content was being verified");
+    return result;
+  }
+  std::array<unsigned char, 32> current_digest{};
+  if (!compute_sha256(current, &current_digest)) {
+    fail(&result, "internal_error", "SHA-256 content verification is unavailable");
+    return result;
+  }
+  if (current_digest != request.expected_digest) {
+    fail(&result, "concurrent_change", "The target content changed while the replacement was staged");
+    return result;
+  }
+
+  LIBSSH2_SFTP_ATTRIBUTES after_read{};
+  if (!sftp_lstat(resources.sftp_, request.path, deadline, resources.session_, &after_read)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Rechecking target metadata after content verification timed out"
+                   : "Could not recheck target metadata after content verification");
+    return result;
+  }
+  if (!is_regular_file(after_read) ||
+      ((after_read.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0 ? after_read.filesize : 0) != request.expected_size ||
+      modified_time(after_read) != request.expected_modified) {
+    fail(&result, "concurrent_change", "The target metadata changed during content verification");
+    return result;
+  }
+
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "Publishing the guarded SFTP replacement timed out");
+    return result;
+  }
+  const int rename_result = libssh2_sftp_posix_rename_ex(
+      resources.sftp_, stage_path.data(), stage_path.size(), request.path.data(), request.path.size());
+  if (rename_result != 0) {
+    const int session_error = libssh2_session_last_errno(resources.session_);
+    const bool timed_out = remaining_ms(deadline) == 0 || session_error == LIBSSH2_ERROR_TIMEOUT;
+    if (timed_out) {
+      fail(&result, "timeout", "Publishing the guarded SFTP replacement timed out");
+    } else if (session_error == LIBSSH2_FX_OP_UNSUPPORTED ||
+               session_error == LIBSSH2_ERROR_SFTP_PROTOCOL) {
+      fail(&result, "replace_unsupported",
+           "The server refused safe atomic replacement, so the edit was not published");
+    } else {
+      fail(&result, "sftp_error", "The guarded SFTP replacement could not be confirmed");
+    }
+    return result;
+  }
+  cleanup.mark_published();
+
+  LIBSSH2_SFTP_ATTRIBUTES published{};
+  if (!sftp_lstat(resources.sftp_, request.path, deadline, resources.session_, &published)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Verifying the published replacement timed out"
+                   : "The replacement was published but its metadata could not be verified");
+    return result;
+  }
+  if (!is_regular_file(published) ||
+      ((published.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0 ? published.filesize : 0) != request.content.size()) {
+    fail(&result, "concurrent_change", "The published path does not contain the replacement that was staged");
+    return result;
+  }
+  const auto published_modified = modified_time(published);
+  result.stdout_text = nlohmann::json{
+      {"size", (published.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0 ? published.filesize : 0},
+      {"modified", published_modified ? nlohmann::json(*published_modified) : nlohmann::json(nullptr)}}.dump();
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
 std::string shell_single_quote(const std::string& value) {
   std::string quoted = "'";
   for (const char character : value) {
@@ -1014,6 +1410,10 @@ ExecResult sftp_remove_file(const TargetConfig& target, const std::string& path,
   result.exit_code = 0;
   result.completed = true;
   return result;
+}
+
+ExecResult sftp_replace_guarded(const TargetConfig& target, const ExecRequest& request) {
+  return sftp_replace_guarded_impl(target, request);
 }
 
 ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
@@ -1071,6 +1471,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "sftp_remove_file") {
     return sftp_remove_file(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_replace_guarded") {
+    return sftp_replace_guarded(target, request);
   }
   if (request.operation == "sftp_link_count") {
     return sftp_link_count(target, request.path, request.timeout_seconds);

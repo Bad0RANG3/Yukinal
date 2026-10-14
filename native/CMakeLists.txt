@@ -93,7 +93,10 @@ target_link_libraries(yukinal_ssh_core
 )
 if(WIN32)
   target_compile_definitions(yukinal_ssh_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-  target_link_libraries(yukinal_ssh_core PRIVATE ws2_32)
+  target_link_libraries(yukinal_ssh_core PRIVATE ws2_32 bcrypt)
+else()
+  find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+  target_link_libraries(yukinal_ssh_core PRIVATE OpenSSL::Crypto)
 endif()
 
 add_executable(yukinal-ssh-service src/main.cpp)
