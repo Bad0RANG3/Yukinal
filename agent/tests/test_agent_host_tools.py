@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from yukinal_agent import ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
+from langchain_core.messages import AIMessage
+
+from yukinal_agent import ExecutionContext, MemoryAuditSink, ModelDrivenAgent, ToolCallError, ToolRegistry
 from yukinal_agent.host_tools import register_host_tools
 from yukinal_agent.tools import approval_fingerprint
 
@@ -17,7 +19,74 @@ class FakeHost:
         return {"status": "success", "output": {"state": "exited", "exitCode": 0}}
 
 
+class ScriptedModel:
+    def __init__(self, responses: list[AIMessage]) -> None:
+        self.responses = list(responses)
+
+    def bind_tools(self, _tools: list[dict[str, Any]], *, parallel_tool_calls: bool) -> ScriptedModel:
+        return self
+
+    def bind(self, *, max_tokens: int) -> ScriptedModel:
+        return self
+
+    async def ainvoke(self, _messages: list[Any]) -> AIMessage:
+        if not self.responses:
+            raise AssertionError("scripted model ran out of responses")
+        return self.responses.pop(0)
+
+
 class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resumed_model_approval_reaches_the_host_with_its_exact_ticket(self) -> None:
+        host = FakeHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        arguments = {
+            "command": "systemctl restart api.service",
+            "purpose": "Restart the failed API service",
+            "timeoutMs": 15000,
+            "maxOutputBytes": 4096,
+        }
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "server.exec", "args": arguments, "id": "action-call-1", "type": "tool_call",
+            }]),
+            AIMessage(content="The approved action completed."),
+        ])
+        agent = ModelDrivenAgent(registry, model)
+        first = await agent.run(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            prompt="Restart the failed API service.",
+            allowed_tools={"server.exec"},
+            allowed_target_ids={"srv_stage1"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-current-1",
+            plan_step_id="step-action-1",
+            evidence_ids=("ev-1", "ev-2"),
+            run_id="run-1",
+            trace_id="trace-1",
+        )
+
+        self.assertEqual(first.status, "awaiting_approval")
+        self.assertEqual(host.calls, [])
+        resumed = await agent.resume_after_approval(
+            first.checkpoint_id or "",
+            first.approval_requests[0].fingerprint,
+            "apr-host-ticket",
+            approved=True,
+        )
+
+        self.assertEqual(resumed.status, "succeeded")
+        self.assertEqual(len(host.calls), 1)
+        _, request, _ = host.calls[0]
+        self.assertEqual(request["approvalId"], "apr-host-ticket")
+        self.assertEqual(request["input"], arguments)
+        self.assertEqual(request["planId"], "plan-current-1")
+        self.assertEqual(request["planStepId"], "step-action-1")
+        self.assertEqual(request["evidenceIds"], ["ev-1", "ev-2"])
+
     async def test_server_exec_forwards_exact_approval_and_current_plan_binding(self) -> None:
         host = FakeHost()
         registry = ToolRegistry(MemoryAuditSink())

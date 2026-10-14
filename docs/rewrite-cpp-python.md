@@ -3,7 +3,7 @@
 > **Current scope:** the standalone C++ SSH service and Python caller are in
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
-> read-only bridge to the desktop host, and tool lifecycle events consumed by the
+> desktop-host bridge for read-only tools and one plan-bound task action, plus tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
 > hosts native UI IPC, local trust-store updates, approvals, and PTY/SFTP
@@ -31,7 +31,11 @@
 > approval ticket; other interrupted actions stay outcome-unknown and are never
 > automatically replayed. The Python sidecar supports approval events and
 > response RPCs for registered tools that require approval, including reject
-> and expiry handling; the current desktop catalog still exposes read-only tools.
+> and expiry handling. Its desktop catalog includes read-only tools plus a
+> plan-bound `server.exec` action only for a remote goal run with an active action
+> step that allows it. That action always requires exact per-call approval; Rust
+> recomputes the input fingerprint and consumes a one-time ticket before its
+> current SSH executor runs the command.
 
 ## Repository baseline and migration boundary
 
@@ -52,8 +56,11 @@ Python sidecar also registers `ssh.service_status`; it binds the call to the
 selected `host_target.serverId`, so the model cannot choose a different target.
 The desktop host also routes its existing `docker.restart`, `systemd.restart`,
 and `package.install` actions through structured C++ SSH operations after the
-host approval and one-time call checks. These effectful actions are not
-registered in the Python Agent tool catalog.
+host approval and one-time call checks. Those structured actions are not yet
+registered in the Python Agent tool catalog; the separately guarded
+`server.exec` task action is exposed only when the host supplies the current
+remote action-plan binding. This remains a Rust execution path and is not a
+replacement for the structured C++ operations.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
@@ -66,7 +73,7 @@ fallback.
 
 ```text
 Python Agent Runtime
-    ├── Tool Registry → schema → per-run read allowlist → audit
+    ├── Tool Registry → schema → per-run tool/plan allowlist → audit
     ├── LangGraph bounded tool workflow
     ├── host.* JSON-RPC bridge → Tauri/Rust host → existing SSH and MCP
     └── yukinal_ssh caller (optional service-status tool)
@@ -86,8 +93,10 @@ The bridge uses the existing sidecar request path: Python sends
 desktop host replies over that same pipe. Python does not open SSH sessions or
 start MCP processes through this bridge. The host continues to resolve the
 server, enforce its current authorization and approval checks, and execute the
-operation. MCP entries are exposed to the model only when the host catalog
-classifies them as low-risk.
+operation. For `server.exec`, Python carries the host-issued approval ID and
+current plan/evidence binding; Rust derives the command-input fingerprint from
+the approval event itself and checks it again before opening SSH. MCP entries
+are exposed to the model only when the host catalog classifies them as low-risk.
 
 The direct C++ caller is enabled only when `YUKINAL_SSH_API_TOKEN` is explicitly
 forwarded to the Python Agent sidecar. The C++ configuration's `target_id` must
@@ -355,9 +364,10 @@ Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. After configuring CMake to use that interpreter, the C++ build
 completed and all six CTest targets passed on the current source revision. Full
-Python unittest discovery ran 45 tests: 42 passed and 3 service integration
-cases were skipped because the service binary path was not configured for that
-standalone run. The Agent suite covers live stdio and Streamable HTTP MCP
+Python Agent-focused discovery ran 48 tests: all passed. An earlier full Python
+unittest discovery ran 45 tests: 42 passed and 3 service integration cases were
+skipped because the service binary path was not configured for that standalone
+run. The Agent suite covers live stdio and Streamable HTTP MCP
 connections, credential-reference handling, schema/target rejection,
 parameter-bound approvals, approval RPC resume/reject, audit redaction,
 tool/task/output limits, LangGraph execution, bidirectional host RPC framing,
@@ -370,7 +380,8 @@ Python-to-C++ HTTP tests also passed in CTest.
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- arbitrary shell commands outside the existing host's separately guarded task flow;
+- moving the separately guarded `server.exec` task flow from Rust SSH execution to a
+  safe C++ capability; arbitrary shell execution remains outside the C++ service API;
 - SFTP transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
