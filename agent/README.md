@@ -90,6 +90,18 @@ host marks low-risk. The host remains the final authorization boundary.
 Multimodal prompts, approval RPCs, durable task state, broader tool coverage
 and the desktop launcher switch are still being migrated.
 
+For the desktop development launcher, create the environment from the repository
+root and install the runtime dependencies:
+
+```powershell
+python -m venv agent/.venv
+agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
+pnpm desktop:dev:python
+```
+
+On macOS or Linux, use `agent/.venv/bin/python` for the install command. Set
+`YUKINAL_PYTHON` to another interpreter path when needed.
+
 ## Register and run tools
 
 The standalone `ModelDrivenAgent` API receives the identity and allowlists from

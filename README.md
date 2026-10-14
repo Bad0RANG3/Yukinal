@@ -43,6 +43,11 @@ implementation remains in the repository as the current desktop backend while
 the replacement is built in small, reviewable stages; this milestone does not
 claim full product parity.
 
+To run the existing desktop UI with the Python Agent sidecar during development,
+create `agent/.venv`, install `agent[agent,models]`, then run
+`pnpm desktop:dev:python`. This selects Python for the sidecar while the existing
+Tauri host continues to own the process and execute host-mediated tools.
+
 The new milestone boundary, API contract, build instructions, and remaining
 work are documented in [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md).
 
