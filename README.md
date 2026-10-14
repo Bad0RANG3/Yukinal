@@ -6,7 +6,7 @@ starting with a narrow C++ SSH service and a Python caller.
 
 ## Rewrite status
 
-The current rewrite implements **milestone 1 only** from
+The current rewrite implements **milestones 1 and 2** from
 [`ssh_agent_development_brief.md`](./ssh_agent_development_brief.md):
 
 - a standalone C++ service bound to `127.0.0.1`;
@@ -14,7 +14,17 @@ The current rewrite implements **milestone 1 only** from
 - one read-only structured SSH operation, `service_status`;
 - target allowlisting, strict SSH host-key verification, bounded timeouts and
   output, and credentials referenced from environment variables or private-key
-  files.
+  files;
+- a Python Tool Registry with JSON Schema validation, per-call tool/target
+  authorization, parameter-bound approval grants, and redacted audit events;
+- Streamable HTTP and stdio MCP clients, with remotely discovered tools
+  defaulting to approval-required;
+- a bounded LangGraph workflow with tool-call, total-time, and output-size
+  limits.
+
+Model providers, approval UI, durable task state, and desktop UI wiring remain
+later milestones. The new runtime is invoked by Python for now; the existing
+React/Tauri application has not yet been connected to it.
 
 The C++ service is not yet connected to the desktop UI. The existing React
 components and their Tauri bridge are preserved. The existing Rust/Tauri
@@ -46,14 +56,14 @@ environment variable; it never stores a password value.
 The Python client can be installed for development with:
 
 ```powershell
-python -m pip install -e agent
+python -m pip install -e "agent[agent]"
 ```
 
 To include the Paramiko SSH mock in CTest, install the optional test extra
 before configuring CMake:
 
 ```powershell
-python -m pip install -e "agent[test]"
+python -m pip install -e "agent[agent,test]"
 ```
 
 CMake registers `ssh_mock_integration` when Paramiko is available. This test
@@ -69,6 +79,10 @@ client = SshServiceClient(token="same-token-as-YUKINAL_SSH_API_TOKEN")
 result = client.service_status("staging-web-01", "nginx.service")
 print(result.stdout.strip(), result.exit_code)
 ```
+
+The Agent Runtime setup, MCP configuration and direct workflow example are in
+[`agent/README.md`](./agent/README.md). The combined extras above let CTest
+include its MCP/LangGraph tests and the Paramiko SSH mock.
 
 For real SSH protocol checks against the isolated OpenSSH container, configure
 with `-DYUKINAL_ENABLE_SSH_CONTAINER_TEST=ON` or run

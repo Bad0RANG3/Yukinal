@@ -9,6 +9,7 @@ option(YUKINAL_BUILD_TESTS "Build the SSH service tests" ON)
 option(YUKINAL_FETCH_DEPS "Fetch pinned third-party source dependencies" ON)
 option(YUKINAL_ENABLE_SSH_MOCK_TEST "Register the Paramiko SSH mock test when Paramiko is installed" ON)
 option(YUKINAL_ENABLE_SSH_CONTAINER_TEST "Register the real OpenSSH container integration test" OFF)
+option(YUKINAL_ENABLE_AGENT_TESTS "Register Python Agent Runtime tests when dependencies are installed" ON)
 
 if(YUKINAL_FETCH_DEPS)
   include(FetchContent)
@@ -117,6 +118,27 @@ if(YUKINAL_BUILD_TESTS)
     ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
     TIMEOUT 30
   )
+
+  if(YUKINAL_ENABLE_AGENT_TESTS)
+    execute_process(
+      COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp"
+      RESULT_VARIABLE YUKINAL_AGENT_IMPORT_RESULT
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    if(YUKINAL_AGENT_IMPORT_RESULT EQUAL 0)
+      add_test(
+        NAME python_agent_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_agent_*.py -v
+      )
+      set_tests_properties(python_agent_tests PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
+        TIMEOUT 90
+      )
+    else()
+      message(STATUS "Agent dependencies are not installed; python_agent_tests is not registered (install agent[agent])")
+    endif()
+  endif()
 
   if(YUKINAL_ENABLE_SSH_MOCK_TEST)
     execute_process(

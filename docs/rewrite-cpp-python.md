@@ -1,8 +1,9 @@
-# C++ / Python rewrite: milestone 1
+# C++ / Python rewrite: milestones 1 and 2
 
-> **Current scope:** only the SSH foundation milestone in
-> [`ssh_agent_development_brief.md`](../ssh_agent_development_brief.md) is being
-> implemented. This is not a rewrite of every product feature and is not a
+> **Current scope:** the SSH foundation and bounded Agent Runtime milestones in
+> [`ssh_agent_development_brief.md`](../ssh_agent_development_brief.md) are being
+> implemented. Model providers, durable task control, and desktop integration
+> are not complete. This is not a rewrite of every product feature and is not a
 > claim that the desktop app has switched from Tauri.
 
 ## Repository baseline and migration boundary
@@ -15,22 +16,55 @@ replaced with the narrower implementation below. The React components and their
 Tauri calls are preserved. The Rust/Tauri code remains available as a legacy
 behavior reference until replacement milestones are built and checked.
 
-The new service is intentionally separate from the desktop UI in this first
-milestone. The UI switch and broader operation coverage are later work.
+The new service and Python runtime remain separate from the desktop UI. The UI
+switch, model providers, durable task state, and broader operations are later
+work.
 
 ## Processes and trust boundaries
 
 ```text
-Python caller
-    │ HTTP/JSON + local bearer token
-    ▼
-C++ SSH service (binds only 127.0.0.1)
-    │ target_id lookup → policy validation → known_hosts check
-    ▼
-libssh2 ── SSH ──► configured server
+Python Agent Runtime
+    ├── Tool Registry → schema → allowlist/approval → audit
+    ├── LangGraph bounded tool workflow
+    ├── MCP Client Manager (stdio / Streamable HTTP)
+    └── yukinal_ssh caller
+              │ HTTP/JSON + local bearer token
+              ▼
+        C++ SSH service (binds only 127.0.0.1)
+              │ target_id lookup → operation policy → known_hosts check
+              ▼
+        libssh2 ── SSH ──► configured server
 
 React/Tauri desktop UI: unchanged; not yet connected to the new service
 ```
+
+## Python Agent Runtime
+
+The `yukinal_agent` package is an independent runtime layer alongside the
+stdlib-only `yukinal_ssh` client. The registry rejects duplicate names, checks
+each JSON Schema before invoking a handler, and re-evaluates the caller's
+allowed tools and target IDs on every invocation. Write/destructive tools
+require an approval grant fingerprinted against the exact tool, target and
+parameters. The embedding host must provide authenticated identity and
+allowlists; model output cannot provide or widen them.
+
+Audit has an interface, an in-memory test sink and an append-only JSONL sink.
+It stores the operator/task/target/tool, argument names and types, timing,
+result shape, approval status and stable error code, but omits raw argument and
+result values. Audit write failure blocks tool execution.
+
+`MCPClientManager` supports stdio and Streamable HTTP. HTTP credentials and
+stdio environment values resolve from explicitly named environment references;
+remote cleartext HTTP is limited to loopback. Discovered names are namespaced
+and registered atomically. MCP descriptions, annotations and results are
+external data. Discovered tools require approval unless an administrator's
+local `read_only_tools` allowlist classifies the exact tool as read-only.
+
+`AgentWorkflow` is a minimal LangGraph graph that accepts explicit tool calls,
+executes them sequentially, stops on the first error, and applies per-tool,
+total-time, tool-count and output-byte limits. It compiles with an in-memory
+checkpoint saver. Model planning, durable checkpoint storage and UI approval
+round-trips remain for later milestones.
 
 The service currently targets Linux hosts with systemd. The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or command. The service resolves a `target_id` to a
@@ -110,10 +144,12 @@ Never commit credentials or a real production target configuration.
 
 ## Python caller
 
-The package in [`agent/`](../agent/) uses only the Python standard library and
-supports Python 3.11+. It validates inputs before sending them and validates the
-response before returning a `ServiceStatusResult`. Structured remote errors are
-raised as `SshServiceError` with a stable `code` and `http_status`.
+The `yukinal_ssh` package in [`agent/`](../agent/) uses only the Python standard
+library and supports Python 3.11+. It validates inputs before sending them and
+validates the response before returning a `ServiceStatusResult`. Structured
+remote errors are raised as `SshServiceError` with a stable `code` and
+`http_status`. Install Agent dependencies with `python -m pip install -e
+"agent[agent]"` to use LangGraph and MCP.
 
 ## Build and verification
 
@@ -125,11 +161,11 @@ ctest --test-dir native/build -C Release --output-on-failure
 
 The CTest suite covers config/schema validation, operation policy, Python client
 behavior, and a live Python-to-C++ HTTP path including health, allowlist
-rejection, origin rejection, and SSH connection failure classification. When the
-optional `agent[test]` extra is installed before CMake configuration, CTest also
-runs a Paramiko SSH mock for success, bad credentials, command timeout, output
-limit, and unknown/changed host keys. The separate OpenSSH container test checks
-the same SSH cases against OpenSSH.
+rejection, origin rejection, and SSH connection failure classification. Install
+`agent[agent,test]` before CMake configuration to register Agent Runtime/MCP
+tests and the Paramiko SSH mock for success, bad credentials, command timeout,
+output limit, and unknown/changed host keys. The separate OpenSSH container test
+checks the same SSH cases against OpenSSH.
 
 Local verification on 2026-10-15: Windows 11, Visual Studio 2022 17.14.39,
 CMake 4.4.4, and Python 3.14.8 successfully configured and built the C++ service
@@ -151,14 +187,24 @@ output-cap, and host-key rejection cases. The separate OpenSSH test container
 was not run because Docker is unavailable, so compatibility with an OpenSSH
 server remains unverified.
 
+Phase 2 verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
+MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
+environment. After configuring CMake to use that interpreter, the C++ build
+completed and all five CTest targets passed. The Agent target passed 12 tests,
+including live stdio and Streamable HTTP MCP connections, credential-reference
+handling, schema/target rejection, parameter-bound approvals, audit redaction,
+tool/task/output limits, and LangGraph execution. The existing Paramiko SSH
+mock and Python-to-C++ HTTP tests also passed again.
+
 ## Deliberately deferred
 
 - connecting the React UI to the new service or replacing its Tauri bridge;
-- arbitrary shell commands, write operations, approval workflows, and audits;
-- Python Agent orchestration, LangChain/LangGraph, model providers, and MCP;
+- arbitrary shell commands and write operations;
+- model providers, user-facing approval flows, durable task state, and control plane;
 - SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
-The next milestone should first verify a real read-only SSH success against the
-test server and then continue the staged scope in the development brief. Do not
-mark later product requirements as delivered by the scaffold or documentation.
+The next milestone is provider integration and the complete host-enforced
+permission/approval path. A real SSH success against the OpenSSH test server and
+desktop wiring remain unverified. Do not mark later product requirements as
+delivered by the scaffold or documentation.
