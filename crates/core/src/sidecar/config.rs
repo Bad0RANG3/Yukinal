@@ -233,6 +233,17 @@ impl SidecarConfig {
         self
     }
 
+    /// Let the desktop Python Agent resolve each selected server through Host RPC and
+    /// start a one-target C++ service for that operation.
+    #[must_use]
+    pub fn with_python_ssh_service_autoconfig(mut self, binary: &Path) -> Self {
+        if self.is_python_agent {
+            self = self.with_env("YUKINAL_SSH_SERVICE_BINARY", &binary.display().to_string());
+            self = self.with_env("YUKINAL_SSH_SERVICE_AUTOCONFIG", "1");
+        }
+        self
+    }
+
     /// True when `program` is a bare command name for the OS to resolve through `PATH`,
     /// rather than a path some caller chose.
     ///

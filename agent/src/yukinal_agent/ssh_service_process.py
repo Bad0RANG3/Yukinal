@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import secrets
+import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -28,15 +32,17 @@ class SshServiceProcess:
         self._token_env = ""
         self._token_value = ""
         self._secret_env: set[str] = set()
+        self._secret_values: dict[str, str] | None = None
+        self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._port = 0
 
     @classmethod
     def from_environment(cls) -> SshServiceProcess | None:
         binary_value = os.environ.get("YUKINAL_SSH_SERVICE_BINARY", "").strip()
         config_value = os.environ.get("YUKINAL_SSH_SERVICE_CONFIG", "").strip()
-        if not binary_value and not config_value:
+        if not config_value:
             return None
-        if not binary_value or not config_value:
+        if not binary_value:
             raise SshServiceProcessError(
                 "set both YUKINAL_SSH_SERVICE_BINARY and YUKINAL_SSH_SERVICE_CONFIG to manage the C++ SSH service"
             )
@@ -119,6 +125,106 @@ class SshServiceProcess:
         instance._port = port
         return instance
 
+    @classmethod
+    def for_desktop_target(
+        cls, binary: Path, payload: object
+    ) -> tuple[SshServiceProcess, str, str]:
+        """Create an ephemeral one-target config from a trusted desktop Host RPC result."""
+        if not binary.is_file():
+            raise SshServiceProcessError("the packaged C++ SSH service executable is missing")
+        if not isinstance(payload, dict):
+            raise SshServiceProcessError("the desktop host returned an invalid SSH target")
+        target = payload.get("target")
+        credentials = payload.get("credentials")
+        if not isinstance(target, dict) or not isinstance(credentials, dict):
+            raise SshServiceProcessError("the desktop host returned an invalid SSH target")
+        if set(target) != {
+            "target_id", "host", "port", "username", "host_key_fingerprint", "auth",
+        }:
+            raise SshServiceProcessError("the desktop host returned an invalid SSH target")
+        target_id = target.get("target_id")
+        host = target.get("host")
+        username = target.get("username")
+        port = target.get("port")
+        fingerprint = target.get("host_key_fingerprint")
+        auth = target.get("auth")
+        if (
+            not isinstance(target_id, str)
+            or not re.fullmatch(r"srv_[a-z0-9]+", target_id)
+            or not isinstance(host, str)
+            or not host
+            or len(host) > 253
+            or any(ord(character) <= 0x20 or ord(character) == 0x7f for character in host)
+            or isinstance(port, bool)
+            or not isinstance(port, int)
+            or not 1 <= port <= 65535
+            or not isinstance(username, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", username)
+            or not isinstance(fingerprint, str)
+            or not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint)
+            or not isinstance(auth, dict)
+        ):
+            raise SshServiceProcessError("the desktop host returned an invalid SSH target")
+
+        if (
+            auth.get("type") == "password"
+            and set(auth) == {"type", "password_env"}
+            and isinstance(auth.get("password_env"), str)
+        ):
+            credential_names = {auth["password_env"]}
+        elif auth.get("type") == "private_key" and set(auth) in (
+            {"type", "private_key_env"},
+            {"type", "private_key_env", "passphrase_env"},
+        ) and isinstance(auth.get("private_key_env"), str) and (
+            "passphrase_env" not in auth or isinstance(auth.get("passphrase_env"), str)
+        ):
+            credential_names = {auth["private_key_env"]}
+            if "passphrase_env" in auth:
+                credential_names.add(auth["passphrase_env"])
+        else:
+            raise SshServiceProcessError("the desktop host returned an unsupported SSH identity")
+        if (
+            not all(_valid_credential_env_name(name) for name in credential_names)
+            or set(credentials) != credential_names
+            or not all(
+                isinstance(value, str)
+                and bool(value)
+                and "\x00" not in value
+                and len(value.encode("utf-8")) <= 1024 * 1024
+                for value in credentials.values()
+            )
+        ):
+            raise SshServiceProcessError("the desktop host returned invalid SSH credentials")
+
+        listen_port = _unused_loopback_port()
+        token = secrets.token_urlsafe(32)
+        document = {
+            "listen_port": listen_port,
+            "api_token_env": "YUKINAL_SSH_API_TOKEN",
+            "targets": [target],
+        }
+        temporary_directory = tempfile.TemporaryDirectory(prefix="yukinal-ssh-service-")
+        config = Path(temporary_directory.name) / "service.json"
+        try:
+            config.write_text(
+                json.dumps(document, separators=(",", ":"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                config.chmod(0o600)
+        except OSError:
+            temporary_directory.cleanup()
+            raise SshServiceProcessError("the temporary SSH service configuration could not be created") from None
+
+        instance = cls(binary, config)
+        instance._token_env = "YUKINAL_SSH_API_TOKEN"
+        instance._token_value = token
+        instance._secret_env = set(credential_names)
+        instance._secret_values = dict(credentials)
+        instance._port = listen_port
+        instance._temporary_directory = temporary_directory
+        return instance, token, f"http://127.0.0.1:{listen_port}"
+
     async def start(self) -> None:
         if self._process is not None:
             if self._process.returncode is None:
@@ -138,7 +244,11 @@ class SshServiceProcess:
         }
         env[self._token_env] = self._token_value
         for name in self._secret_env:
-            value = os.environ.get(name)
+            value = (
+                self._secret_values.get(name)
+                if self._secret_values is not None
+                else os.environ.get(name)
+            )
             if not value:
                 raise SshServiceProcessError(f"the SSH service credential environment variable {name} is not set")
             env[name] = value
@@ -183,22 +293,31 @@ class SshServiceProcess:
 
     async def stop(self) -> None:
         process, self._process = self._process, None
-        if process is None:
-            return
-        if process.returncode is not None:
-            await process.wait()
-            return
         try:
-            process.terminate()
-            await asyncio.wait_for(process.wait(), timeout=3.0)
-        except TimeoutError:
+            if process is None:
+                return
+            if process.returncode is not None:
+                await process.wait()
+                return
             try:
-                process.kill()
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=3.0)
+            except TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
             except ProcessLookupError:
-                pass
-            await process.wait()
-        except ProcessLookupError:
-            await process.wait()
+                await process.wait()
+        finally:
+            if self._secret_values is not None:
+                self._secret_values.clear()
+                self._secret_values = None
+            self._token_value = ""
+            if self._temporary_directory is not None:
+                self._temporary_directory.cleanup()
+                self._temporary_directory = None
 
 
 def _valid_env_name(value: object) -> bool:
@@ -243,3 +362,9 @@ async def _health_check(port: int) -> bool:
                 await writer.wait_closed()
             except OSError:
                 pass
+
+
+def _unused_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        return int(server.getsockname()[1])

@@ -22,7 +22,7 @@ from .host_rpc import HostRpcClient
 from .host_tools import register_host_tools, register_mcp_catalog
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
-from .ssh_tools import register_ssh_tools
+from .ssh_tools import register_desktop_ssh_tools, register_ssh_tools
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .tools import ToolRegistry
 
@@ -75,6 +75,7 @@ class PythonSidecar:
         notification_sink: Callable[[str, dict[str, Any]], None] | None = None,
         approval_ttl_seconds: int = 120,
         checkpointer: Any | None = None,
+        managed_ssh_service_binary: Path | None = None,
     ) -> None:
         if isinstance(approval_ttl_seconds, bool) or not isinstance(approval_ttl_seconds, int) or not 1 <= approval_ttl_seconds <= 3600:
             raise ValueError("approval_ttl_seconds must be between 1 and 3600")
@@ -92,6 +93,8 @@ class PythonSidecar:
         self._host_tools_registered = False
         self._mcp_loaded = False
         self._pending_approvals: dict[str, _PendingApproval] = {}
+        self._managed_ssh_service_binary = managed_ssh_service_binary
+        self._managed_ssh_tools_registered = False
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -101,6 +104,15 @@ class PythonSidecar:
         if host is not None and not self._host_tools_registered:
             register_host_tools(self._registry, host)
             self._host_tools_registered = True
+        if (
+            host is not None
+            and self._managed_ssh_service_binary is not None
+            and not self._managed_ssh_tools_registered
+        ):
+            register_desktop_ssh_tools(
+                self._registry, host, self._managed_ssh_service_binary
+            )
+            self._managed_ssh_tools_registered = True
 
     def set_checkpointer(self, checkpointer: Any | None) -> None:
         if self._active_runs:
@@ -1095,7 +1107,14 @@ def main() -> None:
             register_ssh_tools(registry, SshServiceClient(token, base_url=service_url))
         except ValueError:
             print("SSH service client configuration is invalid", file=sys.stderr, flush=True)
-    sidecar = PythonSidecar(registry)
+    managed_ssh_service_binary = None
+    if os.environ.get("YUKINAL_SSH_SERVICE_AUTOCONFIG") == "1":
+        binary_value = os.environ.get("YUKINAL_SSH_SERVICE_BINARY", "").strip()
+        if binary_value and Path(binary_value).is_file():
+            managed_ssh_service_binary = Path(binary_value).expanduser()
+        else:
+            print("C++ SSH service is unavailable; desktop SSH tools are disabled", file=sys.stderr, flush=True)
+    sidecar = PythonSidecar(registry, managed_ssh_service_binary=managed_ssh_service_binary)
     try:
         asyncio.run(_serve_runtime(sidecar, data_dir, len(registry.list())))
     except SshServiceProcessError as error:

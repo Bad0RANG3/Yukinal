@@ -6,6 +6,7 @@
 use super::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use yukinal_credentials::{CredentialRef, CredentialStore};
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -115,8 +116,14 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
         } else {
             let ssh_token = std::env::var("YUKINAL_SSH_API_TOKEN").ok();
             let ssh_api_url = std::env::var("YUKINAL_SSH_API_URL").ok();
-            config =
-                config.with_python_ssh_service_env(ssh_token.as_deref(), ssh_api_url.as_deref());
+            if ssh_token.as_deref().is_some_and(|token| !token.is_empty()) {
+                config = config
+                    .with_python_ssh_service_env(ssh_token.as_deref(), ssh_api_url.as_deref());
+            } else if let Some(binary) = resolve_ssh_service_binary(&cwd, resources.as_deref())? {
+                config = config.with_python_ssh_service_autoconfig(&binary);
+            } else {
+                eprintln!("[yukinal] C++ SSH service is unavailable; desktop SSH Agent tools are disabled");
+            }
         }
     }
     // 「为什么起不来」的一半答案是「到底起了什么」。一条启动行比事后猜文件名便宜得多：
@@ -220,23 +227,9 @@ fn resolve_ssh_service_runtime(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let explicit_binary = std::env::var_os("YUKINAL_SSH_SERVICE_BINARY")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if explicit_binary.as_ref().is_some_and(|path| !path.is_file()) {
-        return Err(
-            "YUKINAL_SSH_SERVICE_BINARY does not point to a C++ SSH service executable".into(),
-        );
-    }
-    let packaged_binary = resources.map(yukinal_core::sidecar::packaged_ssh_service_entry);
-    let binary = explicit_binary
-        .or_else(|| packaged_binary.filter(|path| path.is_file()))
-        .or_else(|| find_dev_ssh_service(cwd))
-        .ok_or_else(|| {
+    let binary = resolve_ssh_service_binary(cwd, resources)?.ok_or_else(|| {
             "the C++ SSH service executable is unavailable; build it with `pnpm build:ssh-service` or set YUKINAL_SSH_SERVICE_BINARY".to_string()
         })?;
-    let binary = std::fs::canonicalize(binary)
-        .map_err(|_| "the C++ SSH service executable could not be resolved".to_string())?;
     let base_url =
         std::env::var("YUKINAL_SSH_API_URL").unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));
 
@@ -247,6 +240,30 @@ fn resolve_ssh_service_runtime(
         base_url,
         referenced_environment,
     })
+}
+
+fn resolve_ssh_service_binary(
+    cwd: &Path,
+    resources: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    let explicit = std::env::var_os("YUKINAL_SSH_SERVICE_BINARY")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if explicit.as_ref().is_some_and(|path| !path.is_file()) {
+        return Err(
+            "YUKINAL_SSH_SERVICE_BINARY does not point to a C++ SSH service executable".into(),
+        );
+    }
+    let packaged = resources.map(yukinal_core::sidecar::packaged_ssh_service_entry);
+    let Some(binary) = explicit
+        .or_else(|| packaged.filter(|path| path.is_file()))
+        .or_else(|| find_dev_ssh_service(cwd))
+    else {
+        return Ok(None);
+    };
+    std::fs::canonicalize(binary)
+        .map(Some)
+        .map_err(|_| "the C++ SSH service executable could not be resolved".to_string())
 }
 
 fn find_dev_ssh_service(cwd: &Path) -> Option<PathBuf> {
@@ -300,6 +317,139 @@ fn valid_ssh_credential_environment_name(name: &str) -> bool {
         ]
         .iter()
         .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshServiceTargetRequest {
+    server_id: String,
+}
+
+/// Resolve one selected desktop target for a short-lived C++ SSH service process.
+/// Secrets leave the OS credential store only for this local sidecar request and
+/// are returned separately from the non-secret target allowlist.
+pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Result<Value, String> {
+    let request: SshServiceTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH service target request is invalid".to_string())?;
+    if request.server_id.len() <= 4
+        || request.server_id.len() > 160
+        || !request.server_id.starts_with("srv_")
+        || !request.server_id[4..]
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+    {
+        return Err("the SSH service target ID is invalid".into());
+    }
+
+    let server = state
+        .database
+        .servers()
+        .get(&request.server_id)
+        .map_err(|_| "the selected SSH server is not available".to_string())?;
+    if server.connection.host_certificate_authority.is_some() {
+        return Err("C++ SSH service does not yet support host certificate authorities".into());
+    }
+    let fingerprint = state
+        .ssh
+        .host_key_pin(&server.connection.host, server.connection.port)
+        .map_err(|_| "the selected server host-key pin could not be read".to_string())?
+        .ok_or_else(|| "the selected server has no confirmed host-key pin".to_string())?;
+
+    let identity_id = server
+        .connection
+        .identity_id
+        .as_deref()
+        .ok_or_else(|| "the selected server has no SSH identity".to_string())?;
+    let identity = state
+        .database
+        .identities()
+        .get(identity_id)
+        .map_err(|_| "the selected server SSH identity is unavailable".to_string())?;
+
+    let mut credentials = serde_json::Map::new();
+    let auth = match identity.method.as_str() {
+        "password" => {
+            credentials.insert(
+                "YK_SSH_PASSWORD".into(),
+                serde_json::Value::String(read_ssh_secret(
+                    state.credentials.as_ref(),
+                    &identity.credential_ref,
+                    "password",
+                )?),
+            );
+            json!({ "type": "password", "password_env": "YK_SSH_PASSWORD" })
+        }
+        "privateKey" => {
+            credentials.insert(
+                "YK_SSH_PRIVATE_KEY".into(),
+                serde_json::Value::String(read_ssh_secret(
+                    state.credentials.as_ref(),
+                    &identity.credential_ref,
+                    "private key",
+                )?),
+            );
+            let passphrase_env = if let Some(reference) = identity.passphrase_ref.as_deref() {
+                credentials.insert(
+                    "YK_SSH_PASSPHRASE".into(),
+                    serde_json::Value::String(read_ssh_secret(
+                        state.credentials.as_ref(),
+                        reference,
+                        "private-key passphrase",
+                    )?),
+                );
+                Some("YK_SSH_PASSPHRASE")
+            } else {
+                None
+            };
+            let mut auth = json!({
+                "type": "private_key",
+                "private_key_env": "YK_SSH_PRIVATE_KEY",
+            });
+            if let Some(passphrase_env) = passphrase_env {
+                auth["passphrase_env"] = json!(passphrase_env);
+            }
+            auth
+        }
+        _ => {
+            return Err(
+                "the selected SSH identity method is not supported by the C++ service".into(),
+            )
+        }
+    };
+
+    Ok(json!({
+        "target": {
+            "target_id": server.id,
+            "host": server.connection.host,
+            "port": server.connection.port,
+            "username": server.connection.username,
+            "host_key_fingerprint": fingerprint,
+            "auth": auth,
+        },
+        "credentials": credentials,
+    }))
+}
+
+fn read_ssh_secret(
+    credentials: &dyn CredentialStore,
+    reference: &str,
+    label: &str,
+) -> Result<String, String> {
+    let reference = CredentialRef::parse(reference)
+        .map_err(|_| format!("the selected server {label} reference is invalid"))?;
+    let secret = credentials.get(&reference).map_err(|_| {
+        format!("the selected server {label} is unavailable in the OS credential store")
+    })?;
+    let value = secret
+        .as_utf8()
+        .map_err(|_| format!("the selected server {label} is not valid UTF-8"))?
+        .into_owned();
+    if value.is_empty() || value.len() > 1024 * 1024 {
+        return Err(format!(
+            "the selected server {label} is empty or exceeds the size limit"
+        ));
+    }
+    Ok(value)
 }
 
 /// One task per launched sidecar: keeps stderr visible and maps sidecar notifications

@@ -152,8 +152,11 @@ def expect_error(client: SshServiceClient, target_id: str, service: str,
         raise AssertionError(f"{service}: expected {expected_code}")
 
 
-def exercise_agent_runtime(client: SshServiceClient) -> None:
+def exercise_agent_runtime(
+    client: SshServiceClient, service_binary: Path, desktop_target: dict[str, object]
+) -> None:
     from yukinal_agent import AgentWorkflow, MemoryAuditSink, ToolRegistry, register_ssh_tools
+    from yukinal_agent.ssh_tools import register_desktop_ssh_tools
 
     registry = ToolRegistry(MemoryAuditSink())
     register_ssh_tools(registry, client)
@@ -207,6 +210,33 @@ def exercise_agent_runtime(client: SshServiceClient) -> None:
         )
         if forged.error_code != "invalid_arguments":
             raise AssertionError(f"Agent accepted a model-supplied target override: {forged!r}")
+
+        class DesktopHost:
+            async def request(self, method: str, params: dict[str, object], *, timeout_seconds: float) -> object:
+                if method != "host.ssh.service_target" or params != {"serverId": "srv_stage1"}:
+                    raise AssertionError(f"unexpected desktop SSH target request: {method} {params!r}")
+                return desktop_target
+
+        desktop_registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(desktop_registry, DesktopHost(), service_binary)
+        desktop_workflow = AgentWorkflow(desktop_registry)
+        desktop_result = await desktop_workflow.run(
+            task_id="desktop-managed-ssh-target",
+            tenant_id="integration-tenant",
+            user_id="integration-operator",
+            allowed_tools={"ssh.service_status"},
+            allowed_target_ids={"srv_stage1"},
+            tool_calls=[{
+                "name": "ssh.service_status",
+                "arguments": {"service": "nginx.service"},
+            }],
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+        if desktop_result.status != "succeeded" or not desktop_result.results:
+            raise AssertionError(f"desktop-managed C++ SSH path failed: {desktop_result!r}")
+        desktop_output = desktop_result.results[0].get("result", {})
+        if desktop_output.get("target_id") != "srv_stage1" or desktop_output.get("stdout") != "active\n":
+            raise AssertionError(f"desktop-managed C++ SSH path used the wrong target: {desktop_output!r}")
 
     asyncio.run(run())
 
@@ -309,8 +339,20 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             else:
                 raise RuntimeError("C++ service did not become healthy")
 
+            desktop_target = {
+                "target": {
+                    "target_id": "srv_stage1",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_key_fingerprint": pinned_fingerprint,
+                    "auth": {"type": "private_key", "private_key_env": "YK_SSH_PRIVATE_KEY"},
+                },
+                "credentials": {"YK_SSH_PRIVATE_KEY": private_key_pem},
+            }
+
             if agent_runtime_only:
-                exercise_agent_runtime(client)
+                exercise_agent_runtime(client, service_binary, desktop_target)
                 return
 
             result = client.service_status("srv_stage1", "nginx.service", timeout_seconds=5)
