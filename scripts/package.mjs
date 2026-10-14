@@ -42,6 +42,11 @@ const steps = [
     args: ["scripts/build-python-agent.mjs"],
   },
   {
+    name: "C++ SSH service build and resource staging",
+    command: process.execPath,
+    args: ["scripts/build-ssh-service.mjs"],
+  },
+  {
     name: "installed-layout smoke with bundled Node.js fallback",
     command: process.execPath,
     args: ["scripts/smoke-packaged-agent.mjs"],
@@ -119,5 +124,5 @@ if (!bundleDir) {
 }
 
 console.log("\nThese installers are UNSIGNED: no certificate or signing identity is configured.");
-console.log("The packaged app starts the frozen Python Agent; its Node.js runtime is retained as a transition fallback.");
+console.log("The packaged app starts the frozen Python Agent and includes the C++ SSH service; Node.js remains a transition fallback.");
 console.log("See the repository docs/release.md, 「交付与发布」.");

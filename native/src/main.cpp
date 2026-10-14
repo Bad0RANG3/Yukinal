@@ -1,6 +1,9 @@
 #include <cstdlib>
+#include <charconv>
+#include <cstdint>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <string>
 
 #include "yukinal/config.hpp"
@@ -9,7 +12,7 @@
 namespace {
 
 void print_usage() {
-  std::cerr << "Usage: yukinal-ssh-service --config <path>\n";
+  std::cerr << "Usage: yukinal-ssh-service --config <path> [--parent-pid <pid>]\n";
 }
 
 bool valid_token(const std::string& token) {
@@ -27,10 +30,20 @@ bool valid_token(const std::string& token) {
 
 int main(int argc, char** argv) {
   std::string config_path;
+  std::optional<std::uint64_t> parent_pid;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
     if (argument == "--config" && i + 1 < argc) {
       config_path = argv[++i];
+    } else if (argument == "--parent-pid" && i + 1 < argc) {
+      const std::string value = argv[++i];
+      std::uint64_t parsed = 0;
+      const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+      if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || parsed < 2) {
+        print_usage();
+        return 2;
+      }
+      parent_pid = parsed;
     } else if (argument == "--help") {
       print_usage();
       return 0;
@@ -53,7 +66,8 @@ int main(int argc, char** argv) {
     }
     std::cerr << "SSH service listening on 127.0.0.1:" << config.listen_port
               << " with " << config.targets.size() << " configured target(s)\n";
-    if (!yukinal::ssh_service::serve(config, token_value)) {
+    if (!yukinal::ssh_service::serve(config, token_value,
+                                     yukinal::ssh_service::service_status, parent_pid)) {
       std::cerr << "SSH service failed to bind its loopback HTTP socket\n";
       return 1;
     }

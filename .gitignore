@@ -14,6 +14,8 @@ apps/desktop/src-tauri/resources/runtime/node
 apps/desktop/src-tauri/resources/runtime/node.exe
 apps/desktop/src-tauri/resources/runtime/LICENSE
 apps/desktop/src-tauri/resources/runtime/*.new
+apps/desktop/src-tauri/resources/ssh-service/yukinal-ssh-service
+apps/desktop/src-tauri/resources/ssh-service/yukinal-ssh-service.exe
 *.tsbuildinfo
 .vite/
 coverage/

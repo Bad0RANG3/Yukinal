@@ -9,8 +9,11 @@
 > hosts native UI IPC and existing platform services. The Python sidecar can call the C++ `service_status` operation when
 > configured; its
 > target is bound to the selected server ID, which must be present in the C++
-> allowlist. Automatic server-record synchronization and full desktop task/plan
-> lifecycle recovery remain unfinished. On startup, a durable task whose exact
+> allowlist. The C++ executable is included in desktop resources; when an
+> operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
+> loopback health endpoint, and stops it with the Agent process. Automatic
+> server-record synchronization and full desktop task/plan lifecycle recovery
+> remain unfinished. On startup, a durable task whose exact
 > action step was waiting for approval and has no matching host execution-ledger
 > entry can reattach to its LangGraph checkpoint and receive a fresh host
 > approval ticket; other interrupted actions stay outcome-unknown and are never
@@ -71,10 +74,12 @@ Python host tools are read-only; MCP entries are exposed to the model only when
 the host catalog classifies them as low-risk.
 
 The direct C++ caller is enabled only when `YUKINAL_SSH_API_TOKEN` is explicitly
-forwarded to the Python Agent sidecar. The Tauri host does not pass that secret
-to the legacy Node sidecar. The C++ configuration's `target_id` must match the
-selected desktop server ID; automatic synchronization with saved server records
-and service lifecycle management are not implemented yet.
+forwarded to the Python Agent sidecar. The C++ configuration's `target_id` must
+match the selected desktop server ID. When service autostart is configured, the
+Tauri host passes only the config's named token and authentication environment
+references to Python; Python gives those values to the C++ child through an
+allowlisted environment. Automatic synchronization with saved server records
+and OS keychain identities remains unfinished.
 
 ## Python Agent Runtime
 

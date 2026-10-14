@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+  # The desktop installer must run on machines without a separately installed
+  # Visual C++ Redistributable; keep the standalone service self-contained.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+endif()
+
 option(YUKINAL_BUILD_TESTS "Build the SSH service tests" ON)
 option(YUKINAL_FETCH_DEPS "Fetch pinned third-party source dependencies" ON)
 option(YUKINAL_ENABLE_SSH_MOCK_TEST "Register the Paramiko SSH mock test when Paramiko is installed" ON)
@@ -32,6 +38,9 @@ if(YUKINAL_FETCH_DEPS)
     set(CRYPTO_BACKEND WinCNG CACHE STRING "" FORCE)
     set(ENABLE_ECDSA_WINCNG ON CACHE BOOL "" FORCE)
   else()
+    # The service is shipped as a standalone desktop resource. Prefer static OpenSSL
+    # archives so the installed service does not depend on a developer's OpenSSL path.
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
     set(CRYPTO_BACKEND OpenSSL CACHE STRING "" FORCE)
   endif()
   FetchContent_Declare(

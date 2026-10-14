@@ -1,9 +1,21 @@
 #include "yukinal/http_service.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <exception>
+#include <limits>
+#include <thread>
 #include <utility>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <csignal>
+#include <unistd.h>
+#endif
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -12,6 +24,21 @@ namespace yukinal::ssh_service {
 namespace {
 
 using Json = nlohmann::json;
+
+bool parent_is_alive(std::uint64_t pid) {
+#ifdef _WIN32
+  if (pid > static_cast<std::uint64_t>(std::numeric_limits<DWORD>::max())) return false;
+  HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+  if (!process) return false;
+  const DWORD state = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  return state == WAIT_TIMEOUT;
+#else
+  if (pid > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max())) return false;
+  if (kill(static_cast<pid_t>(pid), 0) == 0) return true;
+  return errno == EPERM;
+#endif
+}
 
 bool constant_time_equal(const std::string& left, const std::string& right) {
   const std::size_t count = std::max(left.size(), right.size());
@@ -69,7 +96,8 @@ int error_status(const ExecResult& result) {
 
 }  // namespace
 
-bool serve(const ServiceConfig& config, const std::string& api_token, OperationRunner runner) {
+bool serve(const ServiceConfig& config, const std::string& api_token, OperationRunner runner,
+           std::optional<std::uint64_t> parent_pid) {
   if (!valid_token(api_token) || !runner) return false;
 
   httplib::Server server;
@@ -142,7 +170,26 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     set_json(response, error_status(result), output);
   });
 
-  return server.listen("127.0.0.1", config.listen_port);
+  if (!server.bind_to_port("127.0.0.1", config.listen_port)) return false;
+  if (!parent_pid) return server.listen_after_bind();
+  if (!parent_is_alive(*parent_pid)) return true;
+
+  std::atomic_bool stop_parent_watch = false;
+  std::atomic_bool parent_lost = false;
+  std::thread parent_watch([&server, parent_pid, &stop_parent_watch, &parent_lost] {
+    while (!stop_parent_watch.load(std::memory_order_relaxed)) {
+      if (!parent_is_alive(*parent_pid)) {
+        parent_lost.store(true, std::memory_order_relaxed);
+        server.stop();
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  });
+  const bool listened = server.listen_after_bind();
+  stop_parent_watch.store(true, std::memory_order_relaxed);
+  parent_watch.join();
+  return listened || parent_lost.load(std::memory_order_relaxed);
 }
 
 }  // namespace yukinal::ssh_service

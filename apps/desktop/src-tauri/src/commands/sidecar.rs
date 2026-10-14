@@ -4,6 +4,8 @@
 //! it adapts the supervisor's typed events to the Tauri window and delegates host requests.
 
 use super::*;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -94,11 +96,29 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
         config.data_dir = data_dir.display().to_string();
     }
     let data_dir = config.data_dir.clone();
-    // The sidecar normally gets a minimal, credential-free environment. Pass the
-    // SSH token only to the explicitly selected Python Agent entry point.
-    let ssh_token = std::env::var("YUKINAL_SSH_API_TOKEN").ok();
-    let ssh_api_url = std::env::var("YUKINAL_SSH_API_URL").ok();
-    config = config.with_python_ssh_service_env(ssh_token.as_deref(), ssh_api_url.as_deref());
+    // The Agent normally gets a minimal, credential-free environment. The C++ service is
+    // started only when an operator supplies its config; pass only the config's explicitly
+    // named credential variables, and only to the Python Agent which launches the service.
+    if config.is_python_agent {
+        if let Some(config_path) =
+            std::env::var_os("YUKINAL_SSH_SERVICE_CONFIG").filter(|value| !value.is_empty())
+        {
+            let service =
+                resolve_ssh_service_runtime(Path::new(&config_path), &cwd, resources.as_deref())?;
+            config = config
+                .with_python_ssh_service_env(Some(&service.token), Some(&service.base_url))
+                .with_python_ssh_service_process(
+                    &service.binary,
+                    &service.config,
+                    &service.referenced_environment,
+                );
+        } else {
+            let ssh_token = std::env::var("YUKINAL_SSH_API_TOKEN").ok();
+            let ssh_api_url = std::env::var("YUKINAL_SSH_API_URL").ok();
+            config =
+                config.with_python_ssh_service_env(ssh_token.as_deref(), ssh_api_url.as_deref());
+        }
+    }
     // 「为什么起不来」的一半答案是「到底起了什么」。一条启动行比事后猜文件名便宜得多：
     // `node C:` 这种崩法在日志里看起来完全不像路径解析问题，而它确实是。
     eprintln!(
@@ -108,6 +128,178 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
         data_dir
     );
     Ok(config.with_env("YUKINAL_DATA_DIR", &data_dir))
+}
+
+struct SshServiceRuntime {
+    binary: PathBuf,
+    config: PathBuf,
+    token: String,
+    base_url: String,
+    referenced_environment: Vec<(String, String)>,
+}
+
+fn resolve_ssh_service_runtime(
+    config_path: &Path,
+    cwd: &Path,
+    resources: Option<&Path>,
+) -> Result<SshServiceRuntime, String> {
+    let config = std::fs::canonicalize(config_path).map_err(|_| {
+        "YUKINAL_SSH_SERVICE_CONFIG must point to a readable SSH service JSON file".to_string()
+    })?;
+    let metadata = std::fs::metadata(&config).map_err(|_| {
+        "YUKINAL_SSH_SERVICE_CONFIG must point to a readable SSH service JSON file".to_string()
+    })?;
+    if metadata.len() > 1024 * 1024 {
+        return Err("the SSH service configuration exceeds the 1 MiB size limit".into());
+    }
+    let bytes = std::fs::read(&config).map_err(|_| {
+        "YUKINAL_SSH_SERVICE_CONFIG must point to a readable SSH service JSON file".to_string()
+    })?;
+    let document: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "the SSH service configuration is not valid JSON".to_string())?;
+    let port = document
+        .get("listen_port")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|port| (1..=u16::MAX as u64).contains(port))
+        .ok_or_else(|| "the SSH service configuration has an invalid listen_port".to_string())?;
+    let token_name = document
+        .get("api_token_env")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| *name == "YUKINAL_SSH_API_TOKEN")
+        .ok_or_else(|| {
+            "desktop SSH service config must use YUKINAL_SSH_API_TOKEN for api_token_env"
+                .to_string()
+        })?;
+    let targets = document
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            "the SSH service configuration has an invalid target allowlist".to_string()
+        })?;
+
+    let mut names = BTreeSet::from([token_name.to_string()]);
+    for target in targets {
+        let Some(auth) = target.get("auth").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for key in ["password_env", "passphrase_env"] {
+            if let Some(value) = auth.get(key) {
+                let name = value
+                    .as_str()
+                    .filter(|name| valid_ssh_credential_environment_name(name))
+                    .ok_or_else(|| format!("the SSH service configuration has an invalid {key}"))?;
+                if names
+                    .iter()
+                    .any(|existing| existing != name && existing.eq_ignore_ascii_case(name))
+                {
+                    return Err(
+                        "SSH service environment references differ only by letter case".into(),
+                    );
+                }
+                names.insert(name.to_string());
+            }
+        }
+    }
+    let token = std::env::var(token_name).map_err(|_| {
+        format!("set the SSH service API token in the {token_name} environment variable")
+    })?;
+    if token.is_empty() {
+        return Err(format!(
+            "the SSH service API token in {token_name} is empty"
+        ));
+    }
+    let referenced_environment = names
+        .into_iter()
+        .filter(|name| name != token_name)
+        .map(|name| {
+            std::env::var(&name)
+                .map(|value| (name.clone(), value))
+                .map_err(|_| {
+                    format!("set the configured SSH credential in the {name} environment variable")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let explicit_binary = std::env::var_os("YUKINAL_SSH_SERVICE_BINARY")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if explicit_binary.as_ref().is_some_and(|path| !path.is_file()) {
+        return Err(
+            "YUKINAL_SSH_SERVICE_BINARY does not point to a C++ SSH service executable".into(),
+        );
+    }
+    let packaged_binary = resources.map(yukinal_core::sidecar::packaged_ssh_service_entry);
+    let binary = explicit_binary
+        .or_else(|| packaged_binary.filter(|path| path.is_file()))
+        .or_else(|| find_dev_ssh_service(cwd))
+        .ok_or_else(|| {
+            "the C++ SSH service executable is unavailable; build it with `pnpm build:ssh-service` or set YUKINAL_SSH_SERVICE_BINARY".to_string()
+        })?;
+    let binary = std::fs::canonicalize(binary)
+        .map_err(|_| "the C++ SSH service executable could not be resolved".to_string())?;
+    let base_url =
+        std::env::var("YUKINAL_SSH_API_URL").unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));
+
+    Ok(SshServiceRuntime {
+        binary,
+        config,
+        token,
+        base_url,
+        referenced_environment,
+    })
+}
+
+fn find_dev_ssh_service(cwd: &Path) -> Option<PathBuf> {
+    let executable = if cfg!(windows) {
+        "yukinal-ssh-service.exe"
+    } else {
+        "yukinal-ssh-service"
+    };
+    for directory in cwd.ancestors() {
+        for candidate in [
+            directory
+                .join("native/build-desktop/Release")
+                .join(executable),
+            directory.join("native/build-desktop").join(executable),
+            directory
+                .join("native/build-nmake/Release")
+                .join(executable),
+            directory.join("native/build-nmake").join(executable),
+            directory.join("native/build/Release").join(executable),
+            directory.join("native/build").join(executable),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    matches!(characters.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+        && name.len() <= 128
+}
+
+fn valid_ssh_credential_environment_name(name: &str) -> bool {
+    valid_environment_name(name)
+        && !name.to_ascii_uppercase().starts_with("YUKINAL_")
+        && ![
+            "PATH",
+            "SYSTEMROOT",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+            "HOME",
+            "USERPROFILE",
+            "TMPDIR",
+            "LD_LIBRARY_PATH",
+            "DYLD_LIBRARY_PATH",
+        ]
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 /// One task per launched sidecar: keeps stderr visible and maps sidecar notifications

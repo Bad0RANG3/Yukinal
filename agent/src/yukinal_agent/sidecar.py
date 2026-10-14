@@ -23,6 +23,7 @@ from .host_tools import register_host_tools, register_mcp_catalog
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import register_ssh_tools
+from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .tools import ToolRegistry
 
 RPC_VERSION = "1.0"
@@ -1070,6 +1071,18 @@ async def _serve_with_checkpoint_store(sidecar: PythonSidecar, data_dir: str) ->
             sidecar.set_checkpointer(None)
 
 
+async def _serve_runtime(sidecar: PythonSidecar, data_dir: str, tool_count: int) -> None:
+    service = SshServiceProcess.from_environment()
+    try:
+        if service is not None:
+            await service.start()
+        print(f"Python Agent Node ready (tools={tool_count})", file=sys.stderr, flush=True)
+        await _serve_with_checkpoint_store(sidecar, data_dir)
+    finally:
+        if service is not None:
+            await service.stop()
+
+
 def main() -> None:
     """Entry point for the Python Agent Node Sidecar."""
     data_dir = os.environ.get("YUKINAL_DATA_DIR", "").strip()
@@ -1083,8 +1096,11 @@ def main() -> None:
         except ValueError:
             print("SSH service client configuration is invalid", file=sys.stderr, flush=True)
     sidecar = PythonSidecar(registry)
-    print(f"Python Agent Node ready (tools={len(registry.list())})", file=sys.stderr, flush=True)
-    asyncio.run(_serve_with_checkpoint_store(sidecar, data_dir))
+    try:
+        asyncio.run(_serve_runtime(sidecar, data_dir, len(registry.list())))
+    except SshServiceProcessError as error:
+        print(f"SSH service startup failed: {error}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from None
 
 
 class _StderrAuditSink:

@@ -153,6 +153,29 @@ if (pythonRuntimeEntries.length !== 1) {
   }
 }
 
+const sshServiceEntries =
+  resources !== null && typeof resources === "object" && !Array.isArray(resources)
+    ? Object.entries(resources).filter(([, destination]) =>
+        String(destination).replace(/\\/g, "/").replace(/\/+$/, "") === "ssh-service",
+      )
+    : [];
+if (!existsSync(join(root, "scripts", "build-ssh-service.mjs"))) {
+  fail("scripts/build-ssh-service.mjs is missing — the C++ resource must be built before Tauri packaging");
+}
+if (sshServiceEntries.length !== 1) {
+  fail(`bundle.resources must map one C++ SSH service directory to ssh-service/, found ${sshServiceEntries.length}`);
+} else {
+  const [source] = sshServiceEntries[0];
+  const resolved = resolve(tauriDir, source);
+  const expected = join(tauriDir, "resources", "ssh-service");
+  if (resolved !== expected) {
+    fail(`bundle.resources SSH service source resolves to ${resolved}, expected ${expected}`);
+  }
+  if (!existsSync(join(resolved, ".gitkeep"))) {
+    fail(`SSH service resource directory ${source} must exist in a fresh checkout`);
+  }
+}
+
 const runtimeManifestPath = join(root, "scripts", "node-runtime.json");
 let runtimeManifest;
 try {
@@ -227,7 +250,7 @@ if (targets === "all") {
 // A release build that ships a stale agent is a silent breakage, so the ordering of the
 // hook is part of the contract: contract libs -> agent bundle -> frontend bundle.
 const beforeBuild = conf.build?.beforeBuildCommand ?? "";
-const order = ["prepare-node-runtime.mjs", "build:libs", "@yukinal/agent", "build-python-agent.mjs", "@yukinal/desktop"];
+const order = ["prepare-node-runtime.mjs", "build:libs", "@yukinal/agent", "build-python-agent.mjs", "build-ssh-service.mjs", "@yukinal/desktop"];
 let cursor = -1;
 for (const token of order) {
   const index = beforeBuild.indexOf(token);

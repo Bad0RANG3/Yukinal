@@ -51,7 +51,7 @@ use crate::mcp::{read_frame, FrameRead};
 pub const MAX_SIDECAR_FRAME_BYTES: usize = 24 * 1024 * 1024;
 
 /// 启动配置仍从这里导出 —— 路径与拆分类名前一致，调用方无需知道它换了文件。
-pub use config::SidecarConfig;
+pub use config::{packaged_ssh_service_entry, SidecarConfig};
 // 脱敏逻辑住在 crate 根（`crate::redact`），搬出去的起因是 MCP 客户端也要用它：
 // 同一个 crate 内两处处理不可信子进程文本，就必须共用一份实现，否则第二份会漂移。
 use crate::redact::{redact_log_line, redact_process_log_line, truncate};

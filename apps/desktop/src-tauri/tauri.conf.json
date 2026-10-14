@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm --filter @yukinal/desktop dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm -w exec node scripts/prepare-node-runtime.mjs && pnpm -w run build:libs && pnpm --filter @yukinal/agent build && pnpm -w exec node scripts/build-python-agent.mjs && pnpm --filter @yukinal/desktop build",
+    "beforeBuildCommand": "pnpm -w exec node scripts/prepare-node-runtime.mjs && pnpm -w run build:libs && pnpm --filter @yukinal/agent build && pnpm -w exec node scripts/build-python-agent.mjs && pnpm -w exec node scripts/build-ssh-service.mjs && pnpm --filter @yukinal/desktop build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -41,6 +41,7 @@
       "../../agent/dist/index.js": "agent/index.js",
       "resources/agent-package.json": "agent/package.json",
       "../../../agent/runtime/": "python-agent/",
+      "resources/ssh-service/": "ssh-service/",
       "resources/runtime/": "runtime/",
       "../../../NOTICE": "NOTICE"
     },

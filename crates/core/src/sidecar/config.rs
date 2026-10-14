@@ -215,6 +215,24 @@ impl SidecarConfig {
         self
     }
 
+    /// Pass the packaged C++ SSH executable and explicit config only to Python Agent.
+    #[must_use]
+    pub fn with_python_ssh_service_process(
+        mut self,
+        binary: &Path,
+        config: &Path,
+        referenced_environment: &[(String, String)],
+    ) -> Self {
+        if self.is_python_agent {
+            self = self.with_env("YUKINAL_SSH_SERVICE_BINARY", &binary.display().to_string());
+            self = self.with_env("YUKINAL_SSH_SERVICE_CONFIG", &config.display().to_string());
+            for (name, value) in referenced_environment {
+                self = self.with_env(name, value);
+            }
+        }
+        self
+    }
+
     /// True when `program` is a bare command name for the OS to resolve through `PATH`,
     /// rather than a path some caller chose.
     ///
@@ -372,6 +390,16 @@ pub fn packaged_python_entry(resources: &Path) -> PathBuf {
         "yukinal-agent.exe"
     } else {
         "yukinal-agent"
+    })
+}
+
+/// The bundled standalone C++ SSH service executable.
+#[must_use]
+pub fn packaged_ssh_service_entry(resources: &Path) -> PathBuf {
+    resources.join("ssh-service").join(if cfg!(windows) {
+        "yukinal-ssh-service.exe"
+    } else {
+        "yukinal-ssh-service"
     })
 }
 

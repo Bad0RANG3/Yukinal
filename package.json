@@ -13,6 +13,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "build:libs": "pnpm --filter \"./packages/**\" --if-present build",
     "build:python-agent": "node scripts/build-python-agent.mjs",
+    "build:ssh-service": "node scripts/build-ssh-service.mjs",
     "smoke:python-agent": "node scripts/smoke-python-agent.mjs",
     "test": "pnpm -r --if-present test && node --test scripts/lib/tauri-agent-command.test.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
