@@ -6,11 +6,13 @@
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
 > existing UI. The opt-in `desktop:dev:python` command launches the Python
 > sidecar in Tauri development. The normal desktop and packaged app still use the
-> existing Node sidecar and Rust host execution path. Durable task/plan resume
-> and binding the desktop's selected SSH target to the C++ service configuration
-> remain unfinished. The Python sidecar supports approval events and response
-> RPCs for registered tools that require approval, including reject and expiry
-> handling; the current desktop catalog still exposes read-only tools.
+> existing Node sidecar and Rust host execution path. The Python development
+> sidecar can call the C++ `service_status` operation when configured; its
+> target is bound to the selected server ID, which must be present in the C++
+> allowlist. Automatic server-record synchronization and durable task/plan
+> resume remain unfinished. The Python sidecar supports approval events and
+> response RPCs for registered tools that require approval, including reject
+> and expiry handling; the current desktop catalog still exposes read-only tools.
 
 ## Repository baseline and migration boundary
 
@@ -25,9 +27,12 @@ behavior reference until replacement milestones are built and checked.
 The Python runtime speaks the desktop host's bidirectional JSON-RPC protocol. It
 can execute a first set of read-only server tools through the host, load low-risk
 MCP tools from the host catalog, and emit the tool-call/result events that the
-existing transcript UI displays. `pnpm desktop:dev:python` selects this runtime
-for Tauri development; `pnpm desktop:dev` remains the browser-only UI preview.
-The standard desktop and packaged launcher still use the Node sidecar.
+existing transcript UI displays. When the C++ service token is configured, the
+Python sidecar also registers `ssh.service_status`; it binds the call to the
+selected `host_target.serverId`, so the model cannot choose a different target.
+`pnpm desktop:dev:python` selects this runtime for Tauri development;
+`pnpm desktop:dev` remains the browser-only UI preview. The standard desktop and
+packaged launcher still use the Node sidecar.
 
 ## Processes and trust boundaries
 
@@ -36,7 +41,7 @@ Python Agent Runtime
     ├── Tool Registry → schema → per-run read allowlist → audit
     ├── LangGraph bounded tool workflow
     ├── host.* JSON-RPC bridge → Tauri/Rust host → existing SSH and MCP
-    └── standalone yukinal_ssh caller
+    └── yukinal_ssh caller (optional service-status tool)
               │ HTTP/JSON + local bearer token
               ▼
         C++ SSH service (binds only 127.0.0.1)
@@ -44,7 +49,8 @@ Python Agent Runtime
               ▼
         libssh2 ── SSH ──► configured server
 
-React/Tauri desktop UI: unchanged; the existing host remains the tool executor
+React/Tauri desktop UI: unchanged; the host executes `host.*` tools, while the
+C++ service executes the optional read-only SSH status tool
 ```
 
 The bridge uses the existing sidecar request path: Python sends
@@ -54,6 +60,12 @@ start MCP processes through this bridge. The host continues to resolve the
 server, enforce its current authorization and execute the operation. Current
 Python host tools are read-only; MCP entries are exposed to the model only when
 the host catalog classifies them as low-risk.
+
+The direct C++ caller is enabled only when `YUKINAL_SSH_API_TOKEN` is explicitly
+forwarded to the Python Agent sidecar. The Tauri host does not pass that secret
+to the legacy Node sidecar. The C++ configuration's `target_id` must match the
+selected desktop server ID; automatic synchronization with saved server records
+and service lifecycle management are not implemented yet.
 
 ## Python Agent Runtime
 
@@ -209,7 +221,7 @@ Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. After configuring CMake to use that interpreter, the C++ build
 completed and all five CTest targets passed on the current source revision. Full
-Python unittest discovery ran 42 tests: 39 passed and 3 service integration
+Python unittest discovery ran 45 tests: 42 passed and 3 service integration
 cases were skipped because the service binary path was not configured for that
 standalone run. The Agent suite covers live stdio and Streamable HTTP MCP
 connections, credential-reference handling, schema/target rejection,

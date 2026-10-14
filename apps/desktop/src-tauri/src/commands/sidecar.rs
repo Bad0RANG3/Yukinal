@@ -94,6 +94,11 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
         config.data_dir = data_dir.display().to_string();
     }
     let data_dir = config.data_dir.clone();
+    // The sidecar normally gets a minimal, credential-free environment. Pass the
+    // SSH token only to the explicitly selected Python Agent entry point.
+    let ssh_token = std::env::var("YUKINAL_SSH_API_TOKEN").ok();
+    let ssh_api_url = std::env::var("YUKINAL_SSH_API_URL").ok();
+    config = config.with_python_ssh_service_env(ssh_token.as_deref(), ssh_api_url.as_deref());
     // 「为什么起不来」的一半答案是「到底起了什么」。一条启动行比事后猜文件名便宜得多：
     // `node C:` 这种崩法在日志里看起来完全不像路径解析问题，而它确实是。
     eprintln!(

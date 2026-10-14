@@ -169,6 +169,31 @@ impl SidecarConfig {
         self
     }
 
+    /// Pass the C++ SSH service credentials only to the explicitly selected Python Agent.
+    #[must_use]
+    pub fn with_python_ssh_service_env(
+        mut self,
+        token: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Self {
+        let is_python_agent = self
+            .args
+            .windows(2)
+            .any(|arguments| {
+                arguments[0] == std::ffi::OsStr::new("-m")
+                    && arguments[1] == std::ffi::OsStr::new("yukinal_agent.sidecar")
+            });
+        if is_python_agent {
+            if let Some(token) = token.filter(|value| !value.is_empty()) {
+                self = self.with_env("YUKINAL_SSH_API_TOKEN", token);
+            }
+            if let Some(base_url) = base_url.filter(|value| !value.is_empty()) {
+                self = self.with_env("YUKINAL_SSH_API_URL", base_url);
+            }
+        }
+        self
+    }
+
     /// True when `program` is a bare command name for the OS to resolve through `PATH`,
     /// rather than a path some caller chose.
     ///
@@ -382,6 +407,41 @@ mod tests {
             "{}",
             entry.display()
         );
+    }
+
+    #[test]
+    fn ssh_service_credentials_are_forwarded_only_to_the_python_agent() {
+        let python = SidecarConfig {
+            program: PathBuf::from("python"),
+            args: vec!["-m".into(), "yukinal_agent.sidecar".into()],
+            env: Vec::new(),
+            request_timeout: Duration::from_secs(10),
+            entry_label: "custom command".into(),
+            client_version: "test".into(),
+            data_dir: "data".into(),
+            requires_node: false,
+        }
+        .with_python_ssh_service_env(Some("secret-token"), Some("http://127.0.0.1:8765"));
+        assert_eq!(
+            python.env,
+            vec![
+                ("YUKINAL_SSH_API_TOKEN".into(), "secret-token".into()),
+                ("YUKINAL_SSH_API_URL".into(), "http://127.0.0.1:8765".into()),
+            ]
+        );
+
+        let node = SidecarConfig {
+            program: PathBuf::from("node"),
+            args: vec!["index.js".into()],
+            env: Vec::new(),
+            request_timeout: Duration::from_secs(10),
+            entry_label: "index.js".into(),
+            client_version: "test".into(),
+            data_dir: "data".into(),
+            requires_node: true,
+        }
+        .with_python_ssh_service_env(Some("secret-token"), Some("http://127.0.0.1:8765"));
+        assert!(node.env.is_empty());
     }
 
     fn temp_tagged_dir(tag: &str) -> PathBuf {

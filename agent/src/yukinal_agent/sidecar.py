@@ -1030,9 +1030,10 @@ def main() -> None:
     token = os.environ.get("YUKINAL_SSH_API_TOKEN", "")
     if token:
         try:
-            register_ssh_tools(registry, SshServiceClient(token))
+            service_url = os.environ.get("YUKINAL_SSH_API_URL", "http://127.0.0.1:8765")
+            register_ssh_tools(registry, SshServiceClient(token, base_url=service_url))
         except ValueError:
-            print("SSH service credential configuration is invalid", file=sys.stderr, flush=True)
+            print("SSH service client configuration is invalid", file=sys.stderr, flush=True)
     sidecar = PythonSidecar(registry)
     print(f"Python Agent Node ready (tools={len(registry.list())})", file=sys.stderr, flush=True)
     asyncio.run(serve_stdio(sidecar))

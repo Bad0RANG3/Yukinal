@@ -40,11 +40,12 @@ still exposes read-only tools. Durable task state, broader tool coverage, and
 switching the desktop launcher to Python remain in progress. The existing
 React/Tauri UI remains intact while those paths are migrated.
 
-The C++ service is not yet connected to the desktop UI. The existing React
-components and their Tauri bridge are preserved. The existing Rust/Tauri
-implementation remains in the repository as the current desktop backend while
-the replacement is built in small, reviewable stages; this milestone does not
-claim full product parity.
+The opt-in Python development sidecar can call the C++ service for
+`ssh.service_status` when its token is configured. The service's `target_id`
+must match the selected desktop server ID; syncing saved server records into the
+C++ service configuration is still future work. The standard desktop and
+packaged app continue to use the existing Rust/Tauri and Node backend, so this
+milestone does not claim full product parity.
 
 To run the existing desktop UI with the Python Agent sidecar during development,
 create `agent/.venv`, install `agent[agent,models]`, then run
@@ -77,6 +78,29 @@ The Python client can be installed for development with:
 ```powershell
 python -m pip install -e "agent[agent]"
 ```
+
+To use the C++ service from the existing UI through the opt-in Python sidecar,
+build the service and run it in one PowerShell session with the same token as
+the JSON config. Set the matching environment values in a second session before
+starting the Python desktop. Set the service target's `target_id` to the selected
+desktop server's opaque `serverId` (for example, `srv_stage1`). The model does
+not supply this ID; the Agent binds the request to the selected server.
+
+```powershell
+$env:YUKINAL_SSH_API_TOKEN = "<random URL-safe token>"
+native/build/Release/yukinal-ssh-service.exe --config path/to/ssh-service.json
+```
+
+In the second PowerShell session:
+
+```powershell
+$env:YUKINAL_SSH_API_TOKEN = "<same token>"
+$env:YUKINAL_SSH_API_URL = "http://127.0.0.1:8765"
+pnpm desktop:dev:python
+```
+
+The Tauri host forwards the SSH token only to the explicitly selected Python
+Agent sidecar. The normal Node sidecar and packaged desktop do not receive it.
 
 To include the Paramiko SSH mock in CTest, install the optional test extra
 before configuring CMake:

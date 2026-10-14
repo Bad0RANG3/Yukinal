@@ -65,6 +65,11 @@ result = await agent.run(
     prompt="Check nginx on staging-web-01.",
     allowed_tools={"ssh.service_status"},
     allowed_target_ids={"staging-web-01"},
+    host_target={
+        "host": "remote",
+        "serverId": "staging-web-01",
+        "environment": "staging",
+    },
 )
 ```
 
@@ -94,6 +99,12 @@ the desktop's response RPC, and resumes the paused call; rejection and expiry
 stop the graph without retrying. Multimodal prompts, durable task state,
 write-capable desktop tools and the standard launcher switch are still being
 migrated.
+
+When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it also
+registers the read-only `ssh.service_status` tool backed by the C++ service. The
+tool gets its target from the selected `host_target.serverId`; `target_id` is not
+part of the model-visible input schema. Configure that exact server ID in the
+C++ service allowlist. The normal Node sidecar does not receive this token.
 
 For the desktop development launcher, create the environment from the repository
 root and install the runtime dependencies:
@@ -132,7 +143,10 @@ from yukinal_ssh import SshServiceClient
 
 async def main() -> None:
     registry = ToolRegistry(JsonlAuditSink("var/audit/tool-calls.jsonl"))
-    register_ssh_tools(registry, SshServiceClient(os.environ["YUKINAL_SSH_API_TOKEN"]))
+    register_ssh_tools(registry, SshServiceClient(
+        os.environ["YUKINAL_SSH_API_TOKEN"],
+        os.environ.get("YUKINAL_SSH_API_URL", "http://127.0.0.1:8765"),
+    ))
 
     async with MCPClientManager() as mcp:
         await mcp.connect(MCPServerConfig(
@@ -150,9 +164,14 @@ async def main() -> None:
             user_id="operator-7",
             allowed_tools={"ssh.service_status", "mcp.ops-tools.lookup_service"},
             allowed_target_ids={"staging-web-01"},
+            host_target={
+                "host": "remote",
+                "serverId": "staging-web-01",
+                "environment": "staging",
+            },
             tool_calls=[{
                 "name": "ssh.service_status",
-                "arguments": {"target_id": "staging-web-01", "service": "nginx.service"},
+                "arguments": {"service": "nginx.service"},
             }],
         )
         print(result.status, result.results)

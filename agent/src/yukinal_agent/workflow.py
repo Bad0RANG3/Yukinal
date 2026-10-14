@@ -46,6 +46,7 @@ class _WorkflowState(TypedDict, total=False):
     allowed_tools: list[str]
     allowed_target_ids: list[str]
     approved_actions: dict[str, str]
+    host_target: dict[str, Any]
     tool_calls: list[dict[str, Any]]
     result_items: list[dict[str, Any]]
     current_index: int
@@ -76,6 +77,7 @@ class AgentWorkflow:
         allowed_target_ids: set[str] | frozenset[str],
         tool_calls: list[dict[str, Any]],
         approved_actions: dict[str, str] | None = None,
+        host_target: dict[str, Any] | None = None,
     ) -> WorkflowResult:
         try:
             ExecutionContext(
@@ -85,6 +87,12 @@ class AgentWorkflow:
                 allowed_tools=frozenset(allowed_tools),
                 allowed_target_ids=frozenset(allowed_target_ids),
                 approved_actions=approved_actions or {},
+                host_target=host_target,
+                context_target_id=(
+                    host_target.get("serverId")
+                    if isinstance(host_target, dict) and host_target.get("host") == "remote"
+                    else None
+                ),
             )
         except (TypeError, ValueError):
             return WorkflowResult(task_id, "rejected", (), 0, 0, "invalid_execution_context")
@@ -109,6 +117,7 @@ class AgentWorkflow:
             "allowed_tools": sorted(allowed_tools),
             "allowed_target_ids": sorted(allowed_target_ids),
             "approved_actions": dict(approved_actions or {}),
+            **({"host_target": dict(host_target)} if host_target is not None else {}),
             "tool_calls": tool_calls,
             "result_items": [],
             "current_index": 0,
@@ -197,6 +206,12 @@ class AgentWorkflow:
             allowed_tools=frozenset(state["allowed_tools"]),
             allowed_target_ids=frozenset(state["allowed_target_ids"]),
             approved_actions=state.get("approved_actions", {}),
+            host_target=state.get("host_target"),
+            context_target_id=(
+                state["host_target"].get("serverId")
+                if isinstance(state.get("host_target"), dict) and state["host_target"].get("host") == "remote"
+                else None
+            ),
         )
         try:
             result = await self._registry.execute(
