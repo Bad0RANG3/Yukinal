@@ -580,6 +580,7 @@ pub(super) fn filesystem_failure(error: FilesystemError, cancel: &CancellationTo
 }
 
 pub(super) async fn server_info(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -594,26 +595,62 @@ pub(super) async fn server_info(
         ));
     }
 
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
-    };
     let collected_at = yukinal_core::sidecar::iso8601_now();
-    let (snapshot, _) = tokio::select! {
-        result = yukinal_core::collector::collect_snapshot(
-            &state.ssh,
-            &session,
-            server_id,
-            &collected_at,
-            cancel,
-        ) => match result {
-            Ok(result) => result,
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
             Err(error) => return Ok(transport_or_cancel(error, cancel)),
         },
-        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        None => false,
+    };
+    let (snapshot, _) = if cpp_supported {
+        let outputs = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::system_snapshot(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+            ) => match result {
+                Ok(outputs) => outputs,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = yukinal_core::collector::collect_snapshot_with_command_results(
+                server_id,
+                &collected_at,
+                cancel,
+                outputs,
+            ) => match result {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        }
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = yukinal_core::collector::collect_snapshot(
+                &state.ssh,
+                &session,
+                server_id,
+                &collected_at,
+                cancel,
+            ) => match result {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        }
     };
 
     if let Err(error) = state.database.snapshots().insert(&snapshot) {

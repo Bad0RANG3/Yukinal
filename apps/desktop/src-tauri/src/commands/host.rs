@@ -1378,7 +1378,7 @@ async fn handle_sidecar_request_with_context(
         HostToolCallDecision::Execute(token) => token,
     };
     let response = match request.tool_name.as_str() {
-        SERVER_INFO => server_info(state, server_id, &request.input, &cancel).await,
+        SERVER_INFO => server_info(app, state, server_id, &request.input, &cancel).await,
         SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
         SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
         SERVER_SERVICES => server_services(app, state, server_id, &request.input, &cancel).await,
