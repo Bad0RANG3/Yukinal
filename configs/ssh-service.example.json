@@ -1,0 +1,18 @@
+{
+  "listen_port": 8765,
+  "api_token_env": "YUKINAL_SSH_API_TOKEN",
+  "targets": [
+    {
+      "target_id": "staging-web-01",
+      "host": "replace-with-approved-hostname",
+      "port": 22,
+      "username": "ops",
+      "known_hosts_file": "./known_hosts",
+      "auth": {
+        "type": "private_key",
+        "private_key_file": "./id_ed25519",
+        "passphrase_env": "YUKINAL_SSH_KEY_PASSPHRASE"
+      }
+    }
+  ]
+}

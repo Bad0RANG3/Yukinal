@@ -1,0 +1,21 @@
+#!/bin/sh
+if [ "$1" = "is-active" ] && [ "$2" = "--" ]; then
+  case "$3" in
+    nginx.service)
+      printf 'active\n'
+      exit 0
+      ;;
+    slow.service)
+      sleep 5
+      printf 'active\n'
+      exit 0
+      ;;
+    large.service)
+      head -c 70000 /dev/zero | tr '\000' 'A'
+      printf '\n'
+      exit 0
+      ;;
+  esac
+fi
+printf 'inactive\n'
+exit 3

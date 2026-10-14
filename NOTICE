@@ -14,6 +14,13 @@ https://github.com/JetBrains/JetBrainsMono for the upstream project.
 The remaining dependencies are governed by the license files and notices
 provided by their respective authors and package distributions.
 
+The first-stage C++ SSH service fetches these pinned source dependencies at
+configure time:
+
+- libssh2 1.11.1 — BSD 3-Clause license; https://github.com/libssh2/libssh2
+- nlohmann/json 3.11.3 — MIT license; https://github.com/nlohmann/json
+- cpp-httplib 0.18.3 — MIT license; https://github.com/yhirose/cpp-httplib
+
 The packaged desktop application includes the official Node.js v24.21.0 runtime.
 Its distribution license is included beside the executable as
 `$RESOURCE/runtime/LICENSE`. The runtime is downloaded from nodejs.org during the

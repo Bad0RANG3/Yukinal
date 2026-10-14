@@ -2,6 +2,8 @@
 
 本页说明 Yukinal 当前实现和[目标架构](./architecture-and-build-plan.md)必须保持的信任边界。目标功能尚未全部实现；发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
+当前 C++/Python 重写只包含第一阶段的独立 SSH 服务；它尚未接入桌面 UI 或 Agent。服务只监听回环地址，调用必须带本机 bearer token；请求只能携带配置中的 `target_id` 和 `service_status` 参数，不能指定主机、凭证或原始命令。每次 SSH 连接都先比对配置的 OpenSSH `known_hosts` 项。下文描述的 Agent 审批、持久化审计和更广泛的宿主权限边界属于完整产品目标，不表示当前第一阶段已经实现。
+
 ## 谁能做决定
 
 React 界面通过白名单 Tauri IPC 请求本地 Rust 宿主。宿主持有 SSH/SFTP、PTY、SQLite、操作系统凭据库和本地子进程；Node.js Agent sidecar 负责模型会话、工具提议与权限判断。模型输出、远端日志、文件内容和 MCP 描述都按不可信数据处理。

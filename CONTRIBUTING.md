@@ -1,10 +1,10 @@
 # 贡献指南
 
-感谢你愿意参与 Yukinal。项目同时包含 Rust 宿主、Tauri 桌面端、Node.js Agent sidecar 和一套跨语言契约，因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
+感谢你愿意参与 Yukinal。仓库保留现有 Rust/Tauri/Node 桌面基线；新的 C++/Python 重写按 `ssh_agent_development_brief.md` 分阶段推进，目前只到 SSH 服务基础闭环。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
 
 ## 开始之前
 
-1. 阅读 [文档索引](./docs/README.md)、[产品定义](./docs/product.md) 和[安全与数据边界](./docs/security.md)。
+1. 阅读 [文档索引](./docs/README.md)、[产品定义](./docs/product.md)、[重写状态](./docs/rewrite-cpp-python.md) 和[安全与数据边界](./docs/security.md)。
 2. 要改权限、目标解析、IPC、sidecar 协议或 MCP 时，先说明现有行为与拟改变的信任边界，并在代码、测试和安全文档中保持一致。
 3. 不要在公开 Issue、提交、日志或测试 fixture 中放入真实密钥、令牌、私钥、主机凭据或机器专属路径。
 4. 发现安全漏洞时不要开公开 Issue，按 [安全策略](./SECURITY.md) 私下报告。
@@ -18,6 +18,8 @@ pnpm install --frozen-lockfile
 pnpm check
 ```
 
+新 SSH 服务依赖与 CMake 构建见 [`native/README.md`](./native/README.md)；Python caller 没有第三方运行依赖，可用 `python -m unittest discover -s agent/tests -v` 运行其测试。
+
 ## 分支与提交
 
 - 从最新 `main` 创建短生命周期分支；不要在共享分支上重写历史。
@@ -27,8 +29,8 @@ pnpm check
 
 ## 修改规则
 
-- Rust 拥有的进程、文件系统、SQLite、凭据与 SSH 形状不得下放到 WebView。
-- Agent 只能提出工具调用；执行授权只由 Permission Engine 决策。不要通过提示词绕过权限规则。
+- 现有 Rust 宿主拥有的进程、文件系统、SQLite、凭据与 SSH 能力不得下放到 WebView；新 C++ SSH 服务保持独立并只开放文档化的结构化操作。
+- 未来 Agent 只能提出工具调用；执行授权由程序化策略和宿主复核强制执行。不要通过提示词绕过权限规则。
 - MCP 远端描述和 schema 始终是不可信数据，只可展示或交给模型，不可当作指令执行。
 - 文档中的每项能力都必须能在实现或实际验收中找到依据；未验证的交付条件写入[交付与发布](./docs/release.md)，补完后更新状态。
 

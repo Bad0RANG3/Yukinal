@@ -60,3 +60,13 @@ pnpm-debug.log*
 
 # local agent worktrees: per-session checkouts, never part of the repository
 .claude/
+
+# 2.0 SSH rewrite: Python virtualenv, caches and native build trees
+.venv/
+agent/.venv/
+__pycache__/
+*.pyc
+native/build/
+native/build-*/
+build/
+agent/*.egg-info/

@@ -1,0 +1,17 @@
+[project]
+name = "yukinal-ssh-client"
+version = "0.1.0"
+description = "Small Python caller for the local Yukinal SSH service."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yukinal_ssh"]

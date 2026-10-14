@@ -1,0 +1,14 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_rsa_key
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers yukinal
+AuthorizedKeysFile .ssh/authorized_keys
+StrictModes yes
+UsePAM no
+LogLevel ERROR
+Subsystem sftp internal-sftp

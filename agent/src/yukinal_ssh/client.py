@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import json
+import http.client
+import re
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
+
+from .errors import SshServiceError, SshServiceTransportError
+
+_TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
+_MAX_BODY_BYTES = 1024 * 1024
+_TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
+
+
+@dataclass(frozen=True)
+class ServiceStatusResult:
+    target_id: str
+    operation: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+    output_truncated: bool
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str,
+                         headers: Any, newurl: str) -> None:
+        return None
+
+
+class SshServiceClient:
+    """Calls the loopback-only service using structured, allow-listed operations."""
+
+    def __init__(self, token: str, base_url: str = "http://127.0.0.1:8765") -> None:
+        if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+            raise ValueError("token must be 32 to 256 URL-safe characters")
+        parsed = urllib.parse.urlsplit(base_url)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+            or parsed.port is None
+            or not 1 <= parsed.port <= 65535
+        ):
+            raise ValueError("base_url must be an http URL on 127.0.0.1")
+        self._base_url = f"http://127.0.0.1:{parsed.port}"
+        self._token = token
+        self._opener = urllib.request.build_opener(_NoRedirect())
+
+    def health(self) -> bool:
+        response = self._request("GET", "/health", None, timeout=3, authorized=False)
+        if response != {"status": "healthy"}:
+            raise SshServiceTransportError("invalid_response", "SSH service health response was invalid")
+        return True
+
+    def service_status(self, target_id: str, service: str, timeout_seconds: int = 10) -> ServiceStatusResult:
+        if not isinstance(target_id, str) or not _TARGET_ID.fullmatch(target_id):
+            raise ValueError("target_id has an invalid format")
+        if not isinstance(service, str) or not _SERVICE_NAME.fullmatch(service):
+            raise ValueError("service must be a valid systemd unit name")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 30:
+            raise ValueError("timeout_seconds must be an integer from 1 to 30")
+
+        payload = {
+            "target_id": target_id,
+            "operation": "service_status",
+            "parameters": {"service": service},
+            "timeout_seconds": timeout_seconds,
+        }
+        body = self._request("POST", "/v1/ssh/exec", payload, timeout=timeout_seconds + 5, authorized=True)
+        if not isinstance(body, dict) or body.get("status") != "succeeded":
+            raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
+        expected = {"status", "target_id", "operation", "exit_code", "stdout", "stderr", "duration_ms", "output_truncated", "error"}
+        if set(body) != expected:
+            raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
+        if (
+            body.get("target_id") != target_id
+            or body.get("operation") != "service_status"
+            or isinstance(body.get("exit_code"), bool)
+            or not isinstance(body.get("exit_code"), int)
+            or not isinstance(body.get("stdout"), str)
+            or not isinstance(body.get("stderr"), str)
+            or isinstance(body.get("duration_ms"), bool)
+            or not isinstance(body.get("duration_ms"), int)
+            or body.get("duration_ms") < 0
+            or not isinstance(body.get("output_truncated"), bool)
+            or body.get("error") is not None
+        ):
+            raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
+        return ServiceStatusResult(
+            target_id=target_id,
+            operation="service_status",
+            exit_code=body["exit_code"],
+            stdout=body["stdout"],
+            stderr=body["stderr"],
+            duration_ms=body["duration_ms"],
+            output_truncated=body["output_truncated"],
+        )
+
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None, *,
+                 timeout: int, authorized: bool) -> dict[str, Any]:
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
+        headers = {"Accept": "application/json"}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        if authorized:
+            headers["Authorization"] = f"Bearer {self._token}"
+        request = urllib.request.Request(self._base_url + path, data=data, headers=headers, method=method)
+        try:
+            with self._opener.open(request, timeout=timeout) as response:
+                raw = response.read(_MAX_BODY_BYTES + 1)
+                if len(raw) > _MAX_BODY_BYTES:
+                    raise SshServiceTransportError("response_too_large", "SSH service response exceeded the size limit")
+                return self._decode_json(raw)
+        except urllib.error.HTTPError as error:
+            raw = error.read(_MAX_BODY_BYTES + 1)
+            if len(raw) > _MAX_BODY_BYTES:
+                raise SshServiceTransportError("response_too_large", "SSH service response exceeded the size limit",
+                                               http_status=error.code) from None
+            try:
+                body = self._decode_json(raw)
+            except SshServiceTransportError:
+                raise SshServiceTransportError("invalid_error_response", "SSH service returned an invalid error response",
+                                               http_status=error.code) from None
+            error_info = body.get("error") if isinstance(body, dict) else None
+            if isinstance(error_info, dict) and isinstance(error_info.get("code"), str) and isinstance(error_info.get("message"), str):
+                raise SshServiceError(error_info["code"], error_info["message"], http_status=error.code) from None
+            raise SshServiceTransportError("invalid_error_response", "SSH service returned an invalid error response",
+                                           http_status=error.code) from None
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as error:
+            raise SshServiceTransportError("service_unavailable", "Could not reach the local SSH service") from error
+
+    @staticmethod
+    def _decode_json(raw: bytes) -> dict[str, Any]:
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise SshServiceTransportError("invalid_response", "SSH service returned invalid JSON") from None
+        if not isinstance(value, dict):
+            raise SshServiceTransportError("invalid_response", "SSH service response must be a JSON object")
+        return value
