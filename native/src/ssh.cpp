@@ -3,11 +3,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cerrno>
 #include <climits>
+#include <condition_variable>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -22,6 +26,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+#include "ssh_network.hpp"
 
 #include <libssh2.h>
 
@@ -75,6 +81,144 @@ bool socket_would_block() {
 #endif
 }
 
+}  // namespace
+
+namespace detail {
+namespace {
+
+constexpr std::size_t kMaxBackgroundResolvers = 4;
+
+std::atomic_size_t& active_background_resolvers() {
+  // Timed-out system DNS calls cannot be cancelled portably. Keep this counter
+  // alive until process exit because a detached resolver may outlive main.
+  static auto* active = new std::atomic_size_t{0};
+  return *active;
+}
+
+struct AddressInfoState {
+  ~AddressInfoState() {
+    if (addresses) freeaddrinfo(addresses);
+  }
+
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool complete = false;
+  bool abandoned = false;
+  int result_code = -1;
+  addrinfo* addresses = nullptr;
+};
+
+bool reserve_resolver_slot() {
+  std::size_t active = active_background_resolvers().load();
+  while (active < kMaxBackgroundResolvers) {
+    if (active_background_resolvers().compare_exchange_weak(active, active + 1)) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+AddressResolution resolve_address_list(const std::string& host, const std::string& service,
+                                       const addrinfo& hints,
+                                       std::chrono::steady_clock::time_point deadline,
+                                       addrinfo** addresses, GetAddrInfo resolver) {
+  if (!addresses) return AddressResolution::failed;
+  *addresses = nullptr;
+  if (std::chrono::steady_clock::now() >= deadline) return AddressResolution::timed_out;
+
+  if (!resolver) {
+    resolver = [](const char* node, const char* service_name, const addrinfo* request,
+                  addrinfo** result) {
+      return ::getaddrinfo(node, service_name, request, result);
+    };
+  }
+
+  // Numeric addresses can be resolved locally without waiting on DNS.
+  addrinfo numeric_hints = hints;
+  numeric_hints.ai_flags |= AI_NUMERICHOST;
+  addrinfo* numeric_addresses = nullptr;
+  const int numeric_result = resolver(host.c_str(), service.c_str(), &numeric_hints,
+                                      &numeric_addresses);
+  if (numeric_result == 0 && numeric_addresses) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      freeaddrinfo(numeric_addresses);
+      return AddressResolution::timed_out;
+    }
+    *addresses = numeric_addresses;
+    return AddressResolution::resolved;
+  }
+  if (numeric_addresses) freeaddrinfo(numeric_addresses);
+  if (std::chrono::steady_clock::now() >= deadline) return AddressResolution::timed_out;
+  if (!reserve_resolver_slot()) return AddressResolution::busy;
+
+  std::shared_ptr<AddressInfoState> state;
+  try {
+    state = std::make_shared<AddressInfoState>();
+    // The platform resolver has no portable cancellation API. A detached
+    // worker lets this operation return at its deadline; the four-slot cap
+    // bounds workers that remain in an uninterruptible system call.
+    std::thread worker([state, host, service, hints, resolver = std::move(resolver)]() mutable {
+      addrinfo* resolved = nullptr;
+      int result_code = -1;
+      try {
+        result_code = resolver(host.c_str(), service.c_str(), &hints, &resolved);
+      } catch (...) {
+        result_code = -1;
+      }
+
+      bool release_result = false;
+      {
+        std::lock_guard lock(state->mutex);
+        if (state->abandoned) {
+          release_result = true;
+        } else {
+          state->result_code = result_code;
+          state->addresses = resolved;
+          state->complete = true;
+        }
+      }
+      if (release_result && resolved) freeaddrinfo(resolved);
+      active_background_resolvers().fetch_sub(1);
+      state->ready.notify_one();
+    });
+    worker.detach();
+  } catch (...) {
+    active_background_resolvers().fetch_sub(1);
+    return AddressResolution::unavailable;
+  }
+
+  std::unique_lock lock(state->mutex);
+  if (!state->ready.wait_until(lock, deadline, [&state] { return state->complete; })) {
+    state->abandoned = true;
+    return AddressResolution::timed_out;
+  }
+  if (std::chrono::steady_clock::now() >= deadline) {
+    state->abandoned = true;
+    return AddressResolution::timed_out;
+  }
+  if (state->result_code != 0 || !state->addresses) return AddressResolution::failed;
+  *addresses = state->addresses;
+  state->addresses = nullptr;
+  return AddressResolution::resolved;
+}
+
+}  // namespace detail
+
+namespace {
+
+enum class ConnectFailure {
+  none,
+  connection_failed,
+  timeout,
+  resolver_busy,
+  resolver_unavailable,
+};
+
+struct SocketConnection {
+  Socket socket = kInvalidSocket;
+  ConnectFailure failure = ConnectFailure::connection_failed;
+};
+
 bool wait_connect(Socket socket, int timeout_ms) {
   fd_set write_set;
   FD_ZERO(&write_set);
@@ -98,7 +242,7 @@ bool wait_connect(Socket socket, int timeout_ms) {
   return getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length) == 0 && error == 0;
 }
 
-Socket connect_socket(const TargetConfig& target, Clock::time_point deadline) {
+SocketConnection connect_socket(const TargetConfig& target, Clock::time_point deadline) {
 #ifdef _WIN32
   static std::once_flag winsock_once;
   static int winsock_result = 0;
@@ -106,7 +250,7 @@ Socket connect_socket(const TargetConfig& target, Clock::time_point deadline) {
     WSADATA data{};
     winsock_result = WSAStartup(MAKEWORD(2, 2), &data);
   });
-  if (winsock_result != 0) return kInvalidSocket;
+  if (winsock_result != 0) return {};
 #endif
 
   addrinfo hints{};
@@ -114,8 +258,13 @@ Socket connect_socket(const TargetConfig& target, Clock::time_point deadline) {
   hints.ai_socktype = SOCK_STREAM;
   addrinfo* addresses = nullptr;
   const std::string port_text = std::to_string(target.port);
-  if (getaddrinfo(target.host.c_str(), port_text.c_str(), &hints, &addresses) != 0 || !addresses) {
-    return kInvalidSocket;
+  const auto resolution = detail::resolve_address_list(target.host, port_text, hints, deadline,
+                                                        &addresses);
+  if (resolution != detail::AddressResolution::resolved || !addresses) {
+    if (resolution == detail::AddressResolution::timed_out) return {kInvalidSocket, ConnectFailure::timeout};
+    if (resolution == detail::AddressResolution::busy) return {kInvalidSocket, ConnectFailure::resolver_busy};
+    if (resolution == detail::AddressResolution::unavailable) return {kInvalidSocket, ConnectFailure::resolver_unavailable};
+    return {};
   }
 
   Socket connected = kInvalidSocket;
@@ -142,7 +291,9 @@ Socket connect_socket(const TargetConfig& target, Clock::time_point deadline) {
     close_socket(candidate);
   }
   freeaddrinfo(addresses);
-  return connected;
+  if (connected != kInvalidSocket) return {connected, ConnectFailure::none};
+  return {kInvalidSocket, remaining_ms(deadline) == 0 ? ConnectFailure::timeout
+                                                       : ConnectFailure::connection_failed};
 }
 
 bool wait_for_ssh(Socket socket, LIBSSH2_SESSION* session, Clock::time_point deadline) {
@@ -261,10 +412,23 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
   }
 
   SshResources resources;
-  resources.socket_ = connect_socket(target, deadline);
+  const SocketConnection connection = connect_socket(target, deadline);
+  resources.socket_ = connection.socket;
   if (resources.socket_ == kInvalidSocket) {
-    fail(&result, remaining_ms(deadline) == 0 ? "timeout" : "connection_failed",
-         remaining_ms(deadline) == 0 ? "SSH connection timed out" : "Could not connect to the configured SSH target");
+    switch (connection.failure) {
+      case ConnectFailure::timeout:
+        fail(&result, "timeout", "SSH connection timed out");
+        break;
+      case ConnectFailure::resolver_busy:
+        fail(&result, "resolver_busy", "DNS resolution capacity is temporarily exhausted");
+        break;
+      case ConnectFailure::resolver_unavailable:
+        fail(&result, "resolver_unavailable", "Could not start bounded DNS resolution");
+        break;
+      default:
+        fail(&result, "connection_failed", "Could not connect to the configured SSH target");
+        break;
+    }
     return result;
   }
 

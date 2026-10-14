@@ -96,8 +96,9 @@ if(YUKINAL_BUILD_TESTS)
     tests/test_main.cpp
     tests/test_config.cpp
     tests/test_policy.cpp
+    tests/test_network.cpp
   )
-  target_include_directories(yukinal_ssh_tests PRIVATE tests)
+  target_include_directories(yukinal_ssh_tests PRIVATE tests src)
   target_link_libraries(yukinal_ssh_tests PRIVATE yukinal_ssh_core)
   add_test(NAME yukinal_ssh_tests COMMAND yukinal_ssh_tests)
 

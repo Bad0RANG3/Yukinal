@@ -20,10 +20,12 @@ CMake fetches pinned source releases of nlohmann/json, cpp-httplib, and libssh2.
 On Windows libssh2 uses WinCNG; on macOS/Linux it uses the system OpenSSL
 development package. A C++20 compiler and CMake 3.24+ are required.
 On Windows, run the commands from a Visual Studio 2022 Developer Command
-Prompt/PowerShell so MSVC and the Windows SDK are available. Local verification
-on 2026-10-15 used the NMake generator and passed all four CTest targets with
-the optional Paramiko test dependency installed. The separate OpenSSH container
-test still requires Docker.
+Prompt/PowerShell so MSVC and the Windows SDK are available. The 2026-10-15
+Windows verification used the NMake generator and passed all six registered
+CTest targets with the Agent and optional Paramiko test dependencies installed:
+the C++ config/policy/network tests, Python client tests, service HTTP
+integration, Python Agent tests, SSH mock integration, and Agent-to-SSH
+integration. The real OpenSSH container test is separate and requires Docker.
 
 ## Run
 

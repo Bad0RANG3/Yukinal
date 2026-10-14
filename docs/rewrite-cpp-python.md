@@ -215,16 +215,17 @@ cmake --build native/build-nmake --config Release
 ctest --test-dir native/build-nmake -C Release --output-on-failure
 ```
 
-CTest passed all six registered targets: C++ config/policy tests, Python client
+CTest passed all six registered targets: C++ config/policy/network tests, Python client
 tests, the live Python-to-C++ HTTP integration tests, Agent Runtime tests, the
 Paramiko SSH mock integration, and the Agent-to-C++ mock integration. The HTTP
 path verified health, allowlist rejection, browser-origin rejection, and SSH
-connection-failure classification. The SSH mock path verified successful
-read-only execution and auth, timeout, output-cap, and host-key rejection. The
-Agent path verified selected-server binding and rejected a task-disallowed
-target and a model-supplied target override. The separate OpenSSH test container
-was not run because Docker is unavailable, so compatibility with an OpenSSH
-server remains unverified.
+connection-failure classification. A deliberately stalled DNS resolver
+returned at its operation deadline, and the SSH mock path verified successful
+read-only execution plus bounded command timeout, auth, output-cap, and
+host-key rejection. Agent tests verified selected-server binding and rejected a
+task-disallowed target and a model-supplied target override. The separate
+OpenSSH test container was not run because Docker is unavailable, so
+compatibility with an OpenSSH server remains unverified.
 
 Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`

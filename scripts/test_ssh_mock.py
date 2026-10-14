@@ -124,7 +124,8 @@ def start_ssh_mock(host_key: paramiko.RSAKey) -> tuple[socket.socket, threading.
 
 
 def expect_error(client: SshServiceClient, target_id: str, service: str,
-                 timeout: int, expected_code: str) -> None:
+                 timeout: int, expected_code: str, *, max_elapsed: float | None = None) -> None:
+    started = time.monotonic()
     try:
         client.service_status(target_id, service, timeout)
     except SshServiceError as error:
@@ -132,6 +133,11 @@ def expect_error(client: SshServiceClient, target_id: str, service: str,
             raise AssertionError(f"{service}: expected {expected_code}, received {error.code}: {error}") from error
         if BAD_PASSWORD in str(error):
             raise AssertionError("SSH error response exposed a credential") from error
+        elapsed = time.monotonic() - started
+        if max_elapsed is not None and elapsed > max_elapsed:
+            raise AssertionError(
+                f"{service}: {expected_code} took {elapsed:.2f}s; limit was {max_elapsed:.2f}s"
+            )
     else:
         raise AssertionError(f"{service}: expected {expected_code}")
 
@@ -275,7 +281,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
-            expect_error(client, "srv_stage1", "slow.service", 1, "timeout")
+            expect_error(client, "srv_stage1", "slow.service", 1, "timeout", max_elapsed=2.5)
             expect_error(client, "srv_stage1", "large.service", 5, "output_limit")
 
             known_hosts.write_text("", encoding="ascii")
