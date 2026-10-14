@@ -25,10 +25,13 @@ The current rewrite implements **milestones 1 through 3** from
   LangChain adapters;
 - a model-driven LangGraph tool loop with tenant/user/target/risk policy,
   exact-argument approval requests, and bounded model output.
+- the Python Node's bounded NDJSON/JSON-RPC transport and desktop initialization,
+  health, capability, and tool-catalog methods.
 
-Approval UI, durable task state, and desktop UI wiring remain later milestones.
-The new runtime is invoked by Python for now; the existing React/Tauri
-application has not yet been connected to it.
+The Python JSON-RPC layer is a migration foundation: run execution/provider RPC,
+the host-tool bridge, durable task state, and switching the desktop launcher to
+Python remain in progress. The existing React/Tauri UI remains intact while
+those paths are migrated.
 
 The C++ service is not yet connected to the desktop UI. The existing React
 components and their Tauri bridge are preserved. The existing Rust/Tauri

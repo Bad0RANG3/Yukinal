@@ -68,6 +68,16 @@ approval reference on a subsequent run; changed arguments produce a different
 fingerprint. Sensitive argument values are redacted from the review object.
 Tool calls still pass through the registry and policy on every execution.
 
+## Sidecar protocol
+
+Install `agent[agent,models]`, set `YUKINAL_DATA_DIR` to the private per-user
+data directory, and launch `yukinal-agent-node`. The process speaks version
+1.0 JSON-RPC 2.0 over newline-delimited stdin/stdout; stdout is reserved for
+frames and diagnostics go to stderr. Frames are capped at 24 MiB. The current
+Python sidecar implements `initialize`, `system.ping`, `tools.list`, and
+`system.describe`; remaining run/provider/approval RPCs and the desktop launcher
+switch are being migrated next.
+
 ## Register and run tools
 
 The embedding host supplies the authenticated identity, target allowlist and

@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = []
 
+[project.scripts]
+yukinal-agent-node = "yukinal_agent.sidecar:main"
+
 [project.optional-dependencies]
 test = ["paramiko>=3.5,<6"]
 agent = ["jsonschema>=4.22,<5", "langgraph>=1.2,<2", "mcp>=2,<3"]
