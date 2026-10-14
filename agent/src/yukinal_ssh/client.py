@@ -14,7 +14,7 @@ from .errors import SshServiceError, SshServiceTransportError
 
 _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
-_MAX_BODY_BYTES = 1024 * 1024
+_MAX_BODY_BYTES = 2 * 1024 * 1024
 _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 
 

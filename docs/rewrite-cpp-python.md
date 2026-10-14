@@ -6,9 +6,11 @@
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
-> hosts native UI IPC and existing platform services. The Python sidecar can call the C++ `service_status` operation when
-> configured; its
-> target is bound to the selected server ID, which must be present in the C++
+> hosts native UI IPC and some SSH paths. The Python sidecar can call the C++
+> `service_status` operation when configured; the desktop file browser uses
+> bounded C++ SFTP list/stat/read operations for password/private-key identities
+> without Host CA. Writes, transfers, PTY, and other authentication modes still
+> use Rust. Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
 > loopback health endpoint, and stops it with the Agent process. Automatic
@@ -121,14 +123,16 @@ executions exactly-once.
 `ModelDrivenAgent` pauses and resumes an exact approved call; rejection and
 expiry stop the graph without retrying the requested action.
 
-The service currently targets Unix-like hosts with systemd and Docker. The
-service configuration is the allowlist. Requests cannot provide a hostname,
-port, username, credential, or command. The service resolves a `target_id` to a
-configured target and accepts only `service_status` with one validated systemd
-unit name or the parameterless `service_inventory` operation. Both map to fixed
-read-only commands, and both run only after the target host key matches the
-configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
-keys fail closed.
+Service discovery currently targets Unix-like hosts with systemd and Docker.
+The service configuration is the allowlist. Requests cannot provide a hostname,
+port, username, credential, or arbitrary command. The service resolves a
+`target_id` to a configured target and accepts only `service_status`,
+`service_inventory`, and bounded SFTP `sftp_list`, `sftp_stat`, and `sftp_read`
+operations with validated parameters. Service operations map to fixed
+read-only commands; SFTP reads are capped at 1 MiB plus one sentinel byte.
+Every operation runs only after the target host key matches the configured
+OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed keys fail
+closed.
 
 The API token is read from an environment-variable reference in the config and
 must be 32–256 URL-safe characters. The HTTP handler rejects browser `Origin`
@@ -171,13 +175,15 @@ The desktop inventory request uses the same endpoint with no parameters:
 ```
 
 Only the documented fields are accepted. `service_status` requires exactly one
-validated unit name; `service_inventory` accepts no parameters. Timeouts are
-1–30 seconds, and stdout/stderr are capped at 64 KiB each.
+validated unit name; `service_inventory` accepts no parameters; SFTP operations
+accept only a path and, for reads, a maximum byte count no greater than 1 MiB.
+Timeouts are 1–30 seconds. Service command output is capped at 64 KiB per
+stream; SFTP listing and read responses have operation-specific limits.
 
-The desktop service panel launches a short-lived one-target C++ service for
-`service_inventory`. Its temporary configuration contains only target metadata
-and environment-variable names; credentials are passed to the child process
-environment and the process is stopped after the request.
+The desktop service panel and supported file browser calls launch a short-lived
+one-target C++ service. Its temporary configuration contains only target
+metadata and environment-variable names; credentials are passed to the child
+process environment and the process is stopped after the request.
 
 Completed request:
 
@@ -288,17 +294,17 @@ Python-to-C++ HTTP tests also passed in CTest.
 ## Deliberately deferred
 
 - removing the Node bundle and runtime transition fallback after installed-app parity;
-- packaging and supervising the C++ SSH service with the desktop app;
+- keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
 - write-capable tools in the desktop catalog and full desktop task/plan resume;
 - arbitrary shell commands outside the existing host's separately guarded task flow;
-- SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
+- SFTP writes, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
 The next milestones are installed-app parity checks, removing the Node fallback,
-packaging and supervising the C++ service, durable task/plan state, and automatic
-selected-target synchronization to the C++ service configuration, while keeping
+durable task/plan state, and automatic selected-target synchronization to the C++
+service configuration, while keeping
 host authorization as the final gate. A real SSH success against an OpenSSH
 server and installed frozen-Agent lifecycle remain unverified. Do not mark later
 product requirements as delivered by the scaffold or documentation.

@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -542,6 +543,41 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
   return true;
 }
 
+bool connect_sftp(const TargetConfig& target, Clock::time_point deadline,
+                  SshResources* resources, ExecResult* result) {
+  if (!connect_authenticated(target, deadline, resources, result)) return false;
+  if (!set_session_timeout(resources->session_, deadline)) {
+    fail(result, "timeout", "SFTP initialization timed out");
+    return false;
+  }
+  resources->sftp_ = libssh2_sftp_init(resources->session_);
+  if (!resources->sftp_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP initialization timed out" : "Could not initialize SFTP");
+    return false;
+  }
+  return true;
+}
+
+std::string base64_encode(const std::vector<unsigned char>& bytes) {
+  static constexpr char alphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string encoded;
+  encoded.reserve(((bytes.size() + 2) / 3) * 4);
+  for (std::size_t offset = 0; offset < bytes.size(); offset += 3) {
+    const unsigned int first = bytes[offset];
+    const unsigned int second = offset + 1 < bytes.size() ? bytes[offset + 1] : 0;
+    const unsigned int third = offset + 2 < bytes.size() ? bytes[offset + 2] : 0;
+    const unsigned int block = (first << 16) | (second << 8) | third;
+    encoded.push_back(alphabet[(block >> 18) & 0x3f]);
+    encoded.push_back(alphabet[(block >> 12) & 0x3f]);
+    encoded.push_back(offset + 1 < bytes.size() ? alphabet[(block >> 6) & 0x3f] : '=');
+    encoded.push_back(offset + 2 < bytes.size() ? alphabet[block & 0x3f] : '=');
+  }
+  return encoded;
+}
+
 }  // namespace
 
 static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
@@ -667,19 +703,7 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
 
   const auto deadline = started + std::chrono::seconds(timeout_seconds);
   SshResources resources;
-  if (!connect_authenticated(target, deadline, &resources, &result)) return result;
-  if (!set_session_timeout(resources.session_, deadline)) {
-    fail(&result, "timeout", "SFTP directory listing timed out");
-    return result;
-  }
-
-  resources.sftp_ = libssh2_sftp_init(resources.session_);
-  if (!resources.sftp_) {
-    const bool timed_out = remaining_ms(deadline) == 0;
-    fail(&result, timed_out ? "timeout" : "sftp_error",
-         timed_out ? "SFTP initialization timed out" : "Could not initialize SFTP");
-    return result;
-  }
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
   resources.sftp_handle_ = libssh2_sftp_open_ex(
       resources.sftp_, path.data(), static_cast<unsigned int>(path.size()), 0, 0,
       LIBSSH2_SFTP_OPENDIR);
@@ -738,6 +762,110 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
   return result;
 }
 
+ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SFTP metadata request parameters are invalid");
+    return result;
+  }
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SFTP metadata request timed out");
+    return result;
+  }
+
+  LIBSSH2_SFTP_ATTRIBUTES attributes{};
+  if (libssh2_sftp_stat_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size()),
+                           LIBSSH2_SFTP_LSTAT, &attributes) != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP metadata request timed out" : "Could not read remote path metadata");
+    return result;
+  }
+
+  std::string file_type = "other";
+  if ((attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0) {
+    switch (attributes.permissions & LIBSSH2_SFTP_S_IFMT) {
+      case LIBSSH2_SFTP_S_IFDIR: file_type = "directory"; break;
+      case LIBSSH2_SFTP_S_IFREG: file_type = "file"; break;
+      case LIBSSH2_SFTP_S_IFLNK: file_type = "symlink"; break;
+      default: break;
+    }
+  }
+  nlohmann::json output = {
+      {"kind", file_type},
+      {"size", (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0 ? attributes.filesize : 0},
+      {"modified", (attributes.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) != 0
+                       ? nlohmann::json(attributes.mtime)
+                       : nlohmann::json(nullptr)},
+  };
+  result.stdout_text = output.dump();
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
+ExecResult sftp_read(const TargetConfig& target, const std::string& path,
+                     std::uint32_t max_bytes, int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
+      max_bytes > 1024 * 1024 || timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The bounded SFTP read parameters are invalid");
+    return result;
+  }
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SFTP file read timed out");
+    return result;
+  }
+  resources.sftp_handle_ = libssh2_sftp_open_ex(
+      resources.sftp_, path.data(), static_cast<unsigned int>(path.size()), LIBSSH2_FXF_READ, 0,
+      LIBSSH2_SFTP_OPENFILE);
+  if (!resources.sftp_handle_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP file read timed out" : "Could not open the remote file for reading");
+    return result;
+  }
+
+  const std::size_t limit = static_cast<std::size_t>(max_bytes) + 1;
+  std::vector<unsigned char> bytes;
+  bytes.reserve(limit);
+  std::array<char, 32 * 1024> buffer{};
+  while (bytes.size() < limit) {
+    if (!set_session_timeout(resources.session_, deadline)) {
+      fail(&result, "timeout", "SFTP file read timed out");
+      return result;
+    }
+    const std::size_t remaining = limit - bytes.size();
+    const std::size_t requested = std::min(remaining, buffer.size());
+    const auto count = libssh2_sftp_read(resources.sftp_handle_, buffer.data(), requested);
+    if (count == 0) break;
+    if (count < 0) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "SFTP file read timed out" : "Could not read the remote file");
+      return result;
+    }
+    const auto read_count = static_cast<std::size_t>(count);
+    bytes.insert(bytes.end(), reinterpret_cast<const unsigned char*>(buffer.data()),
+                 reinterpret_cast<const unsigned char*>(buffer.data()) + read_count);
+  }
+  result.stdout_text = base64_encode(bytes);
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
@@ -747,6 +875,12 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "sftp_list") {
     return sftp_list(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_stat") {
+    return sftp_stat(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_read") {
+    return sftp_read(target, request.path, request.max_bytes, request.timeout_seconds);
   }
   ExecResult result;
   fail(&result, "unsupported_operation", "The requested structured SSH operation is not enabled");

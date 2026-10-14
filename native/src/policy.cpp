@@ -63,6 +63,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   const std::string operation = operation_it->get<std::string>();
   std::string service;
   std::string path;
+  std::uint32_t max_bytes = 0;
   if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -80,9 +81,9 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       set_error(error, 422, "invalid_parameters", "service_inventory accepts no parameters");
       return false;
     }
-  } else if (operation == "sftp_list") {
+  } else if (operation == "sftp_list" || operation == "sftp_stat") {
     if (!has_only_keys(*parameters_it, {"path"})) {
-      set_error(error, 422, "invalid_parameters", "sftp_list accepts only a path parameter");
+      set_error(error, 422, "invalid_parameters", "SFTP metadata operations accept only a path parameter");
       return false;
     }
     const auto path_it = parameters_it->find("path");
@@ -92,6 +93,36 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     path = path_it->get<std::string>();
+  } else if (operation == "sftp_read") {
+    if (!has_only_keys(*parameters_it, {"path", "max_bytes"})) {
+      set_error(error, 422, "invalid_parameters", "sftp_read accepts only path and max_bytes parameters");
+      return false;
+    }
+    const auto path_it = parameters_it->find("path");
+    const auto max_bytes_it = parameters_it->find("max_bytes");
+    if (path_it == parameters_it->end() || !path_it->is_string() ||
+        !valid_sftp_path(path_it->get<std::string>()) || max_bytes_it == parameters_it->end() ||
+        !(max_bytes_it->is_number_integer() || max_bytes_it->is_number_unsigned())) {
+      set_error(error, 422, "invalid_parameters", "sftp_read requires a valid path and max_bytes");
+      return false;
+    }
+    std::uint64_t requested_bytes = 0;
+    if (max_bytes_it->is_number_unsigned()) {
+      requested_bytes = max_bytes_it->get<std::uint64_t>();
+    } else {
+      const auto signed_bytes = max_bytes_it->get<std::int64_t>();
+      if (signed_bytes < 0) {
+        set_error(error, 422, "invalid_parameters", "max_bytes must be between 0 and 1048576");
+        return false;
+      }
+      requested_bytes = static_cast<std::uint64_t>(signed_bytes);
+    }
+    if (requested_bytes > 1024 * 1024) {
+      set_error(error, 422, "invalid_parameters", "max_bytes must be between 0 and 1048576");
+      return false;
+    }
+    path = path_it->get<std::string>();
+    max_bytes = static_cast<std::uint32_t>(requested_bytes);
   } else {
     set_error(error, 422, "unsupported_operation", "The requested structured SSH operation is not enabled");
     return false;
@@ -119,6 +150,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->operation = operation;
   request->service = std::move(service);
   request->path = std::move(path);
+  request->max_bytes = max_bytes;
   request->timeout_seconds = static_cast<int>(timeout);
   return true;
 }

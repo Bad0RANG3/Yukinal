@@ -11,6 +11,7 @@ use base64::Engine as _;
 use ring::rand::SecureRandom;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
+use yukinal_filesystem::{RemoteEntryKind, RemoteStat};
 
 use crate::state::AppState;
 
@@ -56,6 +57,68 @@ pub(crate) async fn sftp_list(
         .into_iter()
         .map(|entry| (entry.name, entry.file_type, entry.size))
         .collect())
+}
+
+pub(crate) async fn sftp_stat(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<RemoteStat, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Stat {
+        kind: String,
+        size: u64,
+        modified: Option<u32>,
+    }
+
+    let output = run_operation(app, state, server_id, "sftp_stat", json!({"path": path})).await?;
+    let stat: Stat = serde_json::from_str(&output)
+        .map_err(|_| "the C++ SSH service returned invalid SFTP metadata".to_string())?;
+    let kind = match stat.kind.as_str() {
+        "file" => RemoteEntryKind::File,
+        "directory" => RemoteEntryKind::Directory,
+        "symlink" => RemoteEntryKind::Symlink,
+        "other" => RemoteEntryKind::Other,
+        _ => return Err("the C++ SSH service returned invalid SFTP metadata".into()),
+    };
+    Ok(RemoteStat {
+        kind,
+        size: stat.size,
+        modified: stat.modified,
+    })
+}
+
+pub(crate) async fn sftp_read_bounded(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if max_bytes > 1024 * 1024 {
+        return Err("the requested SFTP read limit is too large".into());
+    }
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_read",
+        json!({"path": path, "max_bytes": max_bytes}),
+    )
+    .await?;
+    decode_sftp_read_output(&output, max_bytes)
+}
+
+fn decode_sftp_read_output(output: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(output.as_bytes())
+        .map_err(|_| "the C++ SSH service returned invalid file contents".to_string())?;
+    if bytes.len() > max_bytes.saturating_add(1) {
+        return Err("the C++ SSH service exceeded the requested SFTP read limit".into());
+    }
+    Ok(bytes)
 }
 
 async fn run_operation(
@@ -221,9 +284,10 @@ async fn request_operation(
         .await
         .map_err(|_| "the C++ SSH service request failed".to_string())?;
     let status = response.status();
+    const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
     if response
         .content_length()
-        .is_some_and(|length| length > 256 * 1024)
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
         return Err("the C++ SSH service response exceeded the size limit".into());
     }
@@ -231,7 +295,7 @@ async fn request_operation(
         .bytes()
         .await
         .map_err(|_| "the C++ SSH service returned invalid JSON".to_string())?;
-    if response_body.len() > 256 * 1024 {
+    if response_body.len() > MAX_RESPONSE_BYTES {
         return Err("the C++ SSH service response exceeded the size limit".into());
     }
     let body: Value = serde_json::from_slice(&response_body)
@@ -275,4 +339,19 @@ fn api_token() -> Result<String, String> {
         .fill(&mut bytes)
         .map_err(|_| "could not generate a local SSH service token".to_string())?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_sftp_read_output;
+
+    #[test]
+    fn bounded_sftp_read_decodes_binary_and_allows_one_truncation_byte() {
+        assert_eq!(
+            decode_sftp_read_output("YWxwaGEA", 5).expect("valid bounded response"),
+            b"alpha\0"
+        );
+        assert!(decode_sftp_read_output("YWxwaGEAYg==", 5).is_err());
+        assert!(decode_sftp_read_output("not base64", 5).is_err());
+    }
 }

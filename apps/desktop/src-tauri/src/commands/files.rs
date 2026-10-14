@@ -1,4 +1,4 @@
-//! UI's remote file browser: directory listing plus one bounded read.
+//! UI's remote file browser: directory listing, one bounded read, and metadata.
 //!
 //! The rules and the limits live in `yukinal-filesystem`; this module only does two things:
 //! adapt `TerminalService` (SFTP) to the capability's transport trait, and map results onto the
@@ -69,13 +69,12 @@ pub struct RemoteFileReadResponse {
     pub truncated: bool,
 }
 
-/// Desktop-side transport: C++ SFTP for supported browser listing calls, with the
-/// `TerminalService` path retained for the other file operations and auth modes.
+/// Desktop-side transport: C++ SFTP for supported browser reads, listings, and metadata,
+/// with `TerminalService` retained for writes and the other auth modes.
 ///
-/// It lives on this side of the boundary because it needs `AppState` and `ensure_session` —
-/// connection and credential resolution belong to the desktop layer, and the capability only sees
-/// [`RemoteFileTransport`]. Every operation establishes the session first; a cached session makes
-/// that a map lookup, so the extra call costs nothing on the hot path.
+/// It lives on this side of the boundary because it needs `AppState` and credentials. Connection
+/// and credential resolution belong to the desktop layer, and the capability only sees
+/// [`RemoteFileTransport`]. The Rust compatibility path ensures its cached session before use.
 pub(crate) struct TerminalFileTransport<'a> {
     state: &'a AppState,
     app: Option<AppHandle>,
@@ -156,6 +155,15 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
         path: &str,
         max_bytes: usize,
     ) -> TransportResult<Vec<u8>> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_read_bounded(
+                    app, self.state, server_id, path, max_bytes,
+                )
+                .await
+                .map_err(TransportError::new);
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;
@@ -205,6 +213,13 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
     }
 
     async fn stat(&self, server_id: &str, path: &str) -> TransportResult<RemoteStat> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_stat(app, self.state, server_id, path)
+                    .await
+                    .map_err(TransportError::new);
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;
@@ -311,11 +326,12 @@ pub async fn remote_file_list(
 
 #[tauri::command]
 pub async fn remote_file_read(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
     path: String,
 ) -> Result<RemoteFileReadResponse, String> {
-    let read = remote_file_service(&state, None)
+    let read = remote_file_service(&state, Some(&app))
         .browse_read(&server_id, &path)
         .await
         .map_err(|error| error.to_string())?;
@@ -339,6 +355,7 @@ pub async fn local_file_preview(
 
 #[tauri::command]
 pub async fn remote_file_preview(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
     path: String,
@@ -349,18 +366,19 @@ pub async fn remote_file_preview(
             "remote file path cannot contain traversal segments or backslashes".to_string(),
         );
     }
-    ensure_session(&state, &server_id).await?;
-    let stat = state
-        .terminals
-        .sftp_stat(&server_id, &path)
+    let transport = TerminalFileTransport {
+        state: &state,
+        app: Some(app),
+    };
+    let stat = transport
+        .stat(&server_id, &path)
         .await
         .map_err(|error| error.to_string())?;
-    if stat.kind != yukinal_ssh::SftpEntryKind::File {
+    if stat.kind != RemoteEntryKind::File {
         return Err("only regular remote files can be previewed".to_string());
     }
-    let bytes = state
-        .terminals
-        .sftp_read_bounded(&server_id, &path, MAX_FILE_PREVIEW_BYTES)
+    let bytes = transport
+        .read_bounded(&server_id, &path, MAX_FILE_PREVIEW_BYTES)
         .await
         .map_err(|error| error.to_string())?;
     let name = Path::new(&path)

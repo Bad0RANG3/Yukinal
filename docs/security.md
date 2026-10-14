@@ -2,7 +2,7 @@
 
 本页说明 Yukinal 当前实现和[目标架构](./architecture-and-build-plan.md)必须保持的信任边界。目标功能尚未全部实现；发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
-当前重写包含独立 C++ SSH 服务和 Python Agent。Python Agent 与桌面服务面板会为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。`service_status` 和 `service_inventory` 只执行固定只读操作。桌面交互终端、SFTP 文件操作、主机密钥探测及其他远程 SSH 路径仍有 Rust 协议实现，迁移尚未完成。
+当前重写包含独立 C++ SSH 服务和 Python Agent。Python Agent 与桌面服务面板会为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。服务状态查询使用固定操作；桌面文件浏览的目录枚举、属性和有界读取也通过 C++ SFTP 操作完成，适用于密码/私钥身份且未配置 Host CA 的服务器。文件变更、传输、交互终端、主机密钥探测、Agent 文件工具及其他未迁移路径仍使用 Rust SSH 协议实现。
 
 ## 谁能做决定
 

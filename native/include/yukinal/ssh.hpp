@@ -24,6 +24,9 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
                           int timeout_seconds);
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds);
 ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds);
+ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds);
+ExecResult sftp_read(const TargetConfig& target, const std::string& path,
+                     std::uint32_t max_bytes, int timeout_seconds);
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request);
 
 }  // namespace yukinal::ssh_service

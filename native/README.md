@@ -3,15 +3,18 @@
 The first rewrite milestone is a small, standalone C++ service. It binds only to
 `127.0.0.1`, accepts structured requests, resolves `target_id` from a configured
 allowlist and exposes read-only operations: `service_status` and
-`service_inventory`. Host keys
+`service_inventory`, plus bounded SFTP `sftp_list`, `sftp_stat`, and `sftp_read`.
+Host keys
 can be checked against an OpenSSH `known_hosts` file or an exact `SHA256:` pin
 from the desktop trust store. Private keys can come from a file or a named
 environment reference, which lets the desktop pass OS-keychain material without
 writing it into the service configuration.
 
-The service deliberately has no raw-command endpoint, terminal, or file transfer.
-The desktop service panel now starts a one-target instance for inventory calls;
-the interactive terminal and SFTP migration remains in progress.
+The service deliberately has no raw-command endpoint, interactive terminal, or
+SFTP write operations. The desktop service panel and supported desktop file
+browser calls start a one-target instance. File browsing uses the C++ SFTP path
+for password/private-key identities without a host CA; terminal, file changes,
+transfers, and other authentication/trust modes still use the Rust transport.
 
 ## Build
 
@@ -44,8 +47,9 @@ service exit if its parent dies without a graceful shutdown.
 
 The Python Agent and desktop service panel create a short-lived one-target
 allowlist from the selected desktop server record and OS keychain identity. The
-interactive terminal and SFTP paths still use the legacy Rust transport while
-their C++ service APIs are being built.
+desktop file browser routes listing, metadata, and bounded reads through the
+C++ service for supported password/private-key identities. SFTP mutations and
+interactive PTY sessions remain on the Rust transport during migration.
 
 ## Run
 

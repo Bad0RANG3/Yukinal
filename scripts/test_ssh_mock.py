@@ -75,6 +75,9 @@ class ExecServer(paramiko.ServerInterface):
 
 
 class StaticSftpInterface(paramiko.SFTPServerInterface):
+    CONTENTS = b"alpha\x00beta\n"
+    LARGE_CONTENTS = b"Z" * (1024 * 1024 + 32)
+
     def list_folder(self, path: str) -> list[paramiko.SFTPAttributes]:
         directory = paramiko.SFTPAttributes()
         directory.filename = "configs"
@@ -83,8 +86,50 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
         file = paramiko.SFTPAttributes()
         file.filename = "settings.toml"
         file.st_mode = stat.S_IFREG | 0o640
-        file.st_size = 42
+        file.st_size = len(self.CONTENTS)
+        file.st_atime = 123456789
+        file.st_mtime = 123456789
         return [directory, file]
+
+    def stat(self, path: str) -> paramiko.SFTPAttributes:
+        attributes = paramiko.SFTPAttributes()
+        if path == "/":
+            attributes.st_mode = stat.S_IFDIR | 0o755
+            attributes.st_size = 0
+        elif path == "/settings.toml":
+            attributes.st_mode = stat.S_IFREG | 0o640
+            attributes.st_size = len(self.CONTENTS)
+            attributes.st_atime = 123456789
+            attributes.st_mtime = 123456789
+        else:
+            return paramiko.SFTP_NO_SUCH_FILE
+        return attributes
+
+    def lstat(self, path: str) -> paramiko.SFTPAttributes:
+        return self.stat(path)
+
+    def open(self, path: str, flags: int, attr: paramiko.SFTPAttributes) -> paramiko.SFTPHandle:
+        write_flags = (
+            paramiko.sftp.SFTP_FLAG_WRITE
+            | paramiko.sftp.SFTP_FLAG_APPEND
+            | paramiko.sftp.SFTP_FLAG_CREATE
+            | paramiko.sftp.SFTP_FLAG_TRUNC
+            | paramiko.sftp.SFTP_FLAG_EXCL
+        )
+        if path not in {"/settings.toml", "/large.bin"} or flags & write_flags:
+            return paramiko.SFTP_PERMISSION_DENIED
+        handle = MemorySftpHandle(flags)
+        content = self.CONTENTS if path == "/settings.toml" else self.LARGE_CONTENTS
+        handle.readfile = io.BytesIO(content)
+        return handle
+
+
+class MemorySftpHandle(paramiko.SFTPHandle):
+    def read(self, offset: int, length: int) -> bytes:
+        if self.readfile is None:
+            return b""
+        self.readfile.seek(offset)
+        return self.readfile.read(length)
 
 
 def start_ssh_mock(
@@ -126,7 +171,7 @@ def start_ssh_mock(
                 channel.sendall(b"nginx.service loaded active running Nginx Web Server\n\n__YUKINAL_SOURCE__=systemd\n")
                 channel.send_exit_status(0)
             elif command == b"systemctl is-active -- slow.service":
-                time.sleep(3)
+                time.sleep(4)
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
             elif command == b"systemctl is-active -- large.service":
@@ -411,13 +456,47 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 raise AssertionError(f"SFTP listing was not JSON: {listing.stdout!r}") from error
             if listing_entries != [
                 {"name": "configs", "file_type": "directory", "size": 0},
-                {"name": "settings.toml", "file_type": "file", "size": 42},
+                {
+                    "name": "settings.toml",
+                    "file_type": "file",
+                    "size": len(StaticSftpInterface.CONTENTS),
+                },
             ]:
                 raise AssertionError(f"unexpected C++ SFTP listing: {listing_entries!r}")
+
+            stat_result = client._execute_operation(
+                "srv_desktop_style", "sftp_stat", {"path": "/settings.toml"}, timeout_seconds=5
+            )
+            stat_metadata = json.loads(stat_result.stdout)
+            if stat_metadata != {
+                "kind": "file",
+                "size": len(StaticSftpInterface.CONTENTS),
+                "modified": 123456789,
+            }:
+                raise AssertionError(f"unexpected C++ SFTP stat result: {stat_metadata!r}")
+
+            read_result = client._execute_operation(
+                "srv_desktop_style",
+                "sftp_read",
+                {"path": "/settings.toml", "max_bytes": 5},
+                timeout_seconds=5,
+            )
+            if base64.b64decode(read_result.stdout, validate=True) != StaticSftpInterface.CONTENTS[:6]:
+                raise AssertionError("C++ SFTP read did not return the bounded binary prefix and sentinel byte")
+
+            maximum_read = client._execute_operation(
+                "srv_desktop_style",
+                "sftp_read",
+                {"path": "/large.bin", "max_bytes": 1024 * 1024},
+                timeout_seconds=10,
+            )
+            maximum_bytes = base64.b64decode(maximum_read.stdout, validate=True)
+            if maximum_bytes != StaticSftpInterface.LARGE_CONTENTS[: 1024 * 1024 + 1]:
+                raise AssertionError("C++ SFTP read exceeded or missed its one-byte truncation bound")
             expect_error(client, "srv_bad_pin", "nginx.service", 5, "host_key_unverified")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
-            expect_error(client, "srv_stage1", "slow.service", 1, "timeout", max_elapsed=2.5)
+            expect_error(client, "srv_stage1", "slow.service", 2, "timeout", max_elapsed=3.5)
             expect_error(client, "srv_stage1", "large.service", 5, "output_limit")
 
             known_hosts.write_text("", encoding="ascii")
@@ -451,7 +530,7 @@ def main() -> int:
     if args.agent_runtime_only:
         print("PASS Agent SSH tool selected-target binding, task target allowlist, and model target override rejection")
     else:
-        print("PASS SSH success, authentication rejection, timeout, output cap, and unknown/changed host-key rejection")
+        print("PASS SSH exec, SFTP listing/stat/bounded binary read, auth rejection, timeout, output cap, and host-key rejection")
     return 0
 
 

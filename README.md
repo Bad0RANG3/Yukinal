@@ -1,18 +1,18 @@
 # Yukinal
 
 Yukinal is a desktop operations workspace for inspecting and managing SSH
-servers. The React interface remains the product UI; the current 2.0 rewrite is
-starting with a narrow C++ SSH service and a Python caller.
+servers. The React interface remains the product UI; the 2.0 rewrite moves SSH
+operations toward a C++ service and Python Agent.
 
 ## Rewrite status
 
-The repository has a verified **first-stage SSH service and Python caller**
-from [`ssh_agent_development_brief.md`](./ssh_agent_development_brief.md), plus
-partial Python Agent components for later stages:
+The brief's first SSH foundation stage is complete; the broader migration is
+still in progress. Current components include:
 
 - a standalone C++ service bound to `127.0.0.1`;
 - a Python caller over local HTTP/JSON;
-- read-only structured SSH operations: `service_status` and `service_inventory`;
+- read-only structured SSH operations: `service_status`, `service_inventory`,
+  and bounded SFTP `sftp_list`, `sftp_stat`, and `sftp_read` for the desktop file browser;
 - target allowlisting, strict SSH host-key verification, bounded timeouts and
   output, and credentials referenced from environment variables or private-key
   files;

@@ -77,6 +77,47 @@ YUKINAL_TEST(policy_accepts_bounded_sftp_directory_paths) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_validates_sftp_read_limits_and_metadata_parameters) {
+  ExecRequest request;
+  ApiError error;
+  const bool read_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_read"},
+       {"parameters", {{"path", "/var/log/app.log"}, {"max_bytes", 1048576}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(read_accepted);
+  YUKINAL_REQUIRE(request.path == "/var/log/app.log");
+  YUKINAL_REQUIRE(request.max_bytes == 1048576);
+
+  const bool oversized_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_read"},
+       {"parameters", {{"path", "/var/log/app.log"}, {"max_bytes", 1048577}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!oversized_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool negative_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_read"},
+       {"parameters", {{"path", "/var/log/app.log"}, {"max_bytes", -1}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!negative_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool stat_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_stat"},
+       {"parameters", {{"path", "/var/log/app.log"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(stat_accepted);
+  YUKINAL_REQUIRE(request.operation == "sftp_stat");
+}
+
 YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {
   ExecRequest request;
   ApiError error;

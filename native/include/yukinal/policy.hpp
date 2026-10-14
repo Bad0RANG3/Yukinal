@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -13,6 +14,7 @@ struct ExecRequest {
   std::string operation;
   std::string service;
   std::string path;
+  std::uint32_t max_bytes = 0;
   int timeout_seconds = 10;
 };
 
