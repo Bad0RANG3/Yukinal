@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import socket
 import stat
 import struct
@@ -318,7 +319,42 @@ def start_ssh_mock(
                     channel.sendall(b"echo:" + data)
                 return
             command = server.command or b""
-            if command == b"systemctl is-active -- nginx.service":
+            snapshot_match = re.search(rb"__YK_SNAPSHOT_([0-9a-f]{32})_os_detect_BEGIN__", command)
+            if snapshot_match:
+                nonce = snapshot_match.group(1).decode("ascii")
+                snapshot_values = {
+                    "os_detect": b"Linux\n",
+                    "os_release": b'NAME="Test Linux"\nVERSION_ID="1"\n',
+                    "os_kernel": b"6.1.0\n",
+                    "os_arch": b"x86_64\n",
+                    "os_hostname": b"mock-host\n",
+                    "cpu_detect": b"ok\n",
+                    "cpu_ticks_a": b"cpu 100 0 100 800\n",
+                    "cpu_wait": b"",
+                    "cpu_ticks_b": b"cpu 120 0 110 830\n",
+                    "cpu_cores": b"4\n",
+                    "cpu_model": b" Mock CPU\n",
+                    "cpu_load": b"0.10 0.20 0.30 1/20 99\n",
+                    "memory_detect": b"ok\n",
+                    "memory_info": b"MemTotal: 1024 kB\nMemAvailable: 512 kB\n",
+                    "uptime_detect": b"ok\n",
+                    "uptime_info": b"120.0 100.0\n",
+                    "disk_detect": b"ok\n",
+                    "disk_usage": b"Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/vda1 1000 250 750 25% /\n",
+                    "network_detect": b"ok\n",
+                    "network_info": b"Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n eth0: 100 1 0 0 0 0 0 0 200 2 0 0 0 0 0 0\n",
+                    "docker_detect": b"0\n",
+                    "docker_info": b"",
+                    "docker_ps": b'{"Names":"api","Image":"example/api","State":"running","Status":"Up","RestartCount":0}\n',
+                }
+                response = bytearray()
+                for operation, value in snapshot_values.items():
+                    response.extend(f"__YK_SNAPSHOT_{nonce}_{operation}_BEGIN__\n".encode())
+                    response.extend(value)
+                    response.extend(f"\n__YK_SNAPSHOT_{nonce}_{operation}_END_0__\n".encode())
+                channel.sendall(response)
+                channel.send_exit_status(0)
+            elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
             elif b"systemctl list-units --type=service" in command:
@@ -821,6 +857,15 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if agent_runtime_only:
                 exercise_agent_runtime(client, service_binary, desktop_target)
                 return
+
+            snapshot = client._execute_operation(
+                "srv_stage1",
+                "system_snapshot",
+                {"nonce": "0123456789abcdef0123456789abcdef"},
+                timeout_seconds=30,
+            )
+            if snapshot.exit_code != 0 or "Mock CPU" not in snapshot.stdout:
+                raise AssertionError(f"unexpected structured system snapshot: {snapshot!r}")
 
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:

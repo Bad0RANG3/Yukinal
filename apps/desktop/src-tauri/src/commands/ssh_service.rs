@@ -3,6 +3,7 @@
 //! Each desktop request gets a one-target allowlist and credentials passed only in the child
 //! environment. The temporary JSON contains target metadata and environment-variable names.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::TcpListener;
@@ -51,6 +52,89 @@ pub(crate) async fn connection_check(
     } else {
         Err("the C++ SSH service did not confirm the SSH connection".into())
     }
+}
+
+pub(crate) async fn system_snapshot(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+) -> Result<HashMap<String, (i32, String)>, String> {
+    const COMMAND_IDS: &[&str] = &[
+        "os_detect",
+        "os_release",
+        "os_kernel",
+        "os_arch",
+        "os_hostname",
+        "cpu_detect",
+        "cpu_ticks_a",
+        "cpu_ticks_b",
+        "cpu_cores",
+        "cpu_model",
+        "cpu_load",
+        "memory_detect",
+        "memory_info",
+        "uptime_detect",
+        "uptime_info",
+        "disk_detect",
+        "disk_usage",
+        "network_detect",
+        "network_info",
+        "docker_detect",
+        "docker_info",
+        "docker_ps",
+    ];
+    let mut random = [0_u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| "could not create a system snapshot request identifier")?;
+    let nonce = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "system_snapshot",
+        json!({ "nonce": nonce }),
+    )
+    .await?;
+
+    let mut results = HashMap::with_capacity(COMMAND_IDS.len());
+    for id in COMMAND_IDS {
+        let start_marker = format!("__YK_SNAPSHOT_{nonce}_{id}_BEGIN__\n");
+        let start = output.find(&start_marker).ok_or_else(|| {
+            "the C++ SSH service returned an incomplete system snapshot".to_string()
+        })?;
+        if output[start + start_marker.len()..].contains(&start_marker) {
+            return Err("the C++ SSH service returned an ambiguous system snapshot".into());
+        }
+        let data_start = start + start_marker.len();
+        let end_prefix = format!("\n__YK_SNAPSHOT_{nonce}_{id}_END_");
+        let end = output[data_start..]
+            .find(&end_prefix)
+            .map(|offset| data_start + offset)
+            .ok_or_else(|| {
+                "the C++ SSH service returned an incomplete system snapshot".to_string()
+            })?;
+        let status_start = end + end_prefix.len();
+        let status_end = output[status_start..]
+            .find("__\n")
+            .map(|offset| status_start + offset)
+            .ok_or_else(|| "the C++ SSH service returned an invalid system snapshot".to_string())?;
+        let exit_code = output[status_start..status_end]
+            .parse::<i32>()
+            .ok()
+            .filter(|status| (0..=255).contains(status))
+            .ok_or_else(|| {
+                "the C++ SSH service returned an invalid system snapshot status".to_string()
+            })?;
+        results.insert(
+            (*id).to_string(),
+            (exit_code, output[data_start..end].to_string()),
+        );
+    }
+    Ok(results)
 }
 
 pub(crate) async fn probe_host_key(
@@ -1552,11 +1636,16 @@ async fn request_operation(
     child: &mut std::process::Child,
 ) -> Result<Value, SshServiceFailure> {
     let base_url = format!("http://127.0.0.1:{port}");
+    let timeout_seconds = if operation == "system_snapshot" {
+        30
+    } else {
+        10
+    };
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(1))
-        .timeout(Duration::from_secs(12))
+        .timeout(Duration::from_secs(timeout_seconds + 2))
         .build()
         .map_err(|_| "could not create the local SSH service client".to_string())?;
 
@@ -1601,7 +1690,7 @@ async fn request_operation(
         "target_id": server_id,
         "operation": operation,
         "parameters": parameters,
-        "timeout_seconds": 10,
+        "timeout_seconds": timeout_seconds,
     }))
     .map_err(|_| "could not encode the local SSH service request".to_string())?;
     let response = client

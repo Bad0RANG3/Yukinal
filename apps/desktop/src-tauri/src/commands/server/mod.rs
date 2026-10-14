@@ -66,26 +66,38 @@ pub struct ServerSnapshotResponse {
 /// 采集器整组失败都会以错误结束，不会返回假数据）。
 #[tauri::command]
 pub async fn server_snapshot(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerSnapshotResponse, String> {
-    ensure_session(&state, &server_id).await?;
-
-    let session = state
-        .terminals
-        .cached_session(&server_id)
-        .map_err(|error| error.to_string())?;
     let collected_at = yukinal_core::sidecar::iso8601_now();
-
-    let (snapshot, _samples) = yukinal_core::collector::collect_snapshot(
-        &state.ssh,
-        &session,
-        &server_id,
-        &collected_at,
-        &tokio_util::sync::CancellationToken::new(),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (snapshot, _samples) = if ssh_service::supports_cpp_target(&state, &server_id)? {
+        let outputs = ssh_service::system_snapshot(&app, &state, &server_id).await?;
+        yukinal_core::collector::collect_snapshot_with_command_results(
+            &server_id,
+            &collected_at,
+            &cancel,
+            outputs,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+    } else {
+        ensure_session(&state, &server_id).await?;
+        let session = state
+            .terminals
+            .cached_session(&server_id)
+            .map_err(|error| error.to_string())?;
+        yukinal_core::collector::collect_snapshot(
+            &state.ssh,
+            &session,
+            &server_id,
+            &collected_at,
+            &cancel,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+    };
 
     // 先入库（audit / 趋势都靠 snapshots 行），再返回给 UI。
     state

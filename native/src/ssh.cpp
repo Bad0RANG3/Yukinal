@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -1358,6 +1359,52 @@ ExecResult connection_check(const TargetConfig& target, int timeout_seconds) {
   return result;
 }
 
+ExecResult system_snapshot(const TargetConfig& target, const std::string& nonce,
+                           int timeout_seconds) {
+  if (target.probe_only || nonce.size() != 32 || timeout_seconds < 1 || timeout_seconds > 30 ||
+      !std::all_of(nonce.begin(), nonce.end(), [](unsigned char byte) {
+        return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+      })) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The system snapshot parameters are invalid");
+    return result;
+  }
+  static constexpr std::pair<std::string_view, std::string_view> commands[] = {
+      {"os_detect", "uname -s 2>/dev/null; test $? -eq 0"},
+      {"os_release", "cat /etc/os-release 2>/dev/null"},
+      {"os_kernel", "uname -r"},
+      {"os_arch", "uname -m"},
+      {"os_hostname", "hostname"},
+      {"cpu_detect", "test -r /proc/stat && echo ok"},
+      {"cpu_ticks_a", "head -n1 /proc/stat"},
+      {"cpu_wait", "sleep 0.12"},
+      {"cpu_ticks_b", "head -n1 /proc/stat"},
+      {"cpu_cores", "nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo"},
+      {"cpu_model", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"},
+      {"cpu_load", "cat /proc/loadavg"},
+      {"memory_detect", "test -r /proc/meminfo && echo ok"},
+      {"memory_info", "cat /proc/meminfo"},
+      {"uptime_detect", "test -r /proc/uptime && echo ok"},
+      {"uptime_info", "cat /proc/uptime"},
+      {"disk_detect", "command -v df >/dev/null && echo ok"},
+      {"disk_usage", "df -B1 -P 2>/dev/null"},
+      {"network_detect", "test -r /proc/net/dev && echo ok"},
+      {"network_info", "cat /proc/net/dev"},
+      {"docker_detect", "docker info >/dev/null 2>&1; echo $?"},
+      {"docker_info", "docker info >/dev/null 2>&1"},
+      {"docker_ps", "docker ps -a --format '{{json .}}' 2>/dev/null"},
+  };
+  std::string command;
+  command.reserve(8192);
+  for (const auto& [id, probe] : commands) {
+    command += "printf '__YK_SNAPSHOT_" + nonce + "_" + std::string(id) + "_BEGIN__\\n'; ";
+    command += probe;
+    command += "; yk_snapshot_status=$?; printf '\\n__YK_SNAPSHOT_" + nonce + "_" +
+               std::string(id) + "_END_%s__\\n' \"$yk_snapshot_status\"; ";
+  }
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   static constexpr char command[] =
       "if command -v systemctl >/dev/null 2>&1; then "
@@ -2510,6 +2557,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "connection_check") {
     return connection_check(target, request.timeout_seconds);
+  }
+  if (request.operation == "system_snapshot") {
+    return system_snapshot(target, request.nonce, request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);

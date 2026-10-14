@@ -109,6 +109,12 @@ bool valid_sftp_path(const std::string& value) {
   return !value.empty() && value.size() <= 4096 && value.find('\0') == std::string::npos;
 }
 
+bool valid_snapshot_nonce(const std::string& value) {
+  return value.size() == 32 && std::all_of(value.begin(), value.end(), [](unsigned char byte) {
+    return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+  });
+}
+
 bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiError* error) {
   if (!value.is_object() || !has_only_keys(value, {"target_id", "operation", "parameters", "timeout_seconds"})) {
     set_error(error, 400, "invalid_request", "Request must contain only the documented fields");
@@ -138,6 +144,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string path;
   std::string source_path;
   std::string destination_path;
+  std::string nonce;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -149,6 +156,18 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       set_error(error, 422, "invalid_parameters", "connection_check accepts no parameters");
       return false;
     }
+  } else if (operation == "system_snapshot") {
+    if (!has_only_keys(*parameters_it, {"nonce"})) {
+      set_error(error, 422, "invalid_parameters", "system_snapshot accepts only a nonce parameter");
+      return false;
+    }
+    const auto nonce_it = parameters_it->find("nonce");
+    if (nonce_it == parameters_it->end() || !nonce_it->is_string() ||
+        !valid_snapshot_nonce(nonce_it->get<std::string>())) {
+      set_error(error, 422, "invalid_parameters", "system_snapshot nonce must be 32 lowercase hexadecimal characters");
+      return false;
+    }
+    nonce = nonce_it->get<std::string>();
   } else if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -411,6 +430,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->path = std::move(path);
   request->source_path = std::move(source_path);
   request->destination_path = std::move(destination_path);
+  request->nonce = std::move(nonce);
   request->content = std::move(content);
   request->since_seconds = since_seconds;
   request->expected_size = expected_size;

@@ -11,7 +11,8 @@ still in progress. Current components include:
 
 - a standalone C++ service bound to `127.0.0.1`;
 - a Python caller over local HTTP/JSON;
-- structured SSH operations: `service_status`, `service_inventory`, and
+- structured SSH operations: `connection_check`, `system_snapshot`,
+  `service_status`, `service_inventory`, and
   bounded SFTP listing, metadata, read, write, exclusive backup creation, removal,
   guarded atomic replacement, and link-count probes for supported desktop Agent identities;
 - target allowlisting, strict SSH host-key verification, bounded timeouts and

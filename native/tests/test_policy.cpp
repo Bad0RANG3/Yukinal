@@ -45,6 +45,38 @@ YUKINAL_TEST(policy_accepts_service_inventory_without_parameters) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_accepts_only_a_bounded_system_snapshot_nonce) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "system_snapshot"},
+       {"parameters", {{"nonce", "0123456789abcdef0123456789abcdef"}}},
+       {"timeout_seconds", 30}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.operation == "system_snapshot");
+  YUKINAL_REQUIRE(request.nonce == "0123456789abcdef0123456789abcdef");
+
+  const bool injected_nonce_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "system_snapshot"},
+       {"parameters", {{"nonce", "0123456789abcdef0123456789abcdef;id"}}},
+       {"timeout_seconds", 30}},
+      &request, &error);
+  YUKINAL_REQUIRE(!injected_nonce_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool extra_parameter_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "system_snapshot"},
+       {"parameters", {{"nonce", "0123456789abcdef0123456789abcdef"}, {"command", "id"}}},
+       {"timeout_seconds", 30}},
+      &request, &error);
+  YUKINAL_REQUIRE(!extra_parameter_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_host_key_probe_without_parameters) {
   ExecRequest request;
   ApiError error;
