@@ -290,6 +290,11 @@ pub(crate) async fn probe_host_key(
     state: &AppState,
     server_id: &str,
 ) -> Result<Option<String>, String> {
+    let proxy =
+        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
+    if proxy.proxy != yukinal_net::NetworkProxy::Direct {
+        return Ok(None);
+    }
     let target_payload =
         super::sidecar::resolve_ssh_service_probe_target(state, json!({ "serverId": server_id }))?;
     let response = match run_operation_response_with_target(
