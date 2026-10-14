@@ -59,7 +59,7 @@ class PythonSidecarTests(unittest.TestCase):
         }))
         self.assertEqual(initialized["result"]["agentVersion"], "0.3.0")
         self.assertEqual(initialized["result"]["capabilities"], {
-            "streaming": False, "toolCalling": False, "cancellation": False, "mcp": False,
+            "streaming": False, "toolCalling": True, "cancellation": True, "mcp": False,
         })
 
         tools = sidecar.handle(_request(3, "tools.list"))["result"]["tools"]
@@ -69,7 +69,7 @@ class PythonSidecarTests(unittest.TestCase):
         described = sidecar.handle(_request(4, "system.describe"))["result"]
         self.assertEqual(described["toolCount"], 1)
         self.assertEqual(described["permissionPolicyIds"], [])
-        self.assertFalse(described["implemented"]["agent.run.start"])
+        self.assertTrue(described["implemented"]["agent.run.start"])
         self.assertEqual(sidecar.handle(_request(5, "system.ping", {"echo": "hello"}))["result"], {"pong": "hello"})
 
     def test_invalid_params_unknown_and_unimplemented_methods_are_explicit(self) -> None:
@@ -101,8 +101,12 @@ class PythonSidecarTests(unittest.TestCase):
         with patch("sys.stderr", new=io.StringIO()):
             asyncio.run(serve_stdio(sidecar, reader=stream, writer=output))
         frames = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual([frame["id"] for frame in frames], [1, 2])
-        self.assertEqual(frames[-1]["result"], {"pong": "pong"})
+        responses = [frame for frame in frames if "method" not in frame]
+        host_requests = [frame for frame in frames if "method" in frame]
+        response_by_id = {frame["id"]: frame for frame in responses}
+        self.assertEqual(set(response_by_id), {1, 2})
+        self.assertEqual(response_by_id[2]["result"], {"pong": "pong"})
+        self.assertEqual([frame["method"] for frame in host_requests], ["host.mcp.catalog"])
 
     def test_python_module_entrypoint_completes_desktop_handshake(self) -> None:
         async def run() -> tuple[int, bytes, bytes]:
@@ -130,9 +134,13 @@ class PythonSidecarTests(unittest.TestCase):
         code, stdout, stderr = asyncio.run(run())
         self.assertEqual(code, 0, stderr.decode("utf-8", errors="replace"))
         frames = [json.loads(line) for line in stdout.splitlines()]
-        self.assertEqual([frame["id"] for frame in frames], [41, 42])
-        self.assertEqual(frames[0]["result"]["protocolVersion"], "1.0")
-        self.assertEqual(frames[1]["result"]["pong"], "pong")
+        responses = [frame for frame in frames if "method" not in frame]
+        host_requests = [frame for frame in frames if "method" in frame]
+        response_by_id = {frame["id"]: frame for frame in responses}
+        self.assertEqual(set(response_by_id), {41, 42})
+        self.assertEqual(response_by_id[41]["result"]["protocolVersion"], "1.0")
+        self.assertEqual(response_by_id[42]["result"]["pong"], "pong")
+        self.assertEqual([frame["method"] for frame in host_requests], ["host.mcp.catalog"])
         self.assertIn(b"Python Agent Node ready", stderr)
 
 

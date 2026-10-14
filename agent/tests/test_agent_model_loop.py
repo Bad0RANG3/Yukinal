@@ -172,6 +172,57 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("untrusted data", model.seen_messages[0][0].content)
         self.assertEqual(model.seen_messages[1][-1].type, "tool")
 
+    async def test_tool_lifecycle_events_share_call_identity_and_redact_secrets(self) -> None:
+        events: list[dict[str, Any]] = []
+        handler_call_ids: list[str] = []
+
+        async def handler(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, str]:
+            handler_call_ids.append(context.call_id)
+            return {"api_key": "sk-proj-1234567890abcdef"}
+
+        registry = ToolRegistry(MemoryAuditSink())
+        registry.register(ToolSpec(
+            name="ops.read",
+            description="Read a safe test value.",
+            input_schema={
+                "type": "object",
+                "properties": {"password": {"type": "string"}},
+                "required": ["password"],
+                "additionalProperties": False,
+            },
+            risk_level="read",
+            requires_approval=False,
+            handler=handler,
+            target_id_argument=None,
+        ))
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "ops.read", "args": {"password": "secret-input"}, "id": "model-call-1", "type": "tool_call"
+            }]),
+            AIMessage(content="Done."),
+        ])
+        agent = ModelDrivenAgent(registry, model, event_sink=events.append)
+        result = await agent.run(
+            task_id="task-events", tenant_id="tenant-1", user_id="user-1", prompt="Read the value.",
+            allowed_tools={"ops.read"}, allowed_target_ids=set(),
+            host_target={"host": "local", "environment": "local"},
+            run_id="run-events", trace_id="trace-events",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result"])
+        call_event, result_event = events
+        self.assertEqual(call_event["runId"], "run-events")
+        self.assertEqual(call_event["traceId"], "trace-events")
+        self.assertEqual(call_event["input"], {"password": "[redacted]"})
+        self.assertEqual(call_event["decision"], "auto")
+        self.assertEqual(call_event["riskLevel"], "read")
+        self.assertEqual(result_event["callId"], call_event["callId"])
+        self.assertEqual(handler_call_ids, [call_event["callId"]])
+        self.assertEqual(result_event["status"], "success")
+        self.assertNotIn("sk-proj-1234567890abcdef", result_event["outputSummary"])
+        self.assertNotIn("secret-input", str(call_event["input"]))
+
     async def test_write_action_waits_for_exact_approval_and_redacts_secret(self) -> None:
         executions: list[dict[str, Any]] = []
 
