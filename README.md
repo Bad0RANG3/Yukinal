@@ -86,6 +86,13 @@ replace the target fields, create its OpenSSH `known_hosts` entry, and set
 configuration keeps SSH credentials as a private-key path or a reference to an
 environment variable; it never stores a password value.
 
+Desktop SSH targets also follow the app's selected proxy route. The C++ service
+accepts an optional target `proxy` with `type: "http_connect"`, a proxy `host`
+and `port`, and an optional `auth_env` reference. Proxy credentials belong in
+that environment variable, not in the JSON file. The desktop uses this route
+only for plain HTTP proxies without `NO_PROXY` bypass rules; HTTPS proxies and
+routes with bypass rules stay on the Rust compatibility path.
+
 The Python client can be installed for development with:
 
 ```powershell
@@ -123,11 +130,12 @@ python -m pip install -e "agent[agent,test]"
 ```
 
 CMake registers `ssh_mock_integration` when Paramiko is available. This test
-covers SSH success, bad credentials, timeouts, output limits, and unknown or
-changed host keys without requiring Docker. When the Agent dependencies are also
-installed, `agent_ssh_mock_integration` exercises the Python Agent tool through
-the C++ service and checks selected-server binding, the task target allowlist,
-and rejection of model-supplied target overrides.
+covers SSH success, HTTP CONNECT success and proxy-auth rejection, bad SSH
+credentials, timeouts, output limits, and unknown or changed host keys without
+requiring Docker. When the Agent dependencies are also installed,
+`agent_ssh_mock_integration` exercises the Python Agent tool through the C++
+service and checks selected-server binding, the task target allowlist, and
+rejection of model-supplied target overrides.
 
 Its only enabled operation is:
 
@@ -138,6 +146,21 @@ client = SshServiceClient(token="same-token-as-YUKINAL_SSH_API_TOKEN")
 result = client.service_status("staging-web-01", "nginx.service")
 print(result.stdout.strip(), result.exit_code)
 ```
+
+## Common connection errors
+
+- `host_key_unverified`: the server's key does not match the saved pin or
+  `known_hosts` entry. Confirm the server identity through the desktop trust
+  flow before retrying.
+- `authentication_failed`: check the selected SSH identity, key file or
+  credential-store reference, and any private-key passphrase.
+- `proxy_auth_required`: the HTTP proxy rejected its Basic credential or the
+  configured `auth_env` is missing. Store `user:password` in that environment
+  variable; do not place it in the service JSON.
+- `proxy_connect_failed`: the proxy did not open a CONNECT tunnel. Check the
+  proxy host/port and whether it allows CONNECT to the SSH server port.
+- `timeout` or `resolver_busy`: retry after checking DNS, network reachability,
+  and the operation timeout. DNS lookups have a bounded worker pool.
 
 The Agent Runtime setup, MCP configuration and direct workflow example are in
 [`agent/README.md`](./agent/README.md). The combined extras above let CTest
