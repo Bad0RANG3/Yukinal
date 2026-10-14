@@ -105,6 +105,9 @@ class ExecutionContext:
     context_target_id: str | None = None
     host_target: Mapping[str, Any] | None = None
     host_task_id: str | None = None
+    plan_id: str | None = None
+    plan_step_id: str | None = None
+    evidence_ids: tuple[str, ...] = ()
     run_id: str = ""
     trace_id: str = ""
     call_id: str = ""
@@ -126,6 +129,27 @@ class ExecutionContext:
             raise ValueError("host_target must be an object")
         if self.host_task_id is not None and (not isinstance(self.host_task_id, str) or not _IDENTIFIER.fullmatch(self.host_task_id)):
             raise ValueError("host_task_id has an invalid format")
+        for field_name in ("plan_id", "plan_step_id"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not _IDENTIFIER.fullmatch(value)):
+                raise ValueError(f"{field_name} has an invalid format")
+        if (self.plan_id is None) != (self.plan_step_id is None):
+            raise ValueError("plan_id and plan_step_id must be provided together")
+        if self.plan_id is None and self.evidence_ids:
+            raise ValueError("evidence_ids require a plan binding")
+        if (
+            not isinstance(self.evidence_ids, tuple)
+            or len(self.evidence_ids) > 128
+            or any(not isinstance(item, str) or not _IDENTIFIER.fullmatch(item) for item in self.evidence_ids)
+            or len(set(self.evidence_ids)) != len(self.evidence_ids)
+        ):
+            raise ValueError("evidence_ids contains an invalid evidence id")
+        if self.plan_id is not None and (
+            self.host_task_id is None
+            or not isinstance(self.host_target, Mapping)
+            or self.host_target.get("host") != "remote"
+        ):
+            raise ValueError("plan bindings require a durable remote task target")
         for field_name in ("run_id", "trace_id", "call_id"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or (value and not _IDENTIFIER.fullmatch(value)):

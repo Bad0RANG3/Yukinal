@@ -313,7 +313,7 @@ fn host_tool_request_fingerprint(request: &HostToolExecuteRequest) -> Result<Str
 
 /// Match the sidecar's `actionFingerprint` for JSON inputs. `serde_json::Map`
 /// uses lexicographically ordered keys, as does the Agent's UTF-8 canonicalizer.
-pub(super) fn server_exec_input_fingerprint(input: &Value) -> Result<String, String> {
+pub(crate) fn server_exec_input_fingerprint(input: &Value) -> Result<String, String> {
     fn canonicalize(value: &Value) -> Value {
         match value {
             Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),

@@ -20,6 +20,8 @@ from yukinal_agent.sidecar import (
     RPC_NOT_IMPLEMENTED,
     PythonSidecar,
     _allowed_tool_names,
+    _parse_run_request,
+    _RpcFault,
     serve_stdio,
 )
 
@@ -142,7 +144,7 @@ class PythonSidecarTests(unittest.TestCase):
                 "awaiting_approval",
                 "",
                 ({"call_id": "call-ui-1", "status": "awaiting_approval"},),
-                (ApprovalRequest("a" * 64, "ops.write", "srv_stage1", "write", {"password": "[redacted]"}),),
+                (ApprovalRequest("a" * 64, "server.exec", "srv_stage1", "destructive", {"password": "[redacted]"}),),
                 1,
                 0,
                 "approval_required",
@@ -151,6 +153,7 @@ class PythonSidecarTests(unittest.TestCase):
             approval_task = asyncio.create_task(sidecar._await_approval({
                 "taskId": "task-ui",
                 "hostTarget": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+                "planBinding": {"planId": "plan-ui", "planStepId": "step-ui", "evidenceIds": ["ev-ui"]},
             }, "run-ui-1", agent, result))
             await asyncio.sleep(0)
             method, event = notifications[-1]
@@ -172,6 +175,9 @@ class PythonSidecarTests(unittest.TestCase):
             self.assertEqual(event["type"], "agent.waiting_approval")
             self.assertEqual(event["approval"]["callId"], "call-ui-1")
             self.assertEqual(event["approval"]["inputFingerprint"], "a" * 64)
+            self.assertEqual(event["approval"]["planId"], "plan-ui")
+            self.assertEqual(event["approval"]["planStepId"], "step-ui")
+            self.assertEqual(event["approval"]["evidenceIds"], ["ev-ui"])
             self.assertFalse(event["approval"]["sessionGrantable"])
             self.assertTrue(response["result"]["accepted"])
             self.assertEqual(resumed.answer, "approved")
@@ -235,6 +241,40 @@ class PythonSidecarTests(unittest.TestCase):
         resumed, calls, event = asyncio.run(run_rejection())
         self.assertEqual(resumed.answer, "stopped")
         self.assertEqual(calls, [("agent-checkpoint-2", "b" * 64, None, False, "approval_rejected")])
+
+    def test_run_request_validates_and_preserves_durable_plan_binding(self) -> None:
+        parsed = _parse_run_request({
+            "runId": "run-plan",
+            "sessionId": "session-plan",
+            "taskId": "task-plan",
+            "prompt": "run the approved step",
+            "focusServerId": "srv_stage1",
+            "target": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            "planBinding": {
+                "planId": "plan-current",
+                "planStepId": "step-action",
+                "evidenceIds": ["ev-1", "ev-2"],
+            },
+        })
+        self.assertEqual(parsed["planBinding"], {
+            "planId": "plan-current",
+            "planStepId": "step-action",
+            "evidenceIds": ["ev-1", "ev-2"],
+        })
+        with self.assertRaises(_RpcFault) as raised:
+            _parse_run_request({
+                "runId": "run-plan",
+                "sessionId": "session-plan",
+                "taskId": "task-plan",
+                "prompt": "run the approved step",
+                "target": {"host": "local", "environment": "local"},
+                "planBinding": {
+                    "planId": "plan-current",
+                    "planStepId": "step-action",
+                    "evidenceIds": ["ev-1", "ev-1"],
+                },
+            })
+        self.assertEqual(raised.exception.code, RPC_INVALID_PARAMS)
 
     def test_notifications_receive_no_response_and_bad_frames_are_dropped(self) -> None:
         sidecar = PythonSidecar(_registry())

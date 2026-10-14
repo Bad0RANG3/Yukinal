@@ -13,6 +13,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Notify;
 
+use crate::commands::host::server_exec_input_fingerprint;
+
 const SERVER_EXEC: &str = "server.exec";
 const MAX_TICKETS: usize = 256;
 const MAX_APPROVAL_TTL_SECONDS: u64 = 180;
@@ -73,6 +75,7 @@ struct ApprovalEvent {
     trace_id: String,
     call_id: String,
     tool_name: String,
+    input: Value,
     input_fingerprint: String,
     target: ApprovalTarget,
     expires_at: String,
@@ -130,9 +133,8 @@ pub(crate) enum ServerExecTicketError {
 }
 
 impl HostApprovalLedger {
-    /// Capture only well-formed server command approvals. The input itself stays
-    /// redacted in the stream; its fingerprint binds the eventual host request to
-    /// the exact original input without copying command text into this ledger.
+    /// Capture only well-formed server command approvals. Retain a host-computed
+    /// fingerprint instead of copying command text into this in-memory ledger.
     pub(crate) fn record_waiting_event(&self, params: &Value, now: u64) -> Result<bool, String> {
         let event = serde_json::from_value::<WaitingApprovalEvent>(params.clone())
             .map_err(|_| "approval event is missing host binding fields".to_string())?;
@@ -185,6 +187,13 @@ impl HostApprovalLedger {
         let Some(server_id) = event.approval.target.server_id else {
             return Err("server.exec approval requires a resolved server".into());
         };
+        if !event.approval.input.is_object() {
+            return Err("server.exec approval input must be an object".into());
+        }
+        // The sidecar fingerprint includes Python authorization context. Tickets
+        // instead bind to the exact host-tool input, using the same canonical JSON
+        // fingerprint that the Rust executor recomputes before it opens SSH.
+        let input_fingerprint = server_exec_input_fingerprint(&event.approval.input)?;
 
         let binding = ApprovalBinding {
             approval_id: event.approval.approval_id,
@@ -192,7 +201,7 @@ impl HostApprovalLedger {
             trace_id: event.approval.trace_id,
             call_id: event.approval.call_id,
             tool_name: event.approval.tool_name,
-            input_fingerprint: event.approval.input_fingerprint,
+            input_fingerprint,
             target_host: event.approval.target.host,
             server_id,
             workspace_id: event.approval.target.workspace_id,
@@ -405,8 +414,10 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
     const EXPIRY: &str = "2027-01-15T08:02:00Z";
-    const INPUT_FINGERPRINT: &str =
+    const SIDECAR_INPUT_FINGERPRINT: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const INPUT_FINGERPRINT: &str =
+        "e7f4c8955b0f073290e4877f41c370cedd9083cd502d18a58294774789adc689";
 
     fn waiting_event() -> serde_json::Value {
         json!({
@@ -420,7 +431,7 @@ mod tests {
                 "callId": "call_1",
                 "toolName": "server.exec",
                 "input": { "command": "systemctl restart api" },
-                "inputFingerprint": INPUT_FINGERPRINT,
+                "inputFingerprint": SIDECAR_INPUT_FINGERPRINT,
                 "target": {
                     "host": "remote",
                     "serverId": "srv_1",

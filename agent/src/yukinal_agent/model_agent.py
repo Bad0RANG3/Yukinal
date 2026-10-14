@@ -82,6 +82,9 @@ class _AgentState(TypedDict, total=False):
     approved_actions: dict[str, str]
     host_target: dict[str, Any]
     host_task_id: str
+    plan_id: str
+    plan_step_id: str
+    evidence_ids: list[str]
     run_id: str
     trace_id: str
     checkpoint_binding: str
@@ -163,6 +166,9 @@ class ModelDrivenAgent:
         approved_actions: dict[str, str] | None = None,
         host_target: dict[str, Any] | None = None,
         host_task_id: str | None = None,
+        plan_id: str | None = None,
+        plan_step_id: str | None = None,
+        evidence_ids: tuple[str, ...] = (),
         run_id: str = "",
         trace_id: str = "",
         checkpoint_binding: str = "",
@@ -180,6 +186,9 @@ class ModelDrivenAgent:
                 approved_actions=approved_actions or {},
                 host_target=host_target,
                 host_task_id=host_task_id,
+                plan_id=plan_id,
+                plan_step_id=plan_step_id,
+                evidence_ids=evidence_ids,
                 run_id=run_id,
                 trace_id=trace_id,
                 context_target_id=(
@@ -203,6 +212,7 @@ class ModelDrivenAgent:
             "approved_actions": dict(context.approved_actions),
             **({"host_target": dict(host_target)} if host_target is not None else {}),
             **({"host_task_id": host_task_id} if host_task_id else {}),
+            **({"plan_id": plan_id, "plan_step_id": plan_step_id, "evidence_ids": list(evidence_ids)} if plan_id is not None else {}),
             "run_id": run_id,
             "trace_id": trace_id,
             "checkpoint_binding": checkpoint_binding,
@@ -432,6 +442,9 @@ class ModelDrivenAgent:
             approved_actions=state["approved_actions"],
             host_target=state.get("host_target"),
             host_task_id=state.get("host_task_id"),
+            plan_id=state.get("plan_id"),
+            plan_step_id=state.get("plan_step_id"),
+            evidence_ids=tuple(state.get("evidence_ids", [])),
             run_id=state.get("run_id", ""),
             trace_id=state.get("trace_id", ""),
             context_target_id=(

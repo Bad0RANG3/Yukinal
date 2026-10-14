@@ -5,10 +5,28 @@ import re
 from typing import Any
 
 from .host_rpc import HostRpcClient
-from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
+from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec, approval_fingerprint
 
 _BASE_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {}}
 _MCP_INPUT_SCHEMA = {"type": "object", "additionalProperties": True}
+_SERVER_EXEC_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["command", "purpose", "timeoutMs", "maxOutputBytes"],
+    "properties": {
+        "command": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 512},
+        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "maxOutputBytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "workdir": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000-\\u001f]*$"},
+        "env": {
+            "type": "object",
+            "maxProperties": 16,
+            "propertyNames": {"enum": ["LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_TIME", "LC_NUMERIC", "LC_COLLATE", "TZ", "TERM"]},
+            "additionalProperties": {"type": "string", "maxLength": 256},
+        },
+    },
+}
 
 
 def register_host_tools(registry: ToolRegistry, host: HostRpcClient) -> None:
@@ -121,6 +139,19 @@ def register_host_tools(registry: ToolRegistry, host: HostRpcClient) -> None:
         )
         for name, description, schema in definitions
     ])
+    registry.register(ToolSpec(
+        name="server.exec",
+        description="Run one bounded command on the selected remote server after exact per-call user approval and host plan checks.",
+        input_schema=_SERVER_EXEC_SCHEMA,
+        risk_level="destructive",
+        requires_approval=True,
+        handler=_host_tool_handler(host, "server.exec"),
+        target_id_argument=None,
+        target_required=True,
+        origin={"kind": "builtin"},
+        timeout_ms=30_000,
+        cancellable=True,
+    ))
 
 
 def register_mcp_catalog(registry: ToolRegistry, host: HostRpcClient, catalog: object) -> list[str]:
@@ -212,6 +243,29 @@ async def _execute_on_host(
         request["runId"] = context.run_id
     if context.host_task_id:
         request["taskId"] = context.host_task_id
+    if tool_name == "server.exec":
+        if (
+            context.host_target.get("host") != "remote"
+            or not context.host_task_id
+            or not context.plan_id
+            or not context.plan_step_id
+        ):
+            raise ToolCallError("durable_plan_required", "server.exec requires a current durable action plan")
+        request["planId"] = context.plan_id
+        request["planStepId"] = context.plan_step_id
+        request["evidenceIds"] = list(context.evidence_ids)
+        fingerprint = approval_fingerprint(
+            tool_name,
+            context.context_target_id,
+            arguments,
+            task_id=context.task_id,
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+        )
+        approval_id = context.approved_actions.get(fingerprint)
+        if not approval_id:
+            raise ToolCallError("approval_reference_missing", "The exact server.exec approval reference is unavailable")
+        request["approvalId"] = approval_id
     try:
         response = await host.request("host.tool.execute", request, timeout_seconds=45.0)
     except asyncio.CancelledError:

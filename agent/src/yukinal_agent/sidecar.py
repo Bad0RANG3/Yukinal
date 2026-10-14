@@ -381,7 +381,9 @@ class PythonSidecar:
         try:
             target_id = request.get("targetId")
             mode = request.get("mode", "goal")
-            allowed_tools = _allowed_tool_names(self._registry, mode)
+            allowed_tools = set(_allowed_tool_names(self._registry, mode))
+            if not _server_exec_has_plan_binding(request):
+                allowed_tools.discard("server.exec")
             result = await agent.run(
                 task_id=_safe_context_id("task", task_id or run_id),
                 tenant_id="local",
@@ -391,6 +393,9 @@ class PythonSidecar:
                 allowed_target_ids=frozenset({target_id}) if target_id else frozenset(),
                 host_target=request.get("hostTarget"),
                 host_task_id=task_id,
+                plan_id=(request["planBinding"]["planId"] if request.get("planBinding") else None),
+                plan_step_id=(request["planBinding"]["planStepId"] if request.get("planBinding") else None),
+                evidence_ids=(tuple(request["planBinding"]["evidenceIds"]) if request.get("planBinding") else ()),
                 run_id=run_id,
                 trace_id=_safe_context_id("trace", run_id),
                 checkpoint_binding=_run_checkpoint_binding(request),
@@ -500,6 +505,9 @@ class PythonSidecar:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Agent approval is missing its tool call identity")
 
         fingerprint = approval.fingerprint
+        plan_binding = request.get("planBinding")
+        if approval.tool_name == "server.exec" and not isinstance(plan_binding, dict):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "server.exec approval is missing its durable plan binding")
         approval_id = "apr_" + hashlib.sha256(
             f"{run_id}\x1f{call_id}\x1f{fingerprint}".encode("utf-8")
         ).hexdigest()[:32]
@@ -527,6 +535,11 @@ class PythonSidecar:
                 "target": dict(target),
                 "expiresAt": expires_at,
                 "sessionGrantable": False,
+                **({
+                    "planId": plan_binding["planId"],
+                    "planStepId": plan_binding["planStepId"],
+                    "evidenceIds": list(plan_binding["evidenceIds"]),
+                } if approval.tool_name == "server.exec" and isinstance(plan_binding, dict) else {}),
             },
             "at": _timestamp(),
         })
@@ -777,7 +790,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     fields = {
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
-        "providerConfig", "requireCheckpoint",
+        "providerConfig", "requireCheckpoint", "planBinding",
     }
     parsed = _strict_object(value, fields)
     run_id = parsed.get("runId")
@@ -849,6 +862,34 @@ def _parse_run_request(value: object) -> dict[str, Any]:
             **({"workspaceId": parsed["workspaceId"]} if parsed.get("workspaceId") else {}),
         }
 
+    plan_binding: dict[str, Any] | None = None
+    if "planBinding" in parsed:
+        raw_binding = _strict_object(parsed["planBinding"], {"planId", "planStepId", "evidenceIds"})
+        plan_id = raw_binding.get("planId")
+        plan_step_id = raw_binding.get("planStepId")
+        evidence_ids = raw_binding.get("evidenceIds")
+        def valid_identifier(item: object) -> bool:
+            return isinstance(item, str) and bool(
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}", item)
+            )
+        if (
+            not valid_identifier(plan_id)
+            or not valid_identifier(plan_step_id)
+            or not isinstance(evidence_ids, list)
+            or len(evidence_ids) > 128
+            or any(not valid_identifier(item) for item in evidence_ids)
+            or len(set(evidence_ids)) != len(evidence_ids)
+            or not parsed.get("taskId")
+            or not isinstance(host_target, dict)
+            or host_target.get("host") != "remote"
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid durable plan binding")
+        plan_binding = {
+            "planId": plan_id,
+            "planStepId": plan_step_id,
+            "evidenceIds": list(evidence_ids),
+        }
+
     if "parts" in parsed and not isinstance(parsed["parts"], list):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
     if "taskBudget" in parsed and not isinstance(parsed["taskBudget"], dict):
@@ -867,6 +908,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "promptText": prompt_text,
         "targetId": target_id,
         "hostTarget": host_target,
+        **({"planBinding": plan_binding} if plan_binding is not None else {}),
         "agentBudget": task_budget,
     }
 
@@ -954,6 +996,7 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "prompt": request["prompt"],
             "parts": request.get("parts"),
             "requireCheckpoint": request.get("requireCheckpoint", False),
+            "planBinding": request.get("planBinding"),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -968,6 +1011,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
     fields = (
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
+        "planBinding",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")
@@ -979,6 +1023,17 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
 
 def _safe_context_id(prefix: str, value: str) -> str:
     return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _server_exec_has_plan_binding(request: dict[str, Any]) -> bool:
+    binding = request.get("planBinding")
+    target = request.get("hostTarget")
+    return bool(
+        request.get("taskId")
+        and isinstance(binding, dict)
+        and isinstance(target, dict)
+        and target.get("host") == "remote"
+    )
 
 
 def _valid_server_id(value: object) -> bool:

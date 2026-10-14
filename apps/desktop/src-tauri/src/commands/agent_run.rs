@@ -751,6 +751,35 @@ pub(crate) async fn start_agent_run(
                 "maxAttempts": task.budget.max_attempts,
             });
         }
+        if task
+            .as_ref()
+            .is_some_and(|task| task.scope.host == InvestigationTargetHost::Remote)
+        {
+            let plan = state
+                .database
+                .investigations()
+                .latest_plan(task_id)
+                .map_err(|error| format!("failed to read the current investigation plan: {error}"))?;
+            if let Some(plan) = plan.filter(|plan| {
+                plan.status == yukinal_database::models::PlanStatus::Active
+            }) {
+                if let Some(step) = plan
+                    .current_step_id
+                    .as_deref()
+                    .and_then(|step_id| plan.steps.iter().find(|step| step.id == step_id))
+                    .filter(|step| {
+                        step.kind == yukinal_database::models::PlanStepKind::Action
+                            && step.allowed_tools.iter().any(|tool| tool == "server.exec")
+                    })
+                {
+                    params["planBinding"] = json!({
+                        "planId": plan.id,
+                        "planStepId": step.id,
+                        "evidenceIds": step.evidence_ids,
+                    });
+                }
+            }
+        }
     }
     if let Some(workspace_id) = workspace_id.as_deref() {
         params["workspaceId"] = json!(workspace_id);
