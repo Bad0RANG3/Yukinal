@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import json
 import logging
@@ -135,7 +136,66 @@ def expect_error(client: SshServiceClient, target_id: str, service: str,
         raise AssertionError(f"{service}: expected {expected_code}")
 
 
-def run_test(service_binary: Path) -> None:
+def exercise_agent_runtime(client: SshServiceClient) -> None:
+    from yukinal_agent import AgentWorkflow, MemoryAuditSink, ToolRegistry, register_ssh_tools
+
+    registry = ToolRegistry(MemoryAuditSink())
+    register_ssh_tools(registry, client)
+    workflow = AgentWorkflow(registry)
+
+    async def run() -> None:
+        succeeded = await workflow.run(
+            task_id="agent-ssh-selected-target",
+            tenant_id="integration-tenant",
+            user_id="integration-operator",
+            allowed_tools={"ssh.service_status"},
+            allowed_target_ids={"srv_stage1"},
+            tool_calls=[{
+                "name": "ssh.service_status",
+                "arguments": {"service": "nginx.service"},
+            }],
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+        if succeeded.status != "succeeded" or not succeeded.results:
+            raise AssertionError(f"Agent SSH tool did not succeed: {succeeded!r}")
+        result = succeeded.results[0].get("result", {})
+        if result.get("target_id") != "srv_stage1" or result.get("stdout") != "active\n":
+            raise AssertionError(f"Agent SSH tool did not use the selected server: {result!r}")
+
+        denied = await workflow.run(
+            task_id="agent-ssh-disallowed-target",
+            tenant_id="integration-tenant",
+            user_id="integration-operator",
+            allowed_tools={"ssh.service_status"},
+            allowed_target_ids={"srv_stage1"},
+            tool_calls=[{
+                "name": "ssh.service_status",
+                "arguments": {"service": "nginx.service"},
+            }],
+            host_target={"host": "remote", "serverId": "srv_bad_auth", "environment": "staging"},
+        )
+        if denied.error_code != "target_not_allowed":
+            raise AssertionError(f"Agent did not reject a server outside the task allowlist: {denied!r}")
+
+        forged = await workflow.run(
+            task_id="agent-ssh-forged-target",
+            tenant_id="integration-tenant",
+            user_id="integration-operator",
+            allowed_tools={"ssh.service_status"},
+            allowed_target_ids={"srv_stage1"},
+            tool_calls=[{
+                "name": "ssh.service_status",
+                "arguments": {"target_id": "srv_bad_auth", "service": "nginx.service"},
+            }],
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+        if forged.error_code != "invalid_arguments":
+            raise AssertionError(f"Agent accepted a model-supplied target override: {forged!r}")
+
+    asyncio.run(run())
+
+
+def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     logging.getLogger("paramiko").setLevel(logging.CRITICAL)
     host_key = paramiko.RSAKey.generate(2048)
     wrong_host_key = paramiko.RSAKey.generate(2048)
@@ -162,7 +222,7 @@ def run_test(service_binary: Path) -> None:
             "api_token_env": "YUKINAL_TEST_API_TOKEN",
             "targets": [
                 {
-                    "target_id": "mock-ssh",
+                    "target_id": "srv_stage1",
                     "host": "127.0.0.1",
                     "port": ssh_port,
                     "username": "test-user",
@@ -170,7 +230,7 @@ def run_test(service_binary: Path) -> None:
                     "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
                 },
                 {
-                    "target_id": "mock-ssh-bad-auth",
+                    "target_id": "srv_bad_auth",
                     "host": "127.0.0.1",
                     "port": ssh_port,
                     "username": "test-user",
@@ -206,18 +266,22 @@ def run_test(service_binary: Path) -> None:
             else:
                 raise RuntimeError("C++ service did not become healthy")
 
-            result = client.service_status("mock-ssh", "nginx.service", timeout_seconds=5)
+            if agent_runtime_only:
+                exercise_agent_runtime(client)
+                return
+
+            result = client.service_status("srv_stage1", "nginx.service", timeout_seconds=5)
             if result.stdout != "active\n" or result.exit_code != 0:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
 
-            expect_error(client, "mock-ssh-bad-auth", "nginx.service", 5, "authentication_failed")
-            expect_error(client, "mock-ssh", "slow.service", 1, "timeout")
-            expect_error(client, "mock-ssh", "large.service", 5, "output_limit")
+            expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
+            expect_error(client, "srv_stage1", "slow.service", 1, "timeout")
+            expect_error(client, "srv_stage1", "large.service", 5, "output_limit")
 
             known_hosts.write_text("", encoding="ascii")
-            expect_error(client, "mock-ssh", "nginx.service", 5, "host_key_unverified")
+            expect_error(client, "srv_stage1", "nginx.service", 5, "host_key_unverified")
             write_known_host(wrong_host_key)
-            expect_error(client, "mock-ssh", "nginx.service", 5, "host_key_unverified")
+            expect_error(client, "srv_stage1", "nginx.service", 5, "host_key_unverified")
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -233,11 +297,19 @@ def run_test(service_binary: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Exercise SSH behavior against an in-process Paramiko mock server")
     parser.add_argument("--service-binary", default=os.environ.get("YUKINAL_SSH_SERVICE_BINARY"))
+    parser.add_argument(
+        "--agent-runtime-only",
+        action="store_true",
+        help="exercise the selected-target Agent tool path; requires agent[agent] dependencies",
+    )
     args = parser.parse_args()
     if not args.service_binary or not Path(args.service_binary).is_file():
         parser.error("pass --service-binary or set YUKINAL_SSH_SERVICE_BINARY to the built executable")
-    run_test(Path(args.service_binary).resolve())
-    print("PASS SSH success, authentication rejection, timeout, output cap, and unknown/changed host-key rejection")
+    run_test(Path(args.service_binary).resolve(), agent_runtime_only=args.agent_runtime_only)
+    if args.agent_runtime_only:
+        print("PASS Agent SSH tool selected-target binding, task target allowlist, and model target override rejection")
+    else:
+        print("PASS SSH success, authentication rejection, timeout, output cap, and unknown/changed host-key rejection")
     return 0
 
 

@@ -208,5 +208,8 @@ SDK's in-process transport and cover schema/permission rejection, audit
 redaction, approval binding, model switching, model/tool loops, timeout/output
 budgets, MCP registration, and stable provider/MCP errors. Install
 `agent[agent,models]` before CMake configuration for CTest to register those
-tests. A real SSH success test requires the optional
+tests. When Paramiko is installed too, `agent_ssh_mock_integration` exercises
+`ssh.service_status` through `AgentWorkflow` and the C++ service to verify the
+selected server ID, task target allowlist, and rejection of model-supplied
+target overrides. A real SSH success test requires the optional
 OpenSSH test container described in the repository README.

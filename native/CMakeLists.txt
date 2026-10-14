@@ -157,6 +157,26 @@ if(YUKINAL_BUILD_TESTS)
         ENVIRONMENT_MODIFICATION "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
         TIMEOUT 60
       )
+
+      execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp"
+        RESULT_VARIABLE YUKINAL_AGENT_MOCK_IMPORT_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+      )
+      if(YUKINAL_AGENT_MOCK_IMPORT_RESULT EQUAL 0)
+        add_test(
+          NAME agent_ssh_mock_integration
+          COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test_ssh_mock.py
+                  --service-binary $<TARGET_FILE:yukinal-ssh-service> --agent-runtime-only
+        )
+        set_tests_properties(agent_ssh_mock_integration PROPERTIES
+          ENVIRONMENT_MODIFICATION "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
+          TIMEOUT 60
+        )
+      else()
+        message(STATUS "Agent dependencies are not installed; agent_ssh_mock_integration is not registered")
+      endif()
     else()
       message(STATUS "Paramiko is not installed; ssh_mock_integration is not registered (install agent[test])")
     endif()

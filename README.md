@@ -111,7 +111,10 @@ python -m pip install -e "agent[agent,test]"
 
 CMake registers `ssh_mock_integration` when Paramiko is available. This test
 covers SSH success, bad credentials, timeouts, output limits, and unknown or
-changed host keys without requiring Docker.
+changed host keys without requiring Docker. When the Agent dependencies are also
+installed, `agent_ssh_mock_integration` exercises the Python Agent tool through
+the C++ service and checks selected-server binding, the task target allowlist,
+and rejection of model-supplied target overrides.
 
 Its only enabled operation is:
 

@@ -193,9 +193,11 @@ The CTest suite covers config/schema validation, operation policy, Python client
 behavior, and a live Python-to-C++ HTTP path including health, allowlist
 rejection, origin rejection, and SSH connection failure classification. Install
 `agent[agent,test]` before CMake configuration to register Agent Runtime/MCP
-tests and the Paramiko SSH mock for success, bad credentials, command timeout,
-output limit, and unknown/changed host keys. The separate OpenSSH container test
-checks the same SSH cases against OpenSSH.
+tests, the Paramiko SSH mock for success, bad credentials, command timeout,
+output limit, and unknown/changed host keys, and an Agent-to-C++ mock path that
+checks selected-server binding, task target authorization, and model target
+override rejection. The separate OpenSSH container test checks the SSH cases
+against OpenSSH.
 
 Local verification on 2026-10-15: Windows 11, Visual Studio 2022 17.14.39,
 CMake 4.4.4, and Python 3.14.8 successfully configured and built the C++ service
@@ -208,19 +210,21 @@ cmake --build native/build-nmake --config Release
 ctest --test-dir native/build-nmake -C Release --output-on-failure
 ```
 
-CTest passed all four registered targets: C++ config/policy tests, Python
-client tests, the live Python-to-C++ HTTP integration tests, and the Paramiko
-SSH mock integration. The HTTP path verified health, allowlist rejection,
-browser-origin rejection, and SSH connection-failure classification. The mock
-SSH path verified a successful read-only operation and the auth, timeout,
-output-cap, and host-key rejection cases. The separate OpenSSH test container
+CTest passed all six registered targets: C++ config/policy tests, Python client
+tests, the live Python-to-C++ HTTP integration tests, Agent Runtime tests, the
+Paramiko SSH mock integration, and the Agent-to-C++ mock integration. The HTTP
+path verified health, allowlist rejection, browser-origin rejection, and SSH
+connection-failure classification. The SSH mock path verified successful
+read-only execution and auth, timeout, output-cap, and host-key rejection. The
+Agent path verified selected-server binding and rejected a task-disallowed
+target and a model-supplied target override. The separate OpenSSH test container
 was not run because Docker is unavailable, so compatibility with an OpenSSH
 server remains unverified.
 
 Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. After configuring CMake to use that interpreter, the C++ build
-completed and all five CTest targets passed on the current source revision. Full
+completed and all six CTest targets passed on the current source revision. Full
 Python unittest discovery ran 45 tests: 42 passed and 3 service integration
 cases were skipped because the service binary path was not configured for that
 standalone run. The Agent suite covers live stdio and Streamable HTTP MCP
@@ -233,14 +237,15 @@ Python-to-C++ HTTP tests also passed in CTest.
 ## Deliberately deferred
 
 - switching the standard/package desktop launcher to Python;
-- binding C++ service targets to the desktop's selected server records;
+- automatically synchronizing selected desktop targets and credentials to the
+  C++ service configuration;
 - write-capable tools in the desktop catalog and durable task/plan resume;
 - arbitrary shell commands outside the existing host's separately guarded task flow;
 - SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
-The next milestone is to add durable task/plan state and bind the desktop's
-selected SSH target to the C++ service configuration, while keeping host
+The next milestone is to add durable task/plan state and automate selected
+target synchronization to the C++ service configuration, while keeping host
 authorization as the final gate. A real SSH success against an OpenSSH server
 and packaged-app migration remain unverified. Do not mark later product
 requirements as delivered by the scaffold or documentation.
