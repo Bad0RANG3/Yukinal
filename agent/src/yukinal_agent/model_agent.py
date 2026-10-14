@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -95,9 +97,16 @@ class _AgentState(TypedDict, total=False):
 class ModelDrivenAgent:
     """LangGraph model/tool loop; all tool execution remains behind ToolRegistry."""
 
-    def __init__(self, registry: ToolRegistry, model: Any, budget: AgentBudget | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        model: Any,
+        budget: AgentBudget | None = None,
+        event_sink: Any | None = None,
+    ) -> None:
         self._registry = registry
         self._budget = budget or AgentBudget()
+        self._event_sink = event_sink
         tool_specs = registry.list()
         tool_definitions = [
             {
@@ -302,6 +311,10 @@ class ModelDrivenAgent:
         if remaining <= 0:
             return {"status": "failed", "error_code": "output_budget_exceeded"}
         spec = self._registry.get(request["name"])
+        call_id = f"call-{uuid.uuid4().hex}"
+        started_at = datetime.now(UTC).isoformat()
+        event_base = _tool_event_base(request, state, spec, call_id)
+        self._emit_tool_call(event_base)
         tool_timeout = min(
             self._budget.max_tool_seconds,
             (spec.timeout_ms / 1000) if spec is not None else self._budget.max_tool_seconds,
@@ -313,8 +326,29 @@ class ModelDrivenAgent:
                 context,
                 timeout_seconds=tool_timeout,
                 max_output_bytes=min(remaining, 4 * 1024 * 1024),
+                call_id=call_id,
             )
+        except asyncio.CancelledError:
+            self._emit_tool_result(
+                event_base,
+                started_at=started_at,
+                status="cancelled",
+                output_summary="Tool call cancelled",
+                error="Tool call cancelled",
+                error_code="cancelled",
+            )
+            raise
         except ToolCallError as error:
+            event_code = _event_error_code(error.code)
+            event_status = "cancelled" if event_code == "cancelled" else "failed"
+            self._emit_tool_result(
+                event_base,
+                started_at=started_at,
+                status=event_status,
+                output_summary=f"Tool call failed ({event_code})",
+                error=error.args[0] if error.args else "Tool call failed",
+                error_code=event_code,
+            )
             pending = error.code == "approval_required"
             results = [
                 *state["tool_results"],
@@ -340,8 +374,23 @@ class ModelDrivenAgent:
                     update["status"] = "awaiting_approval"
             return update
         except Exception:
+            self._emit_tool_result(
+                event_base,
+                started_at=started_at,
+                status="failed",
+                output_summary="Tool call failed (internal)",
+                error="Tool execution failed",
+                error_code="internal",
+            )
             return {"status": "failed", "error_code": "tool_failed"}
 
+        self._emit_tool_result(
+            event_base,
+            started_at=started_at,
+            status="success",
+            output_summary=_tool_output_summary(result.value),
+            duration_ms=result.duration_ms,
+        )
         output_size = result.output_bytes
         item = {
             "tool": result.tool_name,
@@ -364,6 +413,40 @@ class ModelDrivenAgent:
             "status": "running",
             "error_code": None,
         }
+
+    def _emit_tool_call(self, event: dict[str, Any]) -> None:
+        if self._event_sink is not None:
+            self._event_sink({"type": "agent.tool_call", **event, "at": datetime.now(UTC).isoformat()})
+
+    def _emit_tool_result(
+        self,
+        event: dict[str, Any],
+        *,
+        started_at: str,
+        status: str,
+        output_summary: str,
+        error: str | None = None,
+        error_code: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        if self._event_sink is None:
+            return
+        ended_at = datetime.now(UTC).isoformat()
+        result = {
+            "type": "agent.tool_result",
+            **event,
+            "status": status,
+            "outputSummary": _truncate_utf16(_redact_sensitive_text(output_summary), 4000),
+            "startedAt": started_at,
+            "endedAt": ended_at,
+            "durationMs": duration_ms if duration_ms is not None else _elapsed_ms(started_at, ended_at),
+            "at": ended_at,
+        }
+        if error is not None:
+            result["error"] = _truncate_utf16(_redact_sensitive_text(error), 4000)
+        if error_code is not None:
+            result["errorCode"] = error_code
+        self._event_sink(result)
 
     @staticmethod
     def _route_model(state: _AgentState) -> str:
@@ -393,20 +476,18 @@ def _message_text(content: Any) -> str:
 
 
 def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    sensitive = ("password", "secret", "token", "credential", "authorization", "private_key", "privatekey", "api_key", "api-key", "access_key")
-
     def visit(value: Any, depth: int = 0) -> Any:
         if depth > 16:
             return "[truncated]"
         if isinstance(value, dict):
             return {
-                str(key): "[redacted]" if any(mark in str(key).lower() for mark in sensitive) else visit(child, depth + 1)
+                str(key): "[redacted]" if _is_sensitive_key(key) else visit(child, depth + 1)
                 for key, child in value.items()
             }
         if isinstance(value, list):
             return [visit(child, depth + 1) for child in value[:100]]
         if isinstance(value, str):
-            return value[:2048]
+            return _redact_sensitive_text(value)[:2048]
         if value is None or isinstance(value, (int, float, bool)):
             return value
         return "[unsupported]"
@@ -415,6 +496,162 @@ def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if len(encoded.encode("utf-8")) > 8192:
         return {"_review": "arguments exceed the approval display limit", "_bytes": len(encoded.encode("utf-8"))}
     return visit(arguments)
+
+
+def _tool_event_base(
+    request: dict[str, Any],
+    state: _AgentState,
+    spec: Any,
+    call_id: str,
+) -> dict[str, Any]:
+    target = state.get("host_target")
+    if not isinstance(target, dict):
+        target = {"host": "local", "environment": "unknown"}
+    risk = {"read": "read", "write": "medium", "destructive": "critical"}.get(
+        getattr(spec, "risk_level", "destructive"), "critical"
+    )
+    allowed = request["name"] in state.get("allowed_tools", [])
+    target_id = target.get("serverId") if target.get("host") == "remote" else None
+    target_allowed = target_id is None or target_id in state.get("allowed_target_ids", [])
+    if spec is None or not allowed or not target_allowed:
+        decision = "deny"
+    elif getattr(spec, "requires_approval", False):
+        decision = "ask"
+    elif getattr(spec, "target_required", False) and target_id is None:
+        decision = "deny"
+    else:
+        decision = "auto"
+    origin = getattr(spec, "origin", None) or {"kind": "builtin"}
+    return {
+        "runId": state.get("run_id", ""),
+        "traceId": state.get("trace_id") or call_id,
+        "stepId": call_id,
+        "callId": call_id,
+        "toolName": str(request.get("name", "unknown_tool"))[:256],
+        "input": _redact_event_value(request.get("arguments", {})),
+        "target": dict(target),
+        "riskLevel": risk,
+        "decision": decision,
+        "origin": dict(origin),
+    }
+
+
+def _event_error_code(code: str) -> str:
+    allowed = {
+        "invalid_input", "plan_deviation", "denied_by_policy", "approval_rejected",
+        "approval_timeout", "timeout", "cancelled", "not_found", "transport",
+        "unsupported", "execution_failed", "internal",
+    }
+    if code in allowed:
+        return code
+    mapped = {
+        "tool_not_allowed": "denied_by_policy",
+        "target_required": "denied_by_policy",
+        "target_not_allowed": "denied_by_policy",
+        "risk_not_allowed": "denied_by_policy",
+        "authorization_failed": "denied_by_policy",
+        "approval_required": "denied_by_policy",
+        "invalid_arguments": "invalid_input",
+        "invalid_target": "invalid_input",
+        "unknown_tool": "not_found",
+        "execution_timeout": "timeout",
+        "execution_cancelled": "cancelled",
+        "host_unavailable": "transport",
+        "host_tool_failed": "execution_failed",
+    }
+    return mapped.get(code, "internal")
+
+
+def _tool_output_summary(value: Any) -> str:
+    safe = _redact_event_value(value)
+    try:
+        encoded = json.dumps(safe, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return "Tool returned a result that could not be summarized"
+    if _utf16_length(encoded) > 4000:
+        return _truncate_utf16(encoded, 3988) + "…[truncated]"
+    return encoded
+
+
+def _redact_event_value(value: Any, depth: int = 0) -> Any:
+    if depth > 16:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {
+            str(key): "[redacted]" if _is_sensitive_key(key) else _redact_event_value(child, depth + 1)
+            for key, child in list(value.items())[:256]
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_event_value(child, depth + 1) for child in value[:100]]
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)[:2048]
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return "[unsupported]"
+
+
+_SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"),
+    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs)_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{12,}\b"),
+    re.compile(r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=:-]{8,}\b", re.IGNORECASE),
+    re.compile(r"([\"']?(?:[A-Za-z][A-Za-z0-9_-]*(?:key|token|secret|password|passwd|credential|passphrase)|key|token|secret|password|passwd|credential|passphrase|authorization|cookie)[\"']?\s*[:=]\s*)(?:\[[^\]]*\]|\"[^\"]*\"|'[^']*'|[^\s,;)}\]]+)", re.IGNORECASE),
+    re.compile(r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+:)[^@\s/]+(@)", re.IGNORECASE),
+)
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?:api|access|auth|bearer|client|private|secret|session|service|signing)?(?:key|token|secret|password|passwd|credential|passphrase)|authorization|cookie",
+    re.IGNORECASE,
+)
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key), flags=re.IGNORECASE)
+    return _SENSITIVE_KEY_PATTERN.search(normalized) is not None
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = value
+    for pattern in _SENSITIVE_TEXT_PATTERNS:
+        redacted = pattern.sub(_replace_sensitive_text_match, redacted)
+    return redacted
+
+
+def _replace_sensitive_text_match(match: re.Match[str]) -> str:
+    if not match.lastindex:
+        return "[redacted]"
+    suffix = match.group(2) if match.lastindex > 1 else ""
+    return f"{match.group(1)}[redacted]{suffix or ''}"
+
+
+def _utf16_length(value: str) -> int:
+    return sum(2 if ord(character) > 0xFFFF else 1 for character in value)
+
+
+def _truncate_utf16(value: str, max_units: int) -> str:
+    if _utf16_length(value) <= max_units:
+        return value
+    result: list[str] = []
+    units = 0
+    for character in value:
+        character_units = 2 if ord(character) > 0xFFFF else 1
+        if units + character_units > max_units:
+            break
+        result.append(character)
+        units += character_units
+    return "".join(result)
+
+
+def _elapsed_ms(started_at: str, ended_at: str) -> int:
+    try:
+        started = datetime.fromisoformat(started_at)
+        ended = datetime.fromisoformat(ended_at)
+        return max(0, round((ended - started).total_seconds() * 1000))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _approval_from_state(item: dict[str, Any]) -> ApprovalRequest:

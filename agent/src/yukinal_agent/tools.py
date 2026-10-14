@@ -147,6 +147,7 @@ class ToolCallResult:
     value: Any
     duration_ms: int
     output_bytes: int
+    call_id: str | None = None
 
 
 class AuthorizationPolicy(Protocol):
@@ -233,6 +234,7 @@ class ToolRegistry:
         *,
         timeout_seconds: float = 30.0,
         max_output_bytes: int = 256 * 1024,
+        call_id: str | None = None,
     ) -> ToolCallResult:
         if (
             isinstance(timeout_seconds, bool)
@@ -288,7 +290,7 @@ class ToolRegistry:
             approval_status = policy_status
             handler_context = replace(
                 context,
-                call_id=event_id,
+                call_id=call_id or event_id,
                 trace_id=context.trace_id or event_id,
             )
             value = await asyncio.wait_for(spec.handler(arguments, handler_context), timeout=timeout_seconds)
@@ -350,7 +352,7 @@ class ToolRegistry:
             context, event_id, "succeeded", spec.name if spec is not None else "<unregistered>", target_id, started, safe_arguments,
             started_clock, result_summary=result_summary, approval_status=approval_status,
         )
-        return ToolCallResult(name, json_value, duration_ms, len(encoded))
+        return ToolCallResult(name, json_value, duration_ms, len(encoded), handler_context.call_id)
 
     @staticmethod
     def _copy_spec(spec: ToolSpec) -> ToolSpec:

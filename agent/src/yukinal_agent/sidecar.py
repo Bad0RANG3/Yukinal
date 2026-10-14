@@ -259,7 +259,12 @@ class PythonSidecar:
 
         model, _timeout_ms = self._create_runtime_model(request.get("providerConfig"))
         try:
-            agent = ModelDrivenAgent(self._registry, model, request["agentBudget"])
+            agent = ModelDrivenAgent(
+                self._registry,
+                model,
+                request["agentBudget"],
+                event_sink=self._emit,
+            )
         except Exception:
             raise _RpcFault(RPC_INVALID_PARAMS, "configured model cannot run the registered tools") from None
 
