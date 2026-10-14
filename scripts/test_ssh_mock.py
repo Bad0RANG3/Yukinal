@@ -155,7 +155,7 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
     def open(self, path: str, flags: int, attr: paramiko.SFTPAttributes) -> paramiko.SFTPHandle:
         with self._files_lock:
             exists = path in self._files
-            if path not in {"/settings.toml", "/large.bin", "/write.bin", "/backup.bin"}:
+            if path not in {"/settings.toml", "/large.bin", "/write.bin", "/backup.bin", "/transfer-stream.bin", "/stream-failure.bin"}:
                 return paramiko.SFTP_PERMISSION_DENIED
             if flags & (os.O_WRONLY | os.O_RDWR):
                 if flags & os.O_EXCL and exists:
@@ -429,6 +429,136 @@ def exercise_cpp_terminal(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=3)
+
+
+def exercise_cpp_sftp_streams(
+    service_binary: Path,
+    root: Path,
+    target: dict[str, object],
+    environment: dict[str, str],
+) -> None:
+    sftp_config = root / "sftp-stream-service.json"
+    sftp_config.write_text(
+        json.dumps({"listen_port": 8765, "api_token_env": "YUKINAL_TEST_API_TOKEN", "targets": [target]}),
+        encoding="utf-8",
+    )
+
+    download = subprocess.Popen(
+        [str(service_binary), "--config", str(sftp_config), "--sftp-download", "--path", "/large.bin"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        env=environment,
+    )
+    if download.stdout is None:
+        download.kill()
+        raise RuntimeError("could not open the C++ SFTP download output pipe")
+    try:
+        ready = json.loads(download.stdout.readline())
+        if ready.get("type") != "ready":
+            raise AssertionError(f"C++ SFTP download did not become ready: {ready!r}")
+        content = bytearray()
+        while True:
+            event = json.loads(download.stdout.readline())
+            if event.get("type") == "data":
+                content.extend(base64.b64decode(str(event.get("data", "")), validate=True))
+            elif event.get("type") == "closed":
+                if event.get("exit_code") != 0:
+                    raise AssertionError(f"C++ SFTP download failed: {event!r}")
+                break
+            else:
+                raise AssertionError(f"C++ SFTP download returned an invalid event: {event!r}")
+        if bytes(content) != StaticSftpInterface.LARGE_CONTENTS:
+            raise AssertionError("C++ SFTP streaming download changed the binary file contents")
+        if download.wait(timeout=5) != 0:
+            raise AssertionError(f"C++ SFTP download worker exited with {download.returncode}")
+    finally:
+        if download.poll() is None:
+            download.kill()
+            download.wait(timeout=3)
+
+    upload_content = bytes((index * 31) % 256 for index in range(240_000))
+    upload = subprocess.Popen(
+        [str(service_binary), "--config", str(sftp_config), "--sftp-upload-exclusive", "--path", "/transfer-stream.bin"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        env=environment,
+    )
+    if upload.stdin is None or upload.stdout is None:
+        upload.kill()
+        raise RuntimeError("could not open the C++ SFTP upload worker pipes")
+    try:
+        ready = json.loads(upload.stdout.readline())
+        if ready.get("type") != "ready":
+            raise AssertionError(f"C++ SFTP upload did not become ready: {ready!r}")
+        chunk_size = 32 * 1024
+        for offset in range(0, len(upload_content), chunk_size):
+            chunk = upload_content[offset:offset + chunk_size]
+            frame = {"type": "data", "data": base64.b64encode(chunk).decode("ascii")}
+            upload.stdin.write(json.dumps(frame) + "\n")
+        upload.stdin.write(json.dumps({"type": "close"}) + "\n")
+        upload.stdin.flush()
+        closed = json.loads(upload.stdout.readline())
+        if closed.get("type") != "closed" or closed.get("bytes") != len(upload_content):
+            raise AssertionError(f"C++ SFTP upload returned an invalid completion: {closed!r}")
+        if upload.wait(timeout=8) != 0:
+            raise AssertionError(f"C++ SFTP upload worker exited with {upload.returncode}")
+        if StaticSftpInterface._files.get("/transfer-stream.bin") != upload_content:
+            raise AssertionError("C++ SFTP streaming upload changed the binary file contents")
+    finally:
+        if upload.poll() is None:
+            upload.kill()
+            upload.wait(timeout=3)
+
+    existing = subprocess.run(
+        [str(service_binary), "--config", str(sftp_config), "--sftp-upload-exclusive", "--path", "/settings.toml"],
+        input="",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=8,
+        env=environment,
+    )
+    if existing.returncode == 0 or json.loads(existing.stdout.splitlines()[0]).get("type") != "error":
+        raise AssertionError("C++ SFTP exclusive upload accepted an existing destination")
+
+    failed_upload = subprocess.Popen(
+        [str(service_binary), "--config", str(sftp_config), "--sftp-upload-exclusive", "--path", "/stream-failure.bin"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        env=environment,
+    )
+    if failed_upload.stdin is None or failed_upload.stdout is None:
+        failed_upload.kill()
+        raise RuntimeError("could not open the C++ SFTP failure-case pipes")
+    try:
+        ready = json.loads(failed_upload.stdout.readline())
+        if ready.get("type") != "ready":
+            raise AssertionError(f"C++ SFTP cleanup case did not become ready: {ready!r}")
+        failed_upload.stdin.write(json.dumps({"type": "data", "data": "%%%"}) + "\n")
+        failed_upload.stdin.flush()
+        failure = json.loads(failed_upload.stdout.readline())
+        if failure.get("type") != "error":
+            raise AssertionError(f"C++ SFTP upload accepted malformed input: {failure!r}")
+        if failed_upload.wait(timeout=5) == 0:
+            raise AssertionError("C++ SFTP malformed upload exited successfully")
+        if "/stream-failure.bin" in StaticSftpInterface._files:
+            raise AssertionError("C++ SFTP malformed upload left a staging file behind")
+    finally:
+        if failed_upload.poll() is None:
+            failed_upload.kill()
+            failed_upload.wait(timeout=3)
 
 
 def exercise_agent_runtime(
@@ -791,6 +921,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
             }
             exercise_cpp_terminal(service_binary, root, terminal_target, environment)
+            exercise_cpp_sftp_streams(service_binary, root, terminal_target, environment)
         finally:
             if process.poll() is None:
                 process.terminate()

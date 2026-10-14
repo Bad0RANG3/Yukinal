@@ -12,7 +12,7 @@
 namespace {
 
 void print_usage() {
-  std::cerr << "Usage: yukinal-ssh-service --config <path> [--parent-pid <pid>] [--terminal --cols <n> --rows <n>]\n";
+  std::cerr << "Usage: yukinal-ssh-service --config <path> [--parent-pid <pid>] [--terminal --cols <n> --rows <n> | --sftp-download --path <path> | --sftp-upload-exclusive --path <path>]\n";
 }
 
 bool parse_dimension(const std::string& value, std::uint16_t* output) {
@@ -43,6 +43,9 @@ int main(int argc, char** argv) {
   std::string config_path;
   std::optional<std::uint64_t> parent_pid;
   bool terminal_mode = false;
+  bool sftp_download_mode = false;
+  bool sftp_upload_mode = false;
+  std::string sftp_path;
   std::uint16_t columns = 80;
   std::uint16_t rows = 24;
   for (int i = 1; i < argc; ++i) {
@@ -60,6 +63,12 @@ int main(int argc, char** argv) {
       parent_pid = parsed;
     } else if (argument == "--terminal") {
       terminal_mode = true;
+    } else if (argument == "--sftp-download") {
+      sftp_download_mode = true;
+    } else if (argument == "--sftp-upload-exclusive") {
+      sftp_upload_mode = true;
+    } else if (argument == "--path" && i + 1 < argc) {
+      sftp_path = argv[++i];
     } else if (argument == "--cols" && i + 1 < argc) {
       if (!parse_dimension(argv[++i], &columns)) {
         print_usage();
@@ -85,13 +94,24 @@ int main(int argc, char** argv) {
 
   try {
     const auto config = yukinal::ssh_service::load_config(config_path);
-    if (terminal_mode) {
-      if (config.targets.size() != 1) {
-        std::cerr << "SSH terminal startup failed: exactly one target is required\n";
+    const int worker_modes = static_cast<int>(terminal_mode) +
+                             static_cast<int>(sftp_download_mode) +
+                             static_cast<int>(sftp_upload_mode);
+    if (worker_modes > 0) {
+      if (worker_modes != 1 ||
+          ((sftp_download_mode || sftp_upload_mode) && sftp_path.empty())) {
+        print_usage();
         return 2;
       }
-      return yukinal::ssh_service::run_terminal_session(config.targets.begin()->second,
-                                                        columns, rows);
+      if (config.targets.size() != 1) {
+        std::cerr << "SSH worker startup failed: exactly one target is required\n";
+        return 2;
+      }
+      const auto& target = config.targets.begin()->second;
+      if (terminal_mode) {
+        return yukinal::ssh_service::run_terminal_session(target, columns, rows);
+      }
+      return yukinal::ssh_service::run_sftp_stream(target, sftp_path, sftp_upload_mode);
     }
     const char* token_value = std::getenv(config.api_token_env.c_str());
     if (!token_value || !valid_token(token_value)) {

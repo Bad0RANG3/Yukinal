@@ -3,19 +3,26 @@
 //! Each desktop request gets a one-target allowlist and credentials passed only in the child
 //! environment. The temporary JSON contains target metadata and environment-variable names.
 
+use std::future::Future;
+use std::io;
 use std::net::TcpListener;
+use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine as _;
 use ring::rand::SecureRandom;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child as TokioChild, ChildStdin, Command as TokioCommand};
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
+use tokio::process::{Child as TokioChild, ChildStdin, ChildStdout, Command as TokioCommand};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use yukinal_filesystem::transfer::{TransferReader, TransferWriter};
 use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
 };
@@ -423,6 +430,474 @@ pub(crate) async fn open_terminal(
         closed: AtomicBool::new(false),
         _config_directory: directory,
     })
+}
+
+async fn spawn_sftp_stream_worker(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    mode: &str,
+    path: &str,
+) -> Result<
+    (
+        TokioChild,
+        ChildStdin,
+        BufReader<ChildStdout>,
+        tempfile::TempDir,
+    ),
+    String,
+> {
+    let target_payload =
+        super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
+    let target = target_payload
+        .get("target")
+        .filter(|target| target.get("target_id").and_then(Value::as_str) == Some(server_id))
+        .cloned()
+        .ok_or_else(|| "the desktop returned an invalid SSH transfer target".to_string())?;
+    let credentials = target_payload
+        .get("credentials")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "the desktop returned invalid SSH transfer credentials".to_string())?;
+    let cwd =
+        std::env::current_dir().map_err(|_| "the desktop working directory is unavailable")?;
+    let resources = app.path().resource_dir().ok();
+    let binary = super::sidecar::resolve_ssh_service_binary(&cwd, resources.as_deref())?
+        .ok_or_else(|| "the packaged C++ SSH service executable is unavailable".to_string())?;
+    let directory = tempfile::Builder::new()
+        .prefix("yukinal-sftp-stream-")
+        .tempdir()
+        .map_err(|_| "could not create the temporary SFTP directory".to_string())?;
+    let config_path = directory.path().join("transfer.json");
+    let config = json!({
+        "listen_port": 8765,
+        "api_token_env": "YUKINAL_SSH_API_TOKEN",
+        "targets": [target],
+    });
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&config)
+            .map_err(|_| "could not encode the SFTP transfer configuration".to_string())?,
+    )
+    .map_err(|_| "could not write the SFTP transfer configuration".to_string())?;
+
+    let mut command = TokioCommand::new(binary);
+    command
+        .arg("--config")
+        .arg(&config_path)
+        .arg(mode)
+        .arg("--path")
+        .arg(path)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command
+            .env("SystemRoot", &system_root)
+            .env("WINDIR", system_root);
+    }
+    for (name, value) in credentials {
+        let agent_socket = target
+            .get("auth")
+            .and_then(|auth| auth.get("type"))
+            .and_then(Value::as_str)
+            == Some("agent")
+            && name == "SSH_AUTH_SOCK";
+        if !(agent_socket
+            || matches!(
+                name.as_str(),
+                "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
+            ))
+            || !value.is_string()
+        {
+            return Err("the desktop returned invalid SSH transfer credentials".into());
+        }
+        command.env(name, value.as_str().expect("validated string"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.as_std_mut().creation_flags(0x0800_0000);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|_| "could not start the packaged C++ SFTP worker".to_string())?;
+    drop(command);
+    drop(target_payload);
+    let Some(input) = child.stdin.take() else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err("the C++ SFTP worker has no input pipe".into());
+    };
+    let Some(output) = child.stdout.take() else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err("the C++ SFTP worker has no output pipe".into());
+    };
+    Ok((child, input, BufReader::new(output), directory))
+}
+
+async fn expect_sftp_worker_ready(
+    child: &mut TokioChild,
+    output: &mut BufReader<ChildStdout>,
+) -> Result<(), String> {
+    let mut first_line = String::new();
+    let startup =
+        tokio::time::timeout(Duration::from_secs(35), output.read_line(&mut first_line)).await;
+    match startup {
+        Ok(Ok(count)) if count > 0 && first_line.len() <= 48 * 1024 => {}
+        Ok(Ok(_)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("the C++ SFTP worker exited during startup".into());
+        }
+        Ok(Err(_)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("could not read the C++ SFTP startup response".into());
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("the C++ SFTP worker did not connect within 35 seconds".into());
+        }
+    }
+    let startup: Value = match serde_json::from_str(first_line.trim_end()) {
+        Ok(startup) => startup,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("the C++ SFTP worker returned an invalid startup response".into());
+        }
+    };
+    if startup.get("type").and_then(Value::as_str) == Some("ready") {
+        return Ok(());
+    }
+    let message = startup
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("the C++ SFTP worker could not start")
+        .to_string();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    Err(message)
+}
+
+struct SftpStreamReader {
+    receiver: mpsc::Receiver<io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    pending_offset: usize,
+}
+
+impl AsyncRead for SftpStreamReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.pending_offset < self.pending.len() {
+            let count = (self.pending.len() - self.pending_offset).min(output.remaining());
+            output.put_slice(&self.pending[self.pending_offset..self.pending_offset + count]);
+            self.pending_offset += count;
+            return Poll::Ready(Ok(()));
+        }
+        self.pending.clear();
+        self.pending_offset = 0;
+        match self.receiver.poll_recv(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Err(error)),
+            Poll::Ready(Some(Ok(bytes))) => {
+                let count = bytes.len().min(output.remaining());
+                output.put_slice(&bytes[..count]);
+                if count < bytes.len() {
+                    self.pending = bytes;
+                    self.pending_offset = count;
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
+struct SftpStreamWriter {
+    stream: tokio::io::DuplexStream,
+    finish: Option<oneshot::Sender<()>>,
+    completion: oneshot::Receiver<Result<(), String>>,
+    shutdown_started: bool,
+    shutdown_complete: bool,
+}
+
+impl AsyncWrite for SftpStreamWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, data)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.shutdown_started {
+            match Pin::new(&mut self.stream).poll_shutdown(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {
+                    self.shutdown_started = true;
+                    if let Some(finish) = self.finish.take() {
+                        let _ = finish.send(());
+                    }
+                }
+            }
+        }
+        if self.shutdown_complete {
+            return Poll::Ready(Ok(()));
+        }
+        match Pin::new(&mut self.completion).poll(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(Ok(()))) => {
+                self.shutdown_complete = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Ok(Err(message))) => Poll::Ready(Err(io::Error::other(message))),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(io::Error::other(
+                "the C++ SFTP upload worker ended unexpectedly",
+            ))),
+        }
+    }
+}
+
+pub(crate) async fn sftp_download_stream(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<TransferReader, String> {
+    let (mut child, input, mut output, directory) =
+        spawn_sftp_stream_worker(app, state, server_id, "--sftp-download", path).await?;
+    drop(input);
+    expect_sftp_worker_ready(&mut child, &mut output).await?;
+    let (sender, receiver) = mpsc::channel(8);
+    tauri::async_runtime::spawn(async move {
+        let _config_directory = directory;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read_result = tokio::select! {
+                biased;
+                _ = sender.closed() => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return;
+                }
+                result = output.read_line(&mut line) => result,
+            };
+            match read_result {
+                Ok(count) if count > 0 && line.len() <= 48 * 1024 => {}
+                _ => {
+                    let _ = sender
+                        .send(Err(io::Error::other(
+                            "the C++ SFTP download ended without a final event",
+                        )))
+                        .await;
+                    let _ = child.kill().await;
+                    break;
+                }
+            }
+            let message: Value = match serde_json::from_str(line.trim_end()) {
+                Ok(message) => message,
+                Err(_) => {
+                    let _ = sender
+                        .send(Err(io::Error::other(
+                            "the C++ SFTP download returned invalid framing",
+                        )))
+                        .await;
+                    let _ = child.kill().await;
+                    break;
+                }
+            };
+            match message.get("type").and_then(Value::as_str) {
+                Some("data") => {
+                    let decoded = message
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .and_then(|encoded| {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(encoded)
+                                .ok()
+                        })
+                        .filter(|bytes| !bytes.is_empty() && bytes.len() <= 32 * 1024);
+                    let Some(bytes) = decoded else {
+                        let _ = sender
+                            .send(Err(io::Error::other(
+                                "the C++ SFTP download returned an invalid data chunk",
+                            )))
+                            .await;
+                        let _ = child.kill().await;
+                        break;
+                    };
+                    if sender.send(Ok(bytes)).await.is_err() {
+                        let _ = child.kill().await;
+                        break;
+                    }
+                }
+                Some("closed") if message.get("exit_code").and_then(Value::as_i64) == Some(0) => {
+                    let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+                    match status {
+                        Ok(Ok(status)) if status.success() => {}
+                        _ => {
+                            let _ = sender
+                                .send(Err(io::Error::other(
+                                    "the C++ SFTP download worker did not exit cleanly",
+                                )))
+                                .await;
+                        }
+                    }
+                    break;
+                }
+                Some("error") => {
+                    let message = message
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the C++ SFTP download failed");
+                    let _ = sender
+                        .send(Err(io::Error::other(message.to_string())))
+                        .await;
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    break;
+                }
+                _ => {
+                    let _ = sender
+                        .send(Err(io::Error::other(
+                            "the C++ SFTP download returned an unexpected event",
+                        )))
+                        .await;
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    break;
+                }
+            }
+        }
+    });
+    Ok(Box::new(SftpStreamReader {
+        receiver,
+        pending: Vec::new(),
+        pending_offset: 0,
+    }))
+}
+
+pub(crate) async fn sftp_create_exclusive_stream(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<TransferWriter, String> {
+    let (mut child, mut input, mut output, directory) =
+        spawn_sftp_stream_worker(app, state, server_id, "--sftp-upload-exclusive", path).await?;
+    expect_sftp_worker_ready(&mut child, &mut output).await?;
+    let (stream, mut bridge) = tokio::io::duplex(128 * 1024);
+    let (finish_sender, finish_receiver) = oneshot::channel();
+    let (completion_sender, completion_receiver) = oneshot::channel();
+    tauri::async_runtime::spawn(async move {
+        let _config_directory = directory;
+        let result: Result<(), String> = async {
+            let mut buffer = vec![0u8; 32 * 1024];
+            loop {
+                let count = bridge
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if count == 0 {
+                    finish_receiver.await.map_err(|_| {
+                        "the SFTP upload writer was dropped before shutdown".to_string()
+                    })?;
+                    let mut close_frame = serde_json::to_vec(&json!({ "type": "close" }))
+                        .map_err(|_| "could not encode the SFTP close frame".to_string())?;
+                    close_frame.push(b'\n');
+                    input
+                        .write_all(&close_frame)
+                        .await
+                        .map_err(|_| "could not close the C++ SFTP upload".to_string())?;
+                    input
+                        .flush()
+                        .await
+                        .map_err(|_| "could not flush the C++ SFTP close frame".to_string())?;
+                    break;
+                }
+                let frame = json!({
+                    "type": "data",
+                    "data": base64::engine::general_purpose::STANDARD.encode(&buffer[..count]),
+                });
+                let mut encoded = serde_json::to_vec(&frame)
+                    .map_err(|_| "could not encode an SFTP upload frame".to_string())?;
+                encoded.push(b'\n');
+                input
+                    .write_all(&encoded)
+                    .await
+                    .map_err(|_| "could not write to the C++ SFTP upload".to_string())?;
+                input
+                    .flush()
+                    .await
+                    .map_err(|_| "could not flush the C++ SFTP upload".to_string())?;
+            }
+
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match tokio::time::timeout(Duration::from_secs(90), output.read_line(&mut line))
+                    .await
+                {
+                    Ok(Ok(count)) if count > 0 && line.len() <= 48 * 1024 => {}
+                    _ => return Err("the C++ SFTP upload did not finish within 90 seconds".into()),
+                }
+                let message: Value = serde_json::from_str(line.trim_end())
+                    .map_err(|_| "the C++ SFTP upload returned invalid framing".to_string())?;
+                match message.get("type").and_then(Value::as_str) {
+                    Some("closed")
+                        if message.get("exit_code").and_then(Value::as_i64) == Some(0) =>
+                    {
+                        break
+                    }
+                    Some("error") => {
+                        return Err(message
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("the C++ SFTP upload failed")
+                            .to_string());
+                    }
+                    _ => return Err("the C++ SFTP upload returned an unexpected event".into()),
+                }
+            }
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .map_err(|_| "the C++ SFTP upload worker did not exit".to_string())?
+                .map_err(|_| "could not wait for the C++ SFTP upload worker".to_string())?;
+            if !status.success() {
+                return Err("the C++ SFTP upload worker exited unsuccessfully".into());
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        let _ = completion_sender.send(result);
+    });
+    Ok(Box::new(SftpStreamWriter {
+        stream,
+        finish: Some(finish_sender),
+        completion: completion_receiver,
+        shutdown_started: false,
+        shutdown_complete: false,
+    }))
 }
 
 pub(crate) async fn sftp_list(

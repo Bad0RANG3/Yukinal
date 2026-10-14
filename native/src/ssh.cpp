@@ -924,6 +924,324 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
   return failed ? 1 : 0;
 }
 
+namespace {
+
+struct SftpStreamCommand {
+  bool close = false;
+  std::vector<unsigned char> data;
+};
+
+struct SftpStreamInput {
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::deque<SftpStreamCommand> commands;
+  std::size_t queued_data_bytes = 0;
+  bool eof = false;
+  bool invalid = false;
+};
+
+constexpr std::size_t kSftpStreamChunkBytes = 32 * 1024;
+constexpr std::size_t kSftpStreamFrameBytes = 48 * 1024;
+constexpr std::size_t kSftpStreamMaxQueueBytes = 1024 * 1024;
+constexpr std::size_t kSftpStreamMaxQueueCommands = 64;
+
+int sftp_base64_value(char value) {
+  if (value >= 'A' && value <= 'Z') return value - 'A';
+  if (value >= 'a' && value <= 'z') return value - 'a' + 26;
+  if (value >= '0' && value <= '9') return value - '0' + 52;
+  if (value == '+') return 62;
+  if (value == '/') return 63;
+  return -1;
+}
+
+bool decode_sftp_stream_data(std::string_view encoded,
+                             std::vector<unsigned char>* decoded) {
+  if (!decoded || encoded.empty() || encoded.size() % 4 != 0 ||
+      encoded.size() > ((kSftpStreamChunkBytes + 2) / 3) * 4) {
+    return false;
+  }
+  const std::size_t padding = encoded.ends_with("==") ? 2 : encoded.ends_with("=") ? 1 : 0;
+  for (std::size_t index = 0; index < encoded.size(); ++index) {
+    const bool is_padding = encoded[index] == '=';
+    if ((is_padding && (padding == 0 || index < encoded.size() - padding)) ||
+        (!is_padding && sftp_base64_value(encoded[index]) < 0)) {
+      return false;
+    }
+  }
+  if (padding == 2 &&
+      (sftp_base64_value(encoded[encoded.size() - 3]) & 0x0f) != 0) return false;
+  if (padding == 1 &&
+      (sftp_base64_value(encoded[encoded.size() - 2]) & 0x03) != 0) return false;
+
+  decoded->clear();
+  decoded->reserve(encoded.size() / 4 * 3 - padding);
+  for (std::size_t index = 0; index < encoded.size(); index += 4) {
+    const unsigned int first = static_cast<unsigned int>(sftp_base64_value(encoded[index]));
+    const unsigned int second = static_cast<unsigned int>(sftp_base64_value(encoded[index + 1]));
+    const unsigned int third = encoded[index + 2] == '=' ? 0U :
+        static_cast<unsigned int>(sftp_base64_value(encoded[index + 2]));
+    const unsigned int fourth = encoded[index + 3] == '=' ? 0U :
+        static_cast<unsigned int>(sftp_base64_value(encoded[index + 3]));
+    const unsigned int block = (first << 18) | (second << 12) | (third << 6) | fourth;
+    decoded->push_back(static_cast<unsigned char>((block >> 16) & 0xff));
+    if (encoded[index + 2] != '=') decoded->push_back(static_cast<unsigned char>((block >> 8) & 0xff));
+    if (encoded[index + 3] != '=') decoded->push_back(static_cast<unsigned char>(block & 0xff));
+  }
+  return decoded->size() <= kSftpStreamChunkBytes;
+}
+
+void read_sftp_stream_input(const std::shared_ptr<SftpStreamInput>& input) {
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.size() > kSftpStreamFrameBytes) {
+      std::lock_guard lock(input->mutex);
+      input->invalid = true;
+      break;
+    }
+    try {
+      const auto message = nlohmann::json::parse(line);
+      if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
+        std::lock_guard lock(input->mutex);
+        input->invalid = true;
+        break;
+      }
+      const std::string type = message["type"].get<std::string>();
+      SftpStreamCommand command;
+      if (type == "data" && message.size() == 2 && message.contains("data") &&
+          message["data"].is_string() && decode_sftp_stream_data(
+              message["data"].get_ref<const std::string&>(), &command.data)) {
+        // The decoded payload is bounded to one 32 KiB transfer chunk.
+      } else if (type == "close" && message.size() == 1) {
+        command.close = true;
+        std::lock_guard lock(input->mutex);
+        input->commands.push_back(std::move(command));
+        input->changed.notify_all();
+        break;
+      } else {
+        std::lock_guard lock(input->mutex);
+        input->invalid = true;
+        break;
+      }
+
+      std::unique_lock lock(input->mutex);
+      input->changed.wait(lock, [&] {
+        return input->eof ||
+               (input->commands.size() < kSftpStreamMaxQueueCommands &&
+                input->queued_data_bytes + command.data.size() <= kSftpStreamMaxQueueBytes);
+      });
+      if (input->eof) break;
+      input->queued_data_bytes += command.data.size();
+      input->commands.push_back(std::move(command));
+      input->changed.notify_all();
+    } catch (const nlohmann::json::exception&) {
+      std::lock_guard lock(input->mutex);
+      input->invalid = true;
+      break;
+    }
+  }
+  {
+    std::lock_guard lock(input->mutex);
+    input->eof = true;
+  }
+  input->changed.notify_all();
+}
+
+bool write_sftp_stream_chunk(SshResources* resources,
+                             const std::vector<unsigned char>& data) {
+  std::size_t offset = 0;
+  auto deadline = Clock::now() + std::chrono::seconds(30);
+  while (offset < data.size()) {
+    const auto count = libssh2_sftp_write(
+        resources->sftp_handle_, reinterpret_cast<const char*>(data.data() + offset),
+        data.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      deadline = Clock::now() + std::chrono::seconds(30);
+      continue;
+    }
+    if (count == LIBSSH2_ERROR_EAGAIN &&
+        wait_for_ssh(resources->socket_, resources->session_, deadline)) continue;
+    return false;
+  }
+  return true;
+}
+
+bool sync_sftp_stream_handle(SshResources* resources, Clock::time_point deadline) {
+  for (;;) {
+    const int result = libssh2_sftp_fsync(resources->sftp_handle_);
+    if (result == 0) return true;
+    if (result != LIBSSH2_ERROR_EAGAIN ||
+        !wait_for_ssh(resources->socket_, resources->session_, deadline)) return false;
+  }
+}
+
+bool close_sftp_stream_handle(SshResources* resources, Clock::time_point deadline) {
+  if (!resources->sftp_handle_) return true;
+  for (;;) {
+    const int result = libssh2_sftp_close_handle(resources->sftp_handle_);
+    if (result == LIBSSH2_ERROR_EAGAIN) {
+      if (wait_for_ssh(resources->socket_, resources->session_, deadline)) continue;
+      return false;
+    }
+    resources->sftp_handle_ = nullptr;
+    return result == 0;
+  }
+}
+
+void remove_failed_sftp_stream(SshResources* resources, const std::string& path) {
+  const auto deadline = Clock::now() + std::chrono::seconds(5);
+  for (;;) {
+    const int result = libssh2_sftp_unlink_ex(
+        resources->sftp_, path.data(), static_cast<unsigned int>(path.size()));
+    if (result != LIBSSH2_ERROR_EAGAIN ||
+        !wait_for_ssh(resources->socket_, resources->session_, deadline)) return;
+  }
+}
+
+bool emit_sftp_stream_error(const std::string& code, const std::string& message) {
+  return emit_terminal_message({{"type", "error"}, {"code", code}, {"message", message}});
+}
+
+}  // namespace
+
+int run_sftp_stream(const TargetConfig& target, const std::string& path, bool upload) {
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos) {
+    emit_sftp_stream_error("invalid_parameters", "The SFTP stream path is invalid");
+    return 2;
+  }
+
+  ExecResult connection_result;
+  SshResources resources;
+  const auto startup_deadline = Clock::now() + std::chrono::seconds(30);
+  if (!connect_sftp(target, startup_deadline, &resources, &connection_result)) {
+    emit_sftp_stream_error(connection_result.error_code.empty() ? "sftp_error" : connection_result.error_code,
+                           connection_result.error_message.empty() ? "SFTP connection failed" : connection_result.error_message);
+    return 2;
+  }
+  const long flags = upload
+      ? LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL
+      : LIBSSH2_FXF_READ;
+  if (!set_session_timeout(resources.session_, startup_deadline)) {
+    emit_sftp_stream_error("timeout", "SFTP stream startup timed out");
+    return 2;
+  }
+  resources.sftp_handle_ = libssh2_sftp_open_ex(
+      resources.sftp_, path.data(), static_cast<unsigned int>(path.size()), flags,
+      upload ? 0644 : 0, LIBSSH2_SFTP_OPENFILE);
+  if (!resources.sftp_handle_) {
+    const bool timed_out = remaining_ms(startup_deadline) == 0;
+    emit_sftp_stream_error(timed_out ? "timeout" : "sftp_error",
+                           upload ? "Could not exclusively create the remote staging file"
+                                   : "Could not open the remote file for reading");
+    return 2;
+  }
+  if (!set_nonblocking(resources.socket_, true)) {
+    emit_sftp_stream_error("sftp_error", "Could not configure the SFTP stream socket");
+    return 2;
+  }
+  libssh2_session_set_blocking(resources.session_, 0);
+  if (!emit_terminal_message({{"type", "ready"}})) return 0;
+
+  bool succeeded = true;
+  std::uint64_t transferred = 0;
+  std::array<char, kSftpStreamChunkBytes> buffer{};
+  if (!upload) {
+    auto deadline = Clock::now() + std::chrono::seconds(30);
+    for (;;) {
+      const auto count = libssh2_sftp_read(resources.sftp_handle_, buffer.data(), buffer.size());
+      if (count == 0) break;
+      if (count == LIBSSH2_ERROR_EAGAIN) {
+        if (!wait_for_ssh(resources.socket_, resources.session_, deadline)) {
+          emit_sftp_stream_error("timeout", "SFTP download timed out");
+          succeeded = false;
+          break;
+        }
+        continue;
+      }
+      if (count < 0) {
+        emit_sftp_stream_error("sftp_error", "Reading the remote file failed");
+        succeeded = false;
+        break;
+      }
+      deadline = Clock::now() + std::chrono::seconds(30);
+      transferred += static_cast<std::uint64_t>(count);
+      std::vector<unsigned char> bytes(buffer.begin(), buffer.begin() + count);
+      if (!emit_terminal_message({{"type", "data"}, {"data", base64_encode(bytes)}})) {
+        succeeded = false;
+        break;
+      }
+    }
+  } else {
+    const auto input = std::make_shared<SftpStreamInput>();
+    std::thread(read_sftp_stream_input, input).detach();
+    bool close_received = false;
+    auto input_deadline = Clock::now() + std::chrono::seconds(60);
+    while (succeeded && !close_received) {
+      SftpStreamCommand command;
+      bool has_command = false;
+      bool invalid_input = false;
+      bool input_ended = false;
+      bool input_timed_out = false;
+      {
+        std::unique_lock lock(input->mutex);
+        const bool ready = input->changed.wait_until(lock, input_deadline, [&] {
+          return input->invalid || input->eof || !input->commands.empty();
+        });
+        input_timed_out = !ready;
+        invalid_input = input->invalid;
+        input_ended = input->eof && input->commands.empty();
+        if (!input->commands.empty()) {
+          command = std::move(input->commands.front());
+          input->commands.pop_front();
+          input->queued_data_bytes -= command.data.size();
+          has_command = true;
+        }
+      }
+      input->changed.notify_all();
+      if (input_timed_out) {
+        emit_sftp_stream_error("timeout", "The SFTP upload input was idle for 60 seconds");
+        succeeded = false;
+      } else if (invalid_input) {
+        emit_sftp_stream_error("invalid_input", "The SFTP upload frame is invalid");
+        succeeded = false;
+      } else if (input_ended && !has_command) {
+        emit_sftp_stream_error("cancelled", "The SFTP upload ended before its close frame");
+        succeeded = false;
+      } else if (has_command && command.close) {
+        close_received = true;
+      } else if (has_command) {
+        if (!write_sftp_stream_chunk(&resources, command.data)) {
+          emit_sftp_stream_error("sftp_error", "Writing the remote staging file failed");
+          succeeded = false;
+        } else {
+          transferred += command.data.size();
+          input_deadline = Clock::now() + std::chrono::seconds(60);
+        }
+      }
+    }
+    if (succeeded && !close_received) succeeded = false;
+    if (succeeded && !sync_sftp_stream_handle(
+            &resources, Clock::now() + std::chrono::seconds(30))) {
+      emit_sftp_stream_error("sftp_error", "The SFTP server could not sync the staging file");
+      succeeded = false;
+    }
+  }
+
+  if (resources.sftp_handle_ && !close_sftp_stream_handle(
+          &resources, Clock::now() + std::chrono::seconds(30)) && succeeded) {
+    emit_sftp_stream_error("sftp_error", "Closing the SFTP stream failed");
+    succeeded = false;
+  }
+  if (upload && !succeeded) {
+    remove_failed_sftp_stream(&resources, path);
+  }
+  if (succeeded) {
+    emit_terminal_message({{"type", "closed"}, {"exit_code", 0}, {"bytes", transferred}});
+    return 0;
+  }
+  return 1;
+}
+
 static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
                                   int timeout_seconds) {
   ExecResult result;

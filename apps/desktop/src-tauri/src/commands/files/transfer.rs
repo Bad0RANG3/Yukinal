@@ -18,6 +18,7 @@ use yukinal_filesystem::{RemoteEntryKind, RemoteStat};
 use yukinal_ssh::{SftpEntryKind, SshBackend};
 
 use crate::commands::files::local_paths::LocalPathHandles;
+use crate::commands::ssh_service;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
@@ -284,6 +285,11 @@ impl RemoteTransferBackend for SftpTransferBackend {
     ) -> TransferFuture<'a, TransferReader> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return ssh_service::sftp_download_stream(&self.app, &state, server_id, path)
+                    .await
+                    .map_err(TransferError::Remote);
+            }
             let (_session, client) = sftp_client(&state, server_id).await?;
             state
                 .ssh
@@ -300,6 +306,13 @@ impl RemoteTransferBackend for SftpTransferBackend {
     ) -> TransferFuture<'a, TransferWriter> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return ssh_service::sftp_create_exclusive_stream(
+                    &self.app, &state, server_id, path,
+                )
+                .await
+                .map_err(TransferError::Remote);
+            }
             let (_session, client) = sftp_client(&state, server_id).await?;
             state
                 .ssh
