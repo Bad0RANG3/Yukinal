@@ -64,6 +64,7 @@ pnpm-debug.log*
 # 2.0 SSH rewrite: Python virtualenv, caches and native build trees
 .venv/
 agent/.venv/
+agent/runtime/
 __pycache__/
 *.pyc
 native/build/
