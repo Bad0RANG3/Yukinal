@@ -197,6 +197,33 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
                 handler=handler,
             )
 
+    async def test_local_json_schema_references_are_supported(self) -> None:
+        registry = ToolRegistry(MemoryAuditSink())
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, Any]:
+            return arguments
+
+        registry.register(ToolSpec(
+            name="ops.local_ref",
+            description="Schema with a local definition.",
+            input_schema={
+                "type": "object",
+                "properties": {"target_id": {"$ref": "#/$defs/target"}},
+                "required": ["target_id"],
+                "$defs": {"target": {"type": "string", "minLength": 1}},
+                "additionalProperties": False,
+            },
+            risk_level="read",
+            requires_approval=False,
+            handler=handler,
+            target_required=True,
+        ))
+        result = await registry.execute(
+            "ops.local_ref", {"target_id": "staging-01"},
+            context(allowed_tools=frozenset({"ops.local_ref"})),
+        )
+        self.assertEqual(result.value, {"target_id": "staging-01"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,9 +23,18 @@ ToolHandler = Callable[[dict[str, Any], "ExecutionContext"], Awaitable[Any]]
 
 
 class ToolCallError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        approval_fingerprint: str | None = None,
+        target_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else "tool_failed"
+        self.approval_fingerprint = approval_fingerprint
+        self.target_id = target_id
 
 
 @dataclass(frozen=True)
@@ -92,7 +101,7 @@ class ExecutionContext:
             raise ValueError("execution context contains too many permissions")
         if self.context_target_id is not None and not _IDENTIFIER.fullmatch(self.context_target_id):
             raise ValueError("context_target_id has an invalid format")
-        if len(self.approved_actions) > 1000 or any(
+        if not isinstance(self.approved_actions, Mapping) or len(self.approved_actions) > 1000 or any(
             not isinstance(key, str)
             or not re.fullmatch(r"[0-9a-f]{64}", key)
             or not isinstance(reference, str)
@@ -140,7 +149,12 @@ class AllowlistAuthorization:
             tenant_id=context.tenant_id, user_id=context.user_id,
         )
         if not context.approved_actions.get(fingerprint):
-            raise ToolCallError("approval_required", "This tool call requires approval")
+            raise ToolCallError(
+                "approval_required",
+                "This tool call requires approval",
+                approval_fingerprint=fingerprint,
+                target_id=target_id,
+            )
         return "approved"
 
 
@@ -263,9 +277,24 @@ class ToolRegistry:
             )
             raise
         except ToolCallError as error:
-            status = "denied" if error.code in {
-                "tool_not_allowed", "target_required", "target_not_allowed", "approval_required"
-            } else "failed"
+            status = "awaiting_approval" if error.code == "approval_required" else (
+                "denied" if error.code in {"tool_not_allowed", "target_required", "target_not_allowed", "risk_not_allowed", "authorization_failed"}
+                else "failed"
+            )
+            if error.code == "approval_required" and spec is not None and isinstance(arguments, dict):
+                target_for_approval = context.context_target_id
+                if spec.target_id_argument is not None and spec.target_id_argument in arguments:
+                    target_for_approval = arguments[spec.target_id_argument]
+                error.target_id = target_for_approval if isinstance(target_for_approval, str) else None
+                error.approval_fingerprint = _approval_fingerprint(
+                    spec.name,
+                    error.target_id,
+                    arguments,
+                    task_id=context.task_id,
+                    tenant_id=context.tenant_id,
+                    user_id=context.user_id,
+                )
+                approval_status = "awaiting_approval"
             await self._record_finished(
                 context, event_id, status, spec.name if spec is not None else "<unregistered>", target_id, started, safe_arguments,
                 started_clock, error_code=error.code, approval_status=approval_status,
@@ -455,8 +484,13 @@ def _to_json_value(value: Any) -> Any:
 
 def _reject_schema_references(node: Any) -> None:
     if isinstance(node, dict):
-        if "$ref" in node or "$dynamicRef" in node or "$recursiveRef" in node:
-            raise ValueError("schema references are not supported")
+        for key in ("$ref", "$dynamicRef", "$recursiveRef"):
+            reference = node.get(key)
+            if reference is not None and (not isinstance(reference, str) or not reference.startswith("#")):
+                raise ValueError("external schema references are not supported")
+        schema_id = node.get("$id")
+        if schema_id is not None and (not isinstance(schema_id, str) or "://" in schema_id):
+            raise ValueError("external schema identifiers are not supported")
         for value in node.values():
             _reject_schema_references(value)
     elif isinstance(node, list):

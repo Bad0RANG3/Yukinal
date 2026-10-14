@@ -207,11 +207,15 @@ class AgentWorkflow:
                 max_output_bytes=min(remaining_output, 4 * 1024 * 1024),
             )
         except ToolCallError as error:
-            item = {"tool": name, "status": "failed", "error_code": error.code}
+            item = {"tool": name, "status": "awaiting_approval" if error.code == "approval_required" else "failed", "error_code": error.code}
+            if error.approval_fingerprint is not None:
+                item["approval_fingerprint"] = error.approval_fingerprint
+            if error.target_id is not None:
+                item["target_id"] = error.target_id
             return {
                 "result_items": [*state["result_items"], item],
                 "current_index": index + 1,
-                "status": "failed",
+                "status": "awaiting_approval" if error.code == "approval_required" else "failed",
                 "error_code": error.code,
             }
         except Exception:
@@ -240,7 +244,7 @@ class AgentWorkflow:
 
     @staticmethod
     def _route(state: _WorkflowState) -> str:
-        if state.get("status") in {"failed", "succeeded"} or state["current_index"] >= len(state["tool_calls"]):
+        if state.get("status") in {"failed", "succeeded", "awaiting_approval"} or state["current_index"] >= len(state["tool_calls"]):
             return "finish"
         return "continue"
 

@@ -9,6 +9,7 @@ dependencies = []
 [project.optional-dependencies]
 test = ["paramiko>=3.5,<6"]
 agent = ["jsonschema>=4.22,<5", "langgraph>=1.2,<2", "mcp>=2,<3"]
+models = ["langchain-anthropic>=1.7,<2", "langchain-openai>=1.6,<2"]
 
 [build-system]
 requires = ["hatchling"]

@@ -6,7 +6,7 @@ starting with a narrow C++ SSH service and a Python caller.
 
 ## Rewrite status
 
-The current rewrite implements **milestones 1 and 2** from
+The current rewrite implements **milestones 1 through 3** from
 [`ssh_agent_development_brief.md`](./ssh_agent_development_brief.md):
 
 - a standalone C++ service bound to `127.0.0.1`;
@@ -21,10 +21,14 @@ The current rewrite implements **milestones 1 and 2** from
   defaulting to approval-required;
 - a bounded LangGraph workflow with tool-call, total-time, and output-size
   limits.
+- a configuration-driven OpenAI/Anthropic model factory using official
+  LangChain adapters;
+- a model-driven LangGraph tool loop with tenant/user/target/risk policy,
+  exact-argument approval requests, and bounded model output.
 
-Model providers, approval UI, durable task state, and desktop UI wiring remain
-later milestones. The new runtime is invoked by Python for now; the existing
-React/Tauri application has not yet been connected to it.
+Approval UI, durable task state, and desktop UI wiring remain later milestones.
+The new runtime is invoked by Python for now; the existing React/Tauri
+application has not yet been connected to it.
 
 The C++ service is not yet connected to the desktop UI. The existing React
 components and their Tauri bridge are preserved. The existing Rust/Tauri

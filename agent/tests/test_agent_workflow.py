@@ -75,10 +75,10 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     "arguments": {"service": "nginx"},
                 }],
             )
-            self.assertEqual(denied.status, "failed")
+            self.assertEqual(denied.status, "awaiting_approval")
             self.assertEqual(denied.error_code, "approval_required")
 
-        self.assertEqual([event.status for event in audit.events], ["started", "succeeded", "started", "denied"])
+        self.assertEqual([event.status for event in audit.events], ["started", "succeeded", "started", "awaiting_approval"])
 
     async def test_call_count_limit_and_task_deadline_are_enforced(self) -> None:
         audit = MemoryAuditSink()
