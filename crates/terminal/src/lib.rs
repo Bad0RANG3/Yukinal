@@ -1,4 +1,4 @@
-//! yukinal-terminal — PTY Manager（数据流：xterm.js → Tauri IPC → 本 crate → SSH Channel → Remote PTY）。
+//! yukinal-terminal — PTY Manager（数据流：xterm.js → Tauri IPC → 本 crate → transport adapter → Remote PTY）。
 //!
 //! 职责：
 //! - 每个会话一个稳定 `terminal_session_id`，多会话互不干扰；
@@ -28,7 +28,7 @@ mod pty;
 pub use error::TerminalError;
 pub use event::{TerminalAppEvent, TerminalSessionInfo};
 pub use manager::TerminalManager;
-pub use pty::TerminalPty;
+pub use pty::{TerminalPty, TerminalPtyEvent};
 
 pub type Result<T> = std::result::Result<T, TerminalError>;
 

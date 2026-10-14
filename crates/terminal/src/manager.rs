@@ -5,14 +5,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::sync::{broadcast, Mutex};
-use tokio_util::sync::CancellationToken;
-use yukinal_ssh::PtyEvent;
-
 use crate::event::{TerminalAppEvent, TerminalSessionInfo};
 use crate::iso8601_now;
-use crate::pty::TerminalPty;
+use crate::pty::{TerminalPty, TerminalPtyEvent};
 use crate::{Result, TerminalError};
+use tokio::sync::{Mutex, broadcast};
+use tokio_util::sync::CancellationToken;
 
 struct Session<P: TerminalPty> {
     info: TerminalSessionInfo,
@@ -308,7 +306,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                     break;
                 };
                 match event {
-                    Some(PtyEvent::Output(bytes)) => {
+                    Some(TerminalPtyEvent::Output(bytes)) => {
                         let current = sessions
                             .lock()
                             .await
@@ -328,7 +326,7 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
                             break; // 无订阅者（UI 已关），任务结束
                         }
                     }
-                    Some(PtyEvent::Closed { code }) => {
+                    Some(TerminalPtyEvent::Closed { code }) => {
                         let current = sessions
                             .lock()
                             .await
@@ -415,7 +413,7 @@ mod tests {
             self.resizes.lock().expect("lock").push((cols, rows));
             Ok(())
         }
-        fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
+        fn events(&self) -> tokio::sync::mpsc::Receiver<TerminalPtyEvent> {
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             let _ = tx; // 第二次订阅是空的（与 SshPty 的 take_output 语义一致）
             rx
@@ -429,11 +427,10 @@ mod tests {
     /// 带"可注入脚本"的 pty：events() 给出与 emit() 同一信道（模拟 SshPty 的一次性订阅）。
     ///
     /// 信道与生产侧一样是**有界**的（容量 16，测试里只放两三条事件）。这样 `emit` 就成了
-    /// 异步操作 —— 与 `yukinal-ssh` 里「队列满则生产端挂起」的语义一致，测试也不会因为
-    /// 用了无界队列而无意中掩盖背压行为。
+    /// 异步操作 —— 队列满时生产端挂起，测试不会因为无界队列而掩盖背压行为。
     struct ScriptedMemoryPty {
-        output_tx: tokio::sync::mpsc::Sender<PtyEvent>,
-        receiver: StdMutex<Option<tokio::sync::mpsc::Receiver<PtyEvent>>>,
+        output_tx: tokio::sync::mpsc::Sender<TerminalPtyEvent>,
+        receiver: StdMutex<Option<tokio::sync::mpsc::Receiver<TerminalPtyEvent>>>,
         written: StdMutex<Vec<Vec<u8>>>,
     }
 
@@ -456,7 +453,7 @@ mod tests {
         async fn resize(&self, _cols: u16, _rows: u16) -> Result<()> {
             Ok(())
         }
-        fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
+        fn events(&self) -> tokio::sync::mpsc::Receiver<TerminalPtyEvent> {
             self.receiver
                 .lock()
                 .expect("lock")
@@ -597,7 +594,9 @@ mod tests {
             let emitter = pty.output_tx.clone();
             let id = manager.open("srv_1", 120, 30, pty).await.expect("open");
 
-            let _ = emitter.send(PtyEvent::Output(b"hello\r\n".to_vec())).await;
+            let _ = emitter
+                .send(TerminalPtyEvent::Output(b"hello\r\n".to_vec()))
+                .await;
 
             match rx.recv().await.expect("event 1") {
                 TerminalAppEvent::Opened { .. } => {}
@@ -615,7 +614,9 @@ mod tests {
             }
 
             // 远端关闭 → Closed 上抛。
-            let _ = emitter.send(PtyEvent::Closed { code: Some(0) }).await;
+            let _ = emitter
+                .send(TerminalPtyEvent::Closed { code: Some(0) })
+                .await;
             match rx.recv().await.expect("event 3") {
                 TerminalAppEvent::Closed {
                     terminal_session_id,

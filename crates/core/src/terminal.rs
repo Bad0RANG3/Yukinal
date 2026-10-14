@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use yukinal_ssh::{
-    link_count_probe_command, parse_link_count, ConnectionSecrets, PtyEvent, RusshBackend, Session,
-    SftpFileStat, SftpReplaceError, SftpReplaceGuard, SftpReplacement, SshBackend, SshConfig,
+    ConnectionSecrets, PtyEvent, RusshBackend, Session, SftpFileStat, SftpReplaceError,
+    SftpReplaceGuard, SftpReplacement, SshBackend, SshConfig, link_count_probe_command,
+    parse_link_count,
 };
-use yukinal_terminal::{TerminalAppEvent, TerminalManager, TerminalPty};
+use yukinal_terminal::{TerminalAppEvent, TerminalManager, TerminalPty, TerminalPtyEvent};
 
 pub type Result<T> = std::result::Result<T, TerminalServiceError>;
 
@@ -71,8 +72,21 @@ impl TerminalPty for SshPty {
             .map_err(|error| yukinal_terminal::TerminalError::Channel(error.to_string()))
     }
 
-    fn events(&self) -> tokio::sync::mpsc::Receiver<PtyEvent> {
-        self.backend.pty_output(&self.pty)
+    fn events(&self) -> tokio::sync::mpsc::Receiver<TerminalPtyEvent> {
+        let mut source = self.backend.pty_output(&self.pty);
+        let (sender, receiver) = tokio::sync::mpsc::channel(128);
+        tokio::spawn(async move {
+            while let Some(event) = source.recv().await {
+                let event = match event {
+                    PtyEvent::Output(bytes) => TerminalPtyEvent::Output(bytes),
+                    PtyEvent::Closed { code } => TerminalPtyEvent::Closed { code },
+                };
+                if sender.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        receiver
     }
 
     async fn close(&self) -> yukinal_terminal::Result<()> {

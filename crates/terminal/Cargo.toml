@@ -12,7 +12,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-yukinal-ssh = { workspace = true }
 yukinal-time = { workspace = true }
 
 [dev-dependencies]
