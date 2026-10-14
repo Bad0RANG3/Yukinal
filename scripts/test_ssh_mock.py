@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import re
+import select
 import socket
 import stat
 import struct
@@ -38,6 +39,7 @@ BAD_PASSWORD = "intentionally-wrong-local-password"
 EXEC_COMMANDS: list[bytes] = []
 AUTH_EVENTS: list[str] = []
 TERMINAL_DIMENSIONS: list[tuple[int, int]] = []
+PROXY_CONNECT_TARGETS: list[str] = []
 
 
 def unused_port() -> int:
@@ -444,6 +446,84 @@ def start_ssh_mock(
     return listener, stopping
 
 
+def start_http_connect_proxy(
+    expected_credential: str,
+) -> tuple[socket.socket, threading.Event]:
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    stopping = threading.Event()
+    expected_authorization = "Basic " + base64.b64encode(
+        expected_credential.encode("utf-8")
+    ).decode("ascii")
+
+    def handle_connection(connection: socket.socket) -> None:
+        upstream: socket.socket | None = None
+        try:
+            request = bytearray()
+            while b"\r\n\r\n" not in request and len(request) < 8192:
+                chunk = connection.recv(1)
+                if not chunk:
+                    return
+                request.extend(chunk)
+            if b"\r\n\r\n" not in request:
+                connection.sendall(b"HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n")
+                return
+            lines = request.decode("iso-8859-1").split("\r\n")
+            if len(lines) < 2 or not lines[0].startswith("CONNECT "):
+                connection.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                return
+            headers = {
+                key.strip().lower(): value.strip()
+                for line in lines[1:]
+                if ":" in line
+                for key, value in [line.split(":", 1)]
+            }
+            if headers.get("proxy-authorization") != expected_authorization:
+                connection.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                return
+            authority = lines[0][len("CONNECT "):].split(" ", 1)[0]
+            host, separator, port_text = authority.rpartition(":")
+            if not separator or not port_text.isdigit():
+                connection.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                return
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
+            upstream = socket.create_connection((host, int(port_text)), timeout=3)
+            upstream.settimeout(None)
+            PROXY_CONNECT_TARGETS.append(authority)
+            connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            while not stopping.is_set():
+                readable, _, _ = select.select([connection, upstream], [], [], 1)
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    destination = upstream if source is connection else connection
+                    destination.sendall(data)
+        except (OSError, ValueError):
+            pass
+        finally:
+            if upstream is not None:
+                upstream.close()
+            connection.close()
+
+    def accept_connections() -> None:
+        while not stopping.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=handle_connection, args=(connection,), daemon=True).start()
+
+    threading.Thread(target=accept_connections, daemon=True).start()
+    return listener, stopping
+
+
 def expect_error(client: SshServiceClient, target_id: str, service: str,
                  timeout: int, expected_code: str, *, max_elapsed: float | None = None) -> None:
     started = time.monotonic()
@@ -765,6 +845,9 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     user_key = paramiko.RSAKey.generate(2048)
     listener, stopping = start_ssh_mock(host_key, user_key)
     ssh_port = listener.getsockname()[1]
+    proxy_listener, proxy_stopping = start_http_connect_proxy("proxy-user:proxy-password")
+    proxy_port = proxy_listener.getsockname()[1]
+    PROXY_CONNECT_TARGETS.clear()
 
     with tempfile.TemporaryDirectory(prefix="yukinal-paramiko-ssh-") as temp:
         root = Path(temp)
@@ -834,6 +917,34 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "probe_only": True,
                     "auth": {"type": "probe"},
                 },
+                {
+                    "target_id": "srv_proxy",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "type": "http_connect",
+                        "host": "127.0.0.1",
+                        "port": proxy_port,
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_proxy_bad_auth",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "type": "http_connect",
+                        "host": "127.0.0.1",
+                        "port": proxy_port,
+                        "auth_env": "YK_SSH_TEST_PROXY_BAD_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
             ],
         }
         config_path = root / "service.json"
@@ -843,6 +954,8 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
         environment["YUKINAL_TEST_SSH_PASSWORD"] = PASSWORD
         environment["YUKINAL_TEST_BAD_PASSWORD"] = BAD_PASSWORD
         environment["YK_SSH_TEST_PRIVATE_KEY"] = private_key_pem
+        environment["YK_SSH_TEST_PROXY_CREDENTIAL"] = "proxy-user:proxy-password"
+        environment["YK_SSH_TEST_PROXY_BAD_CREDENTIAL"] = "proxy-user:bad-proxy-password"
         process = subprocess.Popen(
             [str(service_binary), "--config", str(config_path)],
             stdin=subprocess.DEVNULL,
@@ -871,6 +984,22 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 raise AssertionError(f"C++ host-key probe returned an unexpected fingerprint: {probe!r}")
             if AUTH_EVENTS:
                 raise AssertionError(f"host-key probe attempted SSH authentication: {AUTH_EVENTS!r}")
+
+            proxy_result = client.service_status("srv_proxy", "nginx.service", timeout_seconds=8)
+            if proxy_result.exit_code != 0 or proxy_result.stdout != "active\n":
+                raise AssertionError(f"HTTP CONNECT proxy did not carry the SSH operation: {proxy_result!r}")
+            expected_authority = f"127.0.0.1:{ssh_port}"
+            if PROXY_CONNECT_TARGETS != [expected_authority]:
+                raise AssertionError(f"HTTP CONNECT used an unexpected target: {PROXY_CONNECT_TARGETS!r}")
+            try:
+                client.service_status("srv_proxy_bad_auth", "nginx.service", timeout_seconds=5)
+            except SshServiceError as error:
+                if error.code != "proxy_auth_required":
+                    raise AssertionError(f"proxy authentication rejection used the wrong error: {error.code}") from error
+                if "bad-proxy-password" in str(error):
+                    raise AssertionError("proxy error response exposed the credential") from error
+            else:
+                raise AssertionError("C++ SSH accepted a rejected HTTP proxy credential")
 
             desktop_target = {
                 "target": {
@@ -1183,6 +1312,8 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     process.wait(timeout=5)
             stopping.set()
             listener.close()
+            proxy_stopping.set()
+            proxy_listener.close()
 
 
 def main() -> int:
@@ -1200,7 +1331,7 @@ def main() -> int:
     if args.agent_runtime_only:
         print("PASS Agent SSH tool selected-target binding, task target allowlist, and model target override rejection")
     else:
-        print("PASS SSH exec, SFTP listing/stat/read/write/exclusive-create/remove/link-count, auth rejection, timeout, output cap, and host-key rejection")
+        print("PASS SSH exec, HTTP CONNECT proxy, SFTP listing/stat/read/write/exclusive-create/remove/link-count, auth rejection, timeout, output cap, and host-key rejection")
     return 0
 
 

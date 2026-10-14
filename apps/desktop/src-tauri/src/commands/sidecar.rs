@@ -392,6 +392,10 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         .host_key_pin(&server.connection.host, server.connection.port)
         .map_err(|_| "the selected server host-key pin could not be read".to_string())?
         .ok_or_else(|| "the selected server has no confirmed host-key pin".to_string())?;
+    let proxy_route = super::ssh_service::resolve_cpp_proxy_route(state)?;
+    if matches!(&proxy_route, super::ssh_service::CppProxyRoute::Unsupported) {
+        return Err("the configured proxy route is not supported by the C++ SSH service".into());
+    }
 
     let identity_id = server
         .connection
@@ -503,15 +507,40 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         }
     };
 
-    Ok(json!({
-        "target": {
+    let mut target = json!({
             "target_id": server.id,
             "host": server.connection.host,
             "port": server.connection.port,
             "username": server.connection.username,
             "host_key_fingerprint": fingerprint,
             "auth": auth,
-        },
+        });
+    match proxy_route {
+        super::ssh_service::CppProxyRoute::Direct => {}
+        super::ssh_service::CppProxyRoute::HttpConnect {
+            host,
+            port,
+            credential,
+        } => {
+            let mut proxy = json!({
+                "type": "http_connect",
+                "host": host,
+                "port": port,
+            });
+            if let Some(credential) = credential {
+                credentials.insert(
+                    "YK_SSH_PROXY_CREDENTIAL".into(),
+                    serde_json::Value::String(credential),
+                );
+                proxy["auth_env"] = json!("YK_SSH_PROXY_CREDENTIAL");
+            }
+            target["proxy"] = proxy;
+        }
+        super::ssh_service::CppProxyRoute::Unsupported => unreachable!("route checked above"),
+    }
+
+    Ok(json!({
+        "target": target,
         "credentials": credentials,
     }))
 }

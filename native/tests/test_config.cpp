@@ -144,6 +144,56 @@ YUKINAL_TEST(config_accepts_isolated_probe_only_target) {
   YUKINAL_REQUIRE(config.targets.at("staging-web-01").probe_only);
 }
 
+YUKINAL_TEST(config_accepts_authenticated_http_connect_proxy) {
+  auto value = valid_config();
+  value["targets"][0]["proxy"] = {
+      {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
+      {"auth_env", "YK_SSH_PROXY_CREDENTIAL"}};
+
+  const auto config = parse_config(value);
+  const auto& target = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(target.proxy_host == "proxy.example.test");
+  YUKINAL_REQUIRE(target.proxy_port == 8080);
+  YUKINAL_REQUIRE(target.proxy_auth_env == "YK_SSH_PROXY_CREDENTIAL");
+}
+
+YUKINAL_TEST(config_rejects_unsupported_or_malformed_proxy) {
+  auto unsupported = valid_config();
+  unsupported["targets"][0]["proxy"] = {
+      {"type", "socks5"}, {"host", "proxy.example.test"}, {"port", 1080}};
+  bool unsupported_rejected = false;
+  try {
+    (void)parse_config(unsupported);
+  } catch (const std::runtime_error&) {
+    unsupported_rejected = true;
+  }
+  YUKINAL_REQUIRE(unsupported_rejected);
+
+  auto invalid_environment = valid_config();
+  invalid_environment["targets"][0]["proxy"] = {
+      {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
+      {"auth_env", "INVALID-NAME"}};
+  bool environment_rejected = false;
+  try {
+    (void)parse_config(invalid_environment);
+  } catch (const std::runtime_error&) {
+    environment_rejected = true;
+  }
+  YUKINAL_REQUIRE(environment_rejected);
+
+  auto reserved_environment = valid_config();
+  reserved_environment["targets"][0]["proxy"] = {
+      {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
+      {"auth_env", "PATH"}};
+  bool reserved_rejected = false;
+  try {
+    (void)parse_config(reserved_environment);
+  } catch (const std::runtime_error&) {
+    reserved_rejected = true;
+  }
+  YUKINAL_REQUIRE(reserved_rejected);
+}
+
 YUKINAL_TEST(config_rejects_probe_target_credentials_and_trust) {
   auto auth_rejected = valid_config();
   auto& target = auth_rejected["targets"][0];

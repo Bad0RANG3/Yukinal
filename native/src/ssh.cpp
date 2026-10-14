@@ -66,6 +66,17 @@ void close_socket(Socket socket) {
 #endif
 }
 
+bool prevent_sigpipe(Socket socket) {
+#ifdef SO_NOSIGPIPE
+  int enabled = 1;
+  return setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE,
+                    reinterpret_cast<const char*>(&enabled), sizeof(enabled)) == 0;
+#else
+  (void)socket;
+  return true;
+#endif
+}
+
 int remaining_ms(Clock::time_point deadline) {
   const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
   if (remaining <= 0) return 0;
@@ -224,12 +235,18 @@ enum class ConnectFailure {
   timeout,
   resolver_busy,
   resolver_unavailable,
+  proxy_auth_required,
+  proxy_connect_failed,
 };
 
 struct SocketConnection {
   Socket socket = kInvalidSocket;
   ConnectFailure failure = ConnectFailure::connection_failed;
 };
+
+std::string read_environment(const std::string& name);
+void wipe(std::string* value);
+std::string base64_encode(const std::vector<unsigned char>& bytes);
 
 bool wait_connect(Socket socket, int timeout_ms) {
   fd_set write_set;
@@ -254,6 +271,116 @@ bool wait_connect(Socket socket, int timeout_ms) {
   return getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length) == 0 && error == 0;
 }
 
+enum class ProxyTunnelFailure { none, timeout, authentication, rejected };
+
+bool wait_socket_ready(Socket socket, bool writing, Clock::time_point deadline) {
+  const int time_left = remaining_ms(deadline);
+  if (time_left <= 0) return false;
+  fd_set read_set;
+  fd_set write_set;
+  FD_ZERO(&read_set);
+  FD_ZERO(&write_set);
+  if (writing) FD_SET(socket, &write_set);
+  else FD_SET(socket, &read_set);
+  timeval timeout{};
+  timeout.tv_sec = time_left / 1000;
+  timeout.tv_usec = (time_left % 1000) * 1000;
+#ifdef _WIN32
+  return select(0, &read_set, &write_set, nullptr, &timeout) > 0;
+#else
+  return select(socket + 1, &read_set, &write_set, nullptr, &timeout) > 0;
+#endif
+}
+
+ProxyTunnelFailure establish_http_connect_tunnel(const TargetConfig& target, Socket socket,
+                                                  Clock::time_point deadline) {
+  std::string authority = target.host;
+  if (authority.find(':') != std::string::npos && authority.front() != '[') {
+    authority = "[" + authority + "]";
+  }
+  authority += ":" + std::to_string(target.port);
+
+  std::string request = "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority +
+                        "\r\nProxy-Connection: Keep-Alive\r\n";
+  std::string encoded_credential;
+  if (!target.proxy_auth_env.empty()) {
+    std::string credential = read_environment(target.proxy_auth_env);
+    if (credential.empty() || credential.size() > 1024) {
+      wipe(&credential);
+      return ProxyTunnelFailure::authentication;
+    }
+    std::vector<unsigned char> credential_bytes(credential.begin(), credential.end());
+    encoded_credential = base64_encode(credential_bytes);
+    volatile unsigned char* credential_data =
+        credential_bytes.empty() ? nullptr : credential_bytes.data();
+    for (std::size_t i = 0; i < credential_bytes.size(); ++i) credential_data[i] = 0;
+    credential_bytes.clear();
+    wipe(&credential);
+    constexpr std::string_view authorization_prefix = "Proxy-Authorization: Basic ";
+    request.reserve(request.size() + authorization_prefix.size() + encoded_credential.size() + 4);
+    request.append(authorization_prefix);
+    request.append(encoded_credential);
+    request.append("\r\n");
+  }
+  request += "\r\n";
+  wipe(&encoded_credential);
+
+  std::size_t sent_total = 0;
+  while (sent_total < request.size()) {
+    if (!wait_socket_ready(socket, true, deadline)) {
+      wipe(&request);
+      return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
+                                         : ProxyTunnelFailure::rejected;
+    }
+    const auto remaining = request.size() - sent_total;
+    const int chunk = static_cast<int>(std::min<std::size_t>(remaining, INT_MAX));
+#ifdef MSG_NOSIGNAL
+    constexpr int send_flags = MSG_NOSIGNAL;
+#else
+    constexpr int send_flags = 0;
+#endif
+    const int sent = send(socket, request.data() + sent_total, chunk, send_flags);
+    if (sent <= 0) {
+      wipe(&request);
+      return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
+                                         : ProxyTunnelFailure::rejected;
+    }
+    sent_total += static_cast<std::size_t>(sent);
+  }
+  wipe(&request);
+
+  std::string response;
+  response.reserve(512);
+  while (response.size() < 8192 && response.find("\r\n\r\n") == std::string::npos) {
+    if (!wait_socket_ready(socket, false, deadline)) {
+      return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
+                                         : ProxyTunnelFailure::rejected;
+    }
+    char byte = 0;
+    const int received = recv(socket, &byte, 1, 0);
+    if (received != 1) {
+      return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
+                                         : ProxyTunnelFailure::rejected;
+    }
+    response.push_back(byte);
+  }
+  const auto line_end = response.find("\r\n");
+  if (line_end == std::string::npos || response.find("\r\n\r\n") == std::string::npos) {
+    return ProxyTunnelFailure::rejected;
+  }
+  const std::string status_line = response.substr(0, line_end);
+  if ((status_line.rfind("HTTP/1.0 ", 0) != 0 && status_line.rfind("HTTP/1.1 ", 0) != 0) ||
+      status_line.size() < 12 || status_line[9] < '0' || status_line[9] > '9' ||
+      status_line[10] < '0' || status_line[10] > '9' || status_line[11] < '0' ||
+      status_line[11] > '9' || (status_line.size() > 12 && status_line[12] != ' ')) {
+    return ProxyTunnelFailure::rejected;
+  }
+  const std::string status = status_line.substr(9, 3);
+  if (status == "200") return ProxyTunnelFailure::none;
+  if (status == "407") return ProxyTunnelFailure::authentication;
+  return ProxyTunnelFailure::rejected;
+}
+
 SocketConnection connect_socket(const TargetConfig& target, Clock::time_point deadline) {
 #ifdef _WIN32
   static std::once_flag winsock_once;
@@ -269,8 +396,11 @@ SocketConnection connect_socket(const TargetConfig& target, Clock::time_point de
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   addrinfo* addresses = nullptr;
-  const std::string port_text = std::to_string(target.port);
-  const auto resolution = detail::resolve_address_list(target.host, port_text, hints, deadline,
+  const bool use_proxy = !target.proxy_host.empty();
+  const std::string& connect_host = use_proxy ? target.proxy_host : target.host;
+  const int connect_port = use_proxy ? target.proxy_port : target.port;
+  const std::string port_text = std::to_string(connect_port);
+  const auto resolution = detail::resolve_address_list(connect_host, port_text, hints, deadline,
                                                         &addresses);
   if (resolution != detail::AddressResolution::resolved || !addresses) {
     if (resolution == detail::AddressResolution::timed_out) return {kInvalidSocket, ConnectFailure::timeout};
@@ -297,13 +427,23 @@ SocketConnection connect_socket(const TargetConfig& target, Clock::time_point de
     const int connect_result = connect(candidate, address->ai_addr, address->ai_addrlen);
 #endif
     if (connect_result == 0 || (socket_would_block() && wait_connect(candidate, time_left))) {
-      if (set_nonblocking(candidate, false)) connected = candidate;
+      if (set_nonblocking(candidate, false) && prevent_sigpipe(candidate)) connected = candidate;
       if (connected != kInvalidSocket) break;
     }
     close_socket(candidate);
   }
   freeaddrinfo(addresses);
-  if (connected != kInvalidSocket) return {connected, ConnectFailure::none};
+  if (connected != kInvalidSocket) {
+    if (!use_proxy) return {connected, ConnectFailure::none};
+    const auto tunnel = establish_http_connect_tunnel(target, connected, deadline);
+    if (tunnel == ProxyTunnelFailure::none) return {connected, ConnectFailure::none};
+    close_socket(connected);
+    if (tunnel == ProxyTunnelFailure::timeout) return {kInvalidSocket, ConnectFailure::timeout};
+    if (tunnel == ProxyTunnelFailure::authentication) {
+      return {kInvalidSocket, ConnectFailure::proxy_auth_required};
+    }
+    return {kInvalidSocket, ConnectFailure::proxy_connect_failed};
+  }
   return {kInvalidSocket, remaining_ms(deadline) == 0 ? ConnectFailure::timeout
                                                        : ConnectFailure::connection_failed};
 }
@@ -493,6 +633,12 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
         break;
       case ConnectFailure::resolver_unavailable:
         fail(result, "resolver_unavailable", "Could not start bounded DNS resolution");
+        break;
+      case ConnectFailure::proxy_auth_required:
+        fail(result, "proxy_auth_required", "The configured HTTP proxy credential is missing or was rejected");
+        break;
+      case ConnectFailure::proxy_connect_failed:
+        fail(result, "proxy_connect_failed", "Could not establish an HTTP CONNECT tunnel to the SSH target");
         break;
       default:
         fail(result, "connection_failed", "Could not connect to the configured SSH target");
@@ -1640,6 +1786,12 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
         break;
       case ConnectFailure::resolver_unavailable:
         fail(&result, "resolver_unavailable", "Could not start bounded DNS resolution");
+        break;
+      case ConnectFailure::proxy_auth_required:
+        fail(&result, "proxy_auth_required", "The configured HTTP proxy credential is missing or was rejected");
+        break;
+      case ConnectFailure::proxy_connect_failed:
+        fail(&result, "proxy_connect_failed", "Could not establish an HTTP CONNECT tunnel to the SSH host");
         break;
       default:
         fail(&result, "connection_failed", "Could not connect to the SSH host for probing");

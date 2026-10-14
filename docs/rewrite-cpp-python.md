@@ -7,17 +7,17 @@
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
 > hosts native UI IPC, local trust-store updates, approvals, and PTY/SFTP
-> compatibility paths for Host CA, proxy routes, keyboard-interactive auth,
-> known-hosts-only trust, and other unsupported SSH modes. Supported direct desktop terminals use a dedicated C++
+> compatibility paths for Host CA, HTTPS proxies, proxies with bypass rules, keyboard-interactive auth,
+> known-hosts-only trust, and other unsupported SSH modes. Supported desktop terminals use a dedicated C++
 > PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
 > C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
-> SSH-agent identities on direct connections with a confirmed host-key pin and
+> SSH-agent identities on direct or supported HTTP CONNECT routes with a confirmed host-key pin and
 > without Host CA. The same identities use C++ for
 > structured SSH operations. Host-key probes use C++ unless Host CA, a configured
 > proxy, or an unsupported host-key format requires the Rust path. Manual transfers use
-> bounded C++ SFTP streams for supported direct targets with a confirmed host-key
+> bounded C++ SFTP streams for supported direct or HTTP CONNECT targets with a confirmed host-key
 > pin and retain the Rust compatibility path for unsupported targets. PTY and
 > Host CA trust still use Rust where unsupported.
 > Every C++ operation resolves its `target_id` through the service
@@ -279,6 +279,13 @@ enforce the same exact-key trust decision as the existing server host-key UI.
 Private-key environment references let the desktop pass decrypted keychain
 material directly to the C++ child without writing key material into the JSON
 configuration.
+
+The desktop may also add a target-level `proxy` object with `type: "http_connect"`,
+proxy `host` and `port`, and an optional `auth_env`. The desktop emits this only
+for a plain HTTP proxy with no `NO_PROXY` rules; proxy credentials are forwarded
+to the child environment separately from the target JSON. HTTPS proxies and
+proxy routes with bypass rules stay on the Rust path. The C++ service bounds the
+CONNECT response and shares the SSH operation deadline.
 
 Desktop host-key probes use a separate short-lived `probe_only` target with no
 credential and no trust entry. The service permits that target to perform only

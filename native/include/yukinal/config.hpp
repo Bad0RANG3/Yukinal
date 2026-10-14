@@ -19,6 +19,9 @@ struct TargetConfig {
   std::string private_key_env;
   std::string password_env;
   std::string passphrase_env;
+  std::string proxy_host;
+  int proxy_port = 0;
+  std::string proxy_auth_env;
   bool agent_auth = false;
   bool probe_only = false;
 };

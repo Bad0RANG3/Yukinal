@@ -1,5 +1,7 @@
 #include "yukinal/config.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <cstdint>
@@ -56,6 +58,19 @@ bool valid_env_name(const std::string& name) {
   return std::regex_match(name, pattern);
 }
 
+bool valid_proxy_credential_env_name(const std::string& name) {
+  if (!valid_env_name(name)) return false;
+  std::string normalized = name;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::toupper(ch));
+  });
+  if (normalized.rfind("YUKINAL_", 0) == 0) return false;
+  static const std::set<std::string> reserved = {
+      "PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE",
+      "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"};
+  return !reserved.contains(normalized);
+}
+
 bool valid_host(const std::string& host) {
   if (host.empty() || host.size() > 253) return false;
   for (const unsigned char ch : host) {
@@ -108,7 +123,7 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     require_object(entry, label);
     require_only_keys(entry,
                       {"target_id", "host", "port", "username", "known_hosts_file",
-                       "host_key_fingerprint", "auth", "probe_only"},
+                       "host_key_fingerprint", "auth", "probe_only", "proxy"},
                       label);
 
     TargetConfig target;
@@ -141,6 +156,26 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     if (!valid_target_id(target.target_id)) throw std::runtime_error(label + ".target_id is invalid");
     if (!valid_host(target.host)) throw std::runtime_error(label + ".host is invalid");
     if (!valid_username(target.username)) throw std::runtime_error(label + ".username is invalid");
+
+    if (entry.contains("proxy")) {
+      const Json& proxy = entry["proxy"];
+      require_object(proxy, label + ".proxy");
+      require_only_keys(proxy, {"type", "host", "port", "auth_env"}, label + ".proxy");
+      if (required_string(proxy, "type", label + ".proxy") != "http_connect") {
+        throw std::runtime_error(label + ".proxy.type must be http_connect");
+      }
+      target.proxy_host = required_string(proxy, "host", label + ".proxy");
+      target.proxy_port = required_integer(proxy, "port", 1, 65535, label + ".proxy");
+      if (!valid_host(target.proxy_host)) {
+        throw std::runtime_error(label + ".proxy.host is invalid");
+      }
+      if (proxy.contains("auth_env")) {
+        target.proxy_auth_env = required_string(proxy, "auth_env", label + ".proxy");
+        if (!valid_proxy_credential_env_name(target.proxy_auth_env)) {
+          throw std::runtime_error(label + ".proxy.auth_env is invalid");
+        }
+      }
+    }
 
     const auto auth_it = entry.find("auth");
     if (auth_it == entry.end()) throw std::runtime_error(label + ".auth is required");

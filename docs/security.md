@@ -2,7 +2,7 @@
 
 本页说明 Yukinal 当前实现和[目标架构](./architecture-and-build-plan.md)必须保持的信任边界。目标功能尚未全部实现；发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
-当前重写包含独立 C++ SSH 服务和 Python Agent。桌面为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。没有 Host CA、未配置代理的主机指纹探测由 C++ 完成：探测目标没有凭据和信任 pin，且只能执行握手探测；它只返回未验证指纹，不写本地状态。Host CA、代理或 C++ 不支持的 host-key 格式由 Rust 的证书感知探针处理。服务状态查询使用固定操作；桌面文件浏览和 Agent 文件读取、覆盖写入、备份创建、清理以及编辑/恢复使用 C++ SFTP 操作，适用于直连、已确认主机密钥 pin、未配置 Host CA 且使用密码、私钥、OpenSSH 用户证书或 SSH Agent 身份的服务器。SSH Agent socket 仅在目标选择 Agent 认证时传给 C++ 子进程（Unix 使用 `SSH_AUTH_SOCK`，Windows 使用平台 Agent 接口）。支持的直连终端会话通过独立 C++ PTY 子进程连接，输入、尺寸变化和输出使用有界 JSON-lines 管道；该入口只由手动终端 UI 调用，不暴露给 Agent 工具。C++ 密码认证不适用时，键盘交互认证会回到 Rust 的用户确认流程。Host CA、代理连接、键盘交互认证及仅有 known_hosts 信任的终端仍使用 Rust。守卫式替换会复核目标的大小、mtime 和 SHA-256，在同目录独占创建暂存文件，保留并复核 mode/mtime/owner/group，再通过 OpenSSH POSIX 原子重命名发布；服务器不支持安全原子替换时会拒绝发布。受支持目标的手动文件传输使用 C++ SFTP 流式子进程：仅在直连、已确认主机密钥 pin、无 Host CA 且身份受支持时启用，数据通过有界本机 JSON-lines 管道转发，不经过模型或 Agent sidecar；Host CA、代理或其他不兼容目标保留 Rust SFTP 回退。
+当前重写包含独立 C++ SSH 服务和 Python Agent。桌面为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。没有 Host CA、未配置代理的主机指纹探测由 C++ 完成：探测目标没有凭据和信任 pin，且只能执行握手探测；它只返回未验证指纹，不写本地状态。Host CA、代理或 C++ 不支持的 host-key 格式由 Rust 的证书感知探针处理。服务状态查询使用固定操作；桌面文件浏览和 Agent 文件读取、覆盖写入、备份创建、清理以及编辑/恢复使用 C++ SFTP 操作，适用于直连或无 bypass 规则的 HTTP CONNECT 代理、已确认主机密钥 pin、未配置 Host CA 且使用密码、私钥、OpenSSH 用户证书或 SSH Agent 身份的服务器。代理凭据通过 C++ 子进程环境变量传递，不写进目标 JSON；HTTPS 代理与配置了 `NO_PROXY` 的代理继续留在 Rust 路径。SSH Agent socket 仅在目标选择 Agent 认证时传给 C++ 子进程（Unix 使用 `SSH_AUTH_SOCK`，Windows 使用平台 Agent 接口）。支持的终端会话通过独立 C++ PTY 子进程连接，输入、尺寸变化和输出使用有界 JSON-lines 管道；该入口只由手动终端 UI 调用，不暴露给 Agent 工具。C++ 密码认证不适用时，键盘交互认证会回到 Rust 的用户确认流程。Host CA、HTTPS 代理、带 `NO_PROXY` 的代理、键盘交互认证及仅有 known_hosts 信任的终端仍使用 Rust。守卫式替换会复核目标的大小、mtime 和 SHA-256，在同目录独占创建暂存文件，保留并复核 mode/mtime/owner/group，再通过 OpenSSH POSIX 原子重命名发布；服务器不支持安全原子替换时会拒绝发布。受支持目标的手动文件传输使用 C++ SFTP 流式子进程：仅在直连或受支持 HTTP CONNECT 路由、已确认主机密钥 pin、无 Host CA 且身份受支持时启用，数据通过有界本机 JSON-lines 管道转发，不经过模型或 Agent sidecar；其他不兼容目标保留 Rust SFTP 回退。
 
 ## 谁能做决定
 
@@ -25,7 +25,7 @@ Python sidecar 在 `YUKINAL_DATA_DIR/agent-state/langgraph-checkpoints.sqlite` �
 
 远端读取、日志、附件和 IPC 帧有大小或数量限制。提供给模型的内容必须受限并脱敏；审计记录应保留操作与结果的可追溯信息，避免写入凭据、完整远端正文和不必要的模型上下文。连接外部 Provider 或 MCP 服务器前，用户应知道相关数据会离开本机；MCP 自报的描述、schema 和风险注解不能单独成为授权依据。
 
-本机↔远端的手动文件传输由用户在工作区发起。只有直连、已确认主机密钥 pin、未配置 Host CA 且使用受支持身份的目标才通过 Rust 宿主启动 C++ SFTP 流式子进程；数据以有界 JSON-lines 帧在本机进程间转发，不经过模型或 Agent sidecar。Host CA、代理或其他不兼容目标保留 Rust SFTP 回退。原生选择/拖放授予的本机来源要绑定到短期传输句柄，远端目标绑定已核验的 `serverId` 和路径。上传/下载都要防路径穿越、符号链接越界、静默覆盖、不完整文件被当成完成；预览上限和传输上限分开。文件名、日志和预览内容仍按不可信输入显示。
+本机↔远端的手动文件传输由用户在工作区发起。只有直连或无 bypass 规则的 HTTP CONNECT、已确认主机密钥 pin、未配置 Host CA 且使用受支持身份的目标才通过 Rust 宿主启动 C++ SFTP 流式子进程；数据以有界 JSON-lines 帧在本机进程间转发，不经过模型或 Agent sidecar。HTTPS 代理、配置了 `NO_PROXY` 的代理、Host CA 或其他不兼容目标保留 Rust SFTP 回退。原生选择/拖放授予的本机来源要绑定到短期传输句柄，远端目标绑定已核验的 `serverId` 和路径。上传/下载都要防路径穿越、符号链接越界、静默覆盖、不完整文件被当成完成；预览上限和传输上限分开。文件名、日志和预览内容仍按不可信输入显示。
 
 ## 明确的限制
 

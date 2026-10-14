@@ -345,6 +345,67 @@ pub(crate) enum TerminalOpenFailure {
     Failed(String),
 }
 
+pub(crate) enum CppProxyRoute {
+    Direct,
+    HttpConnect {
+        host: String,
+        port: u16,
+        credential: Option<String>,
+    },
+    Unsupported,
+}
+
+/// Resolve the app's selected proxy route for the C++ transport. Only a plain HTTP
+/// CONNECT proxy without bypass rules can be represented without changing routing.
+pub(crate) fn resolve_cpp_proxy_route(state: &AppState) -> Result<CppProxyRoute, String> {
+    let outbound =
+        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
+    Ok(cpp_proxy_route(outbound))
+}
+
+fn cpp_proxy_route(outbound: yukinal_net::OutboundProxy) -> CppProxyRoute {
+    match outbound.proxy {
+        yukinal_net::NetworkProxy::Direct => CppProxyRoute::Direct,
+        yukinal_net::NetworkProxy::Unusable { .. } => CppProxyRoute::Unsupported,
+        yukinal_net::NetworkProxy::Proxy { url, no_proxy, .. } => {
+            if no_proxy.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                return CppProxyRoute::Unsupported;
+            }
+            let Ok(url) = reqwest::Url::parse(&url) else {
+                return CppProxyRoute::Unsupported;
+            };
+            if url.scheme() != "http"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.path() != "/"
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return CppProxyRoute::Unsupported;
+            }
+            let Some(host) = url.host_str() else {
+                return CppProxyRoute::Unsupported;
+            };
+            let host = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host)
+                .to_string();
+            let Some(port) = url.port_or_known_default() else {
+                return CppProxyRoute::Unsupported;
+            };
+            CppProxyRoute::HttpConnect {
+                host,
+                port,
+                credential: outbound
+                    .credential
+                    .as_ref()
+                    .map(|credential| credential.expose().to_string()),
+            }
+        }
+    }
+}
+
 /// Whether the configured connection uses auth and trust modes supported by C++.
 pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<bool, String> {
     let server = state
@@ -378,9 +439,7 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
     if !identity_supported {
         return Ok(false);
     }
-    let proxy =
-        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
-    if proxy.proxy != yukinal_net::NetworkProxy::Direct {
+    if matches!(resolve_cpp_proxy_route(state)?, CppProxyRoute::Unsupported) {
         return Ok(false);
     }
     let pin = state
@@ -1984,7 +2043,45 @@ fn api_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_sftp_read_output, valid_host_key_fingerprint};
+    use super::{
+        cpp_proxy_route, decode_sftp_read_output, valid_host_key_fingerprint, CppProxyRoute,
+    };
+    use yukinal_net::{NetworkProxy, OutboundProxy, ProxyCredential, ProxySource};
+
+    fn proxy_route(url: &str, no_proxy: Option<&str>) -> CppProxyRoute {
+        cpp_proxy_route(OutboundProxy {
+            proxy: NetworkProxy::Proxy {
+                url: url.to_string(),
+                no_proxy: no_proxy.map(str::to_string),
+                source: ProxySource::EnvironmentVariable,
+            },
+            credential: Some(
+                ProxyCredential::new("proxy-user:proxy-password".to_string())
+                    .expect("valid proxy credential"),
+            ),
+        })
+    }
+
+    #[test]
+    fn cpp_proxy_route_accepts_only_plain_http_without_bypass_rules() {
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", None),
+            CppProxyRoute::HttpConnect { host, port: 8080, credential: Some(value) }
+                if host == "proxy.example.test" && value == "proxy-user:proxy-password"
+        ));
+        assert!(matches!(
+            proxy_route("http://[::1]:8080", Some("  ")),
+            CppProxyRoute::HttpConnect { host, port: 8080, .. } if host == "::1"
+        ));
+        assert!(matches!(
+            proxy_route("https://proxy.example.test:8443", None),
+            CppProxyRoute::Unsupported
+        ));
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("localhost")),
+            CppProxyRoute::Unsupported
+        ));
+    }
 
     #[test]
     fn bounded_sftp_read_decodes_binary_and_allows_one_truncation_byte() {

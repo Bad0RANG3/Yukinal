@@ -30,6 +30,12 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 "api_token_env": "YUKINAL_SSH_API_TOKEN",
                 "targets": [{
                     "auth": {"type": "private_key", "private_key_env": "YK_SSH_KEY_0"},
+                    "proxy": {
+                        "type": "http_connect",
+                        "host": "127.0.0.1",
+                        "port": 8080,
+                        "auth_env": "YK_PROXY_CREDENTIAL",
+                    },
                 }],
             }), encoding="utf-8")
             environment = {
@@ -37,6 +43,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 "YUKINAL_SSH_SERVICE_CONFIG": str(config),
                 "YUKINAL_SSH_API_TOKEN": "test-token",
                 "YK_SSH_KEY_0": "private-key-material",
+                "YK_PROXY_CREDENTIAL": "proxy-user:proxy-password",
                 "SSH_AUTH_SOCK": "/tmp/agent.sock",
                 "UNRELATED_SECRET": "must-not-be-forwarded",
             }
@@ -61,6 +68,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     await service.start()
                     child_environment = spawn.await_args.kwargs["env"]
                     self.assertEqual(child_environment["YK_SSH_KEY_0"], "private-key-material")
+                    self.assertEqual(child_environment["YK_PROXY_CREDENTIAL"], "proxy-user:proxy-password")
                     self.assertNotIn("SSH_AUTH_SOCK", child_environment)
                     self.assertNotIn("UNRELATED_SECRET", child_environment)
                     await service.stop()
@@ -132,6 +140,43 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 SshServiceProcess.for_desktop_target(
                     binary,
                     {"target": target, "credentials": {"UNRELATED": "value"}},
+                )
+
+    async def test_desktop_target_forwards_http_proxy_credentials_to_cpp_child(self) -> None:
+        target = {
+            "target_id": "srv_example1",
+            "host": "stage.example.test",
+            "port": 22,
+            "username": "ops",
+            "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "auth": {"type": "agent"},
+            "proxy": {
+                "type": "http_connect",
+                "host": "proxy.example.test",
+                "port": 8080,
+                "auth_env": "YK_SSH_PROXY_CREDENTIAL",
+            },
+        }
+        credentials = {
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "YK_SSH_PROXY_CREDENTIAL": "proxy-user:proxy-password",
+        }
+        with tempfile.TemporaryDirectory(prefix="yukinal-ssh-process-") as temporary:
+            binary = Path(temporary) / "service.exe"
+            binary.write_text("service", encoding="utf-8")
+            service, _, _ = SshServiceProcess.for_desktop_target(
+                binary, {"target": target, "credentials": credentials}
+            )
+            self.assertEqual(service._secret_values, credentials)
+            configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
+            self.assertEqual(configured_target["proxy"], target["proxy"])
+            await service.stop()
+
+            invalid_target = dict(target)
+            invalid_target["proxy"] = {**target["proxy"], "auth_env": "PATH"}
+            with self.assertRaises(SshServiceProcessError):
+                SshServiceProcess.for_desktop_target(
+                    binary, {"target": invalid_target, "credentials": credentials}
                 )
 
 

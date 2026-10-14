@@ -92,6 +92,19 @@ class SshServiceProcess:
                         raise SshServiceProcessError("SSH service environment references differ only by letter case")
                     secret_env.add(name)
                     auth_env_names.add(name)
+            if "proxy" in target:
+                proxy_auth_env = _validate_http_connect_proxy(target["proxy"])
+                if proxy_auth_env is not None:
+                    if any(
+                        existing != proxy_auth_env
+                        and existing.casefold() == proxy_auth_env.casefold()
+                        for existing in secret_env
+                    ):
+                        raise SshServiceProcessError(
+                            "SSH service environment references differ only by letter case"
+                        )
+                    secret_env.add(proxy_auth_env)
+                    auth_env_names.add(proxy_auth_env)
 
         if uses_agent:
             if any(name.casefold() == "ssh_auth_sock" for name in auth_env_names):
@@ -154,9 +167,13 @@ class SshServiceProcess:
         credentials = payload.get("credentials")
         if not isinstance(target, dict) or not isinstance(credentials, dict):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
-        if set(target) != {
+        required_target_fields = {
             "target_id", "host", "port", "username", "host_key_fingerprint", "auth",
-        }:
+        }
+        if (
+            not required_target_fields.issubset(target)
+            or set(target) - required_target_fields not in (set(), {"proxy"})
+        ):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
         target_id = target.get("target_id")
         host = target.get("host")
@@ -207,6 +224,10 @@ class SshServiceProcess:
                 credential_names = set()
         else:
             raise SshServiceProcessError("the desktop host returned an unsupported SSH identity")
+        if "proxy" in target:
+            proxy_auth_env = _validate_http_connect_proxy(target["proxy"])
+            if proxy_auth_env is not None:
+                credential_names.add(proxy_auth_env)
         if (
             not all(_valid_credential_env_name(name) for name in credential_names)
             or set(credentials) != credential_names
@@ -357,6 +378,33 @@ def _valid_credential_env_name(value: object) -> bool:
         return False
     reserved = {name.upper() for name in SshServiceProcess._RUNTIME_ENV}
     return value.upper() not in reserved
+
+
+def _validate_http_connect_proxy(value: object) -> str | None:
+    if not isinstance(value, dict):
+        raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
+    required = {"type", "host", "port"}
+    if set(value) not in (required, required | {"auth_env"}):
+        raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
+    host = value.get("host")
+    port = value.get("port")
+    if (
+        value.get("type") != "http_connect"
+        or not isinstance(host, str)
+        or not host
+        or len(host) > 253
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in host)
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+    ):
+        raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
+    if "auth_env" not in value:
+        return None
+    auth_env = value["auth_env"]
+    if not _valid_credential_env_name(auth_env):
+        raise SshServiceProcessError("the SSH service proxy credential reference is invalid")
+    return auth_env
 
 
 def _valid_agent_socket_path(value: object) -> bool:
