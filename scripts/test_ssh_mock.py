@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,7 @@ class ExecServer(paramiko.ServerInterface):
     def __init__(self, public_key: paramiko.PKey) -> None:
         self.command: bytes | None = None
         self.command_ready = threading.Event()
+        self.subsystem_ready = threading.Event()
         self.public_key = public_key
 
     def get_allowed_auths(self, username: str) -> str:
@@ -67,6 +69,23 @@ class ExecServer(paramiko.ServerInterface):
         self.command_ready.set()
         return True
 
+    def check_channel_subsystem_request(self, channel: paramiko.Channel, name: str) -> bool:
+        self.subsystem_ready.set()
+        return super().check_channel_subsystem_request(channel, name)
+
+
+class StaticSftpInterface(paramiko.SFTPServerInterface):
+    def list_folder(self, path: str) -> list[paramiko.SFTPAttributes]:
+        directory = paramiko.SFTPAttributes()
+        directory.filename = "configs"
+        directory.st_mode = stat.S_IFDIR | 0o755
+        directory.st_size = 0
+        file = paramiko.SFTPAttributes()
+        file.filename = "settings.toml"
+        file.st_mode = stat.S_IFREG | 0o640
+        file.st_size = 42
+        return [directory, file]
+
 
 def start_ssh_mock(
     host_key: paramiko.RSAKey, user_key: paramiko.PKey
@@ -83,10 +102,21 @@ def start_ssh_mock(
         try:
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
+            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, StaticSftpInterface)
             server = ExecServer(user_key)
             transport.start_server(server=server)
             channel = transport.accept(10)
-            if channel is None or not server.command_ready.wait(5):
+            if channel is None:
+                return
+            request_deadline = time.monotonic() + 5
+            while not server.subsystem_ready.is_set() and not server.command_ready.is_set():
+                if time.monotonic() >= request_deadline:
+                    return
+                time.sleep(0.01)
+            if server.subsystem_ready.is_set():
+                close_deadline = time.monotonic() + 5
+                while not channel.closed and time.monotonic() < close_deadline:
+                    time.sleep(0.02)
                 return
             command = server.command or b""
             if command == b"systemctl is-active -- nginx.service":
@@ -371,6 +401,19 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if desktop_style_result.stdout != "active\n" or desktop_style_result.exit_code != 0:
                 raise AssertionError(f"desktop keychain/pin path failed: {desktop_style_result!r}")
+
+            listing = client._execute_operation(
+                "srv_desktop_style", "sftp_list", {"path": "/"}, timeout_seconds=5
+            )
+            try:
+                listing_entries = json.loads(listing.stdout)
+            except json.JSONDecodeError as error:
+                raise AssertionError(f"SFTP listing was not JSON: {listing.stdout!r}") from error
+            if listing_entries != [
+                {"name": "configs", "file_type": "directory", "size": 0},
+                {"name": "settings.toml", "file_type": "file", "size": 42},
+            ]:
+                raise AssertionError(f"unexpected C++ SFTP listing: {listing_entries!r}")
             expect_error(client, "srv_bad_pin", "nginx.service", 5, "host_key_unverified")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")

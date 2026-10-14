@@ -12,6 +12,7 @@ struct ExecRequest {
   std::string target_id;
   std::string operation;
   std::string service;
+  std::string path;
   int timeout_seconds = 10;
 };
 

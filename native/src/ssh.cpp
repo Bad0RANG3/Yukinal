@@ -30,6 +30,8 @@
 #include "ssh_network.hpp"
 
 #include <libssh2.h>
+#include <libssh2_sftp.h>
+#include <nlohmann/json.hpp>
 
 namespace yukinal::ssh_service {
 namespace {
@@ -333,6 +335,8 @@ std::string read_environment(const std::string& name) {
 class SshResources {
  public:
   ~SshResources() {
+    if (sftp_handle_) libssh2_sftp_close_handle(sftp_handle_);
+    if (sftp_) libssh2_sftp_shutdown(sftp_);
     if (channel_) {
       libssh2_channel_set_blocking(channel_, 0);
       libssh2_channel_close(channel_);
@@ -349,6 +353,8 @@ class SshResources {
   Socket socket_ = kInvalidSocket;
   LIBSSH2_SESSION* session_ = nullptr;
   LIBSSH2_KNOWNHOSTS* known_hosts_ = nullptr;
+  LIBSSH2_SFTP* sftp_ = nullptr;
+  LIBSSH2_SFTP_HANDLE* sftp_handle_ = nullptr;
   LIBSSH2_CHANNEL* channel_ = nullptr;
 };
 
@@ -414,6 +420,128 @@ std::string host_key_fingerprint(LIBSSH2_SESSION* session) {
   return encoded;
 }
 
+bool connect_authenticated(const TargetConfig& target, Clock::time_point deadline,
+                           SshResources* resources, ExecResult* result) {
+  static std::once_flag libssh2_once;
+  static int libssh2_init_result = 0;
+  std::call_once(libssh2_once, [] { libssh2_init_result = libssh2_init(0); });
+  if (libssh2_init_result != 0) {
+    fail(result, "ssh_unavailable", "SSH library initialization failed");
+    return false;
+  }
+
+  const SocketConnection connection = connect_socket(target, deadline);
+  resources->socket_ = connection.socket;
+  if (resources->socket_ == kInvalidSocket) {
+    switch (connection.failure) {
+      case ConnectFailure::timeout:
+        fail(result, "timeout", "SSH connection timed out");
+        break;
+      case ConnectFailure::resolver_busy:
+        fail(result, "resolver_busy", "DNS resolution capacity is temporarily exhausted");
+        break;
+      case ConnectFailure::resolver_unavailable:
+        fail(result, "resolver_unavailable", "Could not start bounded DNS resolution");
+        break;
+      default:
+        fail(result, "connection_failed", "Could not connect to the configured SSH target");
+        break;
+    }
+    return false;
+  }
+
+  resources->session_ = libssh2_session_init();
+  if (!resources->session_) {
+    fail(result, "ssh_unavailable", "Could not create an SSH session");
+    return false;
+  }
+  libssh2_session_set_blocking(resources->session_, 1);
+  if (!set_session_timeout(resources->session_, deadline)) {
+    fail(result, "timeout", "SSH connection timed out");
+    return false;
+  }
+  if (libssh2_session_handshake(resources->session_, static_cast<libssh2_socket_t>(resources->socket_)) != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0 || libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
+    fail(result, timed_out ? "timeout" : "ssh_handshake_failed",
+         timed_out ? "SSH handshake timed out" : "SSH handshake failed");
+    return false;
+  }
+
+  std::size_t host_key_length = 0;
+  int host_key_type = 0;
+  const char* host_key = libssh2_session_hostkey(resources->session_, &host_key_length, &host_key_type);
+  const int known_key_type = known_host_key_type(host_key_type);
+  if (!host_key || (target.host_key_fingerprint.empty() && known_key_type == 0)) {
+    fail(result, "host_key_unverified", "The SSH server presented an unsupported host key");
+    return false;
+  }
+  if (!target.host_key_fingerprint.empty()) {
+    if (host_key_fingerprint(resources->session_) != target.host_key_fingerprint) {
+      fail(result, "host_key_unverified", "The SSH host key differs from the configured fingerprint");
+      return false;
+    }
+  } else {
+    resources->known_hosts_ = libssh2_knownhost_init(resources->session_);
+    if (!resources->known_hosts_ ||
+        libssh2_knownhost_readfile(resources->known_hosts_, target.known_hosts_file.c_str(),
+                                   LIBSSH2_KNOWNHOST_FILE_OPENSSH) < 0) {
+      fail(result, "host_key_unverified", "Could not load the configured known-hosts file");
+      return false;
+    }
+    const int known_host_result = libssh2_knownhost_checkp(
+        resources->known_hosts_, target.host.c_str(), target.port, host_key, host_key_length,
+        LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | known_key_type, nullptr);
+    if (known_host_result != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
+      fail(result, "host_key_unverified",
+           known_host_result == LIBSSH2_KNOWNHOST_CHECK_MISMATCH
+               ? "The SSH host key differs from the configured known-hosts entry"
+               : "The SSH host key is not present in the configured known-hosts file");
+      return false;
+    }
+  }
+
+  if (!set_session_timeout(resources->session_, deadline)) {
+    fail(result, "timeout", "SSH authentication timed out");
+    return false;
+  }
+  int auth_result = -1;
+  if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
+    std::string passphrase = read_environment(target.passphrase_env);
+    if (!target.private_key_env.empty()) {
+      std::string private_key = read_environment(target.private_key_env);
+      if (private_key.empty()) {
+        fail(result, "credential_unavailable", "The configured SSH private key is not available");
+        wipe(&passphrase);
+        return false;
+      }
+      auth_result = libssh2_userauth_publickey_frommemory(
+          resources->session_, target.username.c_str(), target.username.size(), nullptr, 0,
+          private_key.data(), private_key.size(), passphrase.empty() ? nullptr : passphrase.c_str());
+      wipe(&private_key);
+    } else {
+      auth_result = libssh2_userauth_publickey_fromfile(
+          resources->session_, target.username.c_str(), nullptr, target.private_key_file.c_str(),
+          passphrase.empty() ? nullptr : passphrase.c_str());
+    }
+    wipe(&passphrase);
+  } else {
+    std::string password = read_environment(target.password_env);
+    if (password.empty()) {
+      fail(result, "credential_unavailable", "The configured SSH credential is not available");
+      return false;
+    }
+    auth_result = libssh2_userauth_password(resources->session_, target.username.c_str(), password.c_str());
+    wipe(&password);
+  }
+  if (auth_result != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0 || libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
+    fail(result, timed_out ? "timeout" : "authentication_failed",
+         timed_out ? "SSH authentication timed out" : "SSH authentication failed");
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
@@ -426,124 +554,8 @@ static ExecResult run_ssh_command(const TargetConfig& target, const std::string&
     return result;
   }
   const auto deadline = started + std::chrono::seconds(timeout_seconds);
-  static std::once_flag libssh2_once;
-  static int libssh2_init_result = 0;
-  std::call_once(libssh2_once, [] { libssh2_init_result = libssh2_init(0); });
-  if (libssh2_init_result != 0) {
-    fail(&result, "ssh_unavailable", "SSH library initialization failed");
-    return result;
-  }
-
   SshResources resources;
-  const SocketConnection connection = connect_socket(target, deadline);
-  resources.socket_ = connection.socket;
-  if (resources.socket_ == kInvalidSocket) {
-    switch (connection.failure) {
-      case ConnectFailure::timeout:
-        fail(&result, "timeout", "SSH connection timed out");
-        break;
-      case ConnectFailure::resolver_busy:
-        fail(&result, "resolver_busy", "DNS resolution capacity is temporarily exhausted");
-        break;
-      case ConnectFailure::resolver_unavailable:
-        fail(&result, "resolver_unavailable", "Could not start bounded DNS resolution");
-        break;
-      default:
-        fail(&result, "connection_failed", "Could not connect to the configured SSH target");
-        break;
-    }
-    return result;
-  }
-
-  resources.session_ = libssh2_session_init();
-  if (!resources.session_) {
-    fail(&result, "ssh_unavailable", "Could not create an SSH session");
-    return result;
-  }
-  libssh2_session_set_blocking(resources.session_, 1);
-  if (!set_session_timeout(resources.session_, deadline)) {
-    fail(&result, "timeout", "SSH connection timed out");
-    return result;
-  }
-  if (libssh2_session_handshake(resources.session_, static_cast<libssh2_socket_t>(resources.socket_)) != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0 || libssh2_session_last_errno(resources.session_) == LIBSSH2_ERROR_TIMEOUT;
-    fail(&result, timed_out ? "timeout" : "ssh_handshake_failed",
-         timed_out ? "SSH handshake timed out" : "SSH handshake failed");
-    return result;
-  }
-
-  std::size_t host_key_length = 0;
-  int host_key_type = 0;
-  const char* host_key = libssh2_session_hostkey(resources.session_, &host_key_length, &host_key_type);
-  const int known_key_type = known_host_key_type(host_key_type);
-  if (!host_key || (target.host_key_fingerprint.empty() && known_key_type == 0)) {
-    fail(&result, "host_key_unverified", "The SSH server presented an unsupported host key");
-    return result;
-  }
-  if (!target.host_key_fingerprint.empty()) {
-    if (host_key_fingerprint(resources.session_) != target.host_key_fingerprint) {
-      fail(&result, "host_key_unverified", "The SSH host key differs from the configured fingerprint");
-      return result;
-    }
-  } else {
-    resources.known_hosts_ = libssh2_knownhost_init(resources.session_);
-    if (!resources.known_hosts_ ||
-        libssh2_knownhost_readfile(resources.known_hosts_, target.known_hosts_file.c_str(),
-                                   LIBSSH2_KNOWNHOST_FILE_OPENSSH) < 0) {
-      fail(&result, "host_key_unverified", "Could not load the configured known-hosts file");
-      return result;
-    }
-    const int known_host_result = libssh2_knownhost_checkp(
-        resources.known_hosts_, target.host.c_str(), target.port, host_key, host_key_length,
-        LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | known_key_type, nullptr);
-    if (known_host_result != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
-      fail(&result, "host_key_unverified",
-           known_host_result == LIBSSH2_KNOWNHOST_CHECK_MISMATCH
-               ? "The SSH host key differs from the configured known-hosts entry"
-               : "The SSH host key is not present in the configured known-hosts file");
-      return result;
-    }
-  }
-
-  if (!set_session_timeout(resources.session_, deadline)) {
-    fail(&result, "timeout", "SSH authentication timed out");
-    return result;
-  }
-  int auth_result = -1;
-  if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
-    std::string passphrase = read_environment(target.passphrase_env);
-    if (!target.private_key_env.empty()) {
-      std::string private_key = read_environment(target.private_key_env);
-      if (private_key.empty()) {
-        fail(&result, "credential_unavailable", "The configured SSH private key is not available");
-        wipe(&passphrase);
-        return result;
-      }
-      auth_result = libssh2_userauth_publickey_frommemory(
-          resources.session_, target.username.c_str(), target.username.size(), nullptr, 0,
-          private_key.data(), private_key.size(), passphrase.empty() ? nullptr : passphrase.c_str());
-      wipe(&private_key);
-    } else {
-      auth_result = libssh2_userauth_publickey_fromfile(
-          resources.session_, target.username.c_str(), nullptr, target.private_key_file.c_str(),
-          passphrase.empty() ? nullptr : passphrase.c_str());
-    }
-    wipe(&passphrase);
-  } else {
-    std::string password = read_environment(target.password_env);
-    if (password.empty()) {
-      fail(&result, "credential_unavailable", "The configured SSH credential is not available");
-      return result;
-    }
-    auth_result = libssh2_userauth_password(resources.session_, target.username.c_str(), password.c_str());
-    wipe(&password);
-  }
-  if (auth_result != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0 || libssh2_session_last_errno(resources.session_) == LIBSSH2_ERROR_TIMEOUT;
-    fail(&result, timed_out ? "timeout" : "authentication_failed",
-         timed_out ? "SSH authentication timed out" : "SSH authentication failed");
-    return result;
-  }
+  if (!connect_authenticated(target, deadline, &resources, &result)) return result;
 
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SSH command timed out");
@@ -643,12 +655,98 @@ ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   return run_ssh_command(target, command, timeout_seconds);
 }
 
+ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SFTP directory listing parameters are invalid");
+    return result;
+  }
+
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_authenticated(target, deadline, &resources, &result)) return result;
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SFTP directory listing timed out");
+    return result;
+  }
+
+  resources.sftp_ = libssh2_sftp_init(resources.session_);
+  if (!resources.sftp_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP initialization timed out" : "Could not initialize SFTP");
+    return result;
+  }
+  resources.sftp_handle_ = libssh2_sftp_open_ex(
+      resources.sftp_, path.data(), static_cast<unsigned int>(path.size()), 0, 0,
+      LIBSSH2_SFTP_OPENDIR);
+  if (!resources.sftp_handle_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP directory listing timed out" : "Could not open the remote directory");
+    return result;
+  }
+
+  nlohmann::json entries = nlohmann::json::array();
+  std::array<char, 4096> name{};
+  for (;;) {
+    if (!set_session_timeout(resources.session_, deadline)) {
+      fail(&result, "timeout", "SFTP directory listing timed out");
+      return result;
+    }
+    LIBSSH2_SFTP_ATTRIBUTES attributes{};
+    const int count = libssh2_sftp_readdir_ex(resources.sftp_handle_, name.data(),
+                                               static_cast<unsigned int>(name.size()), nullptr, 0,
+                                               &attributes);
+    if (count == 0) break;
+    if (count < 0) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "SFTP directory listing timed out" : "Could not read the remote directory");
+      return result;
+    }
+    const std::string entry_name(name.data(), static_cast<std::size_t>(count));
+    std::string file_type = "other";
+    if ((attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0) {
+      switch (attributes.permissions & LIBSSH2_SFTP_S_IFMT) {
+        case LIBSSH2_SFTP_S_IFDIR: file_type = "directory"; break;
+        case LIBSSH2_SFTP_S_IFREG: file_type = "file"; break;
+        case LIBSSH2_SFTP_S_IFLNK: file_type = "symlink"; break;
+        default: break;
+      }
+    }
+    const std::uint64_t size = (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0
+                                   ? attributes.filesize
+                                   : 0;
+    entries.push_back({{"name", entry_name}, {"file_type", file_type}, {"size", size}});
+    if (entries.size() > 4096) {
+      fail(&result, "output_limit", "The remote directory contains too many entries to list safely");
+      return result;
+    }
+  }
+  result.stdout_text = entries.dump();
+  if (result.stdout_text.size() > 256 * 1024) {
+    result.stdout_text.clear();
+    fail(&result, "output_limit", "The remote directory listing exceeded the response size limit");
+    return result;
+  }
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_list") {
+    return sftp_list(target, request.path, request.timeout_seconds);
   }
   ExecResult result;
   fail(&result, "unsupported_operation", "The requested structured SSH operation is not enabled");

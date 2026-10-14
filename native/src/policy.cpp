@@ -33,6 +33,10 @@ bool valid_service_name(const std::string& value) {
   return std::regex_match(value, pattern);
 }
 
+bool valid_sftp_path(const std::string& value) {
+  return !value.empty() && value.size() <= 4096 && value.find('\0') == std::string::npos;
+}
+
 bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiError* error) {
   if (!value.is_object() || !has_only_keys(value, {"target_id", "operation", "parameters", "timeout_seconds"})) {
     set_error(error, 400, "invalid_request", "Request must contain only the documented fields");
@@ -58,6 +62,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   }
   const std::string operation = operation_it->get<std::string>();
   std::string service;
+  std::string path;
   if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -75,6 +80,18 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       set_error(error, 422, "invalid_parameters", "service_inventory accepts no parameters");
       return false;
     }
+  } else if (operation == "sftp_list") {
+    if (!has_only_keys(*parameters_it, {"path"})) {
+      set_error(error, 422, "invalid_parameters", "sftp_list accepts only a path parameter");
+      return false;
+    }
+    const auto path_it = parameters_it->find("path");
+    if (path_it == parameters_it->end() || !path_it->is_string() ||
+        !valid_sftp_path(path_it->get<std::string>())) {
+      set_error(error, 422, "invalid_parameters", "path must be a non-empty SFTP path of at most 4096 bytes");
+      return false;
+    }
+    path = path_it->get<std::string>();
   } else {
     set_error(error, 422, "unsupported_operation", "The requested structured SSH operation is not enabled");
     return false;
@@ -101,6 +118,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->target_id = target_id;
   request->operation = operation;
   request->service = std::move(service);
+  request->path = std::move(path);
   request->timeout_seconds = static_cast<int>(timeout);
   return true;
 }

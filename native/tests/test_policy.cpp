@@ -45,6 +45,38 @@ YUKINAL_TEST(policy_accepts_service_inventory_without_parameters) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_accepts_bounded_sftp_directory_paths) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_list"},
+       {"parameters", {{"path", "/var/log"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.operation == "sftp_list");
+  YUKINAL_REQUIRE(request.path == "/var/log");
+
+  const bool nul_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_list"},
+       {"parameters", {{"path", std::string("/var\0/log", 9)}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!nul_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool extra_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_list"},
+       {"parameters", {{"path", "/var/log"}, {"command", "id"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!extra_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {
   ExecRequest request;
   ApiError error;

@@ -19,10 +19,11 @@ struct ExecResult {
   std::string error_message;
 };
 
-/// Run the single permitted read-only operation. No raw command is accepted here.
+/// Run a fixed structured SSH operation. No raw command is accepted here.
 ExecResult service_status(const TargetConfig& target, const std::string& service,
                           int timeout_seconds);
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds);
+ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds);
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request);
 
 }  // namespace yukinal::ssh_service

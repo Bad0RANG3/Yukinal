@@ -773,7 +773,7 @@ pub(super) async fn filesystem_read(
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let service = remote_file_service(state);
+    let service = remote_file_service(state, None);
     let read = tokio::select! {
         result = service.agent_read(server_id, &request) => match result {
             Ok(read) => read,
@@ -816,7 +816,7 @@ pub(super) async fn filesystem_write(
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let service = remote_file_service(state);
+    let service = remote_file_service(state, None);
     let write = tokio::select! {
         result = service.agent_write(server_id, &request) => match result {
             Ok(write) => write,
@@ -867,7 +867,7 @@ pub(super) async fn filesystem_edit(
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let service = remote_file_service(state);
+    let service = remote_file_service(state, None);
     let edit = tokio::select! {
         result = service.agent_edit(server_id, &request) => match result {
             Ok(edit) => edit,
@@ -1217,7 +1217,7 @@ pub(super) async fn filesystem_backup(
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let service = remote_file_service(state);
+    let service = remote_file_service(state, None);
     let backup = tokio::select! {
         result = service.agent_backup(server_id, &request) => match result {
             Ok(backup) => backup,
@@ -1369,7 +1369,7 @@ async fn filesystem_backup_cleanup_single(
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let service = remote_file_service(state);
+    let service = remote_file_service(state, None);
     let cleanup = tokio::select! {
         result = service.agent_cleanup_backup(server_id, &request) => match result {
             Ok(cleanup) => cleanup,
@@ -1526,7 +1526,7 @@ async fn filesystem_backup_cleanup_batch(
             }
             session_ready = true;
         }
-        let service = remote_file_service(state);
+        let service = remote_file_service(state, None);
         let cleanup = tokio::select! {
             result = service.agent_cleanup_backup(server_id, &requests[index]) => match result {
                 Ok(cleanup) => cleanup,
@@ -1693,7 +1693,7 @@ pub(super) async fn filesystem_restore(
     if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
         return Ok(transport_or_cancel(error, cancel));
     }
-    let service = remote_file_service(state);
+    let service = remote_file_service(state, None);
     let restore = tokio::select! {
         result = service.agent_restore(server_id, &request) => match result {
             Ok(restore) => restore,

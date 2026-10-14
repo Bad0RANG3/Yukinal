@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use ring::rand::SecureRandom;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::state::AppState;
@@ -18,6 +18,52 @@ pub(crate) async fn service_inventory(
     app: &AppHandle,
     state: &AppState,
     server_id: &str,
+) -> Result<String, String> {
+    run_operation(app, state, server_id, "service_inventory", json!({})).await
+}
+
+pub(crate) async fn sftp_list(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<Vec<(String, String, u64)>, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        name: String,
+        file_type: String,
+        size: u64,
+    }
+
+    let output = run_operation(app, state, server_id, "sftp_list", json!({"path": path})).await?;
+    let entries: Vec<Entry> = serde_json::from_str(&output).map_err(|_| {
+        "the C++ SSH service returned an invalid SFTP directory listing".to_string()
+    })?;
+    if entries.len() > 4096
+        || entries.iter().any(|entry| {
+            entry.name.is_empty()
+                || entry.name.len() > 4096
+                || !matches!(
+                    entry.file_type.as_str(),
+                    "directory" | "file" | "symlink" | "other"
+                )
+        })
+    {
+        return Err("the C++ SSH service returned an invalid SFTP directory listing".into());
+    }
+    Ok(entries
+        .into_iter()
+        .map(|entry| (entry.name, entry.file_type, entry.size))
+        .collect())
+}
+
+async fn run_operation(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    operation: &str,
+    parameters: Value,
 ) -> Result<String, String> {
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
@@ -91,7 +137,7 @@ pub(crate) async fn service_inventory(
     drop(command);
     drop(target_payload);
     let mut child = ServiceChild(child);
-    request_service_inventory(port, &token, server_id, &mut child.0).await
+    request_operation(port, &token, server_id, operation, parameters, &mut child.0).await
 }
 
 struct ServiceChild(Child);
@@ -105,10 +151,12 @@ impl Drop for ServiceChild {
     }
 }
 
-async fn request_service_inventory(
+async fn request_operation(
     port: u16,
     token: &str,
     server_id: &str,
+    operation: &str,
+    parameters: Value,
     child: &mut std::process::Child,
 ) -> Result<String, String> {
     let base_url = format!("http://127.0.0.1:{port}");
@@ -159,8 +207,8 @@ async fn request_service_inventory(
 
     let request_body = serde_json::to_vec(&json!({
         "target_id": server_id,
-        "operation": "service_inventory",
-        "parameters": {},
+        "operation": operation,
+        "parameters": parameters,
         "timeout_seconds": 10,
     }))
     .map_err(|_| "could not encode the local SSH service request".to_string())?;
@@ -198,7 +246,7 @@ async fn request_service_inventory(
     }
     if body.get("status").and_then(Value::as_str) != Some("succeeded")
         || body.get("target_id").and_then(Value::as_str) != Some(server_id)
-        || body.get("operation").and_then(Value::as_str) != Some("service_inventory")
+        || body.get("operation").and_then(Value::as_str) != Some(operation)
         || body.get("exit_code").and_then(Value::as_i64) != Some(0)
         || body.get("stdout").and_then(Value::as_str).is_none()
         || body.get("stderr").and_then(Value::as_str).is_none()
@@ -206,12 +254,12 @@ async fn request_service_inventory(
         || body.get("output_truncated").and_then(Value::as_bool) != Some(false)
         || body.get("error") != Some(&Value::Null)
     {
-        return Err("the C++ SSH service returned an invalid inventory result".into());
+        return Err("the C++ SSH service returned an invalid operation result".into());
     }
     body.get("stdout")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "the C++ SSH service returned an invalid inventory result".into())
+        .ok_or_else(|| "the C++ SSH service returned an invalid operation result".into())
 }
 
 fn unused_loopback_port() -> Result<u16, String> {

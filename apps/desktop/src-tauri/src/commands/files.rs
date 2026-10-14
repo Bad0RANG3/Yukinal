@@ -15,7 +15,7 @@ pub(crate) use local_paths::{emit_local_drop, LocalPathHandles};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
@@ -69,7 +69,8 @@ pub struct RemoteFileReadResponse {
     pub truncated: bool,
 }
 
-/// Desktop-side transport: `TerminalService`'s SFTP calls.
+/// Desktop-side transport: C++ SFTP for supported browser listing calls, with the
+/// `TerminalService` path retained for the other file operations and auth modes.
 ///
 /// It lives on this side of the boundary because it needs `AppState` and `ensure_session` —
 /// connection and credential resolution belong to the desktop layer, and the capability only sees
@@ -77,17 +78,59 @@ pub struct RemoteFileReadResponse {
 /// that a map lookup, so the extra call costs nothing on the hot path.
 pub(crate) struct TerminalFileTransport<'a> {
     state: &'a AppState,
+    app: Option<AppHandle>,
 }
 
 /// The file capability's assembly point: `AppState` → remote file service.
-pub(crate) fn remote_file_service(
-    state: &AppState,
-) -> RemoteFileService<TerminalFileTransport<'_>> {
-    RemoteFileService::new(TerminalFileTransport { state })
+pub(crate) fn remote_file_service<'a>(
+    state: &'a AppState,
+    app: Option<&AppHandle>,
+) -> RemoteFileService<TerminalFileTransport<'a>> {
+    RemoteFileService::new(TerminalFileTransport {
+        state,
+        app: app.cloned(),
+    })
+}
+
+fn cpp_ssh_file_operations_supported(state: &AppState, server_id: &str) -> Result<bool, String> {
+    let server = match state.database.servers().get(server_id) {
+        Ok(server) => server,
+        Err(_) => return Ok(false),
+    };
+    if server.connection.host_certificate_authority.is_some() {
+        return Ok(false);
+    }
+    let Some(identity_id) = server.connection.identity_id.as_deref() else {
+        return Ok(false);
+    };
+    let identity = match state.database.identities().get(identity_id) {
+        Ok(identity) => identity,
+        Err(_) => return Ok(false),
+    };
+    Ok(matches!(
+        identity.method.as_str(),
+        "password" | "privateKey"
+    ))
 }
 
 impl RemoteFileTransport for TerminalFileTransport<'_> {
     async fn list(&self, server_id: &str, path: &str) -> TransportResult<Vec<ListedEntry>> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                let entries =
+                    crate::commands::ssh_service::sftp_list(app, self.state, server_id, path)
+                        .await
+                        .map_err(TransportError::new)?;
+                return Ok(entries
+                    .into_iter()
+                    .map(|(name, file_type, size)| ListedEntry {
+                        name,
+                        file_type,
+                        size,
+                    })
+                    .collect());
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;
@@ -242,11 +285,12 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
 
 #[tauri::command]
 pub async fn remote_file_list(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
     path: String,
 ) -> Result<RemoteFileListResponse, String> {
-    let listing = remote_file_service(&state)
+    let listing = remote_file_service(&state, Some(&app))
         .list(&server_id, &path)
         .await
         .map_err(|error| error.to_string())?;
@@ -271,7 +315,7 @@ pub async fn remote_file_read(
     server_id: String,
     path: String,
 ) -> Result<RemoteFileReadResponse, String> {
-    let read = remote_file_service(&state)
+    let read = remote_file_service(&state, None)
         .browse_read(&server_id, &path)
         .await
         .map_err(|error| error.to_string())?;
