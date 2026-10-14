@@ -2,7 +2,7 @@
 
 The rewrite uses a standalone C++ service. It binds only to `127.0.0.1`, accepts
 structured requests, resolves `target_id` from a configured allowlist and
-exposes service queries plus bounded SFTP list, stat, read, write,
+exposes service queries, probe-only host-key discovery, and bounded SFTP list, stat, read, write,
 exclusive-create, remove, guarded atomic replacement, and link-count operations.
 Host keys can be checked against an OpenSSH `known_hosts` file or an exact
 `SHA256:` pin from the desktop trust store. Authentication supports password,
@@ -12,6 +12,10 @@ integration on Windows. The socket path is forwarded only when a target in the
 allowlist selects agent authentication.
 
 The service deliberately has no raw-command endpoint or interactive terminal.
+The `host_key_probe` operation is restricted to targets configured with
+`probe_only: true` and `auth: {"type":"probe"}`; those targets cannot perform
+any authenticated operation and do not configure a trust source. The desktop
+uses this shape only for its separate user-confirmed host-key probe flow.
 SFTP writes are capped at 512 KiB; exclusive recovery-file creation is capped
 at 1 MiB and removes a partial file if writing or syncing fails. Guarded replacement
 compares size, mtime, and SHA-256; stages beside the target with exclusive create;

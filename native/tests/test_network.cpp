@@ -11,6 +11,7 @@
 #endif
 
 #include "ssh_network.hpp"
+#include "yukinal/ssh.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -19,6 +20,40 @@
 
 using yukinal::ssh_service::detail::AddressResolution;
 using yukinal::ssh_service::detail::resolve_address_list;
+
+YUKINAL_TEST(probe_only_target_rejects_all_authenticated_operations) {
+  yukinal::ssh_service::TargetConfig target;
+  target.target_id = "probe-target";
+  target.host = "example.test";
+  target.port = 22;
+  target.username = "ssh_probe";
+  target.probe_only = true;
+
+  yukinal::ssh_service::ExecRequest request;
+  request.operation = "service_status";
+  request.service = "nginx.service";
+  request.timeout_seconds = 5;
+  const auto result = yukinal::ssh_service::run_operation(target, request);
+
+  YUKINAL_REQUIRE(!result.completed);
+  YUKINAL_REQUIRE(result.error_code == "operation_not_allowed");
+}
+
+YUKINAL_TEST(host_key_probe_rejects_regular_authenticated_target) {
+  yukinal::ssh_service::TargetConfig target;
+  target.target_id = "regular-target";
+  target.host = "example.test";
+  target.port = 22;
+  target.username = "ops";
+
+  yukinal::ssh_service::ExecRequest request;
+  request.operation = "host_key_probe";
+  request.timeout_seconds = 5;
+  const auto result = yukinal::ssh_service::run_operation(target, request);
+
+  YUKINAL_REQUIRE(!result.completed);
+  YUKINAL_REQUIRE(result.error_code == "operation_not_allowed");
+}
 
 YUKINAL_TEST(dns_resolution_obeys_the_operation_deadline) {
   using Clock = std::chrono::steady_clock;

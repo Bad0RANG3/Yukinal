@@ -105,6 +105,53 @@ YUKINAL_TEST(config_rejects_ssh_agent_credential_fields) {
   YUKINAL_REQUIRE(rejected);
 }
 
+YUKINAL_TEST(config_accepts_isolated_probe_only_target) {
+  auto value = valid_config();
+  auto& target = value["targets"][0];
+  target.erase("known_hosts_file");
+  target["probe_only"] = true;
+  target["auth"] = {{"type", "probe"}};
+
+  const auto config = parse_config(value);
+  YUKINAL_REQUIRE(config.targets.at("staging-web-01").probe_only);
+}
+
+YUKINAL_TEST(config_rejects_probe_target_credentials_and_trust) {
+  auto auth_rejected = valid_config();
+  auto& target = auth_rejected["targets"][0];
+  target.erase("known_hosts_file");
+  target["probe_only"] = true;
+  target["auth"] = {{"type", "password"}, {"password_env", "SSH_PASSWORD"}};
+  bool rejected = false;
+  try {
+    (void)parse_config(auth_rejected);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+
+  auto trust_rejected = valid_config();
+  trust_rejected["targets"][0]["probe_only"] = true;
+  trust_rejected["targets"][0]["auth"] = {{"type", "probe"}};
+  rejected = false;
+  try {
+    (void)parse_config(trust_rejected);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+
+  auto regular_auth_rejected = valid_config();
+  regular_auth_rejected["targets"][0]["auth"] = {{"type", "probe"}};
+  rejected = false;
+  try {
+    (void)parse_config(regular_auth_rejected);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+}
+
 YUKINAL_TEST(config_rejects_missing_or_ambiguous_host_key_trust) {
   auto missing = valid_config();
   missing["targets"][0].erase("known_hosts_file");

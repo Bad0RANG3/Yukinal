@@ -33,6 +33,7 @@ TOKEN = "paramiko-live-ssh-test-token-long-enough-for-service"
 PASSWORD = "test-only-password-for-local-ssh-fixture"
 BAD_PASSWORD = "intentionally-wrong-local-password"
 EXEC_COMMANDS: list[bytes] = []
+AUTH_EVENTS: list[str] = []
 
 
 def unused_port() -> int:
@@ -52,11 +53,13 @@ class ExecServer(paramiko.ServerInterface):
         return "password,publickey"
 
     def check_auth_password(self, username: str, password: str) -> int:
+        AUTH_EVENTS.append("password")
         if username == "test-user" and password == PASSWORD:
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
     def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        AUTH_EVENTS.append("publickey")
         if username == "test-user" and key.asbytes() == self.public_key.asbytes():
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
@@ -195,6 +198,7 @@ def start_ssh_mock(
         "/large.bin": StaticSftpInterface.LARGE_CONTENTS,
     }
     EXEC_COMMANDS.clear()
+    AUTH_EVENTS.clear()
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -450,6 +454,14 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "host_key_fingerprint": wrong_fingerprint,
                     "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
                 },
+                {
+                    "target_id": "srv_probe_only",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "ssh_probe",
+                    "probe_only": True,
+                    "auth": {"type": "probe"},
+                },
             ],
         }
         config_path = root / "service.json"
@@ -479,6 +491,14 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     time.sleep(0.05)
             else:
                 raise RuntimeError("C++ service did not become healthy")
+
+            probe = client._execute_operation(
+                "srv_probe_only", "host_key_probe", {}, timeout_seconds=8
+            )
+            if probe.stdout != pinned_fingerprint or probe.exit_code != 0:
+                raise AssertionError(f"C++ host-key probe returned an unexpected fingerprint: {probe!r}")
+            if AUTH_EVENTS:
+                raise AssertionError(f"host-key probe attempted SSH authentication: {AUTH_EVENTS!r}")
 
             desktop_target = {
                 "target": {

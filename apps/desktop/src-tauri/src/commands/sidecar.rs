@@ -482,6 +482,43 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
     }))
 }
 
+/// Resolve a single endpoint into a target that can perform only a host-key handshake.
+/// It has no SSH identity and no configured trust source; the result is reported to the
+/// existing user-confirmation flow and is never persisted by this resolver.
+pub(super) fn resolve_ssh_service_probe_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request: SshServiceTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH host-key probe request is invalid".to_string())?;
+    if request.server_id.len() <= 4
+        || request.server_id.len() > 160
+        || !request.server_id.starts_with("srv_")
+        || !request.server_id[4..]
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+    {
+        return Err("the SSH host-key probe target ID is invalid".into());
+    }
+    let server = state
+        .database
+        .servers()
+        .get(&request.server_id)
+        .map_err(|_| "the selected SSH server is not available".to_string())?;
+
+    Ok(json!({
+        "target": {
+            "target_id": server.id,
+            "host": server.connection.host,
+            "port": server.connection.port,
+            "username": "ssh_probe",
+            "probe_only": true,
+            "auth": { "type": "probe" },
+        },
+        "credentials": {},
+    }))
+}
+
 fn read_ssh_secret(
     credentials: &dyn CredentialStore,
     reference: &str,

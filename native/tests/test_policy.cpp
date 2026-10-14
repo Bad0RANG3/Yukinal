@@ -45,6 +45,28 @@ YUKINAL_TEST(policy_accepts_service_inventory_without_parameters) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_accepts_host_key_probe_without_parameters) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "host_key_probe"},
+       {"parameters", json::object()},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.operation == "host_key_probe");
+
+  const bool extra_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "host_key_probe"},
+       {"parameters", {{"host", "attacker.example"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!extra_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_bounded_sftp_directory_paths) {
   ExecRequest request;
   ApiError error;

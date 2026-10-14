@@ -108,7 +108,7 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     require_object(entry, label);
     require_only_keys(entry,
                       {"target_id", "host", "port", "username", "known_hosts_file",
-                       "host_key_fingerprint", "auth"},
+                       "host_key_fingerprint", "auth", "probe_only"},
                       label);
 
     TargetConfig target;
@@ -116,14 +116,23 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     target.host = required_string(entry, "host", label);
     target.port = required_integer(entry, "port", 1, 65535, label);
     target.username = required_string(entry, "username", label);
+    if (entry.contains("probe_only")) {
+      if (!entry["probe_only"].is_boolean()) {
+        throw std::runtime_error(label + ".probe_only must be a boolean");
+      }
+      target.probe_only = entry["probe_only"].get<bool>();
+    }
     const bool has_known_hosts_file = entry.contains("known_hosts_file");
     const bool has_host_key_fingerprint = entry.contains("host_key_fingerprint");
-    if (has_known_hosts_file == has_host_key_fingerprint) {
+    if (target.probe_only) {
+      if (has_known_hosts_file || has_host_key_fingerprint) {
+        throw std::runtime_error(label + " probe-only targets cannot configure host-key trust");
+      }
+    } else if (has_known_hosts_file == has_host_key_fingerprint) {
       throw std::runtime_error(label + " must contain exactly one host-key trust source");
-    }
-    if (has_known_hosts_file) {
+    } else if (has_known_hosts_file) {
       target.known_hosts_file = resolve_path(required_string(entry, "known_hosts_file", label), base_directory);
-    } else {
+    } else if (!target.probe_only) {
       target.host_key_fingerprint = required_string(entry, "host_key_fingerprint", label);
       if (!valid_host_key_fingerprint(target.host_key_fingerprint)) {
         throw std::runtime_error(label + ".host_key_fingerprint must be a SHA256 host-key fingerprint");
@@ -141,7 +150,11 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
                        "passphrase_env"},
                       label + ".auth");
     const std::string auth_type = required_string(*auth_it, "type", label + ".auth");
-    if (auth_type == "private_key") {
+    if (target.probe_only) {
+      if (auth_type != "probe" || auth_it->size() != 1) {
+        throw std::runtime_error(label + ".auth probe-only configuration accepts only type=probe");
+      }
+    } else if (auth_type == "private_key") {
       if (auth_it->contains("password_env") ||
           auth_it->contains("private_key_file") == auth_it->contains("private_key_env")) {
         throw std::runtime_error(label + ".auth has conflicting or missing private-key fields");

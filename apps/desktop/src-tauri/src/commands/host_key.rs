@@ -12,12 +12,13 @@
 //! 4. **pin 按 `host:port` 关联**（第 7 条）。所以响应里回的是 host/port 而不是只有
 //!    serverId —— 同一台机器在两个条目下共用同一条 pin，界面必须能说出是哪一条。
 //!
-//! 这一层不做 SSH：能力在 `crates/ssh`（`RusshBackend::probe_host_key` / `trust_host` /
-//! `forget_host` / `host_key_pin`），策略规则在 `KnownHostsStore` 的纯函数里。
+//! 网络握手由白名单 C++ SSH 服务完成；本机 pin 的比较、写入与删除继续由 Rust
+//! known-hosts store 管理。探测与信任仍然是两个独立动作。
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
+use crate::commands::ssh_service;
 use crate::state::AppState;
 use yukinal_ssh::known_hosts::{Check, ForgetOutcome, TrustDecision};
 use yukinal_ssh::SshBackend;
@@ -147,38 +148,68 @@ pub async fn server_host_key_status(
 ///   副作用」这条要求的落地（ADR 0012 第 4 条）。
 #[tauri::command]
 pub async fn server_host_key_probe(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerHostKeyProbeResponse, String> {
-    let (host, port) = resolve_endpoint(&state, &server_id)?;
-
-    let probe = state
-        .ssh
-        .probe_host_key(&host, port)
-        .await
-        .map_err(|error| {
-            format!(
-                "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
+    let server = state.database.servers().get(&server_id).map_err(|error| {
+        format!("读取服务器 `{server_id}` 失败：{error}。请刷新服务器列表后重试；如果这台服务器已被删除，指纹面板对它不再适用。")
+    })?;
+    let host = server.connection.host.clone();
+    let port = server.connection.port;
+    let presented_fingerprint = if server.connection.host_certificate_authority.is_some() {
+        // C++ 当前探针报告原始 host-key 指纹。保留 Rust 校验路径，直到 C++ 能按
+        // OpenSSH host certificate 的底层公钥语义返回相同指纹。
+        state
+            .ssh
+            .probe_host_key(&host, port)
+            .await
+            .map(|probe| probe.fingerprint)
+            .map_err(|error| {
+                format!(
+                    "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
              并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
-            )
-        })?;
+                )
+            })?
+    } else {
+        match ssh_service::probe_host_key(&app, &state, &server_id).await {
+            Ok(Some(fingerprint)) => fingerprint,
+            Ok(None) => state
+                .ssh
+                .probe_host_key(&host, port)
+                .await
+                .map(|probe| probe.fingerprint)
+                .map_err(|error| {
+                    format!(
+                        "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
+             并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
+                    )
+                })?,
+            Err(error) => {
+                return Err(format!(
+                    "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
+             并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
+                ));
+            }
+        }
+    };
 
     // 比较用的是 store 自己的比较（`check`），不是这里重写一遍的 `if`。
     let check = state
         .ssh
-        .host_key_check(&host, port, &probe.fingerprint)
+        .host_key_check(&host, port, &presented_fingerprint)
         .map_err(|error| format!("读取 known_hosts 失败：{error}。请重试；持续失败请检查数据目录下 known_hosts 的权限。"))?;
 
     let probe_ticket = state
         .host_keys
-        .issue(&server_id, &host, port, &probe.fingerprint)
+        .issue(&server_id, &host, port, &presented_fingerprint)
         .map_err(|error| format!("issue a host-key probe ticket: {error}"))?;
 
     Ok(ServerHostKeyProbeResponse {
         host,
         port,
         probe_ticket,
-        presented_fingerprint: probe.fingerprint,
+        presented_fingerprint,
         comparison: comparison_word(&check),
         pinned_fingerprint: check.pinned().map(str::to_string),
     })

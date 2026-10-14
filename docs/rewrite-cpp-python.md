@@ -6,12 +6,14 @@
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
-> hosts native UI IPC and some SSH paths. The Python sidecar can call the C++
+> hosts native UI IPC, local trust-store updates, terminal sessions, transfers,
+> and some SSH paths. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
 > C++ SFTP operations for password, private-key, and SSH-agent identities
-> without Host CA. Transfers, PTY, and certificate/Host CA trust modes still use
-> Rust. Every C++ operation resolves its `target_id` through the service
+> without Host CA. Host-key probes use C++ unless Host CA or an unsupported
+> host-key format requires the certificate-aware Rust path; transfers, PTY, and
+> Host CA trust still use Rust. Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
 > loopback health endpoint, and stops it with the Agent process. Automatic
@@ -128,16 +130,18 @@ Service discovery currently targets Unix-like hosts with systemd and Docker.
 The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or arbitrary command. The service resolves a
 `target_id` to a configured target and accepts only `service_status`,
-`service_inventory`, and bounded SFTP list/stat/read/write/exclusive-create/
+`service_inventory`, probe-only `host_key_probe`, and bounded SFTP list/stat/read/write/exclusive-create/
 remove/link-count operations with validated parameters. Service operations map
 to fixed commands; SFTP reads are capped at 1 MiB plus one sentinel byte, normal
 writes at 512 KiB, and exclusive recovery copies at 1 MiB. Write bodies use
 base64 inside a bounded JSON request. The link-count operation runs one fixed,
 single-quoted `stat` probe and returns `null` when the host cannot report a
 count.
-Every operation runs only after the target host key matches the configured
-OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed keys fail
-closed.
+Every authenticated operation runs only after the target host key matches the
+configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
+keys fail closed. The separate `probe_only` operation intentionally does not
+authenticate or persist trust; its fingerprint is only presented for the
+existing user confirmation step.
 
 The API token is read from an environment-variable reference in the config and
 must be 32–256 URL-safe characters. The HTTP handler rejects browser `Origin`
@@ -234,6 +238,13 @@ enforce the same exact-key trust decision as the existing server host-key UI.
 Private-key environment references let the desktop pass decrypted keychain
 material directly to the C++ child without writing key material into the JSON
 configuration.
+
+Desktop host-key probes use a separate short-lived `probe_only` target with no
+credential and no trust entry. The service permits that target to perform only
+`host_key_probe`; the returned fingerprint remains untrusted until the user
+confirms it through the existing UI. Targets configured with a host CA retain
+the Rust probe path because it reports the certificate's underlying
+public-key fingerprint.
 
 Set the configured API token environment variable before starting the service.
 Never commit credentials or a real production target configuration.

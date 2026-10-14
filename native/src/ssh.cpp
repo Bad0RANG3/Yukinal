@@ -431,12 +431,16 @@ std::string host_key_fingerprint(LIBSSH2_SESSION* session) {
   return encoded;
 }
 
+int initialize_libssh2() {
+  static std::once_flag initialized;
+  static int result = 0;
+  std::call_once(initialized, [] { result = libssh2_init(0); });
+  return result;
+}
+
 bool connect_authenticated(const TargetConfig& target, Clock::time_point deadline,
                            SshResources* resources, ExecResult* result) {
-  static std::once_flag libssh2_once;
-  static int libssh2_init_result = 0;
-  std::call_once(libssh2_once, [] { libssh2_init_result = libssh2_init(0); });
-  if (libssh2_init_result != 0) {
+  if (initialize_libssh2() != 0) {
     fail(result, "ssh_unavailable", "SSH library initialization failed");
     return false;
   }
@@ -746,6 +750,83 @@ ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
       "if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=docker\\n'; exit 0; fi; fi; "
       "printf '__YUKINAL_SOURCE__=unavailable\\n'";
   return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (!target.probe_only || timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The host-key probe target or timeout is invalid");
+    return result;
+  }
+
+  if (initialize_libssh2() != 0) {
+    fail(&result, "ssh_unavailable", "SSH library initialization failed");
+    return result;
+  }
+
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  const SocketConnection connection = connect_socket(target, deadline);
+  SshResources resources;
+  resources.socket_ = connection.socket;
+  if (resources.socket_ == kInvalidSocket) {
+    switch (connection.failure) {
+      case ConnectFailure::timeout:
+        fail(&result, "timeout", "SSH host-key probe timed out");
+        break;
+      case ConnectFailure::resolver_busy:
+        fail(&result, "resolver_busy", "DNS resolution capacity is temporarily exhausted");
+        break;
+      case ConnectFailure::resolver_unavailable:
+        fail(&result, "resolver_unavailable", "Could not start bounded DNS resolution");
+        break;
+      default:
+        fail(&result, "connection_failed", "Could not connect to the SSH host for probing");
+        break;
+    }
+    return result;
+  }
+
+  resources.session_ = libssh2_session_init();
+  if (!resources.session_) {
+    fail(&result, "ssh_unavailable", "Could not create an SSH session");
+    return result;
+  }
+  libssh2_session_set_blocking(resources.session_, 1);
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SSH host-key probe timed out");
+    return result;
+  }
+  if (libssh2_session_handshake(resources.session_, static_cast<libssh2_socket_t>(resources.socket_)) != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0 ||
+                           libssh2_session_last_errno(resources.session_) == LIBSSH2_ERROR_TIMEOUT;
+    fail(&result, timed_out ? "timeout" : "ssh_handshake_failed",
+         timed_out ? "SSH host-key probe timed out" : "SSH host-key handshake failed");
+    return result;
+  }
+
+  std::size_t host_key_length = 0;
+  int host_key_type = LIBSSH2_HOSTKEY_TYPE_UNKNOWN;
+  const char* host_key =
+      libssh2_session_hostkey(resources.session_, &host_key_length, &host_key_type);
+  if (!host_key || host_key_length == 0) {
+    fail(&result, "host_key_unavailable", "The SSH server did not present a host key");
+    return result;
+  }
+  if (known_host_key_type(host_key_type) == 0) {
+    fail(&result, "host_key_unsupported",
+         "The SSH host-key format requires the certificate-aware probe path");
+    return result;
+  }
+  result.stdout_text = host_key_fingerprint(resources.session_);
+  if (result.stdout_text.empty()) {
+    fail(&result, "host_key_unavailable", "The SSH server did not present a supported host key");
+    return result;
+  }
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
 }
 
 ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds) {
@@ -1500,6 +1581,19 @@ ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
 }
 
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
+  if (target.probe_only) {
+    if (request.operation != "host_key_probe") {
+      ExecResult result;
+      fail(&result, "operation_not_allowed", "Probe-only targets allow only host_key_probe");
+      return result;
+    }
+    return host_key_probe(target, request.timeout_seconds);
+  }
+  if (request.operation == "host_key_probe") {
+    ExecResult result;
+    fail(&result, "operation_not_allowed", "host_key_probe requires a probe-only target");
+    return result;
+  }
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
   }

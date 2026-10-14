@@ -25,6 +25,49 @@ pub(crate) async fn service_inventory(
     run_operation(app, state, server_id, "service_inventory", json!({})).await
 }
 
+pub(crate) async fn probe_host_key(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+) -> Result<Option<String>, String> {
+    let target_payload = super::sidecar::resolve_ssh_service_probe_target(
+        state,
+        json!({ "serverId": server_id }),
+    )?;
+    let response = match run_operation_response_with_target(
+        app,
+        server_id,
+        "host_key_probe",
+        json!({}),
+        target_payload,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if error.code == "host_key_unsupported" => return Ok(None),
+        Err(error) => return Err(error.message),
+    };
+    validate_operation_response(&response, server_id, "host_key_probe")?;
+    let fingerprint = response
+        .get("stdout")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "the C++ SSH service returned an invalid host-key probe result")?;
+    if !valid_host_key_fingerprint(&fingerprint) {
+        return Err("the C++ SSH service returned an invalid host-key fingerprint".into());
+    }
+    Ok(Some(fingerprint))
+}
+
+fn valid_host_key_fingerprint(value: &str) -> bool {
+    value.strip_prefix("SHA256:").is_some_and(|encoded| {
+        encoded.len() == 43
+            && encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+    })
+}
+
 pub(crate) async fn sftp_list(
     app: &AppHandle,
     state: &AppState,
@@ -357,6 +400,17 @@ async fn run_operation_response(
 ) -> Result<Value, SshServiceFailure> {
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
+    run_operation_response_with_target(app, server_id, operation, parameters, target_payload)
+        .await
+}
+
+async fn run_operation_response_with_target(
+    app: &AppHandle,
+    server_id: &str,
+    operation: &str,
+    parameters: Value,
+    target_payload: Value,
+) -> Result<Value, SshServiceFailure> {
     let target = target_payload
         .get("target")
         .filter(|target| target.get("target_id").and_then(Value::as_str) == Some(server_id))
@@ -607,7 +661,7 @@ fn api_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_sftp_read_output;
+    use super::{decode_sftp_read_output, valid_host_key_fingerprint};
 
     #[test]
     fn bounded_sftp_read_decodes_binary_and_allows_one_truncation_byte() {
@@ -617,5 +671,16 @@ mod tests {
         );
         assert!(decode_sftp_read_output("YWxwaGEAYg==", 5).is_err());
         assert!(decode_sftp_read_output("not base64", 5).is_err());
+    }
+
+    #[test]
+    fn host_key_probe_requires_an_openssh_sha256_fingerprint() {
+        assert!(valid_host_key_fingerprint(
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+        assert!(!valid_host_key_fingerprint("SHA256:short"));
+        assert!(!valid_host_key_fingerprint(
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        ));
     }
 }
