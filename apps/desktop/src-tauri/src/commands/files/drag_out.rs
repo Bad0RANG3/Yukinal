@@ -17,8 +17,10 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::oneshot;
 use tokio::sync::Semaphore;
 use yukinal_filesystem::transfer::{ConflictPolicy, TransferStatus};
+use yukinal_filesystem::RemoteEntryKind;
 use yukinal_ssh::{SftpEntryKind, SshBackend};
 
+use crate::commands::ssh_service;
 use crate::commands::files::transfer::FileTransferState;
 use crate::commands::terminal::ensure_session;
 use crate::commands::EmptyResponse;
@@ -146,6 +148,7 @@ pub(crate) fn start_cleanup_loop(app: AppHandle) {
 
 #[tauri::command]
 pub async fn file_prepare_remote_drag(
+    app: AppHandle,
     state: State<'_, AppState>,
     transfers: State<'_, FileTransferState>,
     drags: State<'_, NativeRemoteDrags>,
@@ -159,27 +162,34 @@ pub async fn file_prepare_remote_drag(
         .acquire_owned()
         .await
         .map_err(|_| "native drag preparation is shutting down".to_string())?;
-    ensure_session(&state, &server_id).await?;
-    let session = state
-        .terminals
-        .cached_session(&server_id)
-        .map_err(|error| error.to_string())?;
-    let client = state
-        .ssh
-        .sftp(&session)
-        .await
-        .map_err(|error| error.to_string())?;
-    let stat = state
-        .ssh
-        .sftp_lstat_optional(&client, &path)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "remote file no longer exists".to_string())?;
-    drop(session);
-    if stat.kind != SftpEntryKind::File {
+    let (remote_size, is_regular_file) = if ssh_service::supports_cpp_target(&state, &server_id)? {
+        let stat = ssh_service::sftp_lstat_optional(&app, &state, &server_id, &path)
+            .await?
+            .ok_or_else(|| "remote file no longer exists".to_string())?;
+        (stat.size, stat.kind == RemoteEntryKind::File)
+    } else {
+        ensure_session(&state, &server_id).await?;
+        let session = state
+            .terminals
+            .cached_session(&server_id)
+            .map_err(|error| error.to_string())?;
+        let client = state
+            .ssh
+            .sftp(&session)
+            .await
+            .map_err(|error| error.to_string())?;
+        let stat = state
+            .ssh
+            .sftp_lstat_optional(&client, &path)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "remote file no longer exists".to_string())?;
+        (stat.size, stat.kind == SftpEntryKind::File)
+    };
+    if !is_regular_file {
         return Err("only regular remote files can be dragged to the desktop".to_string());
     }
-    if stat.size > MAX_DRAG_FILE_BYTES {
+    if remote_size > MAX_DRAG_FILE_BYTES {
         return Err(
             "remote files larger than 8 GiB cannot be prepared for native drag-out".to_string(),
         );
@@ -231,7 +241,7 @@ pub async fn file_prepare_remote_drag(
     }
     let staged_file = &files[0];
     let metadata = fs::symlink_metadata(staged_file).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != stat.size {
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != remote_size {
         return Err("staged remote file failed its local type or size check".to_string());
     }
     let canonical_root = fs::canonicalize(directory.path()).map_err(|error| error.to_string())?;
