@@ -1,6 +1,6 @@
 # 目标架构与施工交接
 
-> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线。当前 2.0 只在重建第一阶段的独立 C++ SSH 服务和 Python caller；Windows 上 C++ 已配置并编译，CTest 四个目标通过，Paramiko SSH mock 覆盖成功与关键失败路径。缺少 Docker，尚未验证 OpenSSH 服务端兼容性。React/Tauri UI 尚未接入新服务。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
+> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线。当前重建已包含独立 C++ SSH 服务、Python caller 与 Agent Runtime、多 Provider 适配、MCP 和只读桌面宿主桥接；Windows 上最近一次 CTest 的 5 个目标全部通过。Docker/OpenSSH 容器验收尚未运行。React/Tauri 的 Python sidecar 开发入口已可选用，但默认和安装版仍使用旧 sidecar，宿主 SSH/审批/任务执行也尚未迁出。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
 
 ## 目标与角色
 

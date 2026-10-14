@@ -1,10 +1,14 @@
-# C++ / Python rewrite: milestones 1 and 2
+# C++ / Python rewrite: milestones 1–3 in progress
 
-> **Current scope:** the SSH foundation and bounded Agent Runtime milestones in
-> [`ssh_agent_development_brief.md`](../ssh_agent_development_brief.md) are being
-> implemented. Model providers and a first host-tool bridge are implemented;
-> durable task control and the desktop launcher switch are not complete. This is
-> not a claim that the desktop app has switched from its current backend.
+> **Current scope:** the standalone C++ SSH service and Python caller are in
+> place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
+> Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
+> read-only bridge to the desktop host, and tool lifecycle events consumed by the
+> existing UI. The opt-in `desktop:dev:python` command launches the Python
+> sidecar in Tauri development. The normal desktop and packaged app still use the
+> existing Node sidecar and Rust host execution path. Durable task/plan resume,
+> approval round-trips, and binding the desktop's selected SSH target to the C++
+> service configuration remain unfinished.
 
 ## Repository baseline and migration boundary
 
@@ -16,10 +20,12 @@ replaced with the narrower implementation below. The React components and their
 Tauri calls are preserved. The Rust/Tauri code remains available as a legacy
 behavior reference until replacement milestones are built and checked.
 
-The Python runtime now speaks the desktop host's bidirectional JSON-RPC protocol.
-It can execute a first set of read-only server tools through the host and load
-low-risk MCP tools from the host catalog. The desktop still launches its current
-Node sidecar by default; launcher and packaging migration remain later work.
+The Python runtime speaks the desktop host's bidirectional JSON-RPC protocol. It
+can execute a first set of read-only server tools through the host, load low-risk
+MCP tools from the host catalog, and emit the tool-call/result events that the
+existing transcript UI displays. `pnpm desktop:dev:python` selects this runtime
+for Tauri development; `pnpm desktop:dev` remains the browser-only UI preview.
+The standard desktop and packaged launcher still use the Node sidecar.
 
 ## Processes and trust boundaries
 
@@ -196,24 +202,27 @@ output-cap, and host-key rejection cases. The separate OpenSSH test container
 was not run because Docker is unavailable, so compatibility with an OpenSSH
 server remains unverified.
 
-Phase 2 verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
+Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. After configuring CMake to use that interpreter, the C++ build
-completed and all five CTest targets passed. The Agent target passed 12 tests,
+completed and all five CTest targets passed on the current source revision. The Agent target passed 27 tests,
 including live stdio and Streamable HTTP MCP connections, credential-reference
 handling, schema/target rejection, parameter-bound approvals, audit redaction,
-tool/task/output limits, and LangGraph execution. The existing Paramiko SSH
+tool/task/output limits, LangGraph execution, bidirectional host RPC framing,
+and redacted tool lifecycle events. The existing Paramiko SSH
 mock and Python-to-C++ HTTP tests also passed again.
 
 ## Deliberately deferred
 
-- connecting the React UI to the new service or replacing its Tauri bridge;
-- arbitrary shell commands and write operations;
-- model providers, user-facing approval flows, durable task state, and control plane;
+- switching the standard/package desktop launcher to Python;
+- binding C++ service targets to the desktop's selected server records;
+- write-capable Agent tools, user-facing approval round-trips, and durable task/plan resume;
+- arbitrary shell commands outside the existing host's separately guarded task flow;
 - SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
-The next milestone is provider integration and the complete host-enforced
-permission/approval path. A real SSH success against the OpenSSH test server and
-desktop wiring remain unverified. Do not mark later product requirements as
+The next milestone is to make the Python Agent's durable task and approval
+protocol fit the existing UI/host contract, while keeping host authorization as
+the final gate. A real SSH success against an OpenSSH server and packaged-app
+migration remain unverified. Do not mark later product requirements as
 delivered by the scaffold or documentation.
