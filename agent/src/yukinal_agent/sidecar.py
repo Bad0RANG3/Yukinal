@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
+from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import register_ssh_tools
 from .tools import ToolRegistry
@@ -29,8 +34,8 @@ METHODS = {
     "system.ping": True,
     "tools.list": True,
     "system.describe": True,
-    "agent.run.start": False,
-    "agent.run.stop": False,
+    "agent.run.start": True,
+    "agent.run.stop": True,
     "agent.approval.respond": False,
     "provider.models": False,
     "provider.test": True,
@@ -53,11 +58,19 @@ class PythonSidecar:
         *,
         agent_version: str = "0.1.0",
         model_factory: ModelFactory | None = None,
+        notification_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._registry = registry
         self._agent_version = agent_version
         self._model_factory = model_factory or ModelFactory()
+        self._notification_sink = notification_sink
         self._initialized = False
+        self._active_runs: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._completed_runs: OrderedDict[str, str] = OrderedDict()
+        self._admissions: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
+        self._notification_sink = sink
 
     def handle(self, request: object) -> dict[str, Any] | None:
         request_id: int | None = None
@@ -104,11 +117,12 @@ class PythonSidecar:
             return _failure(request_id, RPC_INTERNAL_ERROR, "Internal sidecar error")
 
     async def handle_async(self, request: object) -> dict[str, Any] | None:
-        """Handle async provider checks while keeping the other RPCs synchronous."""
+        """Handle run and provider RPCs that may wait on model work."""
         if (
             not isinstance(request, dict)
             or request.get("jsonrpc") != "2.0"
-            or request.get("method") != "provider.test"
+            or not isinstance(request.get("method"), str)
+            or request.get("method") not in ("provider.test", "agent.run.start", "agent.run.stop")
             or not isinstance(request.get("id"), int)
             or isinstance(request.get("id"), bool)
         ):
@@ -117,7 +131,15 @@ class PythonSidecar:
         try:
             if not self._initialized:
                 raise _RpcFault(RPC_INVALID_REQUEST, "initialize must be the first call")
-            result = await self._test_provider(request.get("params", {}))
+            method = request["method"]
+            if method == "provider.test":
+                result = await self._test_provider(request.get("params", {}))
+            elif method == "agent.run.start":
+                result = await self._run_start(request.get("params", {}))
+            elif method == "agent.run.stop":
+                result = self._run_stop(request.get("params", {}))
+            else:
+                return self.handle(request)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except _RpcFault as error:
             response = _failure(request_id, error.code, error.message)
@@ -125,9 +147,35 @@ class PythonSidecar:
                 response["error"]["data"] = error.data
             return response
         except Exception:
-            return _failure(request_id, RPC_INTERNAL_ERROR, "Model test failed; check the endpoint, credentials, and model configuration")
+            return _failure(request_id, RPC_INTERNAL_ERROR, "Agent request failed")
 
     async def _test_provider(self, params: object) -> dict[str, bool]:
+        model, timeout_ms = self._create_runtime_model(params)
+        try:
+            async with asyncio.timeout(timeout_ms / 1000):
+                response = await model.ainvoke("Reply with OK only.")
+        except Exception:
+            raise _RpcFault(
+                RPC_INTERNAL_ERROR,
+                "Model test failed; check the endpoint, credentials, and model configuration",
+            ) from None
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            has_text = bool(content.strip())
+        elif isinstance(content, list):
+            has_text = any(
+                isinstance(block, dict)
+                and isinstance(block.get("text"), str)
+                and bool(block["text"].strip())
+                for block in content
+            )
+        else:
+            has_text = False
+        if not has_text:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Model returned no text; check the model and endpoint settings")
+        return {"ok": True}
+
+    def _create_runtime_model(self, params: object) -> tuple[Any, int]:
         fields = {"kind", "baseUrl", "model", "apiKey", "customHeaders", "apiVersion", "timeoutMs", "wireApi"}
         parsed = _strict_object(params, fields)
         kind = parsed.get("kind")
@@ -138,16 +186,15 @@ class PythonSidecar:
         api_version = parsed.get("apiVersion")
         wire_api = parsed.get("wireApi")
         timeout_ms = parsed.get("timeoutMs", 30_000)
+        optional_strings = {"apiKey": api_key, "apiVersion": api_version, "wireApi": wire_api}
         if (
             kind not in ("openai-compatible", "anthropic", "gemini")
             or not isinstance(base_url, str)
             or len(base_url) > 2048
             or not isinstance(model_name, str)
             or len(model_name) > 256
-            or api_key is not None and not isinstance(api_key, str)
-            or custom_headers is not None and not isinstance(custom_headers, dict)
-            or api_version is not None and not isinstance(api_version, str)
-            or wire_api is not None and not isinstance(wire_api, str)
+            or any(name in parsed and not isinstance(value, str) for name, value in optional_strings.items())
+            or "customHeaders" in parsed and not isinstance(custom_headers, dict)
             or isinstance(timeout_ms, bool)
             or not isinstance(timeout_ms, int)
             or not 100 <= timeout_ms <= 600_000
@@ -175,29 +222,195 @@ class PythonSidecar:
             raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         except (TypeError, ValueError):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params") from None
+        return model, timeout_ms
+
+    async def _run_start(self, params: object) -> dict[str, Any]:
+        request = _parse_run_request(params)
+        run_id = request["runId"]
+        message_id = request.get("messageId")
+        fingerprint = _run_fingerprint(request)
+        admission = self._admissions.get(message_id) if message_id else None
+        resumed = False
+        if admission is not None:
+            if admission["sessionId"] != request["sessionId"] or admission["fingerprint"] != fingerprint:
+                raise _RpcFault(RPC_INVALID_PARAMS, "messageId was already admitted with different content")
+            if admission["started"]:
+                return {"runId": admission["runId"], "started": False, "duplicate": True}
+            if not request["resume"]:
+                return {"runId": admission["runId"], "started": False, "duplicate": True}
+            run_id = admission["runId"]
+            resumed = True
+
+        if not request["resume"]:
+            if not message_id:
+                raise _RpcFault(RPC_INVALID_PARAMS, "resume false requires messageId")
+            self._admissions[message_id] = {
+                "sessionId": request["sessionId"],
+                "fingerprint": fingerprint,
+                "runId": run_id,
+                "started": False,
+                "completed": False,
+            }
+            self._prune_admissions()
+            return {"runId": run_id, "started": False}
+
+        if run_id in self._active_runs:
+            raise _RpcFault(RPC_INVALID_PARAMS, "runId is already running")
+        if run_id in self._completed_runs:
+            if self._completed_runs[run_id] != fingerprint:
+                raise _RpcFault(RPC_INVALID_PARAMS, "runId was already used with different content")
+            return {"runId": run_id, "started": False, "duplicate": True}
+
+        model, _timeout_ms = self._create_runtime_model(request.get("providerConfig"))
         try:
-            async with asyncio.timeout(timeout_ms / 1000):
-                response = await model.ainvoke("Reply with OK only.")
+            agent = ModelDrivenAgent(self._registry, model, request["agentBudget"])
         except Exception:
-            raise _RpcFault(
-                RPC_INTERNAL_ERROR,
-                "Model test failed; check the endpoint, credentials, and model configuration",
-            ) from None
-        content = getattr(response, "content", None)
-        if isinstance(content, str):
-            has_text = bool(content.strip())
-        elif isinstance(content, list):
-            has_text = any(
-                isinstance(block, dict)
-                and isinstance(block.get("text"), str)
-                and bool(block["text"].strip())
-                for block in content
-            )
+            raise _RpcFault(RPC_INVALID_PARAMS, "configured model cannot run the registered tools") from None
+
+        if admission is not None:
+            admission["started"] = True
+        elif message_id:
+            self._admissions[message_id] = {
+                "sessionId": request["sessionId"],
+                "fingerprint": fingerprint,
+                "runId": run_id,
+                "started": True,
+                "completed": False,
+            }
+            self._prune_admissions()
+
+        request["runId"] = run_id
+        task = asyncio.create_task(self._execute_run(request, run_id, agent))
+        self._active_runs[run_id] = task
+        if request["delivery"] == "sync":
+            result = await task
+            response: dict[str, Any] = {"runId": run_id, "started": True, "result": result}
         else:
-            has_text = False
-        if not has_text:
-            raise _RpcFault(RPC_INTERNAL_ERROR, "Model returned no text; check the model and endpoint settings")
-        return {"ok": True}
+            response = {"runId": run_id, "started": True}
+        if resumed:
+            response["resumed"] = True
+        return response
+
+    def _run_stop(self, params: object) -> dict[str, bool]:
+        parsed = _strict_object(params, {"runId"})
+        run_id = parsed.get("runId")
+        if not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 256:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        task = self._active_runs.get(run_id)
+        if task is None or task.done():
+            return {"stopped": False}
+        task.cancel()
+        return {"stopped": True}
+
+    async def _execute_run(
+        self,
+        request: dict[str, Any],
+        run_id: str,
+        agent: ModelDrivenAgent,
+    ) -> dict[str, Any]:
+        task_id = request.get("taskId")
+        now = _timestamp
+        self._emit({
+            "type": "agent.started",
+            "runId": run_id,
+            **({"taskId": task_id} if task_id else {}),
+            "at": now(),
+        })
+        try:
+            target_id = request.get("targetId")
+            allowed_tools = frozenset(
+                spec.name for spec in self._registry.list()
+                if spec.risk_level == "read" and not spec.requires_approval
+            )
+            result = await agent.run(
+                task_id=_safe_context_id("task", task_id or run_id),
+                tenant_id="local",
+                user_id=_safe_context_id("session", request["sessionId"]),
+                prompt=request["promptText"],
+                allowed_tools=allowed_tools,
+                allowed_target_ids=frozenset({target_id}) if target_id else frozenset(),
+            )
+            text = result.answer[:200_000]
+            base_result: dict[str, Any] = {
+                "runId": run_id,
+                "state": "completed" if result.status == "succeeded" else "failed",
+                "text": text,
+                "steps": result.tool_calls + (1 if result.status == "succeeded" else 0),
+                "toolCalls": result.tool_calls,
+            }
+            if result.status == "succeeded":
+                for offset in range(0, len(text), 20_000):
+                    self._emit({"type": "agent.text", "runId": run_id, "textDelta": text[offset:offset + 20_000], "at": now()})
+                self._emit({
+                    "type": "agent.completed",
+                    "runId": run_id,
+                    **({"taskId": task_id} if task_id else {}),
+                    "result": base_result,
+                    "at": now(),
+                })
+            else:
+                message = result.error_code or "agent_run_failed"
+                base_result["error"] = message
+                self._emit({
+                    "type": "agent.failed",
+                    "runId": run_id,
+                    **({"taskId": task_id} if task_id else {}),
+                    "error": message,
+                    "at": now(),
+                })
+            return base_result
+        except asyncio.CancelledError:
+            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
+            self._emit({
+                "type": "agent.completed",
+                "runId": run_id,
+                **({"taskId": task_id} if task_id else {}),
+                "result": result,
+                "at": now(),
+            })
+            return result
+        except Exception:
+            message = "agent_run_failed"
+            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message}
+            self._emit({
+                "type": "agent.failed",
+                "runId": run_id,
+                **({"taskId": task_id} if task_id else {}),
+                "error": message,
+                "at": now(),
+            })
+            return result
+        finally:
+            self._active_runs.pop(run_id, None)
+            self._completed_runs[run_id] = _run_fingerprint(request)
+            self._completed_runs.move_to_end(run_id)
+            while len(self._completed_runs) > 256:
+                self._completed_runs.popitem(last=False)
+            message_id = request.get("messageId")
+            admission = self._admissions.get(message_id) if message_id else None
+            if admission and admission["runId"] == run_id:
+                admission["completed"] = True
+                self._prune_admissions()
+
+    def _prune_admissions(self) -> None:
+        while len(self._admissions) > 256:
+            for message_id, admission in list(self._admissions.items()):
+                if admission["completed"]:
+                    del self._admissions[message_id]
+                    break
+            else:
+                return
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self._notification_sink is not None:
+            self._notification_sink("agent.stream", event)
+
+    async def shutdown(self) -> None:
+        active = list(self._active_runs.values())
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
 
     def _initialize(self, params: object) -> dict[str, Any]:
         if self._initialized:
@@ -218,8 +431,8 @@ class PythonSidecar:
             "agentVersion": self._agent_version,
             "capabilities": {
                 "streaming": False,
-                "toolCalling": False,
-                "cancellation": False,
+                "toolCalling": bool(self._registry.list()),
+                "cancellation": True,
                 "mcp": False,
             },
         }
@@ -255,6 +468,170 @@ def _strict_object(value: object, allowed_keys: set[str]) -> dict[str, Any]:
     return value
 
 
+def _parse_run_request(value: object) -> dict[str, Any]:
+    fields = {
+        "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
+        "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
+        "providerConfig",
+    }
+    parsed = _strict_object(value, fields)
+    run_id = parsed.get("runId")
+    session_id = parsed.get("sessionId")
+    prompt = parsed.get("prompt")
+    if (
+        not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 256
+        or not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256
+        or not isinstance(prompt, str) or len(prompt) > 100_000
+    ):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    for field in ("taskId", "messageId", "workspaceId", "focusServerId"):
+        item = parsed.get(field)
+        if field in parsed and (not isinstance(item, str) or not item.strip() or len(item) > 256):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if parsed.get("delivery", "async") not in ("async", "sync"):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if not isinstance(parsed.get("resume", True), bool):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if parsed.get("permissionMode", "ask") not in ("ask", "auto"):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if parsed.get("mode", "goal") not in ("goal", "plan", "readonly"):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if "policyId" in parsed:
+        if not isinstance(parsed["policyId"], str) or not parsed["policyId"].strip() or len(parsed["policyId"]) > 256:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        raise _RpcFault(RPC_INVALID_PARAMS, "policy selection is not supported by this Python Agent Node yet")
+
+    target_id = parsed.get("focusServerId")
+    if target_id is not None and not _valid_server_id(target_id):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    target = parsed.get("target")
+    if "target" in parsed:
+        target = _strict_object(target, {"host", "serverId", "workspaceId", "environment"})
+        if (
+            target.get("host") not in ("local", "remote")
+            or target.get("environment") not in ("local", "development", "staging", "production", "unknown")
+            or "workspaceId" in target
+            and (not isinstance(target["workspaceId"], str) or not target["workspaceId"].strip() or len(target["workspaceId"]) > 256)
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        scoped_server = target.get("serverId")
+        if "serverId" in target and not isinstance(scoped_server, str):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        if target["host"] == "remote" and not _valid_server_id(scoped_server):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        if target["host"] == "local" and scoped_server is not None:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        if scoped_server is not None and target_id is not None and scoped_server != target_id:
+            raise _RpcFault(RPC_INVALID_PARAMS, "target conflicts with focusServerId")
+        target_id = scoped_server or target_id
+
+    if "parts" in parsed and not isinstance(parsed["parts"], list):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
+    if "taskBudget" in parsed and not isinstance(parsed["taskBudget"], dict):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid taskBudget")
+    prompt_text = _prompt_text(prompt, parsed.get("parts"))
+    if not prompt_text.strip() or len(prompt_text.encode("utf-8")) > 64 * 1024:
+        raise _RpcFault(RPC_INVALID_PARAMS, "prompt is empty or exceeds the Python Agent input limit")
+    task_budget = _run_budget(parsed.get("taskBudget"))
+    return {
+        **parsed,
+        "runId": run_id.strip(),
+        "sessionId": session_id.strip(),
+        "delivery": parsed.get("delivery", "async"),
+        "resume": parsed.get("resume", True),
+        "promptText": prompt_text,
+        "targetId": target_id,
+        "agentBudget": task_budget,
+    }
+
+
+def _prompt_text(prompt: str, parts: object) -> str:
+    if parts is None:
+        return prompt.strip()
+    if not isinstance(parts, list) or not 1 <= len(parts) <= 32:
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
+    text_parts: list[str] = []
+    files: list[tuple[str, str]] = []
+    text_size = 0
+    for part in parts:
+        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
+        if part["type"] == "text":
+            parsed = _strict_object(part, {"type", "text"})
+            if not isinstance(parsed.get("text"), str) or not parsed["text"]:
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
+            text_parts.append(parsed["text"])
+            text_size += len(parsed["text"].encode("utf-8"))
+        elif part["type"] == "file":
+            parsed = _strict_object(part, {"type", "mediaType", "data", "name"})
+            name, data = parsed.get("name"), parsed.get("data")
+            if (
+                parsed.get("mediaType") != "text/plain"
+                or not isinstance(name, str) or not name.strip()
+                or len(name) > 256
+                or not isinstance(data, str) or not data
+                or re.search(r"[\x00-\x1f\x7f]", name)
+                or "/" in name or "\\" in name
+                or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", data)
+            ):
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
+            files.append((name.strip(), data))
+            text_size += len(data.encode("utf-8"))
+        else:
+            raise _RpcFault(RPC_INVALID_PARAMS, "image, document, and audio parts are not supported by the Python Agent Node yet")
+        if text_size > 64 * 1024:
+            raise _RpcFault(RPC_INVALID_PARAMS, "prompt parts exceed the Python Agent input limit")
+    prompt_text = "\n".join(text_parts).strip() or prompt.strip()
+    file_blocks = [
+        f"--- BEGIN ATTACHED TEXT FILE: {name} ---\n{data}\n--- END ATTACHED TEXT FILE ---"
+        for name, data in files
+    ]
+    return "\n\n".join([prompt_text, *file_blocks]).strip()
+
+
+def _run_budget(value: object) -> AgentBudget:
+    max_steps = 8
+    max_run_ms = 120_000
+    if value is not None:
+        parsed = _strict_object(value, {"maxSteps", "maxRunMs", "maxAttempts"})
+        max_steps = parsed.get("maxSteps")
+        max_run_ms = parsed.get("maxRunMs")
+        max_attempts = parsed.get("maxAttempts")
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in (max_steps, max_run_ms, max_attempts)):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid taskBudget")
+        if not 1 <= max_steps <= 10_000 or not 1 <= max_run_ms <= 86_400_000 or not 1 <= max_attempts <= 32:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid taskBudget")
+    steps = min(max_steps, 8)
+    return AgentBudget(
+        max_tool_calls=min(12, steps),
+        max_model_rounds=steps,
+        max_total_seconds=max(0.01, min(120.0, max_run_ms / 1000)),
+        max_output_bytes=200_000,
+    )
+
+
+def _run_fingerprint(request: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {"prompt": request["prompt"], "parts": request.get("parts")},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _safe_context_id(prefix: str, value: str) -> str:
+    return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _valid_server_id(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"srv_[a-z0-9]+", value))
+
+
+def _timestamp() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def _failure(request_id: int | None, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
@@ -283,6 +660,13 @@ async def serve_stdio(
             output_stream.write(encoded)
             output_stream.flush()
 
+    def notify(method: str, params: dict[str, Any]) -> None:
+        task = asyncio.create_task(write_frame({"jsonrpc": "2.0", "method": method, "params": params}))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    sidecar.set_notification_sink(notify)
+
     async def respond(value: object) -> None:
         result = await sidecar.handle_async(value)
         if result is not None:
@@ -305,6 +689,7 @@ async def serve_stdio(
         task = asyncio.create_task(respond(value))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+    await sidecar.shutdown()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
