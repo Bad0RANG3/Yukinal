@@ -121,12 +121,14 @@ executions exactly-once.
 `ModelDrivenAgent` pauses and resumes an exact approved call; rejection and
 expiry stop the graph without retrying the requested action.
 
-The service currently targets Linux hosts with systemd. The service configuration is the allowlist. Requests cannot provide a hostname,
+The service currently targets Unix-like hosts with systemd and Docker. The
+service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or command. The service resolves a `target_id` to a
-configured target and accepts only `operation: "service_status"` with one
-validated systemd unit name. It sends the fixed command `systemctl is-active --
-<service>` only after the target's host key matches the configured OpenSSH
-`known_hosts` file. Unknown and changed keys fail closed.
+configured target and accepts only `service_status` with one validated systemd
+unit name or the parameterless `service_inventory` operation. Both map to fixed
+read-only commands, and both run only after the target host key matches the
+configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
+keys fail closed.
 
 The API token is read from an environment-variable reference in the config and
 must be 32–256 URL-safe characters. The HTTP handler rejects browser `Origin`
@@ -157,9 +159,25 @@ Request:
 }
 ```
 
-Only the documented fields are accepted. Timeouts are 1–30 seconds, unit names
-are restricted to a conservative character set, and stdout/stderr are capped at
-64 KiB each.
+The desktop inventory request uses the same endpoint with no parameters:
+
+```json
+{
+  "target_id": "staging-web-01",
+  "operation": "service_inventory",
+  "parameters": {},
+  "timeout_seconds": 10
+}
+```
+
+Only the documented fields are accepted. `service_status` requires exactly one
+validated unit name; `service_inventory` accepts no parameters. Timeouts are
+1–30 seconds, and stdout/stderr are capped at 64 KiB each.
+
+The desktop service panel launches a short-lived one-target C++ service for
+`service_inventory`. Its temporary configuration contains only target metadata
+and environment-variable names; credentials are passed to the child process
+environment and the process is stopped after the request.
 
 Completed request:
 

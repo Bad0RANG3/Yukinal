@@ -19,7 +19,7 @@ _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 
 
 @dataclass(frozen=True)
-class ServiceStatusResult:
+class SshOperationResult:
     target_id: str
     operation: str
     exit_code: int
@@ -27,6 +27,9 @@ class ServiceStatusResult:
     stderr: str
     duration_ms: int
     output_truncated: bool
+
+
+ServiceStatusResult = SshOperationResult
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -65,17 +68,28 @@ class SshServiceClient:
         return True
 
     def service_status(self, target_id: str, service: str, timeout_seconds: int = 10) -> ServiceStatusResult:
-        if not isinstance(target_id, str) or not _TARGET_ID.fullmatch(target_id):
-            raise ValueError("target_id has an invalid format")
         if not isinstance(service, str) or not _SERVICE_NAME.fullmatch(service):
             raise ValueError("service must be a valid systemd unit name")
+        return self._execute_operation(
+            target_id, "service_status", {"service": service}, timeout_seconds
+        )
+
+    def service_inventory(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
+        """List services through the fixed, read-only inventory operation."""
+        return self._execute_operation(target_id, "service_inventory", {}, timeout_seconds)
+
+    def _execute_operation(
+        self, target_id: str, operation: str, parameters: dict[str, Any], timeout_seconds: int
+    ) -> SshOperationResult:
+        if not isinstance(target_id, str) or not _TARGET_ID.fullmatch(target_id):
+            raise ValueError("target_id has an invalid format")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 30:
             raise ValueError("timeout_seconds must be an integer from 1 to 30")
 
         payload = {
             "target_id": target_id,
-            "operation": "service_status",
-            "parameters": {"service": service},
+            "operation": operation,
+            "parameters": parameters,
             "timeout_seconds": timeout_seconds,
         }
         body = self._request("POST", "/v1/ssh/exec", payload, timeout=timeout_seconds + 5, authorized=True)
@@ -86,7 +100,7 @@ class SshServiceClient:
             raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
         if (
             body.get("target_id") != target_id
-            or body.get("operation") != "service_status"
+            or body.get("operation") != operation
             or isinstance(body.get("exit_code"), bool)
             or not isinstance(body.get("exit_code"), int)
             or not isinstance(body.get("stdout"), str)
@@ -98,9 +112,9 @@ class SshServiceClient:
             or body.get("error") is not None
         ):
             raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
-        return ServiceStatusResult(
+        return SshOperationResult(
             target_id=target_id,
-            operation="service_status",
+            operation=operation,
             exit_code=body["exit_code"],
             stdout=body["stdout"],
             stderr=body["stderr"],

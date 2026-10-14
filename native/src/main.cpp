@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     std::cerr << "SSH service listening on 127.0.0.1:" << config.listen_port
               << " with " << config.targets.size() << " configured target(s)\n";
     if (!yukinal::ssh_service::serve(config, token_value,
-                                     yukinal::ssh_service::service_status, parent_pid)) {
+                                     yukinal::ssh_service::run_operation, parent_pid)) {
       std::cerr << "SSH service failed to bind its loopback HTTP socket\n";
       return 1;
     }

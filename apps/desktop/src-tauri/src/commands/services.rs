@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio_util::sync::CancellationToken;
 use yukinal_ssh::SshBackend;
 
+use crate::commands::ssh_service;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
@@ -96,13 +97,45 @@ pub(crate) fn filter_services(
 /// `server_services`: connect if necessary, then run one fixed read-only probe.
 #[tauri::command]
 pub async fn server_services(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerServicesResponse, String> {
-    ensure_session(&state, &server_id).await?;
+    let server = state
+        .database
+        .servers()
+        .get(&server_id)
+        .map_err(|error| error.to_string())?;
+    let identity_id = server
+        .connection
+        .identity_id
+        .as_deref()
+        .ok_or_else(|| "the selected server has no SSH identity".to_string())?;
+    let identity = state
+        .database
+        .identities()
+        .get(identity_id)
+        .map_err(|error| error.to_string())?;
+    if server.connection.host_certificate_authority.is_some()
+        || !matches!(identity.method.as_str(), "password" | "privateKey")
+    {
+        return legacy_service_inventory(&state, &server_id).await;
+    }
+    let output = ssh_service::service_inventory(&app, &state, &server_id).await?;
+    parse_services_output(&output)
+        .map_err(|error| format!("service discovery returned an invalid response: {error}"))
+}
+
+/// Preserve current certificate, agent, and host-CA identities until the C++ service supports
+/// those authentication and trust modes. New password/private-key desktop calls use C++.
+async fn legacy_service_inventory(
+    state: &AppState,
+    server_id: &str,
+) -> Result<ServerServicesResponse, String> {
+    ensure_session(state, server_id).await?;
     let session = state
         .terminals
-        .cached_session(&server_id)
+        .cached_session(server_id)
         .map_err(|error| error.to_string())?;
     let output = state
         .ssh
@@ -114,7 +147,6 @@ pub async fn server_services(
         )
         .await
         .map_err(|error| error.to_string())?;
-
     parse_services_output(&output.stdout_lossy())
         .map_err(|error| format!("service discovery returned an invalid response: {error}"))
 }
@@ -228,8 +260,8 @@ fn state_from_docker(state: &str) -> ServiceState {
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_services, parse_services_output, ServerService, ServerServicesInput,
-        ServerServicesResponse, ServiceSource, ServiceState,
+        ServerService, ServerServicesInput, ServerServicesResponse, ServiceSource, ServiceState,
+        filter_services, parse_services_output,
     };
 
     const FIXTURE: &str =
@@ -278,14 +310,16 @@ mod tests {
         assert_eq!(response.source, ServiceSource::Systemd);
         assert_eq!(response.services.len(), 1);
         assert_eq!(response.services[0].name, "worker.service");
-        assert!(filter_services(
-            &mut response,
-            &ServerServicesInput {
-                name: Some("worker.service;id".into()),
-                state: None,
-            },
-        )
-        .is_err());
+        assert!(
+            filter_services(
+                &mut response,
+                &ServerServicesInput {
+                    name: Some("worker.service;id".into()),
+                    state: None,
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

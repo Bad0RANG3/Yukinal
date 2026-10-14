@@ -10,6 +10,7 @@ namespace yukinal::ssh_service {
 
 struct ExecRequest {
   std::string target_id;
+  std::string operation;
   std::string service;
   int timeout_seconds = 10;
 };

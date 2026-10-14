@@ -84,6 +84,22 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 3)
         self.assertEqual(result.stdout, "inactive\n")
 
+    def test_service_inventory_is_a_parameterless_structured_operation(self) -> None:
+        self.server.response_body["operation"] = "service_inventory"
+        self.server.response_body["stdout"] = "nginx.service loaded active running Nginx\n__YUKINAL_SOURCE__=systemd\n"
+        result = self.client.service_inventory("staging-web-01", 8)
+        self.assertEqual(result.operation, "service_inventory")
+        self.assertIn("__YUKINAL_SOURCE__=systemd", result.stdout)
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "service_inventory",
+                "parameters": {},
+                "timeout_seconds": 8,
+            },
+        )
+
     def test_structured_service_errors_are_preserved(self) -> None:
         self.server.status_code = 404
         self.server.response_body = {"status": "failed", "error": {"code": "unknown_target", "message": "not allow-listed"}}

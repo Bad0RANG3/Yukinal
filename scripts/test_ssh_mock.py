@@ -92,6 +92,9 @@ def start_ssh_mock(
             if command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
+            elif b"systemctl list-units --type=service" in command:
+                channel.sendall(b"nginx.service loaded active running Nginx Web Server\n\n__YUKINAL_SOURCE__=systemd\n")
+                channel.send_exit_status(0)
             elif command == b"systemctl is-active -- slow.service":
                 time.sleep(3)
                 channel.sendall(b"active\n")
@@ -354,6 +357,10 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if agent_runtime_only:
                 exercise_agent_runtime(client, service_binary, desktop_target)
                 return
+
+            inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
+            if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:
+                raise AssertionError(f"unexpected read-only service inventory: {inventory!r}")
 
             result = client.service_status("srv_stage1", "nginx.service", timeout_seconds=5)
             if result.stdout != "active\n" or result.exit_code != 0:

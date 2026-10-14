@@ -1,15 +1,17 @@
 # SSH Service (C++)
 
 The first rewrite milestone is a small, standalone C++ service. It binds only to
-`127.0.0.1`, accepts structured requests, resolves `target_id` from an operator
-configuration and exposes one read-only operation: `service_status`. Host keys
+`127.0.0.1`, accepts structured requests, resolves `target_id` from a configured
+allowlist and exposes read-only operations: `service_status` and
+`service_inventory`. Host keys
 can be checked against an OpenSSH `known_hosts` file or an exact `SHA256:` pin
 from the desktop trust store. Private keys can come from a file or a named
 environment reference, which lets the desktop pass OS-keychain material without
 writing it into the service configuration.
 
-The service deliberately has no raw-command endpoint, UI bridge, Agent runtime,
-MCP support, terminal, or file transfer. Those are later milestones.
+The service deliberately has no raw-command endpoint, terminal, or file transfer.
+The desktop service panel now starts a one-target instance for inventory calls;
+the interactive terminal and SFTP migration remains in progress.
 
 ## Build
 
@@ -34,17 +36,16 @@ integration. The real OpenSSH container test is separate and requires Docker.
 `pnpm build:ssh-service` builds only the C++ executable and stages it under
 `apps/desktop/src-tauri/resources/ssh-service/`; `pnpm package` and the direct
 Tauri build hook do this automatically. The executable is included in the app
-resources, but starts only when `YUKINAL_SSH_SERVICE_CONFIG` points to an
-operator-managed JSON file and the configured API token and credential
-environment references are present. The Python Agent checks `/health` before
-it becomes ready, then owns the service lifetime. It passes only the
-environment variables named in that service config to the C++ child. A
-`--parent-pid` monitor also makes the C++ service exit if the Python Agent dies
-without a graceful shutdown.
+resources. The Python Agent can use an operator-managed config; the desktop
+Agent and service panel also create a one-target config from the selected
+server and keychain identity. Both start the C++ child with only the referenced
+credential environment values. A `--parent-pid` monitor also makes the C++
+service exit if its parent dies without a graceful shutdown.
 
-The packaged service still uses a static operator allowlist. Automatic
-synchronization from saved desktop server records and OS keychain identities is
-not implemented yet.
+The Python Agent and desktop service panel create a short-lived one-target
+allowlist from the selected desktop server record and OS keychain identity. The
+interactive terminal and SFTP paths still use the legacy Rust transport while
+their C++ service APIs are being built.
 
 ## Run
 

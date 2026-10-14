@@ -122,7 +122,9 @@ fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
             } else if let Some(binary) = resolve_ssh_service_binary(&cwd, resources.as_deref())? {
                 config = config.with_python_ssh_service_autoconfig(&binary);
             } else {
-                eprintln!("[yukinal] C++ SSH service is unavailable; desktop SSH Agent tools are disabled");
+                eprintln!(
+                    "[yukinal] C++ SSH service is unavailable; desktop SSH Agent tools are disabled"
+                );
             }
         }
     }
@@ -242,7 +244,7 @@ fn resolve_ssh_service_runtime(
     })
 }
 
-fn resolve_ssh_service_binary(
+pub(super) fn resolve_ssh_service_binary(
     cwd: &Path,
     resources: Option<&Path>,
 ) -> Result<Option<PathBuf>, String> {
@@ -413,7 +415,7 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         _ => {
             return Err(
                 "the selected SSH identity method is not supported by the C++ service".into(),
-            )
+            );
         }
     };
 

@@ -21,6 +21,30 @@ YUKINAL_TEST(policy_accepts_only_structured_service_status) {
   YUKINAL_REQUIRE(request.timeout_seconds == 8);
 }
 
+YUKINAL_TEST(policy_accepts_service_inventory_without_parameters) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "service_inventory"},
+       {"parameters", json::object()},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.operation == "service_inventory");
+  YUKINAL_REQUIRE(request.service.empty());
+  YUKINAL_REQUIRE(request.timeout_seconds == 8);
+
+  const bool parameter_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "service_inventory"},
+       {"parameters", {{"command", "id"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!parameter_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {
   ExecRequest request;
   ApiError error;

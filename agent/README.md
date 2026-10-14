@@ -106,12 +106,12 @@ the per-user application-data ACL. Multimodal prompts and write-capable desktop
 tools are still being migrated. Tauri builds select the frozen Python sidecar;
 installed-app lifecycle and cross-platform acceptance remain in progress.
 
-When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it also
-registers the read-only `ssh.service_status` tool backed by the C++ service. The
-tool gets its target from the selected `host_target.serverId`; `target_id` is not
-part of the model-visible input schema. Configure that exact server ID in the
-C++ service allowlist. New Tauri builds forward the configured token to the
-Python sidecar; the retained Node fallback does not receive it.
+When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it
+registers the read-only `ssh.service_status` tool backed by the C++ service. In
+the desktop autoconfiguration path, the Python sidecar resolves the selected
+`host_target.serverId` through Host RPC and starts a one-target C++ service for
+that call. `target_id` is not part of the model-visible input schema. The
+retained Node fallback does not receive the C++ service credentials.
 
 Tauri development uses this runtime by default. Create the environment from the
 repository root and install the runtime dependencies:

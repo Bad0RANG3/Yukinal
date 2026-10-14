@@ -144,7 +144,7 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
 
     ExecResult result;
     try {
-      result = runner(target->second, parsed.service, parsed.timeout_seconds);
+      result = runner(target->second, parsed);
     } catch (const std::exception&) {
       result.error_code = "internal_error";
       result.error_message = "The SSH operation failed unexpectedly";
@@ -154,7 +154,7 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     }
     Json output{{"status", result.completed ? "succeeded" : "failed"},
                 {"target_id", parsed.target_id},
-                {"operation", "service_status"},
+                {"operation", parsed.operation},
                 {"exit_code", result.completed ? Json(result.exit_code) : Json(nullptr)},
                 {"stdout", result.stdout_text},
                 {"stderr", result.stderr_text},

@@ -56,18 +56,27 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     set_error(error, 422, "invalid_target_id", "target_id has an invalid format");
     return false;
   }
-  if (operation_it->get<std::string>() != "service_status") {
-    set_error(error, 422, "unsupported_operation", "Only service_status is enabled");
-    return false;
-  }
-  if (!has_only_keys(*parameters_it, {"service"})) {
-    set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
-    return false;
-  }
-  const auto service_it = parameters_it->find("service");
-  if (service_it == parameters_it->end() || !service_it->is_string() ||
-      !valid_service_name(service_it->get<std::string>())) {
-    set_error(error, 422, "invalid_parameters", "service must be a valid systemd unit name");
+  const std::string operation = operation_it->get<std::string>();
+  std::string service;
+  if (operation == "service_status") {
+    if (!has_only_keys(*parameters_it, {"service"})) {
+      set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
+      return false;
+    }
+    const auto service_it = parameters_it->find("service");
+    if (service_it == parameters_it->end() || !service_it->is_string() ||
+        !valid_service_name(service_it->get<std::string>())) {
+      set_error(error, 422, "invalid_parameters", "service must be a valid systemd unit name");
+      return false;
+    }
+    service = service_it->get<std::string>();
+  } else if (operation == "service_inventory") {
+    if (!parameters_it->empty()) {
+      set_error(error, 422, "invalid_parameters", "service_inventory accepts no parameters");
+      return false;
+    }
+  } else {
+    set_error(error, 422, "unsupported_operation", "The requested structured SSH operation is not enabled");
     return false;
   }
   std::uint64_t timeout = 0;
@@ -90,7 +99,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     return false;
   }
   request->target_id = target_id;
-  request->service = service_it->get<std::string>();
+  request->operation = operation;
+  request->service = std::move(service);
   request->timeout_seconds = static_cast<int>(timeout);
   return true;
 }

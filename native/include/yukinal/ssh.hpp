@@ -4,6 +4,7 @@
 #include <string>
 
 #include "yukinal/config.hpp"
+#include "yukinal/policy.hpp"
 
 namespace yukinal::ssh_service {
 
@@ -21,5 +22,7 @@ struct ExecResult {
 /// Run the single permitted read-only operation. No raw command is accepted here.
 ExecResult service_status(const TargetConfig& target, const std::string& service,
                           int timeout_seconds);
+ExecResult service_inventory(const TargetConfig& target, int timeout_seconds);
+ExecResult run_operation(const TargetConfig& target, const ExecRequest& request);
 
 }  // namespace yukinal::ssh_service

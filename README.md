@@ -12,7 +12,7 @@ partial Python Agent components for later stages:
 
 - a standalone C++ service bound to `127.0.0.1`;
 - a Python caller over local HTTP/JSON;
-- one read-only structured SSH operation, `service_status`;
+- read-only structured SSH operations: `service_status` and `service_inventory`;
 - target allowlisting, strict SSH host-key verification, bounded timeouts and
   output, and credentials referenced from environment variables or private-key
   files;
@@ -40,10 +40,10 @@ still exposes read-only tools. Durable task state and broader tool coverage
 remain in progress. The existing React/Tauri UI remains intact while those
 paths are migrated.
 
-The Python development sidecar can call the C++ service for
-`ssh.service_status` when its token is configured. The service's `target_id`
-must match the selected desktop server ID; syncing saved server records into the
-C++ service configuration is still future work. Tauri development and new
+The Python Agent resolves the selected desktop server from SQLite and the OS
+credential store before starting a one-target C++ service. The desktop service
+panel uses the same short-lived service process for read-only service inventory.
+Tauri development and new
 desktop builds now select the frozen Python Agent. The Node runtime and bundle
 remain staged as a temporary fallback while the remaining desktop migration is
 validated.

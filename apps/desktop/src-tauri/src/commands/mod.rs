@@ -43,6 +43,7 @@ pub mod recovery;
 pub mod scheduler;
 pub mod server;
 pub mod services;
+pub(crate) mod ssh_service;
 pub mod terminal;
 pub mod workspace;
 

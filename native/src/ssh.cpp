@@ -416,12 +416,12 @@ std::string host_key_fingerprint(LIBSSH2_SESSION* session) {
 
 }  // namespace
 
-ExecResult service_status(const TargetConfig& target, const std::string& service,
-                          int timeout_seconds) {
+static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
+                                  int timeout_seconds) {
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
-  if (!valid_service_name(service) || timeout_seconds < 1 || timeout_seconds > 30) {
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
     fail(&result, "invalid_parameters", "The read-only SSH operation parameters are invalid");
     return result;
   }
@@ -557,8 +557,6 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
     return result;
   }
 
-  // The service name is schema-validated before it reaches this fixed read-only command.
-  const std::string command = "systemctl is-active -- " + service;
   if (!set_session_timeout(resources.session_, deadline) ||
       libssh2_channel_process_startup(resources.channel_, "exec", 4, command.c_str(),
                                       static_cast<unsigned int>(command.size())) != 0) {
@@ -620,6 +618,40 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
       result.completed = true;
     }
   }
+  return result;
+}
+
+ExecResult service_status(const TargetConfig& target, const std::string& service,
+                          int timeout_seconds) {
+  if (!valid_service_name(service)) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The read-only SSH operation parameters are invalid");
+    return result;
+  }
+  return run_ssh_command(target, "systemctl is-active -- " + service, timeout_seconds);
+}
+
+ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
+  static constexpr char command[] =
+      "if command -v systemctl >/dev/null 2>&1; then "
+      "systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null; "
+      "if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=systemd\\n'; exit 0; fi; fi; "
+      "if command -v docker >/dev/null 2>&1; then "
+      "docker ps -a --format '{{.Names}}\\t{{.State}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null; "
+      "if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=docker\\n'; exit 0; fi; fi; "
+      "printf '__YUKINAL_SOURCE__=unavailable\\n'";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
+  if (request.operation == "service_status") {
+    return service_status(target, request.service, request.timeout_seconds);
+  }
+  if (request.operation == "service_inventory") {
+    return service_inventory(target, request.timeout_seconds);
+  }
+  ExecResult result;
+  fail(&result, "unsupported_operation", "The requested structured SSH operation is not enabled");
   return result;
 }
 

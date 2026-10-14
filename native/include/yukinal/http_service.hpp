@@ -11,11 +11,11 @@
 
 namespace yukinal::ssh_service {
 
-using OperationRunner = std::function<ExecResult(const TargetConfig&, const std::string&, int)>;
+using OperationRunner = std::function<ExecResult(const TargetConfig&, const ExecRequest&)>;
 
 /// Start the loopback-only HTTP API. Returns false if the socket cannot be bound.
 bool serve(const ServiceConfig& config, const std::string& api_token,
-           OperationRunner runner = service_status,
+           OperationRunner runner = run_operation,
            std::optional<std::uint64_t> parent_pid = std::nullopt);
 
 }  // namespace yukinal::ssh_service
