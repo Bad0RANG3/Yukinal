@@ -6,17 +6,21 @@
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
-> hosts native UI IPC, local trust-store updates, file transfers, and fallback
-> PTY sessions for Host CA, certificate identities, proxy routes,
-> keyboard-interactive auth, and known-hosts-only trust. Supported direct desktop terminals use a dedicated C++
+> hosts native UI IPC, local trust-store updates, approvals, and PTY/SFTP
+> compatibility paths for Host CA, proxy routes, keyboard-interactive auth,
+> known-hosts-only trust, and other unsupported SSH modes. Supported direct desktop terminals use a dedicated C++
 > PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
 > C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
-> SSH-agent identities without Host CA. The same identities use C++ for
+> SSH-agent identities on direct connections with a confirmed host-key pin and
+> without Host CA. The same identities use C++ for
 > structured SSH operations. Host-key probes use C++ unless Host CA or an unsupported
-> host-key format requires the certificate-aware Rust path; transfers, PTY, and
-> Host CA trust still use Rust. Every C++ operation resolves its `target_id` through the service
+> host-key format requires the certificate-aware Rust path. Manual transfers use
+> bounded C++ SFTP streams for supported direct targets with a confirmed host-key
+> pin and retain the Rust compatibility path for unsupported targets. PTY and
+> Host CA trust still use Rust where unsupported.
+> Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
 > loopback health endpoint, and stops it with the Agent process. Automatic

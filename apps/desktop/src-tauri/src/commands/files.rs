@@ -95,32 +95,7 @@ pub(crate) fn cpp_ssh_file_operations_supported(
     state: &AppState,
     server_id: &str,
 ) -> Result<bool, String> {
-    let server = match state.database.servers().get(server_id) {
-        Ok(server) => server,
-        Err(_) => return Ok(false),
-    };
-    if server.connection.host_certificate_authority.is_some() {
-        return Ok(false);
-    }
-    let Some(identity_id) = server.connection.identity_id.as_deref() else {
-        return Ok(false);
-    };
-    let identity = match state.database.identities().get(identity_id) {
-        Ok(identity) => identity,
-        Err(_) => return Ok(false),
-    };
-    Ok(matches!(
-        identity.method.as_str(),
-        "password" | "privateKey" | "agent"
-    ) || (identity.method == "certificate"
-        && (identity
-            .certificate_path
-            .as_deref()
-            .is_some_and(|path| !path.is_empty())
-            || identity
-                .private_key_path
-                .as_deref()
-                .is_some_and(|path| !path.is_empty()))))
+    crate::commands::ssh_service::supports_cpp_target(state, server_id)
 }
 
 impl RemoteFileTransport for TerminalFileTransport<'_> {
