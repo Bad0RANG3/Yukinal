@@ -568,18 +568,45 @@ pub(super) fn resolve_ssh_service_probe_target(
         .servers()
         .get(&request.server_id)
         .map_err(|_| "the selected SSH server is not available".to_string())?;
+    let proxy_route = super::ssh_service::resolve_cpp_proxy_route(state)?;
+    if matches!(&proxy_route, super::ssh_service::CppProxyRoute::Unsupported) {
+        return Err("the configured proxy route is not supported by the C++ SSH service".into());
+    }
 
-    Ok(json!({
-        "target": {
+    let mut target = json!({
             "target_id": server.id,
             "host": server.connection.host,
             "port": server.connection.port,
             "username": "ssh_probe",
             "probe_only": true,
             "auth": { "type": "probe" },
-        },
-        "credentials": {},
-    }))
+        });
+    let mut credentials = serde_json::Map::new();
+    match proxy_route {
+        super::ssh_service::CppProxyRoute::Direct => {}
+        super::ssh_service::CppProxyRoute::HttpConnect {
+            host,
+            port,
+            credential,
+        } => {
+            let mut proxy = json!({
+                "type": "http_connect",
+                "host": host,
+                "port": port,
+            });
+            if let Some(credential) = credential {
+                credentials.insert(
+                    "YK_SSH_PROXY_CREDENTIAL".into(),
+                    serde_json::Value::String(credential),
+                );
+                proxy["auth_env"] = json!("YK_SSH_PROXY_CREDENTIAL");
+            }
+            target["proxy"] = proxy;
+        }
+        super::ssh_service::CppProxyRoute::Unsupported => unreachable!("route checked above"),
+    }
+
+    Ok(json!({ "target": target, "credentials": credentials }))
 }
 
 fn read_ssh_secret(

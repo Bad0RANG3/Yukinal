@@ -290,9 +290,7 @@ pub(crate) async fn probe_host_key(
     state: &AppState,
     server_id: &str,
 ) -> Result<Option<String>, String> {
-    let proxy =
-        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
-    if proxy.proxy != yukinal_net::NetworkProxy::Direct {
+    if matches!(resolve_cpp_proxy_route(state)?, CppProxyRoute::Unsupported) {
         return Ok(None);
     }
     let target_payload =
@@ -617,7 +615,10 @@ pub(crate) async fn open_terminal(
         if !(agent_socket
             || matches!(
                 name.as_str(),
-                "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
+                "YK_SSH_PASSWORD"
+                    | "YK_SSH_PRIVATE_KEY"
+                    | "YK_SSH_PASSPHRASE"
+                    | "YK_SSH_PROXY_CREDENTIAL"
             ))
             || !value.is_string()
         {
@@ -835,7 +836,10 @@ async fn spawn_sftp_stream_worker(
         if !(agent_socket
             || matches!(
                 name.as_str(),
-                "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
+                "YK_SSH_PASSWORD"
+                    | "YK_SSH_PRIVATE_KEY"
+                    | "YK_SSH_PASSPHRASE"
+                    | "YK_SSH_PROXY_CREDENTIAL"
             ))
             || !value.is_string()
         {
@@ -1826,7 +1830,10 @@ async fn run_operation_response_with_target(
         if !(agent_socket
             || matches!(
                 name.as_str(),
-                "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
+                "YK_SSH_PASSWORD"
+                    | "YK_SSH_PRIVATE_KEY"
+                    | "YK_SSH_PASSPHRASE"
+                    | "YK_SSH_PROXY_CREDENTIAL"
             ))
             || !value.is_string()
         {

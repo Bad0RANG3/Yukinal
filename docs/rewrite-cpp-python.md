@@ -15,8 +15,8 @@
 > C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
 > SSH-agent identities on direct or supported HTTP CONNECT routes with a confirmed host-key pin and
 > without Host CA. The same identities use C++ for
-> structured SSH operations. Host-key probes use C++ unless Host CA, a configured
-> proxy, or an unsupported host-key format requires the Rust path. Manual transfers use
+> structured SSH operations. Host-key probes use C++ on direct and supported HTTP
+> CONNECT routes; Host CA, unsupported proxy routes, or unsupported host-key formats use Rust. Manual transfers use
 > bounded C++ SFTP streams for supported direct or HTTP CONNECT targets with a confirmed host-key
 > pin and retain the Rust compatibility path for unsupported targets. PTY and
 > Host CA trust still use Rust where unsupported.

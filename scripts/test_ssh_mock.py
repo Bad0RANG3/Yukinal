@@ -945,6 +945,20 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     },
                     "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
                 },
+                {
+                    "target_id": "srv_proxy_probe_only",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "ssh_probe",
+                    "probe_only": True,
+                    "proxy": {
+                        "type": "http_connect",
+                        "host": "127.0.0.1",
+                        "port": proxy_port,
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "probe"},
+                },
             ],
         }
         config_path = root / "service.json"
@@ -985,11 +999,19 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if AUTH_EVENTS:
                 raise AssertionError(f"host-key probe attempted SSH authentication: {AUTH_EVENTS!r}")
 
+            proxy_probe = client._execute_operation(
+                "srv_proxy_probe_only", "host_key_probe", {}, timeout_seconds=8
+            )
+            if proxy_probe.stdout != pinned_fingerprint or proxy_probe.exit_code != 0:
+                raise AssertionError(f"HTTP CONNECT host-key probe returned an unexpected result: {proxy_probe!r}")
+            if AUTH_EVENTS:
+                raise AssertionError(f"HTTP CONNECT host-key probe attempted SSH authentication: {AUTH_EVENTS!r}")
+
             proxy_result = client.service_status("srv_proxy", "nginx.service", timeout_seconds=8)
             if proxy_result.exit_code != 0 or proxy_result.stdout != "active\n":
                 raise AssertionError(f"HTTP CONNECT proxy did not carry the SSH operation: {proxy_result!r}")
             expected_authority = f"127.0.0.1:{ssh_port}"
-            if PROXY_CONNECT_TARGETS != [expected_authority]:
+            if PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
                 raise AssertionError(f"HTTP CONNECT used an unexpected target: {PROXY_CONNECT_TARGETS!r}")
             try:
                 client.service_status("srv_proxy_bad_auth", "nginx.service", timeout_seconds=5)
