@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -425,6 +426,12 @@ def _valid_cpp_no_proxy_entry(value: object) -> bool:
     if not isinstance(value, str) or not value or len(value) > 253:
         return False
     if value == "*":
+        return True
+    if "/" in value:
+        try:
+            ipaddress.IPv4Network(value, strict=False)
+        except ValueError:
+            return False
         return True
     if value.startswith("*."):
         host = value[2:]

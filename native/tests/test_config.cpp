@@ -161,10 +161,10 @@ YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   auto value = valid_config();
   value["targets"][0]["proxy"] = {
       {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
-      {"no_proxy", json::array({"*.corp", ".internal", "10.*", "[::1]", "localhost", "example.test"})}};
+      {"no_proxy", json::array({"*.corp", ".internal", "10.*", "[::1]", "localhost", "example.test", "192.168.0.0/16"})}};
   auto config = parse_config(value);
   auto& target = config.targets.at("staging-web-01");
-  YUKINAL_REQUIRE(target.proxy_no_proxy.size() == 6);
+  YUKINAL_REQUIRE(target.proxy_no_proxy.size() == 7);
 
   target.host = "api.corp";
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
@@ -176,6 +176,10 @@ YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
   target.host = "10.42.0.8";
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+  target.host = "192.168.42.1";
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+  target.host = "192.169.42.1";
+  YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
   target.host = "[::1]";
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
   target.host = "stage.example.test";
@@ -184,11 +188,11 @@ YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
 }
 
-YUKINAL_TEST(config_rejects_unimplemented_no_proxy_patterns) {
+YUKINAL_TEST(config_rejects_invalid_no_proxy_patterns) {
   auto value = valid_config();
   value["targets"][0]["proxy"] = {
       {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
-      {"no_proxy", json::array({"10.0.0.0/8"})}};
+      {"no_proxy", json::array({"10.0.0.0/33"})}};
   bool rejected = false;
   try {
     (void)parse_config(value);

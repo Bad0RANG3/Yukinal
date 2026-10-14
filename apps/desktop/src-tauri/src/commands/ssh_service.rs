@@ -441,6 +441,14 @@ fn parse_cpp_no_proxy(value: &str) -> Option<Vec<String>> {
             if entry == "*" {
                 return Some(entry.to_string());
             }
+            if let Some((address, prefix)) = entry.split_once('/') {
+                if address.contains('/') {
+                    return None;
+                }
+                return (address.parse::<std::net::Ipv4Addr>().is_ok()
+                    && prefix.parse::<u8>().is_ok_and(|prefix| prefix <= 32))
+                .then(|| entry.to_string());
+            }
             if let Some(host) = entry.strip_prefix("*.") {
                 return valid_host(host).then(|| entry.to_string());
             }
@@ -2151,6 +2159,11 @@ mod tests {
         ));
         assert!(matches!(
             proxy_route("http://proxy.example.test:8080", Some("10.0.0.0/8")),
+            CppProxyRoute::HttpConnect { no_proxy, .. }
+                if no_proxy.len() == 1 && no_proxy[0] == "10.0.0.0/8"
+        ));
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("10.0.0.0/33")),
             CppProxyRoute::Unsupported
         ));
         assert!(matches!(

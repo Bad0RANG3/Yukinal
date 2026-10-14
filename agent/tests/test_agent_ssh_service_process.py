@@ -155,7 +155,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 "host": "proxy.example.test",
                 "port": 8080,
                 "auth_env": "YK_SSH_PROXY_CREDENTIAL",
-                "no_proxy": ["*.corp", "10.*", "localhost"],
+                "no_proxy": ["*.corp", "10.*", "localhost", "10.0.0.0/8"],
             },
         }
         credentials = {
@@ -181,7 +181,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             invalid_target = dict(target)
-            invalid_target["proxy"] = {**target["proxy"], "no_proxy": ["10.0.0.0/8"]}
+            invalid_target["proxy"] = {**target["proxy"], "no_proxy": ["10.0.0.0/33"]}
             with self.assertRaises(SshServiceProcessError):
                 SshServiceProcess.for_desktop_target(
                     binary, {"target": invalid_target, "credentials": credentials}

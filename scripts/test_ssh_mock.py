@@ -955,7 +955,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                         "type": "http_connect",
                         "host": "127.0.0.1",
                         "port": proxy_port,
-                        "no_proxy": ["127.0.0.1"],
+                        "no_proxy": ["127.0.0.0/8"],
                     },
                     "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
                 },

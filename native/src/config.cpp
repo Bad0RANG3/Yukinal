@@ -1,6 +1,8 @@
 #include "yukinal/config.hpp"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -72,9 +74,67 @@ bool valid_proxy_credential_env_name(const std::string& name) {
   return !reserved.contains(normalized);
 }
 
+bool parse_ipv4(std::string_view value, std::array<unsigned char, 4>* address) {
+  if (!address) return false;
+  std::size_t start = 0;
+  for (std::size_t index = 0; index < address->size(); ++index) {
+    const auto end = value.find('.', start);
+    if ((index < address->size() - 1) == (end == std::string_view::npos)) return false;
+    const auto octet = value.substr(start, end == std::string_view::npos ? value.size() - start : end - start);
+    if (octet.empty() || octet.size() > 3 || (octet.size() > 1 && octet.front() == '0')) return false;
+    unsigned int parsed = 0;
+    const auto result = std::from_chars(octet.data(), octet.data() + octet.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != octet.data() + octet.size() || parsed > 255) return false;
+    (*address)[index] = static_cast<unsigned char>(parsed);
+    start = end == std::string_view::npos ? value.size() : end + 1;
+  }
+  return start == value.size();
+}
+
+bool parse_ipv4_cidr(std::string_view value, std::array<unsigned char, 4>* address,
+                     unsigned int* prefix) {
+  const auto slash = value.find('/');
+  if (slash == std::string_view::npos || value.find('/', slash + 1) != std::string_view::npos || !prefix) {
+    return false;
+  }
+  if (!parse_ipv4(value.substr(0, slash), address)) return false;
+  const auto prefix_text = value.substr(slash + 1);
+  if (prefix_text.empty()) return false;
+  unsigned int parsed = 0;
+  const auto result = std::from_chars(prefix_text.data(), prefix_text.data() + prefix_text.size(), parsed);
+  if (result.ec != std::errc{} || result.ptr != prefix_text.data() + prefix_text.size() || parsed > 32) {
+    return false;
+  }
+  *prefix = parsed;
+  return true;
+}
+
+bool ipv4_matches_cidr(std::string_view host, std::string_view cidr) {
+  std::array<unsigned char, 4> address{};
+  std::array<unsigned char, 4> network{};
+  unsigned int prefix = 0;
+  if (!parse_ipv4(host, &address) || !parse_ipv4_cidr(cidr, &network, &prefix)) return false;
+  for (std::size_t index = 0; index < address.size(); ++index) {
+    if (prefix >= 8) {
+      if (address[index] != network[index]) return false;
+      prefix -= 8;
+    } else if (prefix > 0) {
+      const auto mask = static_cast<unsigned char>(0xffU << (8 - prefix));
+      if ((address[index] & mask) != (network[index] & mask)) return false;
+      prefix = 0;
+    }
+  }
+  return true;
+}
+
 bool valid_proxy_bypass_entry(const std::string& entry) {
   if (entry.empty() || entry.size() > 253) return false;
   if (entry == "*") return true;
+  if (entry.find('/') != std::string::npos) {
+    std::array<unsigned char, 4> network{};
+    unsigned int prefix = 0;
+    return parse_ipv4_cidr(entry, &network, &prefix);
+  }
 
   std::string_view host = entry;
   if (host.rfind("*.", 0) == 0) host.remove_prefix(2);
@@ -327,6 +387,10 @@ bool proxy_bypasses_target(const TargetConfig& target) {
   for (const auto& raw_entry : target.proxy_no_proxy) {
     const std::string entry = lowercase(raw_entry);
     if (entry == "*") return true;
+    if (entry.find('/') != std::string::npos) {
+      if (ipv4_matches_cidr(host, entry)) return true;
+      continue;
+    }
     if (entry.rfind("*.", 0) == 0) {
       if (host_matches_suffix(host, entry.substr(2))) return true;
       continue;
