@@ -399,6 +399,16 @@ impl RemoteTransferBackend for SftpTransferBackend {
     ) -> TransferFuture<'a, ()> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return ssh_service::sftp_publish_no_replace(
+                    &self.app,
+                    &state,
+                    server_id,
+                    source,
+                    destination,
+                )
+                .await;
+            }
             let (_session, client) = sftp_client(&state, server_id).await?;
             state
                 .ssh

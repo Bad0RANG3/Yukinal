@@ -202,6 +202,31 @@ YUKINAL_TEST(policy_validates_sftp_mutations_and_binary_payload_limits) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_accepts_only_sibling_paths_for_sftp_no_replace_publication) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_publish_no_replace"},
+       {"parameters", {{"source", "/srv/app/.config.part"},
+                       {"destination", "/srv/app/config"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.source_path == "/srv/app/.config.part");
+  YUKINAL_REQUIRE(request.destination_path == "/srv/app/config");
+
+  const bool different_parent_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_publish_no_replace"},
+       {"parameters", {{"source", "/srv/app/.config.part"},
+                       {"destination", "/srv/other/config"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!different_parent_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {
   ExecRequest request;
   ApiError error;

@@ -40,6 +40,8 @@ ExecResult sftp_lstat_optional(const TargetConfig& target, const std::string& pa
                                int timeout_seconds);
 ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
                            int timeout_seconds);
+ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string& source,
+                                   const std::string& destination, int timeout_seconds);
 ExecResult sftp_read(const TargetConfig& target, const std::string& path,
                      std::uint32_t max_bytes, int timeout_seconds);
 ExecResult sftp_write(const TargetConfig& target, const std::string& path,

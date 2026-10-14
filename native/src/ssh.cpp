@@ -2257,6 +2257,223 @@ ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
   return probe;
 }
 
+namespace {
+
+void append_sftp_u32(std::vector<unsigned char>* output, std::uint32_t value) {
+  output->push_back(static_cast<unsigned char>((value >> 24) & 0xff));
+  output->push_back(static_cast<unsigned char>((value >> 16) & 0xff));
+  output->push_back(static_cast<unsigned char>((value >> 8) & 0xff));
+  output->push_back(static_cast<unsigned char>(value & 0xff));
+}
+
+std::uint32_t read_sftp_u32(const unsigned char* data) {
+  return (static_cast<std::uint32_t>(data[0]) << 24) |
+         (static_cast<std::uint32_t>(data[1]) << 16) |
+         (static_cast<std::uint32_t>(data[2]) << 8) |
+         static_cast<std::uint32_t>(data[3]);
+}
+
+void append_sftp_string(std::vector<unsigned char>* output, std::string_view value) {
+  append_sftp_u32(output, static_cast<std::uint32_t>(value.size()));
+  output->insert(output->end(), value.begin(), value.end());
+}
+
+bool read_sftp_string(const std::vector<unsigned char>& packet, std::size_t* offset,
+                      std::string_view* value) {
+  if (!offset || !value || *offset > packet.size() || packet.size() - *offset < 4) return false;
+  const std::uint32_t length = read_sftp_u32(packet.data() + *offset);
+  *offset += 4;
+  if (length > packet.size() - *offset) return false;
+  *value = std::string_view(reinterpret_cast<const char*>(packet.data() + *offset), length);
+  *offset += length;
+  return true;
+}
+
+bool write_sftp_channel(SshResources* resources,
+                        const std::vector<unsigned char>& bytes,
+                        Clock::time_point deadline) {
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    if (!set_session_timeout(resources->session_, deadline)) return false;
+    const auto count = libssh2_channel_write_ex(
+        resources->channel_, 0, reinterpret_cast<const char*>(bytes.data() + offset),
+        bytes.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+    } else if (count == LIBSSH2_ERROR_EAGAIN &&
+               wait_for_ssh(resources->socket_, resources->session_, deadline)) {
+      continue;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool read_sftp_channel_exact(SshResources* resources, unsigned char* output,
+                             std::size_t size, Clock::time_point deadline) {
+  std::size_t offset = 0;
+  while (offset < size) {
+    if (!set_session_timeout(resources->session_, deadline)) return false;
+    const auto count = libssh2_channel_read_ex(
+        resources->channel_, 0, reinterpret_cast<char*>(output + offset), size - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+    } else if ((count == LIBSSH2_ERROR_EAGAIN || count == 0) &&
+               !libssh2_channel_eof(resources->channel_) &&
+               wait_for_ssh(resources->socket_, resources->session_, deadline)) {
+      continue;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool read_sftp_channel_packet(SshResources* resources,
+                              std::vector<unsigned char>* packet,
+                              Clock::time_point deadline) {
+  std::array<unsigned char, 4> length_bytes{};
+  if (!read_sftp_channel_exact(resources, length_bytes.data(), length_bytes.size(), deadline)) {
+    return false;
+  }
+  const std::uint32_t length = read_sftp_u32(length_bytes.data());
+  if (length == 0 || length > 64 * 1024) return false;
+  packet->resize(length);
+  return read_sftp_channel_exact(resources, packet->data(), packet->size(), deadline);
+}
+
+}  // namespace
+
+ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string& source,
+                                   const std::string& destination, int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (source.empty() || destination.empty() || source.size() > 4096 ||
+      destination.size() > 4096 || source.front() != '/' || destination.front() != '/' ||
+      source.find_first_of("\r\n") != std::string::npos || source.find('\0') != std::string::npos ||
+      destination.find_first_of("\r\n") != std::string::npos ||
+      destination.find('\0') != std::string::npos || source.back() == '/' ||
+      destination.back() == '/' || source == destination ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SFTP no-replace publication paths are invalid");
+    return result;
+  }
+  const auto source_parent = source.substr(0, source.find_last_of('/'));
+  const auto destination_parent = destination.substr(0, destination.find_last_of('/'));
+  const std::string normalized_source_parent = source_parent.empty() ? "/" : source_parent;
+  const std::string normalized_destination_parent =
+      destination_parent.empty() ? "/" : destination_parent;
+  if (normalized_source_parent != normalized_destination_parent) {
+    fail(&result, "invalid_parameters", "The SFTP no-replace publication paths must be siblings");
+    return result;
+  }
+
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_authenticated(target, deadline, &resources, &result)) return result;
+  resources.channel_ = libssh2_channel_open_session(resources.session_);
+  if (!resources.channel_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Starting the SFTP publication timed out"
+                   : "Could not open the SFTP publication channel");
+    return result;
+  }
+  if (!set_session_timeout(resources.session_, deadline) ||
+      libssh2_channel_process_startup(resources.channel_, "subsystem", 9, "sftp", 4) != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Starting the SFTP publication timed out"
+                   : "Could not start the SFTP subsystem for publication");
+    return result;
+  }
+  if (!set_nonblocking(resources.socket_, true)) {
+    fail(&result, "sftp_error", "Could not configure the SFTP publication channel");
+    return result;
+  }
+  libssh2_session_set_blocking(resources.session_, 0);
+  libssh2_channel_set_blocking(resources.channel_, 0);
+
+  std::vector<unsigned char> init_body{1};  // SSH_FXP_INIT
+  append_sftp_u32(&init_body, 3);
+  std::vector<unsigned char> init_frame;
+  append_sftp_u32(&init_frame, static_cast<std::uint32_t>(init_body.size()));
+  init_frame.insert(init_frame.end(), init_body.begin(), init_body.end());
+  if (!write_sftp_channel(&resources, init_frame, deadline)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Negotiating the SFTP publication timed out"
+                   : "Could not initialize the SFTP publication channel");
+    return result;
+  }
+
+  std::vector<unsigned char> packet;
+  if (!read_sftp_channel_packet(&resources, &packet, deadline)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Negotiating the SFTP publication timed out"
+                   : "The SFTP server returned an invalid version packet");
+    return result;
+  }
+  if (packet.size() < 5 || packet[0] != 2 || read_sftp_u32(packet.data() + 1) < 3) {
+    fail(&result, "replace_unsupported", "The SFTP server did not negotiate a supported protocol version");
+    return result;
+  }
+  bool hardlink_v1 = false;
+  std::size_t extension_offset = 5;
+  while (extension_offset < packet.size()) {
+    std::string_view name;
+    std::string_view version;
+    if (!read_sftp_string(packet, &extension_offset, &name) ||
+        !read_sftp_string(packet, &extension_offset, &version)) {
+      fail(&result, "sftp_error", "The SFTP server returned malformed extension metadata");
+      return result;
+    }
+    if (name == "hardlink@openssh.com" && version == "1") hardlink_v1 = true;
+  }
+  if (!hardlink_v1) {
+    fail(&result, "replace_unsupported",
+         "The SFTP server did not negotiate hardlink@openssh.com version 1");
+    return result;
+  }
+
+  std::vector<unsigned char> request_body{200};  // SSH_FXP_EXTENDED
+  append_sftp_u32(&request_body, 1);
+  append_sftp_string(&request_body, "hardlink@openssh.com");
+  append_sftp_string(&request_body, source);
+  append_sftp_string(&request_body, destination);
+  std::vector<unsigned char> request_frame;
+  append_sftp_u32(&request_frame, static_cast<std::uint32_t>(request_body.size()));
+  request_frame.insert(request_frame.end(), request_body.begin(), request_body.end());
+  if (!write_sftp_channel(&resources, request_frame, deadline) ||
+      !read_sftp_channel_packet(&resources, &packet, deadline)) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "Publishing the remote file timed out"
+                   : "The SFTP server did not confirm file publication");
+    return result;
+  }
+  if (packet.size() < 9 || packet[0] != 101 || read_sftp_u32(packet.data() + 1) != 1) {
+    fail(&result, "sftp_error", "The SFTP server returned an invalid publication response");
+    return result;
+  }
+  const std::uint32_t status = read_sftp_u32(packet.data() + 5);
+  if (status == LIBSSH2_FX_FILE_ALREADY_EXISTS) {
+    fail(&result, "already_exists", "The remote destination already exists");
+    return result;
+  }
+  if (status != LIBSSH2_FX_OK) {
+    fail(&result, "sftp_error", "The SFTP server refused no-replace publication");
+    return result;
+  }
+  result.stdout_text = "{\"published\":true}";
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
   if (target.probe_only) {
     if (request.operation != "host_key_probe") {
@@ -2291,6 +2508,10 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "sftp_create_dir") {
     return sftp_create_dir(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_publish_no_replace") {
+    return sftp_publish_no_replace(target, request.source_path, request.destination_path,
+                                   request.timeout_seconds);
   }
   if (request.operation == "sftp_read") {
     return sftp_read(target, request.path, request.max_bytes, request.timeout_seconds);

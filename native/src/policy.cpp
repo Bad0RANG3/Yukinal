@@ -136,6 +136,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string service;
   std::string unit;
   std::string path;
+  std::string source_path;
+  std::string destination_path;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -326,6 +328,35 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       expected_digest[i] = static_cast<unsigned char>((high << 4) | low);
     }
     path = path_it->get<std::string>();
+  } else if (operation == "sftp_publish_no_replace") {
+    if (!has_only_keys(*parameters_it, {"source", "destination"})) {
+      set_error(error, 422, "invalid_parameters", "SFTP publication accepts only source and destination paths");
+      return false;
+    }
+    const auto source_it = parameters_it->find("source");
+    const auto destination_it = parameters_it->find("destination");
+    if (source_it == parameters_it->end() || !source_it->is_string() ||
+        destination_it == parameters_it->end() || !destination_it->is_string()) {
+      set_error(error, 422, "invalid_parameters", "SFTP publication requires source and destination paths");
+      return false;
+    }
+    source_path = source_it->get<std::string>();
+    destination_path = destination_it->get<std::string>();
+    const auto parent_path = [](const std::string& value) -> std::string_view {
+      const auto separator = value.find_last_of('/');
+      if (separator == std::string::npos) return {};
+      return separator == 0 ? std::string_view(value).substr(0, 1)
+                            : std::string_view(value).substr(0, separator);
+    };
+    const bool source_valid = valid_sftp_path(source_path) && source_path.front() == '/' &&
+        source_path.find_first_of("\r\n") == std::string::npos;
+    const bool destination_valid = valid_sftp_path(destination_path) &&
+        destination_path.front() == '/' && destination_path.find_first_of("\r\n") == std::string::npos;
+    if (!source_valid || !destination_valid || source_path == destination_path ||
+        parent_path(source_path) != parent_path(destination_path)) {
+      set_error(error, 422, "invalid_parameters", "SFTP no-replace publication requires distinct absolute sibling paths");
+      return false;
+    }
   } else if (operation == "sftp_remove_file" || operation == "sftp_link_count" ||
              operation == "sftp_create_dir") {
     if (!has_only_keys(*parameters_it, {"path"})) {
@@ -373,6 +404,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->service = std::move(service);
   request->unit = std::move(unit);
   request->path = std::move(path);
+  request->source_path = std::move(source_path);
+  request->destination_path = std::move(destination_path);
   request->content = std::move(content);
   request->since_seconds = since_seconds;
   request->expected_size = expected_size;

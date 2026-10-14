@@ -11,6 +11,7 @@ import os
 import queue
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -160,7 +161,7 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
     def open(self, path: str, flags: int, attr: paramiko.SFTPAttributes) -> paramiko.SFTPHandle:
         with self._files_lock:
             exists = path in self._files
-            if path not in {"/settings.toml", "/large.bin", "/write.bin", "/backup.bin", "/transfer-stream.bin", "/stream-failure.bin"}:
+            if path not in {"/settings.toml", "/large.bin", "/write.bin", "/backup.bin", "/backup-published.bin", "/transfer-stream.bin", "/stream-failure.bin"}:
                 return paramiko.SFTP_PERMISSION_DENIED
             if flags & (os.O_WRONLY | os.O_RDWR):
                 if flags & os.O_EXCL and exists:
@@ -215,9 +216,36 @@ class MemorySftpHandle(paramiko.SFTPHandle):
 
 
 class FsyncSftpServer(paramiko.SFTPServer):
+    advertise_hardlink = True
+
+    def _send_server_version(self) -> int:
+        request_type, data = self._read_packet()
+        if request_type != paramiko_sftp.CMD_INIT:
+            raise paramiko.SFTPError("incompatible SFTP protocol")
+        version = struct.unpack(">I", data[:4])[0]
+        message = paramiko.Message()
+        message.add_int(paramiko_sftp._VERSION)
+        if self.advertise_hardlink:
+            message.add("hardlink@openssh.com", "1")
+        message.add("check-file", "md5,sha1")
+        self._send_packet(paramiko_sftp.CMD_VERSION, message)
+        return version
+
     def _process(self, request_type: int, request_number: int, message: object) -> None:
         if request_type == paramiko_sftp.CMD_EXTENDED:
             extension = message.get_text()
+            if extension == "hardlink@openssh.com":
+                source = message.get_text()
+                destination = message.get_text()
+                with StaticSftpInterface._files_lock:
+                    if destination in StaticSftpInterface._files or destination in StaticSftpInterface._directories:
+                        self._send_status(request_number, 11, "File already exists")
+                    elif source not in StaticSftpInterface._files:
+                        self._send_status(request_number, paramiko_sftp.SFTP_NO_SUCH_FILE)
+                    else:
+                        StaticSftpInterface._files[destination] = StaticSftpInterface._files[source]
+                        self._send_status(request_number, paramiko_sftp.SFTP_OK)
+                return
             if extension == "fsync@openssh.com":
                 handle_id = message.get_binary()
                 handle = self.file_table.get(handle_id)
@@ -930,6 +958,49 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if base64.b64decode(backup_read.stdout, validate=True) != backup_payload:
                 raise AssertionError("C++ exclusive SFTP create did not preserve the 1 MiB recovery copy")
+            publish_result = client._execute_operation(
+                "srv_desktop_style",
+                "sftp_publish_no_replace",
+                {"source": "/backup.bin", "destination": "/backup-published.bin"},
+                timeout_seconds=8,
+            )
+            if json.loads(publish_result.stdout) != {"published": True}:
+                raise AssertionError("C++ SFTP hardlink publication was not confirmed")
+            if StaticSftpInterface._files.get("/backup-published.bin") != backup_payload:
+                raise AssertionError("C++ SFTP hardlink publication changed the staging contents")
+            try:
+                client._execute_operation(
+                    "srv_desktop_style",
+                    "sftp_publish_no_replace",
+                    {"source": "/backup.bin", "destination": "/settings.toml"},
+                    timeout_seconds=8,
+                )
+            except SshServiceError as error:
+                if error.code != "already_exists":
+                    raise AssertionError(
+                        f"no-replace publication returned the wrong error: {error.code}"
+                    ) from error
+            else:
+                raise AssertionError("C++ SFTP no-replace publication overwrote an existing destination")
+            FsyncSftpServer.advertise_hardlink = False
+            try:
+                client._execute_operation(
+                    "srv_desktop_style",
+                    "sftp_publish_no_replace",
+                    {"source": "/backup.bin", "destination": "/unsupported-published.bin"},
+                    timeout_seconds=8,
+                )
+            except SshServiceError as error:
+                if error.code != "replace_unsupported":
+                    raise AssertionError(
+                        f"unnegotiated hardlink publication returned the wrong error: {error.code}"
+                    ) from error
+            else:
+                raise AssertionError("C++ SFTP used an unnegotiated hardlink extension")
+            finally:
+                FsyncSftpServer.advertise_hardlink = True
+            if "/unsupported-published.bin" in StaticSftpInterface._files:
+                raise AssertionError("unsupported hardlink publication created a destination")
             try:
                 client.sftp_create_exclusive(
                     "srv_desktop_style", "/backup.bin", b"overwrite", 8
@@ -942,6 +1013,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             remove_result = client.sftp_remove_file("srv_desktop_style", "/backup.bin", 8)
             if json.loads(remove_result.stdout) != {"removed": True}:
                 raise AssertionError("C++ SFTP file removal was not confirmed")
+            client.sftp_remove_file("srv_desktop_style", "/backup-published.bin", 8)
             expect_error(client, "srv_bad_pin", "nginx.service", 5, "host_key_unverified")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")

@@ -88,6 +88,7 @@ bool authorized(const httplib::Request& request, const std::string& token) {
 }
 
 int error_status(const ExecResult& result) {
+  if (result.error_code == "already_exists") return 409;
   if (result.error_code == "timeout") return 504;
   if (result.error_code == "invalid_parameters") return 422;
   if (result.error_code == "concurrent_change") return 409;

@@ -22,7 +22,7 @@ use tokio::io::{
 };
 use tokio::process::{Child as TokioChild, ChildStdin, ChildStdout, Command as TokioCommand};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
-use yukinal_filesystem::transfer::{TransferReader, TransferWriter};
+use yukinal_filesystem::transfer::{TransferError, TransferReader, TransferWriter};
 use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
 };
@@ -1087,6 +1087,53 @@ pub(crate) async fn sftp_create_dir(
         .map_err(|_| "the C++ SSH service returned an invalid SFTP directory result".to_string())?;
     if !result.created {
         return Err("the C++ SSH service did not confirm SFTP directory creation".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn sftp_publish_no_replace(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    source: &str,
+    destination: &str,
+) -> Result<(), TransferError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublishResult {
+        published: bool,
+    }
+
+    let response = run_operation_response(
+        app,
+        state,
+        server_id,
+        "sftp_publish_no_replace",
+        json!({"source": source, "destination": destination}),
+    )
+    .await
+    .map_err(|error| match error.code.as_str() {
+        "already_exists" => TransferError::AlreadyExists,
+        "replace_unsupported" => TransferError::Unsupported(error.message),
+        _ => TransferError::Remote(error.message),
+    })?;
+    validate_operation_response(&response, server_id, "sftp_publish_no_replace")
+        .map_err(TransferError::Remote)?;
+    let output = response
+        .get("stdout")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            TransferError::Remote(
+                "the C++ SSH service returned an invalid publication result".into(),
+            )
+        })?;
+    let result: PublishResult = serde_json::from_str(output).map_err(|_| {
+        TransferError::Remote("the C++ SSH service returned invalid publication metadata".into())
+    })?;
+    if !result.published {
+        return Err(TransferError::Remote(
+            "the C++ SSH service did not confirm no-replace publication".into(),
+        ));
     }
     Ok(())
 }

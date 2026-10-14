@@ -18,6 +18,8 @@ struct ExecRequest {
   std::string service;
   std::string unit;
   std::string path;
+  std::string source_path;
+  std::string destination_path;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
