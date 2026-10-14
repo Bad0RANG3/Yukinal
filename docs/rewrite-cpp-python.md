@@ -45,6 +45,10 @@ MCP tools from the host catalog, and emit the tool-call/result events that the
 existing transcript UI displays. When the C++ service token is configured, the
 Python sidecar also registers `ssh.service_status`; it binds the call to the
 selected `host_target.serverId`, so the model cannot choose a different target.
+The desktop host also routes its existing `docker.restart`, `systemd.restart`,
+and `package.install` actions through structured C++ SSH operations after the
+host approval and one-time call checks. These effectful actions are not
+registered in the Python Agent tool catalog.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
@@ -133,13 +137,24 @@ The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or arbitrary command. The service resolves a
 `target_id` to a configured target and accepts only `connection_check`, bounded
 `system_snapshot`, `docker_ps`, bounded `docker_logs` and `docker_inspect`,
-`systemd_inspect`, `package_inspect`, `service_status`, `service_inventory`, bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP list/stat/read/write/exclusive-create/
-remove/link-count operations with validated parameters. Service operations map
-to fixed commands; SFTP reads are capped at 1 MiB plus one sentinel byte, normal
-writes at 512 KiB, and exclusive recovery copies at 1 MiB. Write bodies use
-base64 inside a bounded JSON request. The link-count operation runs one fixed,
-single-quoted `stat` probe and returns `null` when the host cannot report a
-count.
+`systemd_inspect`, `package_inspect`, `service_status`, `service_inventory`,
+bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP
+list/stat/read/write/exclusive-create/remove/link-count operations with
+validated parameters. Service operations map to fixed commands; SFTP reads are
+capped at 1 MiB plus one sentinel byte, normal writes at 512 KiB, and exclusive
+recovery copies at 1 MiB. Write bodies use base64 inside a bounded JSON
+request. The link-count operation runs one fixed, single-quoted `stat` probe
+and returns `null` when the host cannot report a count. The host-gated restart
+and package-install commands are built from validated
+structured fields and do not accept command text. `docker_restart` accepts a
+safe container name and `grace_period_seconds` from 1 to 120; its SSH request
+deadline remains 1–30 seconds. `systemd_restart` accepts a safe `.service`
+unit and `timeout_seconds` from 1 to 120. `package_install` accepts only `apt`
+or `dnf`, a safe package name, an optional validated version, and
+`timeout_seconds` from 1 to 600. For the latter two operations, the nested
+timeout must equal the request's top-level timeout. The desktop host continues
+to enforce approval, parameter binding, and one-time call handling before
+dispatching these actions.
 Every authenticated operation runs only after the target host key matches the
 configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
 keys fail closed. The separate `probe_only` operation intentionally does not
@@ -200,7 +215,9 @@ range from 1 second to 7 days and an optional bounded
 the service does not fall back to unfiltered system log files. SFTP operations
 accept only their documented path, byte limit, or base64 content fields.
 `sftp_write` accepts at most 512 KiB, `sftp_create_exclusive` at most 1 MiB,
-and `sftp_read` at most 1 MiB plus a sentinel byte. Timeouts are 1–30 seconds.
+and `sftp_read` at most 1 MiB plus a sentinel byte. Read-only command and SFTP
+timeouts are 1–30 seconds; the three host-gated actions have the specific
+limits described above.
 Service command output is capped at 64 KiB per stream; SFTP responses have
 operation-specific limits.
 
