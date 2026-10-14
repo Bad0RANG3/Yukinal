@@ -71,6 +71,11 @@ bool valid_username(const std::string& username) {
   return std::regex_match(username, pattern);
 }
 
+bool valid_host_key_fingerprint(const std::string& fingerprint) {
+  static const std::regex pattern("^SHA256:[A-Za-z0-9+/]{43}$");
+  return std::regex_match(fingerprint, pattern);
+}
+
 std::string resolve_path(const std::string& path, const std::string& base_directory) {
   std::filesystem::path result(path);
   if (result.is_relative() && !base_directory.empty()) {
@@ -101,14 +106,29 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     const Json& entry = (*targets_it)[i];
     const std::string label = "config.targets[" + std::to_string(i) + "]";
     require_object(entry, label);
-    require_only_keys(entry, {"target_id", "host", "port", "username", "known_hosts_file", "auth"}, label);
+    require_only_keys(entry,
+                      {"target_id", "host", "port", "username", "known_hosts_file",
+                       "host_key_fingerprint", "auth"},
+                      label);
 
     TargetConfig target;
     target.target_id = required_string(entry, "target_id", label);
     target.host = required_string(entry, "host", label);
     target.port = required_integer(entry, "port", 1, 65535, label);
     target.username = required_string(entry, "username", label);
-    target.known_hosts_file = resolve_path(required_string(entry, "known_hosts_file", label), base_directory);
+    const bool has_known_hosts_file = entry.contains("known_hosts_file");
+    const bool has_host_key_fingerprint = entry.contains("host_key_fingerprint");
+    if (has_known_hosts_file == has_host_key_fingerprint) {
+      throw std::runtime_error(label + " must contain exactly one host-key trust source");
+    }
+    if (has_known_hosts_file) {
+      target.known_hosts_file = resolve_path(required_string(entry, "known_hosts_file", label), base_directory);
+    } else {
+      target.host_key_fingerprint = required_string(entry, "host_key_fingerprint", label);
+      if (!valid_host_key_fingerprint(target.host_key_fingerprint)) {
+        throw std::runtime_error(label + ".host_key_fingerprint must be a SHA256 host-key fingerprint");
+      }
+    }
     if (!valid_target_id(target.target_id)) throw std::runtime_error(label + ".target_id is invalid");
     if (!valid_host(target.host)) throw std::runtime_error(label + ".host is invalid");
     if (!valid_username(target.username)) throw std::runtime_error(label + ".username is invalid");
@@ -116,17 +136,31 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     const auto auth_it = entry.find("auth");
     if (auth_it == entry.end()) throw std::runtime_error(label + ".auth is required");
     require_object(*auth_it, label + ".auth");
-    require_only_keys(*auth_it, {"type", "private_key_file", "password_env", "passphrase_env"}, label + ".auth");
+    require_only_keys(*auth_it,
+                      {"type", "private_key_file", "private_key_env", "password_env",
+                       "passphrase_env"},
+                      label + ".auth");
     const std::string auth_type = required_string(*auth_it, "type", label + ".auth");
     if (auth_type == "private_key") {
-      if (auth_it->contains("password_env")) throw std::runtime_error(label + ".auth has conflicting credential fields");
-      target.private_key_file = resolve_path(required_string(*auth_it, "private_key_file", label + ".auth"), base_directory);
+      if (auth_it->contains("password_env") ||
+          auth_it->contains("private_key_file") == auth_it->contains("private_key_env")) {
+        throw std::runtime_error(label + ".auth has conflicting or missing private-key fields");
+      }
+      if (auth_it->contains("private_key_file")) {
+        target.private_key_file = resolve_path(required_string(*auth_it, "private_key_file", label + ".auth"), base_directory);
+      } else {
+        target.private_key_env = required_string(*auth_it, "private_key_env", label + ".auth");
+        if (!valid_env_name(target.private_key_env)) {
+          throw std::runtime_error(label + ".auth.private_key_env is invalid");
+        }
+      }
       if (auth_it->contains("passphrase_env")) {
         target.passphrase_env = required_string(*auth_it, "passphrase_env", label + ".auth");
         if (!valid_env_name(target.passphrase_env)) throw std::runtime_error(label + ".auth.passphrase_env is invalid");
       }
     } else if (auth_type == "password") {
-      if (auth_it->contains("private_key_file") || auth_it->contains("passphrase_env")) {
+      if (auth_it->contains("private_key_file") || auth_it->contains("private_key_env") ||
+          auth_it->contains("passphrase_env")) {
         throw std::runtime_error(label + ".auth has conflicting credential fields");
       }
       target.password_env = required_string(*auth_it, "password_env", label + ".auth");

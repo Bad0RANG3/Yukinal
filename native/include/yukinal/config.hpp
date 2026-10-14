@@ -13,7 +13,9 @@ struct TargetConfig {
   int port = 22;
   std::string username;
   std::string known_hosts_file;
+  std::string host_key_fingerprint;
   std::string private_key_file;
+  std::string private_key_env;
   std::string password_env;
   std::string passphrase_env;
 };

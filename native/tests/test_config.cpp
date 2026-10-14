@@ -69,3 +69,76 @@ YUKINAL_TEST(config_rejects_ambiguous_authentication) {
   }
   YUKINAL_REQUIRE(rejected);
 }
+
+YUKINAL_TEST(config_accepts_desktop_host_key_pin_and_memory_private_key) {
+  auto value = valid_config();
+  auto& target = value["targets"][0];
+  target.erase("known_hosts_file");
+  target["host_key_fingerprint"] = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  target["auth"] = {{"type", "private_key"}, {"private_key_env", "YK_SSH_KEY_0"}};
+
+  const auto config = parse_config(value);
+  const auto& parsed = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(parsed.known_hosts_file.empty());
+  YUKINAL_REQUIRE(parsed.host_key_fingerprint == "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+  YUKINAL_REQUIRE(parsed.private_key_env == "YK_SSH_KEY_0");
+}
+
+YUKINAL_TEST(config_rejects_missing_or_ambiguous_host_key_trust) {
+  auto missing = valid_config();
+  missing["targets"][0].erase("known_hosts_file");
+  bool missing_rejected = false;
+  try {
+    (void)parse_config(missing);
+  } catch (const std::runtime_error&) {
+    missing_rejected = true;
+  }
+  YUKINAL_REQUIRE(missing_rejected);
+
+  auto ambiguous = valid_config();
+  ambiguous["targets"][0]["host_key_fingerprint"] =
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  bool ambiguous_rejected = false;
+  try {
+    (void)parse_config(ambiguous);
+  } catch (const std::runtime_error&) {
+    ambiguous_rejected = true;
+  }
+  YUKINAL_REQUIRE(ambiguous_rejected);
+}
+
+YUKINAL_TEST(config_rejects_invalid_host_key_fingerprint) {
+  auto value = valid_config();
+  value["targets"][0].erase("known_hosts_file");
+  value["targets"][0]["host_key_fingerprint"] = "SHA256:short";
+  bool rejected = false;
+  try {
+    (void)parse_config(value);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+}
+
+YUKINAL_TEST(config_rejects_missing_or_ambiguous_private_key_source) {
+  auto missing = valid_config();
+  missing["targets"][0]["auth"] = {{"type", "private_key"}};
+  bool missing_rejected = false;
+  try {
+    (void)parse_config(missing);
+  } catch (const std::runtime_error&) {
+    missing_rejected = true;
+  }
+  YUKINAL_REQUIRE(missing_rejected);
+
+  auto ambiguous = valid_config();
+  ambiguous["targets"][0]["auth"] = {
+      {"type", "private_key"}, {"private_key_file", "id_ed25519"}, {"private_key_env", "YK_SSH_KEY_0"}};
+  bool ambiguous_rejected = false;
+  try {
+    (void)parse_config(ambiguous);
+  } catch (const std::runtime_error&) {
+    ambiguous_rejected = true;
+  }
+  YUKINAL_REQUIRE(ambiguous_rejected);
+}

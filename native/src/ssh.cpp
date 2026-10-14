@@ -391,6 +391,29 @@ bool append_output(std::string* output, const char* buffer, std::size_t length) 
   return keep == length;
 }
 
+std::string host_key_fingerprint(LIBSSH2_SESSION* session) {
+  const char* hash = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256);
+  if (!hash) return {};
+
+  constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  constexpr std::size_t hash_length = 32;
+  std::string encoded = "SHA256:";
+  encoded.reserve(50);
+  for (std::size_t i = 0; i < hash_length; i += 3) {
+    const auto first = static_cast<unsigned char>(hash[i]);
+    const auto second = i + 1 < hash_length ? static_cast<unsigned char>(hash[i + 1]) : 0;
+    const auto third = i + 2 < hash_length ? static_cast<unsigned char>(hash[i + 2]) : 0;
+    const unsigned int block = (static_cast<unsigned int>(first) << 16) |
+                               (static_cast<unsigned int>(second) << 8) |
+                               static_cast<unsigned int>(third);
+    encoded.push_back(alphabet[(block >> 18) & 0x3f]);
+    encoded.push_back(alphabet[(block >> 12) & 0x3f]);
+    if (i + 1 < hash_length) encoded.push_back(alphabet[(block >> 6) & 0x3f]);
+    if (i + 2 < hash_length) encoded.push_back(alphabet[block & 0x3f]);
+  }
+  return encoded;
+}
+
 }  // namespace
 
 ExecResult service_status(const TargetConfig& target, const std::string& service,
@@ -449,30 +472,37 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
     return result;
   }
 
-  resources.known_hosts_ = libssh2_knownhost_init(resources.session_);
-  if (!resources.known_hosts_ ||
-      libssh2_knownhost_readfile(resources.known_hosts_, target.known_hosts_file.c_str(),
-                                 LIBSSH2_KNOWNHOST_FILE_OPENSSH) < 0) {
-    fail(&result, "host_key_unverified", "Could not load the configured known-hosts file");
-    return result;
-  }
   std::size_t host_key_length = 0;
   int host_key_type = 0;
   const char* host_key = libssh2_session_hostkey(resources.session_, &host_key_length, &host_key_type);
   const int known_key_type = known_host_key_type(host_key_type);
-  if (!host_key || known_key_type == 0) {
+  if (!host_key || (target.host_key_fingerprint.empty() && known_key_type == 0)) {
     fail(&result, "host_key_unverified", "The SSH server presented an unsupported host key");
     return result;
   }
-  const int known_host_result = libssh2_knownhost_checkp(
-      resources.known_hosts_, target.host.c_str(), target.port, host_key, host_key_length,
-      LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | known_key_type, nullptr);
-  if (known_host_result != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
-    fail(&result, "host_key_unverified",
-         known_host_result == LIBSSH2_KNOWNHOST_CHECK_MISMATCH
-             ? "The SSH host key differs from the configured known-hosts entry"
-             : "The SSH host key is not present in the configured known-hosts file");
-    return result;
+  if (!target.host_key_fingerprint.empty()) {
+    if (host_key_fingerprint(resources.session_) != target.host_key_fingerprint) {
+      fail(&result, "host_key_unverified", "The SSH host key differs from the configured fingerprint");
+      return result;
+    }
+  } else {
+    resources.known_hosts_ = libssh2_knownhost_init(resources.session_);
+    if (!resources.known_hosts_ ||
+        libssh2_knownhost_readfile(resources.known_hosts_, target.known_hosts_file.c_str(),
+                                   LIBSSH2_KNOWNHOST_FILE_OPENSSH) < 0) {
+      fail(&result, "host_key_unverified", "Could not load the configured known-hosts file");
+      return result;
+    }
+    const int known_host_result = libssh2_knownhost_checkp(
+        resources.known_hosts_, target.host.c_str(), target.port, host_key, host_key_length,
+        LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | known_key_type, nullptr);
+    if (known_host_result != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
+      fail(&result, "host_key_unverified",
+           known_host_result == LIBSSH2_KNOWNHOST_CHECK_MISMATCH
+               ? "The SSH host key differs from the configured known-hosts entry"
+               : "The SSH host key is not present in the configured known-hosts file");
+      return result;
+    }
   }
 
   if (!set_session_timeout(resources.session_, deadline)) {
@@ -480,11 +510,24 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
     return result;
   }
   int auth_result = -1;
-  if (!target.private_key_file.empty()) {
+  if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
     std::string passphrase = read_environment(target.passphrase_env);
-    auth_result = libssh2_userauth_publickey_fromfile(
-        resources.session_, target.username.c_str(), nullptr, target.private_key_file.c_str(),
-        passphrase.empty() ? nullptr : passphrase.c_str());
+    if (!target.private_key_env.empty()) {
+      std::string private_key = read_environment(target.private_key_env);
+      if (private_key.empty()) {
+        fail(&result, "credential_unavailable", "The configured SSH private key is not available");
+        wipe(&passphrase);
+        return result;
+      }
+      auth_result = libssh2_userauth_publickey_frommemory(
+          resources.session_, target.username.c_str(), target.username.size(), nullptr, 0,
+          private_key.data(), private_key.size(), passphrase.empty() ? nullptr : passphrase.c_str());
+      wipe(&private_key);
+    } else {
+      auth_result = libssh2_userauth_publickey_fromfile(
+          resources.session_, target.username.c_str(), nullptr, target.private_key_file.c_str(),
+          passphrase.empty() ? nullptr : passphrase.c_str());
+    }
     wipe(&passphrase);
   } else {
     std::string password = read_environment(target.password_env);

@@ -190,9 +190,16 @@ Paths are resolved relative to that JSON file. Each target requires:
 
 - a unique, restricted `target_id`;
 - a configured host, port, and SSH username;
-- an OpenSSH-format `known_hosts_file`;
-- exactly one auth mode: a `private_key_file` (optional passphrase environment
-  reference), or a `password_env` reference.
+- exactly one host-key trust source: an OpenSSH-format `known_hosts_file`, or
+  `host_key_fingerprint` containing the desktop pin in `SHA256:<base64>` form;
+- exactly one auth mode: a `private_key_file`, a `private_key_env`, or a
+  `password_env` reference. Private-key environment references can include an
+  optional `passphrase_env`.
+
+The desktop pin form lets the service enforce the same exact-key trust decision
+as the existing server host-key UI. Private-key environment references let the
+desktop pass decrypted keychain material directly to the C++ child without
+writing key material into the JSON configuration.
 
 Set the configured API token environment variable before starting the service.
 Never commit credentials or a real production target configuration.

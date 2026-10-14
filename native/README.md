@@ -2,8 +2,11 @@
 
 The first rewrite milestone is a small, standalone C++ service. It binds only to
 `127.0.0.1`, accepts structured requests, resolves `target_id` from an operator
-configuration, verifies SSH host keys against OpenSSH `known_hosts`, and exposes
-one read-only operation: `service_status`.
+configuration and exposes one read-only operation: `service_status`. Host keys
+can be checked against an OpenSSH `known_hosts` file or an exact `SHA256:` pin
+from the desktop trust store. Private keys can come from a file or a named
+environment reference, which lets the desktop pass OS-keychain material without
+writing it into the service configuration.
 
 The service deliberately has no raw-command endpoint, UI bridge, Agent runtime,
 MCP support, terminal, or file transfer. Those are later milestones.
@@ -47,8 +50,9 @@ not implemented yet.
 
 Copy `configs/ssh-service.example.json`, set `YUKINAL_SSH_API_TOKEN` to a random
 value of at least 32 characters, and fill in an allow-listed target. The target
-must specify a known-hosts file and either a private-key path or a name for a
-password environment variable. Then run:
+must specify exactly one trust source (`known_hosts_file` or
+`host_key_fingerprint`) and one authentication source (private-key file,
+private-key environment reference, or password environment reference). Then run:
 
 ```powershell
 native/build/Release/yukinal-ssh-service.exe --config path/to/ssh-service.json

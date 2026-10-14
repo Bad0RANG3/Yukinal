@@ -182,7 +182,7 @@ fn resolve_ssh_service_runtime(
         let Some(auth) = target.get("auth").and_then(serde_json::Value::as_object) else {
             continue;
         };
-        for key in ["password_env", "passphrase_env"] {
+        for key in ["password_env", "passphrase_env", "private_key_env"] {
             if let Some(value) = auth.get(key) {
                 let name = value
                     .as_str()

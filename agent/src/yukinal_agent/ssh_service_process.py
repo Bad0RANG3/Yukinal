@@ -73,7 +73,7 @@ class SshServiceProcess:
             auth = target.get("auth")
             if not isinstance(auth, dict):
                 raise SshServiceProcessError("the SSH service target authentication configuration is invalid")
-            for key in ("password_env", "passphrase_env"):
+            for key in ("password_env", "passphrase_env", "private_key_env"):
                 name = auth.get(key)
                 if name is not None:
                     if not _valid_credential_env_name(name):

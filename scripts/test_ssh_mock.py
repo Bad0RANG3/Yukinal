@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
+import io
 import json
 import logging
 import os
@@ -37,15 +39,21 @@ def unused_port() -> int:
 
 
 class ExecServer(paramiko.ServerInterface):
-    def __init__(self) -> None:
+    def __init__(self, public_key: paramiko.PKey) -> None:
         self.command: bytes | None = None
         self.command_ready = threading.Event()
+        self.public_key = public_key
 
     def get_allowed_auths(self, username: str) -> str:
-        return "password"
+        return "password,publickey"
 
     def check_auth_password(self, username: str, password: str) -> int:
         if username == "test-user" and password == PASSWORD:
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
+    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        if username == "test-user" and key.asbytes() == self.public_key.asbytes():
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
@@ -60,7 +68,9 @@ class ExecServer(paramiko.ServerInterface):
         return True
 
 
-def start_ssh_mock(host_key: paramiko.RSAKey) -> tuple[socket.socket, threading.Event]:
+def start_ssh_mock(
+    host_key: paramiko.RSAKey, user_key: paramiko.PKey
+) -> tuple[socket.socket, threading.Event]:
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -73,7 +83,7 @@ def start_ssh_mock(host_key: paramiko.RSAKey) -> tuple[socket.socket, threading.
         try:
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
-            server = ExecServer()
+            server = ExecServer(user_key)
             transport.start_server(server=server)
             channel = transport.accept(10)
             if channel is None or not server.command_ready.wait(5):
@@ -205,7 +215,8 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     logging.getLogger("paramiko").setLevel(logging.CRITICAL)
     host_key = paramiko.RSAKey.generate(2048)
     wrong_host_key = paramiko.RSAKey.generate(2048)
-    listener, stopping = start_ssh_mock(host_key)
+    user_key = paramiko.RSAKey.generate(2048)
+    listener, stopping = start_ssh_mock(host_key, user_key)
     ssh_port = listener.getsockname()[1]
 
     with tempfile.TemporaryDirectory(prefix="yukinal-paramiko-ssh-") as temp:
@@ -220,6 +231,15 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
 
         write_known_host(host_key)
+        private_key_buffer = io.StringIO()
+        user_key.write_private_key(private_key_buffer)
+        private_key_pem = private_key_buffer.getvalue()
+        pinned_fingerprint = "SHA256:" + base64.b64encode(
+            hashlib.sha256(host_key.asbytes()).digest()
+        ).decode("ascii").rstrip("=")
+        wrong_fingerprint = "SHA256:" + base64.b64encode(
+            hashlib.sha256(wrong_host_key.asbytes()).digest()
+        ).decode("ascii").rstrip("=")
         service_port = unused_port()
         while service_port == ssh_port:
             service_port = unused_port()
@@ -243,6 +263,22 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "known_hosts_file": str(known_hosts),
                     "auth": {"type": "password", "password_env": "YUKINAL_TEST_BAD_PASSWORD"},
                 },
+                {
+                    "target_id": "srv_desktop_style",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_key_fingerprint": pinned_fingerprint,
+                    "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
+                },
+                {
+                    "target_id": "srv_bad_pin",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_key_fingerprint": wrong_fingerprint,
+                    "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
+                },
             ],
         }
         config_path = root / "service.json"
@@ -251,6 +287,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
         environment["YUKINAL_TEST_API_TOKEN"] = TOKEN
         environment["YUKINAL_TEST_SSH_PASSWORD"] = PASSWORD
         environment["YUKINAL_TEST_BAD_PASSWORD"] = BAD_PASSWORD
+        environment["YK_SSH_TEST_PRIVATE_KEY"] = private_key_pem
         process = subprocess.Popen(
             [str(service_binary), "--config", str(config_path)],
             stdin=subprocess.DEVNULL,
@@ -279,6 +316,13 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             result = client.service_status("srv_stage1", "nginx.service", timeout_seconds=5)
             if result.stdout != "active\n" or result.exit_code != 0:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
+
+            desktop_style_result = client.service_status(
+                "srv_desktop_style", "nginx.service", timeout_seconds=5
+            )
+            if desktop_style_result.stdout != "active\n" or desktop_style_result.exit_code != 0:
+                raise AssertionError(f"desktop keychain/pin path failed: {desktop_style_result!r}")
+            expect_error(client, "srv_bad_pin", "nginx.service", 5, "host_key_unverified")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
             expect_error(client, "srv_stage1", "slow.service", 1, "timeout", max_elapsed=2.5)
