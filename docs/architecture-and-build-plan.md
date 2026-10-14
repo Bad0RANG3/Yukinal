@@ -1,6 +1,6 @@
 # 目标架构与施工交接
 
-> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线。当前重建已包含独立 C++ SSH 服务、Python caller 与 Agent Runtime、多 Provider 适配、MCP 和只读桌面宿主桥接；Windows 上最近一次 CTest 的 5 个目标全部通过。Docker/OpenSSH 容器验收尚未运行。React/Tauri 的 Python sidecar 开发入口已可选用，但默认和安装版仍使用旧 sidecar，宿主 SSH/审批/任务执行也尚未迁出。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
+> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线。当前重建包含独立 C++ SSH 服务、Python caller 与 Agent Runtime、多 Provider 适配、MCP 和只读桌面宿主桥接；Tauri 开发与新安装包选择 Python sidecar，旧 Node sidecar 仍是迁移回退。Windows 最近一次 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器验收尚未运行。Rust/Tauri 仍持有 UI IPC、SSH/SFTP、审批与任务生命周期，待分阶段迁移。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
 
 ## 目标与角色
 

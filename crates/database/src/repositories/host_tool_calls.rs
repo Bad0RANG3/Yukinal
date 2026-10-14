@@ -74,6 +74,30 @@ impl<'a> HostToolCallsRepository<'a> {
         Self { db }
     }
 
+    /// Read the durable execution fence for one sidecar call. Startup recovery
+    /// uses this to distinguish an approval prompt from a tool call that may
+    /// already have reached an external system.
+    pub fn status(&self, trace_id: &str, call_id: &str) -> Result<Option<HostToolCallStatus>> {
+        self.db.with(|connection| {
+            let raw_status: Option<String> = connection
+                .query_row(
+                    "SELECT status FROM host_tool_calls WHERE trace_id = ?1 AND call_id = ?2",
+                    params![trace_id, call_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            raw_status
+                .map(|raw_status| {
+                    HostToolCallStatus::from_db(&raw_status).ok_or_else(|| {
+                        DatabaseError::Decode(format!(
+                            "unknown host tool call status `{raw_status}`"
+                        ))
+                    })
+                })
+                .transpose()
+        })
+    }
+
     /// Atomically reserve a call key from the database connection's serialized
     /// critical section. The unique primary key handles concurrent event tasks;
     /// no check-then-insert race is left for the host layer to solve.

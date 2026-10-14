@@ -381,6 +381,7 @@ class PythonSidecar:
                 run_id=run_id,
                 trace_id=_safe_context_id("trace", run_id),
                 checkpoint_binding=_run_checkpoint_binding(request),
+                require_checkpoint=request["requireCheckpoint"],
             )
             while result.status == "awaiting_approval":
                 result = await self._await_approval(request, run_id, agent, result)
@@ -763,7 +764,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     fields = {
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
-        "providerConfig",
+        "providerConfig", "requireCheckpoint",
     }
     parsed = _strict_object(value, fields)
     run_id = parsed.get("runId")
@@ -782,6 +783,8 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     if parsed.get("delivery", "async") not in ("async", "sync"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if not isinstance(parsed.get("resume", True), bool):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if not isinstance(parsed.get("requireCheckpoint", False), bool):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if parsed.get("permissionMode", "ask") not in ("ask", "auto"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
@@ -847,6 +850,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "sessionId": session_id.strip(),
         "delivery": parsed.get("delivery", "async"),
         "resume": parsed.get("resume", True),
+        "requireCheckpoint": parsed.get("requireCheckpoint", False),
         "promptText": prompt_text,
         "targetId": target_id,
         "hostTarget": host_target,
@@ -933,7 +937,11 @@ def _run_budget(value: object) -> AgentBudget:
 
 def _run_fingerprint(request: dict[str, Any]) -> str:
     canonical = json.dumps(
-        {"prompt": request["prompt"], "parts": request.get("parts")},
+        {
+            "prompt": request["prompt"],
+            "parts": request.get("parts"),
+            "requireCheckpoint": request.get("requireCheckpoint", False),
+        },
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

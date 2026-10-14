@@ -166,7 +166,10 @@ class ModelDrivenAgent:
         run_id: str = "",
         trace_id: str = "",
         checkpoint_binding: str = "",
+        require_checkpoint: bool = False,
     ) -> ModelAgentResult:
+        if not isinstance(require_checkpoint, bool):
+            return _failed_result(task_id, "invalid_checkpoint_requirement")
         try:
             context = ExecutionContext(
                 task_id=task_id,
@@ -235,6 +238,8 @@ class ModelDrivenAgent:
                         state = saved_state
                     else:
                         state = await self._graph.ainvoke(None, config=config)
+                elif require_checkpoint:
+                    return _failed_result(task_id, "checkpoint_missing")
                 else:
                     state = await self._graph.ainvoke(initial, config=config)
         except TimeoutError:

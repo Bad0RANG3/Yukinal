@@ -25,10 +25,10 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use yukinal_core::sidecar::iso8601_now;
 use yukinal_database::models::{
-    Environment, InvestigationFailure, InvestigationPermissionMode, InvestigationRunMode,
-    InvestigationRunStatus, InvestigationStepKind, InvestigationStepStatus,
-    InvestigationTargetHost, InvestigationTask, TaskAutomationLevel, TaskFailureCode, TaskPhase,
-    TaskStatus,
+    Environment, InvestigationFailure, InvestigationPermissionMode, InvestigationRun,
+    InvestigationRunMode, InvestigationRunStatus, InvestigationStep, InvestigationStepKind,
+    InvestigationStepStatus, InvestigationTargetHost, InvestigationTask, TaskAutomationLevel,
+    TaskFailureCode, TaskPhase, TaskStatus,
 };
 use yukinal_database::repositories::TaskProgressUpdate;
 
@@ -52,6 +52,12 @@ pub(crate) fn start_auto_recovery(app: AppHandle) {
         }
         if !wait_for_sidecar(&state, &shutdown).await {
             return;
+        }
+        if shutdown.is_cancelled() {
+            return;
+        }
+        if let Err(error) = resume_waiting_approval_tasks(&state, &shutdown).await {
+            eprintln!("[yukinal] pending approval recovery failed: {error}");
         }
         if shutdown.is_cancelled() {
             return;
@@ -111,6 +117,21 @@ fn reconcile_interrupted_tasks(state: &AppState) -> Result<(), String> {
             .find_failure_step_for_run(&task.id, run_id, TaskFailureCode::OutcomeUnknown)
             .map_err(|error| error.to_string())?
             .is_some_and(|step| step.kind == InvestigationStepKind::Action);
+        let approval_call_started = pending_approval_call_started(state, run.as_ref(), &steps)?;
+        if run.as_ref().is_some_and(|run| {
+            is_resumable_pending_approval(
+                &task,
+                run,
+                &steps,
+                had_unknown_action,
+                approval_call_started,
+            )
+        }) {
+            // The exact action is persisted as waiting for user approval. Its
+            // LangGraph checkpoint can be restored and the host will issue a
+            // fresh, one-time approval ticket before any execution.
+            continue;
+        }
         let waiting_for_approval = run
             .as_ref()
             .is_some_and(|run| run.status == InvestigationRunStatus::WaitingUser);
@@ -179,6 +200,144 @@ fn reconcile_interrupted_tasks(state: &AppState) -> Result<(), String> {
             .investigations()
             .update_task_status(&task.id, TaskStatus::Failed, &now, Some(&now))
             .map_err(|error| format!("failed to expose interrupted task {}: {error}", task.id))?;
+    }
+    Ok(())
+}
+
+fn is_resumable_pending_approval(
+    task: &InvestigationTask,
+    run: &InvestigationRun,
+    steps: &[InvestigationStep],
+    had_unknown_action: bool,
+    approval_call_started: bool,
+) -> bool {
+    if task.status != TaskStatus::WaitingUser
+        || task.active_run_id.as_deref() != Some(run.id.as_str())
+        || run.task_id != task.id
+        || run.status != InvestigationRunStatus::WaitingUser
+        || had_unknown_action
+        || approval_call_started
+    {
+        return false;
+    }
+    let pending_actions = steps
+        .iter()
+        .filter(|step| {
+            step.kind == InvestigationStepKind::Action
+                && step.status == InvestigationStepStatus::WaitingUser
+        })
+        .count();
+    let active_actions = steps
+        .iter()
+        .filter(|step| {
+            step.kind == InvestigationStepKind::Action
+                && matches!(
+                    step.status,
+                    InvestigationStepStatus::Running | InvestigationStepStatus::WaitingUser
+                )
+        })
+        .count();
+    pending_actions == 1 && active_actions == pending_actions
+}
+
+/// Missing trace/call records cannot prove that a tool was never dispatched.
+/// Treat them as started unless the step has a complete identity and the
+/// durable host execution fence explicitly has no row for it.
+fn pending_approval_call_started(
+    state: &AppState,
+    run: Option<&InvestigationRun>,
+    steps: &[InvestigationStep],
+) -> Result<bool, String> {
+    let Some(run) = run else {
+        return Ok(true);
+    };
+    let pending_actions: Vec<&InvestigationStep> = steps
+        .iter()
+        .filter(|step| {
+            step.kind == InvestigationStepKind::Action
+                && step.status == InvestigationStepStatus::WaitingUser
+        })
+        .collect();
+    if pending_actions.is_empty() {
+        return Ok(false);
+    }
+    let Some(trace_id) = run
+        .trace_id
+        .as_deref()
+        .filter(|trace_id| !trace_id.trim().is_empty())
+    else {
+        return Ok(true);
+    };
+    for step in pending_actions {
+        if step.id.trim().is_empty()
+            || state
+                .database
+                .host_tool_calls()
+                .status(trace_id, &step.id)
+                .map_err(|error| error.to_string())?
+                .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn resume_waiting_approval_tasks(
+    state: &AppState,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    let tasks = state
+        .database
+        .investigations()
+        .list_tasks(Some(TaskStatus::WaitingUser), RECOVERY_SCAN_LIMIT)
+        .map_err(|error| error.to_string())?;
+    for candidate in tasks {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        let task = match state.database.investigations().get_task(&candidate.id) {
+            Ok(task) => task,
+            Err(yukinal_database::DatabaseError::NotFound) => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let Some(run_id) = task.active_run_id.clone() else {
+            continue;
+        };
+        let run = match state.database.investigations().get_run(&run_id) {
+            Ok(run) => run,
+            Err(yukinal_database::DatabaseError::NotFound) => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let steps = state
+            .database
+            .investigations()
+            .list_active_steps_for_run(&task.id, &run_id)
+            .map_err(|error| error.to_string())?;
+        let had_unknown_action = state
+            .database
+            .investigations()
+            .find_failure_step_for_run(&task.id, &run_id, TaskFailureCode::OutcomeUnknown)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|step| step.kind == InvestigationStepKind::Action);
+        let approval_call_started = pending_approval_call_started(state, Some(&run), &steps)?;
+        if !is_resumable_pending_approval(
+            &task,
+            &run,
+            &steps,
+            had_unknown_action,
+            approval_call_started,
+        ) {
+            continue;
+        }
+        if let Err(error) =
+            crate::commands::investigation::resume_waiting_approval(state, &task.id, &run_id).await
+        {
+            eprintln!(
+                "[yukinal] pending approval recovery could not resume task {}: {error}",
+                task.id
+            );
+        }
     }
     Ok(())
 }

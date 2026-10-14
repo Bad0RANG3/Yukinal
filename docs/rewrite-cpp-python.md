@@ -9,8 +9,12 @@
 > hosts native UI IPC and existing platform services. The Python sidecar can call the C++ `service_status` operation when
 > configured; its
 > target is bound to the selected server ID, which must be present in the C++
-> allowlist. Automatic server-record synchronization and desktop task/plan
-> lifecycle recovery remain unfinished. The Python sidecar supports approval events and
+> allowlist. Automatic server-record synchronization and full desktop task/plan
+> lifecycle recovery remain unfinished. On startup, a durable task whose exact
+> action step was waiting for approval and has no matching host execution-ledger
+> entry can reattach to its LangGraph checkpoint and receive a fresh host
+> approval ticket; other interrupted actions stay outcome-unknown and are never
+> automatically replayed. The Python sidecar supports approval events and
 > response RPCs for registered tools that require approval, including reject
 > and expiry handling; the current desktop catalog still exposes read-only tools.
 
@@ -101,10 +105,16 @@ total-time, tool-count and output-byte limits. The production sidecar stores
 stand-alone callers without that data directory retain the in-memory saver.
 The persisted state is bound to the run identity, prompt, authorization scope,
 and budget. A pending approval can be restored for the same run after the saver
-is reopened. This does not yet recover the desktop task/plan lifecycle or make
-all interrupted tool executions exactly-once. `ModelDrivenAgent` pauses and
-resumes an exact approved call; rejection and expiry stop the graph without
-retrying the requested action.
+is reopened. Desktop startup reattaches only when the durable run and its one
+active action step both say they are waiting for approval and the host execution
+ledger has no record for that call; it reissues a fresh host ticket. A matching
+host execution record, missing or mismatched checkpoint, or ambiguous step
+state fails closed instead of retrying the action. An interrupted action step
+without that precise waiting state remains outcome-unknown. This does not yet
+recover the full desktop task/plan lifecycle or make interrupted tool
+executions exactly-once.
+`ModelDrivenAgent` pauses and resumes an exact approved call; rejection and
+expiry stop the graph without retrying the requested action.
 
 The service currently targets Linux hosts with systemd. The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or command. The service resolves a `target_id` to a
@@ -251,7 +261,7 @@ Python-to-C++ HTTP tests also passed in CTest.
 - packaging and supervising the C++ SSH service with the desktop app;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- write-capable tools in the desktop catalog and desktop task/plan resume;
+- write-capable tools in the desktop catalog and full desktop task/plan resume;
 - arbitrary shell commands outside the existing host's separately guarded task flow;
 - SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.

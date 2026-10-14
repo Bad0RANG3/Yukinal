@@ -12,7 +12,7 @@ use crate::state::AppState;
 use yukinal_database::models::{
     DecisionBrief, DecisionOptionContinuation, InvestigationFailure,
     InvestigationNotificationPolicy, InvestigationPermissionMode, InvestigationPlanApproval,
-    InvestigationRunMode, InvestigationSchedule, InvestigationScheduleRun,
+    InvestigationRunMode, InvestigationRunStatus, InvestigationSchedule, InvestigationScheduleRun,
     InvestigationScheduleStatus, InvestigationTarget, InvestigationTargetHost, InvestigationTask,
     InvestigationTaskGuardrails, PlanApprovalSource, PlanApprovalStatus, TaskArtifactKind,
     TaskArtifactStatus, TaskAutomationLevel, TaskBudget, TaskFailureCode, TaskPhase, TaskStatus,
@@ -435,6 +435,70 @@ pub(crate) async fn start_investigation_task(
         run_id: response.run_id,
         started: response.started,
     })
+}
+
+/// Reattach a durable investigation run that was waiting for a tool approval
+/// when the desktop exited. The caller verifies its persisted action step is
+/// still waiting; `agent_run_start` then requires the original LangGraph
+/// checkpoint and re-emits the approval for a fresh host ticket.
+pub(crate) async fn resume_waiting_approval(
+    state: &AppState,
+    task_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    let task_id = validate_id(task_id, "task id")?;
+    let run_id = validate_id(run_id, "run id")?;
+    let task = state
+        .database
+        .investigations()
+        .get_task(&task_id)
+        .map_err(|error| error.to_string())?;
+    if task.status != TaskStatus::WaitingUser
+        || task.active_run_id.as_deref() != Some(run_id.as_str())
+    {
+        return Err("investigation task no longer has the pending approval run".into());
+    }
+    task_time_window_error(&task)?;
+    let run = state
+        .database
+        .investigations()
+        .get_run(&run_id)
+        .map_err(|error| error.to_string())?;
+    if run.task_id != task.id || run.status != InvestigationRunStatus::WaitingUser {
+        return Err("investigation run is no longer waiting for approval".into());
+    }
+
+    let session_id = run
+        .session_id
+        .clone()
+        .unwrap_or_else(|| format!("session_task_{}", task.id));
+    let message_id = run
+        .message_id
+        .clone()
+        .unwrap_or_else(|| format!("message_{run_id}"));
+    let response = crate::commands::agent_run::start_agent_run(
+        state,
+        Some(run_id.clone()),
+        session_id,
+        Some(task.id.clone()),
+        autonomous_task_prompt(&task),
+        Some(message_id),
+        None,
+        Some("async".into()),
+        Some(true),
+        None,
+        None,
+        task.workspace_id.clone(),
+        task.server_id.clone(),
+        Some(task.permission_mode.as_str().into()),
+        Some(task.mode.as_str().into()),
+        None,
+    )
+    .await?;
+    if response.run_id != run_id {
+        return Err("Agent sidecar returned a different run id during approval recovery".into());
+    }
+    Ok(())
 }
 
 /// Stop a durable task through the host-owned cancellation fence. This is deliberately

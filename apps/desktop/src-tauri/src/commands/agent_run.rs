@@ -616,6 +616,7 @@ pub(crate) async fn start_agent_run(
         .transpose()?;
     let mut effective_mode = mode;
     let mut effective_permission_mode = permission_mode;
+    let mut require_checkpoint = false;
     if let Some(task) = task.as_ref() {
         if matches!(
             task.status,
@@ -704,7 +705,9 @@ pub(crate) async fn start_agent_run(
                         })
                         .map_err(|error| format!("failed to persist investigation run: {error}"))?;
                 }
-                Ok(existing) if existing.task_id == task.id => {}
+                Ok(existing) if existing.task_id == task.id => {
+                    require_checkpoint = existing.status == InvestigationRunStatus::WaitingUser;
+                }
                 Ok(_) => return Err("run id is already bound to another investigation task".into()),
                 Err(error) => return Err(format!("failed to read investigation run: {error}")),
             }
@@ -793,6 +796,9 @@ pub(crate) async fn start_agent_run(
     }
     if let Some(policy_id) = policy_id.as_deref() {
         params["policyId"] = json!(policy_id);
+    }
+    if require_checkpoint {
+        params["requireCheckpoint"] = json!(true);
     }
     let response = tokio::select! {
         biased;

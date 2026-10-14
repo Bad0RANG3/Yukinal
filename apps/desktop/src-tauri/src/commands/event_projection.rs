@@ -341,7 +341,39 @@ pub(crate) fn persist_investigation_event_state(
 
     match event_type {
         "agent.started" => run.status = InvestigationRunStatus::Running,
-        "agent.waiting_approval" => run.status = InvestigationRunStatus::WaitingUser,
+        "agent.waiting_approval" => {
+            run.status = InvestigationRunStatus::WaitingUser;
+            if let Some(step_id) = params
+                .pointer("/approval/callId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                match state.database.investigations().get_step_for_run(
+                    &run.task_id,
+                    &run.id,
+                    step_id,
+                ) {
+                    Ok(mut step)
+                        if step.kind == InvestigationStepKind::Action
+                            && matches!(
+                                step.status,
+                                InvestigationStepStatus::Running
+                                    | InvestigationStepStatus::WaitingUser
+                            ) =>
+                    {
+                        step.status = InvestigationStepStatus::WaitingUser;
+                        if let Err(error) = state.database.investigations().upsert_step(&step) {
+                            eprintln!("[yukinal] pending approval step update failed: {error}");
+                        }
+                    }
+                    Ok(_) | Err(yukinal_database::DatabaseError::NotFound) => {}
+                    Err(error) => eprintln!(
+                        "[yukinal] pending approval step lookup failed for {step_id}: {error}"
+                    ),
+                }
+            }
+        }
         "agent.tool_call" => {
             if let Some(step) = investigation_step_from_tool_call(&run, params, state) {
                 if let Err(error) = state.database.investigations().upsert_step(&step) {
