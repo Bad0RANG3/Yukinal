@@ -349,12 +349,13 @@ pub(crate) enum CppProxyRoute {
         host: String,
         port: u16,
         credential: Option<String>,
+        no_proxy: Vec<String>,
     },
     Unsupported,
 }
 
-/// Resolve the app's selected proxy route for the C++ transport. Only a plain HTTP
-/// CONNECT proxy without bypass rules can be represented without changing routing.
+/// Resolve the app's selected proxy route for the C++ transport. The C++ service
+/// applies supported bypass patterns against its one configured target.
 pub(crate) fn resolve_cpp_proxy_route(state: &AppState) -> Result<CppProxyRoute, String> {
     let outbound =
         super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
@@ -366,9 +367,13 @@ fn cpp_proxy_route(outbound: yukinal_net::OutboundProxy) -> CppProxyRoute {
         yukinal_net::NetworkProxy::Direct => CppProxyRoute::Direct,
         yukinal_net::NetworkProxy::Unusable { .. } => CppProxyRoute::Unsupported,
         yukinal_net::NetworkProxy::Proxy { url, no_proxy, .. } => {
-            if no_proxy.as_deref().is_some_and(|value| !value.trim().is_empty()) {
-                return CppProxyRoute::Unsupported;
-            }
+            let no_proxy = match no_proxy.as_deref() {
+                Some(value) => match parse_cpp_no_proxy(value) {
+                    Some(entries) => entries,
+                    None => return CppProxyRoute::Unsupported,
+                },
+                None => Vec::new(),
+            };
             let Ok(url) = reqwest::Url::parse(&url) else {
                 return CppProxyRoute::Unsupported;
             };
@@ -399,9 +404,64 @@ fn cpp_proxy_route(outbound: yukinal_net::OutboundProxy) -> CppProxyRoute {
                     .credential
                     .as_ref()
                     .map(|credential| credential.expose().to_string()),
+                no_proxy,
             }
         }
     }
+}
+
+fn parse_cpp_no_proxy(value: &str) -> Option<Vec<String>> {
+    let entries = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if entries.len() > 256 || entries.iter().any(|entry| entry.len() > 253) {
+        return None;
+    }
+    let valid_host = |host: &str| {
+        let bracketed_ipv6 = host.len() >= 4
+            && host.starts_with('[')
+            && host.ends_with(']')
+            && host.contains(':');
+        !host.is_empty()
+            && host.len() <= 253
+            && !host.starts_with('.')
+            && !host.ends_with('.')
+            && !host.contains("..")
+            && (!host.contains(':') || bracketed_ipv6)
+            && host.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+            })
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            if entry == "*" {
+                return Some(entry.to_string());
+            }
+            if let Some(host) = entry.strip_prefix("*.") {
+                return valid_host(host).then(|| entry.to_string());
+            }
+            if let Some(host) = entry.strip_prefix('.') {
+                return valid_host(host).then(|| entry.to_string());
+            }
+            if let Some(prefix) = entry.strip_suffix(".*") {
+                let octets = prefix.split('.').collect::<Vec<_>>();
+                return (!prefix.is_empty()
+                    && octets.len() <= 3
+                    && octets.iter().all(|octet| {
+                        !octet.is_empty()
+                            && octet.len() <= 3
+                            && octet.bytes().all(|byte| byte.is_ascii_digit())
+                            && octet.parse::<u16>().is_ok_and(|value| value <= 255)
+                    }))
+                .then(|| entry.to_string());
+            }
+            valid_host(entry).then(|| entry.to_string())
+        })
+        .collect()
 }
 
 /// Whether the configured connection uses auth and trust modes supported by C++.
@@ -2070,10 +2130,10 @@ mod tests {
     }
 
     #[test]
-    fn cpp_proxy_route_accepts_only_plain_http_without_bypass_rules() {
+    fn cpp_proxy_route_accepts_plain_http_and_supported_bypass_rules() {
         assert!(matches!(
             proxy_route("http://proxy.example.test:8080", None),
-            CppProxyRoute::HttpConnect { host, port: 8080, credential: Some(value) }
+            CppProxyRoute::HttpConnect { host, port: 8080, credential: Some(value), .. }
                 if host == "proxy.example.test" && value == "proxy-user:proxy-password"
         ));
         assert!(matches!(
@@ -2086,6 +2146,19 @@ mod tests {
         ));
         assert!(matches!(
             proxy_route("http://proxy.example.test:8080", Some("localhost")),
+            CppProxyRoute::HttpConnect { no_proxy, .. }
+                if no_proxy.len() == 1 && no_proxy[0] == "localhost"
+        ));
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("10.0.0.0/8")),
+            CppProxyRoute::Unsupported
+        ));
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("*.corp,10.*,localhost")),
+            CppProxyRoute::HttpConnect { no_proxy, .. } if no_proxy.len() == 3
+        ));
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("192.168.999.*")),
             CppProxyRoute::Unsupported
         ));
     }

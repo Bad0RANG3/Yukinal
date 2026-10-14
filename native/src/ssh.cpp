@@ -396,7 +396,7 @@ SocketConnection connect_socket(const TargetConfig& target, Clock::time_point de
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   addrinfo* addresses = nullptr;
-  const bool use_proxy = !target.proxy_host.empty();
+  const bool use_proxy = !target.proxy_host.empty() && !proxy_bypasses_target(target);
   const std::string& connect_host = use_proxy ? target.proxy_host : target.host;
   const int connect_port = use_proxy ? target.proxy_port : target.port;
   const std::string port_text = std::to_string(connect_port);

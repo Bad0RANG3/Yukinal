@@ -946,6 +946,20 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
                 },
                 {
+                    "target_id": "srv_proxy_bypass",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "type": "http_connect",
+                        "host": "127.0.0.1",
+                        "port": proxy_port,
+                        "no_proxy": ["127.0.0.1"],
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
                     "target_id": "srv_proxy_probe_only",
                     "host": "127.0.0.1",
                     "port": ssh_port,
@@ -1013,6 +1027,11 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             expected_authority = f"127.0.0.1:{ssh_port}"
             if PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
                 raise AssertionError(f"HTTP CONNECT used an unexpected target: {PROXY_CONNECT_TARGETS!r}")
+            bypass_result = client.service_status("srv_proxy_bypass", "nginx.service", timeout_seconds=8)
+            if bypass_result.exit_code != 0 or bypass_result.stdout != "active\n":
+                raise AssertionError(f"NO_PROXY direct route did not carry the SSH operation: {bypass_result!r}")
+            if PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
+                raise AssertionError(f"NO_PROXY target was incorrectly sent through HTTP CONNECT: {PROXY_CONNECT_TARGETS!r}")
             try:
                 client.service_status("srv_proxy_bad_auth", "nginx.service", timeout_seconds=5)
             except SshServiceError as error:

@@ -7,7 +7,7 @@
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
 > hosts native UI IPC, local trust-store updates, approvals, and PTY/SFTP
-> compatibility paths for Host CA, HTTPS proxies, proxies with bypass rules, keyboard-interactive auth,
+> compatibility paths for Host CA, HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
 > known-hosts-only trust, and other unsupported SSH modes. Supported desktop terminals use a dedicated C++
 > PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
@@ -284,10 +284,11 @@ material directly to the C++ child without writing key material into the JSON
 configuration.
 
 The desktop may also add a target-level `proxy` object with `type: "http_connect"`,
-proxy `host` and `port`, and an optional `auth_env`. The desktop emits this only
-for a plain HTTP proxy with no `NO_PROXY` rules; proxy credentials are forwarded
-to the child environment separately from the target JSON. HTTPS proxies and
-proxy routes with bypass rules stay on the Rust path. The C++ service bounds the
+proxy `host` and `port`, an optional `auth_env`, and supported `no_proxy` host
+patterns. Exact hosts, domain suffixes, IPv4 prefixes, and `*` are evaluated by
+the C++ service against its single target; unsupported patterns retain the Rust
+path. Proxy credentials are forwarded to the child environment separately from
+the target JSON. HTTPS proxies also stay on the Rust path. The C++ service bounds the
 CONNECT response and shares the SSH operation deadline.
 
 Desktop host-key probes use a separate short-lived `probe_only` target with no

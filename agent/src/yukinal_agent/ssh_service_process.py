@@ -383,8 +383,14 @@ def _valid_credential_env_name(value: object) -> bool:
 def _validate_http_connect_proxy(value: object) -> str | None:
     if not isinstance(value, dict):
         raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
-    required = {"type", "host", "port"}
-    if set(value) not in (required, required | {"auth_env"}):
+    required = frozenset({"type", "host", "port"})
+    allowed = {
+        required,
+        required | {"auth_env"},
+        required | {"no_proxy"},
+        required | {"auth_env", "no_proxy"},
+    }
+    if frozenset(value) not in allowed:
         raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
     host = value.get("host")
     port = value.get("port")
@@ -399,12 +405,63 @@ def _validate_http_connect_proxy(value: object) -> str | None:
         or not 1 <= port <= 65535
     ):
         raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
+    if "no_proxy" in value:
+        bypasses = value["no_proxy"]
+        if (
+            not isinstance(bypasses, list)
+            or len(bypasses) > 256
+            or not all(_valid_cpp_no_proxy_entry(entry) for entry in bypasses)
+        ):
+            raise SshServiceProcessError("the SSH service HTTP proxy bypass configuration is invalid")
     if "auth_env" not in value:
         return None
     auth_env = value["auth_env"]
     if not _valid_credential_env_name(auth_env):
         raise SshServiceProcessError("the SSH service proxy credential reference is invalid")
     return auth_env
+
+
+def _valid_cpp_no_proxy_entry(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 253:
+        return False
+    if value == "*":
+        return True
+    if value.startswith("*."):
+        host = value[2:]
+    elif value.startswith("."):
+        host = value[1:]
+    elif value.endswith(".*"):
+        prefix = value[:-2]
+        octets = prefix.split(".")
+        return bool(prefix) and len(octets) <= 3 and all(
+            octet
+            and len(octet) <= 3
+            and octet.isascii()
+            and octet.isdigit()
+            and int(octet) <= 255
+            for octet in octets
+        )
+    else:
+        host = value
+    bracketed_ipv6 = (
+        len(host) >= 4
+        and host.startswith("[")
+        and host.endswith("]")
+        and ":" in host
+    )
+    return (
+        bool(host)
+        and len(host) <= 253
+        and not host.startswith(".")
+        and not host.endswith(".")
+        and ".." not in host
+        and (":" not in host or bracketed_ipv6)
+        and all(
+            character.isascii()
+            and (character.isalnum() or character in ".-_[]:")
+            for character in host
+        )
+    )
 
 
 def _valid_agent_socket_path(value: object) -> bool:

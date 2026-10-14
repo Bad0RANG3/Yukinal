@@ -521,11 +521,13 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
             host,
             port,
             credential,
+            no_proxy,
         } => {
             let mut proxy = json!({
                 "type": "http_connect",
                 "host": host,
                 "port": port,
+                "no_proxy": no_proxy,
             });
             if let Some(credential) = credential {
                 credentials.insert(
@@ -588,11 +590,13 @@ pub(super) fn resolve_ssh_service_probe_target(
             host,
             port,
             credential,
+            no_proxy,
         } => {
             let mut proxy = json!({
                 "type": "http_connect",
                 "host": host,
                 "port": port,
+                "no_proxy": no_proxy,
             });
             if let Some(credential) = credential {
                 credentials.insert(

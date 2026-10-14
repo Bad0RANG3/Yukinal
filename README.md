@@ -88,10 +88,11 @@ environment variable; it never stores a password value.
 
 Desktop SSH targets also follow the app's selected proxy route. The C++ service
 accepts an optional target `proxy` with `type: "http_connect"`, a proxy `host`
-and `port`, and an optional `auth_env` reference. Proxy credentials belong in
-that environment variable, not in the JSON file. The desktop uses this route
-only for plain HTTP proxies without `NO_PROXY` bypass rules; HTTPS proxies and
-routes with bypass rules stay on the Rust compatibility path.
+and `port`, an optional `auth_env` reference, and `no_proxy` host patterns.
+Supported bypass patterns include exact hosts, domain suffixes (`.corp` or
+`*.corp`), IPv4 prefixes such as `10.*`, and `*`. Proxy credentials belong in
+the environment variable, not in the JSON file. HTTPS proxies and unsupported
+bypass patterns stay on the Rust compatibility path.
 
 The Python client can be installed for development with:
 

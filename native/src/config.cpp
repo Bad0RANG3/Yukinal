@@ -8,6 +8,7 @@
 #include <regex>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 
 #include "yukinal/policy.hpp"
 
@@ -69,6 +70,61 @@ bool valid_proxy_credential_env_name(const std::string& name) {
       "PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE",
       "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"};
   return !reserved.contains(normalized);
+}
+
+bool valid_proxy_bypass_entry(const std::string& entry) {
+  if (entry.empty() || entry.size() > 253) return false;
+  if (entry == "*") return true;
+
+  std::string_view host = entry;
+  if (host.rfind("*.", 0) == 0) host.remove_prefix(2);
+  else if (host.front() == '.') host.remove_prefix(1);
+  else if (host.size() > 2 && host.substr(host.size() - 2) == ".*") {
+    const auto prefix = host.substr(0, host.size() - 2);
+    std::size_t octets = 0;
+    std::size_t start = 0;
+    while (start <= prefix.size()) {
+      const auto end = prefix.find('.', start);
+      const auto octet = prefix.substr(start, end == std::string_view::npos ? prefix.size() - start : end - start);
+      if (octet.empty() || octet.size() > 3 || ++octets > 3) return false;
+      unsigned int value = 0;
+      for (const unsigned char ch : octet) {
+        if (!std::isdigit(ch)) return false;
+        value = value * 10 + static_cast<unsigned int>(ch - '0');
+      }
+      if (value > 255) return false;
+      if (end == std::string_view::npos) break;
+      start = end + 1;
+    }
+    return true;
+  } else if (host.find('*') != std::string_view::npos) {
+    return false;
+  }
+  if (host.empty() || host.front() == '.' || host.back() == '.' || host.find("..") != std::string_view::npos) {
+    return false;
+  }
+  const bool bracketed_ipv6 = host.size() >= 4 && host.front() == '[' && host.back() == ']' &&
+      host.find(':') != std::string_view::npos;
+  if (host.find(':') != std::string_view::npos && !bracketed_ipv6) return false;
+  for (const unsigned char ch : host) {
+    if (!(std::isalnum(ch) || ch == '.' || ch == '-' || ch == '_' || ch == ':' || ch == '[' || ch == ']')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string lowercase(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return value;
+}
+
+bool host_matches_suffix(const std::string& host, const std::string& suffix) {
+  return host == suffix || (host.size() > suffix.size() &&
+      host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+      host[host.size() - suffix.size() - 1] == '.');
 }
 
 bool valid_host(const std::string& host) {
@@ -160,7 +216,7 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     if (entry.contains("proxy")) {
       const Json& proxy = entry["proxy"];
       require_object(proxy, label + ".proxy");
-      require_only_keys(proxy, {"type", "host", "port", "auth_env"}, label + ".proxy");
+      require_only_keys(proxy, {"type", "host", "port", "auth_env", "no_proxy"}, label + ".proxy");
       if (required_string(proxy, "type", label + ".proxy") != "http_connect") {
         throw std::runtime_error(label + ".proxy.type must be http_connect");
       }
@@ -173,6 +229,18 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
         target.proxy_auth_env = required_string(proxy, "auth_env", label + ".proxy");
         if (!valid_proxy_credential_env_name(target.proxy_auth_env)) {
           throw std::runtime_error(label + ".proxy.auth_env is invalid");
+        }
+      }
+      if (proxy.contains("no_proxy")) {
+        const Json& bypasses = proxy["no_proxy"];
+        if (!bypasses.is_array() || bypasses.size() > 256) {
+          throw std::runtime_error(label + ".proxy.no_proxy must be an array of at most 256 entries");
+        }
+        for (const auto& bypass : bypasses) {
+          if (!bypass.is_string() || !valid_proxy_bypass_entry(bypass.get<std::string>())) {
+            throw std::runtime_error(label + ".proxy.no_proxy contains an unsupported entry");
+          }
+          target.proxy_no_proxy.push_back(bypass.get<std::string>());
         }
       }
     }
@@ -249,6 +317,41 @@ ServiceConfig load_config(const std::string& path) {
   }
   const auto config_path = std::filesystem::absolute(path).lexically_normal();
   return parse_config(value, config_path.parent_path().string());
+}
+
+bool proxy_bypasses_target(const TargetConfig& target) {
+  std::string host = lowercase(target.host);
+  if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+    host = host.substr(1, host.size() - 2);
+  }
+  for (const auto& raw_entry : target.proxy_no_proxy) {
+    const std::string entry = lowercase(raw_entry);
+    if (entry == "*") return true;
+    if (entry.rfind("*.", 0) == 0) {
+      if (host_matches_suffix(host, entry.substr(2))) return true;
+      continue;
+    }
+    if (entry.front() == '.') {
+      if (host_matches_suffix(host, entry.substr(1))) return true;
+      continue;
+    }
+    if (entry.size() > 2 && entry.substr(entry.size() - 2) == ".*") {
+      if (host.rfind(entry.substr(0, entry.size() - 1), 0) == 0) return true;
+      continue;
+    }
+    std::string exact = entry;
+    if (exact.size() >= 2 && exact.front() == '[' && exact.back() == ']') {
+      exact = exact.substr(1, exact.size() - 2);
+    }
+    const bool numeric_address = !exact.empty() && std::all_of(exact.begin(), exact.end(), [](unsigned char ch) {
+      return std::isdigit(ch) || ch == '.';
+    });
+    if ((numeric_address || exact.find(':') != std::string::npos) ? host == exact
+                                                                  : host_matches_suffix(host, exact)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace yukinal::ssh_service

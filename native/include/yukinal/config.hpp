@@ -2,6 +2,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -22,6 +23,7 @@ struct TargetConfig {
   std::string proxy_host;
   int proxy_port = 0;
   std::string proxy_auth_env;
+  std::vector<std::string> proxy_no_proxy;
   bool agent_auth = false;
   bool probe_only = false;
 };
@@ -34,5 +36,6 @@ struct ServiceConfig {
 
 ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_directory = {});
 ServiceConfig load_config(const std::string& path);
+bool proxy_bypasses_target(const TargetConfig& target);
 
 }  // namespace yukinal::ssh_service
