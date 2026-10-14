@@ -362,6 +362,14 @@ def start_ssh_mock(
                     b'{"Names":"api","Image":"example/api","State":"running","Status":"Up","RestartCount":0}\n'
                 )
                 channel.send_exit_status(0)
+            elif command == b"docker logs --tail 2 --timestamps -- 'api' 2>&1":
+                channel.sendall(b"2026-10-15T10:00:00Z started\n2026-10-15T10:00:01Z ready\n")
+                channel.send_exit_status(0)
+            elif command == b"docker inspect --format '{{json .}}' -- 'api' 2>/dev/null":
+                channel.sendall(
+                    b'{"Id":"container-id","Name":"/api","Config":{"Image":"example/api"},"State":{"Status":"running","StartedAt":"2026-10-15T10:00:00Z","Health":{"Status":"healthy"}},"RestartCount":1}\n'
+                )
+                channel.send_exit_status(0)
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
@@ -880,6 +888,20 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if docker.exit_code != 0 or json.loads(docker.stdout.splitlines()[0])["Names"] != "api":
                 raise AssertionError(f"unexpected structured Docker listing: {docker!r}")
+
+            docker_logs = client._execute_operation(
+                "srv_stage1",
+                "docker_logs",
+                {"container": "api", "tail": 2},
+                timeout_seconds=5,
+            )
+            if docker_logs.exit_code != 0 or "ready" not in docker_logs.stdout:
+                raise AssertionError(f"unexpected structured Docker logs: {docker_logs!r}")
+            docker_inspect = client._execute_operation(
+                "srv_stage1", "docker_inspect", {"container": "api"}, timeout_seconds=5
+            )
+            if docker_inspect.exit_code != 0 or json.loads(docker_inspect.stdout)["Name"] != "/api":
+                raise AssertionError(f"unexpected structured Docker inspect: {docker_inspect!r}")
 
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:

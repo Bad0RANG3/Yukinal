@@ -56,6 +56,41 @@ pub(crate) async fn docker_ps(
     .await
 }
 
+pub(crate) async fn docker_logs(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    container: &str,
+    tail: usize,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "docker_logs",
+        json!({ "container": container, "tail": tail }),
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn docker_inspect(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    container: &str,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "docker_inspect",
+        json!({ "container": container }),
+        true,
+    )
+    .await
+}
+
 pub(crate) async fn connection_check(
     app: &AppHandle,
     state: &AppState,

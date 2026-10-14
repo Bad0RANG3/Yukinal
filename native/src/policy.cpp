@@ -105,6 +105,20 @@ bool valid_service_name(const std::string& value) {
   return std::regex_match(value, pattern);
 }
 
+bool valid_container_ref(const std::string& value) {
+  if (value.empty() || value.size() > 128) return false;
+  const auto is_ascii_alphanumeric = [](unsigned char character) {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9');
+  };
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [&](unsigned char character) {
+    return is_ascii_alphanumeric(character) || character == '_' || character == '.' ||
+           character == '-';
+  });
+}
+
 bool valid_sftp_path(const std::string& value) {
   return !value.empty() && value.size() <= 4096 && value.find('\0') == std::string::npos;
 }
@@ -145,7 +159,9 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string source_path;
   std::string destination_path;
   std::string nonce;
+  std::string container;
   bool include_all_containers = false;
+  std::uint32_t tail = 120;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -180,6 +196,44 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     include_all_containers = all_it->get<bool>();
+  } else if (operation == "docker_logs") {
+    if (!has_only_keys(*parameters_it, {"container", "tail"})) {
+      set_error(error, 422, "invalid_parameters", "docker_logs accepts only container and tail parameters");
+      return false;
+    }
+    const auto container_it = parameters_it->find("container");
+    const auto tail_it = parameters_it->find("tail");
+    if (container_it == parameters_it->end() || !container_it->is_string() ||
+        !valid_container_ref(container_it->get<std::string>()) ||
+        tail_it == parameters_it->end()) {
+      set_error(error, 422, "invalid_parameters", "docker_logs requires a safe container and bounded tail");
+      return false;
+    }
+    std::uint64_t parsed_tail = 0;
+    if (tail_it->is_number_unsigned()) {
+      parsed_tail = tail_it->get<std::uint64_t>();
+    } else if (tail_it->is_number_integer()) {
+      const auto signed_tail = tail_it->get<std::int64_t>();
+      if (signed_tail > 0) parsed_tail = static_cast<std::uint64_t>(signed_tail);
+    }
+    if (parsed_tail < 1 || parsed_tail > 500) {
+      set_error(error, 422, "invalid_parameters", "docker_logs tail must be between 1 and 500");
+      return false;
+    }
+    container = container_it->get<std::string>();
+    tail = static_cast<std::uint32_t>(parsed_tail);
+  } else if (operation == "docker_inspect") {
+    if (!has_only_keys(*parameters_it, {"container"})) {
+      set_error(error, 422, "invalid_parameters", "docker_inspect accepts only a container parameter");
+      return false;
+    }
+    const auto container_it = parameters_it->find("container");
+    if (container_it == parameters_it->end() || !container_it->is_string() ||
+        !valid_container_ref(container_it->get<std::string>())) {
+      set_error(error, 422, "invalid_parameters", "docker_inspect requires a safe container reference");
+      return false;
+    }
+    container = container_it->get<std::string>();
   } else if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -443,7 +497,9 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->source_path = std::move(source_path);
   request->destination_path = std::move(destination_path);
   request->nonce = std::move(nonce);
+  request->container = std::move(container);
   request->include_all_containers = include_all_containers;
+  request->tail = tail;
   request->content = std::move(content);
   request->since_seconds = since_seconds;
   request->expected_size = expected_size;

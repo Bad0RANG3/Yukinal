@@ -1886,6 +1886,7 @@ pub(super) async fn docker_ps(
 }
 
 pub(super) async fn docker_logs(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -1919,43 +1920,72 @@ pub(super) async fn docker_logs(
             None,
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let command = format!(
-        "docker logs --tail {tail} --timestamps -- {} 2>&1",
-        shell_quote(&input.container)
-    );
-    let result = match state
-        .ssh
-        .execute(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(10)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stdout, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::docker_logs(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.container,
+                tail,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout, String::new())
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let command = format!(
+            "docker logs --tail {tail} --timestamps -- {} 2>&1",
+            shell_quote(&input.container)
+        );
+        match state
+            .ssh
+            .execute(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(10)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (
+                result.exit_code,
+                result.stdout_lossy(),
+                result.stderr_lossy(),
+            ),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "execution_failed",
             format!("could not read logs for container `{}`", input.container),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }
 
-    let (lines, truncated) = bounded_log_lines(&result.stdout_lossy(), tail);
+    let (lines, truncated) = bounded_log_lines(&stdout, tail);
     Ok(success(
         serde_json::to_value(DockerLogsResult {
             container: input.container,
@@ -1967,6 +1997,7 @@ pub(super) async fn docker_logs(
 }
 
 pub(super) async fn docker_inspect(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -1991,42 +2022,70 @@ pub(super) async fn docker_inspect(
             None,
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let command = format!(
-        "docker inspect --format '{{{{json .}}}}' -- {} 2>/dev/null",
-        shell_quote(&input.container)
-    );
-    let result = match state
-        .ssh
-        .execute(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(10)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stdout, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::docker_inspect(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.container,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout, String::new())
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let command = format!(
+            "docker inspect --format '{{{{json .}}}}' -- {} 2>/dev/null",
+            shell_quote(&input.container)
+        );
+        match state
+            .ssh
+            .execute(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(10)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (
+                result.exit_code,
+                result.stdout_lossy(),
+                result.stderr_lossy(),
+            ),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "not_found",
             format!("container `{}` was not found", input.container),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }
-    let inspected = match parse_docker_inspect(&result.stdout_lossy()) {
+    let inspected = match parse_docker_inspect(&stdout) {
         Ok(inspected) => inspected,
         Err(error) => return Ok(failed("execution_failed", error, false, None)),
     };

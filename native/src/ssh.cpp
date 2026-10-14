@@ -1418,6 +1418,32 @@ ExecResult docker_ps(const TargetConfig& target, bool include_all_containers,
   return run_ssh_command(target, command, timeout_seconds);
 }
 
+ExecResult docker_logs(const TargetConfig& target, const std::string& container,
+                       std::uint32_t tail, int timeout_seconds) {
+  if (target.probe_only || !valid_container_ref(container) || tail < 1 || tail > 500 ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The Docker log parameters are invalid");
+    return result;
+  }
+  const std::string command = "docker logs --tail " + std::to_string(tail) +
+                              " --timestamps -- '" + container + "' 2>&1";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult docker_inspect(const TargetConfig& target, const std::string& container,
+                          int timeout_seconds) {
+  if (target.probe_only || !valid_container_ref(container) || timeout_seconds < 1 ||
+      timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The Docker inspect parameters are invalid");
+    return result;
+  }
+  const std::string command = "docker inspect --format '{{json .}}' -- '" + container +
+                              "' 2>/dev/null";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   static constexpr char command[] =
       "if command -v systemctl >/dev/null 2>&1; then "
@@ -2576,6 +2602,12 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "docker_ps") {
     return docker_ps(target, request.include_all_containers, request.timeout_seconds);
+  }
+  if (request.operation == "docker_logs") {
+    return docker_logs(target, request.container, request.tail, request.timeout_seconds);
+  }
+  if (request.operation == "docker_inspect") {
+    return docker_inspect(target, request.container, request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);

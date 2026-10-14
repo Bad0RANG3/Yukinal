@@ -109,6 +109,56 @@ YUKINAL_TEST(policy_requires_a_boolean_for_docker_ps) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_bounds_docker_logs_and_inspect_references) {
+  ExecRequest request;
+  ApiError error;
+  const bool logs_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_logs"},
+       {"parameters", {{"container", "api_1.2-3"}, {"tail", 120}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(logs_accepted);
+  YUKINAL_REQUIRE(request.container == "api_1.2-3");
+  YUKINAL_REQUIRE(request.tail == 120);
+
+  const bool injected_container_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_logs"},
+       {"parameters", {{"container", "api;id"}, {"tail", 120}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(!injected_container_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool oversized_tail_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_logs"},
+       {"parameters", {{"container", "api"}, {"tail", 501}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(!oversized_tail_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool inspect_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_inspect"},
+       {"parameters", {{"container", "api"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(inspect_accepted);
+  YUKINAL_REQUIRE(request.container == "api");
+
+  const bool inspect_extra_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_inspect"},
+       {"parameters", {{"container", "api"}, {"format", "{{json .}}"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(!inspect_extra_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_host_key_probe_without_parameters) {
   ExecRequest request;
   ApiError error;

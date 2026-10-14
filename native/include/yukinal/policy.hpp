@@ -21,7 +21,9 @@ struct ExecRequest {
   std::string source_path;
   std::string destination_path;
   std::string nonce;
+  std::string container;
   bool include_all_containers = false;
+  std::uint32_t tail = 120;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -40,5 +42,6 @@ struct ApiError {
 bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiError* error);
 bool valid_target_id(const std::string& value);
 bool valid_service_name(const std::string& value);
+bool valid_container_ref(const std::string& value);
 
 }  // namespace yukinal::ssh_service
