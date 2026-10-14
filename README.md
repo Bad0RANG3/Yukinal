@@ -29,10 +29,11 @@ The current rewrite implements **milestones 1 through 3** from
 - the Python Node's bounded NDJSON/JSON-RPC transport and desktop initialization,
   health, capability, and tool-catalog methods.
 
-The Python JSON-RPC layer is a migration foundation: run execution/provider RPC,
-the host-tool bridge, durable task state, and switching the desktop launcher to
-Python remain in progress. The existing React/Tauri UI remains intact while
-those paths are migrated.
+The Python JSON-RPC layer now handles desktop initialization, health and tool
+catalogs, plus a provider connectivity check. Run execution, model catalog,
+approval RPCs, the host-tool bridge, durable task state, and switching the
+desktop launcher to Python remain in progress. The existing React/Tauri UI
+remains intact while those paths are migrated.
 
 The C++ service is not yet connected to the desktop UI. The existing React
 components and their Tauri bridge are preserved. The existing Rust/Tauri

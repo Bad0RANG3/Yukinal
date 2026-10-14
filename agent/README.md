@@ -80,9 +80,9 @@ Install `agent[agent,models]`, set `YUKINAL_DATA_DIR` to the private per-user
 data directory, and launch `yukinal-agent-node`. The process speaks version
 1.0 JSON-RPC 2.0 over newline-delimited stdin/stdout; stdout is reserved for
 frames and diagnostics go to stderr. Frames are capped at 24 MiB. The current
-Python sidecar implements `initialize`, `system.ping`, `tools.list`, and
-`system.describe`; remaining run/provider/approval RPCs and the desktop launcher
-switch are being migrated next.
+Python sidecar implements `initialize`, `system.ping`, `tools.list`,
+`system.describe`, and `provider.test`. Run execution, model catalogs, approval
+RPCs and the desktop launcher switch are still being migrated.
 
 ## Register and run tools
 

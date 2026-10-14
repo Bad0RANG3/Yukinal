@@ -11,6 +11,7 @@ from typing import Any, BinaryIO
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
+from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import register_ssh_tools
 from .tools import ToolRegistry
 
@@ -32,7 +33,7 @@ METHODS = {
     "agent.run.stop": False,
     "agent.approval.respond": False,
     "provider.models": False,
-    "provider.test": False,
+    "provider.test": True,
 }
 
 
@@ -46,9 +47,16 @@ class _RpcFault(Exception):
 class PythonSidecar:
     """Minimal version-1 desktop JSON-RPC boundary for the Python Agent Node."""
 
-    def __init__(self, registry: ToolRegistry, *, agent_version: str = "0.1.0") -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        agent_version: str = "0.1.0",
+        model_factory: ModelFactory | None = None,
+    ) -> None:
         self._registry = registry
         self._agent_version = agent_version
+        self._model_factory = model_factory or ModelFactory()
         self._initialized = False
 
     def handle(self, request: object) -> dict[str, Any] | None:
@@ -94,6 +102,102 @@ class PythonSidecar:
             return response
         except Exception:
             return _failure(request_id, RPC_INTERNAL_ERROR, "Internal sidecar error")
+
+    async def handle_async(self, request: object) -> dict[str, Any] | None:
+        """Handle async provider checks while keeping the other RPCs synchronous."""
+        if (
+            not isinstance(request, dict)
+            or request.get("jsonrpc") != "2.0"
+            or request.get("method") != "provider.test"
+            or not isinstance(request.get("id"), int)
+            or isinstance(request.get("id"), bool)
+        ):
+            return self.handle(request)
+        request_id = request["id"]
+        try:
+            if not self._initialized:
+                raise _RpcFault(RPC_INVALID_REQUEST, "initialize must be the first call")
+            result = await self._test_provider(request.get("params", {}))
+            return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        except _RpcFault as error:
+            response = _failure(request_id, error.code, error.message)
+            if error.data is not None:
+                response["error"]["data"] = error.data
+            return response
+        except Exception:
+            return _failure(request_id, RPC_INTERNAL_ERROR, "Model test failed; check the endpoint, credentials, and model configuration")
+
+    async def _test_provider(self, params: object) -> dict[str, bool]:
+        fields = {"kind", "baseUrl", "model", "apiKey", "customHeaders", "apiVersion", "timeoutMs", "wireApi"}
+        parsed = _strict_object(params, fields)
+        kind = parsed.get("kind")
+        base_url = parsed.get("baseUrl")
+        model_name = parsed.get("model")
+        api_key = parsed.get("apiKey")
+        custom_headers = parsed.get("customHeaders")
+        api_version = parsed.get("apiVersion")
+        wire_api = parsed.get("wireApi")
+        timeout_ms = parsed.get("timeoutMs", 30_000)
+        if (
+            kind not in ("openai-compatible", "anthropic", "gemini")
+            or not isinstance(base_url, str)
+            or len(base_url) > 2048
+            or not isinstance(model_name, str)
+            or len(model_name) > 256
+            or api_key is not None and not isinstance(api_key, str)
+            or custom_headers is not None and not isinstance(custom_headers, dict)
+            or api_version is not None and not isinstance(api_version, str)
+            or wire_api is not None and not isinstance(wire_api, str)
+            or isinstance(timeout_ms, bool)
+            or not isinstance(timeout_ms, int)
+            or not 100 <= timeout_ms <= 600_000
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        base_url = base_url.strip()
+        model_name = model_name.strip()
+        api_version = api_version.strip() if api_version is not None else None
+        wire_api = wire_api.strip() if wire_api is not None else None
+        try:
+            config = ModelConfig(
+                provider=kind,
+                model=model_name,
+                temperature=0,
+                timeout_seconds=timeout_ms / 1000,
+                max_retries=0,
+                max_output_tokens=256,
+                base_url=base_url,
+                custom_headers=custom_headers,
+                api_version=api_version,
+                wire_api=wire_api,
+            )
+            model = self._model_factory.create_with_api_key(config, api_key)
+        except ModelFactoryError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        except (TypeError, ValueError):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params") from None
+        try:
+            async with asyncio.timeout(timeout_ms / 1000):
+                response = await model.ainvoke("Reply with OK only.")
+        except Exception:
+            raise _RpcFault(
+                RPC_INTERNAL_ERROR,
+                "Model test failed; check the endpoint, credentials, and model configuration",
+            ) from None
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            has_text = bool(content.strip())
+        elif isinstance(content, list):
+            has_text = any(
+                isinstance(block, dict)
+                and isinstance(block.get("text"), str)
+                and bool(block["text"].strip())
+                for block in content
+            )
+        else:
+            has_text = False
+        if not has_text:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Model returned no text; check the model and endpoint settings")
+        return {"ok": True}
 
     def _initialize(self, params: object) -> dict[str, Any]:
         if self._initialized:
@@ -180,7 +284,7 @@ async def serve_stdio(
             output_stream.flush()
 
     async def respond(value: object) -> None:
-        result = sidecar.handle(value)
+        result = await sidecar.handle_async(value)
         if result is not None:
             await write_frame(result)
 
