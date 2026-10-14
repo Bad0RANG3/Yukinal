@@ -2095,6 +2095,7 @@ pub(super) async fn docker_inspect(
 }
 
 pub(super) async fn docker_restart(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -2128,35 +2129,60 @@ pub(super) async fn docker_restart(
             None,
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let command = docker_restart_command(&input.container, timeout);
-    let result = match state
-        .ssh
-        .execute_once(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(30)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::docker_restart(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.container,
+                timeout,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout)
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let command = docker_restart_command(&input.container, timeout);
+        match state
+            .ssh
+            .execute_once(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(30)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (result.exit_code, result.stderr_lossy()),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "execution_failed",
             format!("could not restart container `{}`", input.container),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }
@@ -2268,6 +2294,7 @@ pub(super) async fn systemd_inspect(
 }
 
 pub(super) async fn systemd_restart(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -2303,35 +2330,60 @@ pub(super) async fn systemd_restart(
             None,
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let command = systemd_restart_command(&input.service);
-    let result = match state
-        .ssh
-        .execute_once(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(timeout as u64)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::systemd_restart(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.service,
+                timeout,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout)
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let command = systemd_restart_command(&input.service);
+        match state
+            .ssh
+            .execute_once(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(timeout as u64)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (result.exit_code, result.stderr_lossy()),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "execution_failed",
             format!("could not restart systemd service `{}`", input.service),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }
@@ -2458,6 +2510,7 @@ pub(super) async fn package_inspect(
 }
 
 pub(super) async fn package_install(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -2516,34 +2569,61 @@ pub(super) async fn package_install(
             Ok(command) => command,
             Err(error) => return Ok(failed("invalid_input", error, true, None)),
         };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let result = match state
-        .ssh
-        .execute_once(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(timeout as u64)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::package_install(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.manager,
+                &input.package,
+                input.version.as_deref(),
+                timeout,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout)
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        match state
+            .ssh
+            .execute_once(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(timeout as u64)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (result.exit_code, result.stderr_lossy()),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "execution_failed",
             format!("could not install package `{}`", input.package),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }

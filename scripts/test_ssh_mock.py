@@ -376,6 +376,14 @@ def start_ssh_mock(
             elif command == b"if command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- 'nginx' 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi":
                 channel.sendall(b"install ok installed\t1.27.0-1\n")
                 channel.send_exit_status(0)
+            elif command == b"docker restart --time 15 -- 'api' 2>&1":
+                channel.sendall(b"api\n")
+                channel.send_exit_status(0)
+            elif command == b"systemctl restart --no-ask-password --wait -- 'nginx.service' 2>&1":
+                channel.send_exit_status(0)
+            elif command == b"DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- 'nginx=1.27.0' 2>&1":
+                channel.sendall(b"Setting up nginx (1.27.0)\n")
+                channel.send_exit_status(0)
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
@@ -922,6 +930,35 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if package_inspect.exit_code != 0 or "1.27.0-1" not in package_inspect.stdout:
                 raise AssertionError(f"unexpected structured package inspect: {package_inspect!r}")
+            docker_restart = client._execute_operation(
+                "srv_stage1",
+                "docker_restart",
+                {"container": "api", "grace_period_seconds": 15},
+                timeout_seconds=30,
+            )
+            if docker_restart.exit_code != 0 or docker_restart.stdout != "api\n":
+                raise AssertionError(f"unexpected structured Docker restart: {docker_restart!r}")
+            systemd_restart = client._execute_operation(
+                "srv_stage1",
+                "systemd_restart",
+                {"service": "nginx.service", "timeout_seconds": 30},
+                timeout_seconds=30,
+            )
+            if systemd_restart.exit_code != 0:
+                raise AssertionError(f"unexpected structured systemd restart: {systemd_restart!r}")
+            package_install = client._execute_operation(
+                "srv_stage1",
+                "package_install",
+                {
+                    "manager": "apt",
+                    "package": "nginx",
+                    "version": "1.27.0",
+                    "timeout_seconds": 30,
+                },
+                timeout_seconds=30,
+            )
+            if package_install.exit_code != 0 or "Setting up nginx" not in package_install.stdout:
+                raise AssertionError(f"unexpected structured package install: {package_install!r}")
 
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:

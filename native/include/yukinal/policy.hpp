@@ -19,6 +19,7 @@ struct ExecRequest {
   std::string unit;
   std::string package_manager;
   std::string package;
+  std::string package_version;
   std::string path;
   std::string source_path;
   std::string destination_path;
@@ -26,6 +27,7 @@ struct ExecRequest {
   std::string container;
   bool include_all_containers = false;
   std::uint32_t tail = 120;
+  std::uint32_t grace_period_seconds = 10;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -46,6 +48,7 @@ bool valid_target_id(const std::string& value);
 bool valid_service_name(const std::string& value);
 bool valid_container_ref(const std::string& value);
 bool valid_package_ref(const std::string& value);
+bool valid_package_version(const std::string& value);
 bool valid_package_manager(const std::string& value);
 
 }  // namespace yukinal::ssh_service

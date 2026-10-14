@@ -209,6 +209,75 @@ YUKINAL_TEST(policy_bounds_systemd_and_package_inspection) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_bounds_effectful_docker_systemd_and_package_operations) {
+  ExecRequest request;
+  ApiError error;
+  const bool docker_restart_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_restart"},
+       {"parameters", {{"container", "api"}, {"grace_period_seconds", 15}}},
+       {"timeout_seconds", 30}},
+      &request, &error);
+  YUKINAL_REQUIRE(docker_restart_accepted);
+  YUKINAL_REQUIRE(request.container == "api");
+  YUKINAL_REQUIRE(request.grace_period_seconds == 15);
+
+  const bool unsafe_docker_restart_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_restart"},
+       {"parameters", {{"container", "api;id"}, {"grace_period_seconds", 15}}},
+       {"timeout_seconds", 30}},
+      &request, &error);
+  YUKINAL_REQUIRE(!unsafe_docker_restart_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool systemd_restart_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "systemd_restart"},
+       {"parameters", {{"service", "nginx.service"}, {"timeout_seconds", 120}}},
+       {"timeout_seconds", 120}},
+      &request, &error);
+  YUKINAL_REQUIRE(systemd_restart_accepted);
+  YUKINAL_REQUIRE(request.unit == "nginx.service");
+  YUKINAL_REQUIRE(request.timeout_seconds == 120);
+
+  const bool mismatched_timeout_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "systemd_restart"},
+       {"parameters", {{"service", "nginx.service"}, {"timeout_seconds", 120}}},
+       {"timeout_seconds", 30}},
+      &request, &error);
+  YUKINAL_REQUIRE(!mismatched_timeout_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_timeout");
+
+  const bool package_install_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "package_install"},
+       {"parameters", {{"manager", "apt"},
+                        {"package", "nginx"},
+                        {"version", "1.27.0"},
+                        {"timeout_seconds", 180}}},
+       {"timeout_seconds", 180}},
+      &request, &error);
+  YUKINAL_REQUIRE(package_install_accepted);
+  YUKINAL_REQUIRE(request.package_manager == "apt");
+  YUKINAL_REQUIRE(request.package == "nginx");
+  YUKINAL_REQUIRE(request.package_version == "1.27.0");
+  YUKINAL_REQUIRE(request.timeout_seconds == 180);
+
+  const bool invalid_version_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "package_install"},
+       {"parameters", {{"manager", "dnf"},
+                        {"package", "nginx"},
+                        {"version", "1;id"},
+                        {"timeout_seconds", 180}}},
+       {"timeout_seconds", 180}},
+      &request, &error);
+  YUKINAL_REQUIRE(!invalid_version_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_host_key_probe_without_parameters) {
   ExecRequest request;
   ApiError error;

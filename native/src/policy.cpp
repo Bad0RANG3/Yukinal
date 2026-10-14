@@ -137,6 +137,21 @@ bool valid_package_ref(const std::string& value) {
   });
 }
 
+bool valid_package_version(const std::string& value) {
+  if (value.empty() || value.size() > 128) return false;
+  const auto is_ascii_alphanumeric = [](unsigned char character) {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9');
+  };
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [&](unsigned char character) {
+    return is_ascii_alphanumeric(character) || character == '+' || character == '.' ||
+           character == '_' || character == ':' || character == '~' || character == '^' ||
+           character == '-';
+  });
+}
+
 bool valid_sftp_path(const std::string& value) {
   return !value.empty() && value.size() <= 4096 && value.find('\0') == std::string::npos;
 }
@@ -179,9 +194,12 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string nonce;
   std::string package_manager;
   std::string package;
+  std::string package_version;
   std::string container;
   bool include_all_containers = false;
   std::uint32_t tail = 120;
+  std::uint32_t grace_period_seconds = 10;
+  int operation_timeout = 0;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -254,6 +272,32 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     container = container_it->get<std::string>();
+  } else if (operation == "docker_restart") {
+    if (!has_only_keys(*parameters_it, {"container", "grace_period_seconds"})) {
+      set_error(error, 422, "invalid_parameters", "docker_restart accepts only container and grace_period_seconds parameters");
+      return false;
+    }
+    const auto container_it = parameters_it->find("container");
+    const auto grace_it = parameters_it->find("grace_period_seconds");
+    if (container_it == parameters_it->end() || !container_it->is_string() ||
+        !valid_container_ref(container_it->get<std::string>()) ||
+        grace_it == parameters_it->end()) {
+      set_error(error, 422, "invalid_parameters", "docker_restart requires a safe container and bounded grace period");
+      return false;
+    }
+    std::uint64_t parsed_grace = 0;
+    if (grace_it->is_number_unsigned()) {
+      parsed_grace = grace_it->get<std::uint64_t>();
+    } else if (grace_it->is_number_integer()) {
+      const auto signed_grace = grace_it->get<std::int64_t>();
+      if (signed_grace > 0) parsed_grace = static_cast<std::uint64_t>(signed_grace);
+    }
+    if (parsed_grace < 1 || parsed_grace > 120) {
+      set_error(error, 422, "invalid_parameters", "docker_restart grace_period_seconds must be between 1 and 120");
+      return false;
+    }
+    container = container_it->get<std::string>();
+    grace_period_seconds = static_cast<std::uint32_t>(parsed_grace);
   } else if (operation == "systemd_inspect") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "systemd_inspect accepts only a service parameter");
@@ -287,6 +331,75 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       set_error(error, 422, "invalid_parameters", "package_inspect requires apt or dnf and a safe package name");
       return false;
     }
+  } else if (operation == "systemd_restart") {
+    if (!has_only_keys(*parameters_it, {"service", "timeout_seconds"})) {
+      set_error(error, 422, "invalid_parameters", "systemd_restart accepts only service and timeout_seconds parameters");
+      return false;
+    }
+    const auto service_it = parameters_it->find("service");
+    const auto timeout_param_it = parameters_it->find("timeout_seconds");
+    if (service_it == parameters_it->end() || !service_it->is_string() ||
+        timeout_param_it == parameters_it->end()) {
+      set_error(error, 422, "invalid_parameters", "systemd_restart requires a safe service and bounded timeout");
+      return false;
+    }
+    unit = service_it->get<std::string>();
+    if (!valid_service_name(unit) || !unit.ends_with(".service")) {
+      set_error(error, 422, "invalid_parameters", "systemd_restart requires a safe .service unit name");
+      return false;
+    }
+    std::uint64_t parsed_timeout = 0;
+    if (timeout_param_it->is_number_unsigned()) {
+      parsed_timeout = timeout_param_it->get<std::uint64_t>();
+    } else if (timeout_param_it->is_number_integer()) {
+      const auto signed_timeout = timeout_param_it->get<std::int64_t>();
+      if (signed_timeout > 0) parsed_timeout = static_cast<std::uint64_t>(signed_timeout);
+    }
+    if (parsed_timeout < 1 || parsed_timeout > 120) {
+      set_error(error, 422, "invalid_parameters", "systemd_restart timeout_seconds must be between 1 and 120");
+      return false;
+    }
+    operation_timeout = static_cast<int>(parsed_timeout);
+  } else if (operation == "package_install") {
+    if (!has_only_keys(*parameters_it, {"manager", "package", "version", "timeout_seconds"})) {
+      set_error(error, 422, "invalid_parameters", "package_install accepts only manager, package, version, and timeout_seconds parameters");
+      return false;
+    }
+    const auto manager_it = parameters_it->find("manager");
+    const auto package_it = parameters_it->find("package");
+    const auto version_it = parameters_it->find("version");
+    const auto timeout_param_it = parameters_it->find("timeout_seconds");
+    if (manager_it == parameters_it->end() || !manager_it->is_string() ||
+        package_it == parameters_it->end() || !package_it->is_string() ||
+        timeout_param_it == parameters_it->end()) {
+      set_error(error, 422, "invalid_parameters", "package_install requires a supported manager, package, and bounded timeout");
+      return false;
+    }
+    package_manager = manager_it->get<std::string>();
+    package = package_it->get<std::string>();
+    if (!valid_package_manager(package_manager) || !valid_package_ref(package)) {
+      set_error(error, 422, "invalid_parameters", "package_install requires apt or dnf and a safe package name");
+      return false;
+    }
+    if (version_it != parameters_it->end() && !version_it->is_null()) {
+      if (!version_it->is_string() || !valid_package_version(version_it->get<std::string>())) {
+        set_error(error, 422, "invalid_parameters", "package_install version contains unsupported characters");
+        return false;
+      }
+      package_version = version_it->get<std::string>();
+    }
+    std::uint64_t parsed_timeout = 0;
+    if (timeout_param_it->is_number_unsigned()) {
+      parsed_timeout = timeout_param_it->get<std::uint64_t>();
+    } else if (timeout_param_it->is_number_integer()) {
+      const auto signed_timeout = timeout_param_it->get<std::int64_t>();
+      if (signed_timeout > 0) parsed_timeout = static_cast<std::uint64_t>(signed_timeout);
+    }
+    if (parsed_timeout < 1 || parsed_timeout > 600) {
+      set_error(error, 422, "invalid_parameters", "package_install timeout_seconds must be between 1 and 600");
+      return false;
+    }
+    operation_timeout = static_cast<int>(parsed_timeout);
   } else if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -523,19 +636,23 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     set_error(error, 422, "unsupported_operation", "The requested structured SSH operation is not enabled");
     return false;
   }
+  const std::uint64_t maximum_timeout = operation == "package_install"
+      ? 600
+      : (operation == "systemd_restart" ? 120 : 30);
   std::uint64_t timeout = 0;
   if (timeout_it->is_number_unsigned()) {
     timeout = timeout_it->get<std::uint64_t>();
   } else {
     const auto signed_timeout = timeout_it->get<std::int64_t>();
-    if (signed_timeout < 1 || signed_timeout > 30) {
-      set_error(error, 422, "invalid_timeout", "timeout_seconds must be between 1 and 30");
+    if (signed_timeout < 1 || static_cast<std::uint64_t>(signed_timeout) > maximum_timeout) {
+      set_error(error, 422, "invalid_timeout", "timeout_seconds exceeds the operation limit");
       return false;
     }
     timeout = static_cast<std::uint64_t>(signed_timeout);
   }
-  if (timeout < 1 || timeout > 30) {
-    set_error(error, 422, "invalid_timeout", "timeout_seconds must be between 1 and 30");
+  if (timeout < 1 || timeout > maximum_timeout ||
+      (operation_timeout > 0 && timeout != static_cast<std::uint64_t>(operation_timeout))) {
+    set_error(error, 422, "invalid_timeout", "timeout_seconds exceeds the operation limit or differs from its validated parameters");
     return false;
   }
   if (!request) {
@@ -552,9 +669,11 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->nonce = std::move(nonce);
   request->package_manager = std::move(package_manager);
   request->package = std::move(package);
+  request->package_version = std::move(package_version);
   request->container = std::move(container);
   request->include_all_containers = include_all_containers;
   request->tail = tail;
+  request->grace_period_seconds = grace_period_seconds;
   request->content = std::move(content);
   request->since_seconds = since_seconds;
   request->expected_size = expected_size;

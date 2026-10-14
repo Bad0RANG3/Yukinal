@@ -126,6 +126,67 @@ pub(crate) async fn package_inspect(
     .await
 }
 
+pub(crate) async fn docker_restart(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    container: &str,
+    grace_period_seconds: usize,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "docker_restart",
+        json!({ "container": container, "grace_period_seconds": grace_period_seconds }),
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn systemd_restart(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    service: &str,
+    timeout_seconds: usize,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "systemd_restart",
+        json!({ "service": service, "timeout_seconds": timeout_seconds }),
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn package_install(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    manager: &str,
+    package: &str,
+    version: Option<&str>,
+    timeout_seconds: usize,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "package_install",
+        json!({
+            "manager": manager,
+            "package": package,
+            "version": version,
+            "timeout_seconds": timeout_seconds,
+        }),
+        true,
+    )
+    .await
+}
+
 pub(crate) async fn connection_check(
     app: &AppHandle,
     state: &AppState,
@@ -1758,10 +1819,19 @@ async fn request_operation(
     child: &mut std::process::Child,
 ) -> Result<Value, SshServiceFailure> {
     let base_url = format!("http://127.0.0.1:{port}");
-    let timeout_seconds = if operation == "system_snapshot" {
-        30
-    } else {
-        10
+    let timeout_seconds = match operation {
+        "system_snapshot" | "docker_restart" => 30,
+        "systemd_restart" => parameters
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .filter(|seconds| (1..=120).contains(seconds))
+            .unwrap_or(10),
+        "package_install" => parameters
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .filter(|seconds| (1..=600).contains(seconds))
+            .unwrap_or(10),
+        _ => 10,
     };
     let client = reqwest::Client::builder()
         .no_proxy()

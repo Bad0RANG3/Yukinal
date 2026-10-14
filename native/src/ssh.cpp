@@ -1243,13 +1243,15 @@ int run_sftp_stream(const TargetConfig& target, const std::string& path, bool up
   return 1;
 }
 
-static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
-                                  int timeout_seconds) {
+static ExecResult run_ssh_command_with_timeout_limit(const TargetConfig& target,
+                                                     const std::string& command,
+                                                     int timeout_seconds,
+                                                     int maximum_timeout_seconds) {
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
-  if (timeout_seconds < 1 || timeout_seconds > 30) {
-    fail(&result, "invalid_parameters", "The read-only SSH operation parameters are invalid");
+  if (timeout_seconds < 1 || timeout_seconds > maximum_timeout_seconds) {
+    fail(&result, "invalid_parameters", "The structured SSH operation timeout is invalid");
     return result;
   }
   const auto deadline = started + std::chrono::seconds(timeout_seconds);
@@ -1330,6 +1332,11 @@ static ExecResult run_ssh_command(const TargetConfig& target, const std::string&
     }
   }
   return result;
+}
+
+static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
+                                  int timeout_seconds) {
+  return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 30);
 }
 
 ExecResult service_status(const TargetConfig& target, const std::string& service,
@@ -1473,6 +1480,53 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
       : "if command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
             package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi";
   return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult docker_restart(const TargetConfig& target, const std::string& container,
+                          std::uint32_t grace_period_seconds, int timeout_seconds) {
+  if (target.probe_only || !valid_container_ref(container) || grace_period_seconds < 1 ||
+      grace_period_seconds > 120 || timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The Docker restart parameters are invalid");
+    return result;
+  }
+  const std::string command = "docker restart --time " +
+                              std::to_string(grace_period_seconds) + " -- '" + container +
+                              "' 2>&1";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult systemd_restart(const TargetConfig& target, const std::string& unit,
+                           int timeout_seconds) {
+  if (target.probe_only || !valid_service_name(unit) || !unit.ends_with(".service") ||
+      timeout_seconds < 1 || timeout_seconds > 120) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The systemd restart parameters are invalid");
+    return result;
+  }
+  const std::string command =
+      "systemctl restart --no-ask-password --wait -- '" + unit + "' 2>&1";
+  return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 120);
+}
+
+ExecResult package_install(const TargetConfig& target, const std::string& manager,
+                           const std::string& package, const std::string& version,
+                           int timeout_seconds) {
+  if (target.probe_only || !valid_package_manager(manager) || !valid_package_ref(package) ||
+      (!version.empty() && !valid_package_version(version)) || timeout_seconds < 1 ||
+      timeout_seconds > 600) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The package install parameters are invalid");
+    return result;
+  }
+  std::string specification = package;
+  if (!version.empty()) specification += manager == "apt" ? "=" + version : "-" + version;
+  const std::string package_arg = "'" + specification + "'";
+  const std::string command = manager == "apt"
+      ? "DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- " +
+            package_arg + " 2>&1"
+      : "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1";
+  return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 600);
 }
 
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
@@ -2646,6 +2700,17 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   if (request.operation == "package_inspect") {
     return package_inspect(target, request.package_manager, request.package,
                            request.timeout_seconds);
+  }
+  if (request.operation == "docker_restart") {
+    return docker_restart(target, request.container, request.grace_period_seconds,
+                          request.timeout_seconds);
+  }
+  if (request.operation == "systemd_restart") {
+    return systemd_restart(target, request.unit, request.timeout_seconds);
+  }
+  if (request.operation == "package_install") {
+    return package_install(target, request.package_manager, request.package,
+                           request.package_version, request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);
