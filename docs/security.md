@@ -2,7 +2,7 @@
 
 本页说明 Yukinal 当前实现和[目标架构](./architecture-and-build-plan.md)必须保持的信任边界。目标功能尚未全部实现；发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
-当前重写包含独立 C++ SSH 服务和 Python Agent。桌面为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。服务状态查询使用固定操作；桌面文件浏览和 Agent 文件读取、覆盖写入、备份创建、清理以及编辑/恢复也使用 C++ SFTP 操作，适用于密码/私钥身份且未配置 Host CA 的服务器。守卫式替换会复核目标的大小、mtime 和 SHA-256，在同目录独占创建暂存文件，保留并复核 mode/mtime/owner/group，再通过 OpenSSH POSIX 原子重命名发布；服务器不支持安全原子替换时会拒绝发布。文件传输、交互终端、主机密钥探测及其他未迁移路径仍使用 Rust。
+当前重写包含独立 C++ SSH 服务和 Python Agent。桌面为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。服务状态查询使用固定操作；桌面文件浏览和 Agent 文件读取、覆盖写入、备份创建、清理以及编辑/恢复也使用 C++ SFTP 操作，适用于密码、私钥或 SSH Agent 身份且未配置 Host CA 的服务器。SSH Agent socket 仅在目标选择 Agent 认证时传给 C++ 子进程（Unix 使用 `SSH_AUTH_SOCK`，Windows 使用平台 Agent 接口）。守卫式替换会复核目标的大小、mtime 和 SHA-256，在同目录独占创建暂存文件，保留并复核 mode/mtime/owner/group，再通过 OpenSSH POSIX 原子重命名发布；服务器不支持安全原子替换时会拒绝发布。文件传输、交互终端、主机密钥探测、Host CA 及其他未迁移路径仍使用 Rust。
 
 ## 谁能做决定
 

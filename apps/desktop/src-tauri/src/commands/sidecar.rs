@@ -187,6 +187,14 @@ fn resolve_ssh_service_runtime(
         })?;
 
     let mut names = BTreeSet::from([token_name.to_string()]);
+    let uses_agent = targets.iter().any(|target| {
+        target
+            .get("auth")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|auth| auth.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("agent")
+    });
     for target in targets {
         let Some(auth) = target.get("auth").and_then(serde_json::Value::as_object) else {
             continue;
@@ -209,6 +217,31 @@ fn resolve_ssh_service_runtime(
             }
         }
     }
+    let agent_socket = if uses_agent {
+        if names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("SSH_AUTH_SOCK"))
+        {
+            return Err("SSH_AUTH_SOCK cannot also be used as a credential reference".into());
+        }
+        match std::env::var_os("SSH_AUTH_SOCK") {
+            Some(value) => {
+                let value = value
+                    .into_string()
+                    .map_err(|_| "SSH_AUTH_SOCK is not a valid Unicode socket path".to_string())?;
+                if value.is_empty() || value.len() > 4096 || value.contains('\0') {
+                    return Err("SSH_AUTH_SOCK is not a valid socket path".into());
+                }
+                Some(value)
+            }
+            None if cfg!(windows) => None,
+            None => {
+                return Err("set SSH_AUTH_SOCK for the configured SSH agent target".into());
+            }
+        }
+    } else {
+        None
+    };
     let token = std::env::var(token_name).map_err(|_| {
         format!("set the SSH service API token in the {token_name} environment variable")
     })?;
@@ -217,7 +250,7 @@ fn resolve_ssh_service_runtime(
             "the SSH service API token in {token_name} is empty"
         ));
     }
-    let referenced_environment = names
+    let mut referenced_environment = names
         .into_iter()
         .filter(|name| name != token_name)
         .map(|name| {
@@ -228,6 +261,9 @@ fn resolve_ssh_service_runtime(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(socket) = agent_socket {
+        referenced_environment.push(("SSH_AUTH_SOCK".into(), socket));
+    }
 
     let binary = resolve_ssh_service_binary(cwd, resources)?.ok_or_else(|| {
             "the C++ SSH service executable is unavailable; build it with `pnpm build:ssh-service` or set YUKINAL_SSH_SERVICE_BINARY".to_string()
@@ -411,6 +447,20 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
                 auth["passphrase_env"] = json!(passphrase_env);
             }
             auth
+        }
+        "agent" => {
+            if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK") {
+                let socket = socket
+                    .into_string()
+                    .map_err(|_| "the SSH agent socket path is not valid Unicode".to_string())?;
+                if socket.is_empty() || socket.len() > 4096 || socket.contains('\0') {
+                    return Err("the SSH agent socket path is invalid".into());
+                }
+                credentials.insert("SSH_AUTH_SOCK".into(), serde_json::Value::String(socket));
+            } else if !cfg!(windows) {
+                return Err("SSH_AUTH_SOCK is not set for the selected SSH agent identity".into());
+            }
+            json!({ "type": "agent" })
         }
         _ => {
             return Err(

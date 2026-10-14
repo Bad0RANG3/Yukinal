@@ -165,8 +165,13 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
       }
       target.password_env = required_string(*auth_it, "password_env", label + ".auth");
       if (!valid_env_name(target.password_env)) throw std::runtime_error(label + ".auth.password_env is invalid");
+    } else if (auth_type == "agent") {
+      if (auth_it->size() != 1) {
+        throw std::runtime_error(label + ".auth agent configuration accepts only type");
+      }
+      target.agent_auth = true;
     } else {
-      throw std::runtime_error(label + ".auth.type must be private_key or password");
+      throw std::runtime_error(label + ".auth.type must be private_key, password, or agent");
     }
 
     const std::string target_id = target.target_id;

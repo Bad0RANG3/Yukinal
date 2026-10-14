@@ -111,7 +111,7 @@ pub(crate) fn cpp_ssh_file_operations_supported(
     };
     Ok(matches!(
         identity.method.as_str(),
-        "password" | "privateKey"
+        "password" | "privateKey" | "agent"
     ))
 }
 

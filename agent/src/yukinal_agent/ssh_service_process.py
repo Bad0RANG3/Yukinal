@@ -73,12 +73,16 @@ class SshServiceProcess:
             raise SshServiceProcessError("the SSH service target allowlist is empty or invalid")
 
         secret_env: set[str] = {token_env}
+        auth_env_names: set[str] = set()
+        uses_agent = False
         for target in targets:
             if not isinstance(target, dict):
                 raise SshServiceProcessError("the SSH service target allowlist is invalid")
             auth = target.get("auth")
             if not isinstance(auth, dict):
                 raise SshServiceProcessError("the SSH service target authentication configuration is invalid")
+            if auth.get("type") == "agent":
+                uses_agent = True
             for key in ("password_env", "passphrase_env", "private_key_env"):
                 name = auth.get(key)
                 if name is not None:
@@ -87,6 +91,18 @@ class SshServiceProcess:
                     if any(existing != name and existing.casefold() == name.casefold() for existing in secret_env):
                         raise SshServiceProcessError("SSH service environment references differ only by letter case")
                     secret_env.add(name)
+                    auth_env_names.add(name)
+
+        if uses_agent:
+            if any(name.casefold() == "ssh_auth_sock" for name in auth_env_names):
+                raise SshServiceProcessError("SSH_AUTH_SOCK cannot also be used as a credential reference")
+            socket_path = os.environ.get("SSH_AUTH_SOCK")
+            if os.name != "nt" and socket_path is None:
+                raise SshServiceProcessError("SSH_AUTH_SOCK is not set for the configured SSH agent target")
+            if socket_path is not None and not _valid_agent_socket_path(socket_path):
+                raise SshServiceProcessError("SSH_AUTH_SOCK is not a valid socket path")
+            if socket_path is not None:
+                secret_env.add("SSH_AUTH_SOCK")
 
         token = os.environ.get(token_env) or os.environ.get("YUKINAL_SSH_API_TOKEN", "")
         if not token:
@@ -181,6 +197,14 @@ class SshServiceProcess:
             credential_names = {auth["private_key_env"]}
             if "passphrase_env" in auth:
                 credential_names.add(auth["passphrase_env"])
+        elif auth == {"type": "agent"}:
+            if "SSH_AUTH_SOCK" in credentials:
+                credential_names = {"SSH_AUTH_SOCK"}
+                socket_path = credentials["SSH_AUTH_SOCK"]
+                if not _valid_agent_socket_path(socket_path):
+                    raise SshServiceProcessError("the desktop host returned an invalid SSH agent socket path")
+            else:
+                credential_names = set()
         else:
             raise SshServiceProcessError("the desktop host returned an unsupported SSH identity")
         if (
@@ -333,6 +357,15 @@ def _valid_credential_env_name(value: object) -> bool:
         return False
     reserved = {name.upper() for name in SshServiceProcess._RUNTIME_ENV}
     return value.upper() not in reserved
+
+
+def _valid_agent_socket_path(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= 4096
+    except UnicodeEncodeError:
+        return False
 
 
 async def _health_check(port: int) -> bool:

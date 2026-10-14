@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use ring::rand::SecureRandom;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
@@ -406,10 +406,18 @@ async fn run_operation_response(
             .env("WINDIR", system_root);
     }
     for (name, value) in credentials {
-        if !matches!(
-            name.as_str(),
-            "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
-        ) || !value.is_string()
+        let agent_socket = target
+            .get("auth")
+            .and_then(|auth| auth.get("type"))
+            .and_then(Value::as_str)
+            == Some("agent")
+            && name == "SSH_AUTH_SOCK";
+        if !(agent_socket
+            || matches!(
+                name.as_str(),
+                "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
+            ))
+            || !value.is_string()
         {
             return Err("the desktop returned invalid SSH credentials".into());
         }

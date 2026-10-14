@@ -117,7 +117,10 @@ pub async fn server_services(
         .get(identity_id)
         .map_err(|error| error.to_string())?;
     if server.connection.host_certificate_authority.is_some()
-        || !matches!(identity.method.as_str(), "password" | "privateKey")
+        || !matches!(
+            identity.method.as_str(),
+            "password" | "privateKey" | "agent"
+        )
     {
         return legacy_service_inventory(&state, &server_id).await;
     }
@@ -126,8 +129,8 @@ pub async fn server_services(
         .map_err(|error| format!("service discovery returned an invalid response: {error}"))
 }
 
-/// Preserve current certificate, agent, and host-CA identities until the C++ service supports
-/// those authentication and trust modes. New password/private-key desktop calls use C++.
+/// Preserve certificate and host-CA identities until the C++ service supports those trust modes.
+/// Password, private-key, and SSH-agent identities use the C++ service.
 async fn legacy_service_inventory(
     state: &AppState,
     server_id: &str,

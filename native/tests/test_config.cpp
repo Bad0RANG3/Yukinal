@@ -84,6 +84,27 @@ YUKINAL_TEST(config_accepts_desktop_host_key_pin_and_memory_private_key) {
   YUKINAL_REQUIRE(parsed.private_key_env == "YK_SSH_KEY_0");
 }
 
+YUKINAL_TEST(config_accepts_ssh_agent_authentication) {
+  auto value = valid_config();
+  value["targets"][0]["auth"] = {{"type", "agent"}};
+
+  const auto config = parse_config(value);
+  YUKINAL_REQUIRE(config.targets.at("staging-web-01").agent_auth);
+}
+
+YUKINAL_TEST(config_rejects_ssh_agent_credential_fields) {
+  auto value = valid_config();
+  value["targets"][0]["auth"] = {{"type", "agent"}, {"password_env", "SSH_PASSWORD"}};
+
+  bool rejected = false;
+  try {
+    (void)parse_config(value);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+}
+
 YUKINAL_TEST(config_rejects_missing_or_ambiguous_host_key_trust) {
   auto missing = valid_config();
   missing["targets"][0].erase("known_hosts_file");

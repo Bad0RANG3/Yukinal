@@ -341,6 +341,10 @@ std::string read_environment(const std::string& name) {
 class SshResources {
  public:
   ~SshResources() {
+    if (agent_) {
+      libssh2_agent_disconnect(agent_);
+      libssh2_agent_free(agent_);
+    }
     if (sftp_handle_) libssh2_sftp_close_handle(sftp_handle_);
     if (sftp_) libssh2_sftp_shutdown(sftp_);
     if (channel_) {
@@ -359,6 +363,7 @@ class SshResources {
   Socket socket_ = kInvalidSocket;
   LIBSSH2_SESSION* session_ = nullptr;
   LIBSSH2_KNOWNHOSTS* known_hosts_ = nullptr;
+  LIBSSH2_AGENT* agent_ = nullptr;
   LIBSSH2_SFTP* sftp_ = nullptr;
   LIBSSH2_SFTP_HANDLE* sftp_handle_ = nullptr;
   LIBSSH2_CHANNEL* channel_ = nullptr;
@@ -511,6 +516,53 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     return false;
   }
   int auth_result = -1;
+  if (target.agent_auth) {
+    resources->agent_ = libssh2_agent_init(resources->session_);
+    if (!resources->agent_) {
+      fail(result, "ssh_unavailable", "Could not initialize the SSH agent client");
+      return false;
+    }
+    if (libssh2_agent_connect(resources->agent_) != 0) {
+      fail(result, "credential_unavailable", "Could not connect to the configured SSH agent");
+      return false;
+    }
+    if (libssh2_agent_list_identities(resources->agent_) != 0) {
+      fail(result, "credential_unavailable", "Could not list identities from the SSH agent");
+      return false;
+    }
+    struct libssh2_agent_publickey* identity = nullptr;
+    struct libssh2_agent_publickey* previous = nullptr;
+    bool authenticated = false;
+    for (;;) {
+      if (!set_session_timeout(resources->session_, deadline)) {
+        fail(result, "timeout", "SSH agent authentication timed out");
+        return false;
+      }
+      const int identity_result =
+          libssh2_agent_get_identity(resources->agent_, &identity, previous);
+      if (identity_result == 1) break;
+      if (identity_result < 0) {
+        fail(result, "credential_unavailable", "Could not read an identity from the SSH agent");
+        return false;
+      }
+      previous = identity;
+      auth_result = libssh2_agent_userauth(resources->agent_, target.username.c_str(), identity);
+      if (auth_result == 0) {
+        authenticated = true;
+        break;
+      }
+      if (remaining_ms(deadline) == 0 ||
+          libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT) {
+        fail(result, "timeout", "SSH agent authentication timed out");
+        return false;
+      }
+    }
+    if (!authenticated) {
+      fail(result, "authentication_failed", "None of the configured SSH agent identities was accepted");
+      return false;
+    }
+    return true;
+  }
   if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
     std::string passphrase = read_environment(target.passphrase_env);
     if (!target.private_key_env.empty()) {

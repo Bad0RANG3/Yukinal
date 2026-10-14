@@ -9,8 +9,9 @@
 > hosts native UI IPC and some SSH paths. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
-> C++ SFTP operations for password/private-key identities without Host CA.
-> Transfers, PTY, and other authentication modes still use Rust. Every C++ operation resolves its `target_id` through the service
+> C++ SFTP operations for password, private-key, and SSH-agent identities
+> without Host CA. Transfers, PTY, and certificate/Host CA trust modes still use
+> Rust. Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
 > loopback health endpoint, and stops it with the Agent process. Automatic
@@ -222,14 +223,17 @@ Paths are resolved relative to that JSON file. Each target requires:
 - a configured host, port, and SSH username;
 - exactly one host-key trust source: an OpenSSH-format `known_hosts_file`, or
   `host_key_fingerprint` containing the desktop pin in `SHA256:<base64>` form;
-- exactly one auth mode: a `private_key_file`, a `private_key_env`, or a
-  `password_env` reference. Private-key environment references can include an
-  optional `passphrase_env`.
+- exactly one auth mode: a `private_key_file`, a `private_key_env`, a
+  `password_env` reference, or `{ "type": "agent" }`. Private-key environment
+  references can include an optional `passphrase_env`.
 
-The desktop pin form lets the service enforce the same exact-key trust decision
-as the existing server host-key UI. Private-key environment references let the
-desktop pass decrypted keychain material directly to the C++ child without
-writing key material into the JSON configuration.
+Agent authentication uses `SSH_AUTH_SOCK` on Unix and libssh2's platform Agent
+integration on Windows. The socket path is forwarded only when an allow-listed
+target selects agent authentication. The desktop pin form lets the service
+enforce the same exact-key trust decision as the existing server host-key UI.
+Private-key environment references let the desktop pass decrypted keychain
+material directly to the C++ child without writing key material into the JSON
+configuration.
 
 Set the configured API token environment variable before starting the service.
 Never commit credentials or a real production target configuration.

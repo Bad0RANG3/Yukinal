@@ -18,6 +18,7 @@ struct TargetConfig {
   std::string private_key_env;
   std::string password_env;
   std::string passphrase_env;
+  bool agent_auth = false;
 };
 
 struct ServiceConfig {
