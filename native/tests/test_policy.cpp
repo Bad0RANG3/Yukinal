@@ -77,6 +77,38 @@ YUKINAL_TEST(policy_accepts_only_a_bounded_system_snapshot_nonce) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_requires_a_boolean_for_docker_ps) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_ps"},
+       {"parameters", {{"all", true}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.operation == "docker_ps");
+  YUKINAL_REQUIRE(request.include_all_containers);
+
+  const bool string_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_ps"},
+       {"parameters", {{"all", "true"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!string_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool extra_parameter_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "docker_ps"},
+       {"parameters", {{"all", false}, {"command", "id"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!extra_parameter_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_host_key_probe_without_parameters) {
   ExecRequest request;
   ApiError error;

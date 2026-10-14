@@ -39,6 +39,23 @@ pub(crate) async fn service_inventory(
     run_operation(app, state, server_id, "service_inventory", json!({})).await
 }
 
+pub(crate) async fn docker_ps(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    include_all_containers: bool,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "docker_ps",
+        json!({ "all": include_all_containers }),
+        true,
+    )
+    .await
+}
+
 pub(crate) async fn connection_check(
     app: &AppHandle,
     state: &AppState,
@@ -1460,15 +1477,39 @@ async fn run_operation(
     operation: &str,
     parameters: Value,
 ) -> Result<String, String> {
+    run_operation_with_status(app, state, server_id, operation, parameters, false)
+        .await
+        .map(|(_, stdout)| stdout)
+}
+
+async fn run_operation_with_status(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    operation: &str,
+    parameters: Value,
+    allow_nonzero_exit_code: bool,
+) -> Result<(i32, String), String> {
     let response = run_operation_response(app, state, server_id, operation, parameters)
         .await
         .map_err(|error| error.message)?;
-    validate_operation_response(&response, server_id, operation)?;
-    response
+    validate_operation_response_with_exit_code(
+        &response,
+        server_id,
+        operation,
+        allow_nonzero_exit_code,
+    )?;
+    let exit_code = response
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .ok_or_else(|| "the C++ SSH service returned an invalid operation exit code")?;
+    let stdout = response
         .get("stdout")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "the C++ SSH service returned an invalid operation result".into())
+        .ok_or_else(|| "the C++ SSH service returned an invalid operation result")?;
+    Ok((exit_code, stdout))
 }
 
 struct SshServiceFailure {
@@ -1598,10 +1639,21 @@ fn validate_operation_response(
     server_id: &str,
     operation: &str,
 ) -> Result<(), String> {
+    validate_operation_response_with_exit_code(response, server_id, operation, false)
+}
+
+fn validate_operation_response_with_exit_code(
+    response: &Value,
+    server_id: &str,
+    operation: &str,
+    allow_nonzero_exit_code: bool,
+) -> Result<(), String> {
+    let exit_code = response.get("exit_code").and_then(Value::as_i64);
     if response.get("status").and_then(Value::as_str) != Some("succeeded")
         || response.get("target_id").and_then(Value::as_str) != Some(server_id)
         || response.get("operation").and_then(Value::as_str) != Some(operation)
-        || response.get("exit_code").and_then(Value::as_i64) != Some(0)
+        || exit_code.is_none()
+        || (!allow_nonzero_exit_code && exit_code != Some(0))
         || response.get("stdout").and_then(Value::as_str).is_none()
         || response.get("stderr").and_then(Value::as_str).is_none()
         || response

@@ -1382,7 +1382,7 @@ async fn handle_sidecar_request_with_context(
         SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
         SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
         SERVER_SERVICES => server_services(app, state, server_id, &request.input, &cancel).await,
-        DOCKER_PS => docker_ps(state, server_id, &request.input, &cancel).await,
+        DOCKER_PS => docker_ps(app, state, server_id, &request.input, &cancel).await,
         DOCKER_LOGS => docker_logs(state, server_id, &request.input, &cancel).await,
         DOCKER_INSPECT => docker_inspect(state, server_id, &request.input, &cancel).await,
         DOCKER_RESTART => docker_restart(state, server_id, &request.input, &cancel).await,

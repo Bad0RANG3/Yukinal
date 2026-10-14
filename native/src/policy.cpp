@@ -145,6 +145,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string source_path;
   std::string destination_path;
   std::string nonce;
+  bool include_all_containers = false;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
@@ -168,6 +169,17 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     nonce = nonce_it->get<std::string>();
+  } else if (operation == "docker_ps") {
+    if (!has_only_keys(*parameters_it, {"all"})) {
+      set_error(error, 422, "invalid_parameters", "docker_ps accepts only an all parameter");
+      return false;
+    }
+    const auto all_it = parameters_it->find("all");
+    if (all_it == parameters_it->end() || !all_it->is_boolean()) {
+      set_error(error, 422, "invalid_parameters", "docker_ps requires a boolean all parameter");
+      return false;
+    }
+    include_all_containers = all_it->get<bool>();
   } else if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -431,6 +443,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->source_path = std::move(source_path);
   request->destination_path = std::move(destination_path);
   request->nonce = std::move(nonce);
+  request->include_all_containers = include_all_containers;
   request->content = std::move(content);
   request->since_seconds = since_seconds;
   request->expected_size = expected_size;

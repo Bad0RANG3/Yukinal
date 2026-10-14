@@ -354,6 +354,14 @@ def start_ssh_mock(
                     response.extend(f"\n__YK_SNAPSHOT_{nonce}_{operation}_END_0__\n".encode())
                 channel.sendall(response)
                 channel.send_exit_status(0)
+            elif command in (
+                b"docker ps --format '{{json .}}' 2>/dev/null",
+                b"docker ps -a --format '{{json .}}' 2>/dev/null",
+            ):
+                channel.sendall(
+                    b'{"Names":"api","Image":"example/api","State":"running","Status":"Up","RestartCount":0}\n'
+                )
+                channel.send_exit_status(0)
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
@@ -866,6 +874,12 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if snapshot.exit_code != 0 or "Mock CPU" not in snapshot.stdout:
                 raise AssertionError(f"unexpected structured system snapshot: {snapshot!r}")
+
+            docker = client._execute_operation(
+                "srv_stage1", "docker_ps", {"all": True}, timeout_seconds=5
+            )
+            if docker.exit_code != 0 or json.loads(docker.stdout.splitlines()[0])["Names"] != "api":
+                raise AssertionError(f"unexpected structured Docker listing: {docker!r}")
 
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:

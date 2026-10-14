@@ -1405,6 +1405,19 @@ ExecResult system_snapshot(const TargetConfig& target, const std::string& nonce,
   return run_ssh_command(target, command, timeout_seconds);
 }
 
+ExecResult docker_ps(const TargetConfig& target, bool include_all_containers,
+                    int timeout_seconds) {
+  if (target.probe_only || timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The Docker listing parameters are invalid");
+    return result;
+  }
+  const std::string command = include_all_containers
+                                  ? "docker ps -a --format '{{json .}}' 2>/dev/null"
+                                  : "docker ps --format '{{json .}}' 2>/dev/null";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   static constexpr char command[] =
       "if command -v systemctl >/dev/null 2>&1; then "
@@ -2560,6 +2573,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "system_snapshot") {
     return system_snapshot(target, request.nonce, request.timeout_seconds);
+  }
+  if (request.operation == "docker_ps") {
+    return docker_ps(target, request.include_all_containers, request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);

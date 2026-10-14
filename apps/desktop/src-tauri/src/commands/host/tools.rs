@@ -1809,6 +1809,7 @@ pub(super) async fn filesystem_restore(
 }
 
 pub(super) async fn docker_ps(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -1825,39 +1826,62 @@ pub(super) async fn docker_ps(
             ));
         }
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let command = if input.all.unwrap_or(false) {
-        DOCKER_PS_ALL_COMMAND
+    let (exit_code, stdout) = if cpp_supported {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::docker_ps(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                input.all.unwrap_or(false),
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        }
     } else {
-        DOCKER_PS_COMMAND
-    };
-    let result = match state
-        .ssh
-        .execute(
-            &session,
-            command,
-            Some(std::time::Duration::from_secs(10)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let command = if input.all.unwrap_or(false) {
+            DOCKER_PS_ALL_COMMAND
+        } else {
+            DOCKER_PS_COMMAND
+        };
+        match state
+            .ssh
+            .execute(
+                &session,
+                command,
+                Some(std::time::Duration::from_secs(10)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (result.exit_code, result.stdout_lossy()),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
 
     // A missing Docker binary or a non-Docker host is a valid, structured answer.
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(success(json!({ "available": false, "containers": [] })));
     }
     Ok(success(json!({
         "available": true,
-        "containers": parse_docker_ps(&result.stdout_lossy()),
+        "containers": parse_docker_ps(&stdout),
     })))
 }
 

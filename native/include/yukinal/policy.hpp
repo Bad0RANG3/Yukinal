@@ -21,6 +21,7 @@ struct ExecRequest {
   std::string source_path;
   std::string destination_path;
   std::string nonce;
+  bool include_all_containers = false;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
