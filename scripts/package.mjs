@@ -33,11 +33,16 @@ const steps = [
   { name: "verify Node.js runtime checksum pins", command: process.execPath, args: ["scripts/check-node-runtime-pins.mjs"] },
   { name: "prepare bundled Node.js runtime", command: process.execPath, args: ["scripts/prepare-node-runtime.mjs"] },
   { name: "contract libs", command: "pnpm", args: ["build:libs"] },
-  // Rebuilt here even though `beforeBuildCommand` builds it too: this is what step 3 checks,
-  // and both must work for someone who runs `tauri build` directly.
+  // Both runtimes are built here for preflight smoke; the Tauri hook builds them too so a
+  // direct `tauri build` also stages a current Agent.
   { name: "agent bundle (esbuild)", command: "pnpm", args: ["--filter", "@yukinal/agent", "build"] },
   {
-    name: "installed-layout smoke with bundled Node.js",
+    name: "frozen Python Agent build and smoke",
+    command: process.execPath,
+    args: ["scripts/build-python-agent.mjs"],
+  },
+  {
+    name: "installed-layout smoke with bundled Node.js fallback",
     command: process.execPath,
     args: ["scripts/smoke-packaged-agent.mjs"],
     env: { YUKINAL_REQUIRE_PACKAGED_NODE: "1" },
@@ -114,5 +119,5 @@ if (!bundleDir) {
 }
 
 console.log("\nThese installers are UNSIGNED: no certificate or signing identity is configured.");
-console.log("The packaged app includes the pinned Node.js runtime; the project NOTICE and bundled LICENSE identify its terms.");
+console.log("The packaged app starts the frozen Python Agent; its Node.js runtime is retained as a transition fallback.");
 console.log("See the repository docs/release.md, 「交付与发布」.");

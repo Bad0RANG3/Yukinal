@@ -34,10 +34,10 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
 }
 $installDir = [IO.Path]::GetFullPath($InstallDir)
 $appPath = Join-Path $installDir 'yukinal-desktop.exe'
-$runtimePath = Join-Path $installDir 'runtime/node.exe'
-$sidecarCommandPattern = '[\\/]agent[\\/]index\.js(?=$|[\s"''])'
+$agentPath = Join-Path $installDir 'python-agent/yukinal-agent/yukinal-agent.exe'
+$agentName = 'yukinal-agent.exe'
 
-foreach ($required in @($appPath, $runtimePath, (Join-Path $installDir 'agent/index.js'))) {
+foreach ($required in @($appPath, $agentPath)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
     throw "Required installed resource is missing: $required"
   }
@@ -47,7 +47,7 @@ if (-not (Test-Path -LiteralPath $testRoot -PathType Container)) {
 }
 
 $appPath = [IO.Path]::GetFullPath($appPath)
-$runtimePath = [IO.Path]::GetFullPath($runtimePath)
+$agentPath = [IO.Path]::GetFullPath($agentPath)
 $existing = Get-CimInstance Win32_Process -Filter "Name = 'yukinal-desktop.exe'" |
   Where-Object { $_.ExecutablePath -eq $appPath }
 if ($existing) { throw "Refusing to interfere with an already running installation (PID $($existing.ProcessId))." }
@@ -106,7 +106,7 @@ try {
     Start-Sleep -Seconds 1
     $app.Refresh()
     $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-      Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $sidecarCommandPattern } |
+      Where-Object { $_.Name -eq $agentName -and $_.ExecutablePath -eq $agentPath } |
       Select-Object -First 1
     if ($sidecar) { break }
     if ($app.HasExited) { break }
@@ -115,7 +115,7 @@ try {
   if ($sidecar) {
     $sidecarStarted = $true
     $sidecarPath = $sidecar.ExecutablePath
-    $expectedHash = (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash
+    $expectedHash = (Get-FileHash -LiteralPath $agentPath -Algorithm SHA256).Hash
     $actualHash = (Get-FileHash -LiteralPath $sidecarPath -Algorithm SHA256).Hash
     $sidecarHashMatches = $actualHash -eq $expectedHash
 
@@ -150,7 +150,7 @@ try {
   if ($appExited) {
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
       $remaining = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-        Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $sidecarCommandPattern } |
+        Where-Object { $_.Name -eq $agentName -and $_.ExecutablePath -eq $agentPath } |
         Select-Object -First 1
       if (-not $remaining) { $sidecarStopped = $true; break }
       Start-Sleep -Seconds 1
@@ -172,9 +172,9 @@ try {
 
     # A failed smoke must not leave the exact sidecar it launched behind.
     $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-      Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match $sidecarCommandPattern }
+      Where-Object { $_.Name -eq $agentName -and $_.ExecutablePath -eq $agentPath }
     foreach ($child in $children) {
-      if ($child.ExecutablePath -and (Get-FileHash -LiteralPath $child.ExecutablePath -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash) {
+      if ($child.ExecutablePath -and (Get-FileHash -LiteralPath $child.ExecutablePath -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $agentPath -Algorithm SHA256).Hash) {
         Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
       }
     }

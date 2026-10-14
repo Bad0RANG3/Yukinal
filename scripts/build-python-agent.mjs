@@ -6,13 +6,16 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const python = process.env.YUKINAL_PYTHON ?? join(
+const venvPython = join(
   root,
   "agent",
   ".venv",
   process.platform === "win32" ? "Scripts" : "bin",
   process.platform === "win32" ? "python.exe" : "python",
 );
+const python = process.env.YUKINAL_PYTHON ?? (existsSync(venvPython)
+  ? venvPython
+  : (process.platform === "win32" ? "python" : "python3"));
 const entrypoint = join(root, "agent", "packaging", "entrypoint.py");
 const output = join(root, "agent", "runtime");
 const work = join(root, "target", "pyinstaller");
@@ -60,6 +63,16 @@ const executable = join(output, "yukinal-agent", process.platform === "win32" ? 
 if (!existsSync(executable) || !statSync(executable).isFile()) {
   console.error(`PyInstaller did not produce the Agent executable: ${executable}`);
   process.exit(1);
+}
+
+const licenses = spawnSync(python, [
+  join(root, "scripts", "collect-python-licenses.py"),
+  "--destination",
+  join(output, "THIRD_PARTY_LICENSES.txt"),
+], { cwd: root, stdio: "inherit", windowsHide: true });
+if (licenses.error || licenses.status !== 0) {
+  console.error(`Could not collect frozen Agent license notices: ${licenses.error?.message ?? "see diagnostics above"}`);
+  process.exit(licenses.status && licenses.status !== 0 ? licenses.status : 1);
 }
 
 const smoke = spawnSync(process.execPath, [join(root, "scripts", "smoke-python-agent.mjs"), "--executable", executable], {

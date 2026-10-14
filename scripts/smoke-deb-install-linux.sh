@@ -52,17 +52,15 @@ run_privileged dpkg --install "$deb"
 dpkg-query -s "$package" | grep -Fxq 'Status: install ok installed' || fail "$package did not reach the installed state"
 
 package_files=$(dpkg-query -L "$package")
-mapfile -t runtime_paths < <(printf '%s\n' "$package_files" | awk '$0 ~ /\/runtime\/node$/')
-[[ ${#runtime_paths[@]} -eq 1 ]] || fail "expected exactly one installed runtime/node in $package"
-runtime_path=${runtime_paths[0]}
-[[ -x "$runtime_path" ]] || fail "installed packaged Node.js is not executable: $runtime_path"
-[[ "$runtime_path" == */runtime/node ]] || fail "unexpected installed runtime path: $runtime_path"
-resource_root=${runtime_path%/runtime/node}
+mapfile -t agent_paths < <(printf '%s\n' "$package_files" | awk '$0 ~ /\/python-agent\/yukinal-agent\/yukinal-agent$/')
+[[ ${#agent_paths[@]} -eq 1 ]] || fail "expected exactly one installed frozen Python Agent in $package"
+agent_path=${agent_paths[0]}
+[[ -x "$agent_path" ]] || fail "installed Python Agent is not executable: $agent_path"
+[[ "$agent_path" == */python-agent/yukinal-agent/yukinal-agent ]] || fail "unexpected installed Python Agent path: $agent_path"
+resource_root=${agent_path%/python-agent/yukinal-agent/yukinal-agent}
 
 for required_path in \
-  "$resource_root/agent/index.js" \
-  "$resource_root/agent/package.json" \
-  "$resource_root/runtime/LICENSE" \
+  "$agent_path" \
   "$resource_root/NOTICE"; do
   [[ -f "$required_path" ]] || fail "installed package resource is missing: $required_path"
 done
@@ -74,5 +72,5 @@ if dpkg-query -W -f='${db:Status-Abbrev}' "$package" >/dev/null 2>&1; then
   fail "$package still has a dpkg database entry after purge"
 fi
 install_attempted=0
-[[ ! -e "$runtime_path" ]] || fail "installed runtime still exists after purge: $runtime_path"
-printf '✓ Debian install, bundled Agent handshake, and purge smoke: green\n'
+[[ ! -e "$agent_path" ]] || fail "installed Python Agent still exists after purge: $agent_path"
+printf '✓ Debian install, frozen Python Agent handshake, and purge smoke: green\n'

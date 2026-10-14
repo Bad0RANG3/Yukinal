@@ -133,6 +133,26 @@ if (runtimeEntries.length !== 1) {
   }
 }
 
+const pythonRuntimeEntries =
+  resources !== null && typeof resources === "object" && !Array.isArray(resources)
+    ? Object.entries(resources).filter(([, destination]) =>
+        String(destination).replace(/\\/g, "/").replace(/\/+$/, "") === "python-agent",
+      )
+    : [];
+if (pythonRuntimeEntries.length !== 1) {
+  fail(`bundle.resources must map one frozen Python Agent directory to python-agent/, found ${pythonRuntimeEntries.length}`);
+} else {
+  const [source] = pythonRuntimeEntries[0];
+  const resolved = resolve(tauriDir, source);
+  const expected = join(root, "agent", "runtime");
+  if (resolved !== expected) {
+    fail(`bundle.resources Python Agent source "${source}" resolves to ${resolved}, expected ${expected}`);
+  }
+  if (!existsSync(resolved) || !statSync(resolved).isDirectory() || !existsSync(join(resolved, ".gitkeep"))) {
+    fail(`frozen Python Agent source "${source}" must be a tracked directory that exists in a fresh checkout`);
+  }
+}
+
 const runtimeManifestPath = join(root, "scripts", "node-runtime.json");
 let runtimeManifest;
 try {
@@ -207,7 +227,7 @@ if (targets === "all") {
 // A release build that ships a stale agent is a silent breakage, so the ordering of the
 // hook is part of the contract: contract libs -> agent bundle -> frontend bundle.
 const beforeBuild = conf.build?.beforeBuildCommand ?? "";
-const order = ["prepare-node-runtime.mjs", "build:libs", "@yukinal/agent", "@yukinal/desktop"];
+const order = ["prepare-node-runtime.mjs", "build:libs", "@yukinal/agent", "build-python-agent.mjs", "@yukinal/desktop"];
 let cursor = -1;
 for (const token of order) {
   const index = beforeBuild.indexOf(token);
@@ -278,6 +298,16 @@ if (packagedEntryAt === -1) {
 }
 if (!configSource.includes("pub fn packaged_runtime") || !configSource.includes('"runtime"')) {
   fail(`${configRs}: bundled runtime path must be resolved from <resources>/runtime`);
+}
+const pythonEntryAt = configSource.indexOf("pub fn packaged_python_entry");
+if (pythonEntryAt === -1) {
+  fail(`${configRs}: packaged_python_entry() not found — it must match the Tauri resource destination`);
+} else {
+  const pythonEntry = configSource.slice(pythonEntryAt);
+  const body = pythonEntry.slice(0, pythonEntry.indexOf("\n}"));
+  if (!body.includes('"python-agent"') || !body.includes('"yukinal-agent"')) {
+    fail(`${configRs}: packaged_python_entry() must resolve the frozen binary inside python-agent/yukinal-agent`);
+  }
 }
 
 // ───────────────────────────────────────── 3. the bundle is one self-contained file

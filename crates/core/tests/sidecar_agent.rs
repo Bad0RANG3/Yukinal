@@ -100,6 +100,7 @@ fn config() -> Option<SidecarConfig> {
         client_version: String::from("test"),
         data_dir: std::env::temp_dir().display().to_string(),
         requires_node: true,
+        is_python_agent: false,
     })
 }
 
@@ -253,6 +254,7 @@ async fn a_bad_entry_reports_the_build_step_instead_of_hanging() {
         client_version: String::from("test"),
         data_dir: String::new(),
         requires_node: true,
+        is_python_agent: false,
     };
 
     // node exits non-zero without answering: launch must fail fast, not wait forever.
@@ -453,6 +455,7 @@ rl.on("line", (line) => {
         client_version: "test".to_string(),
         data_dir: std::env::temp_dir().display().to_string(),
         requires_node: true,
+        is_python_agent: false,
     };
     let launched = sidecar::launch(&config)
         .await

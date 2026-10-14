@@ -109,15 +109,16 @@ test("Windows package CI runs MSI lifecycle smoke and preserves failure diagnost
   );
 });
 
-test("installed Windows smoke matches the quoted sidecar entrypoint used under Program Files", async () => {
+test("installed Windows smoke tracks the frozen Python Agent process through shutdown", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const smoke = await readFile(path.join(root, "scripts", "smoke-installed-windows.ps1"), "utf8");
 
-  assert.ok(smoke.includes("index\\.js(?=$|[\\s\"''])"), "sidecar matcher must accept a quote after a spaced path argument");
+  assert.ok(smoke.includes("python-agent/yukinal-agent/yukinal-agent.exe"));
+  assert.ok(smoke.includes("$_.Name -eq $agentName -and $_.ExecutablePath -eq $agentPath"));
   assert.equal(
-    [...smoke.matchAll(/CommandLine -match \$sidecarCommandPattern/g)].length,
+    [...smoke.matchAll(/ExecutablePath -eq \$agentPath/g)].length,
     3,
-    "startup, shutdown verification, and cleanup must share the same sidecar matcher",
+    "startup, shutdown verification, and cleanup must track the same packaged binary",
   );
 });
 
@@ -150,7 +151,7 @@ test("Linux package CI installs, checks, and purges the exact Debian artifact", 
 
   assert.match(
     workflow,
-    /- name: Smoke Debian install, bundled Agent, and purge[\s\S]*?if: matrix\.os == 'ubuntu-22\.04'[\s\S]*?YUKINAL_ALLOW_DEB_INSTALL_SMOKE: "1"[\s\S]*?smoke-deb-install-linux\.sh/,
+    /- name: Smoke Debian install, frozen Python Agent, and purge[\s\S]*?if: matrix\.os == 'ubuntu-22\.04'[\s\S]*?YUKINAL_ALLOW_DEB_INSTALL_SMOKE: "1"[\s\S]*?smoke-deb-install-linux\.sh/,
   );
   assert.ok(smoke.includes('dpkg --install "$deb"'), "Linux smoke must install the built artifact");
   assert.ok(smoke.includes("trap cleanup EXIT"), "Linux smoke must arrange package cleanup before mutation");
@@ -167,7 +168,7 @@ test("macOS package CI copies the DMG app into an isolated Applications director
 
   assert.match(
     workflow,
-    /- name: Smoke macOS DMG copy and bundled Agent[\s\S]*?if: matrix\.os == 'macos-latest'[\s\S]*?smoke-dmg-install-macos\.sh/,
+    /- name: Smoke macOS DMG copy and frozen Python Agent[\s\S]*?if: matrix\.os == 'macos-latest'[\s\S]*?smoke-dmg-install-macos\.sh/,
   );
   assert.ok(smoke.includes("hdiutil attach -readonly"), "macOS smoke must mount the built DMG read-only");
   assert.ok(smoke.includes('ditto "$app_bundle" "$installed_app"'), "macOS smoke must copy the app bundle");
@@ -175,18 +176,34 @@ test("macOS package CI copies the DMG app into an isolated Applications director
   assert.ok(smoke.includes("smoke-installed-agent.mjs"), "macOS smoke must handshake through copied app resources");
 });
 
-test("installed package Agent smoke checks the pinned bundled runtime and required resources", async () => {
+test("installed package Agent smoke checks the frozen Python runtime and required resources", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const smoke = await readFile(path.join(root, "scripts", "smoke-installed-agent.mjs"), "utf8");
   const protocolSmoke = await readFile(path.join(root, "scripts", "lib", "sidecar-smoke.mjs"), "utf8");
 
-  assert.ok(smoke.includes('join(resourceRoot, "runtime", process.platform === "win32" ? "node.exe" : "node")'));
-  assert.ok(smoke.includes('join(resourceRoot, "agent", "index.js")'));
-  assert.ok(smoke.includes('join(resourceRoot, "runtime", "LICENSE")'));
+  assert.ok(smoke.includes('"python-agent"'));
+  assert.ok(smoke.includes('"yukinal-agent"'));
+  assert.ok(smoke.includes('"--check-imports"'));
+  assert.ok(smoke.includes('args: []'));
+  assert.ok(smoke.includes('"THIRD_PARTY_LICENSES.txt"'));
   assert.ok(smoke.includes('join(resourceRoot, "NOTICE")'));
-  assert.ok(smoke.includes('`v${runtimeManifest.version}`'), "installed smoke must compare the packaged runtime with the repository pin");
+  assert.ok(smoke.includes('"0.1.0"'), "installed smoke must check the packaged Agent version");
+  assert.ok(smoke.includes("env: { PATH: restrictedPath }"), "installed smoke must prove the frozen runtime starts without Python on PATH");
   assert.ok(smoke.includes("dataDir"), "installed smoke must isolate Agent data in a temporary directory");
   assert.ok(protocolSmoke.includes("options.dataDir"), "shared sidecar smoke must pass its isolated data directory to the Agent");
+});
+
+test("Rust sidecar resolution prefers the packaged Python Agent and marks it for SSH service credentials", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const source = await readFile(path.join(root, "crates", "core", "src", "sidecar", "config.rs"), "utf8");
+  const resolverStart = source.indexOf("pub fn from_env_with_resources");
+  const pythonSelection = source.indexOf("map(packaged_python_entry)", resolverStart);
+  const nodeSelection = source.indexOf("let packaged = resources.map(packaged_entry)", resolverStart);
+
+  assert.ok(resolverStart >= 0 && pythonSelection > resolverStart && pythonSelection < nodeSelection);
+  assert.ok(source.includes("is_python_agent: true"));
+  assert.ok(source.includes("if self.is_python_agent"));
+  assert.ok(source.includes('resources.join("python-agent")'));
 });
 
 test("package build runs the generated NSIS policy check only on Windows", async () => {
@@ -210,10 +227,19 @@ test("installer-sensitive pull requests run the Windows lifecycle gate without p
   for (const requiredPath of [
     "apps/desktop/src-tauri/nsis/**",
     "apps/desktop/src-tauri/tauri.conf.json",
+    "crates/core/src/sidecar/config.rs",
+    "apps/desktop/src-tauri/src/commands/sidecar.rs",
+    "agent/pyproject.toml",
+    "agent/packaging/**",
+    "agent/src/yukinal_agent/sidecar.py",
+    "agent/tests/test_agent_sidecar.py",
     "scripts/check-desktop-window.ps1",
     "scripts/check-nsis-uninstall.mjs",
     "scripts/nsis-uninstall-policy.test.mjs",
     "scripts/lib/sidecar-smoke.mjs",
+    "scripts/build-python-agent.mjs",
+    "scripts/collect-python-licenses.py",
+    "scripts/smoke-python-agent.mjs",
     "scripts/smoke-installed-agent.mjs",
     "scripts/smoke-deb-install-linux.sh",
     "scripts/smoke-dmg-install-macos.sh",
@@ -244,12 +270,24 @@ test("release workflows pin Node 24-compatible GitHub Actions", async () => {
   for (const workflow of [checkWorkflow, packageWorkflow]) {
     assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\s+# v7\.0\.1/);
     assert.match(workflow, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020\s+# v7\.0\.0/);
+    if (workflow === packageWorkflow) {
+      assert.match(workflow, /actions\/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548\s+# v6\.1\.0/);
+    }
     assert.match(workflow, /pnpm\/action-setup@008330803749db0355799c700092d9a85fd074e9\s+# v6\.0\.9/);
     assert.doesNotMatch(workflow, /(?:actions\/checkout|actions\/setup-node|pnpm\/action-setup)@[0-9a-f]{40}\s+# v4\b/);
   }
 
   assert.match(packageWorkflow, /actions\/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f\s+# v7\.0\.0/);
   assert.doesNotMatch(packageWorkflow, /actions\/upload-artifact@[0-9a-f]{40}\s+# v4\b/);
+});
+
+test("package CI installs the Python 3.14 Agent build extra in a private environment", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");
+
+  assert.match(workflow, /actions\/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548\s+# v6\.1\.0[\s\S]*?python-version: "3\.14"/);
+  assert.ok(workflow.includes("python -m venv agent/.venv"));
+  assert.ok(workflow.includes('agent[agent,models,package]'));
 });
 
 test("dependency advisory workflow audits version tags with read-only permissions", async () => {

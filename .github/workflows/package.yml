@@ -30,12 +30,22 @@ on:
       - apps/desktop/src-tauri/nsis/**
       - package.json
       - pnpm-lock.yaml
+      - agent/pyproject.toml
+      - agent/packaging/**
+      - agent/src/yukinal_agent/sidecar.py
+      - agent/tests/test_agent_sidecar.py
+      - apps/desktop/src-tauri/src/commands/sidecar.rs
       - scripts/check-nsis-uninstall.mjs
       - scripts/check-desktop-window.ps1
       - scripts/nsis-uninstall-policy.test.mjs
       - scripts/lib/sidecar-smoke.mjs
       - scripts/package.mjs
+      - scripts/build-python-agent.mjs
+      - scripts/collect-python-licenses.py
+      - scripts/smoke-python-agent.mjs
       - scripts/smoke-installed-agent.mjs
+      - crates/core/src/sidecar/config.rs
+      - NOTICE
       - scripts/smoke-deb-install-linux.sh
       - scripts/smoke-dmg-install-macos.sh
       - scripts/smoke-installed-windows.ps1
@@ -66,6 +76,12 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: agent/pyproject.toml
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
@@ -81,6 +97,20 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Install frozen Python Agent dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          python -m venv agent/.venv
+          agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models,package]"
+
+      - name: Install frozen Python Agent dependencies (macOS / Linux)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          python -m venv agent/.venv
+          agent/.venv/bin/python -m pip install -e 'agent[agent,models,package]'
+
       # The release workflow also runs on tags/manual dispatch, independently of check.yml.
       # Audit the shared lockfile once per release rather than once per OS matrix leg.
       - name: Audit JavaScript dependencies before release
@@ -91,15 +121,15 @@ jobs:
       # contract -> tests -> vite build -> both sidecar smokes -> cargo.
       - run: pnpm check
 
-      # Verify all six runtime pins against official SHASUMS, then prepare the target runtime,
-      # contract libs, agent bundle, strict installed-layout smoke,
+      # Verify runtime pins, prepare the Node transition fallback, contract libs,
+      # Node fallback bundle, frozen Python Agent, installed-layout smokes,
       # packaging contract, then `tauri build`. The runtime and agent are prepared again by
       # `beforeBuildCommand`, so the staged resource layout matches a direct Tauri build too.
       - run: pnpm run package
 
       # Install the actual Debian artifact on the disposable hosted runner, verify the
-      # installed resources and bundled Node/Agent protocol, then purge only this package.
-      - name: Smoke Debian install, bundled Agent, and purge
+      # installed frozen Python Agent protocol, then purge only this package.
+      - name: Smoke Debian install, frozen Python Agent, and purge
         if: matrix.os == 'ubuntu-22.04'
         shell: bash
         timeout-minutes: 5
@@ -108,8 +138,8 @@ jobs:
         run: bash ./scripts/smoke-deb-install-linux.sh
 
       # Mirror the documented drag-to-Applications path in a temporary directory, then
-      # launch the packaged Agent through the Node runtime embedded in the copied app.
-      - name: Smoke macOS DMG copy and bundled Agent
+      # launch the frozen Python Agent embedded in the copied app.
+      - name: Smoke macOS DMG copy and frozen Python Agent
         if: matrix.os == 'macos-latest'
         shell: bash
         timeout-minutes: 5
@@ -140,9 +170,8 @@ jobs:
         run: ./scripts/check-desktop-window.ps1
 
       # Windows hosted runners are disposable and elevated but include a system Node.js.
-      # The MSI test explicitly permits that host runtime while the app smoke launches Yukinal
-      # with a restricted PATH, proving it uses its packaged Node. This checks MSI lifecycle;
-      # it is not a substitute for a clean image with Node.js genuinely absent.
+      # The app smoke launches Yukinal with a restricted PATH and checks the frozen Python
+      # sidecar image directly. This is MSI lifecycle coverage, not a clean-host acceptance.
       - name: Smoke MSI install, packaged launch, shutdown, and uninstall
         if: matrix.os == 'windows-latest'
         shell: pwsh

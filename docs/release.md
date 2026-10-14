@@ -72,7 +72,7 @@ NSIS 当前构建的真实生命周期脚本为 `scripts/smoke-nsis-install-wind
 
 ## 开发和本地验证
 
-开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发还需要 Python 3.11+ 和 `agent[agent,models]` 环境；最终用户使用打包后的应用不需要另装 Node.js。仓库根目录执行：
+开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。新构建的应用默认使用 Python Agent，Node 资源暂留作迁移回退。仓库根目录执行：
 
 ```bash
 pnpm install --frozen-lockfile
@@ -85,9 +85,9 @@ pnpm --filter @yukinal/desktop tauri dev
 macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 `agent/.venv/bin/python`。
 
-只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。构建当前平台安装包使用 `pnpm package`；它会先对六种受支持平台逐一核对 Node.js 官方 SHASUMS pin，再下载并校验当前平台归档，产物位于 `target/release/bundle/`。本地构建成功只证明该平台产物生成，不代替安装后的验收。
+只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。构建当前平台安装包使用 `pnpm package`；它会先对六种受支持平台逐一核对 Node.js 官方 SHASUMS pin，再下载并校验迁移期回退归档，构建并 smoke 检查冻结 Python Agent，产物位于 `target/release/bundle/`。本地构建成功只证明该平台产物生成，不代替安装后的验收。
 
-成功运行 `pnpm package` 会在 `target/release/bundle/` 同步生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发安装文件的 SHA-256、字节数、应用/随包 Node.js 版本、构建平台、源码修订和工作区是否有未提交改动（含未忽略的新文件）。单独重建/替换产物后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm release:manifest -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。`--no-bundle` 编译检查不刷新旧安装包的清单。CI 的平台安装包作业会复核这两份文件再与安装包一起上传；测试也会检查 CI 上传规则覆盖清单支持的全部安装包后缀。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名。
+成功运行 `pnpm package` 会在 `target/release/bundle/` 同步生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发安装文件的 SHA-256、字节数、应用/随包 Node.js 迁移回退版本、构建平台、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的可用第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建/替换产物后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm release:manifest -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。`--no-bundle` 编译检查不刷新旧安装包的清单。CI 的平台安装包作业会复核这两份文件再与安装包一起上传；测试也会检查 CI 上传规则覆盖清单支持的全部安装包后缀。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名。
 
 ## 发布验收
 
@@ -99,7 +99,7 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 ### 安装包与现有自动回归
 
-每个平台至少保留一条从干净安装环境执行的记录，包含提交、版本、操作系统、产物名称与 SHA-256、安装方式、随包 Node 版本、启动/退出/重开/卸载结果和脱敏失败日志位置。确认主机未安装 Node.js 时 sidecar 仍能启动，并检查应用退出后 sidecar、MCP 子进程和 PTY 是否正确收尾。读取安装器清单或本地构建成功不算完成安装验收。Windows 可用 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 对 NSIS 安装版做进程级复验，也可用 `-InstallDir <目录>` 检查 MSI 提取载荷；真实 MSI 生命周期应在一次性管理员测试机运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`。这些脚本仍需配合干净系统、重启/升级及手动 GUI 验收。
+每个平台至少保留一条从干净安装环境执行的记录，包含提交、版本、操作系统、产物名称与 SHA-256、安装方式、随包 Python Agent 和 Node 回退版本、启动/退出/重开/卸载结果和脱敏失败日志位置。确认主机未安装 Node.js 或 Python 时 sidecar 仍能启动，并检查应用退出后 sidecar、MCP 子进程和 PTY 是否正确收尾。读取安装器清单或本地构建成功不算完成安装验收。Windows 可用 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 对 NSIS 安装版做进程级复验，也可用 `-InstallDir <目录>` 检查 MSI 提取载荷；真实 MSI 生命周期应在一次性管理员测试机运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`。这些脚本仍需配合干净系统、重启/升级及手动 GUI 验收。
 
 已有 Agent fixture `pnpm --filter @yukinal/agent exec tsx --test src/runtime/investigation-acceptance.test.ts` 使用真实 AgentLoop、权限审批和 Host RPC client，但服务端和远端文件是状态化内存 fixture。native Host RPC + SQLite 测试 `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib evidence_record_host_rpc_survives_host_restart_and_remains_fetchable` 覆盖 evidence 跨 `AppState` 重启。回环 SSH/SFTP 测试验证协议操作；这些都不证明真实 Provider、OpenSSH、安装版 UI 或大文件传输。新接口需分别补契约、宿主、sidecar、真实远端及 GUI 层的可观察验收。
 

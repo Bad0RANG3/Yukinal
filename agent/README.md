@@ -83,7 +83,7 @@ Tool calls still pass through the registry and policy on every execution.
 ## Sidecar protocol
 
 Install `agent[agent,models]`, set `YUKINAL_DATA_DIR` to the private per-user
-data directory, and launch `yukinal-agent-node`. The process speaks version
+data directory, and launch `yukinal-agent`. The process speaks version
 1.0 JSON-RPC 2.0 over newline-delimited stdin/stdout; stdout is reserved for
 frames and diagnostics go to stderr. Frames are capped at 24 MiB. The current
 Python sidecar implements `initialize`, `system.ping`, `tools.list`,
@@ -96,15 +96,17 @@ read-only server, Docker, systemd, package and file tools, plus MCP tools the
 host marks low-risk. The host remains the final authorization boundary. When a
 registered tool requires approval, the sidecar emits the approval event, accepts
 the desktop's response RPC, and resumes the paused call; rejection and expiry
-stop the graph without retrying. Multimodal prompts, durable task state,
-write-capable desktop tools and the packaged launcher switch are still being
-migrated.
+stop the graph without retrying. Multimodal prompts, durable task state and
+write-capable desktop tools are still being migrated. Tauri builds select the
+frozen Python sidecar; installed-app lifecycle and cross-platform acceptance
+remain in progress.
 
 When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it also
 registers the read-only `ssh.service_status` tool backed by the C++ service. The
 tool gets its target from the selected `host_target.serverId`; `target_id` is not
 part of the model-visible input schema. Configure that exact server ID in the
-C++ service allowlist. The packaged Node sidecar does not receive this token.
+C++ service allowlist. New Tauri builds forward the configured token to the
+Python sidecar; the retained Node fallback does not receive it.
 
 Tauri development uses this runtime by default. Create the environment from the
 repository root and install the runtime dependencies:
@@ -116,6 +118,9 @@ pnpm --filter @yukinal/desktop tauri dev
 ```
 
 `pnpm desktop:dev:python` is an equivalent shortcut.
+
+For a desktop package, also install the `package` extra and run `pnpm package`;
+this builds the frozen sidecar and includes available third-party license texts.
 
 On macOS or Linux, use `agent/.venv/bin/python` for the install command. Set
 `YUKINAL_PYTHON` to another interpreter path when needed.

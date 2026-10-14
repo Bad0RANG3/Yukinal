@@ -71,14 +71,14 @@ pub async fn agent_logs(state: State<'_, AppState>) -> Result<AgentLogsResponse,
 ///
 /// The resource dir is passed in both shapes, and the original comment here was wrong about
 /// dev: `tauri dev` *does* stage `bundle.resources` into the target directory
-/// (`target/debug/agent/index.js`), so in a dev run the packaged path usually wins and the
-/// repo walk-up is the fallback (a bare `cargo run` without Tauri's staging). One resolution
-/// path for both shapes is still the point — it is what makes the installed case the
-/// exercised one instead of a `cfg!(debug_assertions)` branch nothing runs.
+/// (Python under `target/debug/python-agent/`, plus the transition Node resource), so in a
+/// dev run staged resources can win and the repo walk-up is the fallback (a bare `cargo run`
+/// without Tauri's staging). One resolution path for both shapes is still the point — it is
+/// what makes the installed case the exercised one instead of a debug-only branch.
 ///
-/// Whatever this returns hands the bundled Node executable a path that went through
-/// `SidecarConfig::for_command_line`: `resource_dir()` is canonicalised, and Node cannot
-/// resolve a `\\?\` path — it dies with `EISDIR` on `lstat('C:')` before running the agent.
+/// Whatever this returns has passed through `SidecarConfig::for_command_line`:
+/// `resource_dir()` is canonicalised, and the installed executable and any script path must
+/// be passed in a form their runtime can resolve.
 fn resolve_config(app: &AppHandle) -> Result<SidecarConfig, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let resources = app.path().resource_dir().ok();

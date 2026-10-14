@@ -94,7 +94,9 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(described["toolCount"], 1)
         self.assertEqual(described["permissionPolicyIds"], [])
         self.assertTrue(described["implemented"]["agent.run.start"])
-        self.assertEqual(sidecar.handle(_request(5, "system.ping", {"echo": "hello"}))["result"], {"pong": "hello"})
+        ping = sidecar.handle(_request(5, "system.ping", {"echo": "hello"}))["result"]
+        self.assertEqual(ping["pong"], "hello")
+        self.assertGreater(ping["agentPid"], 0)
 
     def test_invalid_params_unknown_and_unimplemented_methods_are_explicit(self) -> None:
         sidecar = PythonSidecar(_registry())
@@ -255,7 +257,8 @@ class PythonSidecarTests(unittest.TestCase):
         host_requests = [frame for frame in frames if "method" in frame]
         response_by_id = {frame["id"]: frame for frame in responses}
         self.assertEqual(set(response_by_id), {1, 2})
-        self.assertEqual(response_by_id[2]["result"], {"pong": "pong"})
+        self.assertEqual(response_by_id[2]["result"]["pong"], "pong")
+        self.assertGreater(response_by_id[2]["result"]["agentPid"], 0)
         self.assertEqual([frame["method"] for frame in host_requests], ["host.mcp.catalog"])
 
     def test_python_module_entrypoint_completes_desktop_handshake(self) -> None:

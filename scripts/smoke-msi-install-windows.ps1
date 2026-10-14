@@ -64,7 +64,7 @@ if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitPr
 $installDir = Join-Path $env:ProgramFiles $installDirectoryLeaf
 $appDataRoot = Join-Path $env:LOCALAPPDATA 'dev.yukinal.workspace'
 $appPath = Join-Path $installDir 'yukinal-desktop.exe'
-$runtimePath = Join-Path $installDir 'runtime/node.exe'
+$pythonAgentPath = Join-Path $installDir 'python-agent/yukinal-agent/yukinal-agent.exe'
 $productRegistryPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$productCode"
 $uninstallRoots = @(
   'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -167,7 +167,7 @@ try {
   if (-not (Test-Path -LiteralPath $productRegistryPath)) {
     throw "MSI returned success but its ProductCode is not registered: $productCode"
   }
-  foreach ($required in @($appPath, $runtimePath, (Join-Path $installDir 'runtime/LICENSE'), (Join-Path $installDir 'agent/index.js'))) {
+  foreach ($required in @($appPath, $pythonAgentPath, (Join-Path $installDir 'NOTICE'))) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
       throw "Installed MSI resource is missing: $required"
     }

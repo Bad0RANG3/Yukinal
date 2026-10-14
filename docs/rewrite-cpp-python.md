@@ -4,9 +4,9 @@
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
-> existing UI. Tauri development now launches the Python sidecar by default.
-> The packaged app still uses the existing Node sidecar and Rust host execution
-> path. The Python sidecar can call the C++ `service_status` operation when
+> existing UI. Tauri development and new package builds now select the Python
+> sidecar; the old Node resources remain as a transition fallback. Rust still
+> hosts native UI IPC and existing platform services. The Python sidecar can call the C++ `service_status` operation when
 > configured; its
 > target is bound to the selected server ID, which must be present in the C++
 > allowlist. Automatic server-record synchronization and durable task/plan
@@ -33,8 +33,11 @@ Python sidecar also registers `ssh.service_status`; it binds the call to the
 selected `host_target.serverId`, so the model cannot choose a different target.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
-`pnpm desktop:dev` remains the browser-only UI preview. The packaged launcher
-still uses the Node sidecar.
+`pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
+the Python runtime with PyInstaller, stages it under `python-agent/`, and the
+Rust resolver prefers it over the retained Node fallback. Installed app and
+cross-platform artifact acceptance are still required before removing that
+fallback.
 
 ## Processes and trust boundaries
 
@@ -238,7 +241,8 @@ Python-to-C++ HTTP tests also passed in CTest.
 
 ## Deliberately deferred
 
-- switching the packaged desktop launcher to Python;
+- removing the Node bundle and runtime transition fallback after installed-app parity;
+- packaging and supervising the C++ SSH service with the desktop app;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
 - write-capable tools in the desktop catalog and durable task/plan resume;
@@ -246,8 +250,9 @@ Python-to-C++ HTTP tests also passed in CTest.
 - SFTP, file transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
-The next milestone is to add durable task/plan state and automate selected
-target synchronization to the C++ service configuration, while keeping host
-authorization as the final gate. A real SSH success against an OpenSSH server
-and packaged-app migration remain unverified. Do not mark later product
-requirements as delivered by the scaffold or documentation.
+The next milestones are installed-app parity checks, removing the Node fallback,
+packaging and supervising the C++ service, durable task/plan state, and automatic
+selected-target synchronization to the C++ service configuration, while keeping
+host authorization as the final gate. A real SSH success against an OpenSSH
+server and installed frozen-Agent lifecycle remain unverified. Do not mark later
+product requirements as delivered by the scaffold or documentation.

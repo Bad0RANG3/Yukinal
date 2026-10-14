@@ -39,4 +39,4 @@ resource_root="$installed_app/Contents/Resources"
 [[ -d "$resource_root" ]] || fail "copied app bundle has no Contents/Resources directory"
 node scripts/smoke-installed-agent.mjs "$resource_root"
 
-printf '✓ macOS DMG attach, Applications copy, and bundled Agent handshake: green\n'
+printf '✓ macOS DMG attach, Applications copy, and frozen Python Agent handshake: green\n'

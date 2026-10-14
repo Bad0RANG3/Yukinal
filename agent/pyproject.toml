@@ -1,5 +1,5 @@
 [project]
-name = "yukinal-agent-node"
+name = "yukinal-agent"
 version = "0.1.0"
 description = "Python Agent Runtime and caller for the local Yukinal SSH service."
 requires-python = ">=3.11"
@@ -7,7 +7,7 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.scripts]
-yukinal-agent-node = "yukinal_agent.sidecar:main"
+yukinal-agent = "yukinal_agent.sidecar:main"
 
 [project.optional-dependencies]
 test = ["paramiko>=3.5,<6"]

@@ -1,8 +1,8 @@
 /**
  * The sidecar protocol smoke, as a reusable routine (ADR 0001 / ADR 0006).
  *
- * Spawns a sidecar entry exactly the way Rust does -- `<runtime> <entry>`, speaking NDJSON
- * on stdin/stdout -- and asserts the protocol behaves as contracted, including the real
+ * Spawns a sidecar exactly the way Rust does -- `<runtime> <args...>` -- speaking NDJSON
+ * on stdin/stdout, and asserts the protocol behaves as contracted, including the real
  * agent admission path and survival of a malformed frame.
  *
  * It lives here, not in a single `smoke-*.mjs`, because two different questions need the
@@ -25,16 +25,17 @@ const assert = (condition, message) => {
 };
 
 /**
- * @param {string} entry absolute path to a runnable sidecar entry file
- * @param {{ env?: Record<string, string>, label?: string, program?: string }} [options]
+ * @param {string} entry absolute path to a runnable sidecar executable or entry file
+ * @param {{ agentKind?: "node" | "python", args?: string[], env?: Record<string, string>, label?: string, program?: string }} [options]
  */
 export async function runSidecarSmoke(entry, options = {}) {
   const label = options.label ?? entry;
   const program = options.program ?? process.execPath;
+  const expectedTool = options.agentKind === "python" ? "server.info" : "system.echo";
   const dataDir = options.dataDir ?? options.env?.YUKINAL_DATA_DIR ?? "/tmp/yukinal-smoke";
   console.log(`── sidecar smoke: ${program} ${label}`);
 
-  const child = spawn(program, [entry], {
+  const child = spawn(program, options.args ?? [entry], {
     env: { ...process.env, YUKINAL_LOG_LEVEL: "warn", ...options.env, YUKINAL_DATA_DIR: dataDir },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -119,7 +120,7 @@ export async function runSidecarSmoke(entry, options = {}) {
 
   await ask({ jsonrpc: "2.0", id: 3, method: "tools.list", params: {} }, (frame) =>
     assert(
-      frame.result?.tools?.some((tool) => tool.name === "system.echo" && tool.timeoutMs > 0),
+      frame.result?.tools?.some((tool) => tool.name === expectedTool && tool.timeoutMs > 0),
       `tools.list: ${JSON.stringify(frame)}`,
     ),
   );

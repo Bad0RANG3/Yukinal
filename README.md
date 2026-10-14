@@ -27,7 +27,7 @@ partial Python Agent components for later stages:
   and Responses API selection;
 - a model-driven LangGraph tool loop with tenant/user/target/risk policy,
   exact-argument approval requests, and bounded model output.
-- the Python Node's bounded NDJSON/JSON-RPC transport and desktop initialization,
+- the Python Agent's bounded NDJSON/JSON-RPC transport and desktop initialization,
   health, capability, and tool-catalog methods.
 
 The Python JSON-RPC layer handles initialization, health, tool catalogs,
@@ -43,15 +43,20 @@ paths are migrated.
 The Python development sidecar can call the C++ service for
 `ssh.service_status` when its token is configured. The service's `target_id`
 must match the selected desktop server ID; syncing saved server records into the
-C++ service configuration is still future work. Tauri development now uses the
-Python Agent by default. The packaged app still uses the existing Node Agent,
-so this milestone does not claim full product parity.
+C++ service configuration is still future work. Tauri development and new
+desktop builds now select the frozen Python Agent. The Node runtime and bundle
+remain staged as a temporary fallback while the remaining desktop migration is
+validated.
 
 To run the existing desktop UI with the Python Agent sidecar, create
 `agent/.venv` and install `agent[agent,models]`. Then run
 `pnpm --filter @yukinal/desktop tauri dev`. The `pnpm desktop:dev:python` command
 is an equivalent shortcut. The Tauri host continues to own the process and
 execute host-mediated tools.
+
+To create an installer, install `agent[agent,models,package]` into that virtual
+environment and run `pnpm package`. The build creates a frozen Python Agent and
+the packaged desktop selects it by default.
 
 The new milestone boundary, API contract, build instructions, and remaining
 work are documented in [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md).
@@ -100,8 +105,8 @@ $env:YUKINAL_SSH_API_URL = "http://127.0.0.1:8765"
 pnpm desktop:dev:python
 ```
 
-The Tauri host forwards the SSH token only to the explicitly selected Python
-Agent sidecar. The packaged Node sidecar does not receive it.
+The Tauri host forwards the SSH token only to the Python Agent sidecar when the
+service is configured. The C++ SSH service still needs to be started separately.
 
 To include the Paramiko SSH mock in CTest, install the optional test extra
 before configuring CMake:
@@ -152,8 +157,10 @@ pnpm check
 pnpm --filter @yukinal/desktop tauri dev
 ```
 
-The packaged app still bundles Node until Python packaging and runtime parity
-are complete.
+The package build creates a frozen Python Agent with PyInstaller and includes
+available third-party license texts. The old Node runtime remains in the
+installer as a transition fallback; removing it follows installed-app parity
+and lifecycle acceptance.
 
 The browser preview is available with `pnpm desktop:dev`; it does not connect to
 the new SSH service.

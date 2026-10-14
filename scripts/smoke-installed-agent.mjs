@@ -1,15 +1,10 @@
 #!/usr/bin/env node
-/**
- * Exercise the Agent using only a package's installed resource directory and its bundled
- * Node.js runtime. The host Node.js runs this harness; the Agent itself is started by the
- * runtime shipped inside the app.
- */
+/** Exercise the frozen Python Agent using only a package's installed resource directory. */
 
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, stat, readFile } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { runSidecarSmoke } from "./lib/sidecar-smoke.mjs";
 
@@ -20,34 +15,42 @@ if (!resourceRootArg || extraArgs.length > 0) {
 }
 
 const resourceRoot = resolve(resourceRootArg);
-const runtime = join(resourceRoot, "runtime", process.platform === "win32" ? "node.exe" : "node");
-const entry = join(resourceRoot, "agent", "index.js");
+const entry = join(
+  resourceRoot,
+  "python-agent",
+  "yukinal-agent",
+  process.platform === "win32" ? "yukinal-agent.exe" : "yukinal-agent",
+);
 const requiredResources = [
-  runtime,
   entry,
-  join(resourceRoot, "agent", "package.json"),
-  join(resourceRoot, "runtime", "LICENSE"),
+  join(resourceRoot, "python-agent", "THIRD_PARTY_LICENSES.txt"),
   join(resourceRoot, "NOTICE"),
 ];
-const runtimeManifestPath = fileURLToPath(new URL("./node-runtime.json", import.meta.url));
-const runtimeManifest = JSON.parse(await readFile(runtimeManifestPath, "utf8"));
 
 for (const requiredPath of requiredResources) {
   const info = await stat(requiredPath).catch(() => null);
   if (!info?.isFile()) throw new Error(`installed package is missing a required file: ${requiredPath}`);
 }
 
-const runtimeVersion = execFileSync(runtime, ["--version"], { encoding: "utf8" }).trim();
-if (runtimeVersion !== `v${runtimeManifest.version}`) {
-  throw new Error(`installed Node.js runtime is ${runtimeVersion}; expected v${runtimeManifest.version}`);
+const version = execFileSync(entry, ["--version"], { encoding: "utf8" }).trim();
+if (version !== "0.1.0") {
+  throw new Error(`installed Python Agent is ${version}; expected 0.1.0`);
 }
-console.log(`✓ installed Node.js runtime ${runtimeVersion}`);
+const imports = execFileSync(entry, ["--check-imports"], { encoding: "utf8" }).trim();
+if (imports !== "packaged imports ok") throw new Error(`installed Python Agent imports failed: ${imports}`);
+console.log(`✓ installed Python Agent ${version} and provider/MCP imports`);
 
 const dataDir = await mkdtemp(join(tmpdir(), "yukinal-installed-agent-data-"));
+const restrictedPath = process.platform === "win32"
+  ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32;${process.env.SystemRoot ?? "C:\\Windows"}`
+  : "/usr/bin:/bin";
 try {
   await runSidecarSmoke(entry, {
-    program: runtime,
-    label: `${entry} (installed package resources)`,
+    agentKind: "python",
+    args: [],
+    env: { PATH: restrictedPath },
+    program: entry,
+    label: `${entry} (installed Python Agent resources)`,
     dataDir,
   });
 } finally {

@@ -131,6 +131,7 @@ try {
 
   foreach ($required in @(
     (Join-Path $installDir 'yukinal-desktop.exe'),
+    (Join-Path $installDir 'python-agent/yukinal-agent/yukinal-agent.exe'),
     (Join-Path $installDir 'runtime/node.exe'),
     (Join-Path $installDir 'agent/index.js'),
     (Join-Path $installDir 'NOTICE')

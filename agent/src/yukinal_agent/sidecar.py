@@ -561,12 +561,12 @@ class PythonSidecar:
         }
 
     @staticmethod
-    def _ping(params: object) -> dict[str, str]:
+    def _ping(params: object) -> dict[str, Any]:
         parsed = _strict_object(params, {"echo"})
         echo = parsed.get("echo", "pong")
         if not isinstance(echo, str) or len(echo) > 1000:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
-        return {"pong": echo}
+        return {"pong": echo, "agentPid": os.getpid()}
 
     @staticmethod
     def _declaration(spec: Any) -> dict[str, Any]:
