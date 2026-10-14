@@ -7,7 +7,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
@@ -17,7 +17,7 @@ from .audit import AuditEvent, AuditSink
 
 ToolRisk = Literal["read", "write", "destructive"]
 _TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,127}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$")
 _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ToolHandler = Callable[[dict[str, Any], "ExecutionContext"], Awaitable[Any]]
 
@@ -47,6 +47,9 @@ class ToolSpec:
     handler: ToolHandler
     target_id_argument: str | None = "target_id"
     target_required: bool = False
+    origin: dict[str, str] | None = None
+    timeout_ms: int = 30_000
+    cancellable: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _TOOL_NAME.fullmatch(self.name):
@@ -65,6 +68,19 @@ class ToolSpec:
             raise ValueError("tool input schema must be an object")
         if not callable(self.handler):
             raise ValueError("tool handler must be callable")
+        if isinstance(self.timeout_ms, bool) or not isinstance(self.timeout_ms, int) or not 1 <= self.timeout_ms <= 300_000:
+            raise ValueError("tool timeout_ms must be between 1 and 300000")
+        if not isinstance(self.cancellable, bool):
+            raise ValueError("tool cancellable must be a boolean")
+        if self.origin is not None:
+            kind = self.origin.get("kind") if isinstance(self.origin, dict) else None
+            if (
+                not isinstance(self.origin, dict)
+                or not isinstance(kind, str)
+                or kind not in {"builtin", "mcp", "provider"}
+                or any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.origin.items())
+            ):
+                raise ValueError("tool origin is invalid")
         try:
             encoded_schema = json.dumps(self.input_schema, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError):
@@ -87,6 +103,11 @@ class ExecutionContext:
     allowed_target_ids: frozenset[str]
     approved_actions: Mapping[str, str]
     context_target_id: str | None = None
+    host_target: Mapping[str, Any] | None = None
+    host_task_id: str | None = None
+    run_id: str = ""
+    trace_id: str = ""
+    call_id: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("task_id", "tenant_id", "user_id"):
@@ -101,6 +122,14 @@ class ExecutionContext:
             raise ValueError("execution context contains too many permissions")
         if self.context_target_id is not None and not _IDENTIFIER.fullmatch(self.context_target_id):
             raise ValueError("context_target_id has an invalid format")
+        if self.host_target is not None and not isinstance(self.host_target, Mapping):
+            raise ValueError("host_target must be an object")
+        if self.host_task_id is not None and (not isinstance(self.host_task_id, str) or not _IDENTIFIER.fullmatch(self.host_task_id)):
+            raise ValueError("host_task_id has an invalid format")
+        for field_name in ("run_id", "trace_id", "call_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or (value and not _IDENTIFIER.fullmatch(value)):
+                raise ValueError(f"{field_name} has an invalid format")
         if not isinstance(self.approved_actions, Mapping) or len(self.approved_actions) > 1000 or any(
             not isinstance(key, str)
             or not re.fullmatch(r"[0-9a-f]{64}", key)
@@ -181,6 +210,9 @@ class ToolRegistry:
                 handler=spec.handler,
                 target_id_argument=spec.target_id_argument,
                 target_required=spec.target_required,
+                origin=copy.deepcopy(spec.origin),
+                timeout_ms=spec.timeout_ms,
+                cancellable=spec.cancellable,
             )
             for spec in specs
         }
@@ -254,7 +286,12 @@ class ToolRegistry:
             if policy_status not in {"not_required", "approved"}:
                 raise ToolCallError("authorization_failed", "Authorization policy returned an invalid result")
             approval_status = policy_status
-            value = await asyncio.wait_for(spec.handler(arguments, context), timeout=timeout_seconds)
+            handler_context = replace(
+                context,
+                call_id=event_id,
+                trace_id=context.trace_id or event_id,
+            )
+            value = await asyncio.wait_for(spec.handler(arguments, handler_context), timeout=timeout_seconds)
             json_value = _to_json_value(value)
             try:
                 encoded = json.dumps(
@@ -326,6 +363,9 @@ class ToolRegistry:
             handler=spec.handler,
             target_id_argument=spec.target_id_argument,
             target_required=spec.target_required,
+            origin=copy.deepcopy(spec.origin),
+            timeout_ms=spec.timeout_ms,
+            cancellable=spec.cancellable,
         )
 
     async def _record_finished(

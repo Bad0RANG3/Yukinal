@@ -76,6 +76,10 @@ class _AgentState(TypedDict, total=False):
     allowed_tools: list[str]
     allowed_target_ids: list[str]
     approved_actions: dict[str, str]
+    host_target: dict[str, Any]
+    host_task_id: str
+    run_id: str
+    trace_id: str
     calls: list[dict[str, Any]]
     call_index: int
     model_rounds: int
@@ -137,6 +141,10 @@ class ModelDrivenAgent:
         allowed_tools: set[str] | frozenset[str],
         allowed_target_ids: set[str] | frozenset[str],
         approved_actions: dict[str, str] | None = None,
+        host_target: dict[str, Any] | None = None,
+        host_task_id: str | None = None,
+        run_id: str = "",
+        trace_id: str = "",
     ) -> ModelAgentResult:
         try:
             context = ExecutionContext(
@@ -146,6 +154,15 @@ class ModelDrivenAgent:
                 allowed_tools=frozenset(allowed_tools),
                 allowed_target_ids=frozenset(allowed_target_ids),
                 approved_actions=approved_actions or {},
+                host_target=host_target,
+                host_task_id=host_task_id,
+                run_id=run_id,
+                trace_id=trace_id,
+                context_target_id=(
+                    host_target.get("serverId")
+                    if isinstance(host_target, dict) and host_target.get("host") == "remote"
+                    else None
+                ),
             )
         except (TypeError, ValueError):
             return _failed_result(task_id, "invalid_execution_context")
@@ -160,6 +177,10 @@ class ModelDrivenAgent:
             "allowed_tools": sorted(context.allowed_tools),
             "allowed_target_ids": sorted(context.allowed_target_ids),
             "approved_actions": dict(context.approved_actions),
+            **({"host_target": dict(host_target)} if host_target is not None else {}),
+            **({"host_task_id": host_task_id} if host_task_id else {}),
+            "run_id": run_id,
+            "trace_id": trace_id,
             "calls": [],
             "call_index": 0,
             "model_rounds": 0,
@@ -267,16 +288,30 @@ class ModelDrivenAgent:
             allowed_tools=frozenset(state["allowed_tools"]),
             allowed_target_ids=frozenset(state["allowed_target_ids"]),
             approved_actions=state["approved_actions"],
+            host_target=state.get("host_target"),
+            host_task_id=state.get("host_task_id"),
+            run_id=state.get("run_id", ""),
+            trace_id=state.get("trace_id", ""),
+            context_target_id=(
+                state["host_target"].get("serverId")
+                if isinstance(state.get("host_target"), dict) and state["host_target"].get("host") == "remote"
+                else None
+            ),
         )
         remaining = self._budget.max_output_bytes - state["output_bytes"]
         if remaining <= 0:
             return {"status": "failed", "error_code": "output_budget_exceeded"}
+        spec = self._registry.get(request["name"])
+        tool_timeout = min(
+            self._budget.max_tool_seconds,
+            (spec.timeout_ms / 1000) if spec is not None else self._budget.max_tool_seconds,
+        )
         try:
             result = await self._registry.execute(
                 request["name"],
                 request["arguments"],
                 context,
-                timeout_seconds=self._budget.max_tool_seconds,
+                timeout_seconds=tool_timeout,
                 max_output_bytes=min(remaining, 4 * 1024 * 1024),
             )
         except ToolCallError as error:

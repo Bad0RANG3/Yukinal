@@ -17,6 +17,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
+from .host_rpc import HostRpcClient
+from .host_tools import register_host_tools, register_mcp_catalog
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import register_ssh_tools
@@ -70,9 +72,18 @@ class PythonSidecar:
         self._active_runs: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._completed_runs: OrderedDict[str, str] = OrderedDict()
         self._admissions: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._host_rpc: HostRpcClient | None = None
+        self._host_tools_registered = False
+        self._mcp_loaded = False
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
+
+    def set_host_rpc(self, host: HostRpcClient | None) -> None:
+        self._host_rpc = host
+        if host is not None and not self._host_tools_registered:
+            register_host_tools(self._registry, host)
+            self._host_tools_registered = True
 
     def handle(self, request: object) -> dict[str, Any] | None:
         request_id: int | None = None
@@ -124,17 +135,29 @@ class PythonSidecar:
             not isinstance(request, dict)
             or request.get("jsonrpc") != "2.0"
             or not isinstance(request.get("method"), str)
-            or request.get("method") not in ("provider.models", "provider.test", "agent.run.start", "agent.run.stop")
+            or request.get("method") not in ("initialize", "provider.models", "provider.test", "agent.run.start", "agent.run.stop")
             or not isinstance(request.get("id"), int)
             or isinstance(request.get("id"), bool)
         ):
             return self.handle(request)
         request_id = request["id"]
         try:
-            if not self._initialized:
-                raise _RpcFault(RPC_INVALID_REQUEST, "initialize must be the first call")
             method = request["method"]
-            if method == "provider.models":
+            if method == "initialize":
+                result = self._initialize(request.get("params", {}))
+                if self._host_rpc is not None:
+                    try:
+                        catalog = await self._host_rpc.request("host.mcp.catalog", {}, timeout_seconds=8.0)
+                        registered = register_mcp_catalog(self._registry, self._host_rpc, catalog)
+                        self._mcp_loaded = True
+                        print(f"Loaded {len(registered)} MCP tools from the desktop host", file=sys.stderr, flush=True)
+                    except Exception:
+                        print("Desktop MCP catalog is unavailable; continuing without its tools", file=sys.stderr, flush=True)
+                result["capabilities"]["toolCalling"] = bool(self._registry.list())
+                result["capabilities"]["mcp"] = self._mcp_loaded
+            elif not self._initialized:
+                raise _RpcFault(RPC_INVALID_REQUEST, "initialize must be the first call")
+            elif method == "provider.models":
                 result = await self._list_provider_models(request.get("params", {}))
             elif method == "provider.test":
                 result = await self._test_provider(request.get("params", {}))
@@ -302,6 +325,10 @@ class PythonSidecar:
                 prompt=request["promptText"],
                 allowed_tools=allowed_tools,
                 allowed_target_ids=frozenset({target_id}) if target_id else frozenset(),
+                host_target=request.get("hostTarget"),
+                host_task_id=task_id,
+                run_id=run_id,
+                trace_id=_safe_context_id("trace", run_id),
             )
             text = result.answer[:200_000]
             base_result: dict[str, Any] = {
@@ -406,7 +433,7 @@ class PythonSidecar:
                 "streaming": False,
                 "toolCalling": bool(self._registry.list()),
                 "cancellation": True,
-                "mcp": False,
+                "mcp": self._mcp_loaded,
             },
         }
 
@@ -424,11 +451,11 @@ class PythonSidecar:
             "name": spec.name,
             "description": spec.description,
             "risk": {"read": "read", "write": "medium", "destructive": "critical"}[spec.risk_level],
-            "timeoutMs": 30_000,
-            "cancellable": False,
+            "timeoutMs": spec.timeout_ms,
+            "cancellable": spec.cancellable,
             "retry": {"maxAttempts": 1, "backoffMs": 0},
             "inputSchema": spec.input_schema,
-            "origin": {"kind": "builtin"},
+            "origin": spec.origin or {"kind": "builtin"},
             "effectful": spec.risk_level != "read",
         }
 
@@ -635,6 +662,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     if target_id is not None and not _valid_server_id(target_id):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     target = parsed.get("target")
+    host_target: dict[str, Any] | None = None
     if "target" in parsed:
         target = _strict_object(target, {"host", "serverId", "workspaceId", "environment"})
         if (
@@ -654,6 +682,22 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         if scoped_server is not None and target_id is not None and scoped_server != target_id:
             raise _RpcFault(RPC_INVALID_PARAMS, "target conflicts with focusServerId")
         target_id = scoped_server or target_id
+        if target["host"] == "local" and target_id is not None:
+            raise _RpcFault(RPC_INVALID_PARAMS, "focusServerId conflicts with a local target")
+        host_target = {
+            "host": target["host"],
+            **({"serverId": scoped_server} if scoped_server is not None else {}),
+            **({"workspaceId": target["workspaceId"]} if target.get("workspaceId") is not None else {}),
+            "environment": target["environment"],
+        }
+    elif target_id is not None:
+        host_target = {"host": "remote", "serverId": target_id, "environment": "unknown"}
+    else:
+        host_target = {
+            "host": "local",
+            "environment": "local",
+            **({"workspaceId": parsed["workspaceId"]} if parsed.get("workspaceId") else {}),
+        }
 
     if "parts" in parsed and not isinstance(parsed["parts"], list):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid prompt parts")
@@ -671,6 +715,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "resume": parsed.get("resume", True),
         "promptText": prompt_text,
         "targetId": target_id,
+        "hostTarget": host_target,
         "agentBudget": task_budget,
     }
 
@@ -781,6 +826,11 @@ async def serve_stdio(
     async def write_frame(frame: dict[str, Any]) -> None:
         encoded = json.dumps(frame, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
         if len(encoded) > MAX_SIDECAR_FRAME_BYTES:
+            if isinstance(frame.get("method"), str):
+                raise ValueError("sidecar request exceeds the frame limit")
+            if "id" not in frame:
+                print("dropped oversized sidecar notification", file=sys.stderr, flush=True)
+                return
             frame_id = frame.get("id")
             encoded = json.dumps(
                 _failure(frame_id if isinstance(frame_id, int) else None, RPC_INTERNAL_ERROR, "Response exceeds the frame limit"),
@@ -789,6 +839,9 @@ async def serve_stdio(
         async with write_lock:
             output_stream.write(encoded)
             output_stream.flush()
+
+    host_rpc = HostRpcClient(write_frame)
+    sidecar.set_host_rpc(host_rpc)
 
     def notify(method: str, params: dict[str, Any]) -> None:
         task = asyncio.create_task(write_frame({"jsonrpc": "2.0", "method": method, "params": params}))
@@ -816,10 +869,13 @@ async def serve_stdio(
         except (UnicodeDecodeError, json.JSONDecodeError):
             print("dropped malformed sidecar frame", file=sys.stderr, flush=True)
             continue
+        if host_rpc.handle_response(value):
+            continue
         task = asyncio.create_task(respond(value))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
     await sidecar.shutdown()
+    host_rpc.close()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 

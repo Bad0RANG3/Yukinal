@@ -2,9 +2,9 @@
 
 > **Current scope:** the SSH foundation and bounded Agent Runtime milestones in
 > [`ssh_agent_development_brief.md`](../ssh_agent_development_brief.md) are being
-> implemented. Model providers, durable task control, and desktop integration
-> are not complete. This is not a rewrite of every product feature and is not a
-> claim that the desktop app has switched from Tauri.
+> implemented. Model providers and a first host-tool bridge are implemented;
+> durable task control and the desktop launcher switch are not complete. This is
+> not a claim that the desktop app has switched from its current backend.
 
 ## Repository baseline and migration boundary
 
@@ -16,18 +16,19 @@ replaced with the narrower implementation below. The React components and their
 Tauri calls are preserved. The Rust/Tauri code remains available as a legacy
 behavior reference until replacement milestones are built and checked.
 
-The new service and Python runtime remain separate from the desktop UI. The UI
-switch, model providers, durable task state, and broader operations are later
-work.
+The Python runtime now speaks the desktop host's bidirectional JSON-RPC protocol.
+It can execute a first set of read-only server tools through the host and load
+low-risk MCP tools from the host catalog. The desktop still launches its current
+Node sidecar by default; launcher and packaging migration remain later work.
 
 ## Processes and trust boundaries
 
 ```text
 Python Agent Runtime
-    ├── Tool Registry → schema → allowlist/approval → audit
+    ├── Tool Registry → schema → per-run read allowlist → audit
     ├── LangGraph bounded tool workflow
-    ├── MCP Client Manager (stdio / Streamable HTTP)
-    └── yukinal_ssh caller
+    ├── host.* JSON-RPC bridge → Tauri/Rust host → existing SSH and MCP
+    └── standalone yukinal_ssh caller
               │ HTTP/JSON + local bearer token
               ▼
         C++ SSH service (binds only 127.0.0.1)
@@ -35,8 +36,16 @@ Python Agent Runtime
               ▼
         libssh2 ── SSH ──► configured server
 
-React/Tauri desktop UI: unchanged; not yet connected to the new service
+React/Tauri desktop UI: unchanged; the existing host remains the tool executor
 ```
+
+The bridge uses the existing sidecar request path: Python sends
+`host.tool.execute` (or `host.mcp.catalog`) over the child process pipe, and the
+desktop host replies over that same pipe. Python does not open SSH sessions or
+start MCP processes through this bridge. The host continues to resolve the
+server, enforce its current authorization and execute the operation. Current
+Python host tools are read-only; MCP entries are exposed to the model only when
+the host catalog classifies them as low-risk.
 
 ## Python Agent Runtime
 

@@ -83,14 +83,20 @@ frames and diagnostics go to stderr. Frames are capped at 24 MiB. The current
 Python sidecar implements `initialize`, `system.ping`, `tools.list`,
 `system.describe`, `provider.test`, text-only `agent.run.start`, and
 `agent.run.stop`; `provider.models` returns model catalogs for all three
-providers. A run only exposes registered read-only tools. Multimodal prompts,
-host-mediated tools, approval RPCs and the desktop launcher switch are still
-being migrated.
+providers. Over the same NDJSON connection it can request host-side tool
+execution and fetch the host's MCP catalog. The first integrated set contains
+read-only server, Docker, systemd, package and file tools, plus MCP tools the
+host marks low-risk. The host remains the final authorization boundary.
+Multimodal prompts, approval RPCs, durable task state, broader tool coverage
+and the desktop launcher switch are still being migrated.
 
 ## Register and run tools
 
-The embedding host supplies the authenticated identity, target allowlist and
-allowed-tool set. The model must never be allowed to provide those claims.
+The standalone `ModelDrivenAgent` API receives the identity and allowlists from
+its embedding host. In the desktop bridge, the Python sidecar exposes only its
+registered read-only tools and passes the resolved target and call to the
+desktop host, which remains responsible for its authenticated permission and
+approval checks. The model never supplies those claims.
 
 ```python
 import asyncio
