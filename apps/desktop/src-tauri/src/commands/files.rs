@@ -112,7 +112,15 @@ pub(crate) fn cpp_ssh_file_operations_supported(
     Ok(matches!(
         identity.method.as_str(),
         "password" | "privateKey" | "agent"
-    ))
+    ) || (identity.method == "certificate"
+        && (identity
+            .certificate_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+            || identity
+                .private_key_path
+                .as_deref()
+                .is_some_and(|path| !path.is_empty()))))
 }
 
 impl RemoteFileTransport for TerminalFileTransport<'_> {

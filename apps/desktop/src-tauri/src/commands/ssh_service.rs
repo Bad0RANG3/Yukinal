@@ -358,10 +358,19 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
         .identities()
         .get(identity_id)
         .map_err(|error| error.to_string())?;
-    if !matches!(
+    let identity_supported = matches!(
         identity.method.as_str(),
         "password" | "privateKey" | "agent"
-    ) {
+    ) || (identity.method == "certificate"
+        && (identity
+            .certificate_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+            || identity
+                .private_key_path
+                .as_deref()
+                .is_some_and(|path| !path.is_empty())));
+    if !identity_supported {
         return Ok(false);
     }
     let proxy =

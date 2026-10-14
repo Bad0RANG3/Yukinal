@@ -417,7 +417,7 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
             );
             json!({ "type": "password", "password_env": "YK_SSH_PASSWORD" })
         }
-        "privateKey" => {
+        "privateKey" | "certificate" => {
             credentials.insert(
                 "YK_SSH_PRIVATE_KEY".into(),
                 serde_json::Value::String(read_ssh_secret(
@@ -445,6 +445,40 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
             });
             if let Some(passphrase_env) = passphrase_env {
                 auth["passphrase_env"] = json!(passphrase_env);
+            }
+            if identity.method == "certificate" {
+                let certificate_path = identity
+                    .certificate_path
+                    .clone()
+                    .or_else(|| {
+                        identity
+                            .private_key_path
+                            .as_deref()
+                            .map(|path| format!("{path}-cert.pub"))
+                    })
+                    .filter(|path| {
+                        !path.is_empty()
+                            && path.len() <= 4096
+                            && !path.chars().any(char::is_control)
+                            && !path.contains('\0')
+                    })
+                    .ok_or_else(|| {
+                        "the selected SSH certificate identity has no valid public certificate file"
+                            .to_string()
+                    })?;
+                let certificate_path = std::path::Path::new(&certificate_path);
+                let certificate_path = if certificate_path.is_absolute() {
+                    certificate_path.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|_| "the desktop working directory is unavailable")?
+                        .join(certificate_path)
+                };
+                let certificate_path = certificate_path.to_string_lossy().into_owned();
+                if certificate_path.len() > 4096 {
+                    return Err("the SSH public certificate path is too long".into());
+                }
+                auth["public_key_file"] = json!(certificate_path);
             }
             auth
         }

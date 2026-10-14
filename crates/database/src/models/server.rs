@@ -171,7 +171,7 @@ pub struct Workspace {
 pub struct Identity {
     pub id: String,
     pub label: String,
-    /// "password" | "privateKey" | "agent"
+    /// "password" | "privateKey" | "certificate" | "agent"
     pub method: String,
     /// 凭据引用。agent 身份**没有**凭据条目，这里是空串 —— `identities.credential_ref`
     /// 是 `NOT NULL`，空串表示「这个身份没有 secret」，而不是编一个指向不存在条目的

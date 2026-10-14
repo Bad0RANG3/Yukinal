@@ -12,8 +12,9 @@
 > PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
-> C++ SFTP operations for password, private-key, and SSH-agent identities
-> without Host CA. Host-key probes use C++ unless Host CA or an unsupported
+> C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
+> SSH-agent identities without Host CA. The same identities use C++ for
+> structured SSH operations. Host-key probes use C++ unless Host CA or an unsupported
 > host-key format requires the certificate-aware Rust path; transfers, PTY, and
 > Host CA trust still use Rust. Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
@@ -257,13 +258,19 @@ Paths are resolved relative to that JSON file. Each target requires:
 - a configured host, port, and SSH username;
 - exactly one host-key trust source: an OpenSSH-format `known_hosts_file`, or
   `host_key_fingerprint` containing the desktop pin in `SHA256:<base64>` form;
-- exactly one auth mode: a `private_key_file`, a `private_key_env`, a
-  `password_env` reference, or `{ "type": "agent" }`. Private-key environment
-  references can include an optional `passphrase_env`.
+- exactly one auth mode: `private_key_file` or `private_key_env`, a
+  `password_env` reference, or `{ "type": "agent" }`. Private-key auth can
+  include `passphrase_env`; OpenSSH user-certificate auth additionally sets
+  `public_key_file` to its `*-cert.pub` file. The certificate is public
+  material; the private key remains in its configured file or environment
+  reference.
 
 Agent authentication uses `SSH_AUTH_SOCK` on Unix and libssh2's platform Agent
 integration on Windows. The socket path is forwarded only when an allow-listed
-target selects agent authentication. The desktop pin form lets the service
+target selects agent authentication. For certificate identities, the C++
+service reads the configured public certificate line and passes it to libssh2
+alongside the private key; the desktop does not copy certificate bytes into
+the secret store. The desktop pin form lets the service
 enforce the same exact-key trust decision as the existing server host-key UI.
 Private-key environment references let the desktop pass decrypted keychain
 material directly to the C++ child without writing key material into the JSON

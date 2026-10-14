@@ -146,8 +146,8 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     if (auth_it == entry.end()) throw std::runtime_error(label + ".auth is required");
     require_object(*auth_it, label + ".auth");
     require_only_keys(*auth_it,
-                      {"type", "private_key_file", "private_key_env", "password_env",
-                       "passphrase_env"},
+                      {"type", "private_key_file", "public_key_file", "private_key_env",
+                       "password_env", "passphrase_env"},
                       label + ".auth");
     const std::string auth_type = required_string(*auth_it, "type", label + ".auth");
     if (target.probe_only) {
@@ -167,13 +167,21 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
           throw std::runtime_error(label + ".auth.private_key_env is invalid");
         }
       }
+      if (auth_it->contains("public_key_file")) {
+        target.public_key_file = resolve_path(
+            required_string(*auth_it, "public_key_file", label + ".auth"), base_directory);
+        if (target.public_key_file.size() > 4096 ||
+            target.public_key_file.find('\0') != std::string::npos) {
+          throw std::runtime_error(label + ".auth.public_key_file is invalid");
+        }
+      }
       if (auth_it->contains("passphrase_env")) {
         target.passphrase_env = required_string(*auth_it, "passphrase_env", label + ".auth");
         if (!valid_env_name(target.passphrase_env)) throw std::runtime_error(label + ".auth.passphrase_env is invalid");
       }
     } else if (auth_type == "password") {
       if (auth_it->contains("private_key_file") || auth_it->contains("private_key_env") ||
-          auth_it->contains("passphrase_env")) {
+          auth_it->contains("public_key_file") || auth_it->contains("passphrase_env")) {
         throw std::runtime_error(label + ".auth has conflicting credential fields");
       }
       target.password_env = required_string(*auth_it, "password_env", label + ".auth");

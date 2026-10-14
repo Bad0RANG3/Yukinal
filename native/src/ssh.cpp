@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -341,6 +342,38 @@ std::string read_environment(const std::string& name) {
   return value ? value : "";
 }
 
+bool read_public_key_file(const std::string& path, std::string* public_key) {
+  if (path.empty() || !public_key) return false;
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return false;
+  public_key->clear();
+  public_key->reserve(4096);
+  char character = 0;
+  while (input.get(character) && character != '\n') {
+    if (public_key->size() == 64 * 1024) {
+      public_key->clear();
+      return false;
+    }
+    public_key->push_back(character);
+  }
+  if (input.bad()) {
+    public_key->clear();
+    return false;
+  }
+  if (!public_key->empty() && public_key->back() == '\r') public_key->pop_back();
+  if (public_key->empty() || public_key->size() > 64 * 1024 ||
+      public_key->find('\0') != std::string::npos) {
+    public_key->clear();
+    return false;
+  }
+  const bool printable = std::all_of(public_key->begin(), public_key->end(),
+                                      [](unsigned char character) {
+                                        return character >= 0x20 && character <= 0x7e;
+                                      });
+  if (!printable) public_key->clear();
+  return printable;
+}
+
 class SshResources {
  public:
   ~SshResources() {
@@ -574,18 +607,30 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     std::string passphrase = read_environment(target.passphrase_env);
     if (!target.private_key_env.empty()) {
       std::string private_key = read_environment(target.private_key_env);
+      std::string public_key;
       if (private_key.empty()) {
         fail(result, "credential_unavailable", "The configured SSH private key is not available");
         wipe(&passphrase);
         return false;
       }
+      if (!target.public_key_file.empty() &&
+          !read_public_key_file(target.public_key_file, &public_key)) {
+        fail(result, "credential_unavailable", "The configured SSH public key or certificate is not available");
+        wipe(&private_key);
+        wipe(&passphrase);
+        return false;
+      }
       auth_result = libssh2_userauth_publickey_frommemory(
-          resources->session_, target.username.c_str(), target.username.size(), nullptr, 0,
+          resources->session_, target.username.c_str(), target.username.size(),
+          public_key.empty() ? nullptr : public_key.data(), public_key.size(),
           private_key.data(), private_key.size(), passphrase.empty() ? nullptr : passphrase.c_str());
+      wipe(&public_key);
       wipe(&private_key);
     } else {
       auth_result = libssh2_userauth_publickey_fromfile(
-          resources->session_, target.username.c_str(), nullptr, target.private_key_file.c_str(),
+          resources->session_, target.username.c_str(),
+          target.public_key_file.empty() ? nullptr : target.public_key_file.c_str(),
+          target.private_key_file.c_str(),
           passphrase.empty() ? nullptr : passphrase.c_str());
     }
     wipe(&passphrase);

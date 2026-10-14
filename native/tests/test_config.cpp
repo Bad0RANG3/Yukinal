@@ -84,6 +84,34 @@ YUKINAL_TEST(config_accepts_desktop_host_key_pin_and_memory_private_key) {
   YUKINAL_REQUIRE(parsed.private_key_env == "YK_SSH_KEY_0");
 }
 
+YUKINAL_TEST(config_accepts_public_certificate_with_memory_private_key) {
+  auto value = valid_config();
+  value["targets"][0]["auth"] = {
+      {"type", "private_key"},
+      {"private_key_env", "YK_SSH_KEY_0"},
+      {"public_key_file", "keys/id_ed25519-cert.pub"}};
+
+  const auto config = parse_config(value, "config-root");
+  const auto& parsed = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(parsed.private_key_env == "YK_SSH_KEY_0");
+  YUKINAL_REQUIRE(parsed.public_key_file ==
+                  (std::filesystem::path("config-root") / "keys/id_ed25519-cert.pub")
+                      .lexically_normal()
+                      .string());
+}
+
+YUKINAL_TEST(config_rejects_public_certificate_with_password_authentication) {
+  auto value = valid_config();
+  value["targets"][0]["auth"]["public_key_file"] = "id_ed25519-cert.pub";
+  bool rejected = false;
+  try {
+    (void)parse_config(value);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+}
+
 YUKINAL_TEST(config_accepts_ssh_agent_authentication) {
   auto value = valid_config();
   value["targets"][0]["auth"] = {{"type", "agent"}};

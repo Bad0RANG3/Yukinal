@@ -16,7 +16,8 @@ still in progress. Current components include:
   `service_status`, `service_inventory`, and the existing host-approved
   `docker_restart`, `systemd_restart`, and `package_install` actions, plus
   bounded SFTP listing, metadata, read, write, exclusive backup creation, removal,
-  guarded atomic replacement, and link-count probes for supported desktop Agent identities;
+  guarded atomic replacement, and link-count probes for supported desktop identities,
+  including OpenSSH user-certificate identities;
 - target allowlisting, strict SSH host-key verification, bounded timeouts and
   output, and credentials referenced from environment variables or private-key
   files;
