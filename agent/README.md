@@ -137,6 +137,13 @@ must be JSON-compatible, no deeper than 32 levels, and at most 4 MiB, 100,000
 nodes, and 10,000 content blocks. Oversized or cyclic responses fail with a
 stable tool error instead of being copied into the Agent result.
 
+`SshServiceClient` provides Python wrappers for the C++ service's fixed
+read-only connection check, service inventory, Docker listing/logs/inspection,
+systemd inspection, package inspection, and bounded server logs. Each wrapper
+validates its parameters before sending a structured operation. These client
+methods do not automatically add Agent tools; the embedding host still chooses
+which operations to register and authorize.
+
 The standalone `ModelDrivenAgent` API receives the identity and allowlists from
 its embedding host. In the desktop bridge, the Python sidecar exposes only its
 registered read-only tools and passes the resolved target and call to the

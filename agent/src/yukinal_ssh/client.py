@@ -15,6 +15,8 @@ from .errors import SshServiceError, SshServiceTransportError
 
 _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
+_CONTAINER_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_PACKAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$")
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 _MAX_SFTP_WRITE_BYTES = 512 * 1024
@@ -77,9 +79,66 @@ class SshServiceClient:
             target_id, "service_status", {"service": service}, timeout_seconds
         )
 
+    def connection_check(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
+        """Verify SSH authentication for the configured target without running a command."""
+        return self._execute_operation(target_id, "connection_check", {}, timeout_seconds)
+
     def service_inventory(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
         """List services through the fixed, read-only inventory operation."""
         return self._execute_operation(target_id, "service_inventory", {}, timeout_seconds)
+
+    def docker_ps(
+        self, target_id: str, include_all_containers: bool = False, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        if not isinstance(include_all_containers, bool):
+            raise ValueError("include_all_containers must be a boolean")
+        return self._execute_operation(
+            target_id, "docker_ps", {"all": include_all_containers}, timeout_seconds
+        )
+
+    def docker_logs(
+        self, target_id: str, container: str, tail: int = 120, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        if not isinstance(container, str) or not _CONTAINER_REF.fullmatch(container):
+            raise ValueError("container must be a safe container reference")
+        if isinstance(tail, bool) or not isinstance(tail, int) or not 1 <= tail <= 500:
+            raise ValueError("tail must be an integer from 1 to 500")
+        return self._execute_operation(
+            target_id, "docker_logs", {"container": container, "tail": tail}, timeout_seconds
+        )
+
+    def docker_inspect(
+        self, target_id: str, container: str, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        if not isinstance(container, str) or not _CONTAINER_REF.fullmatch(container):
+            raise ValueError("container must be a safe container reference")
+        return self._execute_operation(
+            target_id, "docker_inspect", {"container": container}, timeout_seconds
+        )
+
+    def systemd_inspect(
+        self, target_id: str, service: str, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        if (
+            not isinstance(service, str)
+            or not _SERVICE_NAME.fullmatch(service)
+            or not service.endswith(".service")
+        ):
+            raise ValueError("service must be a valid .service unit name")
+        return self._execute_operation(
+            target_id, "systemd_inspect", {"service": service}, timeout_seconds
+        )
+
+    def package_inspect(
+        self, target_id: str, manager: str, package: str, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        if manager not in ("apt", "dnf"):
+            raise ValueError("manager must be apt or dnf")
+        if not isinstance(package, str) or not _PACKAGE_REF.fullmatch(package):
+            raise ValueError("package must be a safe package reference")
+        return self._execute_operation(
+            target_id, "package_inspect", {"manager": manager, "package": package}, timeout_seconds
+        )
 
     def server_logs(
         self,

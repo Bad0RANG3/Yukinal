@@ -130,6 +130,66 @@ class ClientTests(unittest.TestCase):
                     self.client.server_logs("staging-web-01", since_seconds, unit)
         self.assertIsNone(self.server.last_request)
 
+    def test_read_only_operations_use_only_their_structured_parameters(self) -> None:
+        calls = (
+            ("connection_check", lambda: self.client.connection_check("staging-web-01", 7), {}),
+            ("service_inventory", lambda: self.client.service_inventory("staging-web-01", 7), {}),
+            (
+                "docker_ps",
+                lambda: self.client.docker_ps("staging-web-01", include_all_containers=True, timeout_seconds=7),
+                {"all": True},
+            ),
+            (
+                "docker_logs",
+                lambda: self.client.docker_logs("staging-web-01", "api_1", tail=40, timeout_seconds=7),
+                {"container": "api_1", "tail": 40},
+            ),
+            (
+                "docker_inspect",
+                lambda: self.client.docker_inspect("staging-web-01", "api_1", 7),
+                {"container": "api_1"},
+            ),
+            (
+                "systemd_inspect",
+                lambda: self.client.systemd_inspect("staging-web-01", "nginx.service", 7),
+                {"service": "nginx.service"},
+            ),
+            (
+                "package_inspect",
+                lambda: self.client.package_inspect("staging-web-01", "apt", "nginx", 7),
+                {"manager": "apt", "package": "nginx"},
+            ),
+        )
+        for operation, invoke, parameters in calls:
+            with self.subTest(operation=operation):
+                self.server.response_body["operation"] = operation
+                result = invoke()
+                self.assertEqual(result.operation, operation)
+                self.assertEqual(
+                    self.server.last_request["body"],
+                    {
+                        "target_id": "staging-web-01",
+                        "operation": operation,
+                        "parameters": parameters,
+                        "timeout_seconds": 7,
+                    },
+                )
+
+    def test_read_only_operation_arguments_are_rejected_before_network_call(self) -> None:
+        invalid_calls = (
+            lambda: self.client.docker_ps("staging-web-01", include_all_containers=1),
+            lambda: self.client.docker_logs("staging-web-01", "api;id"),
+            lambda: self.client.docker_logs("staging-web-01", "api", tail=True),
+            lambda: self.client.docker_inspect("staging-web-01", "api/other"),
+            lambda: self.client.systemd_inspect("staging-web-01", "nginx"),
+            lambda: self.client.package_inspect("staging-web-01", "yum", "nginx"),
+            lambda: self.client.package_inspect("staging-web-01", "apt", "nginx;id"),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke), self.assertRaises(ValueError):
+                invoke()
+        self.assertIsNone(self.server.last_request)
+
     def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
         self.server.response_body["operation"] = "sftp_write"
         self.server.response_body["stdout"] = '{"bytes_written":4}'
