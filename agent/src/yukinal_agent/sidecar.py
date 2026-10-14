@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from yukinal_ssh import SshServiceClient
 
@@ -37,7 +39,7 @@ METHODS = {
     "agent.run.start": True,
     "agent.run.stop": True,
     "agent.approval.respond": False,
-    "provider.models": False,
+    "provider.models": True,
     "provider.test": True,
 }
 
@@ -122,7 +124,7 @@ class PythonSidecar:
             not isinstance(request, dict)
             or request.get("jsonrpc") != "2.0"
             or not isinstance(request.get("method"), str)
-            or request.get("method") not in ("provider.test", "agent.run.start", "agent.run.stop")
+            or request.get("method") not in ("provider.models", "provider.test", "agent.run.start", "agent.run.stop")
             or not isinstance(request.get("id"), int)
             or isinstance(request.get("id"), bool)
         ):
@@ -132,7 +134,9 @@ class PythonSidecar:
             if not self._initialized:
                 raise _RpcFault(RPC_INVALID_REQUEST, "initialize must be the first call")
             method = request["method"]
-            if method == "provider.test":
+            if method == "provider.models":
+                result = await self._list_provider_models(request.get("params", {}))
+            elif method == "provider.test":
                 result = await self._test_provider(request.get("params", {}))
             elif method == "agent.run.start":
                 result = await self._run_start(request.get("params", {}))
@@ -175,53 +179,22 @@ class PythonSidecar:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Model returned no text; check the model and endpoint settings")
         return {"ok": True}
 
-    def _create_runtime_model(self, params: object) -> tuple[Any, int]:
-        fields = {"kind", "baseUrl", "model", "apiKey", "customHeaders", "apiVersion", "timeoutMs", "wireApi"}
-        parsed = _strict_object(params, fields)
-        kind = parsed.get("kind")
-        base_url = parsed.get("baseUrl")
-        model_name = parsed.get("model")
-        api_key = parsed.get("apiKey")
-        custom_headers = parsed.get("customHeaders")
-        api_version = parsed.get("apiVersion")
-        wire_api = parsed.get("wireApi")
-        timeout_ms = parsed.get("timeoutMs", 30_000)
-        optional_strings = {"apiKey": api_key, "apiVersion": api_version, "wireApi": wire_api}
-        if (
-            kind not in ("openai-compatible", "anthropic", "gemini")
-            or not isinstance(base_url, str)
-            or len(base_url) > 2048
-            or not isinstance(model_name, str)
-            or len(model_name) > 256
-            or any(name in parsed and not isinstance(value, str) for name, value in optional_strings.items())
-            or "customHeaders" in parsed and not isinstance(custom_headers, dict)
-            or isinstance(timeout_ms, bool)
-            or not isinstance(timeout_ms, int)
-            or not 100 <= timeout_ms <= 600_000
-        ):
-            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
-        base_url = base_url.strip()
-        model_name = model_name.strip()
-        api_version = api_version.strip() if api_version is not None else None
-        wire_api = wire_api.strip() if wire_api is not None else None
+    async def _list_provider_models(self, params: object) -> dict[str, Any]:
+        config, api_key, timeout_ms = _parse_runtime_model_config(params)
         try:
-            config = ModelConfig(
-                provider=kind,
-                model=model_name,
-                temperature=0,
-                timeout_seconds=timeout_ms / 1000,
-                max_retries=0,
-                max_output_tokens=256,
-                base_url=base_url,
-                custom_headers=custom_headers,
-                api_version=api_version,
-                wire_api=wire_api,
-            )
+            models = await asyncio.to_thread(_fetch_model_catalog, config, api_key, timeout_ms)
+        except _RpcFault:
+            raise
+        except Exception:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog request failed") from None
+        return {"models": models}
+
+    def _create_runtime_model(self, params: object) -> tuple[Any, int]:
+        config, api_key, timeout_ms = _parse_runtime_model_config(params)
+        try:
             model = self._model_factory.create_with_api_key(config, api_key)
         except ModelFactoryError as error:
             raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
-        except (TypeError, ValueError):
-            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params") from None
         return model, timeout_ms
 
     async def _run_start(self, params: object) -> dict[str, Any]:
@@ -466,6 +439,163 @@ def _strict_object(value: object, allowed_keys: set[str]) -> dict[str, Any]:
     if set(value) - allowed_keys:
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     return value
+
+
+def _parse_runtime_model_config(params: object) -> tuple[ModelConfig, str | None, int]:
+    fields = {"kind", "baseUrl", "model", "apiKey", "customHeaders", "apiVersion", "timeoutMs", "wireApi"}
+    parsed = _strict_object(params, fields)
+    kind = parsed.get("kind")
+    base_url = parsed.get("baseUrl")
+    model_name = parsed.get("model")
+    api_key = parsed.get("apiKey")
+    custom_headers = parsed.get("customHeaders")
+    api_version = parsed.get("apiVersion")
+    wire_api = parsed.get("wireApi")
+    timeout_ms = parsed.get("timeoutMs", 30_000)
+    optional_strings = {"apiKey": api_key, "apiVersion": api_version, "wireApi": wire_api}
+    if (
+        kind not in ("openai-compatible", "anthropic", "gemini")
+        or not isinstance(base_url, str)
+        or len(base_url) > 2048
+        or not isinstance(model_name, str)
+        or len(model_name) > 256
+        or any(name in parsed and not isinstance(value, str) for name, value in optional_strings.items())
+        or "customHeaders" in parsed and not isinstance(custom_headers, dict)
+        or isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or not 100 <= timeout_ms <= 600_000
+    ):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    base_url = base_url.strip()
+    model_name = model_name.strip()
+    api_version = api_version.strip() if api_version is not None else None
+    wire_api = wire_api.strip() if wire_api is not None else None
+    try:
+        config = ModelConfig(
+            provider=kind,
+            model=model_name,
+            temperature=0,
+            timeout_seconds=timeout_ms / 1000,
+            max_retries=0,
+            max_output_tokens=256,
+            base_url=base_url,
+            custom_headers=custom_headers,
+            api_version=api_version,
+            wire_api=wire_api,
+        )
+    except (TypeError, ValueError):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params") from None
+    if kind in ("anthropic", "gemini") and not api_key:
+        raise _RpcFault(RPC_INVALID_PARAMS, "Configured model API key is unavailable")
+    if api_key is not None and (len(api_key) > 4096 or "\r" in api_key or "\n" in api_key):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    return config, api_key, timeout_ms
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request: Request, file: Any, code: int, message: str, headers: Any, new_url: str) -> None:
+        return None
+
+
+def _fetch_model_catalog(config: ModelConfig, api_key: str | None, timeout_ms: int) -> list[dict[str, Any]]:
+    base_url = config.base_url.rstrip("/") if config.base_url else ""
+    if config.provider == "openai-compatible":
+        endpoint = f"{base_url}/models"
+    elif config.provider == "anthropic":
+        endpoint = f"{base_url}/v1/models"
+    else:
+        endpoint = f"{base_url}/v1beta/models"
+
+    headers = dict(config.custom_headers or {})
+    headers["Accept"] = "application/json"
+    if config.provider == "openai-compatible":
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    elif config.provider == "anthropic":
+        headers["anthropic-version"] = config.api_version or "2023-06-01"
+        headers["x-api-key"] = api_key or ""
+    elif api_key:
+        headers["x-goog-api-key"] = api_key
+
+    request = Request(endpoint, headers=headers, method="GET")
+    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=timeout_ms / 1000) as response:
+            if response.status != 200:
+                raise _RpcFault(RPC_INTERNAL_ERROR, f"Provider model catalog request failed (HTTP {response.status})")
+            body = response.read(4 * 1024 * 1024 + 1)
+    except HTTPError as error:
+        raise _RpcFault(RPC_INTERNAL_ERROR, f"Provider model catalog request failed (HTTP {error.code})") from None
+    except (URLError, TimeoutError, OSError):
+        raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog request failed") from None
+    if len(body) > 4 * 1024 * 1024:
+        raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog response exceeds the size limit")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+        models = _map_provider_models(config.provider, payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+        raise _RpcFault(RPC_INTERNAL_ERROR, "Provider returned an invalid model catalog") from None
+    if len(models) > 1000:
+        raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog exceeds the entry limit")
+    return models
+
+
+def _map_provider_models(provider: str, payload: object) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise ValueError("invalid catalog")
+    if provider == "openai-compatible":
+        if set(payload) - {"data", "object"}:
+            raise ValueError("invalid catalog")
+        entries = payload.get("data", [])
+        label_key = "id"
+        id_key = "id"
+    elif provider == "anthropic":
+        if set(payload) - {"data", "has_more", "first_id", "last_id"}:
+            raise ValueError("invalid catalog")
+        entries = payload.get("data")
+        label_key = "display_name"
+        id_key = "id"
+    else:
+        entries = payload.get("models")
+        label_key = "displayName"
+        id_key = "name"
+    if not isinstance(entries, list):
+        raise ValueError("invalid catalog")
+    models: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid model entry")
+        if provider == "gemini":
+            methods = entry.get("supportedGenerationMethods")
+            if not isinstance(methods, list) or "generateContent" not in methods:
+                continue
+        model_id = entry.get(id_key)
+        label = entry.get(label_key)
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError("invalid model id")
+        if provider == "gemini" and model_id.startswith("models/"):
+            model_id = model_id.removeprefix("models/")
+        model_id = model_id.strip()
+        if len(model_id) > 256:
+            raise ValueError("model id exceeds the limit")
+        if label is not None and (not isinstance(label, str) or not label.strip()):
+            raise ValueError("invalid model label")
+        if label is None:
+            label = model_id
+        label = label.strip()
+        if len(label) > 256:
+            raise ValueError("model label exceeds the limit")
+        result: dict[str, Any] = {
+            "id": model_id,
+            "label": label,
+            "supportsToolCalling": True,
+            "supportsStreaming": True,
+        }
+        context_window = entry.get("inputTokenLimit") if provider == "gemini" else None
+        if isinstance(context_window, int) and not isinstance(context_window, bool) and 0 < context_window <= 10_000_000:
+            result["contextWindow"] = context_window
+        models.append(result)
+    return models
 
 
 def _parse_run_request(value: object) -> dict[str, Any]:

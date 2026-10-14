@@ -30,8 +30,8 @@ The current rewrite implements **milestones 1 through 3** from
   health, capability, and tool-catalog methods.
 
 The Python JSON-RPC layer now handles initialization, health, tool catalogs,
-provider checks, text runs, and cancellation. Model catalogs, multimodal input,
-the host-tool bridge, approval RPCs, durable task state, and switching the
+provider checks and model catalogs, text runs, and cancellation. Multimodal
+input, the host-tool bridge, approval RPCs, durable task state, and switching the
 desktop launcher to Python remain in progress. The existing React/Tauri UI
 remains intact while those paths are migrated.
 

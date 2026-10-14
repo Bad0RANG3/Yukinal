@@ -82,9 +82,10 @@ data directory, and launch `yukinal-agent-node`. The process speaks version
 frames and diagnostics go to stderr. Frames are capped at 24 MiB. The current
 Python sidecar implements `initialize`, `system.ping`, `tools.list`,
 `system.describe`, `provider.test`, text-only `agent.run.start`, and
-`agent.run.stop`. It only exposes registered read-only tools to a run. Model
-catalogs, multimodal prompts, host-mediated tools, approval RPCs and the desktop
-launcher switch are still being migrated.
+`agent.run.stop`; `provider.models` returns model catalogs for all three
+providers. A run only exposes registered read-only tools. Multimodal prompts,
+host-mediated tools, approval RPCs and the desktop launcher switch are still
+being migrated.
 
 ## Register and run tools
 
