@@ -132,6 +132,11 @@ On macOS or Linux, use `agent/.venv/bin/python` for the install command. Set
 
 ## Register and run tools
 
+MCP responses are validated before the Tool Registry normalizes them: a result
+must be JSON-compatible, no deeper than 32 levels, and at most 4 MiB, 100,000
+nodes, and 10,000 content blocks. Oversized or cyclic responses fail with a
+stable tool error instead of being copied into the Agent result.
+
 The standalone `ModelDrivenAgent` API receives the identity and allowlists from
 its embedding host. In the desktop bridge, the Python sidecar exposes only its
 registered read-only tools and passes the resolved target and call to the

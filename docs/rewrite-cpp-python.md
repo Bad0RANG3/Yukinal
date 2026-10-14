@@ -116,8 +116,11 @@ result values. Audit write failure blocks tool execution.
 stdio environment values resolve from explicitly named environment references;
 remote cleartext HTTP is limited to loopback. Discovered names are namespaced
 and registered atomically. MCP descriptions, annotations and results are
-external data. Discovered tools require approval unless an administrator's
-local `read_only_tools` allowlist classifies the exact tool as read-only.
+external data. A response is checked before the Tool Registry copies it and is
+rejected if it is not JSON-compatible, cyclic, deeper than 32 levels, larger
+than 4 MiB, above 100,000 nodes, or above 10,000 content blocks. Discovered
+tools require approval unless an administrator's local `read_only_tools`
+allowlist classifies the exact tool as read-only.
 
 `AgentWorkflow` is a minimal LangGraph graph that accepts explicit tool calls,
 executes them sequentially, stops on the first error, and applies per-tool,

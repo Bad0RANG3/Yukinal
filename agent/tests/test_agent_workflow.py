@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -20,10 +21,12 @@ from yukinal_agent import (
     MCPServerConfig,
     MemoryAuditSink,
     TaskBudget,
+    ToolCallError,
     ToolRegistry,
     ToolSpec,
 )
 from yukinal_agent.tools import ExecutionContext
+from yukinal_agent.mcp_manager import _MAX_MCP_RESULT_BYTES, _bounded_json_result_size
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
@@ -79,6 +82,48 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(denied.error_code, "approval_required")
 
         self.assertEqual([event.status for event in audit.events], ["started", "succeeded", "started", "awaiting_approval"])
+
+    async def test_mcp_oversized_result_is_rejected_before_tool_registry_copy(self) -> None:
+        server = MCPServer("large-result-test")
+
+        @server.tool()
+        def oversized_result() -> dict[str, str]:
+            return {"payload": "x" * (_MAX_MCP_RESULT_BYTES + 1)}
+
+        registry = ToolRegistry(MemoryAuditSink())
+        async with MCPClientManager() as manager:
+            await manager.attach_client(
+                "large",
+                Client(server),
+                read_only_tools=frozenset({"oversized_result"}),
+            )
+            await manager.register_tools("large", registry)
+            result = await AgentWorkflow(registry).run(
+                task_id="mcp-large-result",
+                tenant_id="tenant-1",
+                user_id="user-1",
+                allowed_tools={"mcp.large.oversized_result"},
+                allowed_target_ids=set(),
+                tool_calls=[{
+                    "name": "mcp.large.oversized_result",
+                    "arguments": {},
+                }],
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_code, "mcp_output_too_large")
+
+    def test_mcp_json_size_guard_rejects_cyclic_results(self) -> None:
+        cyclic: list[object] = []
+        cyclic.append(cyclic)
+        with self.assertRaises(ToolCallError) as caught:
+            _bounded_json_result_size(cyclic)
+        self.assertEqual(caught.exception.code, "mcp_invalid_result")
+
+    def test_mcp_json_size_guard_counts_compact_utf8_exactly(self) -> None:
+        value = {"text": "quote: \" slash: \\ newline:\n中文", "items": [None, True, -3, 1.5]}
+        expected = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        self.assertEqual(_bounded_json_result_size(value), expected)
 
     async def test_call_count_limit_and_task_deadline_are_enforced(self) -> None:
         audit = MemoryAuditSink()

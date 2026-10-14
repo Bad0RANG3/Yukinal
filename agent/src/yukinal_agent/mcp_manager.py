@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from contextlib import AsyncExitStack
@@ -14,6 +15,10 @@ _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _REMOTE_TOOL = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]{0,127})\}$")
+_MAX_MCP_RESULT_BYTES = 4 * 1024 * 1024
+_MAX_MCP_RESULT_NODES = 100_000
+_MAX_MCP_RESULT_DEPTH = 32
+_MAX_MCP_CONTENT_BLOCKS = 10_000
 
 
 class MCPManagerError(RuntimeError):
@@ -219,11 +224,22 @@ class MCPClientManager:
                 if result.is_error:
                     raise ToolCallError("mcp_tool_failed", "MCP server reported a tool error")
                 content: list[dict[str, str]] = []
-                for block in result.content:
+                content_bytes = 0
+                for block_index, block in enumerate(result.content):
+                    if block_index >= _MAX_MCP_CONTENT_BLOCKS:
+                        raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
                     text = getattr(block, "text", None)
                     if isinstance(text, str):
+                        try:
+                            content_bytes += len(text.encode("utf-8"))
+                        except UnicodeEncodeError:
+                            raise ToolCallError("mcp_invalid_result", "MCP server returned invalid text") from None
+                        if content_bytes > _MAX_MCP_RESULT_BYTES:
+                            raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
                         content.append({"type": "text", "text": text})
-                return {"structured_content": result.structured_content, "content": content}
+                response = {"structured_content": result.structured_content, "content": content}
+                _bounded_json_result_size(response)
+                return response
 
             input_schema = dict(remote_tool.input_schema)
             properties = input_schema.get("properties", {})
@@ -293,3 +309,87 @@ def _resolve_url(url_or_reference: str) -> str:
             raise ValueError(f"required MCP URL reference is missing: {variable}")
     _validate_http_url(url)
     return url
+
+
+def _bounded_json_result_size(value: Any) -> int:
+    """Validate an MCP result and count its compact UTF-8 JSON size without copying it."""
+    active_containers: set[int] = set()
+    node_count = 0
+
+    def encoded_scalar_size(item: Any) -> int:
+        if item is None:
+            return 4
+        if item is True:
+            return 4
+        if item is False:
+            return 5
+        if isinstance(item, str):
+            if len(item) + 2 > _MAX_MCP_RESULT_BYTES:
+                raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+            size = 2
+            for character in item:
+                codepoint = ord(character)
+                if character in {'"', "\\"}:
+                    size += 2
+                elif codepoint < 0x20:
+                    size += 2 if character in "\b\f\n\r\t" else 6
+                else:
+                    try:
+                        size += len(character.encode("utf-8"))
+                    except UnicodeEncodeError:
+                        raise ToolCallError("mcp_invalid_result", "MCP server returned invalid text") from None
+                if size > _MAX_MCP_RESULT_BYTES:
+                    raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+            return size
+        if isinstance(item, int) and not isinstance(item, bool) and item.bit_length() > _MAX_MCP_RESULT_BYTES * 4:
+            raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+        try:
+            encoded = json.dumps(item, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            return len(encoded.encode("utf-8"))
+        except (TypeError, ValueError, OverflowError, UnicodeEncodeError):
+            raise ToolCallError("mcp_invalid_result", "MCP server returned a value that is not valid JSON") from None
+
+    def visit(item: Any, depth: int) -> int:
+        nonlocal node_count
+        node_count += 1
+        if node_count > _MAX_MCP_RESULT_NODES:
+            raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+        if depth > _MAX_MCP_RESULT_DEPTH:
+            raise ToolCallError("mcp_invalid_result", "MCP server returned a result that is nested too deeply")
+
+        if item is None or isinstance(item, (str, bool, int, float)):
+            size = encoded_scalar_size(item)
+            if size > _MAX_MCP_RESULT_BYTES:
+                raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+            return size
+
+        if not isinstance(item, (list, dict)):
+            raise ToolCallError("mcp_invalid_result", "MCP server returned a value that is not valid JSON")
+        identity = id(item)
+        if identity in active_containers:
+            raise ToolCallError("mcp_invalid_result", "MCP server returned a cyclic result")
+        if len(item) > _MAX_MCP_RESULT_NODES:
+            raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+
+        active_containers.add(identity)
+        try:
+            size = 2
+            if isinstance(item, list):
+                size += max(0, len(item) - 1)
+                for child in item:
+                    size += visit(child, depth + 1)
+                    if size > _MAX_MCP_RESULT_BYTES:
+                        raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+            else:
+                size += max(0, len(item) - 1)
+                for key, child in item.items():
+                    if not isinstance(key, str):
+                        raise ToolCallError("mcp_invalid_result", "MCP server returned a value that is not valid JSON")
+                    size += encoded_scalar_size(key) + 1 + visit(child, depth + 1)
+                    if size > _MAX_MCP_RESULT_BYTES:
+                        raise ToolCallError("mcp_output_too_large", "MCP tool result exceeded the output size limit")
+            return size
+        finally:
+            active_containers.remove(identity)
+
+    return visit(value, 0)
