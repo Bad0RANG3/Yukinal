@@ -4,9 +4,10 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::activity::record_user_activity;
+use crate::commands::ssh_service;
 use crate::commands::terminal::ensure_session;
 use crate::commands::EmptyResponse;
 use crate::state::AppState;
@@ -107,13 +108,20 @@ pub async fn server_list(state: State<'_, AppState>) -> Result<ServerListRespons
     Ok(ServerListResponse { servers })
 }
 
-/// Establish and cache the SSH session used by terminal, snapshots and SFTP.
+/// Validate SSH authentication and host trust using the supported C++ path, or establish the
+/// legacy cached session for configurations that still require Rust-only features.
 #[tauri::command]
 pub async fn server_connect(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerConnectResponse, String> {
-    match ensure_session(&state, &server_id).await {
+    let connection = if ssh_service::supports_cpp_target(&state, &server_id)? {
+        ssh_service::connection_check(&app, &state, &server_id).await
+    } else {
+        ensure_session(&state, &server_id).await
+    };
+    match connection {
         Ok(()) => {
             state
                 .database
@@ -162,11 +170,10 @@ pub async fn server_disconnect(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<EmptyResponse, String> {
-    state
-        .terminals
-        .disconnect(&server_id)
-        .await
-        .map_err(|error| error.to_string())?;
+    let cpp_disconnect = state.cpp_terminals.close_for_server(&server_id).await;
+    let rust_disconnect = state.terminals.disconnect(&server_id).await;
+    cpp_disconnect.map_err(|error| error.to_string())?;
+    rust_disconnect.map_err(|error| error.to_string())?;
     state
         .database
         .servers()

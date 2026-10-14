@@ -38,6 +38,21 @@ pub(crate) async fn service_inventory(
     run_operation(app, state, server_id, "service_inventory", json!({})).await
 }
 
+pub(crate) async fn connection_check(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+) -> Result<(), String> {
+    let output = run_operation(app, state, server_id, "connection_check", json!({})).await?;
+    let response: Value = serde_json::from_str(&output)
+        .map_err(|_| "the C++ SSH service returned an invalid connection check result")?;
+    if response.get("connected").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err("the C++ SSH service did not confirm the SSH connection".into())
+    }
+}
+
 pub(crate) async fn probe_host_key(
     app: &AppHandle,
     state: &AppState,

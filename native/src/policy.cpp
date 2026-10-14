@@ -144,7 +144,12 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
   std::optional<std::uint32_t> since_seconds;
-  if (operation == "service_status") {
+  if (operation == "connection_check") {
+    if (!parameters_it->empty()) {
+      set_error(error, 422, "invalid_parameters", "connection_check accepts no parameters");
+      return false;
+    }
+  } else if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
       return false;

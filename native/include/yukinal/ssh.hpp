@@ -24,6 +24,7 @@ struct ExecResult {
 /// Run a fixed structured SSH operation. No raw command is accepted here.
 ExecResult service_status(const TargetConfig& target, const std::string& service,
                           int timeout_seconds);
+ExecResult connection_check(const TargetConfig& target, int timeout_seconds);
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds);
 ExecResult server_logs(const TargetConfig& target,
                        std::optional<std::uint32_t> since_seconds,

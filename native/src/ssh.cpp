@@ -1341,6 +1341,23 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
   return run_ssh_command(target, "systemctl is-active -- " + service, timeout_seconds);
 }
 
+ExecResult connection_check(const TargetConfig& target, int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (target.probe_only || timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SSH connection check parameters are invalid");
+    return result;
+  }
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_authenticated(target, deadline, &resources, &result)) return result;
+  result.stdout_text = "{\"connected\":true}";
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   static constexpr char command[] =
       "if command -v systemctl >/dev/null 2>&1; then "
@@ -2490,6 +2507,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
+  }
+  if (request.operation == "connection_check") {
+    return connection_check(target, request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);
