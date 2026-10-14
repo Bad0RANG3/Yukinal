@@ -192,7 +192,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       }
       unit = unit_it->get<std::string>();
     }
-  } else if (operation == "sftp_list" || operation == "sftp_stat") {
+  } else if (operation == "sftp_list" || operation == "sftp_stat" ||
+             operation == "sftp_lstat_optional") {
     if (!has_only_keys(*parameters_it, {"path"})) {
       set_error(error, 422, "invalid_parameters", "SFTP metadata operations accept only a path parameter");
       return false;
@@ -325,7 +326,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       expected_digest[i] = static_cast<unsigned char>((high << 4) | low);
     }
     path = path_it->get<std::string>();
-  } else if (operation == "sftp_remove_file" || operation == "sftp_link_count") {
+  } else if (operation == "sftp_remove_file" || operation == "sftp_link_count" ||
+             operation == "sftp_create_dir") {
     if (!has_only_keys(*parameters_it, {"path"})) {
       set_error(error, 422, "invalid_parameters", "SFTP path operations accept only a path parameter");
       return false;

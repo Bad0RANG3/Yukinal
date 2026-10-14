@@ -991,6 +991,106 @@ pub(crate) async fn sftp_stat(
     })
 }
 
+pub(crate) async fn sftp_lstat_optional(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<Option<RemoteStat>, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Missing {
+        exists: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Present {
+        exists: bool,
+        kind: String,
+        size: u64,
+        modified: Option<u32>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Lstat {
+        Missing(Missing),
+        Present(Present),
+    }
+
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_lstat_optional",
+        json!({"path": path}),
+    )
+    .await?;
+    match serde_json::from_str::<Lstat>(&output)
+        .map_err(|_| "the C++ SSH service returned invalid optional SFTP metadata".to_string())?
+    {
+        Lstat::Missing(Missing { exists: false }) => Ok(None),
+        Lstat::Missing(Missing { exists: true }) => {
+            Err("the C++ SSH service returned incomplete optional SFTP metadata".into())
+        }
+        Lstat::Present(Present {
+            exists: true,
+            kind,
+            size,
+            modified,
+        }) => {
+            let kind = match kind.as_str() {
+                "file" => RemoteEntryKind::File,
+                "directory" => RemoteEntryKind::Directory,
+                "symlink" => RemoteEntryKind::Symlink,
+                "other" => RemoteEntryKind::Other,
+                _ => {
+                    return Err(
+                        "the C++ SSH service returned invalid optional SFTP metadata".into(),
+                    )
+                }
+            };
+            Ok(Some(RemoteStat {
+                kind,
+                size,
+                modified,
+            }))
+        }
+        Lstat::Present(Present { exists: false, .. }) => {
+            Err("the C++ SSH service returned inconsistent optional SFTP metadata".into())
+        }
+    }
+}
+
+pub(crate) async fn sftp_create_dir(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CreateResult {
+        created: bool,
+    }
+
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_create_dir",
+        json!({"path": path}),
+    )
+    .await?;
+    let result: CreateResult = serde_json::from_str(&output)
+        .map_err(|_| "the C++ SSH service returned an invalid SFTP directory result".to_string())?;
+    if !result.created {
+        return Err("the C++ SSH service did not confirm SFTP directory creation".into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn sftp_read_bounded(
     app: &AppHandle,
     state: &AppState,

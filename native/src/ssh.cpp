@@ -1527,7 +1527,8 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
   return result;
 }
 
-ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds) {
+static ExecResult sftp_stat_impl(const TargetConfig& target, const std::string& path,
+                                 int timeout_seconds, bool optional) {
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
@@ -1547,6 +1548,14 @@ ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int ti
   LIBSSH2_SFTP_ATTRIBUTES attributes{};
   if (libssh2_sftp_stat_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size()),
                            LIBSSH2_SFTP_LSTAT, &attributes) != 0) {
+    const unsigned long sftp_error = libssh2_sftp_last_error(resources.sftp_);
+    if (optional && (sftp_error == LIBSSH2_FX_NO_SUCH_FILE ||
+                     sftp_error == LIBSSH2_FX_NO_SUCH_PATH)) {
+      result.stdout_text = "{\"exists\":false}";
+      result.exit_code = 0;
+      result.completed = true;
+      return result;
+    }
     const bool timed_out = remaining_ms(deadline) == 0;
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "SFTP metadata request timed out" : "Could not read remote path metadata");
@@ -1569,7 +1578,48 @@ ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int ti
                        ? nlohmann::json(attributes.mtime)
                        : nlohmann::json(nullptr)},
   };
+  if (optional) output["exists"] = true;
   result.stdout_text = output.dump();
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
+ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds) {
+  return sftp_stat_impl(target, path, timeout_seconds, false);
+}
+
+ExecResult sftp_lstat_optional(const TargetConfig& target, const std::string& path,
+                               int timeout_seconds) {
+  return sftp_stat_impl(target, path, timeout_seconds, true);
+}
+
+ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
+                           int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SFTP directory creation parameters are invalid");
+    return result;
+  }
+
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SFTP directory creation timed out");
+    return result;
+  }
+  if (libssh2_sftp_mkdir_ex(resources.sftp_, path.data(),
+                            static_cast<unsigned int>(path.size()), 0755) != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP directory creation timed out" : "Could not create the remote directory");
+    return result;
+  }
+  result.stdout_text = "{\"created\":true}";
   result.exit_code = 0;
   result.completed = true;
   return result;
@@ -2235,6 +2285,12 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "sftp_stat") {
     return sftp_stat(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_lstat_optional") {
+    return sftp_lstat_optional(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_create_dir") {
+    return sftp_create_dir(target, request.path, request.timeout_seconds);
   }
   if (request.operation == "sftp_read") {
     return sftp_read(target, request.path, request.max_bytes, request.timeout_seconds);

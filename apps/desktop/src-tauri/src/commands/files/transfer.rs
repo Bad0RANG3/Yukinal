@@ -244,6 +244,11 @@ impl RemoteTransferBackend for SftpTransferBackend {
     ) -> TransferFuture<'a, Option<RemoteStat>> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return ssh_service::sftp_lstat_optional(&self.app, &state, server_id, path)
+                    .await
+                    .map_err(TransferError::Remote);
+            }
             let (session, client) = sftp_client(&state, server_id).await?;
             let stat = state
                 .ssh
@@ -262,6 +267,36 @@ impl RemoteTransferBackend for SftpTransferBackend {
     ) -> TransferFuture<'a, Vec<RemoteTransferEntry>> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                let entries = ssh_service::sftp_list(&self.app, &state, server_id, path)
+                    .await
+                    .map_err(TransferError::Remote)?;
+                return entries
+                    .into_iter()
+                    .map(|(name, file_type, size)| {
+                        let kind = match file_type.as_str() {
+                            "directory" => RemoteEntryKind::Directory,
+                            "file" => RemoteEntryKind::File,
+                            "symlink" => RemoteEntryKind::Symlink,
+                            "other" => RemoteEntryKind::Other,
+                            _ => {
+                                return Err(TransferError::Remote(
+                                    "the C++ SSH service returned an invalid SFTP entry type"
+                                        .into(),
+                                ))
+                            }
+                        };
+                        Ok(RemoteTransferEntry {
+                            name,
+                            stat: RemoteStat {
+                                kind,
+                                size,
+                                modified: None,
+                            },
+                        })
+                    })
+                    .collect();
+            }
             let (_session, client) = sftp_client(&state, server_id).await?;
             let entries = state
                 .ssh
@@ -325,6 +360,11 @@ impl RemoteTransferBackend for SftpTransferBackend {
     fn create_dir<'a>(&'a self, server_id: &'a str, path: &'a str) -> TransferFuture<'a, ()> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return ssh_service::sftp_create_dir(&self.app, &state, server_id, path)
+                    .await
+                    .map_err(TransferError::Remote);
+            }
             let (_session, client) = sftp_client(&state, server_id).await?;
             state
                 .ssh
@@ -337,6 +377,11 @@ impl RemoteTransferBackend for SftpTransferBackend {
     fn remove_file<'a>(&'a self, server_id: &'a str, path: &'a str) -> TransferFuture<'a, ()> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return ssh_service::sftp_remove_file(&self.app, &state, server_id, path)
+                    .await
+                    .map_err(TransferError::Remote);
+            }
             let (_session, client) = sftp_client(&state, server_id).await?;
             state
                 .ssh
@@ -388,6 +433,22 @@ impl RemoteTransferBackend for SftpTransferBackend {
     ) -> TransferFuture<'a, ()> {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
+            if ssh_service::supports_cpp_target(&state, server_id).map_err(TransferError::Remote)? {
+                return match ssh_service::sftp_lstat_optional(&self.app, &state, server_id, path)
+                    .await
+                    .map_err(TransferError::Remote)?
+                {
+                    None => Ok(()),
+                    Some(stat) if stat.kind == RemoteEntryKind::File => {
+                        ssh_service::sftp_remove_file(&self.app, &state, server_id, path)
+                            .await
+                            .map_err(TransferError::Remote)
+                    }
+                    Some(_) => Err(TransferError::InvalidInput(
+                        "recovered remote staging entry is not a regular file".into(),
+                    )),
+                };
+            }
             let session = state.terminals.cached_session(server_id).map_err(|_| {
                 TransferError::Unsupported(
                     "remote staging cleanup is waiting for an authenticated session".into(),

@@ -36,6 +36,10 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
 int run_sftp_stream(const TargetConfig& target, const std::string& path, bool upload);
 ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds);
 ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds);
+ExecResult sftp_lstat_optional(const TargetConfig& target, const std::string& path,
+                               int timeout_seconds);
+ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
+                           int timeout_seconds);
 ExecResult sftp_read(const TargetConfig& target, const std::string& path,
                      std::uint32_t max_bytes, int timeout_seconds);
 ExecResult sftp_write(const TargetConfig& target, const std::string& path,

@@ -118,6 +118,7 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
         "/settings.toml": CONTENTS,
         "/large.bin": LARGE_CONTENTS,
     }
+    _directories: set[str] = {"/"}
     _files_lock = threading.Lock()
 
     def list_folder(self, path: str) -> list[paramiko.SFTPAttributes]:
@@ -136,6 +137,10 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
     def stat(self, path: str) -> paramiko.SFTPAttributes:
         attributes = paramiko.SFTPAttributes()
         if path == "/":
+            attributes.st_mode = stat.S_IFDIR | 0o755
+            attributes.st_size = 0
+            attributes.st_nlink = 1
+        elif path in self._directories:
             attributes.st_mode = stat.S_IFDIR | 0o755
             attributes.st_size = 0
             attributes.st_nlink = 1
@@ -185,6 +190,14 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
             del self._files[path]
         return paramiko.SFTP_OK
 
+    def mkdir(self, path: str, attr: paramiko.SFTPAttributes) -> int:
+        if path != "/created-by-cpp":
+            return paramiko.SFTP_PERMISSION_DENIED
+        if path in self._directories:
+            return paramiko.SFTP_FAILURE
+        self._directories.add(path)
+        return paramiko.SFTP_OK
+
 
 class MemorySftpHandle(paramiko.SFTPHandle):
     def close(self) -> None:
@@ -228,6 +241,7 @@ def start_ssh_mock(
         "/settings.toml": StaticSftpInterface.CONTENTS,
         "/large.bin": StaticSftpInterface.LARGE_CONTENTS,
     }
+    StaticSftpInterface._directories = {"/"}
     EXEC_COMMANDS.clear()
     AUTH_EVENTS.clear()
     TERMINAL_DIMENSIONS.clear()
@@ -838,6 +852,33 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 "modified": 123456789,
             }:
                 raise AssertionError(f"unexpected C++ SFTP stat result: {stat_metadata!r}")
+
+            existing_lstat = client._execute_operation(
+                "srv_desktop_style", "sftp_lstat_optional", {"path": "/settings.toml"}, timeout_seconds=5
+            )
+            if json.loads(existing_lstat.stdout) != {
+                "exists": True,
+                "kind": "file",
+                "size": len(StaticSftpInterface.CONTENTS),
+                "modified": 123456789,
+            }:
+                raise AssertionError(f"unexpected optional C++ SFTP lstat result: {existing_lstat.stdout!r}")
+            missing_lstat = client._execute_operation(
+                "srv_desktop_style", "sftp_lstat_optional", {"path": "/missing.bin"}, timeout_seconds=5
+            )
+            if json.loads(missing_lstat.stdout) != {"exists": False}:
+                raise AssertionError(f"missing C++ SFTP lstat did not return absent: {missing_lstat.stdout!r}")
+
+            created_directory = client._execute_operation(
+                "srv_desktop_style", "sftp_create_dir", {"path": "/created-by-cpp"}, timeout_seconds=5
+            )
+            if json.loads(created_directory.stdout) != {"created": True}:
+                raise AssertionError("C++ SFTP directory creation was not confirmed")
+            created_lstat = client._execute_operation(
+                "srv_desktop_style", "sftp_lstat_optional", {"path": "/created-by-cpp"}, timeout_seconds=5
+            )
+            if json.loads(created_lstat.stdout).get("kind") != "directory":
+                raise AssertionError("C++ SFTP directory creation did not produce a remote directory")
 
             read_result = client._execute_operation(
                 "srv_desktop_style",
