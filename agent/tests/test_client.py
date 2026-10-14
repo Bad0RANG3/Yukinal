@@ -101,6 +101,35 @@ class ClientTests(unittest.TestCase):
             },
         )
 
+    def test_server_logs_exposes_only_bounded_filters(self) -> None:
+        self.server.response_body["operation"] = "server_logs"
+        self.server.response_body["stdout"] = "__YUKINAL_SOURCE__=journalctl\n"
+        result = self.client.server_logs(
+            "staging-web-01", since_seconds=3600, unit="nginx.service", timeout_seconds=9
+        )
+        self.assertEqual(result.operation, "server_logs")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "server_logs",
+                "parameters": {"since_seconds": 3600, "unit": "nginx.service"},
+                "timeout_seconds": 9,
+            },
+        )
+
+    def test_server_logs_rejects_invalid_filters_before_network_call(self) -> None:
+        for since_seconds, unit in [
+            (0, None),
+            (604_801, None),
+            (True, None),
+            (None, "nginx.service;id"),
+        ]:
+            with self.subTest(since_seconds=since_seconds, unit=unit):
+                with self.assertRaises(ValueError):
+                    self.client.server_logs("staging-web-01", since_seconds, unit)
+        self.assertIsNone(self.server.last_request)
+
     def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
         self.server.response_body["operation"] = "sftp_write"
         self.server.response_body["stdout"] = '{"bytes_written":4}'

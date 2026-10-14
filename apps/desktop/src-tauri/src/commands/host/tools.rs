@@ -624,6 +624,7 @@ pub(super) async fn server_info(
 }
 
 pub(super) async fn server_logs(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -644,34 +645,60 @@ pub(super) async fn server_logs(
         Ok(command) => command,
         Err(error) => return Ok(failed("invalid_input", error, true, None)),
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let result = match state
-        .ssh
-        .execute(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(10)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let output = if cpp_supported {
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::server_logs(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                input.since_seconds,
+                input.unit.as_deref(),
+            ) => result,
+        };
+        match result {
+            Ok(output) => output,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let result = match state
+            .ssh
+            .execute(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(10)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        result.stdout_lossy()
     };
-    let parsed = match parse_logs_output(&result.stdout_lossy()) {
+    let parsed = match parse_logs_output(&output) {
         Ok(parsed) => parsed,
         Err(error) => {
             return Ok(failed(
                 "execution_failed",
                 format!("server.logs returned an invalid response: {error}"),
                 false,
-                Some(json!({ "exitCode": result.exit_code })),
+                None,
             ));
         }
     };

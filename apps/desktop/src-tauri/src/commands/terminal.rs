@@ -210,7 +210,7 @@ pub async fn terminal_open(
     rows: u16,
 ) -> Result<TerminalOpenResponse, String> {
     validate_terminal_dimensions(cols, rows)?;
-    let terminal_session_id = if supports_cpp_terminal(&state, &server_id)? {
+    let terminal_session_id = if ssh_service::supports_cpp_target(&state, &server_id)? {
         match ssh_service::open_terminal(&app, &state, &server_id, cols, rows).await {
             Ok(pty) => {
                 let session_id = state
@@ -267,41 +267,6 @@ async fn open_rust_terminal(
         .open(server_id, cols, rows)
         .await
         .map_err(|error| error.to_string())
-}
-
-fn supports_cpp_terminal(state: &AppState, server_id: &str) -> Result<bool, String> {
-    let server = state
-        .database
-        .servers()
-        .get(server_id)
-        .map_err(|error| error.to_string())?;
-    if server.connection.host_certificate_authority.is_some() {
-        return Ok(false);
-    }
-    let Some(identity_id) = server.connection.identity_id.as_deref() else {
-        return Ok(false);
-    };
-    let identity = state
-        .database
-        .identities()
-        .get(identity_id)
-        .map_err(|error| error.to_string())?;
-    if !matches!(
-        identity.method.as_str(),
-        "password" | "privateKey" | "agent"
-    ) {
-        return Ok(false);
-    }
-    let proxy =
-        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
-    if proxy.proxy != yukinal_net::NetworkProxy::Direct {
-        return Ok(false);
-    }
-    let pin = state
-        .ssh
-        .host_key_pin(&server.connection.host, server.connection.port)
-        .map_err(|error| error.to_string())?;
-    Ok(pin.is_some())
 }
 
 #[tauri::command]

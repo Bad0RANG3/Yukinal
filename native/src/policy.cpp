@@ -1,5 +1,6 @@
 #include "yukinal/policy.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <regex>
@@ -21,6 +22,23 @@ bool has_only_keys(const nlohmann::json& value, const std::set<std::string>& all
     if (!allowed.contains(it.key())) return false;
   }
   return true;
+}
+
+bool valid_systemd_unit(const std::string& value) {
+  const auto is_ascii_alphanumeric = [](unsigned char character) {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9');
+  };
+  if (value.size() < 8 || value.size() > 128 ||
+      value.compare(value.size() - 8, 8, ".service") != 0 ||
+      !is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [&](unsigned char character) {
+    return is_ascii_alphanumeric(character) || character == '_' || character == '.' ||
+           character == '@' || character == ':' || character == '-';
+  });
 }
 
 int base64_value(char character) {
@@ -116,12 +134,14 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   }
   const std::string operation = operation_it->get<std::string>();
   std::string service;
+  std::string unit;
   std::string path;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
   std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
+  std::optional<std::uint32_t> since_seconds;
   if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -143,6 +163,34 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     if (!parameters_it->empty()) {
       set_error(error, 422, "invalid_parameters", "service_inventory accepts no parameters");
       return false;
+    }
+  } else if (operation == "server_logs") {
+    if (!has_only_keys(*parameters_it, {"since_seconds", "unit"})) {
+      set_error(error, 422, "invalid_parameters", "server_logs accepts only since_seconds and unit parameters");
+      return false;
+    }
+    const auto since_it = parameters_it->find("since_seconds");
+    if (since_it != parameters_it->end()) {
+      std::uint64_t seconds = 0;
+      if (since_it->is_number_unsigned()) {
+        seconds = since_it->get<std::uint64_t>();
+      } else if (since_it->is_number_integer()) {
+        const auto signed_seconds = since_it->get<std::int64_t>();
+        if (signed_seconds > 0) seconds = static_cast<std::uint64_t>(signed_seconds);
+      }
+      if (seconds < 1 || seconds > 604800) {
+        set_error(error, 422, "invalid_parameters", "since_seconds must be between 1 and 604800");
+        return false;
+      }
+      since_seconds = static_cast<std::uint32_t>(seconds);
+    }
+    const auto unit_it = parameters_it->find("unit");
+    if (unit_it != parameters_it->end()) {
+      if (!unit_it->is_string() || !valid_systemd_unit(unit_it->get<std::string>())) {
+        set_error(error, 422, "invalid_parameters", "unit must be a bounded .service reference");
+        return false;
+      }
+      unit = unit_it->get<std::string>();
     }
   } else if (operation == "sftp_list" || operation == "sftp_stat") {
     if (!has_only_keys(*parameters_it, {"path"})) {
@@ -321,8 +369,10 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->target_id = target_id;
   request->operation = operation;
   request->service = std::move(service);
+  request->unit = std::move(unit);
   request->path = std::move(path);
   request->content = std::move(content);
+  request->since_seconds = since_seconds;
   request->expected_size = expected_size;
   request->expected_modified = expected_modified;
   request->expected_digest = expected_digest;

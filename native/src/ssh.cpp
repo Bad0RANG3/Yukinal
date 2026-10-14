@@ -1035,6 +1035,32 @@ ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   return run_ssh_command(target, command, timeout_seconds);
 }
 
+ExecResult server_logs(const TargetConfig& target,
+                       std::optional<std::uint32_t> since_seconds,
+                       const std::string& unit, int timeout_seconds) {
+  if ((since_seconds && (*since_seconds < 1 || *since_seconds > 604800)) ||
+      (!unit.empty() && (!valid_service_name(unit) || !unit.ends_with(".service")))) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The bounded server log parameters are invalid");
+    return result;
+  }
+  std::string command =
+      "if command -v journalctl >/dev/null 2>&1; then journalctl -n 500 --no-pager -o short-iso";
+  if (since_seconds) command += " --since '-" + std::to_string(*since_seconds) + " seconds'";
+  if (!unit.empty()) command += " --unit '" + unit + "'";
+  command +=
+      " 2>/dev/null; if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=journalctl\\n'; exit 0; fi; fi; ";
+  if (!since_seconds && unit.empty()) {
+    command +=
+        "for file in /var/log/syslog /var/log/messages; do if [ -r \"$file\" ]; then "
+        "tail -n 500 \"$file\"; if [ $? -eq 0 ]; then case \"$file\" in "
+        "/var/log/syslog) printf '\\n__YUKINAL_SOURCE__=syslog\\n' ;; "
+        "/var/log/messages) printf '\\n__YUKINAL_SOURCE__=messages\\n' ;; esac; exit 0; fi; fi; done; ";
+  }
+  command += "printf '__YUKINAL_SOURCE__=unavailable\\n'";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
 ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
   ExecResult result;
   const auto started = Clock::now();
@@ -1882,6 +1908,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);
+  }
+  if (request.operation == "server_logs") {
+    return server_logs(target, request.since_seconds, request.unit, request.timeout_seconds);
   }
   if (request.operation == "sftp_list") {
     return sftp_list(target, request.path, request.timeout_seconds);

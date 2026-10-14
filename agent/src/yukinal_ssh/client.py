@@ -81,6 +81,29 @@ class SshServiceClient:
         """List services through the fixed, read-only inventory operation."""
         return self._execute_operation(target_id, "service_inventory", {}, timeout_seconds)
 
+    def server_logs(
+        self,
+        target_id: str,
+        since_seconds: int | None = None,
+        unit: str | None = None,
+        timeout_seconds: int = 10,
+    ) -> SshOperationResult:
+        """Read a bounded journal or system log snapshot through a fixed operation."""
+        parameters: dict[str, Any] = {}
+        if since_seconds is not None:
+            if (
+                isinstance(since_seconds, bool)
+                or not isinstance(since_seconds, int)
+                or not 1 <= since_seconds <= 604_800
+            ):
+                raise ValueError("since_seconds must be an integer from 1 to 604800")
+            parameters["since_seconds"] = since_seconds
+        if unit is not None:
+            if not isinstance(unit, str) or not _SERVICE_NAME.fullmatch(unit) or not unit.endswith(".service"):
+                raise ValueError("unit must be a bounded .service reference")
+            parameters["unit"] = unit
+        return self._execute_operation(target_id, "server_logs", parameters, timeout_seconds)
+
     def sftp_write(
         self, target_id: str, path: str, content: bytes, timeout_seconds: int = 10
     ) -> SshOperationResult:

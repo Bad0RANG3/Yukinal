@@ -16,12 +16,14 @@ struct ExecRequest {
   std::string target_id;
   std::string operation;
   std::string service;
+  std::string unit;
   std::string path;
   std::vector<unsigned char> content;
   std::uint64_t expected_size = 0;
   std::optional<std::uint32_t> expected_modified;
   std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
+  std::optional<std::uint32_t> since_seconds;
   int timeout_seconds = 10;
 };
 

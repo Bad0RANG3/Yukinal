@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio_util::sync::CancellationToken;
 use yukinal_ssh::SshBackend;
 
+use crate::commands::ssh_service;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 
@@ -119,9 +120,15 @@ pub struct ServerLogsResponse {
 /// [`MAX_LOG_LINES`] lines.
 #[tauri::command]
 pub async fn server_logs(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerLogsResponse, String> {
+    if ssh_service::supports_cpp_target(&state, &server_id)? {
+        let output = ssh_service::server_logs(&app, &state, &server_id, None, None).await?;
+        return parse_logs_output(&output)
+            .map_err(|error| format!("log discovery returned an invalid response: {error}"));
+    }
     ensure_session(&state, &server_id).await?;
     let session = state
         .terminals

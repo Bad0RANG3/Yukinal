@@ -1380,7 +1380,7 @@ async fn handle_sidecar_request_with_context(
     let response = match request.tool_name.as_str() {
         SERVER_INFO => server_info(state, server_id, &request.input, &cancel).await,
         SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
-        SERVER_LOGS => server_logs(state, server_id, &request.input, &cancel).await,
+        SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
         SERVER_SERVICES => server_services(state, server_id, &request.input, &cancel).await,
         DOCKER_PS => docker_ps(state, server_id, &request.input, &cancel).await,
         DOCKER_LOGS => docker_logs(state, server_id, &request.input, &cancel).await,

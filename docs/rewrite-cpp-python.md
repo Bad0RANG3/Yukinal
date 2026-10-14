@@ -132,7 +132,7 @@ Service discovery currently targets Unix-like hosts with systemd and Docker.
 The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or arbitrary command. The service resolves a
 `target_id` to a configured target and accepts only `service_status`,
-`service_inventory`, probe-only `host_key_probe`, and bounded SFTP list/stat/read/write/exclusive-create/
+`service_inventory`, bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP list/stat/read/write/exclusive-create/
 remove/link-count operations with validated parameters. Service operations map
 to fixed commands; SFTP reads are capped at 1 MiB plus one sentinel byte, normal
 writes at 512 KiB, and exclusive recovery copies at 1 MiB. Write bodies use
@@ -186,7 +186,10 @@ The desktop inventory request uses the same endpoint with no parameters:
 ```
 
 Only the documented fields are accepted. `service_status` requires exactly one
-validated unit name; `service_inventory` accepts no parameters; SFTP operations
+validated unit name; `service_inventory` accepts no parameters. `server_logs`
+accepts an optional time range from 1 second to 7 days and an optional bounded
+`.service` name; its result is capped at 500 lines. When either filter is set,
+the service does not fall back to unfiltered system log files. SFTP operations
 accept only their documented path, byte limit, or base64 content fields.
 `sftp_write` accepts at most 512 KiB, `sftp_create_exclusive` at most 1 MiB,
 and `sftp_read` at most 1 MiB plus a sentinel byte. Timeouts are 1–30 seconds.

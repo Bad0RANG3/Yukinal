@@ -86,6 +86,42 @@ pub(crate) enum TerminalOpenFailure {
     Failed(String),
 }
 
+/// Whether the configured connection uses auth and trust modes supported by C++.
+pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<bool, String> {
+    let server = state
+        .database
+        .servers()
+        .get(server_id)
+        .map_err(|error| error.to_string())?;
+    if server.connection.host_certificate_authority.is_some() {
+        return Ok(false);
+    }
+    let Some(identity_id) = server.connection.identity_id.as_deref() else {
+        return Ok(false);
+    };
+    let identity = state
+        .database
+        .identities()
+        .get(identity_id)
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        identity.method.as_str(),
+        "password" | "privateKey" | "agent"
+    ) {
+        return Ok(false);
+    }
+    let proxy =
+        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
+    if proxy.proxy != yukinal_net::NetworkProxy::Direct {
+        return Ok(false);
+    }
+    let pin = state
+        .ssh
+        .host_key_pin(&server.connection.host, server.connection.port)
+        .map_err(|error| error.to_string())?;
+    Ok(pin.is_some())
+}
+
 impl From<String> for TerminalOpenFailure {
     fn from(message: String) -> Self {
         Self::Failed(message)
@@ -423,6 +459,30 @@ pub(crate) async fn sftp_list(
         .into_iter()
         .map(|entry| (entry.name, entry.file_type, entry.size))
         .collect())
+}
+
+pub(crate) async fn server_logs(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    since_seconds: Option<u32>,
+    unit: Option<&str>,
+) -> Result<String, String> {
+    let mut parameters = serde_json::Map::new();
+    if let Some(seconds) = since_seconds {
+        parameters.insert("since_seconds".into(), json!(seconds));
+    }
+    if let Some(unit) = unit {
+        parameters.insert("unit".into(), json!(unit));
+    }
+    run_operation(
+        app,
+        state,
+        server_id,
+        "server_logs",
+        Value::Object(parameters),
+    )
+    .await
 }
 
 pub(crate) async fn sftp_stat(

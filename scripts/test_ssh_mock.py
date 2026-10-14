@@ -282,6 +282,16 @@ def start_ssh_mock(
             elif b"systemctl list-units --type=service" in command:
                 channel.sendall(b"nginx.service loaded active running Nginx Web Server\n\n__YUKINAL_SOURCE__=systemd\n")
                 channel.send_exit_status(0)
+            elif b"journalctl -n 500" in command:
+                if b"--since '-3600 seconds'" not in command or b"--unit 'nginx.service'" not in command:
+                    channel.sendall(b"unexpected journal filters\n")
+                    channel.send_exit_status(2)
+                else:
+                    channel.sendall(
+                        b"2026-10-15T06:00:00+0800 host nginx[12]: warning: worker restarted\n"
+                        b"__YUKINAL_SOURCE__=journalctl\n"
+                    )
+                    channel.send_exit_status(0)
             elif command == b"systemctl is-active -- slow.service":
                 time.sleep(4)
                 channel.sendall(b"active\n")
@@ -643,6 +653,23 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:
                 raise AssertionError(f"unexpected read-only service inventory: {inventory!r}")
+
+            logs = client.server_logs(
+                "srv_stage1", since_seconds=3600, unit="nginx.service", timeout_seconds=5
+            )
+            if logs.operation != "server_logs" or "__YUKINAL_SOURCE__=journalctl" not in logs.stdout:
+                raise AssertionError(f"unexpected bounded server logs: {logs!r}")
+            if b"--since '-3600 seconds'" not in EXEC_COMMANDS[-1] or b"--unit 'nginx.service'" not in EXEC_COMMANDS[-1]:
+                raise AssertionError(f"C++ did not preserve validated log filters: {EXEC_COMMANDS[-1]!r}")
+            try:
+                client._execute_operation(
+                    "srv_stage1", "server_logs", {"unit": "nginx.service;id"}, timeout_seconds=5
+                )
+            except SshServiceError as error:
+                if error.code != "invalid_parameters":
+                    raise AssertionError(f"invalid log unit returned the wrong error: {error}") from error
+            else:
+                raise AssertionError("C++ service accepted a shell fragment as a log unit")
 
             result = client.service_status("srv_stage1", "nginx.service", timeout_seconds=5)
             if result.stdout != "active\n" or result.exit_code != 0:
