@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -14,6 +15,7 @@ struct ExecRequest {
   std::string operation;
   std::string service;
   std::string path;
+  std::vector<unsigned char> content;
   std::uint32_t max_bytes = 0;
   int timeout_seconds = 10;
 };

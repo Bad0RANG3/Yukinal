@@ -1,9 +1,9 @@
 //! Host tool executors.
 //!
 //! 每个 `host.tool.execute` 里的工具名对应这里的一个执行器：`server.info`、
-//! `docker.*`、`systemd.*`、`package.*` 与 `filesystem.*`。它们共享同一条会话前缀
-//! （`ensure_session_with_cancel` → `ensure_session`）和同一套失败映射
-//! （`transport_or_cancel` / `filesystem_failure` / `cancelled_failure`）。
+//! `docker.*`、`systemd.*`、`package.*` 与 `filesystem.*`。遗留 SSH 命令仍通过
+//! `ensure_session_with_cancel` 建立 Rust 会话；文件工具按身份选择 C++ 或兼容传输，
+//! 并共享同一套失败映射（`transport_or_cancel` / `filesystem_failure` / `cancelled_failure`）。
 //!
 //! 从 `host.rs` 拆出来的理由：这一段与调查证据、计划、上下文无关 —— 它只负责
 //! 「把一个已校验的工具输入变成一次远端执行与一个有界结果」。`host.rs` 根模块保留
@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::state::{ServerExecExecutionBinding, ServerExecTicketError};
+use tauri::AppHandle;
 use yukinal_database::repositories::TaskCommandBudgetReservation;
 
 const SERVER_EXEC_MAX_COMMAND_CHARS: usize = 16_384;
@@ -746,6 +747,7 @@ pub(super) async fn server_services(
 }
 
 pub(super) async fn filesystem_read(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -770,10 +772,7 @@ pub(super) async fn filesystem_read(
         Ok(request) => request,
         Err(error) => return Ok(filesystem_failure(error, cancel)),
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let service = remote_file_service(state, None);
+    let service = remote_file_service(state, app);
     let read = tokio::select! {
         result = service.agent_read(server_id, &request) => match result {
             Ok(read) => read,
@@ -793,6 +792,7 @@ pub(super) async fn filesystem_read(
 }
 
 pub(super) async fn filesystem_write(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -813,10 +813,7 @@ pub(super) async fn filesystem_write(
         Ok(request) => request,
         Err(error) => return Ok(filesystem_failure(error, cancel)),
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let service = remote_file_service(state, None);
+    let service = remote_file_service(state, app);
     let write = tokio::select! {
         result = service.agent_write(server_id, &request) => match result {
             Ok(write) => write,
@@ -839,6 +836,7 @@ pub(super) async fn filesystem_write(
 /// cancellable as a whole, because a half-applied edit is exactly what the guard exists to
 /// prevent. The checks themselves (cap, revision, single match) live in `yukinal-filesystem`.
 pub(super) async fn filesystem_edit(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -864,10 +862,7 @@ pub(super) async fn filesystem_edit(
         Ok(request) => request,
         Err(error) => return Ok(filesystem_failure(error, cancel)),
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let service = remote_file_service(state, None);
+    let service = remote_file_service(state, app);
     let edit = tokio::select! {
         result = service.agent_edit(server_id, &request) => match result {
             Ok(edit) => edit,
@@ -1193,6 +1188,7 @@ pub(super) fn retention_candidates(
 }
 
 pub(super) async fn filesystem_backup(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -1214,10 +1210,7 @@ pub(super) async fn filesystem_backup(
         Ok(request) => request,
         Err(error) => return Ok(filesystem_failure(error, cancel)),
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let service = remote_file_service(state, None);
+    let service = remote_file_service(state, app);
     let backup = tokio::select! {
         result = service.agent_backup(server_id, &request) => match result {
             Ok(backup) => backup,
@@ -1275,6 +1268,7 @@ pub(super) async fn filesystem_backup(
 }
 
 pub(super) async fn filesystem_backup_cleanup(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -1294,16 +1288,19 @@ pub(super) async fn filesystem_backup_cleanup(
     };
     match input.resolve() {
         Ok(BackupCleanupRequest::Single(item)) => {
-            filesystem_backup_cleanup_single(state, server_id, item, cancel, request_context).await
+            filesystem_backup_cleanup_single(app, state, server_id, item, cancel, request_context)
+                .await
         }
         Ok(BackupCleanupRequest::Batch(items)) => {
-            filesystem_backup_cleanup_batch(state, server_id, items, cancel, request_context).await
+            filesystem_backup_cleanup_batch(app, state, server_id, items, cancel, request_context)
+                .await
         }
         Err(error) => Ok(failed("invalid_input", error, false, None)),
     }
 }
 
 async fn filesystem_backup_cleanup_single(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: FilesystemBackupCleanupItemInput,
@@ -1366,10 +1363,7 @@ async fn filesystem_backup_cleanup_single(
             })),
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let service = remote_file_service(state, None);
+    let service = remote_file_service(state, app);
     let cleanup = tokio::select! {
         result = service.agent_cleanup_backup(server_id, &request) => match result {
             Ok(cleanup) => cleanup,
@@ -1440,6 +1434,7 @@ fn cleanup_item_not_removed(
 /// is checked; once cancelled, the remaining items are reported as skipped rather than
 /// silently omitted. Partial success is always visible in `partial`.
 async fn filesystem_backup_cleanup_batch(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     items: Vec<FilesystemBackupCleanupItemInput>,
@@ -1461,6 +1456,9 @@ async fn filesystem_backup_cleanup_batch(
     }
 
     let mut results = Vec::with_capacity(items.len());
+    let cpp_file_transport = app.is_some()
+        && crate::commands::files::cpp_ssh_file_operations_supported(state, server_id)
+            .unwrap_or(false);
     let mut session_ready = false;
     for (index, item) in items.iter().enumerate() {
         if cancel.is_cancelled() {
@@ -1510,10 +1508,9 @@ async fn filesystem_backup_cleanup_batch(
             ));
             continue;
         }
-        if !session_ready {
+        if !cpp_file_transport && !session_ready {
             if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-                // One transport failure is very likely to repeat for every remaining item,
-                // so stop and mark the rest explicitly instead of hammering a dead target.
+                // One failed Rust connection is likely to affect the remaining items too.
                 results.push(cleanup_item_not_removed(item, "failed", error));
                 for remaining in items.iter().skip(index + 1) {
                     results.push(cleanup_item_not_removed(
@@ -1526,7 +1523,7 @@ async fn filesystem_backup_cleanup_batch(
             }
             session_ready = true;
         }
-        let service = remote_file_service(state, None);
+        let service = remote_file_service(state, app);
         let cleanup = tokio::select! {
             result = service.agent_cleanup_backup(server_id, &requests[index]) => match result {
                 Ok(cleanup) => cleanup,
@@ -1633,6 +1630,7 @@ pub(super) fn cross_task_cleanup_is_plan_bound(
 }
 
 pub(super) async fn filesystem_restore(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -1690,10 +1688,7 @@ pub(super) async fn filesystem_restore(
             })),
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let service = remote_file_service(state, None);
+    let service = remote_file_service(state, app);
     let restore = tokio::select! {
         result = service.agent_restore(server_id, &request) => match result {
             Ok(restore) => restore,

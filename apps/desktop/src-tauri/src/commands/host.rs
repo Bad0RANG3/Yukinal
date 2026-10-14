@@ -23,6 +23,7 @@ use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 use yukinal_core::docker::{
     bounded_log_lines, docker_restart_command, is_safe_container_ref, parse_docker_inspect,
@@ -1164,10 +1165,31 @@ struct FilesystemRestoreResult {
 }
 
 /// Host request entry point with a cancellation token owned by the sidecar
-/// dispatcher. Keeping the token explicit prevents a user Stop from ending only
-/// the Node promise while an SSH operation continues in Rust.
+/// dispatcher. Keeping the token explicit lets cancellation reach whichever SSH
+/// transport owns the active operation.
+#[cfg(test)]
 pub(crate) async fn handle_sidecar_request_with_cancel(
     state: &AppState,
+    method: &str,
+    params: Value,
+    cancel: CancellationToken,
+) -> Result<Value, String> {
+    handle_sidecar_request_with_context(state, None, method, params, cancel).await
+}
+
+pub(crate) async fn handle_sidecar_request_with_app_and_cancel(
+    app: &AppHandle,
+    state: &AppState,
+    method: &str,
+    params: Value,
+    cancel: CancellationToken,
+) -> Result<Value, String> {
+    handle_sidecar_request_with_context(state, Some(app), method, params, cancel).await
+}
+
+async fn handle_sidecar_request_with_context(
+    state: &AppState,
+    app: Option<&AppHandle>,
     method: &str,
     params: Value,
     cancel: CancellationToken,
@@ -1368,9 +1390,9 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
         SYSTEMD_RESTART => systemd_restart(state, server_id, &request.input, &cancel).await,
         PACKAGE_INSPECT => package_inspect(state, server_id, &request.input, &cancel).await,
         PACKAGE_INSTALL => package_install(state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_READ => filesystem_read(state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_WRITE => filesystem_write(state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_EDIT => filesystem_edit(state, server_id, &request.input, &cancel).await,
+        FILESYSTEM_READ => filesystem_read(app, state, server_id, &request.input, &cancel).await,
+        FILESYSTEM_WRITE => filesystem_write(app, state, server_id, &request.input, &cancel).await,
+        FILESYSTEM_EDIT => filesystem_edit(app, state, server_id, &request.input, &cancel).await,
         FILESYSTEM_BACKUP_LIST => {
             filesystem_backup_list(state, server_id, &request.input, &request).await
         }
@@ -1378,13 +1400,14 @@ pub(crate) async fn handle_sidecar_request_with_cancel(
             filesystem_backup_retention(state, server_id, &request.input, &request).await
         }
         FILESYSTEM_BACKUP => {
-            filesystem_backup(state, server_id, &request.input, &cancel, &request).await
+            filesystem_backup(app, state, server_id, &request.input, &cancel, &request).await
         }
         FILESYSTEM_BACKUP_CLEANUP => {
-            filesystem_backup_cleanup(state, server_id, &request.input, &cancel, &request).await
+            filesystem_backup_cleanup(app, state, server_id, &request.input, &cancel, &request)
+                .await
         }
         FILESYSTEM_RESTORE => {
-            filesystem_restore(state, server_id, &request.input, &cancel, &request).await
+            filesystem_restore(app, state, server_id, &request.input, &cancel, &request).await
         }
         other => Ok(failed(
             "not_found",

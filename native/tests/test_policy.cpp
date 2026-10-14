@@ -118,6 +118,68 @@ YUKINAL_TEST(policy_validates_sftp_read_limits_and_metadata_parameters) {
   YUKINAL_REQUIRE(request.operation == "sftp_stat");
 }
 
+YUKINAL_TEST(policy_validates_sftp_mutations_and_binary_payload_limits) {
+  ExecRequest request;
+  ApiError error;
+  const bool write_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_write"},
+       {"parameters", {{"path", "/srv/app/config.bin"}, {"content_base64", "AAEC/w=="}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(write_accepted);
+  YUKINAL_REQUIRE(request.operation == "sftp_write");
+  YUKINAL_REQUIRE(request.content == std::vector<unsigned char>({0, 1, 2, 255}));
+
+  const bool invalid_base64_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_write"},
+       {"parameters", {{"path", "/srv/app/config.bin"}, {"content_base64", "AA=A"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!invalid_base64_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const std::string too_large_write = std::string(((512 * 1024 + 2) / 3) * 4, 'A');
+  const bool oversized_write_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_write"},
+       {"parameters", {{"path", "/srv/app/config.bin"}, {"content_base64", too_large_write}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!oversized_write_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  std::string at_backup_limit(((1024 * 1024 + 2) / 3) * 4, 'A');
+  at_backup_limit.replace(at_backup_limit.size() - 2, 2, "==");
+  const bool exclusive_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_create_exclusive"},
+       {"parameters", {{"path", "/srv/app/config.backup"}, {"content_base64", at_backup_limit}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(exclusive_accepted);
+  YUKINAL_REQUIRE(request.content.size() == 1024 * 1024);
+
+  const bool remove_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_remove_file"},
+       {"parameters", {{"path", "/srv/app/config.backup"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(remove_accepted);
+  YUKINAL_REQUIRE(request.operation == "sftp_remove_file");
+
+  const bool link_count_line_break_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_link_count"},
+       {"parameters", {{"path", "/srv/app/config\nbackup"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!link_count_line_break_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {
   ExecRequest request;
   ApiError error;

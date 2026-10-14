@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import unittest
@@ -99,6 +100,38 @@ class ClientTests(unittest.TestCase):
                 "timeout_seconds": 8,
             },
         )
+
+    def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
+        self.server.response_body["operation"] = "sftp_write"
+        self.server.response_body["stdout"] = '{"bytes_written":4}'
+        result = self.client.sftp_write("staging-web-01", "/srv/app/data.bin", b"\x00\x01\x02\xff", 8)
+        self.assertEqual(result.operation, "sftp_write")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "sftp_write",
+                "parameters": {"path": "/srv/app/data.bin", "content_base64": "AAEC/w=="},
+                "timeout_seconds": 8,
+            },
+        )
+        self.assertEqual(base64.b64decode(self.server.last_request["body"]["parameters"]["content_base64"]), b"\x00\x01\x02\xff")
+
+    def test_sftp_mutation_limits_are_checked_before_network_call(self) -> None:
+        with self.assertRaises(ValueError):
+            self.client.sftp_write("staging-web-01", "/srv/app/data.bin", b"x" * (512 * 1024 + 1))
+        with self.assertRaises(ValueError):
+            self.client.sftp_create_exclusive("staging-web-01", "/srv/app/data.bin", b"x" * (1024 * 1024 + 1))
+        with self.assertRaises(ValueError):
+            self.client.sftp_remove_file("staging-web-01", "/srv/app/\x00data")
+        self.assertIsNone(self.server.last_request)
+
+    def test_link_count_returns_only_a_non_negative_integer_or_null(self) -> None:
+        self.server.response_body["operation"] = "sftp_link_count"
+        self.server.response_body["stdout"] = '{"link_count":1}'
+        self.assertEqual(self.client.sftp_link_count("staging-web-01", "/srv/app/data.bin", 8), 1)
+        self.server.response_body["stdout"] = '{"link_count":null}'
+        self.assertIsNone(self.client.sftp_link_count("staging-web-01", "/srv/app/missing", 8))
 
     def test_structured_service_errors_are_preserved(self) -> None:
         self.server.status_code = 404

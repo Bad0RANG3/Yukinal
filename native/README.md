@@ -1,20 +1,24 @@
 # SSH Service (C++)
 
-The first rewrite milestone is a small, standalone C++ service. It binds only to
-`127.0.0.1`, accepts structured requests, resolves `target_id` from a configured
-allowlist and exposes read-only operations: `service_status` and
-`service_inventory`, plus bounded SFTP `sftp_list`, `sftp_stat`, and `sftp_read`.
+The rewrite uses a standalone C++ service. It binds only to `127.0.0.1`, accepts
+structured requests, resolves `target_id` from a configured allowlist and
+exposes service queries plus bounded SFTP list, stat, read, write,
+exclusive-create, remove, and link-count operations.
 Host keys
 can be checked against an OpenSSH `known_hosts` file or an exact `SHA256:` pin
 from the desktop trust store. Private keys can come from a file or a named
 environment reference, which lets the desktop pass OS-keychain material without
 writing it into the service configuration.
 
-The service deliberately has no raw-command endpoint, interactive terminal, or
-SFTP write operations. The desktop service panel and supported desktop file
-browser calls start a one-target instance. File browsing uses the C++ SFTP path
-for password/private-key identities without a host CA; terminal, file changes,
-transfers, and other authentication/trust modes still use the Rust transport.
+The service deliberately has no raw-command endpoint or interactive terminal.
+SFTP writes are capped at 512 KiB; exclusive recovery-file creation is capped
+at 1 MiB and removes a partial file if writing or syncing fails. The desktop
+calls the one-path remove operation only after it checks backup ownership and
+revision. The link-count operation runs a fixed, quoted `stat` probe. The
+desktop routes supported Agent file reads/writes and backup/cleanup operations
+through C++ for password/private-key identities without a host CA. Guarded
+atomic edit/restore, transfers, PTY sessions, and other auth/trust modes still
+use Rust while their C++ equivalents are migrated.
 
 ## Build
 
@@ -48,8 +52,10 @@ service exit if its parent dies without a graceful shutdown.
 The Python Agent and desktop service panel create a short-lived one-target
 allowlist from the selected desktop server record and OS keychain identity. The
 desktop file browser routes listing, metadata, and bounded reads through the
-C++ service for supported password/private-key identities. SFTP mutations and
-interactive PTY sessions remain on the Rust transport during migration.
+C++ service for supported password/private-key identities. Agent file reads,
+writes, backup creation, and cleanup use the same service. Guarded atomic file
+replacement, transfers, and interactive PTY sessions remain on the Rust
+transport during migration.
 
 ## Run
 

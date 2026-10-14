@@ -101,7 +101,8 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
   if (!valid_token(api_token) || !runner) return false;
 
   httplib::Server server;
-  server.set_payload_max_length(64 * 1024);
+  // Recovery copies arrive as base64 within one JSON request: 1 MiB expands to about 1.34 MiB.
+  server.set_payload_max_length(2 * 1024 * 1024);
   server.set_read_timeout(5, 0);
   server.set_write_timeout(5, 0);
   server.new_task_queue = [] { return new httplib::ThreadPool(4); };

@@ -69,8 +69,8 @@ pub struct RemoteFileReadResponse {
     pub truncated: bool,
 }
 
-/// Desktop-side transport: C++ SFTP for supported browser reads, listings, and metadata,
-/// with `TerminalService` retained for writes and the other auth modes.
+/// Desktop-side transport: C++ SFTP for supported file operations, with `TerminalService`
+/// retained for guarded replacement and the other auth modes.
 ///
 /// It lives on this side of the boundary because it needs `AppState` and credentials. Connection
 /// and credential resolution belong to the desktop layer, and the capability only sees
@@ -91,7 +91,10 @@ pub(crate) fn remote_file_service<'a>(
     })
 }
 
-fn cpp_ssh_file_operations_supported(state: &AppState, server_id: &str) -> Result<bool, String> {
+pub(crate) fn cpp_ssh_file_operations_supported(
+    state: &AppState,
+    server_id: &str,
+) -> Result<bool, String> {
     let server = match state.database.servers().get(server_id) {
         Ok(server) => server,
         Err(_) => return Ok(false),
@@ -175,6 +178,15 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
     }
 
     async fn write(&self, server_id: &str, path: &str, data: &[u8]) -> TransportResult<()> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_write(
+                    app, self.state, server_id, path, data,
+                )
+                .await
+                .map_err(TransportError::new);
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;
@@ -191,6 +203,15 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
         path: &str,
         data: &[u8],
     ) -> TransportResult<()> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_create_exclusive(
+                    app, self.state, server_id, path, data,
+                )
+                .await
+                .map_err(TransportError::new);
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;
@@ -202,6 +223,15 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
     }
 
     async fn remove_file(&self, server_id: &str, path: &str) -> TransportResult<()> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_remove_file(
+                    app, self.state, server_id, path,
+                )
+                .await
+                .map_err(TransportError::new);
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;
@@ -242,6 +272,15 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
     }
 
     async fn link_count(&self, server_id: &str, path: &str) -> TransportResult<Option<u64>> {
+        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
+            if let Some(app) = self.app.as_ref() {
+                return crate::commands::ssh_service::sftp_link_count(
+                    app, self.state, server_id, path,
+                )
+                .await
+                .map_err(TransportError::new);
+            }
+        }
         ensure_session(self.state, server_id)
             .await
             .map_err(TransportError::new)?;

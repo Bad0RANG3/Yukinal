@@ -521,8 +521,8 @@ pub(crate) fn forward_sidecar_events(app: AppHandle) {
                                 let outcome = match registration {
                                     Ok(Some(token)) => {
                                         let state = app.state::<AppState>();
-                                        host::handle_sidecar_request_with_cancel(
-                                            &state, &method, params, token,
+                                        host::handle_sidecar_request_with_app_and_cancel(
+                                            &app, &state, &method, params, token,
                                         )
                                         .await
                                     }

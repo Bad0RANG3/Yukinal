@@ -111,6 +111,122 @@ pub(crate) async fn sftp_read_bounded(
     decode_sftp_read_output(&output, max_bytes)
 }
 
+pub(crate) async fn sftp_write(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    if data.len() > 512 * 1024 {
+        return Err("the requested SFTP write exceeds the 512 KiB limit".into());
+    }
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_write",
+        json!({
+            "path": path,
+            "content_base64": base64::engine::general_purpose::STANDARD.encode(data),
+        }),
+    )
+    .await?;
+    validate_sftp_write_output(&output, data.len())
+}
+
+pub(crate) async fn sftp_create_exclusive(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    if data.len() > 1024 * 1024 {
+        return Err("the requested SFTP recovery file exceeds the 1 MiB limit".into());
+    }
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_create_exclusive",
+        json!({
+            "path": path,
+            "content_base64": base64::engine::general_purpose::STANDARD.encode(data),
+        }),
+    )
+    .await?;
+    validate_sftp_write_output(&output, data.len())
+}
+
+fn validate_sftp_write_output(output: &str, expected_bytes: usize) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct WriteResult {
+        bytes_written: usize,
+    }
+
+    let result: WriteResult = serde_json::from_str(output)
+        .map_err(|_| "the C++ SSH service returned an invalid SFTP write result".to_string())?;
+    if result.bytes_written != expected_bytes {
+        return Err("the C++ SSH service reported an unexpected SFTP write length".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn sftp_remove_file(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RemoveResult {
+        removed: bool,
+    }
+
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_remove_file",
+        json!({"path": path}),
+    )
+    .await?;
+    let result: RemoveResult = serde_json::from_str(&output)
+        .map_err(|_| "the C++ SSH service returned an invalid SFTP removal result".to_string())?;
+    if !result.removed {
+        return Err("the C++ SSH service did not confirm SFTP file removal".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn sftp_link_count(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    path: &str,
+) -> Result<Option<u64>, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LinkCount {
+        link_count: Option<u64>,
+    }
+
+    let output = run_operation(
+        app,
+        state,
+        server_id,
+        "sftp_link_count",
+        json!({"path": path}),
+    )
+    .await?;
+    let result: LinkCount = serde_json::from_str(&output)
+        .map_err(|_| "the C++ SSH service returned invalid SFTP link metadata".to_string())?;
+    Ok(result.link_count)
+}
+
 fn decode_sftp_read_output(output: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(output.as_bytes())

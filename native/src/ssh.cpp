@@ -4,13 +4,16 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cerrno>
+#include <cctype>
 #include <climits>
 #include <condition_variable>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -866,6 +869,184 @@ ExecResult sftp_read(const TargetConfig& target, const std::string& path,
   return result;
 }
 
+namespace {
+
+ExecResult sftp_write_impl(const TargetConfig& target, const std::string& path,
+                           const std::vector<unsigned char>& content, bool exclusive,
+                           int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  const std::size_t maximum = exclusive ? 1024 * 1024 : 512 * 1024;
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
+      content.size() > maximum || timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The bounded SFTP write parameters are invalid");
+    return result;
+  }
+
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  const long flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT |
+                     (exclusive ? LIBSSH2_FXF_EXCL : LIBSSH2_FXF_TRUNC);
+  resources.sftp_handle_ = libssh2_sftp_open_ex(
+      resources.sftp_, path.data(), static_cast<unsigned int>(path.size()), flags, 0644,
+      LIBSSH2_SFTP_OPENFILE);
+  if (!resources.sftp_handle_) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP file write timed out" : "Could not open the remote file for writing");
+    return result;
+  }
+
+  bool write_succeeded = true;
+  for (std::size_t offset = 0; offset < content.size();) {
+    if (!set_session_timeout(resources.session_, deadline)) {
+      fail(&result, "timeout", "SFTP file write timed out");
+      write_succeeded = false;
+      break;
+    }
+    const auto count = libssh2_sftp_write(
+        resources.sftp_handle_, reinterpret_cast<const char*>(content.data() + offset),
+        content.size() - offset);
+    if (count <= 0) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "SFTP file write timed out" : "Could not write the remote file");
+      write_succeeded = false;
+      break;
+    }
+    offset += static_cast<std::size_t>(count);
+  }
+
+  if (write_succeeded && exclusive) {
+    if (!set_session_timeout(resources.session_, deadline) ||
+        libssh2_sftp_fsync(resources.sftp_handle_) != 0) {
+      const bool timed_out = remaining_ms(deadline) == 0;
+      fail(&result, timed_out ? "timeout" : "sftp_error",
+           timed_out ? "Syncing the SFTP recovery file timed out"
+                     : "The SFTP server could not sync the recovery file");
+      write_succeeded = false;
+    }
+  }
+
+  if (!set_session_timeout(resources.session_, deadline)) {
+    // Close a partially-created recovery file even when its main operation reached the deadline.
+    // The cleanup grace is bounded and is not used to continue the requested write.
+    libssh2_session_set_timeout(resources.session_, 1000);
+  }
+  if (resources.sftp_handle_) {
+    LIBSSH2_SFTP_HANDLE* handle = resources.sftp_handle_;
+    resources.sftp_handle_ = nullptr;
+    if (libssh2_sftp_close_handle(handle) != 0 && write_succeeded) {
+      fail(&result, remaining_ms(deadline) == 0 ? "timeout" : "sftp_error",
+           remaining_ms(deadline) == 0 ? "Closing the SFTP file timed out"
+                                       : "Could not close the remote file after writing");
+      write_succeeded = false;
+    }
+  } else {
+    write_succeeded = false;
+    if (result.error_code.empty()) fail(&result, "timeout", "SFTP file write timed out");
+  }
+
+  if (!write_succeeded && exclusive) {
+    if (!set_session_timeout(resources.session_, deadline)) libssh2_session_set_timeout(resources.session_, 1000);
+    libssh2_sftp_unlink_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size()));
+    return result;
+  }
+  if (!write_succeeded) return result;
+
+  result.stdout_text = nlohmann::json{{"bytes_written", content.size()}}.dump();
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
+std::string shell_single_quote(const std::string& value) {
+  std::string quoted = "'";
+  for (const char character : value) {
+    if (character == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted.push_back(character);
+    }
+  }
+  quoted.push_back('\'');
+  return quoted;
+}
+
+}  // namespace
+
+ExecResult sftp_write(const TargetConfig& target, const std::string& path,
+                      const std::vector<unsigned char>& content, int timeout_seconds) {
+  return sftp_write_impl(target, path, content, false, timeout_seconds);
+}
+
+ExecResult sftp_create_exclusive(const TargetConfig& target, const std::string& path,
+                                 const std::vector<unsigned char>& content, int timeout_seconds) {
+  return sftp_write_impl(target, path, content, true, timeout_seconds);
+}
+
+ExecResult sftp_remove_file(const TargetConfig& target, const std::string& path,
+                            int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SFTP file removal parameters are invalid");
+    return result;
+  }
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  SshResources resources;
+  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SFTP file removal timed out");
+    return result;
+  }
+  if (libssh2_sftp_unlink_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size())) != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0;
+    fail(&result, timed_out ? "timeout" : "sftp_error",
+         timed_out ? "SFTP file removal timed out" : "Could not remove the remote file");
+    return result;
+  }
+  result.stdout_text = "{\"removed\":true}";
+  result.exit_code = 0;
+  result.completed = true;
+  return result;
+}
+
+ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
+                           int timeout_seconds) {
+  ExecResult result;
+  const auto started = Clock::now();
+  const DurationTracker duration_tracker{result, started};
+  if (path.empty() || path.size() > 4096 || path.front() != '/' ||
+      path.find('\0') != std::string::npos || path.find_first_of("\r\n") != std::string::npos ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The SFTP link-count path is invalid");
+    return result;
+  }
+  const std::string quoted = shell_single_quote(path);
+  ExecResult probe = run_ssh_command(
+      target, "stat -c %h " + quoted + " 2>/dev/null || stat -f %l " + quoted + " 2>/dev/null",
+      timeout_seconds);
+  if (!probe.completed) return probe;
+
+  std::string_view output(probe.stdout_text);
+  while (!output.empty() && std::isspace(static_cast<unsigned char>(output.front()))) output.remove_prefix(1);
+  while (!output.empty() && std::isspace(static_cast<unsigned char>(output.back()))) output.remove_suffix(1);
+  std::uint64_t count = 0;
+  const auto parsed = std::from_chars(output.data(), output.data() + output.size(), count);
+  const bool valid = probe.exit_code == 0 && !output.empty() &&
+                     parsed.ec == std::errc{} && parsed.ptr == output.data() + output.size();
+  probe.stdout_text = nlohmann::json{{"link_count", valid ? nlohmann::json(count) : nlohmann::json(nullptr)}}.dump();
+  probe.stderr_text.clear();
+  probe.exit_code = 0;
+  probe.completed = true;
+  return probe;
+}
+
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
@@ -881,6 +1062,18 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "sftp_read") {
     return sftp_read(target, request.path, request.max_bytes, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_write") {
+    return sftp_write(target, request.path, request.content, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_create_exclusive") {
+    return sftp_create_exclusive(target, request.path, request.content, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_remove_file") {
+    return sftp_remove_file(target, request.path, request.timeout_seconds);
+  }
+  if (request.operation == "sftp_link_count") {
+    return sftp_link_count(target, request.path, request.timeout_seconds);
   }
   ExecResult result;
   fail(&result, "unsupported_operation", "The requested structured SSH operation is not enabled");

@@ -7,10 +7,10 @@
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
 > hosts native UI IPC and some SSH paths. The Python sidecar can call the C++
-> `service_status` operation when configured; the desktop file browser uses
-> bounded C++ SFTP list/stat/read operations for password/private-key identities
-> without Host CA. Writes, transfers, PTY, and other authentication modes still
-> use Rust. Every C++ operation resolves its `target_id` through the service
+> `service_status` operation when configured; the desktop file browser and
+> supported Agent file reads/writes/backups use C++ SFTP operations for
+> password/private-key identities without Host CA. Guarded atomic edit/restore,
+> transfers, PTY, and other authentication modes still use Rust. Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
 > loopback health endpoint, and stops it with the Agent process. Automatic
@@ -64,16 +64,16 @@ Python Agent Runtime
         libssh2 ── SSH ──► configured server
 
 React/Tauri desktop UI: unchanged; the host executes `host.*` tools, while the
-C++ service executes the optional read-only SSH status tool
+C++ service executes migrated structured SSH and SFTP operations
 ```
 
 The bridge uses the existing sidecar request path: Python sends
 `host.tool.execute` (or `host.mcp.catalog`) over the child process pipe, and the
 desktop host replies over that same pipe. Python does not open SSH sessions or
 start MCP processes through this bridge. The host continues to resolve the
-server, enforce its current authorization and execute the operation. Current
-Python host tools are read-only; MCP entries are exposed to the model only when
-the host catalog classifies them as low-risk.
+server, enforce its current authorization and approval checks, and execute the
+operation. MCP entries are exposed to the model only when the host catalog
+classifies them as low-risk.
 
 The direct C++ caller is enabled only when `YUKINAL_SSH_API_TOKEN` is explicitly
 forwarded to the Python Agent sidecar. The C++ configuration's `target_id` must
@@ -127,9 +127,13 @@ Service discovery currently targets Unix-like hosts with systemd and Docker.
 The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or arbitrary command. The service resolves a
 `target_id` to a configured target and accepts only `service_status`,
-`service_inventory`, and bounded SFTP `sftp_list`, `sftp_stat`, and `sftp_read`
-operations with validated parameters. Service operations map to fixed
-read-only commands; SFTP reads are capped at 1 MiB plus one sentinel byte.
+`service_inventory`, and bounded SFTP list/stat/read/write/exclusive-create/
+remove/link-count operations with validated parameters. Service operations map
+to fixed commands; SFTP reads are capped at 1 MiB plus one sentinel byte, normal
+writes at 512 KiB, and exclusive recovery copies at 1 MiB. Write bodies use
+base64 inside a bounded JSON request. The link-count operation runs one fixed,
+single-quoted `stat` probe and returns `null` when the host cannot report a
+count.
 Every operation runs only after the target host key matches the configured
 OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed keys fail
 closed.
@@ -176,9 +180,11 @@ The desktop inventory request uses the same endpoint with no parameters:
 
 Only the documented fields are accepted. `service_status` requires exactly one
 validated unit name; `service_inventory` accepts no parameters; SFTP operations
-accept only a path and, for reads, a maximum byte count no greater than 1 MiB.
-Timeouts are 1–30 seconds. Service command output is capped at 64 KiB per
-stream; SFTP listing and read responses have operation-specific limits.
+accept only their documented path, byte limit, or base64 content fields.
+`sftp_write` accepts at most 512 KiB, `sftp_create_exclusive` at most 1 MiB,
+and `sftp_read` at most 1 MiB plus a sentinel byte. Timeouts are 1–30 seconds.
+Service command output is capped at 64 KiB per stream; SFTP responses have
+operation-specific limits.
 
 The desktop service panel and supported file browser calls launch a short-lived
 one-target C++ service. Its temporary configuration contains only target
@@ -297,9 +303,10 @@ Python-to-C++ HTTP tests also passed in CTest.
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- write-capable tools in the desktop catalog and full desktop task/plan resume;
+- migrating guarded atomic edit/restore to C++ while preserving the revision,
+  metadata, and no-follow protections;
 - arbitrary shell commands outside the existing host's separately guarded task flow;
-- SFTP writes, file transfer, PTY, persistence, and a Qt desktop shell;
+- SFTP transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
 The next milestones are installed-app parity checks, removing the Node fallback,

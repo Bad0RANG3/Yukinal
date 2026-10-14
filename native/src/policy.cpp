@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <regex>
 #include <set>
+#include <string_view>
 
 namespace yukinal::ssh_service {
 namespace {
@@ -19,6 +20,58 @@ bool has_only_keys(const nlohmann::json& value, const std::set<std::string>& all
     if (!allowed.contains(it.key())) return false;
   }
   return true;
+}
+
+int base64_value(char character) {
+  if (character >= 'A' && character <= 'Z') return character - 'A';
+  if (character >= 'a' && character <= 'z') return character - 'a' + 26;
+  if (character >= '0' && character <= '9') return character - '0' + 52;
+  if (character == '+') return 62;
+  if (character == '/') return 63;
+  return -1;
+}
+
+bool decode_base64(std::string_view encoded, std::size_t maximum,
+                   std::vector<unsigned char>* decoded) {
+  if (encoded.size() % 4 != 0) return false;
+  const std::size_t padding = encoded.ends_with("==") ? 2 : encoded.ends_with("=") ? 1 : 0;
+  if (encoded.size() > ((maximum + 2) / 3) * 4) return false;
+  for (std::size_t index = 0; index < encoded.size(); ++index) {
+    const bool is_padding = encoded[index] == '=';
+    if ((is_padding && (padding == 0 || index < encoded.size() - padding)) ||
+        (!is_padding && base64_value(encoded[index]) < 0)) {
+      return false;
+    }
+  }
+  if (padding == 2 && encoded.size() >= 4 &&
+      (base64_value(encoded[encoded.size() - 3]) & 0x0f) != 0) {
+    return false;
+  }
+  if (padding == 1 && encoded.size() >= 4 &&
+      (base64_value(encoded[encoded.size() - 2]) & 0x03) != 0) {
+    return false;
+  }
+
+  const std::size_t output_size = (encoded.size() / 4) * 3 - padding;
+  if (output_size > maximum) return false;
+  if (!decoded) return false;
+  decoded->clear();
+  decoded->reserve(output_size);
+  for (std::size_t index = 0; index < encoded.size(); index += 4) {
+    const unsigned int first = static_cast<unsigned int>(base64_value(encoded[index]));
+    const unsigned int second = static_cast<unsigned int>(base64_value(encoded[index + 1]));
+    const unsigned int third = encoded[index + 2] == '='
+                                   ? 0U
+                                   : static_cast<unsigned int>(base64_value(encoded[index + 2]));
+    const unsigned int fourth = encoded[index + 3] == '='
+                                    ? 0U
+                                    : static_cast<unsigned int>(base64_value(encoded[index + 3]));
+    const unsigned int block = (first << 18) | (second << 12) | (third << 6) | fourth;
+    decoded->push_back(static_cast<unsigned char>((block >> 16) & 0xff));
+    if (encoded[index + 2] != '=') decoded->push_back(static_cast<unsigned char>((block >> 8) & 0xff));
+    if (encoded[index + 3] != '=') decoded->push_back(static_cast<unsigned char>(block & 0xff));
+  }
+  return decoded->size() == output_size;
 }
 
 }  // namespace
@@ -63,6 +116,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   const std::string operation = operation_it->get<std::string>();
   std::string service;
   std::string path;
+  std::vector<unsigned char> content;
   std::uint32_t max_bytes = 0;
   if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
@@ -123,6 +177,40 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     }
     path = path_it->get<std::string>();
     max_bytes = static_cast<std::uint32_t>(requested_bytes);
+  } else if (operation == "sftp_write" || operation == "sftp_create_exclusive") {
+    if (!has_only_keys(*parameters_it, {"path", "content_base64"})) {
+      set_error(error, 422, "invalid_parameters", "SFTP write operations accept only path and content_base64");
+      return false;
+    }
+    const auto path_it = parameters_it->find("path");
+    const auto content_it = parameters_it->find("content_base64");
+    const std::size_t maximum = operation == "sftp_write" ? 512 * 1024 : 1024 * 1024;
+    if (path_it == parameters_it->end() || !path_it->is_string() ||
+        !valid_sftp_path(path_it->get<std::string>()) || content_it == parameters_it->end() ||
+        !content_it->is_string() ||
+        !decode_base64(content_it->get_ref<const std::string&>(), maximum, &content)) {
+      set_error(error, 422, "invalid_parameters", "path or base64 file contents are invalid or exceed the operation limit");
+      return false;
+    }
+    path = path_it->get<std::string>();
+  } else if (operation == "sftp_remove_file" || operation == "sftp_link_count") {
+    if (!has_only_keys(*parameters_it, {"path"})) {
+      set_error(error, 422, "invalid_parameters", "SFTP path operations accept only a path parameter");
+      return false;
+    }
+    const auto path_it = parameters_it->find("path");
+    if (path_it == parameters_it->end() || !path_it->is_string() ||
+        !valid_sftp_path(path_it->get<std::string>())) {
+      set_error(error, 422, "invalid_parameters", "path must be a non-empty SFTP path of at most 4096 bytes");
+      return false;
+    }
+    if (operation == "sftp_link_count" &&
+        (path_it->get<std::string>().front() != '/' ||
+         path_it->get<std::string>().find_first_of("\r\n") != std::string::npos)) {
+      set_error(error, 422, "invalid_parameters", "sftp_link_count requires an absolute path without line breaks");
+      return false;
+    }
+    path = path_it->get<std::string>();
   } else {
     set_error(error, 422, "unsupported_operation", "The requested structured SSH operation is not enabled");
     return false;
@@ -150,6 +238,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->operation = operation;
   request->service = std::move(service);
   request->path = std::move(path);
+  request->content = std::move(content);
   request->max_bytes = max_bytes;
   request->timeout_seconds = static_cast<int>(timeout);
   return true;

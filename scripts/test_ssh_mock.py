@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "agent" / "src"))
 
 try:
     import paramiko
+    from paramiko import sftp as paramiko_sftp
 except ImportError as error:
     raise SystemExit("install the optional test dependency with: python -m pip install -e 'agent[test]'") from error
 
@@ -31,6 +32,7 @@ from yukinal_ssh import SshServiceClient, SshServiceError
 TOKEN = "paramiko-live-ssh-test-token-long-enough-for-service"
 PASSWORD = "test-only-password-for-local-ssh-fixture"
 BAD_PASSWORD = "intentionally-wrong-local-password"
+EXEC_COMMANDS: list[bytes] = []
 
 
 def unused_port() -> int:
@@ -66,6 +68,7 @@ class ExecServer(paramiko.ServerInterface):
 
     def check_channel_exec_request(self, channel: paramiko.Channel, command: bytes) -> bool:
         self.command = command
+        EXEC_COMMANDS.append(command)
         self.command_ready.set()
         return True
 
@@ -77,6 +80,11 @@ class ExecServer(paramiko.ServerInterface):
 class StaticSftpInterface(paramiko.SFTPServerInterface):
     CONTENTS = b"alpha\x00beta\n"
     LARGE_CONTENTS = b"Z" * (1024 * 1024 + 32)
+    _files: dict[str, bytes] = {
+        "/settings.toml": CONTENTS,
+        "/large.bin": LARGE_CONTENTS,
+    }
+    _files_lock = threading.Lock()
 
     def list_folder(self, path: str) -> list[paramiko.SFTPAttributes]:
         directory = paramiko.SFTPAttributes()
@@ -86,7 +94,7 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
         file = paramiko.SFTPAttributes()
         file.filename = "settings.toml"
         file.st_mode = stat.S_IFREG | 0o640
-        file.st_size = len(self.CONTENTS)
+        file.st_size = len(self._files["/settings.toml"])
         file.st_atime = 123456789
         file.st_mtime = 123456789
         return [directory, file]
@@ -96,11 +104,13 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
         if path == "/":
             attributes.st_mode = stat.S_IFDIR | 0o755
             attributes.st_size = 0
-        elif path == "/settings.toml":
+            attributes.st_nlink = 1
+        elif path in self._files:
             attributes.st_mode = stat.S_IFREG | 0o640
-            attributes.st_size = len(self.CONTENTS)
+            attributes.st_size = len(self._files[path])
             attributes.st_atime = 123456789
             attributes.st_mtime = 123456789
+            attributes.st_nlink = 1
         else:
             return paramiko.SFTP_NO_SUCH_FILE
         return attributes
@@ -109,22 +119,47 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
         return self.stat(path)
 
     def open(self, path: str, flags: int, attr: paramiko.SFTPAttributes) -> paramiko.SFTPHandle:
-        write_flags = (
-            paramiko.sftp.SFTP_FLAG_WRITE
-            | paramiko.sftp.SFTP_FLAG_APPEND
-            | paramiko.sftp.SFTP_FLAG_CREATE
-            | paramiko.sftp.SFTP_FLAG_TRUNC
-            | paramiko.sftp.SFTP_FLAG_EXCL
-        )
-        if path not in {"/settings.toml", "/large.bin"} or flags & write_flags:
-            return paramiko.SFTP_PERMISSION_DENIED
-        handle = MemorySftpHandle(flags)
-        content = self.CONTENTS if path == "/settings.toml" else self.LARGE_CONTENTS
-        handle.readfile = io.BytesIO(content)
-        return handle
+        with self._files_lock:
+            exists = path in self._files
+            if path not in {"/settings.toml", "/large.bin", "/write.bin", "/backup.bin"}:
+                return paramiko.SFTP_PERMISSION_DENIED
+            if flags & (os.O_WRONLY | os.O_RDWR):
+                if flags & os.O_EXCL and exists:
+                    return paramiko.SFTP_PERMISSION_DENIED
+                if not exists and not flags & os.O_CREAT:
+                    return paramiko.SFTP_NO_SUCH_FILE
+                initial = b"" if flags & os.O_TRUNC else self._files.get(path, b"")
+                handle = MemorySftpHandle(flags)
+                handle.writefile = io.BytesIO(initial)
+
+                def save(content: bytes) -> None:
+                    with self._files_lock:
+                        self._files[path] = content
+
+                handle.on_close = save
+                return handle
+            if not exists:
+                return paramiko.SFTP_NO_SUCH_FILE
+            handle = MemorySftpHandle(flags)
+            handle.readfile = io.BytesIO(self._files[path])
+            return handle
+
+    def remove(self, path: str) -> int:
+        with self._files_lock:
+            if path not in self._files:
+                return paramiko.SFTP_NO_SUCH_FILE
+            del self._files[path]
+        return paramiko.SFTP_OK
 
 
 class MemorySftpHandle(paramiko.SFTPHandle):
+    def close(self) -> None:
+        writefile = getattr(self, "writefile", None)
+        on_close = getattr(self, "on_close", None)
+        if writefile is not None and on_close is not None:
+            on_close(writefile.getvalue())
+        super().close()
+
     def read(self, offset: int, length: int) -> bytes:
         if self.readfile is None:
             return b""
@@ -132,9 +167,34 @@ class MemorySftpHandle(paramiko.SFTPHandle):
         return self.readfile.read(length)
 
 
+class FsyncSftpServer(paramiko.SFTPServer):
+    def _process(self, request_type: int, request_number: int, message: object) -> None:
+        if request_type == paramiko_sftp.CMD_EXTENDED:
+            extension = message.get_text()
+            if extension == "fsync@openssh.com":
+                handle_id = message.get_binary()
+                handle = self.file_table.get(handle_id)
+                if handle is None:
+                    self._send_status(request_number, paramiko_sftp.SFTP_FAILURE)
+                    return
+                writefile = getattr(handle, "writefile", None)
+                if writefile is not None:
+                    writefile.flush()
+                self._send_status(request_number, paramiko_sftp.SFTP_OK)
+                return
+            self._send_status(request_number, paramiko_sftp.SFTP_OP_UNSUPPORTED)
+            return
+        super()._process(request_type, request_number, message)
+
+
 def start_ssh_mock(
     host_key: paramiko.RSAKey, user_key: paramiko.PKey
 ) -> tuple[socket.socket, threading.Event]:
+    StaticSftpInterface._files = {
+        "/settings.toml": StaticSftpInterface.CONTENTS,
+        "/large.bin": StaticSftpInterface.LARGE_CONTENTS,
+    }
+    EXEC_COMMANDS.clear()
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -147,7 +207,7 @@ def start_ssh_mock(
         try:
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
-            transport.set_subsystem_handler("sftp", paramiko.SFTPServer, StaticSftpInterface)
+            transport.set_subsystem_handler("sftp", FsyncSftpServer, StaticSftpInterface)
             server = ExecServer(user_key)
             transport.start_server(server=server)
             channel = transport.accept(10)
@@ -176,6 +236,9 @@ def start_ssh_mock(
                 channel.send_exit_status(0)
             elif command == b"systemctl is-active -- large.service":
                 channel.sendall(b"A" * 70000)
+                channel.send_exit_status(0)
+            elif command.startswith(b"stat -c %h '") and b"' 2>/dev/null || stat -f %l '" in command:
+                channel.sendall(b"1\n")
                 channel.send_exit_status(0)
             else:
                 channel.sendall(b"inactive\n")
@@ -493,6 +556,50 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             maximum_bytes = base64.b64decode(maximum_read.stdout, validate=True)
             if maximum_bytes != StaticSftpInterface.LARGE_CONTENTS[: 1024 * 1024 + 1]:
                 raise AssertionError("C++ SFTP read exceeded or missed its one-byte truncation bound")
+
+            write_payload = bytes(range(256)) * 512
+            write_result = client.sftp_write("srv_desktop_style", "/write.bin", write_payload, 8)
+            if json.loads(write_result.stdout) != {"bytes_written": len(write_payload)}:
+                raise AssertionError("C++ SFTP write did not report the complete binary payload")
+            written_read = client._execute_operation(
+                "srv_desktop_style",
+                "sftp_read",
+                {"path": "/write.bin", "max_bytes": len(write_payload)},
+                timeout_seconds=8,
+            )
+            if base64.b64decode(written_read.stdout, validate=True) != write_payload:
+                raise AssertionError("C++ SFTP write did not preserve binary file contents")
+            if client.sftp_link_count("srv_desktop_style", "/settings'.toml", 8) != 1:
+                raise AssertionError("C++ SFTP link-count probe did not return the structured count")
+            if not any(b"'/settings'\\''.toml'" in command for command in EXEC_COMMANDS):
+                raise AssertionError("C++ SFTP link-count probe did not safely quote a single quote")
+
+            backup_payload = bytes(range(256)) * 4096
+            create_result = client.sftp_create_exclusive(
+                "srv_desktop_style", "/backup.bin", backup_payload, 8
+            )
+            if json.loads(create_result.stdout) != {"bytes_written": len(backup_payload)}:
+                raise AssertionError("C++ exclusive SFTP create did not report the complete payload")
+            backup_read = client._execute_operation(
+                "srv_desktop_style",
+                "sftp_read",
+                {"path": "/backup.bin", "max_bytes": len(backup_payload)},
+                timeout_seconds=8,
+            )
+            if base64.b64decode(backup_read.stdout, validate=True) != backup_payload:
+                raise AssertionError("C++ exclusive SFTP create did not preserve the 1 MiB recovery copy")
+            try:
+                client.sftp_create_exclusive(
+                    "srv_desktop_style", "/backup.bin", b"overwrite", 8
+                )
+            except SshServiceError as error:
+                if error.code != "sftp_error":
+                    raise AssertionError(f"exclusive SFTP create returned the wrong error: {error.code}") from error
+            else:
+                raise AssertionError("C++ exclusive SFTP create replaced an existing backup")
+            remove_result = client.sftp_remove_file("srv_desktop_style", "/backup.bin", 8)
+            if json.loads(remove_result.stdout) != {"removed": True}:
+                raise AssertionError("C++ SFTP file removal was not confirmed")
             expect_error(client, "srv_bad_pin", "nginx.service", 5, "host_key_unverified")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
@@ -530,7 +637,7 @@ def main() -> int:
     if args.agent_runtime_only:
         print("PASS Agent SSH tool selected-target binding, task target allowlist, and model target override rejection")
     else:
-        print("PASS SSH exec, SFTP listing/stat/bounded binary read, auth rejection, timeout, output cap, and host-key rejection")
+        print("PASS SSH exec, SFTP listing/stat/read/write/exclusive-create/remove/link-count, auth rejection, timeout, output cap, and host-key rejection")
     return 0
 
 

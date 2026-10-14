@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import base64
 import http.client
+import json
 import re
 import socket
 import urllib.error
@@ -16,6 +17,8 @@ _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
+_MAX_SFTP_WRITE_BYTES = 512 * 1024
+_MAX_SFTP_EXCLUSIVE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,80 @@ class SshServiceClient:
         """List services through the fixed, read-only inventory operation."""
         return self._execute_operation(target_id, "service_inventory", {}, timeout_seconds)
 
+    def sftp_write(
+        self, target_id: str, path: str, content: bytes, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        """Overwrite one remote file with a bounded binary payload."""
+        if not isinstance(content, bytes) or len(content) > _MAX_SFTP_WRITE_BYTES:
+            raise ValueError("content must be bytes no larger than 512 KiB")
+        self._validate_sftp_path(path)
+        return self._execute_operation(
+            target_id,
+            "sftp_write",
+            {"path": path, "content_base64": base64.b64encode(content).decode("ascii")},
+            timeout_seconds,
+        )
+
+    def sftp_create_exclusive(
+        self, target_id: str, path: str, content: bytes, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        """Create one bounded remote file without replacing an existing path."""
+        if not isinstance(content, bytes) or len(content) > _MAX_SFTP_EXCLUSIVE_BYTES:
+            raise ValueError("content must be bytes no larger than 1 MiB")
+        self._validate_sftp_path(path)
+        return self._execute_operation(
+            target_id,
+            "sftp_create_exclusive",
+            {"path": path, "content_base64": base64.b64encode(content).decode("ascii")},
+            timeout_seconds,
+        )
+
+    def sftp_remove_file(
+        self, target_id: str, path: str, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        """Remove one remote file path."""
+        self._validate_sftp_path(path)
+        return self._execute_operation(
+            target_id, "sftp_remove_file", {"path": path}, timeout_seconds
+        )
+
+    def sftp_link_count(
+        self, target_id: str, path: str, timeout_seconds: int = 10
+    ) -> int | None:
+        """Read a remote path's link count, returning None when the host cannot report it."""
+        self._validate_sftp_path(path)
+        if not path.startswith("/") or "\r" in path or "\n" in path:
+            raise ValueError("path must be absolute and contain no line breaks")
+        result = self._execute_operation(
+            target_id, "sftp_link_count", {"path": path}, timeout_seconds
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP link metadata"
+            ) from error
+        if not isinstance(payload, dict) or set(payload) != {"link_count"}:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP link metadata"
+            )
+        value = payload["link_count"]
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP link metadata"
+            )
+        return value
+
+    @staticmethod
+    def _validate_sftp_path(path: str) -> None:
+        if (
+            not isinstance(path, str)
+            or not path
+            or len(path.encode("utf-8")) > 4096
+            or "\x00" in path
+        ):
+            raise ValueError("path must be a non-empty SFTP path of at most 4096 bytes")
+
     def _execute_operation(
         self, target_id: str, operation: str, parameters: dict[str, Any], timeout_seconds: int
     ) -> SshOperationResult:
@@ -125,6 +202,8 @@ class SshServiceClient:
     def _request(self, method: str, path: str, payload: dict[str, Any] | None, *,
                  timeout: int, authorized: bool) -> dict[str, Any]:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
+        if data is not None and len(data) > _MAX_BODY_BYTES:
+            raise ValueError("request body exceeds the 2 MiB limit")
         headers = {"Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
