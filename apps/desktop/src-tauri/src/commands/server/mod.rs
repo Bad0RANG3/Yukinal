@@ -280,6 +280,12 @@ pub async fn server_update(
 
     // A changed endpoint or credential must not leave the old authenticated
     // connection cached under the same stable server id.
+    if let Err(error) = state.cpp_terminals.close_for_server(&input.server_id).await {
+        if let Some(identity_id) = staged_identity_id.as_deref() {
+            let _ = reclaim_identity(&state, identity_id, &server.id);
+        }
+        return Err(error.to_string());
+    }
     if let Err(error) = state.terminals.disconnect(&input.server_id).await {
         if let Some(identity_id) = staged_identity_id.as_deref() {
             let _ = reclaim_identity(&state, identity_id, &server.id);
@@ -329,6 +335,11 @@ pub async fn server_delete(
         .database
         .servers()
         .get(&server_id)
+        .map_err(|error| error.to_string())?;
+    state
+        .cpp_terminals
+        .close_for_server(&server_id)
+        .await
         .map_err(|error| error.to_string())?;
     state
         .terminals

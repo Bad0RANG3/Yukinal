@@ -18,6 +18,7 @@ use yukinal_core::terminal::TerminalService;
 use yukinal_credentials::os::OsCredentialStore;
 use yukinal_database::Database;
 use yukinal_ssh::RusshBackend;
+use yukinal_terminal::TerminalManager;
 
 mod approval;
 mod auth;
@@ -53,8 +54,10 @@ pub struct AppState {
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
     pub ssh: Arc<RusshBackend>,
-    /// PTY Manager（terminal_open/write/resize/close + 事件广播）。
+    /// Rust PTY Manager for legacy configurations that still need its transport.
     pub terminals: TerminalService,
+    /// C++-owned interactive SSH PTYs; `tc_` session IDs route to this manager.
+    pub cpp_terminals: TerminalManager<crate::commands::ssh_service::SshTerminalPty>,
     /// One-shot SSH keyboard-interactive challenges and responses.
     pub auth: AuthChallengeBroker,
     /// One-shot, endpoint-bound host-key probes awaiting explicit user trust.
@@ -76,6 +79,7 @@ impl AppState {
         let ssh =
             Arc::new(RusshBackend::from_data_dir(data_dir).map_err(|error| error.to_string())?);
         let terminals = TerminalService::new(Arc::clone(&ssh));
+        let cpp_terminals = TerminalManager::with_id_prefix("tc");
         let credentials = Arc::new(OsCredentialStore);
         for failure in credential_cleanup::reconcile(&database, credentials.as_ref()) {
             tracing::warn!("credential cleanup reconciliation: {failure}");
@@ -89,6 +93,7 @@ impl AppState {
             credentials,
             ssh,
             terminals,
+            cpp_terminals,
             auth: AuthChallengeBroker::new(),
             host_keys: HostKeyProbeBroker::new(),
             // 空的：授权流程只在用户按下「连接 OAuth」时存在，装配阶段不派生轮询。

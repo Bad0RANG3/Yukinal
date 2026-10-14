@@ -9,7 +9,7 @@ use crate::event::{TerminalAppEvent, TerminalSessionInfo};
 use crate::iso8601_now;
 use crate::pty::{TerminalPty, TerminalPtyEvent};
 use crate::{Result, TerminalError};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 struct Session<P: TerminalPty> {
@@ -49,6 +49,7 @@ impl CloseState {
 /// 多会话 terminal 管理器。`subscribe` 的 broadcast 是 UI 唯一事件入口。
 pub struct TerminalManager<P: TerminalPty> {
     sessions: Arc<Mutex<HashMap<String, Session<P>>>>,
+    id_prefix: &'static str,
     next_id: AtomicU64,
     next_generation: AtomicU64,
     events: broadcast::Sender<TerminalAppEvent>,
@@ -64,9 +65,17 @@ impl<P: TerminalPty + 'static> Default for TerminalManager<P> {
 impl<P: TerminalPty + 'static> TerminalManager<P> {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_id_prefix("t")
+    }
+
+    /// Construct a manager with a namespace prefix so multiple transport managers can share
+    /// the same UI session-ID contract while routing commands to the correct owner.
+    #[must_use]
+    pub fn with_id_prefix(id_prefix: &'static str) -> Self {
         let (events, _) = broadcast::channel(1024);
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            id_prefix,
             next_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
             events,
@@ -269,7 +278,8 @@ impl<P: TerminalPty + 'static> TerminalManager<P> {
 
     fn next_id(&self) -> String {
         format!(
-            "t_{}_{}",
+            "{}_{}_{}",
+            self.id_prefix,
             std::process::id(),
             self.next_id.fetch_add(1, Ordering::Relaxed)
         )

@@ -182,6 +182,7 @@ pub fn run() {
                     // Close host-owned resources first so no terminal or SSH
                     // operation can race the sidecar/MCP teardown that follows.
                     transfers.shutdown().await;
+                    let _ = state.cpp_terminals.close_all().await;
                     state.terminals.shutdown().await;
                     state.auth.cancel_all().await;
                     state.oauth.cancel_all();
@@ -207,12 +208,16 @@ fn configured_data_dir(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::
 fn forward_terminal_events(app: tauri::AppHandle) {
     let shutdown = app.state::<AppState>().shutdown.clone();
     tauri::async_runtime::spawn(async move {
-        let mut receiver = app.state::<AppState>().terminals.subscribe();
+        let (mut rust_receiver, mut cpp_receiver) = {
+            let state = app.state::<AppState>();
+            (state.terminals.subscribe(), state.cpp_terminals.subscribe())
+        };
         loop {
             let event = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break,
-                event = receiver.recv() => event,
+                event = rust_receiver.recv() => event,
+                event = cpp_receiver.recv() => event,
             };
             match event {
                 Ok(TerminalAppEvent::Data {

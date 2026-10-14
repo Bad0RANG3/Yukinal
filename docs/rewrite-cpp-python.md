@@ -6,8 +6,10 @@
 > read-only bridge to the desktop host, and tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
-> hosts native UI IPC, local trust-store updates, terminal sessions, transfers,
-> and some SSH paths. The Python sidecar can call the C++
+> hosts native UI IPC, local trust-store updates, file transfers, and fallback
+> PTY sessions for Host CA, certificate identities, proxy routes,
+> keyboard-interactive auth, and known-hosts-only trust. Supported direct desktop terminals use a dedicated C++
+> PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
 > C++ SFTP operations for password, private-key, and SSH-agent identities

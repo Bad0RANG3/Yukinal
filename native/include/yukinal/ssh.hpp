@@ -26,6 +26,9 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
                           int timeout_seconds);
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds);
 ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds);
+/// Run an interactive PTY over stdin/stdout using the terminal JSON-lines protocol.
+int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
+                         std::uint16_t rows);
 ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds);
 ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds);
 ExecResult sftp_read(const TargetConfig& target, const std::string& path,

@@ -5,15 +5,21 @@
 
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use base64::Engine as _;
 use ring::rand::SecureRandom;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child as TokioChild, ChildStdin, Command as TokioCommand};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
 };
+use yukinal_terminal::{TerminalPty, TerminalPtyEvent};
 
 use crate::state::AppState;
 
@@ -30,10 +36,8 @@ pub(crate) async fn probe_host_key(
     state: &AppState,
     server_id: &str,
 ) -> Result<Option<String>, String> {
-    let target_payload = super::sidecar::resolve_ssh_service_probe_target(
-        state,
-        json!({ "serverId": server_id }),
-    )?;
+    let target_payload =
+        super::sidecar::resolve_ssh_service_probe_target(state, json!({ "serverId": server_id }))?;
     let response = match run_operation_response_with_target(
         app,
         server_id,
@@ -65,6 +69,323 @@ fn valid_host_key_fingerprint(value: &str) -> bool {
             && encoded
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+    })
+}
+
+pub(crate) struct SshTerminalPty {
+    input: AsyncMutex<ChildStdin>,
+    child: AsyncMutex<TokioChild>,
+    events: StdMutex<Option<mpsc::Receiver<TerminalPtyEvent>>>,
+    closed: AtomicBool,
+    _config_directory: tempfile::TempDir,
+}
+
+#[derive(Debug)]
+pub(crate) enum TerminalOpenFailure {
+    AuthenticationFailed,
+    Failed(String),
+}
+
+impl From<String> for TerminalOpenFailure {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for TerminalOpenFailure {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_string())
+    }
+}
+
+impl TerminalPty for SshTerminalPty {
+    async fn write(&self, data: &[u8]) -> yukinal_terminal::Result<()> {
+        if data.len() > 256 * 1024 {
+            return Err(yukinal_terminal::TerminalError::Channel(
+                "terminal input exceeded 256 KiB".into(),
+            ));
+        }
+        let data = std::str::from_utf8(data).map_err(|_| {
+            yukinal_terminal::TerminalError::Channel("terminal input is not valid UTF-8".into())
+        })?;
+        self.write_frame(&json!({ "type": "write", "data": data }))
+            .await
+    }
+
+    async fn resize(&self, cols: u16, rows: u16) -> yukinal_terminal::Result<()> {
+        self.write_frame(&json!({ "type": "resize", "columns": cols, "rows": rows }))
+            .await
+    }
+
+    fn events(&self) -> mpsc::Receiver<TerminalPtyEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_else(|| {
+                let (_sender, receiver) = mpsc::channel(1);
+                receiver
+            })
+    }
+
+    async fn close(&self) -> yukinal_terminal::Result<()> {
+        let mut input = self.input.lock().await;
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            if let Ok(mut frame) = serde_json::to_vec(&json!({ "type": "close" })) {
+                frame.push(b'\n');
+                let _ = input.write_all(&frame).await;
+                let _ = input.flush().await;
+            }
+        }
+        drop(input);
+        let mut child = self.child.lock().await;
+        if tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
+}
+
+impl SshTerminalPty {
+    async fn write_frame(&self, message: &Value) -> yukinal_terminal::Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(yukinal_terminal::TerminalError::Channel(
+                "terminal process is closed".into(),
+            ));
+        }
+        let mut frame = serde_json::to_vec(message).map_err(|_| {
+            yukinal_terminal::TerminalError::Channel("could not encode terminal input".into())
+        })?;
+        frame.push(b'\n');
+        let mut input = self.input.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(yukinal_terminal::TerminalError::Channel(
+                "terminal process is closed".into(),
+            ));
+        }
+        input.write_all(&frame).await.map_err(|_| {
+            yukinal_terminal::TerminalError::Channel(
+                "could not write to the C++ terminal process".into(),
+            )
+        })?;
+        input.flush().await.map_err(|_| {
+            yukinal_terminal::TerminalError::Channel(
+                "could not flush the C++ terminal process".into(),
+            )
+        })
+    }
+}
+
+pub(crate) async fn open_terminal(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    columns: u16,
+    rows: u16,
+) -> Result<SshTerminalPty, TerminalOpenFailure> {
+    let target_payload =
+        super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
+    let target = target_payload
+        .get("target")
+        .filter(|target| target.get("target_id").and_then(Value::as_str) == Some(server_id))
+        .cloned()
+        .ok_or_else(|| "the desktop returned an invalid SSH terminal target".to_string())?;
+    let credentials = target_payload
+        .get("credentials")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "the desktop returned invalid SSH terminal credentials".to_string())?;
+    let cwd =
+        std::env::current_dir().map_err(|_| "the desktop working directory is unavailable")?;
+    let resources = app.path().resource_dir().ok();
+    let binary = super::sidecar::resolve_ssh_service_binary(&cwd, resources.as_deref())?
+        .ok_or_else(|| "the packaged C++ SSH service executable is unavailable".to_string())?;
+    let directory = tempfile::Builder::new()
+        .prefix("yukinal-ssh-terminal-")
+        .tempdir()
+        .map_err(|_| "could not create the temporary SSH terminal directory".to_string())?;
+    let config_path = directory.path().join("terminal.json");
+    let config = json!({
+        "listen_port": 8765,
+        "api_token_env": "YUKINAL_SSH_API_TOKEN",
+        "targets": [target],
+    });
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&config)
+            .map_err(|_| "could not encode the SSH terminal configuration".to_string())?,
+    )
+    .map_err(|_| "could not write the SSH terminal configuration".to_string())?;
+
+    let mut command = TokioCommand::new(binary);
+    command
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--terminal")
+        .arg("--cols")
+        .arg(columns.to_string())
+        .arg("--rows")
+        .arg(rows.to_string())
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command
+            .env("SystemRoot", &system_root)
+            .env("WINDIR", system_root);
+    }
+    for (name, value) in credentials {
+        let agent_socket = target
+            .get("auth")
+            .and_then(|auth| auth.get("type"))
+            .and_then(Value::as_str)
+            == Some("agent")
+            && name == "SSH_AUTH_SOCK";
+        if !(agent_socket
+            || matches!(
+                name.as_str(),
+                "YK_SSH_PASSWORD" | "YK_SSH_PRIVATE_KEY" | "YK_SSH_PASSPHRASE"
+            ))
+            || !value.is_string()
+        {
+            return Err("the desktop returned invalid SSH terminal credentials".into());
+        }
+        command.env(name, value.as_str().expect("validated string"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.as_std_mut().creation_flags(0x0800_0000);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|_| "could not start the packaged C++ SSH terminal process".to_string())?;
+    drop(command);
+    drop(target_payload);
+    let input = child
+        .stdin
+        .take()
+        .ok_or_else(|| "the C++ SSH terminal process has no input pipe".to_string())?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| "the C++ SSH terminal process has no output pipe".to_string())?;
+    let mut output = BufReader::new(output);
+    let mut first_line = String::new();
+    let startup =
+        tokio::time::timeout(Duration::from_secs(35), output.read_line(&mut first_line)).await;
+    match startup {
+        Ok(Ok(count)) if count > 0 && first_line.len() <= 32 * 1024 => {}
+        Ok(Ok(_)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("the C++ SSH terminal process exited during startup".into());
+        }
+        Ok(Err(_)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("could not read the C++ SSH terminal startup response".into());
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("the C++ SSH terminal did not connect within 35 seconds".into());
+        }
+    }
+    let startup: Value = match serde_json::from_str(first_line.trim_end()) {
+        Ok(startup) => startup,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("the C++ SSH terminal returned an invalid startup response".into());
+        }
+    };
+    if startup.get("type").and_then(Value::as_str) != Some("ready") {
+        let message = startup
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("the C++ SSH terminal could not start");
+        let authentication_failed =
+            startup.get("code").and_then(Value::as_str) == Some("authentication_failed");
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(if authentication_failed {
+            TerminalOpenFailure::AuthenticationFailed
+        } else {
+            TerminalOpenFailure::Failed(message.to_string())
+        });
+    }
+
+    let (sender, receiver) = mpsc::channel(256);
+    tauri::async_runtime::spawn(async move {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match output.read_line(&mut line).await {
+                Ok(count) if count > 0 && line.len() <= 32 * 1024 => {}
+                _ => {
+                    let _ = sender.send(TerminalPtyEvent::Closed { code: None }).await;
+                    break;
+                }
+            }
+            let message: Value = match serde_json::from_str(line.trim_end()) {
+                Ok(message) => message,
+                Err(_) => {
+                    let _ = sender.send(TerminalPtyEvent::Closed { code: None }).await;
+                    break;
+                }
+            };
+            match message.get("type").and_then(Value::as_str) {
+                Some("output") => {
+                    let decoded = message
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .and_then(|encoded| {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(encoded)
+                                .ok()
+                        })
+                        .filter(|bytes| bytes.len() <= 8192);
+                    let Some(bytes) = decoded else {
+                        let _ = sender.send(TerminalPtyEvent::Closed { code: None }).await;
+                        break;
+                    };
+                    if sender.send(TerminalPtyEvent::Output(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                Some("closed") => {
+                    let code = message
+                        .get("exit_code")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok());
+                    let _ = sender.send(TerminalPtyEvent::Closed { code }).await;
+                    break;
+                }
+                Some("error") => {
+                    let _ = sender.send(TerminalPtyEvent::Closed { code: None }).await;
+                    break;
+                }
+                _ => {
+                    let _ = sender.send(TerminalPtyEvent::Closed { code: None }).await;
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(SshTerminalPty {
+        input: AsyncMutex::new(input),
+        child: AsyncMutex::new(child),
+        events: StdMutex::new(Some(receiver)),
+        closed: AtomicBool::new(false),
+        _config_directory: directory,
     })
 }
 
@@ -400,8 +721,7 @@ async fn run_operation_response(
 ) -> Result<Value, SshServiceFailure> {
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
-    run_operation_response_with_target(app, server_id, operation, parameters, target_payload)
-        .await
+    run_operation_response_with_target(app, server_id, operation, parameters, target_payload).await
 }
 
 async fn run_operation_response_with_target(

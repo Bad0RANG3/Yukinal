@@ -12,7 +12,18 @@
 namespace {
 
 void print_usage() {
-  std::cerr << "Usage: yukinal-ssh-service --config <path> [--parent-pid <pid>]\n";
+  std::cerr << "Usage: yukinal-ssh-service --config <path> [--parent-pid <pid>] [--terminal --cols <n> --rows <n>]\n";
+}
+
+bool parse_dimension(const std::string& value, std::uint16_t* output) {
+  unsigned int parsed = 0;
+  const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+      parsed == 0 || parsed > 1000) {
+    return false;
+  }
+  *output = static_cast<std::uint16_t>(parsed);
+  return true;
 }
 
 bool valid_token(const std::string& token) {
@@ -31,6 +42,9 @@ bool valid_token(const std::string& token) {
 int main(int argc, char** argv) {
   std::string config_path;
   std::optional<std::uint64_t> parent_pid;
+  bool terminal_mode = false;
+  std::uint16_t columns = 80;
+  std::uint16_t rows = 24;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
     if (argument == "--config" && i + 1 < argc) {
@@ -44,6 +58,18 @@ int main(int argc, char** argv) {
         return 2;
       }
       parent_pid = parsed;
+    } else if (argument == "--terminal") {
+      terminal_mode = true;
+    } else if (argument == "--cols" && i + 1 < argc) {
+      if (!parse_dimension(argv[++i], &columns)) {
+        print_usage();
+        return 2;
+      }
+    } else if (argument == "--rows" && i + 1 < argc) {
+      if (!parse_dimension(argv[++i], &rows)) {
+        print_usage();
+        return 2;
+      }
     } else if (argument == "--help") {
       print_usage();
       return 0;
@@ -59,6 +85,14 @@ int main(int argc, char** argv) {
 
   try {
     const auto config = yukinal::ssh_service::load_config(config_path);
+    if (terminal_mode) {
+      if (config.targets.size() != 1) {
+        std::cerr << "SSH terminal startup failed: exactly one target is required\n";
+        return 2;
+      }
+      return yukinal::ssh_service::run_terminal_session(config.targets.begin()->second,
+                                                        columns, rows);
+    }
     const char* token_value = std::getenv(config.api_token_env.c_str());
     if (!token_value || !valid_token(token_value)) {
       std::cerr << "SSH service startup failed: configured API token is missing or invalid\n";

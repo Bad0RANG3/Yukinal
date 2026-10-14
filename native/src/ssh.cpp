@@ -11,6 +11,8 @@
 #include <climits>
 #include <condition_variable>
 #include <cstdlib>
+#include <deque>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -640,6 +642,287 @@ std::string base64_encode(const std::vector<unsigned char>& bytes) {
 }
 
 }  // namespace
+
+namespace {
+
+struct TerminalInputCommand {
+  enum class Kind { write, resize, close } kind = Kind::close;
+  std::string data;
+  std::uint16_t columns = 0;
+  std::uint16_t rows = 0;
+};
+
+struct TerminalInputQueue {
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::deque<TerminalInputCommand> commands;
+  std::size_t queued_data_bytes = 0;
+  bool eof = false;
+  bool invalid = false;
+};
+
+constexpr std::size_t kMaxTerminalInputFrameBytes = 256 * 1024;
+constexpr std::size_t kMaxTerminalInputJsonBytes = kMaxTerminalInputFrameBytes * 6 + 256;
+constexpr std::size_t kMaxQueuedTerminalInputBytes = 1024 * 1024;
+constexpr std::size_t kMaxQueuedTerminalCommands = 256;
+
+void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.size() > kMaxTerminalInputJsonBytes) {
+      std::lock_guard lock(input->mutex);
+      input->invalid = true;
+      break;
+    }
+    try {
+      const auto message = nlohmann::json::parse(line);
+      if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
+        std::lock_guard lock(input->mutex);
+        input->invalid = true;
+        break;
+      }
+      const std::string type = message["type"].get<std::string>();
+      TerminalInputCommand command;
+      if (type == "write" && message.size() == 2 && message.contains("data") &&
+          message["data"].is_string()) {
+        command.kind = TerminalInputCommand::Kind::write;
+        command.data = message["data"].get<std::string>();
+        if (command.data.size() > kMaxTerminalInputFrameBytes) {
+          std::lock_guard lock(input->mutex);
+          input->invalid = true;
+          break;
+        }
+      } else if (type == "resize" && message.size() == 3 && message.contains("columns") &&
+                 message.contains("rows") && message["columns"].is_number_unsigned() &&
+                 message["rows"].is_number_unsigned()) {
+        const auto columns = message["columns"].get<unsigned int>();
+        const auto rows = message["rows"].get<unsigned int>();
+        if (columns == 0 || columns > 1000 || rows == 0 || rows > 1000) {
+          std::lock_guard lock(input->mutex);
+          input->invalid = true;
+          break;
+        }
+        command.kind = TerminalInputCommand::Kind::resize;
+        command.columns = static_cast<std::uint16_t>(columns);
+        command.rows = static_cast<std::uint16_t>(rows);
+      } else if (type == "close" && message.size() == 1) {
+        command.kind = TerminalInputCommand::Kind::close;
+        std::lock_guard lock(input->mutex);
+        input->commands.push_back(std::move(command));
+        input->changed.notify_all();
+        break;
+      } else {
+        std::lock_guard lock(input->mutex);
+        input->invalid = true;
+        break;
+      }
+
+      std::unique_lock lock(input->mutex);
+      input->changed.wait(lock, [&] {
+        return input->eof ||
+               (input->commands.size() < kMaxQueuedTerminalCommands &&
+                input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
+      });
+      if (input->eof) break;
+      input->queued_data_bytes += command.data.size();
+      input->commands.push_back(std::move(command));
+      input->changed.notify_all();
+    } catch (const nlohmann::json::exception&) {
+      std::lock_guard lock(input->mutex);
+      input->invalid = true;
+      break;
+    }
+  }
+  {
+    std::lock_guard lock(input->mutex);
+    input->eof = true;
+  }
+  input->changed.notify_all();
+}
+
+bool emit_terminal_message(const nlohmann::json& message) {
+  std::cout << message.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace)
+            << '\n' << std::flush;
+  return std::cout.good();
+}
+
+bool write_terminal_channel(SshResources* resources, const std::string& data) {
+  std::size_t offset = 0;
+  const auto deadline = Clock::now() + std::chrono::seconds(10);
+  while (offset < data.size()) {
+    const auto count = libssh2_channel_write_ex(
+        resources->channel_, 0, data.data() + offset,
+        static_cast<std::size_t>(data.size() - offset));
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count == LIBSSH2_ERROR_EAGAIN &&
+        wait_for_ssh(resources->socket_, resources->session_, deadline)) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
+                         std::uint16_t rows) {
+  if (columns == 0 || columns > 1000 || rows == 0 || rows > 1000 || target.probe_only) {
+    emit_terminal_message({{"type", "error"}, {"message", "The terminal dimensions or SSH target are invalid"}});
+    return 2;
+  }
+  ExecResult connection_result;
+  SshResources resources;
+  const auto deadline = Clock::now() + std::chrono::seconds(30);
+  if (!connect_authenticated(target, deadline, &resources, &connection_result)) {
+    emit_terminal_message({{"type", "error"},
+                           {"code", connection_result.error_code},
+                           {"message", connection_result.error_message.empty()
+                                           ? "SSH terminal connection failed"
+                                           : connection_result.error_message}});
+    return 2;
+  }
+  if (!set_session_timeout(resources.session_, deadline)) {
+    emit_terminal_message({{"type", "error"}, {"code", "timeout"}, {"message", "SSH terminal startup timed out"}});
+    return 2;
+  }
+  resources.channel_ = libssh2_channel_open_session(resources.session_);
+  if (!resources.channel_) {
+    emit_terminal_message({{"type", "error"}, {"code", "ssh_error"}, {"message", "Could not open an SSH terminal channel"}});
+    return 2;
+  }
+  const std::string terminal_type = "xterm-256color";
+  if (!set_session_timeout(resources.session_, deadline) ||
+      libssh2_channel_request_pty_ex(resources.channel_, terminal_type.data(),
+                                     static_cast<unsigned int>(terminal_type.size()), nullptr, 0,
+                                     columns, rows, 0, 0) != 0 ||
+      !set_session_timeout(resources.session_, deadline) ||
+      libssh2_channel_process_startup(resources.channel_, "shell", 5, nullptr, 0) != 0) {
+    emit_terminal_message({{"type", "error"}, {"code", "ssh_error"},
+                           {"message", "Could not start the remote SSH terminal"}});
+    return 2;
+  }
+  if (!set_nonblocking(resources.socket_, true)) {
+    emit_terminal_message({{"type", "error"}, {"code", "ssh_error"}, {"message", "Could not configure the SSH terminal socket"}});
+    return 2;
+  }
+  libssh2_session_set_blocking(resources.session_, 0);
+  libssh2_channel_set_blocking(resources.channel_, 0);
+
+  const auto input = std::make_shared<TerminalInputQueue>();
+  std::thread(read_terminal_input, input).detach();
+  if (!emit_terminal_message({{"type", "ready"}})) return 0;
+
+  bool running = true;
+  bool failed = false;
+  int exit_code = -1;
+  std::array<char, 8192> buffer{};
+  while (running) {
+    for (;;) {
+      TerminalInputCommand command;
+      bool has_command = false;
+      bool invalid_input = false;
+      bool input_ended = false;
+      {
+        std::lock_guard lock(input->mutex);
+        invalid_input = input->invalid;
+        input_ended = input->eof && input->commands.empty();
+        if (!input->commands.empty()) {
+          command = std::move(input->commands.front());
+          input->commands.pop_front();
+          input->queued_data_bytes -= command.data.size();
+          has_command = true;
+        }
+      }
+      input->changed.notify_all();
+      if (invalid_input) {
+        emit_terminal_message({{"type", "error"}, {"message", "The SSH terminal input frame is invalid"}});
+        failed = true;
+        running = false;
+        break;
+      }
+      if (input_ended) {
+        running = false;
+        break;
+      }
+      if (!has_command) break;
+      if (command.kind == TerminalInputCommand::Kind::close) {
+        running = false;
+        break;
+      }
+      if (command.kind == TerminalInputCommand::Kind::write) {
+        if (!write_terminal_channel(&resources, command.data)) {
+          emit_terminal_message({{"type", "error"}, {"message", "Writing to the SSH terminal failed"}});
+          failed = true;
+          running = false;
+          break;
+        }
+      } else {
+        const auto resize_deadline = Clock::now() + std::chrono::seconds(5);
+        int result = 0;
+        do {
+          result = libssh2_channel_request_pty_size(resources.channel_, command.columns,
+                                                    command.rows);
+          if (result == LIBSSH2_ERROR_EAGAIN &&
+              wait_for_ssh(resources.socket_, resources.session_, resize_deadline)) {
+            continue;
+          }
+          break;
+        } while (true);
+        if (result != 0) {
+          emit_terminal_message({{"type", "error"}, {"message", "Resizing the SSH terminal failed"}});
+          failed = true;
+          running = false;
+          break;
+        }
+      }
+    }
+    if (!running) break;
+
+    bool made_progress = false;
+    for (const int stream_id : {0, SSH_EXTENDED_DATA_STDERR}) {
+      for (;;) {
+        const auto count = libssh2_channel_read_ex(resources.channel_, stream_id,
+                                                  buffer.data(), buffer.size());
+        if (count == LIBSSH2_ERROR_EAGAIN || count == 0) break;
+        if (count < 0) {
+          emit_terminal_message({{"type", "error"}, {"message", "Reading the SSH terminal failed"}});
+          failed = true;
+          running = false;
+          break;
+        }
+        made_progress = true;
+        std::vector<unsigned char> bytes(buffer.begin(), buffer.begin() + count);
+        if (!emit_terminal_message({{"type", "output"}, {"data", base64_encode(bytes)}})) {
+          running = false;
+          break;
+        }
+      }
+      if (!running) break;
+    }
+    if (!running) break;
+    if (libssh2_channel_eof(resources.channel_)) {
+      exit_code = libssh2_channel_get_exit_status(resources.channel_);
+      break;
+    }
+    if (!made_progress) {
+      (void)wait_for_ssh(resources.socket_, resources.session_,
+                         Clock::now() + std::chrono::milliseconds(40));
+    }
+  }
+
+  if (resources.channel_ && !libssh2_channel_eof(resources.channel_)) {
+    (void)libssh2_channel_send_eof(resources.channel_);
+    (void)libssh2_channel_close(resources.channel_);
+  }
+  emit_terminal_message({{"type", "closed"},
+                         {"exit_code", exit_code < 0 ? nlohmann::json(nullptr)
+                                                       : nlohmann::json(exit_code)}});
+  return failed ? 1 : 0;
+}
 
 static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
                                   int timeout_seconds) {

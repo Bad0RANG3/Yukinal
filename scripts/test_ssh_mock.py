@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import queue
 import socket
 import stat
 import subprocess
@@ -34,6 +35,7 @@ PASSWORD = "test-only-password-for-local-ssh-fixture"
 BAD_PASSWORD = "intentionally-wrong-local-password"
 EXEC_COMMANDS: list[bytes] = []
 AUTH_EVENTS: list[str] = []
+TERMINAL_DIMENSIONS: list[tuple[int, int]] = []
 
 
 def unused_port() -> int:
@@ -46,6 +48,7 @@ class ExecServer(paramiko.ServerInterface):
     def __init__(self, public_key: paramiko.PKey) -> None:
         self.command: bytes | None = None
         self.command_ready = threading.Event()
+        self.terminal_ready = threading.Event()
         self.subsystem_ready = threading.Event()
         self.public_key = public_key
 
@@ -73,6 +76,34 @@ class ExecServer(paramiko.ServerInterface):
         self.command = command
         EXEC_COMMANDS.append(command)
         self.command_ready.set()
+        return True
+
+    def check_channel_pty_request(
+        self,
+        channel: paramiko.Channel,
+        term: bytes,
+        width: int,
+        height: int,
+        pixelwidth: int,
+        pixelheight: int,
+        modes: bytes,
+    ) -> bool:
+        TERMINAL_DIMENSIONS.append((width, height))
+        return term == b"xterm-256color"
+
+    def check_channel_shell_request(self, channel: paramiko.Channel) -> bool:
+        self.terminal_ready.set()
+        return True
+
+    def check_channel_window_change_request(
+        self,
+        channel: paramiko.Channel,
+        width: int,
+        height: int,
+        pixelwidth: int,
+        pixelheight: int,
+    ) -> bool:
+        TERMINAL_DIMENSIONS.append((width, height))
         return True
 
     def check_channel_subsystem_request(self, channel: paramiko.Channel, name: str) -> bool:
@@ -199,6 +230,7 @@ def start_ssh_mock(
     }
     EXEC_COMMANDS.clear()
     AUTH_EVENTS.clear()
+    TERMINAL_DIMENSIONS.clear()
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -218,7 +250,11 @@ def start_ssh_mock(
             if channel is None:
                 return
             request_deadline = time.monotonic() + 5
-            while not server.subsystem_ready.is_set() and not server.command_ready.is_set():
+            while (
+                not server.subsystem_ready.is_set()
+                and not server.command_ready.is_set()
+                and not server.terminal_ready.is_set()
+            ):
                 if time.monotonic() >= request_deadline:
                     return
                 time.sleep(0.01)
@@ -226,6 +262,18 @@ def start_ssh_mock(
                 close_deadline = time.monotonic() + 5
                 while not channel.closed and time.monotonic() < close_deadline:
                     time.sleep(0.02)
+                return
+            if server.terminal_ready.is_set():
+                channel.settimeout(0.2)
+                channel.sendall(b"terminal-ready\n")
+                while not channel.closed:
+                    try:
+                        data = channel.recv(4096)
+                    except socket.timeout:
+                        continue
+                    if not data:
+                        break
+                    channel.sendall(b"echo:" + data)
                 return
             command = server.command or b""
             if command == b"systemctl is-active -- nginx.service":
@@ -295,6 +343,82 @@ def expect_error(client: SshServiceClient, target_id: str, service: str,
             )
     else:
         raise AssertionError(f"{service}: expected {expected_code}")
+
+
+def exercise_cpp_terminal(
+    service_binary: Path,
+    root: Path,
+    target: dict[str, object],
+    environment: dict[str, str],
+) -> None:
+    terminal_config = root / "terminal-service.json"
+    terminal_config.write_text(
+        json.dumps({"listen_port": 8765, "api_token_env": "YUKINAL_TEST_API_TOKEN", "targets": [target]}),
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [str(service_binary), "--config", str(terminal_config), "--terminal", "--cols", "80", "--rows", "24"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+        env=environment,
+    )
+    if process.stdin is None or process.stdout is None:
+        process.kill()
+        raise RuntimeError("could not open the C++ terminal worker pipes")
+
+    events: queue.Queue[dict[str, object]] = queue.Queue()
+
+    def read_events() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            events.put(json.loads(line))
+
+    reader = threading.Thread(target=read_events, daemon=True)
+    reader.start()
+
+    def next_event() -> dict[str, object]:
+        try:
+            return events.get(timeout=8)
+        except queue.Empty as error:
+            raise AssertionError("C++ terminal worker did not produce an event") from error
+
+    try:
+        ready = next_event()
+        if ready.get("type") != "ready":
+            raise AssertionError(f"C++ terminal failed to start: {ready!r}")
+        output = next_event()
+        if output.get("type") != "output" or base64.b64decode(str(output.get("data", ""))) != b"terminal-ready\n":
+            raise AssertionError(f"C++ terminal output did not match the PTY banner: {output!r}")
+
+        process.stdin.write(json.dumps({"type": "write", "data": "ping\n"}) + "\n")
+        process.stdin.flush()
+        echoed = next_event()
+        if echoed.get("type") != "output" or base64.b64decode(str(echoed.get("data", ""))) != b"echo:ping\n":
+            raise AssertionError(f"C++ terminal did not forward interactive input: {echoed!r}")
+
+        process.stdin.write(json.dumps({"type": "resize", "columns": 100, "rows": 30}) + "\n")
+        process.stdin.flush()
+        deadline = time.monotonic() + 3
+        while (100, 30) not in TERMINAL_DIMENSIONS and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if (100, 30) not in TERMINAL_DIMENSIONS:
+            raise AssertionError(f"C++ terminal did not forward the PTY resize: {TERMINAL_DIMENSIONS!r}")
+
+        process.stdin.write(json.dumps({"type": "close"}) + "\n")
+        process.stdin.flush()
+        closed = next_event()
+        if closed.get("type") != "closed":
+            raise AssertionError(f"C++ terminal did not report a clean close: {closed!r}")
+        if process.wait(timeout=5) != 0:
+            raise AssertionError(f"C++ terminal worker exited with {process.returncode}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
 
 
 def exercise_agent_runtime(
@@ -630,6 +754,16 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             expect_error(client, "srv_stage1", "nginx.service", 5, "host_key_unverified")
             write_known_host(wrong_host_key)
             expect_error(client, "srv_stage1", "nginx.service", 5, "host_key_unverified")
+
+            terminal_target = {
+                "target_id": "srv_desktop_style",
+                "host": "127.0.0.1",
+                "port": ssh_port,
+                "username": "test-user",
+                "host_key_fingerprint": pinned_fingerprint,
+                "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
+            }
+            exercise_cpp_terminal(service_binary, root, terminal_target, environment)
         finally:
             if process.poll() is None:
                 process.terminate()

@@ -11,7 +11,9 @@ Agent authentication uses `SSH_AUTH_SOCK` on Unix and libssh2's platform Agent
 integration on Windows. The socket path is forwarded only when a target in the
 allowlist selects agent authentication.
 
-The service deliberately has no raw-command endpoint or interactive terminal.
+The HTTP service deliberately has no raw-command endpoint. Its separate `--terminal`
+worker mode is used only by the manually opened desktop terminal; it is not an
+Agent operation and accepts no HTTP requests.
 The `host_key_probe` operation is restricted to targets configured with
 `probe_only: true` and `auth: {"type":"probe"}`; those targets cannot perform
 any authenticated operation and do not configure a trust source. The desktop

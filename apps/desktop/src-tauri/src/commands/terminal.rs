@@ -1,17 +1,18 @@
 //! Terminal IPC commands: the UI only sees `terminal_session_id`s.
 //!
-//! Wire: resolve server (SQLite) → identity (SQLite) → credential (OS keychain) →
-//! ssh connect (cached per server) → PTY → TerminalManager. React never holds an
-//! ssh `Session`.
+//! Wire: resolve server and identity → read credentials at use time → C++ PTY child
+//! for supported direct connections, with the Rust backend retained for host CA,
+//! certificate-identity, proxy, and known-hosts-only configurations. React only sees
+//! `terminal_session_id`s and the existing terminal events.
 //!
 //! This is intentionally a manual UI path, not an Agent tool. It has no task/plan ticket and
 //! must not be called as an autonomous write primitive; the durable-plan gate lives in
 //! `commands::host` for Agent-side effectful tools.
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
-use crate::commands::EmptyResponse;
+use crate::commands::{ssh_service, EmptyResponse};
 use crate::state::AppState;
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{Identity, Server};
@@ -202,20 +203,105 @@ fn secret_to_string(secret: &Secret) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn terminal_open(
+    app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<TerminalOpenResponse, String> {
-    ensure_session(&state, &server_id).await?;
-    let terminal_session_id = state
-        .terminals
-        .open(&server_id, cols, rows)
-        .await
-        .map_err(|error| error.to_string())?;
+    validate_terminal_dimensions(cols, rows)?;
+    let terminal_session_id = if supports_cpp_terminal(&state, &server_id)? {
+        match ssh_service::open_terminal(&app, &state, &server_id, cols, rows).await {
+            Ok(pty) => {
+                let session_id = state
+                    .cpp_terminals
+                    .open(&server_id, cols, rows, pty)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let _ = state.database.servers().set_status(
+                    &server_id,
+                    yukinal_database::models::ServerStatus::Connected,
+                    &yukinal_core::sidecar::iso8601_now(),
+                );
+                session_id
+            }
+            Err(ssh_service::TerminalOpenFailure::AuthenticationFailed) => {
+                // libssh2's password method does not cover every server's
+                // keyboard-interactive challenge flow; preserve the existing
+                // user-mediated Rust path for that authentication case.
+                open_rust_terminal(&state, &server_id, cols, rows).await?
+            }
+            Err(ssh_service::TerminalOpenFailure::Failed(error)) => {
+                let _ = state.database.servers().set_status(
+                    &server_id,
+                    yukinal_database::models::ServerStatus::Error,
+                    &yukinal_core::sidecar::iso8601_now(),
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        open_rust_terminal(&state, &server_id, cols, rows).await?
+    };
     Ok(TerminalOpenResponse {
         terminal_session_id,
     })
+}
+
+fn validate_terminal_dimensions(cols: u16, rows: u16) -> Result<(), String> {
+    if !(1..=1000).contains(&cols) || !(1..=1000).contains(&rows) {
+        return Err("terminal dimensions must be between 1 and 1000".into());
+    }
+    Ok(())
+}
+
+async fn open_rust_terminal(
+    state: &AppState,
+    server_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<String, String> {
+    ensure_session(state, server_id).await?;
+    state
+        .terminals
+        .open(server_id, cols, rows)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn supports_cpp_terminal(state: &AppState, server_id: &str) -> Result<bool, String> {
+    let server = state
+        .database
+        .servers()
+        .get(server_id)
+        .map_err(|error| error.to_string())?;
+    if server.connection.host_certificate_authority.is_some() {
+        return Ok(false);
+    }
+    let Some(identity_id) = server.connection.identity_id.as_deref() else {
+        return Ok(false);
+    };
+    let identity = state
+        .database
+        .identities()
+        .get(identity_id)
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        identity.method.as_str(),
+        "password" | "privateKey" | "agent"
+    ) {
+        return Ok(false);
+    }
+    let proxy =
+        super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
+    if proxy.proxy != yukinal_net::NetworkProxy::Direct {
+        return Ok(false);
+    }
+    let pin = state
+        .ssh
+        .host_key_pin(&server.connection.host, server.connection.port)
+        .map_err(|error| error.to_string())?;
+    Ok(pin.is_some())
 }
 
 #[tauri::command]
@@ -224,11 +310,19 @@ pub async fn terminal_write(
     terminal_session_id: String,
     data: String,
 ) -> Result<EmptyResponse, String> {
-    state
-        .terminals
-        .write(&terminal_session_id, data.as_bytes())
-        .await
-        .map_err(|error| error.to_string())?;
+    if terminal_session_id.starts_with("tc_") {
+        state
+            .cpp_terminals
+            .write(&terminal_session_id, data.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        state
+            .terminals
+            .write(&terminal_session_id, data.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     Ok(EmptyResponse {})
 }
 
@@ -239,11 +333,20 @@ pub async fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<EmptyResponse, String> {
-    state
-        .terminals
-        .resize(&terminal_session_id, cols, rows)
-        .await
-        .map_err(|error| error.to_string())?;
+    validate_terminal_dimensions(cols, rows)?;
+    if terminal_session_id.starts_with("tc_") {
+        state
+            .cpp_terminals
+            .resize(&terminal_session_id, cols, rows)
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        state
+            .terminals
+            .resize(&terminal_session_id, cols, rows)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     Ok(EmptyResponse {})
 }
 
@@ -252,11 +355,19 @@ pub async fn terminal_close(
     state: State<'_, AppState>,
     terminal_session_id: String,
 ) -> Result<EmptyResponse, String> {
-    state
-        .terminals
-        .close(&terminal_session_id)
-        .await
-        .map_err(|error| error.to_string())?;
+    if terminal_session_id.starts_with("tc_") {
+        state
+            .cpp_terminals
+            .close(&terminal_session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        state
+            .terminals
+            .close(&terminal_session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     Ok(EmptyResponse {})
 }
 
