@@ -33,6 +33,10 @@ ExecResult docker_logs(const TargetConfig& target, const std::string& container,
                        std::uint32_t tail, int timeout_seconds);
 ExecResult docker_inspect(const TargetConfig& target, const std::string& container,
                           int timeout_seconds);
+ExecResult systemd_inspect(const TargetConfig& target, const std::string& unit,
+                           int timeout_seconds);
+ExecResult package_inspect(const TargetConfig& target, const std::string& manager,
+                           const std::string& package, int timeout_seconds);
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds);
 ExecResult server_logs(const TargetConfig& target,
                        std::optional<std::uint32_t> since_seconds,

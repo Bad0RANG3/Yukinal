@@ -119,6 +119,24 @@ bool valid_container_ref(const std::string& value) {
   });
 }
 
+bool valid_package_manager(const std::string& value) {
+  return value == "apt" || value == "dnf";
+}
+
+bool valid_package_ref(const std::string& value) {
+  if (value.empty() || value.size() > 128) return false;
+  const auto is_ascii_alphanumeric = [](unsigned char character) {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9');
+  };
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [&](unsigned char character) {
+    return is_ascii_alphanumeric(character) || character == '+' || character == '.' ||
+           character == '_' || character == ':' || character == '-';
+  });
+}
+
 bool valid_sftp_path(const std::string& value) {
   return !value.empty() && value.size() <= 4096 && value.find('\0') == std::string::npos;
 }
@@ -159,6 +177,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string source_path;
   std::string destination_path;
   std::string nonce;
+  std::string package_manager;
+  std::string package;
   std::string container;
   bool include_all_containers = false;
   std::uint32_t tail = 120;
@@ -234,6 +254,39 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     container = container_it->get<std::string>();
+  } else if (operation == "systemd_inspect") {
+    if (!has_only_keys(*parameters_it, {"service"})) {
+      set_error(error, 422, "invalid_parameters", "systemd_inspect accepts only a service parameter");
+      return false;
+    }
+    const auto service_it = parameters_it->find("service");
+    if (service_it == parameters_it->end() || !service_it->is_string()) {
+      set_error(error, 422, "invalid_parameters", "systemd_inspect requires a .service unit name");
+      return false;
+    }
+    unit = service_it->get<std::string>();
+    if (!valid_service_name(unit) || !unit.ends_with(".service")) {
+      set_error(error, 422, "invalid_parameters", "systemd_inspect requires a safe .service unit name");
+      return false;
+    }
+  } else if (operation == "package_inspect") {
+    if (!has_only_keys(*parameters_it, {"manager", "package"})) {
+      set_error(error, 422, "invalid_parameters", "package_inspect accepts only manager and package parameters");
+      return false;
+    }
+    const auto manager_it = parameters_it->find("manager");
+    const auto package_it = parameters_it->find("package");
+    if (manager_it == parameters_it->end() || !manager_it->is_string() ||
+        package_it == parameters_it->end() || !package_it->is_string()) {
+      set_error(error, 422, "invalid_parameters", "package_inspect requires a supported manager and safe package name");
+      return false;
+    }
+    package_manager = manager_it->get<std::string>();
+    package = package_it->get<std::string>();
+    if (!valid_package_manager(package_manager) || !valid_package_ref(package)) {
+      set_error(error, 422, "invalid_parameters", "package_inspect requires apt or dnf and a safe package name");
+      return false;
+    }
   } else if (operation == "service_status") {
     if (!has_only_keys(*parameters_it, {"service"})) {
       set_error(error, 422, "invalid_parameters", "service_status accepts only a service parameter");
@@ -497,6 +550,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->source_path = std::move(source_path);
   request->destination_path = std::move(destination_path);
   request->nonce = std::move(nonce);
+  request->package_manager = std::move(package_manager);
+  request->package = std::move(package);
   request->container = std::move(container);
   request->include_all_containers = include_all_containers;
   request->tail = tail;

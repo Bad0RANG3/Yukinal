@@ -91,6 +91,41 @@ pub(crate) async fn docker_inspect(
     .await
 }
 
+pub(crate) async fn systemd_inspect(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    service: &str,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "systemd_inspect",
+        json!({ "service": service }),
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn package_inspect(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    manager: &str,
+    package: &str,
+) -> Result<(i32, String), String> {
+    run_operation_with_status(
+        app,
+        state,
+        server_id,
+        "package_inspect",
+        json!({ "manager": manager, "package": package }),
+        true,
+    )
+    .await
+}
+
 pub(crate) async fn connection_check(
     app: &AppHandle,
     state: &AppState,

@@ -133,7 +133,7 @@ The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, credential, or arbitrary command. The service resolves a
 `target_id` to a configured target and accepts only `connection_check`, bounded
 `system_snapshot`, `docker_ps`, bounded `docker_logs` and `docker_inspect`,
-`service_status`, `service_inventory`, bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP list/stat/read/write/exclusive-create/
+`systemd_inspect`, `package_inspect`, `service_status`, `service_inventory`, bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP list/stat/read/write/exclusive-create/
 remove/link-count operations with validated parameters. Service operations map
 to fixed commands; SFTP reads are capped at 1 MiB plus one sentinel byte, normal
 writes at 512 KiB, and exclusive recovery copies at 1 MiB. Write bodies use
@@ -192,7 +192,9 @@ parameters. `system_snapshot` accepts only a fresh 32-character lowercase
 hexadecimal nonce used to delimit its fixed collector results; `docker_ps`
 accepts only a boolean `all` filter. `docker_logs` validates its container
 reference and caps its tail to 500 lines; `docker_inspect` accepts only a safe
-container reference. `server_logs` accepts an optional time
+container reference. `systemd_inspect` accepts only a safe `.service` unit;
+`package_inspect` accepts only `apt` or `dnf` and a safe package name.
+`server_logs` accepts an optional time
 range from 1 second to 7 days and an optional bounded
 `.service` name; its result is capped at 500 lines. When either filter is set,
 the service does not fall back to unfiltered system log files. SFTP operations

@@ -1444,6 +1444,37 @@ ExecResult docker_inspect(const TargetConfig& target, const std::string& contain
   return run_ssh_command(target, command, timeout_seconds);
 }
 
+ExecResult systemd_inspect(const TargetConfig& target, const std::string& unit,
+                           int timeout_seconds) {
+  if (target.probe_only || !valid_service_name(unit) || !unit.ends_with(".service") ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The systemd inspect parameters are invalid");
+    return result;
+  }
+  const std::string command =
+      "systemctl show --no-pager --property=LoadState,ActiveState,SubState,Description --value -- '" +
+      unit + "' 2>&1";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult package_inspect(const TargetConfig& target, const std::string& manager,
+                           const std::string& package, int timeout_seconds) {
+  if (target.probe_only || !valid_package_manager(manager) || !valid_package_ref(package) ||
+      timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The package inspect parameters are invalid");
+    return result;
+  }
+  const std::string package_arg = "'" + package + "'";
+  const std::string command = manager == "apt"
+      ? "if command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " +
+            package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi"
+      : "if command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
+            package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
   static constexpr char command[] =
       "if command -v systemctl >/dev/null 2>&1; then "
@@ -2608,6 +2639,13 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "docker_inspect") {
     return docker_inspect(target, request.container, request.timeout_seconds);
+  }
+  if (request.operation == "systemd_inspect") {
+    return systemd_inspect(target, request.unit, request.timeout_seconds);
+  }
+  if (request.operation == "package_inspect") {
+    return package_inspect(target, request.package_manager, request.package,
+                           request.timeout_seconds);
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);

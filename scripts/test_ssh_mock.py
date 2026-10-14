@@ -370,6 +370,12 @@ def start_ssh_mock(
                     b'{"Id":"container-id","Name":"/api","Config":{"Image":"example/api"},"State":{"Status":"running","StartedAt":"2026-10-15T10:00:00Z","Health":{"Status":"healthy"}},"RestartCount":1}\n'
                 )
                 channel.send_exit_status(0)
+            elif command == b"systemctl show --no-pager --property=LoadState,ActiveState,SubState,Description --value -- 'nginx.service' 2>&1":
+                channel.sendall(b"loaded\nactive\nrunning\nNginx web server\n")
+                channel.send_exit_status(0)
+            elif command == b"if command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- 'nginx' 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi":
+                channel.sendall(b"install ok installed\t1.27.0-1\n")
+                channel.send_exit_status(0)
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
@@ -902,6 +908,20 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if docker_inspect.exit_code != 0 or json.loads(docker_inspect.stdout)["Name"] != "/api":
                 raise AssertionError(f"unexpected structured Docker inspect: {docker_inspect!r}")
+
+            systemd_inspect = client._execute_operation(
+                "srv_stage1", "systemd_inspect", {"service": "nginx.service"}, timeout_seconds=5
+            )
+            if systemd_inspect.exit_code != 0 or systemd_inspect.stdout.splitlines()[2] != "running":
+                raise AssertionError(f"unexpected structured systemd inspect: {systemd_inspect!r}")
+            package_inspect = client._execute_operation(
+                "srv_stage1",
+                "package_inspect",
+                {"manager": "apt", "package": "nginx"},
+                timeout_seconds=5,
+            )
+            if package_inspect.exit_code != 0 or "1.27.0-1" not in package_inspect.stdout:
+                raise AssertionError(f"unexpected structured package inspect: {package_inspect!r}")
 
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:

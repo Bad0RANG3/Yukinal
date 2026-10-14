@@ -159,6 +159,56 @@ YUKINAL_TEST(policy_bounds_docker_logs_and_inspect_references) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_bounds_systemd_and_package_inspection) {
+  ExecRequest request;
+  ApiError error;
+  const bool systemd_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "systemd_inspect"},
+       {"parameters", {{"service", "nginx.service"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(systemd_accepted);
+  YUKINAL_REQUIRE(request.unit == "nginx.service");
+
+  const bool unsafe_systemd_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "systemd_inspect"},
+       {"parameters", {{"service", "nginx.service;id"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(!unsafe_systemd_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool package_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "package_inspect"},
+       {"parameters", {{"manager", "apt"}, {"package", "python3.12-dev"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(package_accepted);
+  YUKINAL_REQUIRE(request.package_manager == "apt");
+  YUKINAL_REQUIRE(request.package == "python3.12-dev");
+
+  const bool unsupported_manager_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "package_inspect"},
+       {"parameters", {{"manager", "apk"}, {"package", "nginx"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(!unsupported_manager_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool injected_package_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "package_inspect"},
+       {"parameters", {{"manager", "dnf"}, {"package", "nginx;id"}}},
+       {"timeout_seconds", 10}},
+      &request, &error);
+  YUKINAL_REQUIRE(!injected_package_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_host_key_probe_without_parameters) {
   ExecRequest request;
   ApiError error;

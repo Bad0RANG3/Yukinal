@@ -2170,6 +2170,7 @@ pub(super) async fn docker_restart(
 }
 
 pub(super) async fn systemd_inspect(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -2194,28 +2195,56 @@ pub(super) async fn systemd_inspect(
             None,
         ));
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let command = systemd_inspect_command(&input.service);
-    let result = match state
-        .ssh
-        .execute(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(10)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stdout, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::systemd_inspect(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.service,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout.clone(), stdout)
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        let command = systemd_inspect_command(&input.service);
+        match state
+            .ssh
+            .execute(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(10)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (
+                result.exit_code,
+                result.stdout_lossy(),
+                result.stderr_lossy(),
+            ),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "not_found",
             format!(
@@ -2224,12 +2253,12 @@ pub(super) async fn systemd_inspect(
             ),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }
-    let inspected = match parse_systemd_inspect(&result.stdout_lossy(), &input.service) {
+    let inspected = match parse_systemd_inspect(&stdout, &input.service) {
         Ok(inspected) => inspected,
         Err(error) => return Ok(failed("execution_failed", error, false, None)),
     };
@@ -2316,6 +2345,7 @@ pub(super) async fn systemd_restart(
 }
 
 pub(super) async fn package_inspect(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     input: &Value,
@@ -2356,38 +2386,67 @@ pub(super) async fn package_inspect(
             None,
         ));
     };
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
-    let result = match state
-        .ssh
-        .execute(
-            &session,
-            &command,
-            Some(std::time::Duration::from_secs(10)),
-            cancel,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let (exit_code, stdout, stderr) = if cpp_supported {
+        let (exit_code, stdout) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::ssh_service::package_inspect(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &input.manager,
+                &input.package,
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        (exit_code, stdout, String::new())
+    } else {
+        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+            return Ok(transport_or_cancel(error, cancel));
+        }
+        let session = match state.terminals.cached_session(server_id) {
+            Ok(session) => session,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        };
+        match state
+            .ssh
+            .execute(
+                &session,
+                &command,
+                Some(std::time::Duration::from_secs(10)),
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => (
+                result.exit_code,
+                result.stdout_lossy(),
+                result.stderr_lossy(),
+            ),
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        }
     };
-    if result.exit_code != 0 {
+    if exit_code != 0 {
         return Ok(failed(
             "execution_failed",
             format!("could not inspect package `{}`", input.package),
             false,
             Some(json!({
-                "exitCode": result.exit_code,
-                "stderr": truncate_text(&result.stderr_lossy(), 1_000),
+                "exitCode": exit_code,
+                "stderr": truncate_text(&stderr, 1_000),
             })),
         ));
     }
-    match parse_package_inspect(&result.stdout_lossy(), &input.manager, &input.package) {
+    match parse_package_inspect(&stdout, &input.manager, &input.package) {
         Ok(inspected) => Ok(success(
             serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         )),

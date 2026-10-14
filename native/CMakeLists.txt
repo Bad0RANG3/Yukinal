@@ -46,8 +46,9 @@ if(YUKINAL_FETCH_DEPS)
   FetchContent_Declare(
     libssh2
     GIT_REPOSITORY https://github.com/libssh2/libssh2.git
-    GIT_TAG libssh2-1.11.1
-    GIT_SHALLOW TRUE
+    # Includes the WinCNG fixed-width mpint normalization fix for intermittent KEX failures.
+    GIT_TAG f216bbe3aa5ec02033de53ed0809a2461fc062c7
+    GIT_SHALLOW FALSE
   )
   FetchContent_MakeAvailable(libssh2)
 

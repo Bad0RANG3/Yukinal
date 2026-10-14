@@ -17,6 +17,8 @@ struct ExecRequest {
   std::string operation;
   std::string service;
   std::string unit;
+  std::string package_manager;
+  std::string package;
   std::string path;
   std::string source_path;
   std::string destination_path;
@@ -43,5 +45,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
 bool valid_target_id(const std::string& value);
 bool valid_service_name(const std::string& value);
 bool valid_container_ref(const std::string& value);
+bool valid_package_ref(const std::string& value);
+bool valid_package_manager(const std::string& value);
 
 }  // namespace yukinal::ssh_service
