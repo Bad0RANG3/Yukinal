@@ -96,10 +96,15 @@ read-only server, Docker, systemd, package and file tools, plus MCP tools the
 host marks low-risk. The host remains the final authorization boundary. When a
 registered tool requires approval, the sidecar emits the approval event, accepts
 the desktop's response RPC, and resumes the paused call; rejection and expiry
-stop the graph without retrying. Multimodal prompts, durable task state and
-write-capable desktop tools are still being migrated. Tauri builds select the
-frozen Python sidecar; installed-app lifecycle and cross-platform acceptance
-remain in progress.
+stop the graph without retrying. With `YUKINAL_DATA_DIR` set, the production
+sidecar stores LangGraph checkpoints in a private `agent-state` SQLite database
+and can restore the same run's pending approval after a process restart. This
+does not yet restore the desktop task/plan lifecycle. Checkpoints can contain
+prompts and tool output; the SQLite file is not encrypted. POSIX builds restrict
+the state directory and database to the current user, while Windows relies on
+the per-user application-data ACL. Multimodal prompts and write-capable desktop
+tools are still being migrated. Tauri builds select the frozen Python sidecar;
+installed-app lifecycle and cross-platform acceptance remain in progress.
 
 When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it also
 registers the read-only `ssh.service_status` tool backed by the C++ service. The

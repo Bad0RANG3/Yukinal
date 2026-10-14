@@ -209,12 +209,17 @@ impl HostApprovalLedger {
             .lock()
             .map_err(|_| "server.exec approval ledger is poisoned".to_string())?;
         entries.retain(|_, entry| entry.binding.expires_at > now);
-        if let Some(existing) = entries.get(&binding.approval_id) {
-            return if existing.binding == binding {
-                Ok(true)
-            } else {
-                Err("approval id is already bound to another server.exec request".into())
-            };
+        if let Some(existing) = entries.get_mut(&binding.approval_id) {
+            if !existing.binding.same_request(&binding) {
+                return Err("approval id is already bound to another server.exec request".into());
+            }
+            if existing.phase != ApprovalPhase::Pending {
+                return Err("approval request is already being answered".into());
+            }
+            // A restored sidecar re-emits the same pending approval ID with a
+            // fresh deadline. Keep the host ticket aligned with that event.
+            existing.binding.expires_at = binding.expires_at;
+            return Ok(true);
         }
         if entries.len() >= MAX_TICKETS {
             return Err("server.exec approval ledger is full".into());
@@ -352,6 +357,23 @@ impl HostApprovalLedger {
 }
 
 impl ApprovalBinding {
+    fn same_request(&self, other: &Self) -> bool {
+        self.approval_id == other.approval_id
+            && self.run_id == other.run_id
+            && self.trace_id == other.trace_id
+            && self.call_id == other.call_id
+            && self.tool_name == other.tool_name
+            && self.input_fingerprint == other.input_fingerprint
+            && self.target_host == other.target_host
+            && self.server_id == other.server_id
+            && self.workspace_id == other.workspace_id
+            && self.environment == other.environment
+            && self.task_id == other.task_id
+            && self.plan_id == other.plan_id
+            && self.plan_step_id == other.plan_step_id
+            && self.evidence_ids == other.evidence_ids
+    }
+
     fn matches(&self, request: &ServerExecExecutionBinding<'_>) -> bool {
         self.approval_id == request.approval_id
             && request.run_id == Some(self.run_id.as_str())
@@ -456,6 +478,29 @@ mod tests {
             ledger.consume(execution_binding(), || NOW).await,
             Err(ServerExecTicketError::Missing)
         );
+    }
+
+    #[tokio::test]
+    async fn restored_pending_approval_refreshes_its_deadline_for_the_same_binding() {
+        let ledger = HostApprovalLedger::default();
+        ledger
+            .record_waiting_event(&waiting_event(), NOW)
+            .expect("record waiting approval");
+
+        let mut restored = waiting_event();
+        restored["approval"]["expiresAt"] = json!("2027-01-15T08:03:00Z");
+        assert!(ledger
+            .record_waiting_event(&restored, NOW)
+            .expect("replay the exact pending approval"));
+
+        let token = ledger
+            .begin_response("apr_1", "run_1", "approve_once", NOW + 150)
+            .expect("the replayed approval is still valid")
+            .expect("server.exec response token");
+        ledger
+            .finish_response(token, true, NOW + 150)
+            .expect("finish accepted response");
+        assert_eq!(ledger.consume(execution_binding(), || NOW + 150).await, Ok(()));
     }
 
     #[tokio::test]

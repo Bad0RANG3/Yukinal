@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from typing import Any
 
@@ -15,6 +16,7 @@ from yukinal_agent import (
     ToolRegistry,
     ToolSpec,
 )
+from yukinal_agent.checkpoints import open_checkpoint_store
 
 
 class ScriptedModel:
@@ -316,6 +318,68 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1]["callId"], events[0]["callId"])
         self.assertEqual(events[1]["status"], "success")
         self.assertIsNone(resumed.checkpoint_id)
+
+    async def test_sqlite_checkpoint_restores_pending_approval_after_reopening_saver(self) -> None:
+        executions: list[dict[str, Any]] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            executions.append(arguments)
+            return "changed"
+
+        registry = _registry(handler, write=True)
+        first_model = ScriptedModel([AIMessage(content="", tool_calls=[{
+            "name": "ops.write",
+            "args": {"target_id": "srv_stage1", "value": "blue"},
+            "id": "write-restart-1",
+            "type": "tool_call",
+        }])])
+        with tempfile.TemporaryDirectory() as data_dir:
+            async with open_checkpoint_store(data_dir) as checkpointer:
+                first_agent = ModelDrivenAgent(registry, first_model, checkpointer=checkpointer)
+                first = await first_agent.run(
+                    task_id="task-restart", tenant_id="tenant-1", user_id="user-1",
+                    prompt="Change the value.", allowed_tools={"ops.write"},
+                    allowed_target_ids={"srv_stage1"},
+                    host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+                    run_id="run-restart-1", checkpoint_binding="binding-restart-1",
+                )
+
+            self.assertEqual(first.status, "awaiting_approval")
+            self.assertEqual(executions, [])
+            approval = first.approval_requests[0]
+            self.assertIsNotNone(first.checkpoint_id)
+
+            async with open_checkpoint_store(data_dir) as checkpointer:
+                changed_agent = ModelDrivenAgent(
+                    registry, ScriptedModel([]), checkpointer=checkpointer,
+                )
+                changed = await changed_agent.run(
+                    task_id="task-restart", tenant_id="tenant-1", user_id="user-1",
+                    prompt="Different request.", allowed_tools={"ops.write"},
+                    allowed_target_ids={"srv_stage1"},
+                    host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+                    run_id="run-restart-1", checkpoint_binding="binding-restart-2",
+                )
+                self.assertEqual(changed.error_code, "checkpoint_context_mismatch")
+
+                restored_model = ScriptedModel([AIMessage(content="The change is complete.")])
+                restored_agent = ModelDrivenAgent(registry, restored_model, checkpointer=checkpointer)
+                restored = await restored_agent.run(
+                    task_id="task-restart", tenant_id="tenant-1", user_id="user-1",
+                    prompt="Change the value.", allowed_tools={"ops.write"},
+                    allowed_target_ids={"srv_stage1"},
+                    host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+                    run_id="run-restart-1", checkpoint_binding="binding-restart-1",
+                )
+                self.assertEqual(restored.status, "awaiting_approval")
+                self.assertEqual(restored.checkpoint_id, first.checkpoint_id)
+                self.assertEqual(restored_model.seen_messages, [])
+                resumed = await restored_agent.resume_after_approval(
+                    restored.checkpoint_id or "", approval.fingerprint,
+                    "approval-ref-restored", approved=True,
+                )
+                self.assertEqual(resumed.status, "succeeded")
+                self.assertEqual(executions, [{"target_id": "srv_stage1", "value": "blue"}])
 
     async def test_rejected_approval_resumes_without_executing_the_tool(self) -> None:
         executions: list[bool] = []

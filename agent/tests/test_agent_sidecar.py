@@ -262,7 +262,7 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual([frame["method"] for frame in host_requests], ["host.mcp.catalog"])
 
     def test_python_module_entrypoint_completes_desktop_handshake(self) -> None:
-        async def run() -> tuple[int, bytes, bytes]:
+        async def run() -> tuple[int, bytes, bytes, int | None, int | None]:
             with tempfile.TemporaryDirectory() as data_dir:
                 env = dict(os.environ)
                 env["YUKINAL_DATA_DIR"] = data_dir
@@ -282,9 +282,13 @@ class PythonSidecarTests(unittest.TestCase):
                 ping = _request(42, "system.ping")
                 payload = b"\n".join(json.dumps(item).encode("utf-8") for item in (initialize, ping)) + b"\n"
                 stdout, stderr = await asyncio.wait_for(process.communicate(payload), timeout=15)
-                return process.returncode or 0, stdout, stderr
+                state_dir = Path(data_dir) / "agent-state"
+                checkpoint_path = state_dir / "langgraph-checkpoints.sqlite"
+                directory_mode = state_dir.stat().st_mode & 0o777 if state_dir.exists() else None
+                checkpoint_mode = checkpoint_path.stat().st_mode & 0o777 if checkpoint_path.exists() else None
+                return process.returncode or 0, stdout, stderr, directory_mode, checkpoint_mode
 
-        code, stdout, stderr = asyncio.run(run())
+        code, stdout, stderr, directory_mode, checkpoint_mode = asyncio.run(run())
         self.assertEqual(code, 0, stderr.decode("utf-8", errors="replace"))
         frames = [json.loads(line) for line in stdout.splitlines()]
         responses = [frame for frame in frames if "method" not in frame]
@@ -295,6 +299,10 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(response_by_id[42]["result"]["pong"], "pong")
         self.assertEqual([frame["method"] for frame in host_requests], ["host.mcp.catalog"])
         self.assertIn(b"Python Agent Node ready", stderr)
+        self.assertIsNotNone(checkpoint_mode)
+        if os.name != "nt":
+            self.assertEqual(directory_mode, 0o700)
+            self.assertEqual(checkpoint_mode, 0o600)
 
 
 if __name__ == "__main__":

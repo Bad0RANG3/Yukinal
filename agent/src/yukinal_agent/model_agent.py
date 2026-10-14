@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
@@ -83,6 +84,8 @@ class _AgentState(TypedDict, total=False):
     host_task_id: str
     run_id: str
     trace_id: str
+    checkpoint_binding: str
+    budget_binding: dict[str, Any]
     calls: list[dict[str, Any]]
     call_index: int
     model_rounds: int
@@ -107,6 +110,7 @@ class ModelDrivenAgent:
         model: Any,
         budget: AgentBudget | None = None,
         event_sink: Any | None = None,
+        checkpointer: Any | None = None,
     ) -> None:
         self._registry = registry
         self._budget = budget or AgentBudget()
@@ -143,7 +147,9 @@ class ModelDrivenAgent:
             "execute_tool", self._route_tool,
             {"execute": "execute_tool", "model": "model", "finish": END},
         )
-        self._graph = graph.compile(checkpointer=InMemorySaver())
+        self._graph = graph.compile(
+            checkpointer=checkpointer if checkpointer is not None else InMemorySaver()
+        )
 
     async def run(
         self,
@@ -159,6 +165,7 @@ class ModelDrivenAgent:
         host_task_id: str | None = None,
         run_id: str = "",
         trace_id: str = "",
+        checkpoint_binding: str = "",
     ) -> ModelAgentResult:
         try:
             context = ExecutionContext(
@@ -195,6 +202,8 @@ class ModelDrivenAgent:
             **({"host_task_id": host_task_id} if host_task_id else {}),
             "run_id": run_id,
             "trace_id": trace_id,
+            "checkpoint_binding": checkpoint_binding,
+            "budget_binding": asdict(self._budget),
             "calls": [],
             "call_index": 0,
             "model_rounds": 0,
@@ -209,11 +218,25 @@ class ModelDrivenAgent:
             "rejection_codes": {},
             "counted_call_ids": [],
         }
-        checkpoint_id = f"agent-{uuid.uuid4().hex}"
+        if run_id:
+            thread_material = "\x1f".join((context.tenant_id, context.user_id, context.task_id, run_id))
+            checkpoint_id = f"agent-{hashlib.sha256(thread_material.encode('utf-8')).hexdigest()}"
+        else:
+            checkpoint_id = f"agent-{uuid.uuid4().hex}"
         config = {"configurable": {"thread_id": checkpoint_id}}
         try:
             async with asyncio.timeout(self._budget.max_total_seconds):
-                state = await self._graph.ainvoke(initial, config=config)
+                snapshot = await self._graph.aget_state(config)
+                saved_state = snapshot.values
+                if saved_state:
+                    if not _checkpoint_matches(saved_state, initial):
+                        return _failed_result(task_id, "checkpoint_context_mismatch")
+                    if saved_state.get("status") in {"awaiting_approval", "succeeded", "failed", "cancelled", "timed_out"}:
+                        state = saved_state
+                    else:
+                        state = await self._graph.ainvoke(None, config=config)
+                else:
+                    state = await self._graph.ainvoke(initial, config=config)
         except TimeoutError:
             return _failed_result(task_id, "task_timeout", status="timed_out")
         except Exception:
@@ -651,6 +674,25 @@ class ModelDrivenAgent:
         if state["call_index"] < len(state["calls"]):
             return "execute"
         return "model"
+
+
+def _checkpoint_matches(saved: _AgentState, initial: _AgentState) -> bool:
+    binding_fields = (
+        "task_id", "tenant_id", "user_id", "allowed_tools", "allowed_target_ids",
+        "host_target", "host_task_id", "run_id", "trace_id", "checkpoint_binding",
+        "budget_binding",
+    )
+    if any(saved.get(field) != initial.get(field) for field in binding_fields):
+        return False
+    saved_messages = saved.get("messages", [])
+    initial_messages = initial.get("messages", [])
+    if len(saved_messages) < 2 or len(initial_messages) < 2:
+        return False
+    return all(
+        type(saved_message) is type(initial_message)
+        and saved_message.content == initial_message.content
+        for saved_message, initial_message in zip(saved_messages[:2], initial_messages[:2])
+    )
 
 
 def _failed_result(task_id: str, error_code: str, *, status: str = "failed") -> ModelAgentResult:

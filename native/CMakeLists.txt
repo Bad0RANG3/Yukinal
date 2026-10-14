@@ -122,7 +122,7 @@ if(YUKINAL_BUILD_TESTS)
 
   if(YUKINAL_ENABLE_AGENT_TESTS)
     execute_process(
-      COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp"
+      COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp; import langgraph.checkpoint.sqlite.aio"
       RESULT_VARIABLE YUKINAL_AGENT_IMPORT_RESULT
       OUTPUT_QUIET
       ERROR_QUIET
@@ -160,7 +160,7 @@ if(YUKINAL_BUILD_TESTS)
       )
 
       execute_process(
-        COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp"
+        COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp; import langgraph.checkpoint.sqlite.aio"
         RESULT_VARIABLE YUKINAL_AGENT_MOCK_IMPORT_RESULT
         OUTPUT_QUIET
         ERROR_QUIET

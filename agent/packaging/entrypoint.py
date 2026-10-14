@@ -17,6 +17,9 @@ def run() -> None:
             "langchain_anthropic",
             "langchain_google_genai",
             "langgraph.graph",
+            "langgraph.checkpoint.sqlite.aio",
+            "aiosqlite",
+            "sqlite_vec",
             "mcp.client.stdio",
             "mcp.client.streamable_http",
         ):

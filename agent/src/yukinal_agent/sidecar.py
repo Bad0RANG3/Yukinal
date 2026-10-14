@@ -8,7 +8,7 @@ import re
 import sys
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
@@ -73,6 +73,7 @@ class PythonSidecar:
         model_factory: ModelFactory | None = None,
         notification_sink: Callable[[str, dict[str, Any]], None] | None = None,
         approval_ttl_seconds: int = 120,
+        checkpointer: Any | None = None,
     ) -> None:
         if isinstance(approval_ttl_seconds, bool) or not isinstance(approval_ttl_seconds, int) or not 1 <= approval_ttl_seconds <= 3600:
             raise ValueError("approval_ttl_seconds must be between 1 and 3600")
@@ -81,6 +82,7 @@ class PythonSidecar:
         self._model_factory = model_factory or ModelFactory()
         self._notification_sink = notification_sink
         self._approval_ttl_seconds = approval_ttl_seconds
+        self._checkpointer = checkpointer
         self._initialized = False
         self._active_runs: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._completed_runs: OrderedDict[str, str] = OrderedDict()
@@ -98,6 +100,11 @@ class PythonSidecar:
         if host is not None and not self._host_tools_registered:
             register_host_tools(self._registry, host)
             self._host_tools_registered = True
+
+    def set_checkpointer(self, checkpointer: Any | None) -> None:
+        if self._active_runs:
+            raise RuntimeError("cannot replace the Agent checkpointer while runs are active")
+        self._checkpointer = checkpointer
 
     def handle(self, request: object) -> dict[str, Any] | None:
         request_id: int | None = None
@@ -285,6 +292,7 @@ class PythonSidecar:
                 model,
                 request["agentBudget"],
                 event_sink=self._emit,
+                checkpointer=self._checkpointer,
             )
         except Exception:
             raise _RpcFault(RPC_INVALID_PARAMS, "configured model cannot run the registered tools") from None
@@ -372,6 +380,7 @@ class PythonSidecar:
                 host_task_id=task_id,
                 run_id=run_id,
                 trace_id=_safe_context_id("trace", run_id),
+                checkpoint_binding=_run_checkpoint_binding(request),
             )
             while result.status == "awaiting_approval":
                 result = await self._await_approval(request, run_id, agent, result)
@@ -476,8 +485,10 @@ class PythonSidecar:
         if not isinstance(call_id, str) or not call_id:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Agent approval is missing its tool call identity")
 
-        approval_id = f"apr_{uuid.uuid4().hex}"
         fingerprint = approval.fingerprint
+        approval_id = "apr_" + hashlib.sha256(
+            f"{run_id}\x1f{call_id}\x1f{fingerprint}".encode("utf-8")
+        ).hexdigest()[:32]
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         self._pending_approvals[approval_id] = _PendingApproval(run_id, result.checkpoint_id, fingerprint, future)
@@ -930,6 +941,21 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _run_checkpoint_binding(request: dict[str, Any]) -> str:
+    # Bind persisted graph state to the user prompt and authorization scope,
+    # while excluding provider credentials so rotated secrets stay out of disk.
+    fields = (
+        "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
+        "focusServerId", "target", "policyId", "permissionMode", "mode",
+    )
+    binding = {field: request[field] for field in fields if field in request}
+    budget = request.get("agentBudget")
+    if isinstance(budget, AgentBudget):
+        binding["agentBudget"] = asdict(budget)
+    canonical = json.dumps(binding, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _safe_context_id(prefix: str, value: str) -> str:
     return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
 
@@ -1022,6 +1048,20 @@ async def _discard_to_newline(stream: BinaryIO) -> None:
             return
 
 
+async def _serve_with_checkpoint_store(sidecar: PythonSidecar, data_dir: str) -> None:
+    if not data_dir:
+        await serve_stdio(sidecar)
+        return
+    from .checkpoints import open_checkpoint_store
+
+    async with open_checkpoint_store(data_dir) as checkpointer:
+        sidecar.set_checkpointer(checkpointer)
+        try:
+            await serve_stdio(sidecar)
+        finally:
+            sidecar.set_checkpointer(None)
+
+
 def main() -> None:
     """Entry point for the Python Agent Node Sidecar."""
     data_dir = os.environ.get("YUKINAL_DATA_DIR", "").strip()
@@ -1036,7 +1076,7 @@ def main() -> None:
             print("SSH service client configuration is invalid", file=sys.stderr, flush=True)
     sidecar = PythonSidecar(registry)
     print(f"Python Agent Node ready (tools={len(registry.list())})", file=sys.stderr, flush=True)
-    asyncio.run(serve_stdio(sidecar))
+    asyncio.run(_serve_with_checkpoint_store(sidecar, data_dir))
 
 
 class _StderrAuditSink:
