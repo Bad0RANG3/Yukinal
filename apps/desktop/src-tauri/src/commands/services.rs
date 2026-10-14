@@ -101,27 +101,7 @@ pub async fn server_services(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerServicesResponse, String> {
-    let server = state
-        .database
-        .servers()
-        .get(&server_id)
-        .map_err(|error| error.to_string())?;
-    let identity_id = server
-        .connection
-        .identity_id
-        .as_deref()
-        .ok_or_else(|| "the selected server has no SSH identity".to_string())?;
-    let identity = state
-        .database
-        .identities()
-        .get(identity_id)
-        .map_err(|error| error.to_string())?;
-    if server.connection.host_certificate_authority.is_some()
-        || !matches!(
-            identity.method.as_str(),
-            "password" | "privateKey" | "agent"
-        )
-    {
+    if !ssh_service::supports_cpp_target(&state, &server_id)? {
         return legacy_service_inventory(&state, &server_id).await;
     }
     let output = ssh_service::service_inventory(&app, &state, &server_id).await?;
@@ -129,8 +109,8 @@ pub async fn server_services(
         .map_err(|error| format!("service discovery returned an invalid response: {error}"))
 }
 
-/// Preserve certificate and host-CA identities until the C++ service supports those trust modes.
-/// Password, private-key, and SSH-agent identities use the C++ service.
+/// Keep using the legacy transport for any endpoint or authentication mode the C++ service
+/// cannot yet validate itself.
 async fn legacy_service_inventory(
     state: &AppState,
     server_id: &str,
@@ -263,8 +243,8 @@ fn state_from_docker(state: &str) -> ServiceState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServerService, ServerServicesInput, ServerServicesResponse, ServiceSource, ServiceState,
-        filter_services, parse_services_output,
+        filter_services, parse_services_output, ServerService, ServerServicesInput,
+        ServerServicesResponse, ServiceSource, ServiceState,
     };
 
     const FIXTURE: &str =
@@ -313,16 +293,14 @@ mod tests {
         assert_eq!(response.source, ServiceSource::Systemd);
         assert_eq!(response.services.len(), 1);
         assert_eq!(response.services[0].name, "worker.service");
-        assert!(
-            filter_services(
-                &mut response,
-                &ServerServicesInput {
-                    name: Some("worker.service;id".into()),
-                    state: None,
-                },
-            )
-            .is_err()
-        );
+        assert!(filter_services(
+            &mut response,
+            &ServerServicesInput {
+                name: Some("worker.service;id".into()),
+                state: None,
+            },
+        )
+        .is_err());
     }
 
     #[test]
