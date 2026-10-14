@@ -3,8 +3,9 @@
 This distribution contains the stdlib SSH service caller and the Python Agent
 Runtime. It uses a shared Tool Registry, JSON Schema validation, tenant/user/
 target/risk policy, parameter-bound approvals, append-only audit events, MCP
-clients and a bounded LangGraph workflow. The model loop supports OpenAI and
-Anthropic through their official LangChain adapters. Desktop approval controls,
+clients and a bounded LangGraph workflow. The model loop supports OpenAI
+compatible endpoints, Anthropic and Gemini through their official LangChain
+adapters. Desktop approval controls,
 durable task storage and UI wiring remain future work.
 
 ## Install
@@ -15,14 +16,17 @@ python -m pip install -e "agent[agent,models]"
 
 The `yukinal_ssh` client itself uses only the Python standard library. The
 `yukinal_agent` package requires LangGraph, the official MCP Python SDK and
-JSON Schema validation. The `models` extra installs the OpenAI and Anthropic
-LangChain adapters. Python 3.11+ is supported.
+JSON Schema validation. The `models` extra installs the OpenAI, Anthropic and
+Google Gemini LangChain adapters. Python 3.11+ is supported.
 
 ## Configure and run a model
 
-Provider selection and credentials stay outside agent business logic. Supply
-the API key through an environment variable name; never put its value in
-`ModelConfig`, task input or audit data.
+Provider selection and credentials stay outside agent business logic. In
+standalone use, supply the API key through an environment variable name. A host
+integration can pass a per-run credential to
+`ModelFactory.create_with_api_key`; the key is not added to `ModelConfig` or
+audit data. OpenAI-compatible local endpoints can run without a credential and
+do not inherit a machine-level OpenAI key.
 
 ```python
 import os
@@ -46,9 +50,11 @@ registry = ToolRegistry(
 )
 register_ssh_tools(registry, SshServiceClient(os.environ["YUKINAL_SSH_API_TOKEN"]))
 model = ModelFactory().create(ModelConfig(
-    provider="openai",  # Switch to "anthropic" without changing the agent loop.
+    provider="openai",  # Also supports openai-compatible, anthropic and gemini.
     model="${LLM_MODEL}",
     api_key_env="LLM_API_KEY",
+    wire_api="responses",  # OpenAI-compatible only: "chat" or "responses".
+    base_url="${LLM_BASE_URL}",
     timeout_seconds=60,
     max_output_tokens=2048,
 ))

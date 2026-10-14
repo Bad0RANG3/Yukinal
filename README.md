@@ -21,8 +21,9 @@ The current rewrite implements **milestones 1 through 3** from
   defaulting to approval-required;
 - a bounded LangGraph workflow with tool-call, total-time, and output-size
   limits.
-- a configuration-driven OpenAI/Anthropic model factory using official
-  LangChain adapters;
+- a configuration-driven OpenAI-compatible, Anthropic and Gemini model
+  factory using official LangChain adapters, including OpenAI Chat Completions
+  and Responses API selection;
 - a model-driven LangGraph tool loop with tenant/user/target/risk policy,
   exact-argument approval requests, and bounded model output.
 - the Python Node's bounded NDJSON/JSON-RPC transport and desktop initialization,
