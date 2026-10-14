@@ -7,7 +7,7 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-dev = []
+test = ["paramiko>=3.5,<6"]
 
 [build-system]
 requires = ["hatchling"]

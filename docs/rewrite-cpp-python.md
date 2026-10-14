@@ -125,15 +125,31 @@ ctest --test-dir native/build -C Release --output-on-failure
 
 The CTest suite covers config/schema validation, operation policy, Python client
 behavior, and a live Python-to-C++ HTTP path including health, allowlist
-rejection, origin rejection, and SSH connection failure classification. The
-optional OpenSSH container test covers a successful SSH operation, bad
-credentials, command timeout/output limit, and unknown/changed host keys.
+rejection, origin rejection, and SSH connection failure classification. When the
+optional `agent[test]` extra is installed before CMake configuration, CTest also
+runs a Paramiko SSH mock for success, bad credentials, command timeout, output
+limit, and unknown/changed host keys. The separate OpenSSH container test checks
+the same SSH cases against OpenSSH.
 
-Local verification on 2026-10-15: all six Python client tests passed. C++
-configuration stopped while fetching the pinned source dependencies because
-the shell could not connect to GitHub; therefore no C++ build or CTest result is
-claimed. The OpenSSH success script is present, but Docker is not installed in
-this environment, so that test was not run.
+Local verification on 2026-10-15: Windows 11, Visual Studio 2022 17.14.39,
+CMake 4.4.4, and Python 3.14.8 successfully configured and built the C++ service
+and unit-test executable. With the Visual Studio developer environment active,
+the verified commands were:
+
+```powershell
+cmake -S native -B native/build-nmake -G "NMake Makefiles"
+cmake --build native/build-nmake --config Release
+ctest --test-dir native/build-nmake -C Release --output-on-failure
+```
+
+CTest passed all four registered targets: C++ config/policy tests, Python
+client tests, the live Python-to-C++ HTTP integration tests, and the Paramiko
+SSH mock integration. The HTTP path verified health, allowlist rejection,
+browser-origin rejection, and SSH connection-failure classification. The mock
+SSH path verified a successful read-only operation and the auth, timeout,
+output-cap, and host-key rejection cases. The separate OpenSSH test container
+was not run because Docker is unavailable, so compatibility with an OpenSSH
+server remains unverified.
 
 ## Deliberately deferred
 

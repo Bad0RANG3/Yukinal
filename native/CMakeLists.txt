@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(YUKINAL_BUILD_TESTS "Build the SSH service tests" ON)
 option(YUKINAL_FETCH_DEPS "Fetch pinned third-party source dependencies" ON)
+option(YUKINAL_ENABLE_SSH_MOCK_TEST "Register the Paramiko SSH mock test when Paramiko is installed" ON)
 option(YUKINAL_ENABLE_SSH_CONTAINER_TEST "Register the real OpenSSH container integration test" OFF)
 
 if(YUKINAL_FETCH_DEPS)
@@ -81,6 +82,7 @@ target_link_libraries(yukinal_ssh_core
   PRIVATE libssh2::libssh2 Threads::Threads
 )
 if(WIN32)
+  target_compile_definitions(yukinal_ssh_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(yukinal_ssh_core PRIVATE ws2_32)
 endif()
 
@@ -115,6 +117,28 @@ if(YUKINAL_BUILD_TESTS)
     ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
     TIMEOUT 30
   )
+
+  if(YUKINAL_ENABLE_SSH_MOCK_TEST)
+    execute_process(
+      COMMAND ${Python3_EXECUTABLE} -c "import paramiko"
+      RESULT_VARIABLE YUKINAL_PARAMIKO_IMPORT_RESULT
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    if(YUKINAL_PARAMIKO_IMPORT_RESULT EQUAL 0)
+      add_test(
+        NAME ssh_mock_integration
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test_ssh_mock.py
+                --service-binary $<TARGET_FILE:yukinal-ssh-service>
+      )
+      set_tests_properties(ssh_mock_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
+        TIMEOUT 60
+      )
+    else()
+      message(STATUS "Paramiko is not installed; ssh_mock_integration is not registered (install agent[test])")
+    endif()
+  endif()
 
   if(YUKINAL_ENABLE_SSH_CONTAINER_TEST)
     add_test(

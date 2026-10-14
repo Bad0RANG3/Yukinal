@@ -49,6 +49,17 @@ The Python client can be installed for development with:
 python -m pip install -e agent
 ```
 
+To include the Paramiko SSH mock in CTest, install the optional test extra
+before configuring CMake:
+
+```powershell
+python -m pip install -e "agent[test]"
+```
+
+CMake registers `ssh_mock_integration` when Paramiko is available. This test
+covers SSH success, bad credentials, timeouts, output limits, and unknown or
+changed host keys without requiring Docker.
+
 Its only enabled operation is:
 
 ```python
