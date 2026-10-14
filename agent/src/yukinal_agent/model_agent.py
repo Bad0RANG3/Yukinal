@@ -68,6 +68,7 @@ class ModelAgentResult:
     tool_calls: int
     output_bytes: int
     error_code: str | None = None
+    checkpoint_id: str | None = None
 
 
 class _AgentState(TypedDict, total=False):
@@ -92,6 +93,7 @@ class _AgentState(TypedDict, total=False):
     approval_requests: list[dict[str, Any]]
     status: str
     error_code: str | None
+    rejected_call_ids: list[str]
 
 
 class ModelDrivenAgent:
@@ -107,6 +109,7 @@ class ModelDrivenAgent:
         self._registry = registry
         self._budget = budget or AgentBudget()
         self._event_sink = event_sink
+        self._approval_checkpoints: set[str] = set()
         tool_specs = registry.list()
         tool_definitions = [
             {
@@ -200,8 +203,10 @@ class ModelDrivenAgent:
             "approval_requests": [],
             "status": "running",
             "error_code": None,
+            "rejected_call_ids": [],
         }
-        config = {"configurable": {"thread_id": f"{task_id}-{uuid.uuid4().hex}"}}
+        checkpoint_id = f"agent-{uuid.uuid4().hex}"
+        config = {"configurable": {"thread_id": checkpoint_id}}
         try:
             async with asyncio.timeout(self._budget.max_total_seconds):
                 state = await self._graph.ainvoke(initial, config=config)
@@ -209,6 +214,90 @@ class ModelDrivenAgent:
             return _failed_result(task_id, "task_timeout", status="timed_out")
         except Exception:
             return _failed_result(task_id, "agent_workflow_failed")
+        if state.get("status") == "awaiting_approval":
+            self._approval_checkpoints.add(checkpoint_id)
+        return self._result_from_state(
+            state,
+            task_id=task_id,
+            checkpoint_id=checkpoint_id if state.get("status") == "awaiting_approval" else None,
+        )
+
+    async def resume_after_approval(
+        self,
+        checkpoint_id: str,
+        approval_fingerprint: str,
+        approval_ref: str | None,
+        *,
+        approved: bool,
+    ) -> ModelAgentResult:
+        """Resume one paused graph after a trusted host returns its approval decision."""
+        if (
+            not isinstance(checkpoint_id, str)
+            or checkpoint_id not in self._approval_checkpoints
+            or not isinstance(approval_fingerprint, str)
+            or not approval_fingerprint
+            or not isinstance(approved, bool)
+            or approved and (not isinstance(approval_ref, str) or not approval_ref.strip())
+        ):
+            return _failed_result("approval", "invalid_approval_resume")
+        config = {"configurable": {"thread_id": checkpoint_id}}
+        state: _AgentState = {}
+        try:
+            snapshot = await self._graph.aget_state(config)
+            state = snapshot.values
+            pending = next(
+                (item for item in state.get("approval_requests", []) if item.get("fingerprint") == approval_fingerprint),
+                None,
+            )
+            if state.get("status") != "awaiting_approval" or pending is None:
+                return _failed_result(str(state.get("task_id", "approval")), "approval_not_pending")
+            calls = state.get("calls", [])
+            call_index = state.get("call_index", -1)
+            if not 0 <= call_index < len(calls):
+                return _failed_result(str(state.get("task_id", "approval")), "approval_state_invalid")
+            call_id = calls[call_index].get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                return _failed_result(str(state.get("task_id", "approval")), "approval_state_invalid")
+
+            remaining_requests = [
+                item for item in state.get("approval_requests", [])
+                if item.get("fingerprint") != approval_fingerprint
+            ]
+            update: dict[str, Any] = {
+                "approval_requests": remaining_requests,
+                "status": "running",
+                "error_code": None,
+            }
+            if approved:
+                approved_actions = dict(state.get("approved_actions", {}))
+                approved_actions[approval_fingerprint] = approval_ref
+                update["approved_actions"] = approved_actions
+            else:
+                update["rejected_call_ids"] = [*state.get("rejected_call_ids", []), call_id]
+            async with asyncio.timeout(self._budget.max_total_seconds):
+                await self._graph.aupdate_state(config, update, as_node="execute_tool")
+                resumed_state = await self._graph.ainvoke(None, config=config)
+        except TimeoutError:
+            return _failed_result(str(state.get("task_id", "approval")), "task_timeout", status="timed_out")
+        except Exception:
+            return _failed_result("approval", "agent_workflow_failed")
+
+        still_pending = resumed_state.get("status") == "awaiting_approval"
+        if not still_pending:
+            self._approval_checkpoints.discard(checkpoint_id)
+        return self._result_from_state(
+            resumed_state,
+            task_id=str(resumed_state.get("task_id", "approval")),
+            checkpoint_id=checkpoint_id if still_pending else None,
+        )
+
+    @staticmethod
+    def _result_from_state(
+        state: _AgentState,
+        *,
+        task_id: str,
+        checkpoint_id: str | None,
+    ) -> ModelAgentResult:
         return ModelAgentResult(
             task_id=task_id,
             status=str(state.get("status", "failed")),
@@ -218,6 +307,7 @@ class ModelDrivenAgent:
             tool_calls=int(state.get("tool_call_count", 0)),
             output_bytes=int(state.get("output_bytes", 0)),
             error_code=state.get("error_code"),
+            checkpoint_id=checkpoint_id,
         )
 
     async def _call_model(self, state: _AgentState) -> dict[str, Any]:
@@ -278,7 +368,13 @@ class ModelDrivenAgent:
             call_id = call.get("id")
             if not isinstance(call_id, str) or not call_id:
                 call_id = f"call-{next_round}-{len(clean_calls)}"
-            clean_calls.append({"name": call["name"], "arguments": call["args"], "id": call_id})
+            clean_calls.append({
+                "name": call["name"],
+                "arguments": call["args"],
+                "id": call_id,
+                "call_id": f"call-{uuid.uuid4().hex}",
+                "event_emitted": False,
+            })
         return {
             "messages": [*state["messages"], response],
             "calls": clean_calls,
@@ -311,10 +407,42 @@ class ModelDrivenAgent:
         if remaining <= 0:
             return {"status": "failed", "error_code": "output_budget_exceeded"}
         spec = self._registry.get(request["name"])
-        call_id = f"call-{uuid.uuid4().hex}"
-        started_at = datetime.now(UTC).isoformat()
+        call_id = request["call_id"]
+        started_at = request.get("started_at") or datetime.now(UTC).isoformat()
         event_base = _tool_event_base(request, state, spec, call_id)
-        self._emit_tool_call(event_base)
+        if not request.get("event_emitted"):
+            self._emit_tool_call(event_base)
+        if call_id in state.get("rejected_call_ids", []):
+            self._emit_tool_result(
+                event_base,
+                started_at=started_at,
+                status="failed",
+                output_summary="Approval rejected",
+                error="The user rejected this tool call",
+                error_code="denied_by_policy",
+            )
+            results = [
+                item for item in state["tool_results"]
+                if not (item.get("call_id") == call_id and item.get("status") == "awaiting_approval")
+            ]
+            results.append({
+                "call_id": call_id,
+                "tool": request["name"],
+                "status": "failed",
+                "error_code": "denied_by_policy",
+            })
+            tool_message = ToolMessage(
+                content="The user rejected this tool call.",
+                tool_call_id=request["id"],
+                name=request["name"],
+            )
+            return {
+                "messages": [*state["messages"], tool_message],
+                "tool_results": results,
+                "call_index": state["call_index"] + 1,
+                "status": "running",
+                "error_code": None,
+            }
         tool_timeout = min(
             self._budget.max_tool_seconds,
             (spec.timeout_ms / 1000) if spec is not None else self._budget.max_tool_seconds,
@@ -341,18 +469,28 @@ class ModelDrivenAgent:
         except ToolCallError as error:
             event_code = _event_error_code(error.code)
             event_status = "cancelled" if event_code == "cancelled" else "failed"
-            self._emit_tool_result(
-                event_base,
-                started_at=started_at,
-                status=event_status,
-                output_summary=f"Tool call failed ({event_code})",
-                error=error.args[0] if error.args else "Tool call failed",
-                error_code=event_code,
+            pending = (
+                error.code == "approval_required"
+                and error.approval_fingerprint is not None
+                and spec is not None
             )
-            pending = error.code == "approval_required"
+            if not pending:
+                self._emit_tool_result(
+                    event_base,
+                    started_at=started_at,
+                    status=event_status,
+                    output_summary=f"Tool call failed ({event_code})",
+                    error=error.args[0] if error.args else "Tool call failed",
+                    error_code=event_code,
+                )
             results = [
                 *state["tool_results"],
-                {"tool": request["name"], "status": "awaiting_approval" if pending else "failed", "error_code": error.code},
+                {
+                    "call_id": call_id,
+                    "tool": request["name"],
+                    "status": "awaiting_approval" if pending else "failed",
+                    "error_code": error.code,
+                },
             ]
             update: dict[str, Any] = {
                 "tool_results": results,
@@ -360,18 +498,19 @@ class ModelDrivenAgent:
                 "status": "awaiting_approval" if pending else "failed",
                 "error_code": error.code,
             }
-            if error.code == "approval_required" and error.approval_fingerprint is not None:
-                spec = self._registry.get(request["name"])
-                if spec is not None:
-                    approval = {
-                        "fingerprint": error.approval_fingerprint,
-                        "tool_name": spec.name,
-                        "target_id": error.target_id,
-                        "risk_level": spec.risk_level,
-                        "arguments": _redact_arguments(request["arguments"]),
-                    }
-                    update["approval_requests"] = [*state["approval_requests"], approval]
-                    update["status"] = "awaiting_approval"
+            if pending:
+                calls = [dict(item) for item in state["calls"]]
+                calls[state["call_index"]]["event_emitted"] = True
+                calls[state["call_index"]]["started_at"] = started_at
+                approval = {
+                    "fingerprint": error.approval_fingerprint,
+                    "tool_name": spec.name,
+                    "target_id": error.target_id,
+                    "risk_level": spec.risk_level,
+                    "arguments": _redact_arguments(request["arguments"]),
+                }
+                update["calls"] = calls
+                update["approval_requests"] = [*state["approval_requests"], approval]
             return update
         except Exception:
             self._emit_tool_result(
@@ -393,6 +532,7 @@ class ModelDrivenAgent:
         )
         output_size = result.output_bytes
         item = {
+            "call_id": call_id,
             "tool": result.tool_name,
             "status": "succeeded",
             "result": result.value,

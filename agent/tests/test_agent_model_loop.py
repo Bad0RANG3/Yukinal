@@ -45,7 +45,7 @@ def _scope() -> PolicyEngine:
     return PolicyEngine({
         ("tenant-1", "user-1"): PrincipalScope(
             frozenset({"ops.read", "ops.write"}),
-            frozenset({"stage-1"}),
+            frozenset({"stage-1", "srv_stage1"}),
             frozenset({"read", "write"}),
         )
     })
@@ -267,6 +267,88 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(changed.status, "awaiting_approval")
         self.assertEqual(len(executions), 1)
+
+    async def test_paused_graph_resumes_the_same_approved_call(self) -> None:
+        executions: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            executions.append(arguments)
+            return "changed"
+
+        call = {
+            "name": "ops.write",
+            "args": {"target_id": "srv_stage1", "value": "blue", "password": "hidden"},
+            "id": "write-resume-1",
+            "type": "tool_call",
+        }
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[call]),
+            AIMessage(content="The change is complete."),
+        ])
+        agent = ModelDrivenAgent(_registry(handler, write=True), model, event_sink=events.append)
+        first = await agent.run(
+            task_id="task-resume", tenant_id="tenant-1", user_id="user-1", prompt="Change the value.",
+            allowed_tools={"ops.write"}, allowed_target_ids={"srv_stage1"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+
+        self.assertEqual(first.status, "awaiting_approval")
+        self.assertIsNotNone(first.checkpoint_id)
+        self.assertEqual(executions, [])
+        self.assertEqual([event["type"] for event in events], ["agent.tool_call"])
+        self.assertEqual(events[0]["decision"], "ask")
+        approval = first.approval_requests[0]
+        resumed = await agent.resume_after_approval(
+            first.checkpoint_id or "",
+            approval.fingerprint,
+            "approval-ref-1",
+            approved=True,
+        )
+
+        self.assertEqual(resumed.status, "succeeded")
+        self.assertEqual(resumed.answer, "The change is complete.")
+        self.assertEqual(executions, [{"target_id": "srv_stage1", "value": "blue", "password": "hidden"}])
+        self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result"])
+        self.assertEqual(events[1]["callId"], events[0]["callId"])
+        self.assertEqual(events[1]["status"], "success")
+        self.assertIsNone(resumed.checkpoint_id)
+
+    async def test_rejected_approval_resumes_without_executing_the_tool(self) -> None:
+        executions: list[bool] = []
+
+        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            executions.append(True)
+            return "changed"
+
+        call = {
+            "name": "ops.write",
+            "args": {"target_id": "stage-1", "value": "blue"},
+            "id": "write-reject-1",
+            "type": "tool_call",
+        }
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[call]),
+            AIMessage(content="I stopped without changing it."),
+        ])
+        agent = ModelDrivenAgent(_registry(handler, write=True), model)
+        first = await agent.run(
+            task_id="task-reject", tenant_id="tenant-1", user_id="user-1", prompt="Change the value.",
+            allowed_tools={"ops.write"}, allowed_target_ids={"stage-1"},
+        )
+        approval = first.approval_requests[0]
+        rejected = await agent.resume_after_approval(
+            first.checkpoint_id or "",
+            approval.fingerprint,
+            None,
+            approved=False,
+        )
+
+        self.assertEqual(rejected.status, "succeeded")
+        self.assertEqual(rejected.answer, "I stopped without changing it.")
+        self.assertEqual(executions, [])
+        self.assertEqual(rejected.tool_results[-1]["status"], "failed")
+        self.assertEqual(rejected.tool_results[-1]["error_code"], "denied_by_policy")
 
     async def test_model_round_limit_and_untrusted_result_boundary(self) -> None:
         async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
