@@ -309,6 +309,9 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.status, "succeeded")
         self.assertEqual(resumed.answer, "The change is complete.")
         self.assertEqual(executions, [{"target_id": "srv_stage1", "value": "blue", "password": "hidden"}])
+        self.assertEqual(resumed.tool_calls, 1)
+        self.assertEqual(len(resumed.tool_results), 1)
+        self.assertEqual(resumed.tool_results[0]["status"], "succeeded")
         self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result"])
         self.assertEqual(events[1]["callId"], events[0]["callId"])
         self.assertEqual(events[1]["status"], "success")
@@ -345,10 +348,50 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(rejected.status, "succeeded")
-        self.assertEqual(rejected.answer, "I stopped without changing it.")
+        self.assertEqual(
+            rejected.answer,
+            "I stopped without making the requested change because approval was rejected.",
+        )
         self.assertEqual(executions, [])
         self.assertEqual(rejected.tool_results[-1]["status"], "failed")
-        self.assertEqual(rejected.tool_results[-1]["error_code"], "denied_by_policy")
+        self.assertEqual(rejected.tool_results[-1]["error_code"], "approval_rejected")
+        self.assertEqual(len(model.responses), 1, "the model must not be called again after rejection")
+
+    async def test_expired_approval_ends_the_graph_without_retry(self) -> None:
+        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            self.fail("an expired approval must never execute the tool")
+
+        call = {
+            "name": "ops.write",
+            "args": {"target_id": "stage-1", "value": "blue"},
+            "id": "write-timeout-1",
+            "type": "tool_call",
+        }
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[call]),
+            AIMessage(content="The operation is done."),
+        ])
+        agent = ModelDrivenAgent(_registry(handler, write=True), model)
+        first = await agent.run(
+            task_id="task-timeout", tenant_id="tenant-1", user_id="user-1", prompt="Change the value.",
+            allowed_tools={"ops.write"}, allowed_target_ids={"stage-1"},
+        )
+        approval = first.approval_requests[0]
+        expired = await agent.resume_after_approval(
+            first.checkpoint_id or "",
+            approval.fingerprint,
+            None,
+            approved=False,
+            rejection_code="approval_timeout",
+        )
+
+        self.assertEqual(expired.status, "succeeded")
+        self.assertEqual(
+            expired.answer,
+            "I stopped without making the requested change because approval expired.",
+        )
+        self.assertEqual(expired.tool_results[-1]["error_code"], "approval_timeout")
+        self.assertEqual(len(model.responses), 1, "the model must not be called again after expiration")
 
     async def test_model_round_limit_and_untrusted_result_boundary(self) -> None:
         async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:

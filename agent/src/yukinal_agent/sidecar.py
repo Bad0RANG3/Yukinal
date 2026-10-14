@@ -6,9 +6,10 @@ import json
 import os
 import re
 import sys
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 from urllib.error import HTTPError, URLError
@@ -40,7 +41,7 @@ METHODS = {
     "system.describe": True,
     "agent.run.start": True,
     "agent.run.stop": True,
-    "agent.approval.respond": False,
+    "agent.approval.respond": True,
     "provider.models": True,
     "provider.test": True,
 }
@@ -53,6 +54,14 @@ class _RpcFault(Exception):
     data: Any = None
 
 
+@dataclass
+class _PendingApproval:
+    run_id: str
+    checkpoint_id: str
+    fingerprint: str
+    future: asyncio.Future[str]
+
+
 class PythonSidecar:
     """Minimal version-1 desktop JSON-RPC boundary for the Python Agent Node."""
 
@@ -63,11 +72,15 @@ class PythonSidecar:
         agent_version: str = "0.1.0",
         model_factory: ModelFactory | None = None,
         notification_sink: Callable[[str, dict[str, Any]], None] | None = None,
+        approval_ttl_seconds: int = 120,
     ) -> None:
+        if isinstance(approval_ttl_seconds, bool) or not isinstance(approval_ttl_seconds, int) or not 1 <= approval_ttl_seconds <= 3600:
+            raise ValueError("approval_ttl_seconds must be between 1 and 3600")
         self._registry = registry
         self._agent_version = agent_version
         self._model_factory = model_factory or ModelFactory()
         self._notification_sink = notification_sink
+        self._approval_ttl_seconds = approval_ttl_seconds
         self._initialized = False
         self._active_runs: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._completed_runs: OrderedDict[str, str] = OrderedDict()
@@ -75,6 +88,7 @@ class PythonSidecar:
         self._host_rpc: HostRpcClient | None = None
         self._host_tools_registered = False
         self._mcp_loaded = False
+        self._pending_approvals: dict[str, _PendingApproval] = {}
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -116,6 +130,8 @@ class PythonSidecar:
                     "toolNameCollisions": [],
                     "implemented": dict(METHODS),
                 }
+            elif method == "agent.approval.respond":
+                result = self._approval_respond(params)
             elif method in METHODS:
                 raise _RpcFault(RPC_NOT_IMPLEMENTED, f"Method {method} is not implemented by this Agent Node")
             else:
@@ -135,7 +151,10 @@ class PythonSidecar:
             not isinstance(request, dict)
             or request.get("jsonrpc") != "2.0"
             or not isinstance(request.get("method"), str)
-            or request.get("method") not in ("initialize", "provider.models", "provider.test", "agent.run.start", "agent.run.stop")
+            or request.get("method") not in (
+                "initialize", "provider.models", "provider.test", "agent.run.start", "agent.run.stop",
+                "agent.approval.respond",
+            )
             or not isinstance(request.get("id"), int)
             or isinstance(request.get("id"), bool)
         ):
@@ -165,6 +184,8 @@ class PythonSidecar:
                 result = await self._run_start(request.get("params", {}))
             elif method == "agent.run.stop":
                 result = self._run_stop(request.get("params", {}))
+            elif method == "agent.approval.respond":
+                result = self._approval_respond(request.get("params", {}))
             else:
                 return self.handle(request)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -303,6 +324,25 @@ class PythonSidecar:
         task.cancel()
         return {"stopped": True}
 
+    def _approval_respond(self, params: object) -> dict[str, bool]:
+        parsed = _strict_object(params, {"approvalId", "runId", "decision", "respondedAt"})
+        approval_id = parsed.get("approvalId")
+        run_id = parsed.get("runId")
+        decision = parsed.get("decision")
+        responded_at = parsed.get("respondedAt")
+        if (
+            not isinstance(approval_id, str) or not approval_id.strip() or len(approval_id) > 256
+            or not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 256
+            or decision not in ("approve_once", "reject")
+            or not isinstance(responded_at, str) or not responded_at.strip() or len(responded_at) > 80
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid approval response")
+        pending = self._pending_approvals.get(approval_id)
+        if pending is None or pending.run_id != run_id or pending.future.done():
+            return {"accepted": False}
+        pending.future.set_result(decision)
+        return {"accepted": True}
+
     async def _execute_run(
         self,
         request: dict[str, Any],
@@ -319,10 +359,8 @@ class PythonSidecar:
         })
         try:
             target_id = request.get("targetId")
-            allowed_tools = frozenset(
-                spec.name for spec in self._registry.list()
-                if spec.risk_level == "read" and not spec.requires_approval
-            )
+            mode = request.get("mode", "goal")
+            allowed_tools = _allowed_tool_names(self._registry, mode)
             result = await agent.run(
                 task_id=_safe_context_id("task", task_id or run_id),
                 tenant_id="local",
@@ -335,6 +373,8 @@ class PythonSidecar:
                 run_id=run_id,
                 trace_id=_safe_context_id("trace", run_id),
             )
+            while result.status == "awaiting_approval":
+                result = await self._await_approval(request, run_id, agent, result)
             text = result.answer[:200_000]
             base_result: dict[str, Any] = {
                 "runId": run_id,
@@ -386,6 +426,11 @@ class PythonSidecar:
             })
             return result
         finally:
+            for approval_id, pending in list(self._pending_approvals.items()):
+                if pending.run_id == run_id:
+                    self._pending_approvals.pop(approval_id, None)
+                    if not pending.future.done():
+                        pending.future.cancel()
             self._active_runs.pop(run_id, None)
             self._completed_runs[run_id] = _run_fingerprint(request)
             self._completed_runs.move_to_end(run_id)
@@ -409,6 +454,79 @@ class PythonSidecar:
     def _emit(self, event: dict[str, Any]) -> None:
         if self._notification_sink is not None:
             self._notification_sink("agent.stream", event)
+
+    async def _await_approval(
+        self,
+        request: dict[str, Any],
+        run_id: str,
+        agent: ModelDrivenAgent,
+        result: Any,
+    ) -> Any:
+        if result.checkpoint_id is None or not result.approval_requests:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Agent paused without a resumable approval")
+        approval = result.approval_requests[0]
+        pending_call = next(
+            (
+                item for item in reversed(result.tool_results)
+                if isinstance(item, dict) and item.get("status") == "awaiting_approval"
+            ),
+            None,
+        )
+        call_id = pending_call.get("call_id") if isinstance(pending_call, dict) else None
+        if not isinstance(call_id, str) or not call_id:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Agent approval is missing its tool call identity")
+
+        approval_id = f"apr_{uuid.uuid4().hex}"
+        fingerprint = approval.fingerprint
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_approvals[approval_id] = _PendingApproval(run_id, result.checkpoint_id, fingerprint, future)
+        target = request.get("hostTarget")
+        if not isinstance(target, dict):
+            target = {"host": "local", "environment": "unknown"}
+        expires_at = (datetime.now(UTC) + timedelta(seconds=self._approval_ttl_seconds)).isoformat()
+        self._emit({
+            "type": "agent.waiting_approval",
+            "runId": run_id,
+            **({"taskId": request["taskId"]} if request.get("taskId") else {}),
+            "approval": {
+                "approvalId": approval_id,
+                "runId": run_id,
+                "traceId": _safe_context_id("trace", run_id),
+                "callId": call_id,
+                "inputFingerprint": fingerprint,
+                "toolName": approval.tool_name,
+                "input": approval.arguments,
+                "reason": f"{approval.tool_name} needs your approval before it can run.",
+                "factsSummary": [f"Risk level: {approval.risk_level}", "The tool has not run yet."],
+                "target": dict(target),
+                "expiresAt": expires_at,
+                "sessionGrantable": False,
+            },
+            "at": _timestamp(),
+        })
+        try:
+            decision = await asyncio.wait_for(future, timeout=self._approval_ttl_seconds)
+        except TimeoutError:
+            self._emit({"type": "agent.approval_expired", "runId": run_id, "approvalId": approval_id, "at": _timestamp()})
+            decision = "reject"
+            rejection_code = "approval_timeout"
+        else:
+            rejection_code = "approval_rejected"
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+        resume_args = (
+            result.checkpoint_id,
+            fingerprint,
+            approval_id if decision == "approve_once" else None,
+        )
+        if decision == "approve_once":
+            return await agent.resume_after_approval(*resume_args, approved=True)
+        return await agent.resume_after_approval(
+            *resume_args,
+            approved=False,
+            rejection_code=rejection_code,
+        )
 
     async def shutdown(self) -> None:
         active = list(self._active_runs.values())
@@ -723,6 +841,18 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "hostTarget": host_target,
         "agentBudget": task_budget,
     }
+
+
+def _allowed_tool_names(registry: ToolRegistry, mode: str) -> frozenset[str]:
+    return frozenset(
+        spec.name for spec in registry.list()
+        if (spec.risk_level == "read" and not spec.requires_approval)
+        or (
+            mode == "goal"
+            and spec.risk_level in ("write", "destructive")
+            and spec.requires_approval
+        )
+    )
 
 
 def _prompt_text(prompt: str, parts: object) -> str:

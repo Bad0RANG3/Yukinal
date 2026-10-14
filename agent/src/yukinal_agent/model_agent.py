@@ -94,6 +94,8 @@ class _AgentState(TypedDict, total=False):
     status: str
     error_code: str | None
     rejected_call_ids: list[str]
+    rejection_codes: dict[str, str]
+    counted_call_ids: list[str]
 
 
 class ModelDrivenAgent:
@@ -204,6 +206,8 @@ class ModelDrivenAgent:
             "status": "running",
             "error_code": None,
             "rejected_call_ids": [],
+            "rejection_codes": {},
+            "counted_call_ids": [],
         }
         checkpoint_id = f"agent-{uuid.uuid4().hex}"
         config = {"configurable": {"thread_id": checkpoint_id}}
@@ -229,6 +233,7 @@ class ModelDrivenAgent:
         approval_ref: str | None,
         *,
         approved: bool,
+        rejection_code: str = "approval_rejected",
     ) -> ModelAgentResult:
         """Resume one paused graph after a trusted host returns its approval decision."""
         if (
@@ -237,6 +242,7 @@ class ModelDrivenAgent:
             or not isinstance(approval_fingerprint, str)
             or not approval_fingerprint
             or not isinstance(approved, bool)
+            or rejection_code not in ("approval_rejected", "approval_timeout")
             or approved and (not isinstance(approval_ref, str) or not approval_ref.strip())
         ):
             return _failed_result("approval", "invalid_approval_resume")
@@ -274,6 +280,9 @@ class ModelDrivenAgent:
                 update["approved_actions"] = approved_actions
             else:
                 update["rejected_call_ids"] = [*state.get("rejected_call_ids", []), call_id]
+                rejection_codes = dict(state.get("rejection_codes", {}))
+                rejection_codes[call_id] = rejection_code
+                update["rejection_codes"] = rejection_codes
             async with asyncio.timeout(self._budget.max_total_seconds):
                 await self._graph.aupdate_state(config, update, as_node="execute_tool")
                 resumed_state = await self._graph.ainvoke(None, config=config)
@@ -410,16 +419,26 @@ class ModelDrivenAgent:
         call_id = request["call_id"]
         started_at = request.get("started_at") or datetime.now(UTC).isoformat()
         event_base = _tool_event_base(request, state, spec, call_id)
+        counted_call_ids = state.get("counted_call_ids", [])
+        already_counted = call_id in counted_call_ids
+        next_counted_call_ids = counted_call_ids if already_counted else [*counted_call_ids, call_id]
+        next_tool_call_count = state["tool_call_count"] + (0 if already_counted else 1)
         if not request.get("event_emitted"):
             self._emit_tool_call(event_base)
         if call_id in state.get("rejected_call_ids", []):
+            rejection_code = state.get("rejection_codes", {}).get(call_id, "approval_rejected")
+            answer = (
+                "I stopped without making the requested change because approval expired."
+                if rejection_code == "approval_timeout"
+                else "I stopped without making the requested change because approval was rejected."
+            )
             self._emit_tool_result(
                 event_base,
                 started_at=started_at,
                 status="failed",
-                output_summary="Approval rejected",
-                error="The user rejected this tool call",
-                error_code="denied_by_policy",
+                output_summary="Approval expired" if rejection_code == "approval_timeout" else "Approval rejected",
+                error="Approval was not granted; the tool was not executed",
+                error_code=rejection_code,
             )
             results = [
                 item for item in state["tool_results"]
@@ -429,18 +448,24 @@ class ModelDrivenAgent:
                 "call_id": call_id,
                 "tool": request["name"],
                 "status": "failed",
-                "error_code": "denied_by_policy",
+                "error_code": rejection_code,
             })
-            tool_message = ToolMessage(
-                content="The user rejected this tool call.",
-                tool_call_id=request["id"],
-                name=request["name"],
-            )
+            answer_size = len(answer.encode("utf-8"))
+            if state["output_bytes"] + answer_size > self._budget.max_output_bytes:
+                return {
+                    "tool_results": results,
+                    "counted_call_ids": next_counted_call_ids,
+                    "tool_call_count": next_tool_call_count,
+                    "status": "failed",
+                    "error_code": "output_budget_exceeded",
+                }
             return {
-                "messages": [*state["messages"], tool_message],
                 "tool_results": results,
-                "call_index": state["call_index"] + 1,
-                "status": "running",
+                "counted_call_ids": next_counted_call_ids,
+                "tool_call_count": next_tool_call_count,
+                "answer": answer,
+                "output_bytes": state["output_bytes"] + answer_size,
+                "status": "succeeded",
                 "error_code": None,
             }
         tool_timeout = min(
@@ -484,17 +509,19 @@ class ModelDrivenAgent:
                     error_code=event_code,
                 )
             results = [
-                *state["tool_results"],
-                {
-                    "call_id": call_id,
-                    "tool": request["name"],
-                    "status": "awaiting_approval" if pending else "failed",
-                    "error_code": error.code,
-                },
+                item for item in state["tool_results"]
+                if not (item.get("call_id") == call_id and item.get("status") == "awaiting_approval")
             ]
+            results.append({
+                "call_id": call_id,
+                "tool": request["name"],
+                "status": "awaiting_approval" if pending else "failed",
+                "error_code": error.code,
+            })
             update: dict[str, Any] = {
                 "tool_results": results,
-                "tool_call_count": state["tool_call_count"] + 1,
+                "counted_call_ids": next_counted_call_ids,
+                "tool_call_count": next_tool_call_count,
                 "status": "awaiting_approval" if pending else "failed",
                 "error_code": error.code,
             }
@@ -521,7 +548,23 @@ class ModelDrivenAgent:
                 error="Tool execution failed",
                 error_code="internal",
             )
-            return {"status": "failed", "error_code": "tool_failed"}
+            results = [
+                item for item in state["tool_results"]
+                if not (item.get("call_id") == call_id and item.get("status") == "awaiting_approval")
+            ]
+            results.append({
+                "call_id": call_id,
+                "tool": request["name"],
+                "status": "failed",
+                "error_code": "tool_failed",
+            })
+            return {
+                "tool_results": results,
+                "counted_call_ids": next_counted_call_ids,
+                "tool_call_count": next_tool_call_count,
+                "status": "failed",
+                "error_code": "tool_failed",
+            }
 
         self._emit_tool_result(
             event_base,
@@ -546,8 +589,15 @@ class ModelDrivenAgent:
         next_index = state["call_index"] + 1
         return {
             "messages": [*state["messages"], tool_message],
-            "tool_results": [*state["tool_results"], item],
-            "tool_call_count": state["tool_call_count"] + 1,
+            "tool_results": [
+                *(
+                    entry for entry in state["tool_results"]
+                    if not (entry.get("call_id") == call_id and entry.get("status") == "awaiting_approval")
+                ),
+                item,
+            ],
+            "counted_call_ids": next_counted_call_ids,
+            "tool_call_count": next_tool_call_count,
             "output_bytes": state["output_bytes"] + output_size,
             "call_index": next_index,
             "status": "running",
