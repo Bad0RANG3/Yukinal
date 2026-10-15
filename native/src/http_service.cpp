@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <mutex>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #ifdef _WIN32
@@ -114,7 +116,10 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     set_json(response, 200, Json{{"status", "healthy"}});
   });
 
-  server.Post("/v1/ssh/exec", [&config, &api_token, runner = std::move(runner)](
+  std::mutex consumed_server_exec_mutex;
+  std::unordered_set<std::string> consumed_server_exec_targets;
+  server.Post("/v1/ssh/exec", [&config, &api_token, &consumed_server_exec_mutex,
+                               &consumed_server_exec_targets, runner = std::move(runner)](
                                   const httplib::Request& request, httplib::Response& response) {
     if (!authorized(request, api_token)) {
       set_api_error(response, 401, "unauthorized", "A valid local service token is required");
@@ -144,6 +149,18 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     if (target == config.targets.end()) {
       set_api_error(response, 404, "unknown_target", "target_id is not present in the configured allowlist");
       return;
+    }
+    if (parsed.operation == "server_exec" && target->second.allow_server_exec) {
+      bool first_use = false;
+      {
+        std::lock_guard<std::mutex> lock(consumed_server_exec_mutex);
+        first_use = consumed_server_exec_targets.insert(parsed.target_id).second;
+      }
+      if (!first_use) {
+        set_api_error(response, 409, "operation_not_allowed",
+                      "the one-shot server.exec authorization has already been used");
+        return;
+      }
     }
 
     ExecResult result;

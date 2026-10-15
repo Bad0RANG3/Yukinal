@@ -959,6 +959,15 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "allow_server_exec": True,
                 },
                 {
+                    "target_id": "srv_server_exec_bounded",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_key_fingerprint": pinned_fingerprint,
+                    "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
+                    "allow_server_exec": True,
+                },
+                {
                     "target_id": "srv_bad_pin",
                     "host": "127.0.0.1",
                     "port": ssh_port,
@@ -1207,20 +1216,33 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if result.stdout != "active\n" or result.exit_code != 0:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
 
-            def run_server_exec(command: str, max_output_bytes: int):
+            def run_server_exec(target_id: str, command: str, max_output_bytes: int):
                 return client.server_exec(
-                    "srv_server_exec_enabled", command, 5000, max_output_bytes
+                    target_id, command, 5000, max_output_bytes
                 )
 
-            exec_result = run_server_exec("printf server-exec-ok", 4096)
+            exec_result = run_server_exec(
+                "srv_server_exec_enabled", "printf server-exec-ok", 4096
+            )
             if exec_result.exit_code != 0 or exec_result.stdout != "authorized-output\n":
                 raise AssertionError(f"C++ server.exec returned an unexpected result: {exec_result!r}")
-            bounded_result = run_server_exec("server-exec-large-output", 4096)
+            bounded_result = run_server_exec(
+                "srv_server_exec_bounded", "server-exec-large-output", 4096
+            )
             if (
                 len(bounded_result.stdout.encode("utf-8")) > 4096
                 or not bounded_result.stdout_truncated
             ):
                 raise AssertionError(f"C++ server.exec did not preserve its combined output cap: {bounded_result!r}")
+            try:
+                run_server_exec("srv_server_exec_enabled", "printf server-exec-ok", 4096)
+            except SshServiceError as error:
+                if error.code != "operation_not_allowed":
+                    raise AssertionError(
+                        f"replayed server.exec returned the wrong error: {error}"
+                    ) from error
+            else:
+                raise AssertionError("C++ service reused a consumed server.exec authorization")
 
             desktop_style_result = client.service_status(
                 "srv_desktop_style", "nginx.service", timeout_seconds=5
