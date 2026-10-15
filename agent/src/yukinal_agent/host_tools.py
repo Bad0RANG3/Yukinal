@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -12,6 +13,50 @@ from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec, appr
 
 _BASE_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {}}
 _MCP_INPUT_SCHEMA = {"type": "object", "additionalProperties": True}
+_PLAN_STEP_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "id", "ordinal", "kind", "title", "purpose", "allowedTools",
+        "successCriteria", "requiresApproval",
+    ],
+    "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$"},
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 63},
+        "kind": {"type": "string", "enum": ["evidence", "decision", "action", "verification"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "allowedTools": {
+            "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"},
+        },
+        "inputBindings": {
+            "type": "object", "maxProperties": 32,
+            "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128},
+            "additionalProperties": {"type": "string", "maxLength": 2048},
+        },
+        "idempotency": {"type": "string", "enum": ["safe", "conditional", "unsafe"]},
+        "riskLevel": {"type": "string", "enum": ["read", "low", "medium", "high", "critical"]},
+        "requiresBaseline": {"type": "boolean"},
+        "preconditions": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "verificationCriteria": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "preview": {"type": "string", "maxLength": 4096},
+        "rollback": {"type": "string", "maxLength": 4096},
+        "evidenceIds": {
+            "type": "array", "maxItems": 128, "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$"},
+        },
+        "successCriteria": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "requiresApproval": {"type": "boolean"},
+        "maxAttempts": {"type": "integer", "minimum": 1, "maximum": 5},
+    },
+}
+_INVESTIGATION_PLAN_INPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["steps"],
+    "properties": {"steps": {"type": "array", "minItems": 1, "maxItems": 64, "items": _PLAN_STEP_SCHEMA}},
+}
 HOST_APPROVAL_TOOLS = frozenset({"server.exec", "docker.restart", "systemd.restart", "package.install"})
 FILESYSTEM_ACTION_TOOLS = frozenset({
     "filesystem.write",
@@ -573,6 +618,25 @@ def register_host_tools(
         for name, description, schema in definitions
         if name not in excluded_names
     ])
+    if "investigation.plan" not in excluded_names:
+        registry.register(ToolSpec(
+            name="investigation.plan",
+            description=(
+                "Create or revise the durable investigation plan for the current task. Declare ordered "
+                "evidence, decision, action, and verification steps with only registered tool names. "
+                "This records a plan and never executes a remote action; the desktop host validates the "
+                "task scope, guardrails, approval requirements, and evidence references."
+            ),
+            input_schema=_INVESTIGATION_PLAN_INPUT_SCHEMA,
+            risk_level="read",
+            requires_approval=False,
+            handler=_investigation_plan_handler(host, registry),
+            target_id_argument=None,
+            target_required=False,
+            origin={"kind": "builtin"},
+            timeout_ms=20_000,
+            cancellable=True,
+        ))
     registry.register(ToolSpec(
         name="server.exec",
         description="Run one bounded command on the selected remote server after exact per-call user approval and host plan checks.",
@@ -775,6 +839,105 @@ def _host_tool_handler(
                     "invalid_host_response", f"The desktop host returned an invalid {tool_name} response"
                 ) from None
         return output
+
+    return execute
+
+
+def _investigation_plan_handler(host: HostRpcClient, registry: ToolRegistry):
+    async def execute(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, Any]:
+        task_id = context.host_task_id
+        if not isinstance(task_id, str) or not task_id:
+            raise ToolCallError("durable_task_required", "Investigation plans require a durable host task")
+        if not context.call_id:
+            raise ToolCallError("invalid_call_identity", "The plan request has no stable tool-call identity")
+
+        steps = arguments.get("steps")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 64:
+            raise ToolCallError("invalid_arguments", "An investigation plan needs between 1 and 64 steps")
+        registered_tools = {
+            spec.name for spec in registry.list() if spec.name != "investigation.plan"
+        }
+        for step in steps:
+            if not isinstance(step, dict) or any(tool not in registered_tools for tool in step["allowedTools"]):
+                raise ToolCallError(
+                    "unknown_plan_tool",
+                    "Every plan step must name tools registered by the desktop host",
+                )
+
+        plan_id = "plan_" + hashlib.sha256(
+            f"{task_id}\x1f{context.call_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        now = datetime.now(UTC).isoformat()
+        plan_steps = []
+        for step in steps:
+            plan_step = dict(step)
+            plan_step.setdefault("evidenceIds", [])
+            plan_step.setdefault("maxAttempts", 1)
+            plan_step.update({
+                "attempts": 0,
+                "status": "pending",
+                "startedAt": None,
+                "endedAt": None,
+                "lastDeviation": None,
+            })
+            plan_steps.append(plan_step)
+        plan = {
+            "id": plan_id,
+            "taskId": task_id,
+            "revision": 0,
+            "status": "draft",
+            "createdAt": now,
+            "updatedAt": now,
+            "steps": plan_steps,
+        }
+        try:
+            response = await host.request(
+                "host.investigation.plan.record", {"plan": plan}, timeout_seconds=18.0
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ToolCallError("host_unavailable", "The desktop host could not record the investigation plan") from None
+
+        if not isinstance(response, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid investigation plan response")
+        if response.get("recorded") is not True:
+            error = response.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            message = error.get("message") if isinstance(error, dict) else None
+            if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+                code = "plan_rejected"
+            if not isinstance(message, str) or len(message) > 2048:
+                message = "The desktop host rejected the investigation plan"
+            raise ToolCallError(code, message)
+
+        saved = response.get("plan")
+        if not isinstance(saved, dict) or saved.get("id") != plan_id:
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid saved plan")
+        current_step_id = saved.get("currentStepId")
+        saved_steps = saved.get("steps")
+        current_step = next(
+            (step for step in saved_steps if isinstance(step, dict) and step.get("id") == current_step_id),
+            None,
+        ) if isinstance(saved_steps, list) else None
+        evidence_ids = current_step.get("evidenceIds") if isinstance(current_step, dict) else None
+        revision = saved.get("revision")
+        if (
+            not isinstance(current_step_id, str)
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or not isinstance(evidence_ids, list)
+            or len(evidence_ids) > 128
+            or any(not isinstance(item, str) or len(item) > 256 for item in evidence_ids)
+        ):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid active plan step")
+        return {
+            "recorded": True,
+            "planId": plan_id,
+            "revision": revision,
+            "currentStepId": current_step_id,
+            "evidenceIds": list(evidence_ids),
+        }
 
     return execute
 

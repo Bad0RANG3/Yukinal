@@ -39,6 +39,7 @@
 #endif
 
 #include "ssh_network.hpp"
+#include "host_key.hpp"
 
 #include <libssh2.h>
 #include <libssh2_sftp.h>
@@ -546,14 +547,14 @@ class SshResources {
   LIBSSH2_CHANNEL* channel_ = nullptr;
 };
 
-int known_host_key_type(int key_type) {
-  switch (key_type) {
-    case LIBSSH2_HOSTKEY_TYPE_RSA: return LIBSSH2_KNOWNHOST_KEY_SSHRSA;
-    case LIBSSH2_HOSTKEY_TYPE_DSS: return LIBSSH2_KNOWNHOST_KEY_SSHDSS;
-    case LIBSSH2_HOSTKEY_TYPE_ECDSA_256: return LIBSSH2_KNOWNHOST_KEY_ECDSA_256;
-    case LIBSSH2_HOSTKEY_TYPE_ECDSA_384: return LIBSSH2_KNOWNHOST_KEY_ECDSA_384;
-    case LIBSSH2_HOSTKEY_TYPE_ECDSA_521: return LIBSSH2_KNOWNHOST_KEY_ECDSA_521;
-    case LIBSSH2_HOSTKEY_TYPE_ED25519: return LIBSSH2_KNOWNHOST_KEY_ED25519;
+int known_host_key_type(detail::HostKeyAlgorithm algorithm) {
+  switch (algorithm) {
+    case detail::HostKeyAlgorithm::rsa: return LIBSSH2_KNOWNHOST_KEY_SSHRSA;
+    case detail::HostKeyAlgorithm::dss: return LIBSSH2_KNOWNHOST_KEY_SSHDSS;
+    case detail::HostKeyAlgorithm::ecdsa_256: return LIBSSH2_KNOWNHOST_KEY_ECDSA_256;
+    case detail::HostKeyAlgorithm::ecdsa_384: return LIBSSH2_KNOWNHOST_KEY_ECDSA_384;
+    case detail::HostKeyAlgorithm::ecdsa_521: return LIBSSH2_KNOWNHOST_KEY_ECDSA_521;
+    case detail::HostKeyAlgorithm::ed25519: return LIBSSH2_KNOWNHOST_KEY_ED25519;
     default: return 0;
   }
 }
@@ -605,29 +606,6 @@ bool append_output(std::string* output, const char* buffer, std::size_t length,
   output->append(buffer, keep);
   *remaining_bytes -= keep;
   return keep == length;
-}
-
-std::string host_key_fingerprint(LIBSSH2_SESSION* session) {
-  const char* hash = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256);
-  if (!hash) return {};
-
-  constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  constexpr std::size_t hash_length = 32;
-  std::string encoded = "SHA256:";
-  encoded.reserve(50);
-  for (std::size_t i = 0; i < hash_length; i += 3) {
-    const auto first = static_cast<unsigned char>(hash[i]);
-    const auto second = i + 1 < hash_length ? static_cast<unsigned char>(hash[i + 1]) : 0;
-    const auto third = i + 2 < hash_length ? static_cast<unsigned char>(hash[i + 2]) : 0;
-    const unsigned int block = (static_cast<unsigned int>(first) << 16) |
-                               (static_cast<unsigned int>(second) << 8) |
-                               static_cast<unsigned int>(third);
-    encoded.push_back(alphabet[(block >> 18) & 0x3f]);
-    encoded.push_back(alphabet[(block >> 12) & 0x3f]);
-    if (i + 1 < hash_length) encoded.push_back(alphabet[(block >> 6) & 0x3f]);
-    if (i + 2 < hash_length) encoded.push_back(alphabet[block & 0x3f]);
-  }
-  return encoded;
 }
 
 int initialize_libssh2() {
@@ -701,15 +679,23 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
   }
 
   std::size_t host_key_length = 0;
-  int host_key_type = 0;
-  const char* host_key = libssh2_session_hostkey(resources->session_, &host_key_length, &host_key_type);
-  const int known_key_type = known_host_key_type(host_key_type);
-  if (!host_key || (target.host_key_fingerprint.empty() && known_key_type == 0)) {
+  const char* host_key = libssh2_session_hostkey(resources->session_, &host_key_length, nullptr);
+  const auto material = host_key
+      ? detail::normalize_host_key_blob(std::string_view(host_key, host_key_length))
+      : std::nullopt;
+  const int known_key_type = material ? known_host_key_type(material->algorithm) : 0;
+  if (!material || (target.host_key_fingerprint.empty() && known_key_type == 0)) {
     fail(result, "host_key_unverified", "The SSH server presented an unsupported host key");
     return false;
   }
+  const std::string fingerprint = detail::fingerprint_host_key_blob(
+      std::string_view(host_key, host_key_length));
+  if (fingerprint.empty()) {
+    fail(result, "host_key_unverified", "Could not fingerprint the SSH host key");
+    return false;
+  }
   if (!target.host_key_fingerprint.empty()) {
-    if (host_key_fingerprint(resources->session_) != target.host_key_fingerprint) {
+    if (fingerprint != target.host_key_fingerprint) {
       fail(result, "host_key_unverified", "The SSH host key differs from the configured fingerprint");
       return false;
     }
@@ -722,7 +708,8 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
       return false;
     }
     const int known_host_result = libssh2_knownhost_checkp(
-        resources->known_hosts_, target.host.c_str(), target.port, host_key, host_key_length,
+        resources->known_hosts_, target.host.c_str(), target.port,
+        material->public_key_blob.data(), material->public_key_blob.size(),
         LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW | known_key_type, nullptr);
     if (known_host_result != LIBSSH2_KNOWNHOST_CHECK_MATCH) {
       fail(result, "host_key_unverified",
@@ -2044,19 +2031,14 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
   }
 
   std::size_t host_key_length = 0;
-  int host_key_type = LIBSSH2_HOSTKEY_TYPE_UNKNOWN;
   const char* host_key =
-      libssh2_session_hostkey(resources.session_, &host_key_length, &host_key_type);
+      libssh2_session_hostkey(resources.session_, &host_key_length, nullptr);
   if (!host_key || host_key_length == 0) {
     fail(&result, "host_key_unavailable", "The SSH server did not present a host key");
     return result;
   }
-  if (known_host_key_type(host_key_type) == 0) {
-    fail(&result, "host_key_unsupported",
-         "The SSH host-key format requires the certificate-aware probe path");
-    return result;
-  }
-  result.stdout_text = host_key_fingerprint(resources.session_);
+  result.stdout_text = detail::fingerprint_host_key_blob(
+      std::string_view(host_key, host_key_length));
   if (result.stdout_text.empty()) {
     fail(&result, "host_key_unavailable", "The SSH server did not present a supported host key");
     return result;

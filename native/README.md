@@ -33,9 +33,11 @@ agent identities when the target has a confirmed host-key pin and uses a
 supported direct or HTTP CONNECT route. Supported interactive terminal sessions
 use the dedicated C++ PTY worker. The C++ terminal worker forwards
 keyboard-interactive challenges through the existing desktop prompt UI. Rust
-remains the compatibility path for Host CA trust, HTTPS proxies, unsupported
-proxy bypass patterns, and other SSH configurations the C++ service cannot yet
-represent.
+remains the compatibility path for Host CA signature policy and KRL handling,
+HTTPS proxies, unsupported proxy bypass patterns, and other SSH configurations
+the C++ service cannot yet represent. For a host certificate, C++ fingerprints
+the certified public key, matching the desktop trust store; this supports key
+pins and `known_hosts` entries containing that plain key.
 
 ## Build
 

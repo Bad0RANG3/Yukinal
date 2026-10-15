@@ -78,6 +78,7 @@ find_package(Threads REQUIRED)
 
 add_library(yukinal_ssh_core
   src/config.cpp
+  src/host_key.cpp
   src/policy.cpp
   src/ssh.cpp
   src/http_service.cpp
@@ -108,6 +109,7 @@ if(YUKINAL_BUILD_TESTS)
   add_executable(yukinal_ssh_tests
     tests/test_main.cpp
     tests/test_config.cpp
+    tests/test_host_key.cpp
     tests/test_policy.cpp
     tests/test_network.cpp
   )

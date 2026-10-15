@@ -7,7 +7,9 @@ clients and a bounded LangGraph workflow. The model loop supports OpenAI
 compatible endpoints, Anthropic and Gemini through their official LangChain
 adapters. The desktop approval response RPC is wired through the Python sidecar;
 its catalog includes read-only tools and plan-bound, approval-required actions.
-Durable task storage and broader write-capable desktop tools remain future work.
+The Python runtime can create a host-validated durable plan and carries the
+host's active step binding into subsequent calls. Full task/plan recovery and
+broader write-capable desktop tools remain future work.
 
 ## Install
 

@@ -86,6 +86,23 @@ class FakeBackupMetadataHost:
         raise AssertionError(f"unexpected host metadata method: {method}")
 
 
+class FakePlanHost:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any], float]] = []
+
+    async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+        self.calls.append((method, params, timeout_seconds))
+        if method == "host.investigation.plan.record":
+            plan = dict(params["plan"])
+            plan["revision"] = 1
+            plan["status"] = "active"
+            plan["currentStepId"] = plan["steps"][0]["id"]
+            return {"recorded": True, "plan": plan}
+        if method == "host.tool.execute":
+            return {"status": "success", "output": {"status": "active"}}
+        raise AssertionError(f"unexpected plan host method: {method}")
+
+
 class ScriptedModel:
     def __init__(self, responses: list[AIMessage]) -> None:
         self.responses = list(responses)
@@ -103,6 +120,95 @@ class ScriptedModel:
 
 
 class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_records_durable_plan_then_uses_host_binding_for_ssh_read(self) -> None:
+        host = FakePlanHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "investigation.plan",
+                "args": {"steps": [{
+                    "id": "inspect-server",
+                    "ordinal": 0,
+                    "kind": "evidence",
+                    "title": "Inspect server health",
+                    "purpose": "Collect current server status before deciding what to do.",
+                    "allowedTools": ["server.info"],
+                    "successCriteria": ["The host returns a structured status snapshot."],
+                    "requiresApproval": False,
+                }]},
+                "id": "plan-call-1",
+                "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "server.info", "args": {}, "id": "info-call-1", "type": "tool_call",
+            }]),
+            AIMessage(content="The current server status is active."),
+        ])
+
+        result = await ModelDrivenAgent(registry, model).run(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            prompt="Check the selected server.",
+            allowed_tools={"investigation.plan", "server.info"},
+            allowed_target_ids={"srv_stage1"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            run_id="run-plan-1",
+            trace_id="trace-plan-1",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual([method for method, _params, _timeout in host.calls], [
+            "host.investigation.plan.record", "host.tool.execute",
+        ])
+        plan_request = host.calls[0][1]["plan"]
+        self.assertEqual(plan_request["taskId"], "task-durable-1")
+        self.assertEqual(plan_request["steps"][0]["attempts"], 0)
+        self.assertEqual(plan_request["steps"][0]["status"], "pending")
+        tool_request = host.calls[1][1]
+        self.assertEqual(tool_request["planId"], plan_request["id"])
+        self.assertEqual(tool_request["planStepId"], "inspect-server")
+        self.assertEqual(tool_request["callId"], result.tool_results[1]["call_id"])
+        self.assertTrue(tool_request["callId"])
+        self.assertEqual(tool_request["traceId"], "trace-plan-1")
+
+    async def test_plan_rejects_tools_not_registered_by_the_host(self) -> None:
+        host = FakePlanHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        context = ExecutionContext(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            allowed_tools=frozenset({"investigation.plan"}),
+            allowed_target_ids=frozenset(),
+            approved_actions={},
+            host_task_id="task-durable-1",
+        )
+
+        with self.assertRaises(ToolCallError) as raised:
+            await registry.execute(
+                "investigation.plan",
+                {"steps": [{
+                    "id": "bad-step",
+                    "ordinal": 0,
+                    "kind": "evidence",
+                    "title": "Unknown tool",
+                    "purpose": "Do not allow tools that the host has not registered.",
+                    "allowedTools": ["arbitrary.shell"],
+                    "successCriteria": ["Rejected before host RPC."],
+                    "requiresApproval": False,
+                }]},
+                context,
+                call_id="plan-call-invalid",
+            )
+
+        self.assertEqual(raised.exception.code, "unknown_plan_tool")
+        self.assertEqual(host.calls, [])
+
     async def test_regular_host_tools_forward_the_current_plan_and_evidence_binding(self) -> None:
         host = FakeHost()
         registry = ToolRegistry(MemoryAuditSink())

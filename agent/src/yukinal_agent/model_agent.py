@@ -632,7 +632,7 @@ class ModelDrivenAgent:
             name=request["name"],
         )
         next_index = state["call_index"] + 1
-        return {
+        update: dict[str, Any] = {
             "messages": [*state["messages"], tool_message],
             "tool_results": [
                 *(
@@ -648,6 +648,22 @@ class ModelDrivenAgent:
             "status": "running",
             "error_code": None,
         }
+        if request["name"] == "investigation.plan" and isinstance(result.value, dict):
+            plan_id = result.value.get("planId")
+            plan_step_id = result.value.get("currentStepId")
+            evidence_ids = result.value.get("evidenceIds")
+            if (
+                isinstance(plan_id, str)
+                and isinstance(plan_step_id, str)
+                and isinstance(evidence_ids, list)
+                and all(isinstance(item, str) for item in evidence_ids)
+            ):
+                update.update({
+                    "plan_id": plan_id,
+                    "plan_step_id": plan_step_id,
+                    "evidence_ids": evidence_ids,
+                })
+        return update
 
     def _emit_tool_call(self, event: dict[str, Any]) -> None:
         if self._event_sink is not None:

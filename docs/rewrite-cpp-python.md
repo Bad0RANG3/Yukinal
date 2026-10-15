@@ -632,8 +632,8 @@ check, and Rust-to-sidecar tests were skipped because Cargo is not on `PATH`.
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- moving Rust-only Host CA, HTTPS proxy, unsupported proxy bypass, keyboard-interactive,
-  and other compatibility SSH routes into the C++ service;
+- moving Rust-only Host CA signature/revocation policy, HTTPS proxy,
+  unsupported proxy bypass, and other compatibility SSH routes into C++;
 - full durable task/plan recovery beyond the pending-approval reattach path;
 - full C++ SFTP and PTY coverage for compatibility-only SSH configurations;
 - control plane, PostgreSQL, and multi-tenant deployment.
@@ -663,3 +663,19 @@ uses the non-streaming OpenAI-compatible JSON response expected by the Python
 foundation stage and remains explicitly unverified; it is not counted as a
 passing integration test. The C++ build and all six CTest targets passed after
 loading the installed Visual Studio environment.
+
+On 2026-10-15, the Python Agent registered `investigation.plan` as a bounded
+host tool. The plan ID derives from the durable task and stable LangGraph tool
+call ID, while task and runtime fields remain host-owned. After the host records
+the plan, LangGraph carries the returned current step and evidence binding into
+the next tool call. Python mock coverage now exercises plan creation followed by
+a host-authorized SSH status read, and rejects plan steps that name unregistered
+tools. The focused host-tool test module passed all 14 tests.
+
+On 2026-10-15, the C++ SSH service began normalizing supported OpenSSH host-key
+certificate blobs to their certified public key for SHA-256 fingerprinting and
+`known_hosts` checks against entries containing that plain key. Host-key probing
+and confirmed key pins can now use the C++ path for certificate-backed hosts.
+This does not validate a host CA signature; that policy and KRL handling remain
+on the Rust compatibility route. C++ build and all six CTest targets passed,
+including the new host-key parser coverage.
