@@ -26,6 +26,9 @@ struct TargetConfig {
   std::vector<std::string> proxy_no_proxy;
   bool agent_auth = false;
   bool probe_only = false;
+  // Defaults to false. The desktop sets this only on a one-shot target config
+  // after host policy authorizes the exact server.exec call.
+  bool allow_server_exec = false;
 };
 
 struct ServiceConfig {

@@ -577,10 +577,12 @@ struct DurationTracker {
   }
 };
 
-bool append_output(std::string* output, const char* buffer, std::size_t length) {
-  const std::size_t available = output->size() < kMaxOutputBytes ? kMaxOutputBytes - output->size() : 0;
-  const std::size_t keep = std::min(available, length);
+bool append_output(std::string* output, const char* buffer, std::size_t length,
+                   std::size_t* remaining_bytes) {
+  if (!remaining_bytes) return false;
+  const std::size_t keep = std::min(*remaining_bytes, length);
   output->append(buffer, keep);
+  *remaining_bytes -= keep;
   return keep == length;
 }
 
@@ -1434,18 +1436,15 @@ int run_sftp_stream(const TargetConfig& target, const std::string& path, bool up
   return 1;
 }
 
-static ExecResult run_ssh_command_with_timeout_limit(const TargetConfig& target,
-                                                     const std::string& command,
-                                                     int timeout_seconds,
-                                                     int maximum_timeout_seconds) {
+static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
+                                             const std::string& command,
+                                             std::chrono::milliseconds timeout,
+                                             std::size_t maximum_output_bytes,
+                                             bool preserve_truncated_output) {
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
-  if (timeout_seconds < 1 || timeout_seconds > maximum_timeout_seconds) {
-    fail(&result, "invalid_parameters", "The structured SSH operation timeout is invalid");
-    return result;
-  }
-  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  const auto deadline = started + timeout;
   SshResources resources;
   if (!connect_authenticated(target, deadline, &resources, &result)) return result;
 
@@ -1472,6 +1471,9 @@ static ExecResult run_ssh_command_with_timeout_limit(const TargetConfig& target,
 
   libssh2_channel_set_blocking(resources.channel_, 0);
   std::array<char, 8192> buffer{};
+  std::size_t stdout_remaining = maximum_output_bytes;
+  std::size_t stderr_remaining = maximum_output_bytes;
+  std::size_t combined_remaining = maximum_output_bytes;
   bool read_error = false;
   bool output_limit_exceeded = false;
   while (!libssh2_channel_eof(resources.channel_)) {
@@ -1490,10 +1492,17 @@ static ExecResult run_ssh_command_with_timeout_limit(const TargetConfig& target,
         }
         made_progress = true;
         std::string& output = stream_id == 0 ? result.stdout_text : result.stderr_text;
-        if (!append_output(&output, buffer.data(), static_cast<std::size_t>(count))) {
+        bool& stream_truncated = stream_id == 0 ? result.stdout_truncated : result.stderr_truncated;
+        std::size_t* remaining = preserve_truncated_output
+            ? &combined_remaining
+            : (stream_id == 0 ? &stdout_remaining : &stderr_remaining);
+        if (!append_output(&output, buffer.data(), static_cast<std::size_t>(count), remaining)) {
+          stream_truncated = true;
           result.output_truncated = true;
-          output_limit_exceeded = true;
-          break;
+          if (!preserve_truncated_output) {
+            output_limit_exceeded = true;
+            break;
+          }
         }
       }
       if (read_error || output_limit_exceeded) break;
@@ -1516,13 +1525,38 @@ static ExecResult run_ssh_command_with_timeout_limit(const TargetConfig& target,
     result.exit_code = libssh2_channel_get_exit_status(resources.channel_);
     if (result.exit_code < 0) {
       fail(&result, "result_unknown", "The SSH connection closed before an exit status was received");
-    } else if (result.output_truncated) {
+    } else if (result.output_truncated && !preserve_truncated_output) {
       fail(&result, "output_limit", "SSH output exceeded the configured 64 KiB per-stream limit");
     } else {
       result.completed = true;
     }
   }
   return result;
+}
+
+static ExecResult run_ssh_command_with_timeout_limit(const TargetConfig& target,
+                                                     const std::string& command,
+                                                     int timeout_seconds,
+                                                     int maximum_timeout_seconds) {
+  if (timeout_seconds < 1 || timeout_seconds > maximum_timeout_seconds) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The structured SSH operation timeout is invalid");
+    return result;
+  }
+  return run_ssh_command_with_limits(target, command, std::chrono::seconds(timeout_seconds),
+                                     kMaxOutputBytes, false);
+}
+
+static ExecResult server_exec_operation(const TargetConfig& target,
+                                        const ExecRequest& request) {
+  if (!target.allow_server_exec) {
+    ExecResult result;
+    fail(&result, "operation_not_allowed", "server.exec requires a one-shot host authorization");
+    return result;
+  }
+  return run_ssh_command_with_limits(target, request.command,
+                                     std::chrono::milliseconds(request.timeout_ms),
+                                     request.max_output_bytes, true);
 }
 
 static ExecResult run_ssh_command(const TargetConfig& target, const std::string& command,
@@ -2875,6 +2909,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
+  }
+  if (request.operation == "server_exec") {
+    return server_exec_operation(target, request);
   }
   if (request.operation == "connection_check") {
     return connection_check(target, request.timeout_seconds);

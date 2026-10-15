@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -389,6 +390,13 @@ def start_ssh_mock(
                 channel.send_exit_status(0)
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
+                channel.send_exit_status(0)
+            elif command == b"printf server-exec-ok":
+                channel.sendall(b"authorized-output\n")
+                channel.send_exit_status(0)
+            elif command == b"server-exec-large-output":
+                channel.sendall(b"A" * 5000)
+                channel.send_stderr(b"B" * 5000)
                 channel.send_exit_status(0)
             elif b"systemctl list-units --type=service" in command:
                 channel.sendall(b"nginx.service loaded active running Nginx Web Server\n\n__YUKINAL_SOURCE__=systemd\n")
@@ -943,6 +951,15 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
                 },
                 {
+                    "target_id": "srv_server_exec_enabled",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_key_fingerprint": pinned_fingerprint,
+                    "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
+                    "allow_server_exec": True,
+                },
+                {
                     "target_id": "srv_bad_pin",
                     "host": "127.0.0.1",
                     "port": ssh_port,
@@ -1190,6 +1207,40 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             result = client.service_status("srv_stage1", "nginx.service", timeout_seconds=5)
             if result.stdout != "active\n" or result.exit_code != 0:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
+
+            def run_server_exec(command: str, max_output_bytes: int) -> dict[str, object]:
+                request = urllib.request.Request(
+                    client._base_url + "/v1/ssh/exec",
+                    data=json.dumps({
+                        "target_id": "srv_server_exec_enabled",
+                        "operation": "server_exec",
+                        "parameters": {
+                            "command": command,
+                            "max_output_bytes": max_output_bytes,
+                            "timeout_ms": 5000,
+                        },
+                        "timeout_seconds": 5,
+                    }).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {TOKEN}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    return json.loads(response.read())
+
+            exec_result = run_server_exec("printf server-exec-ok", 4096)
+            if exec_result.get("status") != "succeeded" or exec_result.get("stdout") != "authorized-output\n":
+                raise AssertionError(f"C++ server.exec returned an unexpected result: {exec_result!r}")
+            bounded_result = run_server_exec("server-exec-large-output", 4096)
+            if (
+                bounded_result.get("status") != "succeeded"
+                or len(str(bounded_result.get("stdout", "")).encode("utf-8")) > 4096
+                or not bounded_result.get("output_truncated")
+                or not bounded_result.get("stdout_truncated")
+            ):
+                raise AssertionError(f"C++ server.exec did not preserve its combined output cap: {bounded_result!r}")
 
             desktop_style_result = client.service_status(
                 "srv_desktop_style", "nginx.service", timeout_seconds=5

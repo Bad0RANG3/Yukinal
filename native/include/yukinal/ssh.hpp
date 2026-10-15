@@ -16,12 +16,15 @@ struct ExecResult {
   std::string stderr_text;
   std::int64_t duration_ms = 0;
   bool output_truncated = false;
+  bool stdout_truncated = false;
+  bool stderr_truncated = false;
   std::string error_code;
   std::string error_message;
   std::vector<std::string> missing_metadata;
 };
 
-/// Run a fixed structured SSH operation. No raw command is accepted here.
+/// Run an allowlisted SSH operation. Raw server.exec is denied unless the
+/// target's one-shot host-authorization capability is explicitly enabled.
 ExecResult service_status(const TargetConfig& target, const std::string& service,
                           int timeout_seconds);
 ExecResult connection_check(const TargetConfig& target, int timeout_seconds);

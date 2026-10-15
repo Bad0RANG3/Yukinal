@@ -6,7 +6,7 @@
 > desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
-> hosts native UI IPC, local trust-store updates, approvals, and PTY/SFTP
+> hosts native UI IPC, local trust-store updates, final approvals, and PTY/SFTP
 > compatibility paths for Host CA, HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
 > known-hosts-only trust, and other unsupported SSH modes. Supported desktop terminals use a dedicated C++
 > PTY child process. The Python sidecar can call the C++
@@ -72,8 +72,12 @@ The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
 recomputes a fingerprint from the exact raw input, consumes the corresponding
 one-time ticket, and dispatches through its existing structured C++ SSH routing.
-`server.exec` remains separately guarded, exposed only when the host supplies the
-current remote action-plan binding, and still uses the Rust command executor.
+`server.exec` remains separately guarded and exposed only when the host supplies
+the current remote action-plan binding. On C++-supported targets, the host first
+consumes the exact approval ticket or reserves the bounded task command grant,
+then starts a one-shot C++ service config that enables `server.exec` for that
+target only. Persistent service target configs deny it by default. Targets that
+still require a Rust-only SSH route retain the existing Rust compatibility path.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
@@ -165,13 +169,17 @@ expiry stop the graph without retrying the requested action.
 
 Service discovery currently targets Unix-like hosts with systemd and Docker.
 The service configuration is the allowlist. Requests cannot provide a hostname,
-port, username, credential, or arbitrary command. The service resolves a
+port, username, or credential. The service resolves a
 `target_id` to a configured target and accepts only `connection_check`, bounded
 `system_snapshot`, `docker_ps`, bounded `docker_logs` and `docker_inspect`,
 `systemd_inspect`, `package_inspect`, `service_status`, `service_inventory`,
 bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP
 list/stat/read/write/exclusive-create/remove/link-count operations with
-validated parameters. Service operations map to fixed commands; SFTP reads are
+validated parameters. `server_exec` is the only command-text operation; it is
+denied unless that target has an explicit `allow_server_exec` capability, which
+the desktop sets only in its one-shot config after host-side approval and task
+policy checks. Service operations map to fixed commands apart from this guarded
+capability; SFTP reads are
 capped at 1 MiB plus one sentinel byte, normal writes at 512 KiB, and exclusive
 recovery copies at 1 MiB. Write bodies use base64 inside a bounded JSON
 request. The link-count operation runs one fixed, single-quoted `stat` probe
@@ -247,8 +255,14 @@ the service does not fall back to unfiltered system log files. SFTP operations
 accept only their documented path, byte limit, or base64 content fields.
 `sftp_write` accepts at most 512 KiB, `sftp_create_exclusive` at most 1 MiB,
 and `sftp_read` at most 1 MiB plus a sentinel byte. Read-only command and SFTP
-timeouts are 1–30 seconds; the three host-gated actions have the specific
-limits described above.
+timeouts are 1–30 seconds; the three structured host-gated actions have the
+specific limits described above. `server_exec` requires a target config with
+`allow_server_exec: true`, which is disabled by default and is set automatically
+only in the desktop's one-shot config after host authorization. Its remote shell
+request is bounded to 128 KiB, timeout to 1–120,000 ms, and combined stdout/stderr to the
+requested 1–65,536-byte budget. The SSH service enforces these execution limits;
+the desktop host remains responsible for exact approval, task scope, critical
+command checks, and command budgets.
 Service command output is capped at 64 KiB per stream; SFTP responses have
 operation-specific limits.
 
@@ -411,14 +425,21 @@ routing suite passed 8 tests. CTest passed all six registered targets. A Rust
 host-tool test now covers snapshot parsing and persistence, but could not be run
 because Cargo and rustc are unavailable in this environment.
 
+On 2026-10-15, after routing approved `server.exec` calls through the one-shot
+C++ service on supported targets, the Windows C++ build succeeded and all six
+CTest targets passed. The SSH mock covers successful command output, combined
+stdout/stderr truncation, and the persistent-config default-deny behavior.
+Python syntax checks and `git diff --check` passed. The Rust host bridge changes
+could not be compiled here because Cargo and rustc are unavailable.
+
 ## Deliberately deferred
 
 - removing the Node bundle and runtime transition fallback after installed-app parity;
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- moving the separately guarded `server.exec` task flow from Rust SSH execution to a
-  safe C++ capability; arbitrary shell execution remains outside the C++ service API;
+- moving Rust-only Host CA, HTTPS proxy, unsupported proxy bypass, keyboard-interactive,
+  and other compatibility SSH routes into the C++ service;
 - SFTP transfer, PTY, persistence, and a Qt desktop shell;
 - control plane, PostgreSQL, and multi-tenant deployment.
 

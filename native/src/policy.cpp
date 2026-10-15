@@ -192,6 +192,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string source_path;
   std::string destination_path;
   std::string nonce;
+  std::string command;
   std::string package_manager;
   std::string package;
   std::string package_version;
@@ -205,6 +206,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::optional<std::uint32_t> expected_modified;
   std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
+  std::uint32_t max_output_bytes = 0;
+  std::uint32_t timeout_ms = 0;
   std::optional<std::uint32_t> since_seconds;
   if (operation == "connection_check") {
     if (!parameters_it->empty()) {
@@ -613,6 +616,45 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       set_error(error, 422, "invalid_parameters", "SFTP no-replace publication requires distinct absolute sibling paths");
       return false;
     }
+  } else if (operation == "server_exec") {
+    if (!has_only_keys(*parameters_it, {"command", "max_output_bytes", "timeout_ms"})) {
+      set_error(error, 422, "invalid_parameters", "server_exec accepts only command, max_output_bytes, and timeout_ms");
+      return false;
+    }
+    const auto command_it = parameters_it->find("command");
+    const auto output_it = parameters_it->find("max_output_bytes");
+    const auto timeout_ms_it = parameters_it->find("timeout_ms");
+    if (command_it == parameters_it->end() || !command_it->is_string() ||
+        output_it == parameters_it->end() || timeout_ms_it == parameters_it->end()) {
+      set_error(error, 422, "invalid_parameters", "server_exec requires a command and bounded output and timeout limits");
+      return false;
+    }
+    command = command_it->get<std::string>();
+    if (command.empty() || command.size() > 128 * 1024 || command.find('\0') != std::string::npos) {
+      set_error(error, 422, "invalid_parameters", "server_exec command must contain at most 131072 bytes and no NUL");
+      return false;
+    }
+    const auto parse_bounded_uint = [](const nlohmann::json& value, std::uint64_t maximum,
+                                       std::uint64_t* parsed) {
+      if (!parsed || !(value.is_number_integer() || value.is_number_unsigned())) return false;
+      if (value.is_number_unsigned()) {
+        *parsed = value.get<std::uint64_t>();
+      } else {
+        const auto signed_value = value.get<std::int64_t>();
+        if (signed_value < 1) return false;
+        *parsed = static_cast<std::uint64_t>(signed_value);
+      }
+      return *parsed >= 1 && *parsed <= maximum;
+    };
+    std::uint64_t parsed_output = 0;
+    std::uint64_t parsed_timeout_ms = 0;
+    if (!parse_bounded_uint(*output_it, 64 * 1024, &parsed_output) ||
+        !parse_bounded_uint(*timeout_ms_it, 120'000, &parsed_timeout_ms)) {
+      set_error(error, 422, "invalid_parameters", "server_exec output and timeout limits are out of range");
+      return false;
+    }
+    max_output_bytes = static_cast<std::uint32_t>(parsed_output);
+    timeout_ms = static_cast<std::uint32_t>(parsed_timeout_ms);
   } else if (operation == "sftp_remove_file" || operation == "sftp_link_count" ||
              operation == "sftp_create_dir") {
     if (!has_only_keys(*parameters_it, {"path"})) {
@@ -638,7 +680,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   }
   const std::uint64_t maximum_timeout = operation == "package_install"
       ? 600
-      : (operation == "systemd_restart" ? 120 : 30);
+      : ((operation == "systemd_restart" || operation == "server_exec") ? 120 : 30);
   std::uint64_t timeout = 0;
   if (timeout_it->is_number_unsigned()) {
     timeout = timeout_it->get<std::uint64_t>();
@@ -651,7 +693,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     timeout = static_cast<std::uint64_t>(signed_timeout);
   }
   if (timeout < 1 || timeout > maximum_timeout ||
-      (operation_timeout > 0 && timeout != static_cast<std::uint64_t>(operation_timeout))) {
+      (operation_timeout > 0 && timeout != static_cast<std::uint64_t>(operation_timeout)) ||
+      (operation == "server_exec" && timeout != (static_cast<std::uint64_t>(timeout_ms) + 999) / 1000)) {
     set_error(error, 422, "invalid_timeout", "timeout_seconds exceeds the operation limit or differs from its validated parameters");
     return false;
   }
@@ -667,6 +710,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->source_path = std::move(source_path);
   request->destination_path = std::move(destination_path);
   request->nonce = std::move(nonce);
+  request->command = std::move(command);
   request->package_manager = std::move(package_manager);
   request->package = std::move(package);
   request->package_version = std::move(package_version);
@@ -680,6 +724,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->expected_modified = expected_modified;
   request->expected_digest = expected_digest;
   request->max_bytes = max_bytes;
+  request->max_output_bytes = max_output_bytes;
+  request->timeout_ms = timeout_ms;
   request->timeout_seconds = static_cast<int>(timeout);
   return true;
 }

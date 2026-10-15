@@ -23,6 +23,7 @@ struct ExecRequest {
   std::string path;
   std::string source_path;
   std::string destination_path;
+  std::string command;
   std::string nonce;
   std::string container;
   bool include_all_containers = false;
@@ -33,6 +34,8 @@ struct ExecRequest {
   std::optional<std::uint32_t> expected_modified;
   std::array<unsigned char, 32> expected_digest{};
   std::uint32_t max_bytes = 0;
+  std::uint32_t max_output_bytes = 0;
+  std::uint32_t timeout_ms = 0;
   std::optional<std::uint32_t> since_seconds;
   int timeout_seconds = 10;
 };

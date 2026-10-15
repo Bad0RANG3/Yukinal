@@ -164,6 +164,10 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
                 {"stderr", result.stderr_text},
                 {"duration_ms", result.duration_ms},
                 {"output_truncated", result.output_truncated}};
+    if (parsed.operation == "server_exec") {
+      output["stdout_truncated"] = result.stdout_truncated;
+      output["stderr_truncated"] = result.stderr_truncated;
+    }
     if (result.completed) {
       output["error"] = nullptr;
       set_json(response, 200, output);

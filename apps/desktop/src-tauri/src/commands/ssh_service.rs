@@ -301,6 +301,7 @@ pub(crate) async fn probe_host_key(
         "host_key_probe",
         json!({}),
         target_payload,
+        false,
     )
     .await
     {
@@ -513,6 +514,43 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
         .host_key_pin(&server.connection.host, server.connection.port)
         .map_err(|error| error.to_string())?;
     Ok(pin.is_some())
+}
+
+/// Execute a host-authorized server.exec call with a one-shot C++ target config.
+/// The generic C++ service config never enables this capability by default.
+pub(crate) async fn execute_server_command(
+    app: &AppHandle,
+    state: &AppState,
+    server_id: &str,
+    command: &str,
+    timeout_ms: u64,
+    max_output_bytes: usize,
+) -> Result<Value, (String, String)> {
+    if !supports_cpp_target(state, server_id).map_err(|message| ("transport_error".into(), message))? {
+        return Err((
+            "unsupported_target".into(),
+            "the selected SSH target requires the Rust compatibility path".into(),
+        ));
+    }
+    let target_payload = super::sidecar::resolve_ssh_service_target(
+        state,
+        json!({ "serverId": server_id }),
+    )
+    .map_err(|message| ("transport_error".into(), message))?;
+    run_operation_response_with_target(
+        app,
+        server_id,
+        "server_exec",
+        json!({
+            "command": command,
+            "timeout_ms": timeout_ms,
+            "max_output_bytes": max_output_bytes,
+        }),
+        target_payload,
+        true,
+    )
+    .await
+    .map_err(|error| (error.code, error.message))
 }
 
 impl From<String> for TerminalOpenFailure {
@@ -1818,6 +1856,18 @@ impl From<&str> for SshServiceFailure {
     }
 }
 
+fn operation_response_failure(operation: &str, message: &str) -> SshServiceFailure {
+    SshServiceFailure {
+        code: if operation == "server_exec" {
+            "result_unknown".into()
+        } else {
+            "transport_error".into()
+        },
+        message: message.to_string(),
+        missing: Vec::new(),
+    }
+}
+
 async fn run_operation_response(
     app: &AppHandle,
     state: &AppState,
@@ -1830,7 +1880,7 @@ async fn run_operation_response(
     }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
-    run_operation_response_with_target(app, server_id, operation, parameters, target_payload).await
+    run_operation_response_with_target(app, server_id, operation, parameters, target_payload, false).await
 }
 
 async fn run_operation_response_with_target(
@@ -1839,12 +1889,16 @@ async fn run_operation_response_with_target(
     operation: &str,
     parameters: Value,
     target_payload: Value,
+    allow_server_exec: bool,
 ) -> Result<Value, SshServiceFailure> {
-    let target = target_payload
+    let mut target = target_payload
         .get("target")
         .filter(|target| target.get("target_id").and_then(Value::as_str) == Some(server_id))
         .cloned()
         .ok_or_else(|| "the desktop returned an invalid SSH target".to_string())?;
+    if allow_server_exec {
+        target["allow_server_exec"] = Value::Bool(true);
+    }
     let credentials = target_payload
         .get("credentials")
         .and_then(Value::as_object)
@@ -1980,6 +2034,12 @@ async fn request_operation(
     let base_url = format!("http://127.0.0.1:{port}");
     let timeout_seconds = match operation {
         "system_snapshot" | "docker_restart" => 30,
+        "server_exec" => parameters
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|millis| (1..=120_000).contains(millis))
+            .map(|millis| millis.div_ceil(1000))
+            .unwrap_or(10),
         "systemd_restart" => parameters
             .get("timeout_seconds")
             .and_then(Value::as_u64)
@@ -2051,24 +2111,38 @@ async fn request_operation(
         .body(request_body)
         .send()
         .await
-        .map_err(|_| "the C++ SSH service request failed".to_string())?;
+        .map_err(|_| SshServiceFailure {
+            code: if operation == "server_exec" {
+                "result_unknown".into()
+            } else {
+                "transport_error".into()
+            },
+            message: "the C++ SSH service request failed".into(),
+            missing: Vec::new(),
+        })?;
     let status = response.status();
     const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err("the C++ SSH service response exceeded the size limit".into());
+        return Err(operation_response_failure(
+            operation,
+            "the C++ SSH service response exceeded the size limit",
+        ));
     }
     let response_body = response
         .bytes()
         .await
-        .map_err(|_| "the C++ SSH service returned invalid JSON".to_string())?;
+        .map_err(|_| operation_response_failure(operation, "the C++ SSH service returned invalid JSON"))?;
     if response_body.len() > MAX_RESPONSE_BYTES {
-        return Err("the C++ SSH service response exceeded the size limit".into());
+        return Err(operation_response_failure(
+            operation,
+            "the C++ SSH service response exceeded the size limit",
+        ));
     }
     let body: Value = serde_json::from_slice(&response_body)
-        .map_err(|_| "the C++ SSH service returned invalid JSON".to_string())?;
+        .map_err(|_| operation_response_failure(operation, "the C++ SSH service returned invalid JSON"))?;
     if !status.is_success() {
         let error = body.get("error");
         let message = error

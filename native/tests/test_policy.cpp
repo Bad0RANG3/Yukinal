@@ -473,6 +473,42 @@ YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {
   YUKINAL_REQUIRE(error.code == "unsupported_operation");
 }
 
+YUKINAL_TEST(policy_accepts_server_exec_only_with_bounded_limits) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "server_exec"},
+       {"parameters", {{"command", "/bin/sh -c 'printf ok'"},
+                        {"max_output_bytes", 4096},
+                        {"timeout_ms", 1500}}},
+       {"timeout_seconds", 2}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.command == "/bin/sh -c 'printf ok'");
+  YUKINAL_REQUIRE(request.max_output_bytes == 4096);
+  YUKINAL_REQUIRE(request.timeout_ms == 1500);
+
+  const bool mismatched_timeout_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "server_exec"},
+       {"parameters", {{"command", "id"}, {"max_output_bytes", 4096}, {"timeout_ms", 1500}}},
+       {"timeout_seconds", 3}},
+      &request, &error);
+  YUKINAL_REQUIRE(!mismatched_timeout_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_timeout");
+
+  const bool extra_parameter_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "server_exec"},
+       {"parameters", {{"command", "id"}, {"max_output_bytes", 4096},
+                        {"timeout_ms", 1500}, {"host", "other.example"}}},
+       {"timeout_seconds", 2}},
+      &request, &error);
+  YUKINAL_REQUIRE(!extra_parameter_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_rejects_shell_metacharacters_and_path_parameters) {
   ExecRequest request;
   ApiError error;

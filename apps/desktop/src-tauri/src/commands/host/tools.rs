@@ -42,6 +42,22 @@ struct ServerExecResult {
     duration_ms: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerExecServiceResponse {
+    status: String,
+    target_id: String,
+    operation: String,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    output_truncated: bool,
+    duration_ms: u64,
+    error: Value,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerExecInterruption {
@@ -77,6 +93,7 @@ fn transport_or_cancel(error: impl std::fmt::Display, cancel: &CancellationToken
 }
 
 pub(super) async fn server_exec(
+    app: Option<&AppHandle>,
     state: &AppState,
     server_id: &str,
     request: &HostToolExecuteRequest,
@@ -230,12 +247,12 @@ pub(super) async fn server_exec(
     if cancel.is_cancelled() {
         return Ok(cancelled_failure());
     }
-    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-        return Ok(transport_or_cancel(error, cancel));
-    }
-    let session = match state.terminals.cached_session(server_id) {
-        Ok(session) => session,
-        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    let cpp_supported = match app {
+        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+            Ok(supported) => supported,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+        None => false,
     };
     if let (true, Some(grant)) = (using_task_grant, grant) {
         match state.database.investigations().reserve_task_command_budget(
@@ -263,6 +280,154 @@ pub(super) async fn server_exec(
 
     let remote_command = server_exec_command(&input);
     let started = std::time::Instant::now();
+    if cpp_supported {
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let output = server_exec_interruption("cancelled", duration_ms);
+                return Ok(failed(
+                    "cancelled",
+                    "remote command was cancelled; its effect may have occurred",
+                    false,
+                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+                ));
+            }
+            result = crate::commands::ssh_service::execute_server_command(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                server_id,
+                &remote_command,
+                input.timeout_ms,
+                input.max_output_bytes,
+            ) => result,
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err((code, _message)) if code == "timeout" => {
+                let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let output = server_exec_interruption("timed_out", duration_ms);
+                return Ok(failed(
+                    "timeout",
+                    "remote command exceeded its host-enforced timeout; its effect may have occurred",
+                    false,
+                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+                ));
+            }
+            Err((code, message)) if code == "result_unknown" => {
+                let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let output = server_exec_interruption("result_unknown", duration_ms);
+                return Ok(failed(
+                    "transport",
+                    format!("SSH command result is unavailable: {message}; its effect may have occurred"),
+                    false,
+                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+                ));
+            }
+            Err((code, message))
+                if matches!(
+                    code.as_str(),
+                    "authentication_failed"
+                        | "connection_failed"
+                        | "credential_unavailable"
+                        | "host_key_unavailable"
+                        | "host_key_unverified"
+                        | "host_key_unsupported"
+                        | "invalid_parameters"
+                        | "operation_not_allowed"
+                        | "proxy_auth_required"
+                        | "proxy_connect_failed"
+                        | "resolver_busy"
+                        | "resolver_unavailable"
+                        | "ssh_handshake_failed"
+                        | "ssh_unavailable"
+                        | "transport_error"
+                        | "unsupported_target"
+                ) =>
+            {
+                return Ok(failed(
+                    "transport",
+                    format!("C++ SSH command execution failed ({code}): {message}"),
+                    true,
+                    None,
+                ));
+            }
+            Err((code, message)) => {
+                let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let output = server_exec_interruption("result_unknown", duration_ms);
+                return Ok(failed(
+                    "transport",
+                    format!("SSH command result is unavailable ({code}): {message}; its effect may have occurred"),
+                    false,
+                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+                ));
+            }
+        };
+        let response = match serde_json::from_value::<ServerExecServiceResponse>(response) {
+            Ok(response) => response,
+            Err(_) => {
+                let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let output = server_exec_interruption("result_unknown", duration_ms);
+                return Ok(failed(
+                    "invalid_response",
+                    "the C++ SSH service returned an invalid server.exec result; its effect may have occurred",
+                    false,
+                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+                ));
+            }
+        };
+        let duration_ms = response.duration_ms;
+        if response.status != "succeeded"
+            || response.target_id != server_id
+            || response.operation != "server_exec"
+            || response.error != Value::Null
+            || response.output_truncated != (response.stdout_truncated || response.stderr_truncated)
+        {
+            let output = server_exec_interruption("result_unknown", duration_ms);
+            return Ok(failed(
+                "invalid_response",
+                "the C++ SSH service returned an invalid server.exec result; its effect may have occurred",
+                false,
+                Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+            ));
+        }
+        let Some(exit_code) = response.exit_code else {
+            let output = server_exec_interruption("result_unknown", duration_ms);
+            return Ok(failed(
+                "execution_failed",
+                "remote command returned without an exit status; its effect is unknown",
+                false,
+                Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
+            ));
+        };
+        let output = ServerExecResult {
+            state: "completed",
+            exit_code,
+            stdout: response.stdout,
+            stderr: response.stderr,
+            stdout_truncated: response.stdout_truncated,
+            stderr_truncated: response.stderr_truncated,
+            duration_ms,
+        };
+        let output_value = serde_json::to_value(output).map_err(|error| error.to_string())?;
+        if exit_code != 0 {
+            return Ok(failed(
+                "execution_failed",
+                format!("remote command exited with status {exit_code}"),
+                false,
+                Some(output_value),
+            ));
+        }
+        return Ok(success(output_value));
+    }
+
+    if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
+        return Ok(transport_or_cancel(error, cancel));
+    }
+    let session = match state.terminals.cached_session(server_id) {
+        Ok(session) => session,
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    };
     let result = state
         .ssh
         .execute_bounded_once(

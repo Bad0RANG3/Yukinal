@@ -1442,7 +1442,7 @@ async fn handle_sidecar_request_with_context(
         Err(error) => Ok(host_action_approval_failure(error)),
         Ok(()) => match request.tool_name.as_str() {
             SERVER_INFO => server_info(app, state, server_id, &request.input, &cancel).await,
-            SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
+            SERVER_EXEC => server_exec(app, state, server_id, &request, &cancel).await,
             SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
             SERVER_SERVICES => server_services(app, state, server_id, &request.input, &cancel).await,
             DOCKER_PS => docker_ps(app, state, server_id, &request.input, &cancel).await,

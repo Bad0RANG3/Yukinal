@@ -239,7 +239,8 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     require_object(entry, label);
     require_only_keys(entry,
                       {"target_id", "host", "port", "username", "known_hosts_file",
-                       "host_key_fingerprint", "auth", "probe_only", "proxy"},
+                       "host_key_fingerprint", "auth", "probe_only", "proxy",
+                       "allow_server_exec"},
                       label);
 
     TargetConfig target;
@@ -252,6 +253,15 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
         throw std::runtime_error(label + ".probe_only must be a boolean");
       }
       target.probe_only = entry["probe_only"].get<bool>();
+    }
+    if (entry.contains("allow_server_exec")) {
+      if (!entry["allow_server_exec"].is_boolean()) {
+        throw std::runtime_error(label + ".allow_server_exec must be a boolean");
+      }
+      target.allow_server_exec = entry["allow_server_exec"].get<bool>();
+      if (target.allow_server_exec && target.probe_only) {
+        throw std::runtime_error(label + ".probe_only targets cannot allow server.exec");
+      }
     }
     const bool has_known_hosts_file = entry.contains("known_hosts_file");
     const bool has_host_key_fingerprint = entry.contains("host_key_fingerprint");
