@@ -472,6 +472,40 @@ class ClientTests(unittest.TestCase):
             self.client.sftp_remove_file("staging-web-01", "/srv/app/\x00data")
         self.assertIsNone(self.server.last_request)
 
+    def test_sftp_no_replace_publication_uses_sibling_paths_and_structured_operation(self) -> None:
+        self.server.response_body["operation"] = "sftp_publish_no_replace"
+        self.server.response_body["stdout"] = '{"published":true}'
+        result = self.client.sftp_publish_no_replace(
+            "staging-web-01", "/srv/app/.config.part", "/srv/app/config", 8
+        )
+        self.assertEqual(result.operation, "sftp_publish_no_replace")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "sftp_publish_no_replace",
+                "parameters": {
+                    "source": "/srv/app/.config.part",
+                    "destination": "/srv/app/config",
+                },
+                "timeout_seconds": 8,
+            },
+        )
+
+    def test_sftp_no_replace_publication_rejects_noncanonical_or_non_sibling_paths(self) -> None:
+        invalid_calls = (
+            lambda: self.client.sftp_publish_no_replace("staging-web-01", "relative", "/srv/app/file"),
+            lambda: self.client.sftp_publish_no_replace("staging-web-01", "/srv/app/../stage", "/srv/app/file"),
+            lambda: self.client.sftp_publish_no_replace("staging-web-01", "/srv//stage", "/srv/file"),
+            lambda: self.client.sftp_publish_no_replace("staging-web-01", "/srv/app/stage\n", "/srv/app/file"),
+            lambda: self.client.sftp_publish_no_replace("staging-web-01", "/srv/app/file", "/srv/app/file"),
+            lambda: self.client.sftp_publish_no_replace("staging-web-01", "/srv/app/stage", "/srv/other/file"),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke), self.assertRaises(ValueError):
+                invoke()
+        self.assertIsNone(self.server.last_request)
+
     def test_link_count_returns_only_a_non_negative_integer_or_null(self) -> None:
         self.server.response_body["operation"] = "sftp_link_count"
         self.server.response_body["stdout"] = '{"link_count":1}'

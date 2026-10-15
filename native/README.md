@@ -3,7 +3,7 @@
 The rewrite uses a standalone C++ service. It binds only to `127.0.0.1`, accepts
 structured requests, resolves `target_id` from a configured allowlist and
 exposes service queries, probe-only host-key discovery, and bounded SFTP list, stat, read, write,
-exclusive-create, remove, guarded atomic replacement, and link-count operations.
+exclusive-create, no-replace publication, remove, guarded atomic replacement, and link-count operations.
 Host keys can be checked against an OpenSSH `known_hosts` file, an exact
 `SHA256:` pin from the desktop trust store, or an OpenSSH host CA certificate.
 Host CA verification checks the certificate signature, host certificate type,
@@ -17,10 +17,13 @@ Agent authentication uses `SSH_AUTH_SOCK` on Unix and libssh2's platform Agent
 integration on Windows. The socket path is forwarded only when a target in the
 allowlist selects agent authentication.
 
-The HTTP service deliberately has no raw-command endpoint. Its separate `--terminal`
-worker mode is used only by the manually opened desktop terminal; it is not an
-Agent operation and accepts no HTTP requests. Supported desktop terminal
-sessions and manual SFTP transfers also use C++ workers.
+The service has no general-purpose command endpoint. The bounded `server_exec`
+operation is accepted only for a target whose one-shot capability is explicitly
+enabled in that service process; command bytes, timeout, output and environment
+parameters are validated before SSH execution. The separate `--terminal` worker
+mode is used only by the manually opened desktop terminal; it accepts no HTTP
+requests. Supported desktop terminal sessions and manual SFTP transfers also
+use C++ workers.
 The `host_key_probe` operation is restricted to targets configured with
 `probe_only: true` and `auth: {"type":"probe"}`; those targets cannot perform
 any authenticated operation and do not configure a trust source. The desktop
@@ -79,7 +82,11 @@ Windows verification used the NMake generator and passed all six registered
 CTest targets with the Agent and optional Paramiko test dependencies installed:
 the C++ config/policy/network tests, Python client tests, service HTTP
 integration, Python Agent tests, SSH mock integration, and Agent-to-SSH
-integration. The real OpenSSH container test is separate and requires Docker.
+integration. Ubuntu CI additionally enables the real OpenSSH container test,
+which checks host-key and authentication failures, bounded command execution,
+`hardlink@openssh.com:1` publication, and collision-safe no-replace behavior.
+The local Windows run did not execute that container test because Docker is not
+installed in this environment.
 The SSH mock also exercises HTTPS CONNECT through a locally trusted CA and
 confirms that a certificate with a mismatched proxy hostname is rejected. It
 verifies authenticated SOCKS5 and SOCKS5H tunnels, including local versus proxy

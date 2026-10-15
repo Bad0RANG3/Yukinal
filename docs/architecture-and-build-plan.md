@@ -1,6 +1,6 @@
 # 目标架构与施工交接
 
-> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文旧 Rust/Node 路径仅表示历史基线或明确标注的测试。当前运行链路由独立 C++ SSH/SFTP 服务和 Python caller/Agent Runtime 承担；React/Tauri 保留现有界面、原生 IPC、系统凭据库接入及桌面授权桥接。Tauri 开发与新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。SSH、SFTP、PTY 和主机指纹探测没有 Rust 传输回退；C++ 不支持的认证、信任或代理配置明确失败。Windows 最近一次 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器验收尚未运行。C++ 支持直连、HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书和受支持的 Host CA；代理 URL、HTTPS 验证、bypass 匹配、CONNECT/SOCKS5 隧道及 Host CA KRL 下载均由 C++ 处理。SOCKS5 在本机解析目标域名，SOCKS5H 由代理解析。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
+> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文旧 Rust/Node 路径仅表示历史基线或明确标注的测试。当前运行链路由独立 C++ SSH/SFTP 服务和 Python caller/Agent Runtime 承担；React/Tauri 保留现有界面、原生 IPC、系统凭据库接入及桌面授权桥接。Tauri 开发与新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。SSH、SFTP、PTY 和主机指纹探测没有 Rust 传输回退；C++ 不支持的认证、信任或代理配置明确失败。Windows 最近一次本地 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器测试已加入 Ubuntu CI，本机缺少 Docker，尚未运行该测试。C++ 支持直连、HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书和受支持的 Host CA；代理 URL、HTTPS 验证、bypass 匹配、CONNECT/SOCKS5 隧道及 Host CA KRL 下载均由 C++ 处理。SOCKS5 在本机解析目标域名，SOCKS5H 由代理解析。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
 
 ## 目标与角色
 

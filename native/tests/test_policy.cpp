@@ -458,6 +458,26 @@ YUKINAL_TEST(policy_accepts_only_sibling_paths_for_sftp_no_replace_publication) 
       &request, &error);
   YUKINAL_REQUIRE(!different_parent_accepted);
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool traversal_path_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_publish_no_replace"},
+       {"parameters", {{"source", "/srv/app/../stage"},
+                        {"destination", "/srv/app/config"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!traversal_path_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+
+  const bool repeated_separator_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "sftp_publish_no_replace"},
+       {"parameters", {{"source", "/srv//stage"},
+                        {"destination", "/srv/file"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!repeated_separator_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
 YUKINAL_TEST(policy_rejects_arbitrary_shell_fields) {

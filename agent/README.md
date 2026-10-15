@@ -144,7 +144,9 @@ stable tool error instead of being copied into the Agent result.
 read-only connection check, service inventory, Docker listing/logs/inspection,
 systemd inspection, package inspection, and bounded server logs, plus structured
 Docker and systemd restart and package installation operations. Each wrapper
-validates its parameters before sending a structured operation. These client methods do not automatically
+validates its parameters before sending a structured operation. Its
+`sftp_publish_no_replace` method accepts only canonical absolute sibling paths
+and calls C++ `hardlink@openssh.com:1`; unsupported servers fail closed. These client methods do not automatically
 add Agent tools; the embedding host still chooses which operations to register
 and authorize.
 

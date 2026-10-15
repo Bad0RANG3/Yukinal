@@ -22,10 +22,13 @@ jobs:
           # Keep the full Linux/GTK dependency graph honest at the declared MSRV.
           - os: ubuntu-latest
             rust: 1.90.0
+            openssh_container_test: ON
           - os: windows-latest
             rust: stable
+            openssh_container_test: OFF
           - os: macos-latest
             rust: stable
+            openssh_container_test: OFF
     runs-on: ${{ matrix.os }}
     env:
       YUKINAL_SSH_CMAKE_BUILD_DIR: native/build-check
@@ -64,7 +67,7 @@ jobs:
         run: python -m pip install -e "agent[agent,models,test]"
 
       - name: Configure C++ SSH service and tests
-        run: cmake -S native -B native/build-check -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON
+        run: cmake -S native -B native/build-check -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }}
 
       - name: Build C++ SSH service and tests
         run: cmake --build native/build-check --config Release --parallel

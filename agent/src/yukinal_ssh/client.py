@@ -604,6 +604,27 @@ class SshServiceClient:
             timeout_seconds,
         )
 
+    def sftp_publish_no_replace(
+        self,
+        target_id: str,
+        source_path: str,
+        destination_path: str,
+        timeout_seconds: int = 10,
+    ) -> SshOperationResult:
+        """Publish a staged sibling file using the server's no-replace SFTP extension."""
+        self._validate_sftp_publication_path(source_path)
+        self._validate_sftp_publication_path(destination_path)
+        source_parent = source_path.rpartition("/")[0] or "/"
+        destination_parent = destination_path.rpartition("/")[0] or "/"
+        if source_path == destination_path or source_parent != destination_parent:
+            raise ValueError("SFTP publication paths must be distinct siblings")
+        return self._execute_operation(
+            target_id,
+            "sftp_publish_no_replace",
+            {"source": source_path, "destination": destination_path},
+            timeout_seconds,
+        )
+
     def sftp_remove_file(
         self, target_id: str, path: str, timeout_seconds: int = 10
     ) -> SshOperationResult:
@@ -649,6 +670,19 @@ class SshServiceClient:
             or "\x00" in path
         ):
             raise ValueError("path must be a non-empty SFTP path of at most 4096 bytes")
+
+    @classmethod
+    def _validate_sftp_publication_path(cls, path: str) -> None:
+        cls._validate_sftp_path(path)
+        segments = path.split("/")
+        if (
+            not path.startswith("/")
+            or path.endswith("/")
+            or "//" in path
+            or any(segment in {".", ".."} for segment in segments)
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in path)
+        ):
+            raise ValueError("SFTP publication paths must be canonical absolute file paths")
 
     def _execute_operation(
         self,

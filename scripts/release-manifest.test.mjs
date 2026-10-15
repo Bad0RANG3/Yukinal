@@ -236,6 +236,8 @@ test("the cross-platform check gate builds and tests the C++ service and Python 
   assert.match(workflow, /actions\/setup-python@[0-9a-f]{40}/);
   assert.match(workflow, /agent\[agent,models,test\]/);
   assert.match(workflow, /cmake -S native -B native\/build-check[\s\S]*-DYUKINAL_BUILD_TESTS=ON/);
+  assert.match(workflow, /-DYUKINAL_ENABLE_SSH_CONTAINER_TEST=\$\{\{ matrix\.openssh_container_test \}\}/);
+  assert.match(workflow, /openssh_container_test: ON/);
   assert.match(workflow, /cmake --build native\/build-check/);
   assert.match(workflow, /YUKINAL_SSH_CMAKE_BUILD_DIR: native\/build-check/);
   assert.match(workflow, /pnpm check/);

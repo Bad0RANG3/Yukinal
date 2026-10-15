@@ -135,6 +135,39 @@ def main() -> int:
             result = client.service_status("test-openssh", "nginx.service", timeout_seconds=10)
             if result.exit_code != 0 or result.stdout != "active\n":
                 raise RuntimeError(f"unexpected service status result: exit={result.exit_code}, stdout={result.stdout!r}")
+
+            transfer_id = uuid.uuid4().hex
+            staging_path = f"/home/yukinal/.yukinal-{transfer_id}.part"
+            target_path = f"/home/yukinal/yukinal-{transfer_id}.txt"
+            collision_staging_path = f"/home/yukinal/.yukinal-{transfer_id}.collision.part"
+            payload = b"OpenSSH hardlink no-replace integration\x00payload"
+            client.sftp_create_exclusive("test-openssh", staging_path, payload, timeout_seconds=10)
+            published = client.sftp_publish_no_replace(
+                "test-openssh", staging_path, target_path, timeout_seconds=10
+            )
+            if published.stdout != '{"published":true}' or client.sftp_read(
+                "test-openssh", target_path, len(payload), timeout_seconds=10
+            ) != payload:
+                raise RuntimeError("OpenSSH hardlink extension did not publish the staged bytes intact")
+            client.sftp_create_exclusive(
+                "test-openssh", collision_staging_path, b"must not replace", timeout_seconds=10
+            )
+            try:
+                client.sftp_publish_no_replace(
+                    "test-openssh", collision_staging_path, target_path, timeout_seconds=10
+                )
+            except Exception as error:
+                if getattr(error, "code", None) != "already_exists":
+                    raise RuntimeError(
+                        f"wrong no-replace collision result: {getattr(error, 'code', type(error).__name__)}"
+                    ) from error
+            else:
+                raise RuntimeError("OpenSSH hardlink publication replaced an existing destination")
+            if client.sftp_read("test-openssh", target_path, len(payload), timeout_seconds=10) != payload:
+                raise RuntimeError("a no-replace collision changed the existing destination")
+            for remote_path in (staging_path, target_path, collision_staging_path):
+                client.sftp_remove_file("test-openssh", remote_path, timeout_seconds=10)
+
             try:
                 client.service_status("test-bad-auth", "nginx.service", timeout_seconds=5)
             except Exception as error:
@@ -182,7 +215,7 @@ def main() -> int:
                     raise RuntimeError(f"wrong changed-host-key classification: {getattr(error, 'code', type(error).__name__)}") from error
             else:
                 raise RuntimeError("a changed SSH host key unexpectedly succeeded")
-            print("PASS SSH success, authentication failure, timeout, output cap, and unknown/changed host-key rejection")
+            print("PASS SSH auth, timeout, output cap, host-key rejection, and OpenSSH SFTP hardlink no-replace")
     finally:
         if process and process.poll() is None:
             process.terminate()

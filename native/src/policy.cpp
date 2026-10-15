@@ -609,10 +609,27 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return separator == 0 ? std::string_view(value).substr(0, 1)
                             : std::string_view(value).substr(0, separator);
     };
-    const bool source_valid = valid_sftp_path(source_path) && source_path.front() == '/' &&
-        source_path.find_first_of("\r\n") == std::string::npos;
-    const bool destination_valid = valid_sftp_path(destination_path) &&
-        destination_path.front() == '/' && destination_path.find_first_of("\r\n") == std::string::npos;
+    const auto valid_publication_path = [](const std::string& value) {
+      if (!valid_sftp_path(value) || value.front() != '/' || value.back() == '/' ||
+          value.find("//") != std::string::npos ||
+          std::any_of(value.begin(), value.end(), [](unsigned char ch) {
+            return ch < 0x20 || ch == 0x7f;
+          })) {
+        return false;
+      }
+      std::size_t start = 1;
+      while (start <= value.size()) {
+        const auto end = value.find('/', start);
+        const auto segment = std::string_view(value).substr(
+            start, end == std::string::npos ? std::string::npos : end - start);
+        if (segment == "." || segment == "..") return false;
+        if (end == std::string::npos) break;
+        start = end + 1;
+      }
+      return true;
+    };
+    const bool source_valid = valid_publication_path(source_path);
+    const bool destination_valid = valid_publication_path(destination_path);
     if (!source_valid || !destination_valid || source_path == destination_path ||
         parent_path(source_path) != parent_path(destination_path)) {
       set_error(error, 422, "invalid_parameters", "SFTP no-replace publication requires distinct absolute sibling paths");
