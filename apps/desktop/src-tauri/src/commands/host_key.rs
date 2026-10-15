@@ -157,10 +157,9 @@ pub async fn server_host_key_probe(
     })?;
     let host = server.connection.host.clone();
     let port = server.connection.port;
-    let presented_fingerprint = if server.connection.host_certificate_authority.is_some() {
-        // C++ 当前探针报告原始 host-key 指纹。保留 Rust 校验路径，直到 C++ 能按
-        // OpenSSH host certificate 的底层公钥语义返回相同指纹。
-        state
+    let presented_fingerprint = match ssh_service::probe_host_key(&app, &state, &server_id).await {
+        Ok(Some(fingerprint)) => fingerprint,
+        Ok(None) => state
             .ssh
             .probe_host_key(&host, port)
             .await
@@ -170,27 +169,12 @@ pub async fn server_host_key_probe(
                     "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
              并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
                 )
-            })?
-    } else {
-        match ssh_service::probe_host_key(&app, &state, &server_id).await {
-            Ok(Some(fingerprint)) => fingerprint,
-            Ok(None) => state
-                .ssh
-                .probe_host_key(&host, port)
-                .await
-                .map(|probe| probe.fingerprint)
-                .map_err(|error| {
-                    format!(
-                        "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
+            })?,
+        Err(error) => {
+            return Err(format!(
+                "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
              并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
-                    )
-                })?,
-            Err(error) => {
-                return Err(format!(
-                    "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
-             并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
-                ));
-            }
+            ));
         }
     };
 
