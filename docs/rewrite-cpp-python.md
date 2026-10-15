@@ -6,7 +6,7 @@
 > desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; installer resources contain Python Agent and C++ SSH assets only.
-> The resolver retains a legacy Node compatibility branch for older layouts.
+> The desktop resolver has no legacy Node resource or runtime fallback; old Node paths below refer only to historical migration evidence.
 > Rust still
 > hosts native UI IPC, local trust-store updates, final approvals, and SSH
 > compatibility paths for configurations outside current C++ coverage: Host CA,
@@ -439,7 +439,6 @@ could not be compiled here because Cargo and rustc are unavailable.
 
 ## Deliberately deferred
 
-- removing the legacy Node resource-resolution branch after old packaged layouts no longer need compatibility;
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;

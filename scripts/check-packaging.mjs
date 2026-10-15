@@ -139,16 +139,18 @@ for (const required of ["webkit2gtk", "gtk3"]) {
   }
 }
 
-// Rust and Tauri must resolve the same frozen Python Agent in packaged builds.
+// Rust and Tauri must resolve the same Python Agent, with no implicit Node fallback.
 const configRs = join(root, "crates", "core", "src", "sidecar", "config.rs");
 const configSource = read(configRs);
 const resolverStart = configSource.indexOf("pub fn from_env_with_resources");
 const pythonSelection = configSource.indexOf("map(packaged_python_entry)", resolverStart);
-const legacyNodeSelection = configSource.indexOf("map(packaged_entry)", resolverStart);
 if (resolverStart === -1 || pythonSelection === -1) {
   fail(`${configRs}: packaged resource resolution must select packaged_python_entry()`);
-} else if (legacyNodeSelection !== -1 && pythonSelection > legacyNodeSelection) {
-  fail(`${configRs}: the Python Agent must be selected before the legacy Node fallback`);
+}
+for (const staleNodeResolver of ["YUKINAL_NODE", "YUKINAL_AGENT_ENTRY", "packaged_entry", "packaged_runtime"]) {
+  if (configSource.includes(staleNodeResolver)) {
+    fail(`${configRs}: stale Node resolver symbol ${staleNodeResolver} must be removed`);
+  }
 }
 const pythonEntryAt = configSource.indexOf("pub fn packaged_python_entry");
 if (pythonEntryAt === -1) {

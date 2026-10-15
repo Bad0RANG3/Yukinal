@@ -204,14 +204,14 @@ test("the installer resource map ships Python and C++ resources without the lega
   assert.match(packageScript, /smoke-packaged-agent\.mjs/);
 });
 
-test("Rust sidecar resolution prefers the packaged Python Agent and marks it for SSH service credentials", async () => {
+test("Rust sidecar resolution uses the Python Agent without a Node fallback", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const source = await readFile(path.join(root, "crates", "core", "src", "sidecar", "config.rs"), "utf8");
   const resolverStart = source.indexOf("pub fn from_env_with_resources");
   const pythonSelection = source.indexOf("map(packaged_python_entry)", resolverStart);
-  const nodeSelection = source.indexOf("let packaged = resources.map(packaged_entry)", resolverStart);
 
-  assert.ok(resolverStart >= 0 && pythonSelection > resolverStart && pythonSelection < nodeSelection);
+  assert.ok(resolverStart >= 0 && pythonSelection > resolverStart);
+  assert.doesNotMatch(source, /YUKINAL_NODE|YUKINAL_AGENT_ENTRY|packaged_entry|packaged_runtime|requires_node/);
   assert.ok(source.includes("is_python_agent: true"));
   assert.ok(source.includes("if self.is_python_agent"));
   assert.ok(source.includes('resources.join("python-agent")'));

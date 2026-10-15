@@ -64,7 +64,6 @@ pub const PROTOCOL_VERSION: &str = "1.0";
 /// JSON-RPC request ids are local to this supervisor; the agent never allocates ids.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const NODE_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
 /// CREATE_NO_WINDOW, so the sidecar never flashes a console on Windows.
@@ -74,7 +73,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[derive(Debug, thiserror::Error)]
 pub enum SidecarError {
     #[error(
-        "no agent bundle to launch (searched {searched}); run `pnpm --filter @yukinal/agent build`"
+        "no Python Agent runtime found (searched {searched}); create `agent/.venv` and install `agent[agent,models]`"
     )]
     NotFound { searched: String },
     #[error("failed to launch agent sidecar: {0}")]
@@ -362,13 +361,11 @@ fn ensure_frame_size(payload: &[u8]) -> Result<(), SidecarError> {
 /// Launch the sidecar. The returned handle has *not* been initialized -- callers that
 /// need a handshake should call `initialize` explicitly (see `crate::commands`).
 pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError> {
-    ensure_node_prerequisite(config).await?;
     let mut command = Command::new(&config.program);
     command
         .args(&config.args)
-        // sidecar 是我们自己的 Node bundle，但仍然会加载第三方包：给它的环境与给 MCP 的
-        // 一样，是显式白名单，而不是宿主的全部环境（见 `crate::child_env`）。它比 MCP
-        // 多保留几个只属于我们自己进程的 `YUKINAL_*` 启动旋钮。
+        // 给 Agent 的环境与给 MCP 的一样，是显式白名单，而不是宿主的全部环境
+        // （见 `crate::child_env`）。配置额外保留少量只属于 Agent 的 `YUKINAL_*` 启动值。
         .env_clear()
         .envs(crate::child_env::minimal_sidecar_environment())
         .envs(config.env.iter().map(|(key, value)| (key, value)))
@@ -521,50 +518,6 @@ pub async fn spawn(config: &SidecarConfig) -> Result<SidecarHandle, SidecarError
     });
 
     Ok(handle)
-}
-
-/// Refuse an unsupported Node before loading the ESM bundle.
-///
-/// The check is deliberately skipped for `YUKINAL_AGENT_COMMAND`: that path may point to
-/// a wrapper or another runtime, so this crate cannot infer that `--version` has Node
-/// semantics. Missing and non-executable normal Node paths still use the same actionable
-/// launch error as a failed spawn.
-async fn ensure_node_prerequisite(config: &SidecarConfig) -> Result<(), SidecarError> {
-    if !config.requires_node {
-        return Ok(());
-    }
-    let mut command = Command::new(&config.program);
-    command
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    let output = match tokio::time::timeout(NODE_VERSION_TIMEOUT, command.output()).await {
-        Err(_) => {
-            return Err(SidecarError::Launch(format!(
-                "timed out while checking the Node.js version from `{} --version`",
-                config.program.display()
-            )));
-        }
-        Ok(Err(error)) => return Err(config.launch_error(&error)),
-        Ok(Ok(output)) => output,
-    };
-    if !output.status.success() {
-        return Err(SidecarError::Launch(format!(
-            "`{} --version` exited with {}; Node.js {} or newer is required",
-            config.program.display(),
-            output
-                .status
-                .code()
-                .map_or_else(|| "a signal".to_string(), |code| format!("code {code}")),
-            config::REQUIRED_NODE_MAJOR
-        )));
-    }
-    config.validate_node_version(&String::from_utf8_lossy(&output.stdout))?;
-    Ok(())
 }
 
 impl Inner {

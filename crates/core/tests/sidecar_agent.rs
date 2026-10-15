@@ -99,7 +99,6 @@ fn config() -> Option<SidecarConfig> {
         entry_label: String::from("integration test bundle"),
         client_version: String::from("test"),
         data_dir: std::env::temp_dir().display().to_string(),
-        requires_node: true,
         is_python_agent: false,
     })
 }
@@ -253,7 +252,6 @@ async fn a_bad_entry_reports_the_build_step_instead_of_hanging() {
         entry_label: String::from("missing bundle"),
         client_version: String::from("test"),
         data_dir: String::new(),
-        requires_node: true,
         is_python_agent: false,
     };
 
@@ -454,7 +452,6 @@ rl.on("line", (line) => {
         entry_label: "shutdown fixture".to_string(),
         client_version: "test".to_string(),
         data_dir: std::env::temp_dir().display().to_string(),
-        requires_node: true,
         is_python_agent: false,
     };
     let launched = sidecar::launch(&config)

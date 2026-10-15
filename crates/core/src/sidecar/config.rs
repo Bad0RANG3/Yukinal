@@ -1,66 +1,32 @@
-//! `SidecarConfig`：**启动什么**与**怎么启动**，以及从环境与目录树解析出它的那些规则。
+//! Resolve the Python Agent process and the environment passed to it.
 //!
-//! 从 `sidecar.rs` 拆出来，因为这一段与「跟子进程说话」无关：它全是纯逻辑（读环境变量、
-//! 在祖先目录里找 dev bundle、拼 node 程序名），没有 IO、不碰 tokio，也不依赖 `SidecarHandle`。
-//! 单独成文件之后，判断「路径是怎么定下来的」不必再翻过 spawn 与 JSON-RPC 那五百行。
+//! The desktop runtime launches the frozen Python Agent in packaged builds and the
+//! repository virtual environment during development. A custom executable remains
+//! available for diagnostics and integration harnesses; there is no implicit Node route.
 
 use super::*;
 
-/// What to launch and how. Kept as data (not a magic env read inside the spawn path)
-/// so tests can point it at anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarConfig {
-    /// Agent executable, normally the frozen Python binary or the legacy Node runtime.
     pub program: PathBuf,
     pub args: Vec<OsString>,
     pub env: Vec<(String, String)>,
     pub request_timeout: Duration,
-    /// Path reported back to the UI, so "what actually started" is visible.
     pub entry_label: String,
-    /// Desktop version sent during `initialize` (audit + capability negotiation).
     pub client_version: String,
-    /// Handed to the sidecar so it can find its local spool. Never a secret and never
-    /// a credential.
     pub data_dir: String,
-    /// Whether `program` is the Node.js executable selected by this app. A custom
-    /// `YUKINAL_AGENT_COMMAND` owns its own runtime contract and is not probed.
-    pub requires_node: bool,
-    /// Whether the launched process is the Python Agent, which may receive the
-    /// explicitly configured local C++ SSH service credentials.
+    /// Whether this process is the Python Agent and may receive its C++ service settings.
     pub is_python_agent: bool,
 }
 
 impl SidecarConfig {
-    /// Resolution order (ADR 0008):
-    /// 1. `YUKINAL_AGENT_COMMAND` (+ optional `YUKINAL_AGENT_ARGS`, `;`-separated)
-    /// 2. `YUKINAL_AGENT_ENTRY` (+ optional `YUKINAL_NODE`)
-    /// 3. dev fallback: nearest `apps/agent/dist/index.js` walking up from `cwd`
-    ///
-    /// Never a silent default: if nothing resolves, the caller gets a message naming
-    /// the build step to run.
-    ///
-    /// No packaged resources: see [`SidecarConfig::from_env_with_resources`] for the
-    /// installer case. This entry point stays because every test and the dev loop use it.
     pub fn from_env_with_cwd(cwd: &Path) -> Result<Self, SidecarError> {
         Self::from_env_with_resources(cwd, None)
     }
 
-    /// Resolution order for a **packaged** app:
-    /// 1. `YUKINAL_AGENT_COMMAND` (+ optional `YUKINAL_AGENT_ARGS`, `;`-separated)
-    /// 2. `YUKINAL_AGENT_ENTRY` (+ optional `YUKINAL_NODE`)
-    /// 3. `<resources>/python-agent/yukinal-agent/yukinal-agent[.exe]`, when present
-    /// 4. the legacy `<resources>/agent/index.js` and bundled Node runtime
-    /// 5. dev fallback: nearest `apps/agent/dist/index.js` walking up from `cwd`
-    ///
-    /// The packaged path outranks the dev one on purpose: an installed app has no repo
-    /// checkout to walk up from, while a dev run has no staged resources, so each order
-    /// picks the right answer in the case that matters and neither can shadow the other.
-    /// The frozen Python Agent takes precedence over the retained Node fallback.
-    /// `YUKINAL_NODE` remains an explicit Node override for diagnostics and development.
-    ///
-    /// `resources` is the Tauri resource directory. It is a parameter rather than an
-    /// `env!`-style constant because only the caller knows where it is, and the crate must
-    /// stay launchable from tests.
+    /// Resolution order: explicit command, packaged Python Agent, then the repository's
+    /// `agent/.venv`. Installed applications cannot discover source-tree runtimes; dev
+    /// launches use `dev-python-agent.mjs`, which supplies the explicit command.
     pub fn from_env_with_resources(
         cwd: &Path,
         resources: Option<&Path>,
@@ -70,18 +36,18 @@ impl SidecarConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         };
-
         let request_timeout = Duration::from_secs(
             lookup("YUKINAL_AGENT_TIMEOUT_SECS")
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .unwrap_or(10),
         );
+        let data_dir = lookup("YUKINAL_DATA_DIR").unwrap_or_default();
+        let client_version = default_client_version();
 
         if let Some(command) = lookup("YUKINAL_AGENT_COMMAND") {
-            let args = match lookup("YUKINAL_AGENT_ARGS") {
-                Some(raw) => raw.split(';').map(OsString::from).collect(),
-                None => Vec::new(),
-            };
+            let args: Vec<OsString> = lookup("YUKINAL_AGENT_ARGS")
+                .map(|raw| raw.split(';').map(OsString::from).collect())
+                .unwrap_or_default();
             let is_python_agent = is_python_module_invocation(&args);
             return Ok(Self {
                 program: PathBuf::from(command),
@@ -89,32 +55,9 @@ impl SidecarConfig {
                 env: Vec::new(),
                 request_timeout,
                 entry_label: String::from("custom command"),
-                client_version: default_client_version(),
-                data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
-                requires_node: false,
+                client_version,
+                data_dir,
                 is_python_agent,
-            });
-        }
-
-        if let Some(entry) = lookup("YUKINAL_AGENT_ENTRY") {
-            let path = PathBuf::from(&entry);
-            if !path.is_file() {
-                return Err(SidecarError::NotFound {
-                    searched: path.display().to_string(),
-                });
-            }
-            // 标签跟着命令行走，而不是照抄环境变量：见下面 packaged 分支的注释。
-            let entry = for_command_line(path);
-            return Ok(Self {
-                program: node_program(lookup("YUKINAL_NODE").as_deref()),
-                args: vec![entry.clone().into_os_string()],
-                env: Vec::new(),
-                request_timeout,
-                entry_label: entry.display().to_string(),
-                client_version: default_client_version(),
-                data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
-                requires_node: true,
-                is_python_agent: false,
             });
         }
 
@@ -129,66 +72,34 @@ impl SidecarConfig {
                 env: Vec::new(),
                 request_timeout,
                 entry_label: executable.display().to_string(),
-                client_version: default_client_version(),
-                data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
-                requires_node: false,
+                client_version,
+                data_dir,
                 is_python_agent: true,
             });
         }
 
-        let packaged = resources.map(packaged_entry);
-        let found = packaged
-            .as_ref()
-            .filter(|candidate| candidate.is_file())
-            .cloned()
-            .or_else(|| find_dev_bundle(cwd));
-
-        match found {
-            Some(path) => {
-                // 交给 Node 的路径与报给界面的路径必须是**同一条**。
-                //
-                // `resource_dir()` 在 Windows 上是规范化路径，带 `\\?\` 前缀；把它交给
-                // Node 会让 agent 一行都跑不起来（见 `for_command_line`），所以那里做了清洗。
-                // 但 `entry_label` 原先用的是**清洗之前**的路径 —— 于是设置页的「Sidecar
-                // entry」显示 `\\?\C:\...\agent\index.js`：一段 Node 读不懂、也从来没被
-                // 真正执行过的路径，而用户就是靠这一行确认「到底跑了哪个文件」。
-                let entry = for_command_line(path);
-                let runtime_override = lookup("YUKINAL_NODE").map(PathBuf::from);
-                let bundled_runtime = resources
-                    .map(packaged_runtime)
-                    .filter(|candidate| candidate.is_file());
-                Ok(Self {
-                    program: for_command_line(
-                        runtime_override
-                            .or(bundled_runtime)
-                            .unwrap_or_else(|| node_program(None)),
-                    ),
-                    args: vec![entry.clone().into_os_string()],
-                    env: Vec::new(),
-                    request_timeout,
-                    entry_label: entry.display().to_string(),
-                    client_version: default_client_version(),
-                    data_dir: lookup("YUKINAL_DATA_DIR").unwrap_or_default(),
-                    requires_node: true,
-                    is_python_agent: false,
-                })
-            }
-            None => {
-                let mut searched: Vec<String> = packaged
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect();
-                if let Some(path) = resources.map(packaged_python_entry) {
-                    searched.push(path.display().to_string());
-                }
-                searched.extend(
-                    ancestors(cwd).map(|dir| format!("{}/apps/agent/dist/index.js", dir.display())),
-                );
-                Err(SidecarError::NotFound {
-                    searched: searched.join(", "),
-                })
-            }
+        if let Some(path) = find_dev_python(cwd) {
+            let executable = for_command_line(path);
+            return Ok(Self {
+                program: executable.clone(),
+                args: vec![OsString::from("-m"), OsString::from("yukinal_agent.sidecar")],
+                env: Vec::new(),
+                request_timeout,
+                entry_label: executable.display().to_string(),
+                client_version,
+                data_dir,
+                is_python_agent: true,
+            });
         }
+
+        let mut searched = Vec::new();
+        if let Some(resources) = resources {
+            searched.push(packaged_python_entry(resources).display().to_string());
+        }
+        searched.extend(ancestors(cwd).map(|dir| dev_python_entry(&dir).display().to_string()));
+        Err(SidecarError::NotFound {
+            searched: searched.join(", "),
+        })
     }
 
     #[must_use]
@@ -197,7 +108,7 @@ impl SidecarConfig {
         self
     }
 
-    /// Pass the C++ SSH service credentials only to the explicitly selected Python Agent.
+    /// Pass C++ service credentials only to the Python Agent process.
     #[must_use]
     pub fn with_python_ssh_service_env(
         mut self,
@@ -215,7 +126,7 @@ impl SidecarConfig {
         self
     }
 
-    /// Pass the packaged C++ SSH executable and explicit config only to Python Agent.
+    /// Pass the packaged C++ service and the exact config credential references to Python.
     #[must_use]
     pub fn with_python_ssh_service_process(
         mut self,
@@ -233,8 +144,7 @@ impl SidecarConfig {
         self
     }
 
-    /// Let the desktop Python Agent resolve each selected server through Host RPC and
-    /// start a one-target C++ service for that operation.
+    /// Enable per-operation target resolution through the desktop host RPC.
     #[must_use]
     pub fn with_python_ssh_service_autoconfig(mut self, binary: &Path) -> Self {
         if self.is_python_agent {
@@ -244,87 +154,25 @@ impl SidecarConfig {
         self
     }
 
-    /// True when `program` is a bare command name for the OS to resolve through `PATH`,
-    /// rather than a path some caller chose.
-    ///
-    /// Only this case may be blamed on `PATH` in an error message: `YUKINAL_NODE` and
-    /// `YUKINAL_AGENT_COMMAND` always produce a path with a separator (or should), and
-    /// telling a user to fix `PATH` when they set an explicit override sends them to the
-    /// wrong place.
     #[must_use]
     pub fn resolved_through_path(&self) -> bool {
         self.program.components().count() == 1
     }
 
-    /// Turn a failed `Command::spawn` into something the user can act on.
-    ///
-    /// A packaged app normally uses its bundled runtime. If that file is missing, resolution
-    /// falls back to PATH so developer builds still work; make the likely packaging problem
-    /// actionable without claiming Node is always an end-user prerequisite. Other spawn
-    /// failures keep the plain `program: error` form.
-    ///
     #[must_use]
     pub fn launch_error(&self, error: &std::io::Error) -> SidecarError {
         if error.kind() == std::io::ErrorKind::NotFound && self.resolved_through_path() {
             return SidecarError::Launch(format!(
-                "Node.js was not found on PATH (`{}`). The packaged app normally includes \
-                 its own runtime; reinstall it if the bundled runtime is missing. For a \
-                 development build, install Node.js {REQUIRED_NODE_MAJOR} or newer \
-                 (https://nodejs.org), or set YUKINAL_NODE to an absolute executable path",
+                "Python Agent command `{}` was not found on PATH; check the configured Python environment or set YUKINAL_AGENT_COMMAND to an executable path",
                 self.program.display()
             ));
         }
         SidecarError::Launch(format!("{}: {error}", self.program.display()))
     }
-
-    /// Parse and enforce the version answer from `node --version`.
-    ///
-    /// This is a small, pure check; [`super::spawn`] owns the bounded process probe. A
-    /// custom command returns `Ok` without probing because it may not even be Node.
-    pub(super) fn validate_node_version(&self, reported: &str) -> Result<u32, SidecarError> {
-        if !self.requires_node {
-            return Ok(REQUIRED_NODE_MAJOR);
-        }
-        let raw = reported.trim();
-        let major = raw
-            .strip_prefix('v')
-            .unwrap_or(raw)
-            .split('.')
-            .next()
-            .and_then(|major| major.parse::<u32>().ok())
-            .ok_or_else(|| {
-                SidecarError::Launch(format!(
-                    "could not determine the Node.js version from `{} --version` (output: {raw:?})",
-                    self.program.display()
-                ))
-            })?;
-        if major < REQUIRED_NODE_MAJOR {
-            return Err(SidecarError::Launch(format!(
-                "Node.js {REQUIRED_NODE_MAJOR} or newer is required, but `{}` reports {raw}. \
-                 Install a newer Node.js (https://nodejs.org) or set YUKINAL_NODE to an \
-                 absolute path to a supported executable",
-                self.program.display()
-            )));
-        }
-        Ok(major)
-    }
 }
 
 fn default_client_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
-}
-
-/// The Node major the agent bundle is built for and that developers need locally.
-///
-/// The installed app carries a pinned Node runtime. This floor is duplicated from the root
-/// `package.json` `engines.node` and the agent's esbuild target; tests keep those in sync.
-pub const REQUIRED_NODE_MAJOR: u32 = 24;
-
-fn node_program(override_path: Option<&str>) -> PathBuf {
-    match override_path {
-        Some(explicit) if !explicit.trim().is_empty() => PathBuf::from(explicit),
-        _ => PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" }),
-    }
 }
 
 fn is_python_module_invocation(args: &[OsString]) -> bool {
@@ -334,17 +182,26 @@ fn is_python_module_invocation(args: &[OsString]) -> bool {
     })
 }
 
-/// Turn a path into one Node.js can actually resolve.
-///
-/// `resource_dir()` comes back canonicalised, and on Windows that means the verbatim prefix
-/// (`\\?\C:\...`). Win32 itself treats it as transparent, but Node does not: handed
-/// `\\?\C:\...\agent\index.js` it ends up calling `lstat('C:')`, dies with `EISDIR` and never
-/// runs a line of the agent. That is not a guess — it is what the app printed when this was
-/// fixed (`node.exe ["\\?\C:\...\target\debug\agent\index.js"]` followed by the crash).
-///
-/// Only the two verbatim forms with a plain equivalent are rewritten. `\\?\Volume{…}` has
-/// none: dropping the prefix would name a different path, so it is left alone rather than
-/// silently pointed somewhere else.
+fn dev_python_entry(repository: &Path) -> PathBuf {
+    let mut path = repository.join("agent").join(".venv");
+    if cfg!(windows) {
+        path.push("Scripts");
+        path.push("python.exe");
+    } else {
+        path.push("bin");
+        path.push("python");
+    }
+    path
+}
+
+fn find_dev_python(cwd: &Path) -> Option<PathBuf> {
+    ancestors(cwd)
+        .map(|directory| dev_python_entry(&directory))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Convert Windows verbatim disk and UNC paths to equivalent ordinary paths before
+/// passing them to child processes. Volume GUID paths have no plain equivalent.
 #[must_use]
 pub fn for_command_line(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
@@ -380,31 +237,17 @@ fn plain_windows_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn find_dev_bundle(cwd: &Path) -> Option<PathBuf> {
-    ancestors(cwd)
-        .map(|dir| dir.join("apps").join("agent").join("dist").join("index.js"))
-        .find(|candidate| candidate.is_file())
-}
-
-/// Where a bundled app keeps the agent. Must match `bundle.resources` in
-/// `apps/desktop/src-tauri/tauri.conf.json`; `scripts/check.mjs` asserts the two agree,
-/// because a rename on one side only would be discovered by an installed user, not by CI.
-#[must_use]
-pub fn packaged_entry(resources: &Path) -> PathBuf {
-    resources.join("agent").join("index.js")
-}
-
-/// The frozen Python Agent executable staged from `agent/runtime/yukinal-agent/`.
+/// Frozen Python Agent path inside Tauri's resource directory.
 #[must_use]
 pub fn packaged_python_entry(resources: &Path) -> PathBuf {
-    resources.join("python-agent").join(if cfg!(windows) {
+    resources.join("python-agent").join("yukinal-agent").join(if cfg!(windows) {
         "yukinal-agent.exe"
     } else {
         "yukinal-agent"
     })
 }
 
-/// The bundled standalone C++ SSH service executable.
+/// Standalone C++ SSH service executable inside Tauri's resource directory.
 #[must_use]
 pub fn packaged_ssh_service_entry(resources: &Path) -> PathBuf {
     resources.join("ssh-service").join(if cfg!(windows) {
@@ -414,20 +257,11 @@ pub fn packaged_ssh_service_entry(resources: &Path) -> PathBuf {
     })
 }
 
-/// The application-bundled Node.js executable, staged from the verified official archive.
-#[must_use]
-pub fn packaged_runtime(resources: &Path) -> PathBuf {
-    resources
-        .join("runtime")
-        .join(if cfg!(windows) { "node.exe" } else { "node" })
-}
-
 fn ancestors(start: &Path) -> impl Iterator<Item = PathBuf> {
     let mut current = Some(start.to_path_buf());
     std::iter::from_fn(move || {
         let path = current.take()?;
-        let parent = path.parent().map(Path::to_path_buf);
-        current = parent;
+        current = path.parent().map(Path::to_path_buf);
         Some(if path.as_os_str().is_empty() {
             PathBuf::from(".")
         } else {
@@ -440,10 +274,6 @@ fn ancestors(start: &Path) -> impl Iterator<Item = PathBuf> {
 mod tests {
     use super::*;
 
-    /// `std::env` is process-global and the test harness runs these tests on parallel
-    /// threads, so every test that *reads* the resolution environment has to hold this lock
-    /// while one that *writes* it is running. Without it `missing_bundle_error_names_the_fix`
-    /// intermittently sees the `YUKINAL_AGENT_COMMAND` another test just set.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -452,396 +282,142 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Guards the bug that kept the desktop app from starting its sidecar at all.
-    ///
-    /// `resource_dir()` is canonicalised, so on Windows the entry arrives with a `\\?\`
-    /// prefix, and Node dies on it before running anything. The app printed exactly this:
-    /// `node.exe ["\\?\C:\...\target\debug\agent\index.js"]` and then `EISDIR ... lstat 'C:'`.
-    #[cfg(windows)]
-    #[test]
-    fn a_verbatim_path_is_stripped_before_it_becomes_a_command_line_argument() {
-        assert_eq!(
-            for_command_line(PathBuf::from(r"\\?\C:\Users\me\agent\index.js")),
-            PathBuf::from(r"C:\Users\me\agent\index.js")
-        );
-        assert_eq!(
-            for_command_line(PathBuf::from(r"\\?\UNC\server\share\agent\index.js")),
-            PathBuf::from(r"\\server\share\agent\index.js")
-        );
-        // Nothing to repair: returned unchanged, so this cannot quietly rewrite a good path.
-        assert_eq!(
-            for_command_line(PathBuf::from(r"C:\already\plain\index.js")),
-            PathBuf::from(r"C:\already\plain\index.js")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn the_packaged_entry_never_reaches_node_with_a_verbatim_prefix() {
-        let entry = for_command_line(packaged_entry(Path::new(r"\\?\C:\app\resources")));
-        assert!(
-            !entry.to_string_lossy().starts_with(r"\\?\"),
-            "{}",
-            entry.display()
-        );
-    }
-
-    #[test]
-    fn ssh_service_credentials_are_forwarded_only_to_the_python_agent() {
-        let python = SidecarConfig {
-            program: PathBuf::from("python"),
-            args: vec!["-m".into(), "yukinal_agent.sidecar".into()],
-            env: Vec::new(),
-            request_timeout: Duration::from_secs(10),
-            entry_label: "custom command".into(),
-            client_version: "test".into(),
-            data_dir: "data".into(),
-            requires_node: false,
-            is_python_agent: true,
+    fn clear_launch_env() {
+        for key in [
+            "YUKINAL_AGENT_COMMAND",
+            "YUKINAL_AGENT_ARGS",
+            "YUKINAL_AGENT_TIMEOUT_SECS",
+            "YUKINAL_DATA_DIR",
+        ] {
+            std::env::remove_var(key);
         }
-        .with_python_ssh_service_env(Some("secret-token"), Some("http://127.0.0.1:8765"));
-        assert_eq!(
-            python.env,
-            vec![
-                ("YUKINAL_SSH_API_TOKEN".into(), "secret-token".into()),
-                ("YUKINAL_SSH_API_URL".into(), "http://127.0.0.1:8765".into()),
-            ]
-        );
-
-        let node = SidecarConfig {
-            program: PathBuf::from("node"),
-            args: vec!["index.js".into()],
-            env: Vec::new(),
-            request_timeout: Duration::from_secs(10),
-            entry_label: "index.js".into(),
-            client_version: "test".into(),
-            data_dir: "data".into(),
-            requires_node: true,
-            is_python_agent: false,
-        }
-        .with_python_ssh_service_env(Some("secret-token"), Some("http://127.0.0.1:8765"));
-        assert!(node.env.is_empty());
     }
 
     fn temp_tagged_dir(tag: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        let unique = format!("yukinal-sidecar-test-{tag}-{}", std::process::id());
-        path.push(unique);
+        let path = std::env::temp_dir().join(format!(
+            "yukinal-sidecar-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create temp dir");
         path
     }
 
     #[test]
-    fn finds_the_dev_bundle_in_an_ancestor() {
-        let root = temp_tagged_dir("bundle");
-        let bundle = root.join("apps").join("agent").join("dist");
-        std::fs::create_dir_all(&bundle).expect("create bundle dir");
-        std::fs::write(bundle.join("index.js"), "console.log('x')").expect("write bundle");
-
-        let nested = root.join("apps").join("desktop").join("src-tauri");
-        std::fs::create_dir_all(&nested).expect("create nested dir");
-
-        let found = find_dev_bundle(&nested);
-        assert_eq!(found, Some(bundle.join("index.js")));
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn missing_bundle_error_names_the_fix() {
+    fn packaged_python_agent_wins_over_a_development_environment() {
         let _guard = env_guard();
-        let root = temp_tagged_dir("empty");
-        let error =
-            SidecarConfig::from_env_with_cwd(&root).expect_err("should fail when nothing resolves");
-        let message = error.to_string();
-        assert!(
-            message.contains("pnpm --filter @yukinal/agent build"),
-            "{message}"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn explicit_command_override_wins_and_splits_args_on_semicolon() {
-        // Guarded: these env vars are process-global, so this test owns them.
-        let _guard = env_guard();
-        std::env::set_var("YUKINAL_AGENT_COMMAND", "/usr/bin/true");
-        std::env::set_var("YUKINAL_AGENT_ARGS", "one;two with space");
-        let config = SidecarConfig::from_env_with_cwd(Path::new(".")).expect("explicit config");
-        assert_eq!(config.program, PathBuf::from("/usr/bin/true"));
-        assert_eq!(config.args.len(), 2);
-        assert_eq!(config.args[1], OsString::from("two with space"));
-        std::env::remove_var("YUKINAL_AGENT_COMMAND");
-        std::env::remove_var("YUKINAL_AGENT_ARGS");
-    }
-
-    #[test]
-    fn a_packaged_bundle_is_found_in_the_resource_directory() {
-        let _guard = env_guard();
-        let root = temp_tagged_dir("packaged");
-        let resources = root.join("resources");
-        let staged = resources.join("agent");
-        std::fs::create_dir_all(&staged).expect("create staged dir");
-        std::fs::write(staged.join("index.js"), "console.log('packaged')").expect("write bundle");
-
-        let config = SidecarConfig::from_env_with_resources(&root, Some(&resources))
-            .expect("packaged bundle resolves");
-        assert_eq!(config.args, vec![staged.join("index.js").into_os_string()]);
-        assert_eq!(
-            config.entry_label,
-            staged.join("index.js").display().to_string()
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_packaged_python_agent_takes_precedence_over_the_legacy_node_bundle() {
-        let _guard = env_guard();
-        std::env::remove_var("YUKINAL_AGENT_COMMAND");
-        std::env::remove_var("YUKINAL_AGENT_ARGS");
-        std::env::remove_var("YUKINAL_AGENT_ENTRY");
-        std::env::remove_var("YUKINAL_NODE");
-
+        clear_launch_env();
         let root = temp_tagged_dir("packaged-python");
         let resources = root.join("resources");
-        let staged_python = packaged_python_entry(&resources);
-        let staged_node = packaged_entry(&resources);
-        std::fs::create_dir_all(staged_python.parent().expect("Python Agent parent"))
-            .expect("create Python Agent resource directory");
-        std::fs::create_dir_all(staged_node.parent().expect("Node Agent parent"))
-            .expect("create Node Agent resource directory");
-        std::fs::write(&staged_python, "frozen Python Agent fixture")
-            .expect("write Python Agent fixture");
-        std::fs::write(&staged_node, "legacy Node Agent fixture")
-            .expect("write Node Agent fixture");
+        let packaged = packaged_python_entry(&resources);
+        let dev_python = dev_python_entry(&root);
+        std::fs::create_dir_all(packaged.parent().expect("packaged parent")).unwrap();
+        std::fs::create_dir_all(dev_python.parent().expect("venv parent")).unwrap();
+        std::fs::write(&packaged, "frozen python fixture").unwrap();
+        std::fs::write(&dev_python, "python fixture").unwrap();
 
         let config = SidecarConfig::from_env_with_resources(&root, Some(&resources))
             .expect("packaged Python Agent resolves");
-        assert_eq!(config.program, staged_python);
+        assert_eq!(config.program, packaged);
         assert!(config.args.is_empty());
-        assert!(!config.requires_node);
         assert!(config.is_python_agent);
-
-        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn the_staged_node_runtime_is_used_for_a_packaged_agent() {
+    fn development_resolves_the_repository_virtual_environment() {
         let _guard = env_guard();
-        let root = temp_tagged_dir("packaged-runtime");
-        let resources = root.join("resources");
-        let staged_agent = packaged_entry(&resources);
-        let staged_runtime = packaged_runtime(&resources);
-        std::fs::create_dir_all(staged_agent.parent().expect("agent parent"))
-            .expect("create staged agent dir");
-        std::fs::create_dir_all(staged_runtime.parent().expect("runtime parent"))
-            .expect("create staged runtime dir");
-        std::fs::write(&staged_agent, "console.log('packaged')").expect("write bundle");
-        std::fs::write(&staged_runtime, "runtime fixture").expect("write runtime fixture");
+        clear_launch_env();
+        let root = temp_tagged_dir("dev-python");
+        let python = dev_python_entry(&root);
+        std::fs::create_dir_all(python.parent().expect("venv parent")).unwrap();
+        std::fs::write(&python, "python fixture").unwrap();
+        let nested = root.join("apps").join("desktop").join("src-tauri");
+        std::fs::create_dir_all(&nested).unwrap();
 
-        let config = SidecarConfig::from_env_with_resources(&root, Some(&resources))
-            .expect("packaged agent resolves");
-        assert_eq!(config.program, staged_runtime);
-        assert_eq!(config.args, vec![staged_agent.into_os_string()]);
-        assert!(config.requires_node);
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Windows 上 `resource_dir()` 是规范化路径，带 `\\?\` 前缀。设置页显示的入口必须
-    /// 与真正交给 Node 的那条命令一致 —— 前缀段是 Node 读不懂、也从没被执行过的字。
-    #[cfg(windows)]
-    #[test]
-    fn the_entry_label_is_the_path_that_was_handed_to_node() {
-        let _guard = env_guard();
-        let root = temp_tagged_dir("verbatim");
-        let resources = root.join("resources");
-        let staged = resources.join("agent");
-        std::fs::create_dir_all(&staged).expect("create staged dir");
-        std::fs::write(staged.join("index.js"), "console.log('packaged')").expect("write bundle");
-
-        // 这正是 Tauri 在 Windows 上给出的形状：`\\?\C:\...\resources`。
-        let verbatim = PathBuf::from(format!(r"\\?\{}", resources.display()));
-        let config = SidecarConfig::from_env_with_resources(&root, Some(&verbatim))
-            .expect("a verbatim resource dir still resolves");
-
-        let entry = staged.join("index.js");
-        assert_eq!(config.args, vec![entry.clone().into_os_string()]);
-        assert_eq!(config.entry_label, entry.display().to_string());
-        assert!(
-            !config.entry_label.contains(r"\\?\"),
-            "the UI must not be shown a prefix Node cannot use: {}",
-            config.entry_label
-        );
-
-        std::fs::remove_dir_all(&root).ok();
+        let config = SidecarConfig::from_env_with_cwd(&nested).expect("dev Python Agent resolves");
+        assert_eq!(config.program, python);
+        assert_eq!(config.args, [OsString::from("-m"), OsString::from("yukinal_agent.sidecar")]);
+        assert!(config.is_python_agent);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn a_packaged_bundle_outranks_a_dev_checkout_and_an_absent_one_falls_back() {
+    fn explicit_python_command_wins_and_splits_arguments() {
         let _guard = env_guard();
-        let root = temp_tagged_dir("precedence");
-        let dev_bundle = root.join("apps").join("agent").join("dist");
-        std::fs::create_dir_all(&dev_bundle).expect("create dev bundle dir");
-        std::fs::write(dev_bundle.join("index.js"), "console.log('dev')")
-            .expect("write dev bundle");
-
-        let resources = root.join("resources");
-        let staged = resources.join("agent");
-        std::fs::create_dir_all(&staged).expect("create staged dir");
-        std::fs::write(staged.join("index.js"), "console.log('packaged')").expect("write bundle");
-
-        let packaged = SidecarConfig::from_env_with_resources(&root, Some(&resources))
-            .expect("packaged bundle resolves");
-        assert_eq!(
-            packaged.entry_label,
-            staged.join("index.js").display().to_string(),
-            "an installed app must run the bundle that was installed with it"
-        );
-
-        // A dev checkout has no staged resources, and that must not be an error: the
-        // ancestor lookup still has to answer.
-        std::fs::remove_file(staged.join("index.js")).expect("remove staged bundle");
-        let dev = SidecarConfig::from_env_with_resources(&root, Some(&resources))
-            .expect("dev bundle resolves");
-        assert_eq!(
-            dev.entry_label,
-            dev_bundle.join("index.js").display().to_string()
-        );
-
-        std::fs::remove_dir_all(&root).ok();
+        clear_launch_env();
+        std::env::set_var("YUKINAL_AGENT_COMMAND", "python-test");
+        std::env::set_var("YUKINAL_AGENT_ARGS", "-m;yukinal_agent.sidecar;two with space");
+        std::env::set_var("YUKINAL_DATA_DIR", "agent-data");
+        let config = SidecarConfig::from_env_with_cwd(Path::new("."))
+            .expect("explicit command resolves");
+        assert_eq!(config.program, PathBuf::from("python-test"));
+        assert_eq!(config.args.len(), 3);
+        assert_eq!(config.args[2], OsString::from("two with space"));
+        assert_eq!(config.data_dir, "agent-data");
+        assert!(config.is_python_agent);
+        clear_launch_env();
     }
 
     #[test]
-    fn the_not_found_error_names_the_packaged_path_too() {
+    fn cxx_credentials_are_not_forwarded_to_a_non_python_command() {
         let _guard = env_guard();
-        let root = temp_tagged_dir("searched");
-        let resources = root.join("resources");
-        let error = SidecarConfig::from_env_with_resources(&root, Some(&resources))
-            .expect_err("nothing resolves");
-        let message = error.to_string();
-        let expected = packaged_entry(&resources).display().to_string();
-        assert!(
-            message.contains(&expected),
-            "an installed user has to be told which packaged path was missing: {message}"
-        );
-        let expected_python = packaged_python_entry(&resources).display().to_string();
-        assert!(
-            message.contains(&expected_python),
-            "an installed user also has to be told which frozen Python path was missing: {message}"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A config whose program is resolved through `PATH`, i.e. the packaged shape.
-    ///
-    /// Built as a literal instead of by reading the environment: the ambient
-    /// `YUKINAL_AGENT_*` variables are process-global and the integration harness sets them,
-    /// so "what does the resolution path produce here" would be a different answer under
-    /// `cargo test --workspace` than under `cargo test -p yukinal-core`.
-    fn path_resolved_config() -> SidecarConfig {
-        SidecarConfig {
-            program: node_program(None),
-            args: vec![OsString::from("/opt/agent/index.js")],
+        let custom = SidecarConfig {
+            program: PathBuf::from("custom-agent"),
+            args: Vec::new(),
             env: Vec::new(),
             request_timeout: Duration::from_secs(10),
-            entry_label: String::from("/opt/agent/index.js"),
-            client_version: default_client_version(),
+            entry_label: "custom command".into(),
+            client_version: "test".into(),
             data_dir: String::new(),
-            requires_node: true,
             is_python_agent: false,
         }
+        .with_python_ssh_service_env(Some("secret-token"), Some("http://127.0.0.1:8765"));
+        assert!(custom.env.is_empty());
+
+        let python = SidecarConfig {
+            is_python_agent: true,
+            ..custom
+        }
+        .with_python_ssh_service_env(Some("secret-token"), Some("http://127.0.0.1:8765"));
+        assert_eq!(python.env.len(), 2);
+        assert_eq!(python.env[0].0, "YUKINAL_SSH_API_TOKEN");
     }
 
     #[test]
-    fn a_missing_path_node_is_reported_as_a_missing_prerequisite() {
-        let config = path_resolved_config();
-        assert!(config.resolved_through_path());
-
-        let error = config.launch_error(&std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "program not found",
-        ));
+    fn not_found_error_lists_python_paths_and_setup_command() {
+        let _guard = env_guard();
+        clear_launch_env();
+        let root = temp_tagged_dir("missing-python");
+        let resources = root.join("resources");
+        let error = SidecarConfig::from_env_with_resources(&root, Some(&resources))
+            .expect_err("missing Python runtime must fail");
         let message = error.to_string();
-        // Keep the Node floor visible for developer builds, without claiming end users must
-        // install Node when packaged applications normally carry the runtime.
-        assert!(
-            message.contains(&format!("Node.js {REQUIRED_NODE_MAJOR}")),
-            "{message}"
-        );
-        assert!(message.contains("YUKINAL_NODE"), "{message}");
+        assert!(message.contains(&packaged_python_entry(&resources).display().to_string()));
+        assert!(message.contains(&dev_python_entry(&root).display().to_string()));
+        assert!(message.contains("agent[agent,models]"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
-    fn an_explicit_program_path_is_never_blamed_on_path_lookup() {
-        let mut config = path_resolved_config();
-        config.program = PathBuf::from("/usr/local/bin/node");
-        assert!(!config.resolved_through_path());
-        let error = config.launch_error(&std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "program not found",
-        ));
-        let message = error.to_string();
-        assert!(
-            !message.contains("PATH"),
-            "an explicit override must not be told to fix PATH: {message}"
-        );
-        assert!(message.contains("/usr/local/bin/node"), "{message}");
-    }
-
-    #[test]
-    fn a_non_notfound_spawn_failure_keeps_the_plain_message() {
-        let config = path_resolved_config();
-        let error = config.launch_error(&std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "access is denied",
-        ));
-        let message = error.to_string();
-        assert!(!message.contains("nodejs.org"), "{message}");
-        assert!(message.contains("access is denied"), "{message}");
-    }
-
-    #[test]
-    fn node_version_probe_rejects_an_old_runtime_with_an_actionable_message() {
-        let config = path_resolved_config();
-        assert_eq!(config.validate_node_version("v24.4.1\n").unwrap(), 24);
-        assert_eq!(config.validate_node_version("24.0.0").unwrap(), 24);
-
-        let error = config
-            .validate_node_version("v22.14.0")
-            .expect_err("an old Node must be refused before loading the bundle");
-        let message = error.to_string();
-        assert!(message.contains("Node.js 24 or newer"), "{message}");
-        assert!(message.contains("v22.14.0"), "{message}");
-        assert!(message.contains("YUKINAL_NODE"), "{message}");
-
-        let malformed = config
-            .validate_node_version("not node")
-            .expect_err("unparseable output must not be guessed");
-        assert!(malformed.to_string().contains("could not determine"));
-    }
-
-    #[test]
-    fn a_custom_command_owns_its_runtime_contract() {
-        let mut config = path_resolved_config();
-        config.program = PathBuf::from("/usr/bin/false");
-        config.requires_node = false;
+    fn verbatim_paths_are_normalized_before_launch() {
         assert_eq!(
-            config.validate_node_version("not node").unwrap(),
-            REQUIRED_NODE_MAJOR
+            for_command_line(PathBuf::from(r"\\?\C:\Users\me\python.exe")),
+            PathBuf::from(r"C:\Users\me\python.exe")
         );
+        assert_eq!(
+            for_command_line(PathBuf::from(r"\\?\UNC\server\share\python.exe")),
+            PathBuf::from(r"\\server\share\python.exe")
+        );
+        let volume = PathBuf::from(r"\\?\Volume{123}\python.exe");
+        assert_eq!(for_command_line(volume.clone()), volume);
     }
 
-    /// The Node floor is stated in three places that cannot import each other: this constant,
-    /// the root `package.json` `engines.node`, and the agent's esbuild `--target`.
     #[test]
-    fn the_node_floor_matches_the_declared_engine_range() {
-        let manifest = include_str!("../../../../package.json");
-        let expected = format!("\">={REQUIRED_NODE_MAJOR}\"");
-        assert!(
-            manifest.contains(&expected),
-            "root package.json engines.node must stay {expected}; raise both together"
-        );
+    fn packaged_ssh_service_entry_uses_the_platform_executable_name() {
+        let path = packaged_ssh_service_entry(Path::new("resources"));
+        assert!(path.starts_with("resources/ssh-service"));
+        assert!(path.to_string_lossy().contains("yukinal-ssh-service"));
     }
 }

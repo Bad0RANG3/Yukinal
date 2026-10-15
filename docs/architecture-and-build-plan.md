@@ -1,6 +1,6 @@
 # 目标架构与施工交接
 
-> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线。当前重建包含独立 C++ SSH 服务、Python caller 与 Agent Runtime、多 Provider 适配、MCP 和只读桌面宿主桥接；Tauri 开发与新安装包选择 Python sidecar，Node Agent/runtime 不再放入新安装包，resolver 仍保留旧资源布局兼容分支。Windows 最近一次 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器验收尚未运行。支持的终端已使用 C++ PTY 子进程；未配置 Host CA、使用受支持认证方式且有已确认主机密钥 pin 的桌面 SSH/SFTP 与手动传输由 C++ 执行，支持直连、HTTP CONNECT 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书身份。Rust/Tauri 仍保留 Host CA、HTTPS 或 C++ 未支持的 NO_PROXY 规则、键盘交互认证和 known_hosts-only 信任等兼容路径，以及审批、任务生命周期和其他尚未迁移的 SSH/SFTP 路径。无 Host CA 且使用受支持代理路由的主机指纹探测由 C++ 执行，其他代理配置走 Rust 探针。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
+> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线或明确标注的测试。当前重建包含独立 C++ SSH 服务、Python caller 与 Agent Runtime、多 Provider 适配、MCP 和只读桌面宿主桥接；Tauri 开发与新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。Windows 最近一次 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器验收尚未运行。支持的终端已使用 C++ PTY 子进程；未配置 Host CA、使用受支持认证方式且有已确认主机密钥 pin 的桌面 SSH/SFTP 与手动传输由 C++ 执行，支持直连、HTTP CONNECT 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书身份。Rust/Tauri 仍保留 Host CA、HTTPS 或 C++ 未支持的 NO_PROXY 规则、键盘交互认证和 known_hosts-only 信任等兼容路径，以及审批、任务生命周期和其他尚未迁移的 SSH/SFTP 路径。无 Host CA 且使用受支持代理路由的主机指纹探测由 C++ 执行，其他代理配置走 Rust 探针。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
 
 ## 目标与角色
 

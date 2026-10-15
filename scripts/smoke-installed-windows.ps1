@@ -60,7 +60,7 @@ $stderrPath = Join-Path $testRoot "package-$runId.stderr.log"
 $oldPath = $env:PATH
 $oldDataDir = [Environment]::GetEnvironmentVariable('YUKINAL_DATA_DIR', 'Process')
 $oldWebViewDataDir = [Environment]::GetEnvironmentVariable('WEBVIEW2_USER_DATA_FOLDER', 'Process')
-$overrideNames = @('YUKINAL_NODE', 'YUKINAL_AGENT_COMMAND', 'YUKINAL_AGENT_ARGS', 'YUKINAL_AGENT_ENTRY')
+$overrideNames = @('YUKINAL_AGENT_COMMAND', 'YUKINAL_AGENT_ARGS')
 $oldOverrides = @{}
 foreach ($name in $overrideNames) {
   $oldOverrides[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')

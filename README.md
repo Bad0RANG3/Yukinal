@@ -57,9 +57,9 @@ The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service
 panel uses the same short-lived service process for read-only service inventory.
 Tauri development and new desktop builds select the frozen Python Agent. The
-Node runtime and bundle are no longer included in installer resources. The
-legacy Node sidecar remains available only as a local development and
-compatibility route.
+Node runtime and bundle are no longer included in installer resources, and the
+desktop launcher has no Node fallback. Legacy Node source remains in the
+repository for protocol and migration checks only.
 
 To run the existing desktop UI with the Python Agent sidecar, create
 `agent/.venv` and install `agent[agent,models]`. Then run
