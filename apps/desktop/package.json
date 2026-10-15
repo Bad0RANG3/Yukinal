@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Tauri 2 shell: server list, overview, terminal, settings and agent panel",
+  "description": "React desktop UI for the C++ host and legacy Tauri shell",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

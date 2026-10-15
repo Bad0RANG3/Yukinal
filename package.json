@@ -22,6 +22,7 @@
     "package": "node scripts/package.mjs",
     "release:manifest": "node scripts/write-release-manifest.mjs",
     "desktop:dev": "pnpm --filter @yukinal/desktop dev",
+    "desktop:dev:cpp": "node scripts/dev-cpp-host.mjs",
     "desktop:dev:python": "node scripts/dev-python-agent.mjs",
     "agent:dev": "node scripts/dev-python-agent.mjs",
     "clean": "node scripts/clean.mjs"

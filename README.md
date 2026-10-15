@@ -237,6 +237,11 @@ pnpm check
 pnpm --filter @yukinal/desktop tauri dev
 ```
 
+To run the React UI in the C++ desktop host, use `pnpm desktop:dev:cpp`. The
+command builds the shared contracts and C++ host, then starts Vite and the native
+window. It accepts `YUKINAL_DESKTOP_HOST_BUILD_DIR` and `YUKINAL_DATA_DIR` for
+local build and data-directory overrides.
+
 The package build creates a frozen Python Agent with PyInstaller and includes
 available third-party license texts. Installer resources contain the Python
 Agent, C++ SSH service, and NOTICE; the legacy Node runtime is not packaged.
