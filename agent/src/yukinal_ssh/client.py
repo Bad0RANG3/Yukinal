@@ -279,6 +279,109 @@ class SshServiceClient:
             )
         return content
 
+    def sftp_stat(
+        self, target_id: str, path: str, timeout_seconds: int = 10
+    ) -> dict[str, int | str | None]:
+        """Read no-follow metadata for one remote path."""
+        self._validate_sftp_path(path)
+        result = self._execute_operation(target_id, "sftp_stat", {"path": path}, timeout_seconds)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP file metadata"
+            ) from None
+        if not isinstance(payload, dict) or set(payload) != {"kind", "size", "modified"}:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP file metadata"
+            )
+        kind = payload["kind"]
+        size = payload["size"]
+        modified = payload["modified"]
+        if (
+            not isinstance(kind, str)
+            or kind not in {"file", "directory", "symlink", "other"}
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or (modified is not None and (
+                isinstance(modified, bool) or not isinstance(modified, int) or not 0 <= modified <= 0xFFFFFFFF
+            ))
+        ):
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP file metadata"
+            )
+        return {"kind": kind, "size": size, "modified": modified}
+
+    def sftp_replace_guarded(
+        self,
+        target_id: str,
+        path: str,
+        content: bytes,
+        *,
+        expected_size: int,
+        expected_modified: int | None,
+        expected_digest: str,
+        timeout_seconds: int = 10,
+    ) -> dict[str, int | None]:
+        """Atomically replace one regular file if its metadata and SHA-256 still match."""
+        self._validate_sftp_path(path)
+        if (
+            not path.startswith("/")
+            or "\r" in path
+            or "\n" in path
+            or not isinstance(content, bytes)
+            or len(content) > 1024 * 1024
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or not 0 <= expected_size <= 1024 * 1024
+            or (expected_modified is not None and (
+                isinstance(expected_modified, bool)
+                or not isinstance(expected_modified, int)
+                or not 0 <= expected_modified <= 0xFFFFFFFF
+            ))
+            or not isinstance(expected_digest, str)
+            or len(expected_digest) != 64
+            or re.fullmatch(r"[0-9a-fA-F]{64}", expected_digest) is None
+        ):
+            raise ValueError("guarded SFTP replacement parameters are invalid")
+        result = self._execute_operation(
+            target_id,
+            "sftp_replace_guarded",
+            {
+                "path": path,
+                "expected_size": expected_size,
+                "expected_modified": expected_modified,
+                "expected_digest": expected_digest,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+            timeout_seconds,
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid guarded replacement metadata"
+            ) from None
+        if not isinstance(payload, dict) or set(payload) != {"size", "modified"}:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid guarded replacement metadata"
+            )
+        size = payload["size"]
+        modified = payload["modified"]
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or (modified is not None and (
+                isinstance(modified, bool) or not isinstance(modified, int) or not 0 <= modified <= 0xFFFFFFFF
+            ))
+        ):
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid guarded replacement metadata"
+            )
+        return {"size": size, "modified": modified}
+
     def sftp_create_exclusive(
         self, target_id: str, path: str, content: bytes, timeout_seconds: int = 10
     ) -> SshOperationResult:

@@ -12,6 +12,7 @@ from yukinal_ssh import SshServiceClient, SshServiceError
 
 from .host_rpc import HostRpcClient
 from .host_tools import (
+    _FILESYSTEM_EDIT_INPUT_SCHEMA,
     _FILESYSTEM_WRITE_INPUT_SCHEMA,
     _execute_on_host,
 )
@@ -24,6 +25,7 @@ _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrst
 _MAX_SERVER_LOG_LINES = 500
 _MAX_DOCKER_PS_CONTAINERS = 200
 _MAX_DOCKER_LOG_LINE_CHARS = 4_000
+_MAX_AGENT_EDIT_BYTES = 512 * 1024
 
 
 def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None:
@@ -420,9 +422,29 @@ def register_desktop_ssh_tools(
             timeout_ms=20_000,
             cancellable=True,
         ))
+    if "filesystem.edit" not in existing_names:
+        registry.register(ToolSpec(
+            name="filesystem.edit",
+            description=(
+                "Replace one unique exact byte sequence in a remote file after per-call approval. "
+                "The file must still match the revision from a complete read; C++ publishes it "
+                "with a guarded atomic SFTP replacement."
+            ),
+            input_schema=_FILESYSTEM_EDIT_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_filesystem_edit(
+                host, binary, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=45_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
-        | {"filesystem.write"}
+        | {"filesystem.write", "filesystem.edit"}
     )
 
 
@@ -567,6 +589,211 @@ async def _desktop_filesystem_write(
     except SshServiceError as error:
         # A transport error can arrive after the server applied the write. Never retry it here.
         raise ToolCallError(error.code, str(error)) from None
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    finally:
+        await process.stop()
+
+
+async def _desktop_filesystem_edit(
+    host: HostRpcClient,
+    binary: Path,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, object]:
+    """Run an approved revision-guarded file edit through C++ atomic SFTP replacement."""
+    target_id = context.context_target_id
+    target = context.host_target
+    if (
+        not isinstance(target_id, str)
+        or not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or target.get("serverId") != target_id
+        or not context.run_id
+        or not context.trace_id
+        or not context.call_id
+        or not context.host_task_id
+        or not context.plan_id
+        or not context.plan_step_id
+    ):
+        raise ToolCallError(
+            "durable_plan_required", "filesystem.edit requires a durable remote action plan"
+        )
+
+    plan_request = {
+        "taskId": context.host_task_id,
+        "toolName": "filesystem.edit",
+        "input": arguments,
+        "target": dict(target),
+    }
+    try:
+        plan = await host.request(
+            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError("host_unavailable", "The desktop host could not validate the action plan") from None
+    if (
+        not isinstance(plan, dict)
+        or plan.get("status") != "allowed"
+        or plan.get("planId") != context.plan_id
+        or plan.get("stepId") != context.plan_step_id
+        or plan.get("stepKind") != "action"
+        or plan.get("evidenceIds") != list(context.evidence_ids)
+    ):
+        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this file edit")
+
+    ledger = FilesystemActionLedger.from_environment()
+    if ledger is None:
+        return await _execute_on_host(host, "filesystem.edit", arguments, context)
+    ledger_scope = {
+        "run_id": context.run_id,
+        "trace_id": context.trace_id,
+        "call_id": context.call_id,
+        "tool_name": "filesystem.edit",
+        "target_id": target_id,
+        "arguments": arguments,
+        "plan_id": context.plan_id,
+        "plan_step_id": context.plan_step_id,
+        "evidence_ids": context.evidence_ids,
+    }
+    try:
+        cached = await ledger.claim(**ledger_scope)
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    if cached is not None:
+        return cached
+
+    async def run_host_compatibility_path() -> dict[str, object]:
+        output = await _execute_on_host(host, "filesystem.edit", arguments, context)
+        if not isinstance(output, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid file edit result")
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+
+    try:
+        payload = await host.request(
+            "host.ssh.filesystem_edit_target",
+            {
+                "serverId": target_id,
+                **arguments,
+                "taskId": context.host_task_id,
+                "planId": context.plan_id,
+                "planStepId": context.plan_step_id,
+                "evidenceIds": list(context.evidence_ids),
+                "target": dict(target),
+            },
+            timeout_seconds=8.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return await run_host_compatibility_path()
+
+    expected_binding = {
+        "path": arguments["path"],
+        "expectedRevision": arguments["expectedRevision"],
+    }
+    binding = payload.get("filesystemEdit") if isinstance(payload, dict) else None
+    if binding != expected_binding:
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid edit binding")
+    try:
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+    except SshServiceProcessError:
+        return await run_host_compatibility_path()
+    try:
+        await process.start()
+    except asyncio.CancelledError:
+        await process.stop()
+        raise
+    except SshServiceProcessError:
+        await process.stop()
+        return await run_host_compatibility_path()
+
+    def edit_remote_file() -> dict[str, object]:
+        client = SshServiceClient(token, base_url=base_url)
+        before = client.sftp_read(target_id, arguments["path"], _MAX_AGENT_EDIT_BYTES)
+        if len(before) > _MAX_AGENT_EDIT_BYTES:
+            raise ToolCallError("invalid_input", "The remote file exceeds the 512 KiB edit limit")
+        actual_revision = hashlib.sha256(before).hexdigest()
+        if actual_revision != arguments["expectedRevision"]:
+            raise ToolCallError(
+                "invalid_input",
+                "The remote file changed after it was read; read it again before editing",
+            )
+
+        metadata = client.sftp_stat(target_id, arguments["path"])
+        if metadata["kind"] != "file":
+            raise ToolCallError("unsafe_remote_write", "Only a regular remote file can be edited")
+        if metadata["size"] != len(before):
+            raise ToolCallError(
+                "concurrent_change", "The remote file changed while its revision was being checked"
+            )
+        if client.sftp_link_count(target_id, arguments["path"]) != 1:
+            raise ToolCallError(
+                "unsafe_remote_write", "The server cannot prove this file has exactly one name"
+            )
+
+        old_bytes = arguments["oldString"].encode("utf-8")
+        offset = before.find(old_bytes)
+        occurrences = 0
+        cursor = offset
+        while cursor >= 0:
+            occurrences += 1
+            cursor = before.find(old_bytes, cursor + 1)
+        if occurrences == 0:
+            raise ToolCallError("invalid_input", "oldString was not found in the file; re-read it and retry")
+        if occurrences != 1:
+            raise ToolCallError(
+                "invalid_input",
+                f"oldString occurs {occurrences} times in the file; include enough context to make it unique",
+            )
+
+        updated = (
+            before[:offset]
+            + arguments["newString"].encode("utf-8")
+            + before[offset + len(old_bytes):]
+        )
+        if len(updated) > _MAX_AGENT_EDIT_BYTES:
+            raise ToolCallError("invalid_input", "The edited file would exceed the 512 KiB limit")
+        result = client.sftp_replace_guarded(
+            target_id,
+            arguments["path"],
+            updated,
+            expected_size=len(before),
+            expected_modified=metadata["modified"],
+            expected_digest=actual_revision,
+            timeout_seconds=25,
+        )
+        if result["size"] != len(updated):
+            raise ToolCallError(
+                "concurrent_change", "The published file does not match the replacement size"
+            )
+        return {
+            "path": arguments["path"],
+            "revision": hashlib.sha256(updated).hexdigest(),
+            "bytesBefore": len(before),
+            "bytesAfter": len(updated),
+            "lineDelta": updated.count(b"\n") - before.count(b"\n"),
+        }
+
+    try:
+        output = await asyncio.to_thread(edit_remote_file)
+        await ledger.complete(**ledger_scope, output=output)
+        return output
+    except asyncio.CancelledError:
+        # The guarded rename may have committed before cancellation; retain the unknown ledger row.
+        raise
+    except ToolCallError:
+        raise
+    except SshServiceError as error:
+        # A transport failure can arrive after the atomic rename; do not retry automatically.
+        code = "unsafe_remote_write" if error.code == "replace_unsupported" else error.code
+        raise ToolCallError(code, str(error)) from None
     except FilesystemActionLedgerError as error:
         raise ToolCallError(error.code, str(error)) from None
     finally:

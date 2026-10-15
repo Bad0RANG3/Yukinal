@@ -1,7 +1,7 @@
 //! Host-side execution for bounded Agent tools (read-only plus permission-gated writes).
 //!
 //! The sidecar can request a tool, but it cannot query the credential store or choose an
-//! unscoped SSH target. This module validates planned writes and resolves their one-target
+//! unscoped SSH target. This module validates planned file actions and resolves their one-target
 //! C++ execution context from Rust-owned state.
 //!
 //! The file tools (`filesystem.read` / `filesystem.write` / `filesystem.edit` /
@@ -10,9 +10,9 @@
 //! only maps the capability's typed failures onto the host protocol's failure codes
 //! (see [`filesystem_failure`]).
 //!
-//! Agent `filesystem.write` is approved by Python and gets a narrowly scoped C++ SFTP target
-//! only after this module revalidates its durable action plan. Other host file writes continue
-//! through the Rust executor. `filesystem.edit` is a guarded read-then-modify,
+//! Agent `filesystem.write` and `filesystem.edit` are approved by Python and get a narrowly scoped
+//! C++ SFTP target only after this module revalidates their durable action plan. Other host file
+//! operations continue through the Rust executor. `filesystem.edit` is a guarded read-then-modify,
 //! `filesystem.backup` creates a host-owned sibling copy, and `filesystem.restore` publishes
 //! that copy only with a current revision guard; the capability's crate docs state what these
 //! guarantees do **not** cover (SFTP has no compare-and-swap, so checks and publication are
@@ -89,6 +89,7 @@ const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
 const HOST_SSH_SERVICE_TARGET: &str = "host.ssh.service_target";
 const HOST_SSH_FILESYSTEM_READ_TARGET: &str = "host.ssh.filesystem_read_target";
 const HOST_SSH_FILESYSTEM_WRITE_TARGET: &str = "host.ssh.filesystem_write_target";
+const HOST_SSH_FILESYSTEM_EDIT_TARGET: &str = "host.ssh.filesystem_edit_target";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -160,6 +161,21 @@ struct HostSshFilesystemWriteTargetRequest {
     server_id: String,
     path: String,
     content: String,
+    task_id: String,
+    plan_id: String,
+    plan_step_id: String,
+    evidence_ids: Vec<String>,
+    target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostSshFilesystemEditTargetRequest {
+    server_id: String,
+    path: String,
+    expected_revision: String,
+    old_string: String,
+    new_string: String,
     task_id: String,
     plan_id: String,
     plan_step_id: String,
@@ -1277,6 +1293,9 @@ async fn handle_sidecar_request_with_context(
     if method == HOST_SSH_FILESYSTEM_WRITE_TARGET {
         return resolve_ssh_filesystem_write_target(state, params);
     }
+    if method == HOST_SSH_FILESYSTEM_EDIT_TARGET {
+        return resolve_ssh_filesystem_edit_target(state, params);
+    }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
     }
@@ -1517,66 +1536,21 @@ fn resolve_ssh_filesystem_write_target(
 ) -> Result<Value, String> {
     let request = serde_json::from_value::<HostSshFilesystemWriteTargetRequest>(params)
         .map_err(|_| "the SSH filesystem write target request is invalid".to_string())?;
-    if request.target.host != "remote"
-        || request.target.server_id.as_deref() != Some(request.server_id.as_str())
-        || request.evidence_ids.len() > 128
-        || request.evidence_ids.iter().collect::<BTreeSet<_>>().len()
-            != request.evidence_ids.len()
-    {
-        return Err("the SSH filesystem write target binding is invalid".into());
-    }
-    let server = state
-        .database
-        .servers()
-        .get(&request.server_id)
-        .map_err(|_| "the selected SSH server is not available".to_string())?;
-    if server.metadata.environment != request.target.environment {
-        return Err("the SSH filesystem write target environment does not match the server".into());
-    }
-    if let Some(workspace_id) = request.target.workspace_id.as_deref() {
-        if !server
-            .metadata
-            .workspace_ids
-            .as_ref()
-            .is_some_and(|ids| ids.iter().any(|id| id == workspace_id))
-        {
-            return Err("the SSH filesystem write target is not attached to that workspace".into());
-        }
-    }
-
     let input = json!({
         "path": request.path.clone(),
         "content": request.content.clone(),
     });
-    match check_plan_for_tool(
+    validate_ssh_filesystem_action_binding(
         state,
+        &request.server_id,
         &request.task_id,
         FILESYSTEM_WRITE,
+        &input,
         &request.target,
-        PlanCheckBinding {
-            input: &input,
-            plan_id: Some(&request.plan_id),
-            step_id: Some(&request.plan_step_id),
-            evidence_ids: Some(&request.evidence_ids),
-        },
-    )? {
-        Ok(()) => {}
-        Err(deviation) => return Err(deviation.message),
-    }
-    let plan = state
-        .database
-        .investigations()
-        .latest_plan(&request.task_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the active file-write plan is unavailable".to_string())?;
-    if plan.current_step_id.as_deref() != Some(request.plan_step_id.as_str())
-        || !plan.steps.iter().any(|step| {
-            step.id == request.plan_step_id && step.kind == PlanStepKind::Action
-        })
-    {
-        return Err("filesystem.write is available only in the current action plan step".into());
-    }
-
+        &request.plan_id,
+        &request.plan_step_id,
+        &request.evidence_ids,
+    )?;
     crate::commands::sidecar::resolve_ssh_service_filesystem_write_target(
         state,
         json!({
@@ -1585,6 +1559,115 @@ fn resolve_ssh_filesystem_write_target(
             "content": input["content"],
         }),
     )
+}
+
+fn resolve_ssh_filesystem_edit_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostSshFilesystemEditTargetRequest>(params)
+        .map_err(|_| "the SSH filesystem edit target request is invalid".to_string())?;
+    AgentEditRequest::check(
+        &request.path,
+        &request.expected_revision,
+        request.old_string.clone(),
+        request.new_string.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let input = json!({
+        "path": request.path.clone(),
+        "expectedRevision": request.expected_revision.clone(),
+        "oldString": request.old_string.clone(),
+        "newString": request.new_string.clone(),
+    });
+    validate_ssh_filesystem_action_binding(
+        state,
+        &request.server_id,
+        &request.task_id,
+        FILESYSTEM_EDIT,
+        &input,
+        &request.target,
+        &request.plan_id,
+        &request.plan_step_id,
+        &request.evidence_ids,
+    )?;
+    crate::commands::sidecar::resolve_ssh_service_filesystem_edit_target(
+        state,
+        json!({
+            "serverId": request.server_id,
+            "path": request.path,
+            "expectedRevision": request.expected_revision,
+            "oldString": request.old_string,
+            "newString": request.new_string,
+        }),
+    )
+}
+
+fn validate_ssh_filesystem_action_binding(
+    state: &AppState,
+    server_id: &str,
+    task_id: &str,
+    tool_name: &str,
+    input: &Value,
+    target: &HostToolTarget,
+    plan_id: &str,
+    plan_step_id: &str,
+    evidence_ids: &[String],
+) -> Result<(), String> {
+    if target.host != "remote"
+        || target.server_id.as_deref() != Some(server_id)
+        || evidence_ids.len() > 128
+        || evidence_ids.iter().collect::<BTreeSet<_>>().len() != evidence_ids.len()
+    {
+        return Err("the SSH filesystem action target binding is invalid".into());
+    }
+    let server = state
+        .database
+        .servers()
+        .get(server_id)
+        .map_err(|_| "the selected SSH server is not available".to_string())?;
+    if server.metadata.environment != target.environment {
+        return Err("the SSH filesystem action environment does not match the server".into());
+    }
+    if let Some(workspace_id) = target.workspace_id.as_deref() {
+        if !server
+            .metadata
+            .workspace_ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| id == workspace_id))
+        {
+            return Err("the SSH filesystem action target is not attached to that workspace".into());
+        }
+    }
+    match check_plan_for_tool(
+        state,
+        task_id,
+        tool_name,
+        target,
+        PlanCheckBinding {
+            input,
+            plan_id: Some(plan_id),
+            step_id: Some(plan_step_id),
+            evidence_ids: Some(evidence_ids),
+        },
+    )? {
+        Ok(()) => {}
+        Err(deviation) => return Err(deviation.message),
+    }
+    let plan = state
+        .database
+        .investigations()
+        .latest_plan(task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the active filesystem action plan is unavailable".to_string())?;
+    if plan.current_step_id.as_deref() != Some(plan_step_id)
+        || !plan.steps.iter().any(|step| {
+            step.id == plan_step_id && step.kind == PlanStepKind::Action
+        })
+    {
+        return Err("filesystem mutation is available only in the current action plan step".into());
+    }
+    Ok(())
 }
 
 fn same_investigation_scope(task: &InvestigationTask, evidence: &Evidence) -> bool {

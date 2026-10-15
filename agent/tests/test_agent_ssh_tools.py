@@ -279,7 +279,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct_names, {
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
-            "filesystem.write",
+            "filesystem.write", "filesystem.edit",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()

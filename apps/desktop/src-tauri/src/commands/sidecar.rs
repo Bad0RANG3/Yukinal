@@ -7,7 +7,9 @@ use super::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use yukinal_credentials::{CredentialRef, CredentialStore};
-use yukinal_filesystem::{AgentReadRequest, AgentWriteRequest, DEFAULT_AGENT_READ_BYTES};
+use yukinal_filesystem::{
+    AgentEditRequest, AgentReadRequest, AgentWriteRequest, DEFAULT_AGENT_READ_BYTES,
+};
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -380,6 +382,16 @@ struct SshServiceFilesystemWriteTargetRequest {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshServiceFilesystemEditTargetRequest {
+    server_id: String,
+    path: String,
+    expected_revision: String,
+    old_string: String,
+    new_string: String,
+}
+
 /// Resolve one selected desktop target for a short-lived C++ SSH service process.
 /// Secrets leave the OS credential store only for this local sidecar request and
 /// are returned separately from the non-secret target allowlist.
@@ -593,6 +605,29 @@ pub(super) fn resolve_ssh_service_filesystem_write_target(
     payload["filesystemWrite"] = json!({
         "path": request.path,
         "bytesWritten": bytes_written,
+    });
+    Ok(payload)
+}
+
+/// Resolve a C++ target only after the host's guarded Agent edit policy accepts the exact input.
+pub(super) fn resolve_ssh_service_filesystem_edit_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request: SshServiceFilesystemEditTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH filesystem edit target request is invalid".to_string())?;
+    AgentEditRequest::check(
+        &request.path,
+        &request.expected_revision,
+        request.old_string.clone(),
+        request.new_string.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut payload =
+        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    payload["filesystemEdit"] = json!({
+        "path": request.path,
+        "expectedRevision": request.expected_revision,
     });
     Ok(payload)
 }
