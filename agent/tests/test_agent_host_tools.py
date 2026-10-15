@@ -36,6 +36,37 @@ class ScriptedModel:
 
 
 class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_regular_host_tools_forward_the_current_plan_and_evidence_binding(self) -> None:
+        host = FakeHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        context = ExecutionContext(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            allowed_tools=frozenset({"server.info"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-current-1",
+            plan_step_id="step-observe-1",
+            evidence_ids=("ev-1", "ev-2"),
+            run_id="run-1",
+            trace_id="trace-1",
+            context_target_id="srv_stage1",
+        )
+
+        await registry.execute("server.info", {}, context, call_id="observe-1")
+
+        self.assertEqual(len(host.calls), 1)
+        method, request, _timeout = host.calls[0]
+        self.assertEqual(method, "host.tool.execute")
+        self.assertEqual(request["planId"], "plan-current-1")
+        self.assertEqual(request["planStepId"], "step-observe-1")
+        self.assertEqual(request["evidenceIds"], ["ev-1", "ev-2"])
+        self.assertNotIn("approvalId", request)
+
     async def test_structured_write_tools_forward_exact_host_approval_tickets(self) -> None:
         host = FakeHost()
         registry = ToolRegistry(MemoryAuditSink())

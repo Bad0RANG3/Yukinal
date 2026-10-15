@@ -508,6 +508,10 @@ async def _execute_on_host(
         request["runId"] = context.run_id
     if context.host_task_id:
         request["taskId"] = context.host_task_id
+    if context.plan_id is not None and context.plan_step_id is not None:
+        request["planId"] = context.plan_id
+        request["planStepId"] = context.plan_step_id
+        request["evidenceIds"] = list(context.evidence_ids)
     if tool_name in HOST_APPROVAL_TOOLS:
         if (
             context.host_target.get("host") != "remote"
@@ -516,9 +520,6 @@ async def _execute_on_host(
             or not context.plan_step_id
         ):
             raise ToolCallError("durable_plan_required", "host actions require a current durable remote action plan")
-        request["planId"] = context.plan_id
-        request["planStepId"] = context.plan_step_id
-        request["evidenceIds"] = list(context.evidence_ids)
         fingerprint = approval_fingerprint(
             tool_name,
             context.context_target_id,

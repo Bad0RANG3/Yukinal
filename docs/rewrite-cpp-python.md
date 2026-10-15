@@ -117,8 +117,9 @@ The bridge uses the existing sidecar request path: Python sends
 desktop host replies over that same pipe. Python does not open SSH sessions or
 start MCP processes through this bridge. The host continues to resolve the
 server, enforce its current authorization and approval checks, and execute the
-operation. For host actions, Python carries the host-issued approval ID and
-current plan/evidence binding. The approval event carries raw host input only
+operation. For investigation calls, Python carries the current durable plan,
+step, and evidence binding; high-risk host actions also carry the host-issued
+per-call approval ID. The approval event carries raw host input only
 across the local pipe; Rust fingerprints it and removes it before persistence or
 UI emission, then checks the fingerprint again before dispatch. MCP entries are
 exposed to the model only when the host catalog classifies them as low-risk.
