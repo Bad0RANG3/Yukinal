@@ -41,6 +41,8 @@ export async function runSidecarSmoke(entry, options = {}) {
     "filesystem.read",
     "server.exec",
     "ssh.service_status",
+    "investigation.evidence.search",
+    "investigation.evidence.compare",
   ];
   const dataDir = options.dataDir ?? options.env?.YUKINAL_DATA_DIR ?? "/tmp/yukinal-smoke";
   console.log(`── sidecar smoke: ${program} ${label}`);

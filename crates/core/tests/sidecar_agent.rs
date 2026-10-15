@@ -215,6 +215,14 @@ async fn handshakes_pings_and_reports_the_real_python_sidecar() {
         "approval-gated server.exec missing: {names:?}"
     );
     assert!(
+        names.contains(&"investigation.evidence.search"),
+        "task-scoped investigation.evidence.search missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"investigation.evidence.compare"),
+        "task-scoped investigation.evidence.compare missing: {names:?}"
+    );
+    assert!(
         names.iter().all(|name| !name.contains("__")),
         "the registry must speak internal names only (ADR 0004): {names:?}"
     );

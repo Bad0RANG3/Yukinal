@@ -80,11 +80,10 @@ consumes the exact approval ticket or reserves the bounded task command grant,
 then starts a one-shot C++ service config that enables `server.exec` for that
 target only. Persistent service target configs deny it by default. Targets that
 still require a Rust-only SSH route retain the existing Rust compatibility path.
-The Python sidecar's current filesystem catalog includes bounded `filesystem.read`
-only. `filesystem.write`, backup/restore/cleanup and durable investigation evidence
-tools are still present in the desktop host and legacy TypeScript Agent reference,
-but have not been ported into the Python Agent; the cross-language smoke does not
-count these capabilities as migrated.
+The Python sidecar exposes bounded `filesystem.read` and task-scoped,
+body-free `investigation.evidence.search`/`compare` through the desktop host.
+`filesystem.write` and backup/restore/cleanup remain present in the desktop host
+and legacy TypeScript Agent reference, but have not been ported into Python.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes

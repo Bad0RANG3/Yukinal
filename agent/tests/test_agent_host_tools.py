@@ -209,5 +209,127 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.calls, [])
 
 
+class FakeEvidenceHost:
+    def __init__(self, *, include_raw_body: bool = False) -> None:
+        self.calls: list[tuple[str, dict[str, Any], float]] = []
+        self.include_raw_body = include_raw_body
+
+    async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+        self.calls.append((method, params, timeout_seconds))
+        left = {
+            "id": "ev_1",
+            "taskId": "task-durable-1",
+            "scope": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            "kind": "snapshot",
+            "sourceTool": "server.info",
+            "collectedAt": "2026-10-15T00:00:00Z",
+            "inputSummary": "{}",
+            "contentType": "json",
+            "contentHash": "a" * 64,
+            "truncated": False,
+            "redactionStatus": "clean",
+        }
+        if self.include_raw_body:
+            left["content"] = {"secret": "must not reach the Agent"}
+        if method == "host.investigation.evidence.search":
+            return {"status": "success", "evidence": [left]}
+        return {
+            "status": "success",
+            "comparison": {
+                "status": "identical",
+                "shape": "json",
+                "left": left,
+                "right": {**left, "id": "ev_2", "contentHash": "b" * 64},
+                "changedPaths": [],
+                "changedPathCount": 0,
+                "diffTruncated": False,
+                "warnings": [],
+            },
+        }
+
+
+class HostEvidenceToolTests(unittest.IsolatedAsyncioTestCase):
+    def make_context(self, *, host_task_id: str | None = "task-durable-1") -> ExecutionContext:
+        return ExecutionContext(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            allowed_tools=frozenset({"investigation.evidence.search", "investigation.evidence.compare"}),
+            allowed_target_ids=frozenset(),
+            approved_actions={},
+            host_task_id=host_task_id,
+        )
+
+    async def test_search_and_compare_use_the_host_task_and_return_body_free_results(self) -> None:
+        host = FakeEvidenceHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+
+        search = await registry.execute(
+            "investigation.evidence.search",
+            {"sourceTool": "server.info", "kind": "snapshot", "limit": 8},
+            self.make_context(),
+            call_id="call-search",
+        )
+        compare = await registry.execute(
+            "investigation.evidence.compare",
+            {"leftEvidenceId": "ev_1", "rightEvidenceId": "ev_2"},
+            self.make_context(),
+            call_id="call-compare",
+        )
+
+        self.assertEqual(search.value["evidence"][0]["id"], "ev_1")
+        self.assertNotIn("content", search.value["evidence"][0])
+        self.assertEqual(compare.value["comparison"]["status"], "identical")
+        self.assertNotIn("content", compare.value["comparison"]["left"])
+        self.assertEqual(
+            [method for method, _params, _timeout in host.calls],
+            ["host.investigation.evidence.search", "host.investigation.evidence.compare"],
+        )
+        self.assertEqual(host.calls[0][1], {
+            "taskId": "task-durable-1",
+            "sourceTool": "server.info",
+            "kind": "snapshot",
+            "limit": 8,
+        })
+        self.assertEqual(host.calls[1][1], {
+            "taskId": "task-durable-1",
+            "leftEvidenceId": "ev_1",
+            "rightEvidenceId": "ev_2",
+        })
+        self.assertEqual([timeout for _method, _params, timeout in host.calls], [15.0, 15.0])
+
+    async def test_evidence_tools_require_a_durable_host_task_and_validate_bounds(self) -> None:
+        host = FakeEvidenceHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+
+        with self.assertRaises(ToolCallError):
+            await registry.execute(
+                "investigation.evidence.search", {}, self.make_context(host_task_id=None), call_id="no-task"
+            )
+        with self.assertRaises(ToolCallError):
+            await registry.execute(
+                "investigation.evidence.search", {"limit": 65}, self.make_context(), call_id="bad-limit"
+            )
+        with self.assertRaises(ToolCallError):
+            await registry.execute(
+                "investigation.evidence.compare", {"leftEvidenceId": "ev_1"}, self.make_context(), call_id="incomplete"
+            )
+        self.assertEqual(host.calls, [])
+
+    async def test_host_response_cannot_smuggle_raw_evidence_bodies(self) -> None:
+        host = FakeEvidenceHost(include_raw_body=True)
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+
+        with self.assertRaises(ToolCallError) as raised:
+            await registry.execute(
+                "investigation.evidence.search", {}, self.make_context(), call_id="raw-body"
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_host_response")
+
+
 if __name__ == "__main__":
     unittest.main()

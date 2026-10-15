@@ -4,6 +4,8 @@ import asyncio
 import re
 from typing import Any
 
+from jsonschema import Draft202012Validator, ValidationError
+
 from .host_rpc import HostRpcClient
 from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec, approval_fingerprint
 
@@ -28,6 +30,125 @@ _SERVER_EXEC_SCHEMA = {
         },
     },
 }
+_EVIDENCE_TOOL_TARGET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "host": {"type": "string", "enum": ["local", "remote"]},
+        "serverId": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^srv_[a-z0-9]+$"},
+        "workspaceId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "environment": {"type": "string", "enum": ["local", "development", "staging", "production", "unknown"]},
+    },
+    "required": ["host", "environment"],
+    "additionalProperties": False,
+    "allOf": [
+        {
+            "if": {"properties": {"host": {"const": "remote"}}, "required": ["host"]},
+            "then": {"required": ["serverId"]},
+        },
+        {
+            "if": {"properties": {"host": {"const": "local"}}, "required": ["host"]},
+            "then": {"not": {"required": ["serverId"]}},
+        },
+    ],
+}
+_EVIDENCE_FRESHNESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["fresh", "stale", "expired", "unknown"]},
+        "policy": {"const": "default-v1"},
+        "evaluatedAt": {"type": "string", "minLength": 1, "maxLength": 80},
+        "ageSeconds": {"type": "integer", "minimum": 0},
+        "staleAfterSeconds": {"type": "integer", "minimum": 1},
+        "expiresAfterSeconds": {"type": "integer", "minimum": 1},
+        "reason": {"type": "string", "maxLength": 256},
+    },
+    "required": ["status", "policy", "evaluatedAt", "staleAfterSeconds", "expiresAfterSeconds"],
+    "additionalProperties": False,
+}
+_EVIDENCE_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "taskId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "runId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "scope": _EVIDENCE_TOOL_TARGET_SCHEMA,
+        "kind": {"type": "string", "enum": ["snapshot", "log", "service", "container", "file", "tool_result", "failure"]},
+        "sourceTool": {"type": "string", "minLength": 1, "maxLength": 256},
+        "collectedAt": {"type": "string", "minLength": 1, "maxLength": 80},
+        "inputSummary": {"type": "string", "maxLength": 4096},
+        "contentType": {"type": "string", "enum": ["json", "text"]},
+        "contentHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "truncated": {"type": "boolean"},
+        "redactionStatus": {"type": "string", "enum": ["clean", "redacted", "unknown"]},
+        "freshness": _EVIDENCE_FRESHNESS_SCHEMA,
+    },
+    "required": [
+        "id", "taskId", "scope", "kind", "sourceTool", "collectedAt", "inputSummary",
+        "contentType", "contentHash", "truncated", "redactionStatus",
+    ],
+    "additionalProperties": False,
+}
+_EVIDENCE_SEARCH_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sourceTool": {"type": "string", "minLength": 1, "maxLength": 256},
+        "kind": {"type": "string", "enum": ["snapshot", "log", "service", "container", "file", "tool_result", "failure"]},
+        "from": {"type": "string", "minLength": 1, "maxLength": 80},
+        "to": {"type": "string", "minLength": 1, "maxLength": 80},
+        "target": _EVIDENCE_TOOL_TARGET_SCHEMA,
+        "limit": {"type": "integer", "minimum": 1, "maximum": 64},
+    },
+    "additionalProperties": False,
+}
+_EVIDENCE_COMPARE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "leftEvidenceId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "rightEvidenceId": {"type": "string", "minLength": 1, "maxLength": 256},
+    },
+    "required": ["leftEvidenceId", "rightEvidenceId"],
+    "additionalProperties": False,
+}
+_EVIDENCE_TEXT_COMPARISON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "leftLineCount": {"type": "integer", "minimum": 0, "maximum": 100_000},
+        "rightLineCount": {"type": "integer", "minimum": 0, "maximum": 100_000},
+        "changedLineCount": {"type": "integer", "minimum": 0, "maximum": 100_000},
+        "addedLineCount": {"type": "integer", "minimum": 0, "maximum": 100_000},
+        "removedLineCount": {"type": "integer", "minimum": 0, "maximum": 100_000},
+    },
+    "required": ["leftLineCount", "rightLineCount", "changedLineCount", "addedLineCount", "removedLineCount"],
+    "additionalProperties": False,
+}
+_EVIDENCE_COMPARISON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["identical", "changed"]},
+        "shape": {"type": "string", "enum": ["json", "text", "mixed"]},
+        "left": _EVIDENCE_SUMMARY_SCHEMA,
+        "right": _EVIDENCE_SUMMARY_SCHEMA,
+        "changedPaths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "maxItems": 64},
+        "changedPathCount": {"type": "integer", "minimum": 0, "maximum": 10_000},
+        "diffTruncated": {"type": "boolean"},
+        "text": _EVIDENCE_TEXT_COMPARISON_SCHEMA,
+        "warnings": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}, "maxItems": 8},
+    },
+    "required": ["status", "shape", "left", "right", "changedPaths", "changedPathCount", "diffTruncated", "warnings"],
+    "additionalProperties": False,
+}
+_EVIDENCE_SEARCH_OUTPUT_VALIDATOR = Draft202012Validator({
+    "type": "object",
+    "properties": {"evidence": {"type": "array", "items": _EVIDENCE_SUMMARY_SCHEMA, "maxItems": 64}},
+    "required": ["evidence"],
+    "additionalProperties": False,
+})
+_EVIDENCE_COMPARE_OUTPUT_VALIDATOR = Draft202012Validator({
+    "type": "object",
+    "properties": {"comparison": _EVIDENCE_COMPARISON_SCHEMA},
+    "required": ["comparison"],
+    "additionalProperties": False,
+})
 _STRUCTURED_ACTIONS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     (
         "docker.restart",
@@ -218,6 +339,43 @@ def register_host_tools(
         )
         for name, description, schema in _STRUCTURED_ACTIONS
     ])
+    evidence_tools = (
+        (
+            "investigation.evidence.search",
+            "Search the current investigation's persisted evidence by source, kind, time window, or target. "
+            "Returns metadata and host-derived freshness only; stale evidence is historical context, not current proof.",
+            _EVIDENCE_SEARCH_INPUT_SCHEMA,
+            "host.investigation.evidence.search",
+            "evidence",
+            _EVIDENCE_SEARCH_OUTPUT_VALIDATOR,
+        ),
+        (
+            "investigation.evidence.compare",
+            "Compare two persisted evidence items from the current investigation. "
+            "Returns host-derived changed paths or bounded text counts, never raw values.",
+            _EVIDENCE_COMPARE_INPUT_SCHEMA,
+            "host.investigation.evidence.compare",
+            "comparison",
+            _EVIDENCE_COMPARE_OUTPUT_VALIDATOR,
+        ),
+    )
+    registry.register_many([
+        ToolSpec(
+            name=name,
+            description=description,
+            input_schema=schema,
+            risk_level="read",
+            requires_approval=False,
+            handler=_evidence_tool_handler(host, name, host_method, result_key, output_validator),
+            target_id_argument=None,
+            target_required=False,
+            origin={"kind": "builtin"},
+            timeout_ms=10_000,
+            cancellable=True,
+        )
+        for name, description, schema, host_method, result_key, output_validator in evidence_tools
+        if name not in excluded_names
+    ])
 
 
 def register_mcp_catalog(registry: ToolRegistry, host: HostRpcClient, catalog: object) -> list[str]:
@@ -278,6 +436,47 @@ def register_mcp_catalog(registry: ToolRegistry, host: HostRpcClient, catalog: o
 def _host_tool_handler(host: HostRpcClient, tool_name: str):
     async def execute(arguments: dict[str, Any], context: ExecutionContext) -> Any:
         return await _execute_on_host(host, tool_name, arguments, context)
+
+    return execute
+
+
+def _evidence_tool_handler(
+    host: HostRpcClient,
+    tool_name: str,
+    host_method: str,
+    result_key: str,
+    output_validator: Draft202012Validator,
+):
+    async def execute(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, Any]:
+        if not context.host_task_id:
+            raise ToolCallError("invalid_input", f"{tool_name} requires a durable task")
+        try:
+            response = await host.request(
+                host_method,
+                {"taskId": context.host_task_id, **arguments},
+                timeout_seconds=15.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ToolCallError("host_unavailable", "The desktop host could not read investigation evidence") from None
+        if not isinstance(response, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid evidence response")
+        if response.get("status") == "failed":
+            error = response.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            message = error.get("message") if isinstance(error, dict) else None
+            if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+                code = "host_tool_failed"
+            raise ToolCallError(code, message if isinstance(message, str) else "The host rejected this evidence request")
+        if response.get("status") != "success":
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid evidence status")
+        result = {result_key: response.get(result_key)}
+        try:
+            output_validator.validate(result)
+        except ValidationError:
+            raise ToolCallError("invalid_host_response", "The desktop host returned invalid or unbounded evidence metadata") from None
+        return result
 
     return execute
 
