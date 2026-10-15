@@ -63,7 +63,8 @@
 > Python verifies each backup's type, size, link count, stability and digest
 > before C++ removes it; the host rechecks ownership and consumes each ledger
 > row. Approved rotation batches retain per-item partial results. Listing and
-> retention remain host operations.
+> retention metadata stays in the host database, while Python formats scoped
+> listings and computes bounded rotation candidates.
 
 ## Repository baseline and migration boundary
 
@@ -114,8 +115,11 @@ target revision and the backup's ledger digest before guarded replacement, then
 asks the host to consume the available ledger row. Cleanup verifies each exact
 backup and lets the host consume each row after C++ removal; cross-task deletion
 is accepted only for an exact item in an approved `backup_rotation` step.
-Unsupported routes use the existing Rust host executor. Backup listing and
-retention remain host operations.
+Unsupported routes use the existing Rust host executor. Backup listing queries
+remain task-scoped at the host database boundary, where Rust revalidates the
+durable task, target and plan binding and records the call identity. Python maps
+the bounded rows into Agent results and performs retention ordering, age and
+keep-count selection over a bounded host scan.
 Task-scoped, body-free `investigation.evidence.search`/`compare` also run through
 the desktop host.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
@@ -552,6 +556,17 @@ implementation run: `py_compile`, the documentation link check, and
 because `jsonschema` is not installed in the active environment. The Rust host
 bridge could not be formatted or compiled because Cargo, rustfmt, and rustc are
 not available on `PATH`.
+
+On 2026-10-15, `filesystem.backup.list` and `filesystem.backup.retention` moved
+to Python tool handlers. Rust now exposes only bounded, task/server-scoped ledger
+queries, after validating the durable task, target, plan and call identity.
+Python validates the returned rows, formats task-owned listings, and calculates
+per-path retention candidates with the same UTC and tie-breaking rules.
+Python Agent discovery ran 101 tests successfully, with 4 skipped; the focused
+host-tools module passed all 12 tests. `py_compile`, the documentation link
+checker (15 Markdown files, 48 links), and `git diff --check` passed. The Rust
+host bridge could not be formatted or compiled because Cargo, rustfmt, and rustc
+are not available on `PATH`.
 
 ## Deliberately deferred
 

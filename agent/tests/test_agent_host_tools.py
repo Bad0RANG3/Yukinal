@@ -6,7 +6,11 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from yukinal_agent import ExecutionContext, MemoryAuditSink, ModelDrivenAgent, ToolCallError, ToolRegistry
-from yukinal_agent.host_tools import FILESYSTEM_ACTION_TOOLS, register_host_tools
+from yukinal_agent.host_tools import (
+    FILESYSTEM_ACTION_TOOLS,
+    register_desktop_backup_metadata_tools,
+    register_host_tools,
+)
 from yukinal_agent.tools import approval_fingerprint
 
 
@@ -17,6 +21,69 @@ class FakeHost:
     async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
         self.calls.append((method, params, timeout_seconds))
         return {"status": "success", "output": {"state": "exited", "exitCode": 0}}
+
+
+class FakeBackupMetadataHost:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any], float]] = []
+        self.list_row = {
+            "id": "backup_1",
+            "serverId": "srv_stage1",
+            "taskId": None,
+            "path": "/etc/app.conf",
+            "backupPath": "/etc/.yukinal-backup-a",
+            "revision": "a" * 64,
+            "bytesBackedUp": 128,
+            "status": "available",
+            "createdAt": "2020-01-01T00:00:00Z",
+            "updatedAt": "2020-01-01T00:00:00Z",
+            "restoredAt": None,
+            "deletedAt": None,
+        }
+        self.retention_rows = [
+            {
+                "id": "backup_old",
+                "path": "/etc/app.conf",
+                "backupPath": "/etc/.yukinal-backup-old",
+                "revision": "b" * 64,
+                "taskId": "task-owner-other",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "bytesBackedUp": 10,
+            },
+            {
+                "id": "backup_new",
+                "path": "/etc/app.conf",
+                "backupPath": "/etc/.yukinal-backup-new",
+                "revision": "c" * 64,
+                "taskId": "task-durable-1",
+                "createdAt": "2021-01-01T00:00:00Z",
+                "bytesBackedUp": 20,
+            },
+            {
+                "id": "backup_single",
+                "path": "/etc/only.conf",
+                "backupPath": "/etc/.yukinal-backup-only",
+                "revision": "d" * 64,
+                "taskId": None,
+                "createdAt": "2020-01-01T00:00:00Z",
+                "bytesBackedUp": 30,
+            },
+        ]
+
+    async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+        self.calls.append((method, params, timeout_seconds))
+        if method == "host.filesystem.backup.list_query":
+            return {"status": "success", "output": {"records": [self.list_row], "truncated": False}}
+        if method == "host.filesystem.backup.retention_scan":
+            return {
+                "status": "success",
+                "output": {
+                    "records": self.retention_rows,
+                    "truncated": False,
+                    "evaluatedAtEpochSeconds": 1_800_000_000,
+                },
+            }
+        raise AssertionError(f"unexpected host metadata method: {method}")
 
 
 class ScriptedModel:
@@ -430,6 +497,76 @@ class HostFilesystemToolTests(unittest.IsolatedAsyncioTestCase):
             await registry.execute("filesystem.backup.retention", {}, context, call_id="bad-retention")
         self.assertEqual(invalid_filter.exception.code, "invalid_arguments")
         self.assertEqual(len(host.calls), 2)
+
+    async def test_desktop_backup_metadata_queries_and_retention_planning_run_in_python(self) -> None:
+        host = FakeBackupMetadataHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        direct_names = register_desktop_backup_metadata_tools(registry, host)  # type: ignore[arg-type]
+        self.assertEqual(direct_names, {"filesystem.backup.list", "filesystem.backup.retention"})
+        context = self.make_context(allowed_tools=direct_names)
+
+        listed = await registry.execute(
+            "filesystem.backup.list", {"status": "available", "limit": 8}, context,
+            call_id="python-backup-list",
+        )
+        retained = await registry.execute(
+            "filesystem.backup.retention",
+            {"pathPrefix": "/etc/", "keepLatest": 1, "olderThanDays": 30},
+            context,
+            call_id="python-backup-retention",
+        )
+
+        self.assertEqual(listed.value["backups"][0]["taskId"], "task-durable-1")
+        self.assertEqual(retained.value, {
+            "candidates": [{
+                "path": "/etc/app.conf",
+                "backupPath": "/etc/.yukinal-backup-old",
+                "revision": "b" * 64,
+                "taskId": "task-owner-other",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "bytesBackedUp": 10,
+            }],
+            "truncated": False,
+            "keptCount": 2,
+            "scannedCount": 3,
+        })
+        self.assertEqual(
+            [method for method, _params, _timeout in host.calls],
+            [
+                "host.filesystem.backup.list_query",
+                "host.filesystem.backup.retention_scan",
+            ],
+        )
+        tool_calls = [params["toolCall"] for _method, params, _timeout in host.calls]
+        self.assertTrue(all(call["taskId"] == "task-durable-1" for call in tool_calls))
+        self.assertTrue(all(call["planId"] == "plan-current-1" for call in tool_calls))
+        self.assertTrue(all(call["evidenceIds"] == ["ev-1"] for call in tool_calls))
+        self.assertEqual(tool_calls[0]["input"], {"status": "available", "limit": 8})
+        self.assertEqual(tool_calls[0]["toolName"], "filesystem.backup.list")
+        self.assertEqual(tool_calls[1]["toolName"], "filesystem.backup.retention")
+
+        host.retention_rows = [
+            {
+                "id": f"backup_{index:02d}",
+                "path": f"/etc/app-{index:02d}.conf",
+                "backupPath": f"/etc/.yukinal-backup-{index:02d}",
+                "revision": "e" * 64,
+                "taskId": "task-durable-1",
+                "createdAt": "2020-01-01T00:00:00Z",
+                "bytesBackedUp": 10,
+            }
+            for index in range(40)
+        ]
+        capped = await registry.execute(
+            "filesystem.backup.retention",
+            {"olderThanDays": 30},
+            context,
+            call_id="python-backup-retention-capped",
+        )
+        self.assertEqual(len(capped.value["candidates"]), 32)
+        self.assertTrue(capped.value["truncated"])
+        self.assertEqual(capped.value["keptCount"], 0)
+        self.assertEqual(capped.value["scannedCount"], 40)
 
 
 class FakeEvidenceHost:

@@ -8,12 +8,14 @@
 //! `filesystem.backup` / `filesystem.restore` / `filesystem.backup.cleanup`) delegate to
 //! `yukinal-filesystem`: path policy, byte caps and bounded decoding live there, and this module
 //! only maps the capability's typed failures onto the host protocol's failure codes
-//! (see [`filesystem_failure`]).
+//! (see [`filesystem_failure`]). Backup listing and retention planning run in Python; this
+//! module exposes only bounded ledger reads after rechecking their task, target and plan.
 //!
 //! Agent filesystem mutations are approved by Python and get a narrowly scoped C++ SFTP target only
 //! after this module revalidates their durable action plan. Backup ownership and restore/cleanup
-//! consumption metadata remain in the host database. Other host file operations continue through
-//! the Rust executor. `filesystem.edit` is a guarded read-then-modify, `filesystem.backup` creates a
+//! consumption metadata remain in the host database. Listing and retention use bounded host
+//! reads with Python formatting and planning. Other remote file operations continue through the
+//! Rust executor. `filesystem.edit` is a guarded read-then-modify, `filesystem.backup` creates a
 //! host-owned sibling copy, `filesystem.restore` publishes it only with a current revision guard,
 //! and cleanup verifies exact backup metadata before consuming ownership. The capability's crate
 //! docs state what these guarantees do **not** cover (SFTP has no compare-and-swap, so checks and
@@ -97,6 +99,8 @@ const HOST_SSH_FILESYSTEM_RESTORE_TARGET: &str = "host.ssh.filesystem_restore_ta
 const HOST_FILESYSTEM_BACKUP_RESTORED: &str = "host.investigation.filesystem_backup.restored";
 const HOST_SSH_FILESYSTEM_CLEANUP_TARGET: &str = "host.ssh.filesystem_cleanup_target";
 const HOST_FILESYSTEM_BACKUP_DELETED: &str = "host.investigation.filesystem_backup.deleted";
+const HOST_FILESYSTEM_BACKUP_LIST_QUERY: &str = "host.filesystem.backup.list_query";
+const HOST_FILESYSTEM_BACKUP_RETENTION_SCAN: &str = "host.filesystem.backup.retention_scan";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -282,6 +286,18 @@ struct HostFilesystemBackupDeletedRequest {
     call_id: String,
     evidence_ids: Vec<String>,
     target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostFilesystemBackupListQueryRequest {
+    tool_call: HostToolExecuteRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostFilesystemBackupRetentionScanRequest {
+    tool_call: HostToolExecuteRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -1269,51 +1285,6 @@ struct FilesystemBackupResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FilesystemBackupLedgerItemResult {
-    id: String,
-    server_id: String,
-    task_id: String,
-    path: String,
-    backup_path: String,
-    revision: String,
-    bytes_backed_up: i64,
-    status: String,
-    created_at: String,
-    updated_at: String,
-    restored_at: Option<String>,
-    deleted_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FilesystemBackupListResult {
-    backups: Vec<FilesystemBackupLedgerItemResult>,
-    truncated: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FilesystemBackupRetentionCandidateResult {
-    path: String,
-    backup_path: String,
-    revision: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task_id: Option<String>,
-    created_at: String,
-    bytes_backed_up: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FilesystemBackupRetentionResult {
-    candidates: Vec<FilesystemBackupRetentionCandidateResult>,
-    truncated: bool,
-    kept_count: usize,
-    scanned_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct FilesystemBackupCleanupBatchItemResult {
     path: String,
     backup_path: String,
@@ -1414,6 +1385,12 @@ async fn handle_sidecar_request_with_context(
     }
     if method == HOST_FILESYSTEM_BACKUP_DELETED {
         return mark_ssh_filesystem_backup_deleted(state, params);
+    }
+    if method == HOST_FILESYSTEM_BACKUP_LIST_QUERY {
+        return query_ssh_filesystem_backup_list(state, params).await;
+    }
+    if method == HOST_FILESYSTEM_BACKUP_RETENTION_SCAN {
+        return scan_ssh_filesystem_backups_for_retention(state, params).await;
     }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
@@ -1613,12 +1590,6 @@ async fn handle_sidecar_request_with_context(
             FILESYSTEM_READ => filesystem_read(app, state, server_id, &request.input, &cancel).await,
             FILESYSTEM_WRITE => filesystem_write(app, state, server_id, &request.input, &cancel).await,
             FILESYSTEM_EDIT => filesystem_edit(app, state, server_id, &request.input, &cancel).await,
-            FILESYSTEM_BACKUP_LIST => {
-                filesystem_backup_list(state, server_id, &request.input, &request).await
-            }
-            FILESYSTEM_BACKUP_RETENTION => {
-                filesystem_backup_retention(state, server_id, &request.input, &request).await
-            }
             FILESYSTEM_BACKUP => {
                 filesystem_backup(app, state, server_id, &request.input, &cancel, &request).await
             }
@@ -1875,6 +1846,375 @@ fn resolve_ssh_filesystem_restore_target(
             "bytesBackedUp": bytes_backed_up,
         }),
     )
+}
+
+fn validate_filesystem_backup_query_scope(
+    state: &AppState,
+    server_id: &str,
+    task_id: &str,
+    target: &HostToolTarget,
+) -> Result<(), Value> {
+    if target.host != "remote" || target.server_id.as_deref() != Some(server_id) {
+        return Err(failed(
+            "denied_by_policy",
+            "filesystem backup metadata target does not match the selected server",
+            false,
+            None,
+        ));
+    }
+    let server = state.database.servers().get(server_id).map_err(|_| {
+        failed(
+            "not_found",
+            "the selected filesystem backup server was not found",
+            false,
+            None,
+        )
+    })?;
+    if server.metadata.environment != target.environment {
+        return Err(failed(
+            "denied_by_policy",
+            "filesystem backup metadata environment does not match the selected server",
+            false,
+            None,
+        ));
+    }
+    if let Some(workspace_id) = target.workspace_id.as_deref() {
+        if !server
+            .metadata
+            .workspace_ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| id == workspace_id))
+        {
+            return Err(failed(
+                "denied_by_policy",
+                "filesystem backup metadata target is not attached to that workspace",
+                false,
+                None,
+            ));
+        }
+    }
+    let task = state.database.investigations().get_task(task_id).map_err(|_| {
+        failed(
+            "not_found",
+            "the durable investigation task was not found",
+            false,
+            None,
+        )
+    })?;
+    if task.server_id.as_deref() != Some(server_id) {
+        return Err(failed(
+            "denied_by_policy",
+            "filesystem backup metadata target does not match the task's registered server",
+            false,
+            None,
+        ));
+    }
+    let requested_scope = host_target_to_investigation(target).map_err(|_| {
+        failed(
+            "denied_by_policy",
+            "filesystem backup metadata target is invalid",
+            false,
+            None,
+        )
+    })?;
+    if !same_investigation_target(&task.scope, &requested_scope) {
+        return Err(failed(
+            "denied_by_policy",
+            "filesystem backup metadata target does not match the task scope",
+            false,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn filesystem_backup_record_value(record: &FilesystemBackupRecord) -> Value {
+    json!({
+        "id": record.id.clone(),
+        "serverId": record.server_id.clone(),
+        "taskId": record.task_id.clone(),
+        "path": record.path.clone(),
+        "backupPath": record.backup_path.clone(),
+        "revision": record.revision.clone(),
+        "bytesBackedUp": record.bytes_backed_up,
+        "status": record.status.as_str(),
+        "createdAt": record.created_at.clone(),
+        "updatedAt": record.updated_at.clone(),
+        "restoredAt": record.restored_at.clone(),
+        "deletedAt": record.deleted_at.clone(),
+    })
+}
+
+async fn prepare_filesystem_backup_query_call(
+    state: &AppState,
+    request: &HostToolExecuteRequest,
+    expected_tool: &str,
+) -> Result<HostToolCallDecision, String> {
+    if request.tool_name != expected_tool {
+        return Ok(HostToolCallDecision::Respond(failed(
+            "denied_by_policy",
+            "filesystem backup query tool name does not match its host endpoint",
+            false,
+            None,
+        )));
+    }
+    let (Some(server_id), Some(task_id)) = (
+        request.target.server_id.as_deref(),
+        request.task_id.as_deref(),
+    ) else {
+        return Ok(HostToolCallDecision::Respond(failed(
+            "durable_task_required",
+            "filesystem backup metadata requires a durable investigation task",
+            false,
+            None,
+        )));
+    };
+    if let Err(response) =
+        validate_filesystem_backup_query_scope(state, server_id, task_id, &request.target)
+    {
+        return Ok(HostToolCallDecision::Respond(response));
+    }
+    let task = match state.database.investigations().get_task(task_id) {
+        Ok(task) => task,
+        Err(error) => {
+            return Ok(HostToolCallDecision::Respond(failed(
+                "not_found",
+                error.to_string(),
+                false,
+                None,
+            )))
+        }
+    };
+    if let Some(violation) = task_guardrail_violation(&task, &request.tool_name, &request.input) {
+        return Ok(HostToolCallDecision::Respond(failed(
+            "denied_by_policy",
+            violation.message,
+            false,
+            Some(json!({ "code": violation.code.as_str() })),
+        )));
+    }
+    match check_plan_for_tool(
+        state,
+        task_id,
+        &request.tool_name,
+        &request.target,
+        PlanCheckBinding {
+            input: &request.input,
+            plan_id: request.plan_id.as_deref(),
+            step_id: request.plan_step_id.as_deref(),
+            evidence_ids: request.evidence_ids.as_deref(),
+        },
+    )? {
+        Ok(()) => prepare_host_tool_call(state, request).await,
+        Err(deviation) => Ok(HostToolCallDecision::Respond(failed(
+            "plan_deviation",
+            deviation.message.clone(),
+            false,
+            Some(serde_json::to_value(deviation).map_err(|error| error.to_string())?),
+        ))),
+    }
+}
+
+async fn query_ssh_filesystem_backup_list(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostFilesystemBackupListQueryRequest>(params)
+        .map_err(|_| "the filesystem backup list query is invalid".to_string())?;
+    let tool_call = request.tool_call;
+    if tool_call.tool_name != FILESYSTEM_BACKUP_LIST {
+        return Ok(failed(
+            "denied_by_policy",
+            "filesystem backup list query has an unexpected tool name",
+            false,
+            None,
+        ));
+    }
+    let input = match serde_json::from_value::<FilesystemBackupListInput>(tool_call.input.clone()) {
+        Ok(input) => input,
+        Err(_) => {
+            return Ok(failed(
+                "invalid_input",
+                "filesystem.backup.list input is invalid",
+                false,
+                None,
+            ));
+        }
+    };
+    if let Some(path) = input.path.as_deref() {
+        if let Err(error) = validate_remote_path(path) {
+            return Ok(failed("invalid_input", error, false, None));
+        }
+    }
+    let status = match input.status.as_deref() {
+        None => None,
+        Some(raw) => match FilesystemBackupStatus::parse(raw) {
+            Some(status) => Some(status),
+            None => {
+                return Ok(failed(
+                    "invalid_input",
+                    "filesystem.backup.list status must be available, restored, or deleted",
+                    false,
+                    None,
+                ));
+            }
+        },
+    };
+    let limit = input.limit.unwrap_or(64);
+    if !(1..=128).contains(&limit) {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.list limit must be between 1 and 128",
+            false,
+            None,
+        ));
+    }
+    let token = match prepare_filesystem_backup_query_call(
+        state,
+        &tool_call,
+        FILESYSTEM_BACKUP_LIST,
+    )
+    .await?
+    {
+        HostToolCallDecision::Respond(response) => return Ok(response),
+        HostToolCallDecision::Execute(token) => token,
+    };
+    let server_id = tool_call.target.server_id.as_deref().expect("validated server id");
+    let task_id = tool_call.task_id.as_deref().expect("validated task id");
+    let response = match state.database.filesystem_backups().list_for_task(
+        server_id,
+        task_id,
+        status,
+        input.path.as_deref(),
+        limit,
+    ) {
+        Ok((records, truncated)) => {
+            let records = records
+                .iter()
+                .map(filesystem_backup_record_value)
+                .collect::<Vec<_>>();
+            success(json!({ "records": records, "truncated": truncated }))
+        }
+        Err(DatabaseError::Validation(message)) => failed("invalid_input", message, false, None),
+        Err(error) => failed("internal", error.to_string(), false, None),
+    };
+    finish_host_tool_call(state, &tool_call, token, &Ok(response.clone()))?;
+    Ok(response)
+}
+
+async fn scan_ssh_filesystem_backups_for_retention(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostFilesystemBackupRetentionScanRequest>(params)
+        .map_err(|_| "the filesystem backup retention scan is invalid".to_string())?;
+    let tool_call = request.tool_call;
+    if tool_call.tool_name != FILESYSTEM_BACKUP_RETENTION {
+        return Ok(failed(
+            "denied_by_policy",
+            "filesystem backup retention scan has an unexpected tool name",
+            false,
+            None,
+        ));
+    }
+    let input = match serde_json::from_value::<FilesystemBackupRetentionInput>(
+        tool_call.input.clone(),
+    ) {
+        Ok(input) => input,
+        Err(_) => {
+            return Ok(failed(
+                "invalid_input",
+                "filesystem.backup.retention input is invalid",
+                false,
+                None,
+            ));
+        }
+    };
+    if input.keep_latest.is_none() && input.older_than_days.is_none() {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.retention requires keepLatest or olderThanDays",
+            false,
+            None,
+        ));
+    }
+    if input.keep_latest.is_some_and(|keep| !(1..=64).contains(&keep)) {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.retention keepLatest must be between 1 and 64",
+            false,
+            None,
+        ));
+    }
+    if input
+        .older_than_days
+        .is_some_and(|days| !(1..=3650).contains(&days))
+    {
+        return Ok(failed(
+            "invalid_input",
+            "filesystem.backup.retention olderThanDays must be between 1 and 3650",
+            false,
+            None,
+        ));
+    }
+    if let Some(prefix) = input.path_prefix.as_deref() {
+        if let Err(error) = validate_remote_path(prefix) {
+            return Ok(failed("invalid_input", error, false, None));
+        }
+    }
+    let token = match prepare_filesystem_backup_query_call(
+        state,
+        &tool_call,
+        FILESYSTEM_BACKUP_RETENTION,
+    )
+    .await?
+    {
+        HostToolCallDecision::Respond(response) => return Ok(response),
+        HostToolCallDecision::Execute(token) => token,
+    };
+    let server_id = tool_call.target.server_id.as_deref().expect("validated server id");
+    let response = match state
+        .database
+        .filesystem_backups()
+        .list_available_for_server_with_path_prefix(
+            server_id,
+            input.path_prefix.as_deref(),
+            512,
+        )
+    {
+        Ok((records, scan_truncated)) => {
+            let records = records
+                .iter()
+                .filter(|record| {
+                    input
+                        .path_prefix
+                        .as_deref()
+                        .is_none_or(|prefix| record.path.starts_with(prefix))
+                })
+                .map(|record| {
+                    json!({
+                        "id": record.id.clone(),
+                        "path": record.path.clone(),
+                        "backupPath": record.backup_path.clone(),
+                        "revision": record.revision.clone(),
+                        "taskId": record.task_id.clone(),
+                        "createdAt": record.created_at.clone(),
+                        "bytesBackedUp": record.bytes_backed_up,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let evaluated_at_epoch_seconds = yukinal_time::now_epoch_seconds();
+            success(json!({
+                "records": records,
+                "truncated": scan_truncated,
+                "evaluatedAtEpochSeconds": evaluated_at_epoch_seconds,
+            }))
+        }
+        Err(DatabaseError::Validation(message)) => failed("invalid_input", message, false, None),
+        Err(error) => failed("internal", error.to_string(), false, None),
+    };
+    finish_host_tool_call(state, &tool_call, token, &Ok(response.clone()))?;
+    Ok(response)
 }
 
 fn resolve_ssh_filesystem_cleanup_target(

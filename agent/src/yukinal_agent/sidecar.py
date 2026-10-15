@@ -22,6 +22,7 @@ from .host_rpc import HostRpcClient
 from .host_tools import (
     HOST_APPROVAL_TOOLS,
     PLAN_BOUND_HOST_ACTION_TOOLS,
+    register_desktop_backup_metadata_tools,
     register_host_tools,
     register_mcp_catalog,
 )
@@ -115,6 +116,7 @@ class PythonSidecar:
         self._admissions: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._host_rpc: HostRpcClient | None = None
         self._host_tools_registered = False
+        self._backup_metadata_tools_registered = False
         self._mcp_loaded = False
         self._pending_approvals: dict[str, _PendingApproval] = {}
         self._managed_ssh_service_binary = managed_ssh_service_binary
@@ -125,18 +127,21 @@ class PythonSidecar:
 
     def set_host_rpc(self, host: HostRpcClient | None) -> None:
         self._host_rpc = host
-        direct_tool_names: frozenset[str] = frozenset()
+        direct_tool_names: set[str] = set()
+        if host is not None and not self._backup_metadata_tools_registered:
+            direct_tool_names.update(register_desktop_backup_metadata_tools(self._registry, host))
+            self._backup_metadata_tools_registered = True
         if (
             host is not None
             and self._managed_ssh_service_binary is not None
             and not self._managed_ssh_tools_registered
         ):
-            direct_tool_names = register_desktop_ssh_tools(
+            direct_tool_names.update(register_desktop_ssh_tools(
                 self._registry, host, self._managed_ssh_service_binary
-            )
+            ))
             self._managed_ssh_tools_registered = True
         if host is not None and not self._host_tools_registered:
-            register_host_tools(self._registry, host, excluded_names=direct_tool_names)
+            register_host_tools(self._registry, host, excluded_names=frozenset(direct_tool_names))
             self._host_tools_registered = True
 
     def set_checkpointer(self, checkpointer: Any | None) -> None:

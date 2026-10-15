@@ -2104,32 +2104,6 @@ fn observation_window_requires_final_verification_and_preserves_only_its_configu
 
 /* ── 备份生命周期（ADR 0076） ─────────────────────────────────────────── */
 
-fn lifecycle_backup(
-    id: &str,
-    path: &str,
-    backup_path: &str,
-    created_at: &str,
-) -> FilesystemBackupRecord {
-    FilesystemBackupRecord {
-        id: id.into(),
-        server_id: "srv_fixture".into(),
-        task_id: Some("task_lifecycle".into()),
-        plan_id: None,
-        plan_step_id: None,
-        trace_id: None,
-        call_id: None,
-        path: path.into(),
-        backup_path: backup_path.into(),
-        revision: "a".repeat(64),
-        bytes_backed_up: 3,
-        status: FilesystemBackupStatus::Available,
-        created_at: created_at.into(),
-        updated_at: created_at.into(),
-        restored_at: None,
-        deleted_at: None,
-    }
-}
-
 fn lifecycle_task() -> InvestigationTask {
     InvestigationTask {
         id: "task_lifecycle".into(),
@@ -2185,39 +2159,6 @@ fn lifecycle_request(tool_name: &str) -> HostToolExecuteRequest {
 }
 
 #[test]
-fn retention_candidates_group_by_path_and_intersect_the_two_filters() {
-    let now = 1_700_000_000u64;
-    let day = 86_400u64;
-    let stamp = |days_ago: u64| yukinal_time::iso8601_utc(now - days_ago * day);
-    let records = vec![
-        lifecycle_backup("a_new", "/etc/a", "/etc/.a-new", &stamp(2)),
-        lifecycle_backup("a_old", "/etc/a", "/etc/.a-old", &stamp(40)),
-        lifecycle_backup("b_new", "/etc/b", "/etc/.b-new", &stamp(1)),
-        lifecycle_backup("b_old", "/etc/b", "/etc/.b-old", &stamp(80)),
-    ];
-    let ids = |records: &[FilesystemBackupRecord]| {
-        records
-            .iter()
-            .map(|record| record.id.clone())
-            .collect::<Vec<_>>()
-    };
-
-    // keepLatest keeps the newest per path, regardless of age.
-    let (candidates, kept) = retention_candidates(records.clone(), Some(1), None, now);
-    assert_eq!(ids(&candidates), vec!["a_old", "b_old"]);
-    assert_eq!(kept, 2);
-
-    // olderThanDays is an absolute age cutoff.
-    let (candidates, kept) = retention_candidates(records.clone(), None, Some(30), now);
-    assert_eq!(ids(&candidates), vec!["a_old", "b_old"]);
-    assert_eq!(kept, 2);
-
-    // Both filters intersect: a record must be beyond the keep count AND old enough.
-    let (candidates, _) = retention_candidates(records, Some(1), Some(30), now);
-    assert_eq!(ids(&candidates), vec!["a_old", "b_old"]);
-}
-
-#[test]
 fn cleanup_input_resolves_single_and_batch_and_rejects_mixed_forms() {
     let item = |path: &str, backup: &str| json!({ "path": path, "backupPath": backup, "expectedRevision": "a".repeat(64) });
     let single: FilesystemBackupCleanupInput =
@@ -2252,95 +2193,6 @@ fn cleanup_input_resolves_single_and_batch_and_rejects_mixed_forms() {
     }))
     .expect("duplicate batch parses");
     assert!(duplicate.resolve().is_err());
-}
-
-#[tokio::test]
-async fn backup_retention_handler_truncates_at_32_candidates() {
-    let directory =
-        std::env::temp_dir().join(format!("yukinal-host-retention-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    let state = AppState::bootstrap(&directory).expect("bootstrap host state");
-    state
-        .database
-        .investigations()
-        .create_task(&lifecycle_task())
-        .expect("create task");
-    let old =
-        yukinal_time::iso8601_utc(yukinal_time::now_epoch_seconds().saturating_sub(40 * 86_400));
-    for index in 0..40 {
-        let record = lifecycle_backup(
-            &format!("backup_{index}"),
-            "/etc/a",
-            &format!("/etc/.b{index}"),
-            &old,
-        );
-        state
-            .database
-            .filesystem_backups()
-            .insert(&record)
-            .expect("insert backup");
-    }
-    // Eight fresh rows on the same path are never candidates under an age cutoff, so the
-    // result must report them as kept rather than silently drop them.
-    let recent = yukinal_time::iso8601_utc(yukinal_time::now_epoch_seconds());
-    for index in 40..48 {
-        let record = lifecycle_backup(
-            &format!("backup_{index}"),
-            "/etc/a",
-            &format!("/etc/.b{index}"),
-            &recent,
-        );
-        state
-            .database
-            .filesystem_backups()
-            .insert(&record)
-            .expect("insert recent backup");
-    }
-
-    let request = lifecycle_request("filesystem.backup.retention");
-    let response = filesystem_backup_retention(
-        &state,
-        "srv_fixture",
-        &json!({ "olderThanDays": 30 }),
-        &request,
-    )
-    .await
-    .expect("handler");
-    assert_eq!(response["status"], json!("success"));
-    let output = &response["output"];
-    assert_eq!(
-        output["candidates"].as_array().expect("candidates").len(),
-        32
-    );
-    assert_eq!(output["truncated"], json!(true));
-    assert_eq!(output["scannedCount"], json!(48));
-    assert_eq!(output["keptCount"], json!(8));
-
-    let mut unbound_request = lifecycle_request("filesystem.backup.retention");
-    unbound_request.task_id = None;
-    let unbound = filesystem_backup_retention(
-        &state,
-        "srv_fixture",
-        &json!({ "pathPrefix": "/etc/a", "olderThanDays": 30 }),
-        &unbound_request,
-    )
-    .await
-    .expect("read-only retention does not need a durable task");
-    assert_eq!(unbound["status"], json!("success"));
-
-    let other_server = filesystem_backup_retention(
-        &state,
-        "srv_other",
-        &json!({ "olderThanDays": 30 }),
-        &request,
-    )
-    .await
-    .expect("handler");
-    assert_eq!(other_server["status"], json!("success"));
-    assert_eq!(other_server["output"]["candidates"], json!([]));
-
-    drop(state);
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[tokio::test]

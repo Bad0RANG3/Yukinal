@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
@@ -824,6 +825,326 @@ def _mcp_tool_handler(host: HostRpcClient, tool_name: str):
         return await _execute_on_host(host, tool_name, arguments, context)
 
     return execute
+
+
+def _filesystem_backup_query_scope(context: ExecutionContext) -> tuple[str, dict[str, Any]]:
+    server_id = context.context_target_id
+    target = context.host_target
+    if (
+        not isinstance(server_id, str)
+        or not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or target.get("serverId") != server_id
+        or not context.host_task_id
+    ):
+        raise ToolCallError(
+            "durable_task_required", "Filesystem backup metadata requires a selected remote investigation task"
+        )
+    return server_id, dict(target)
+
+
+def _filesystem_backup_query_call(
+    tool_name: str,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "callId": context.call_id,
+        "traceId": context.trace_id,
+        "toolName": tool_name,
+        "input": arguments,
+        "target": target,
+        "taskId": context.host_task_id,
+    }
+    if context.run_id:
+        request["runId"] = context.run_id
+    if context.plan_id is not None and context.plan_step_id is not None:
+        request["planId"] = context.plan_id
+        request["planStepId"] = context.plan_step_id
+        request["evidenceIds"] = list(context.evidence_ids)
+    return request
+
+
+def _filesystem_backup_query_output(response: object) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup metadata response")
+    if response.get("status") == "failed":
+        error = response.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            code = "host_tool_failed"
+        raise ToolCallError(
+            code,
+            message if isinstance(message, str) else "The host rejected the backup metadata query",
+        )
+    output = response.get("output")
+    if response.get("status") != "success" or not isinstance(output, dict):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup metadata result")
+    return output
+
+
+def _validate_filesystem_backup_output(tool_name: str, output: dict[str, Any]) -> None:
+    try:
+        _FILESYSTEM_OUTPUT_VALIDATORS[tool_name].validate(output)
+    except ValidationError:
+        raise ToolCallError(
+            "invalid_host_response", "The desktop host returned invalid or unbounded backup metadata"
+        ) from None
+
+
+async def _desktop_filesystem_backup_list(
+    host: HostRpcClient,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, Any]:
+    server_id, target = _filesystem_backup_query_scope(context)
+    try:
+        response = await host.request(
+            "host.filesystem.backup.list_query",
+            {
+                "toolCall": _filesystem_backup_query_call(
+                    "filesystem.backup.list", arguments, context, target
+                ),
+            },
+            timeout_seconds=15.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError("host_unavailable", "The desktop host could not read the backup ledger") from None
+    payload = _filesystem_backup_query_output(response)
+    records = payload.get("records")
+    if (
+        set(payload) != {"records", "truncated"}
+        or not isinstance(records, list)
+        or len(records) > 128
+        or not isinstance(payload.get("truncated"), bool)
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup list")
+    backups: list[dict[str, Any]] = []
+    expected_fields = {
+        "id", "serverId", "taskId", "path", "backupPath", "revision", "bytesBackedUp",
+        "status", "createdAt", "updatedAt", "restoredAt", "deletedAt",
+    }
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or set(record) != expected_fields
+            or record.get("serverId") != server_id
+            or (record.get("taskId") is not None and record.get("taskId") != context.host_task_id)
+        ):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup record")
+        backup = dict(record)
+        if backup.get("taskId") is None:
+            backup["taskId"] = context.host_task_id
+        backups.append(backup)
+    output = {"backups": backups, "truncated": payload["truncated"]}
+    _validate_filesystem_backup_output("filesystem.backup.list", output)
+    return output
+
+
+def _parse_backup_created_at(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?Z",
+        value,
+    )
+    if match is None:
+        return None
+    try:
+        created_at = datetime(
+            int(match[1]), int(match[2]), int(match[3]),
+            int(match[4]), int(match[5]), int(match[6]), tzinfo=UTC,
+        )
+        seconds = int(created_at.timestamp())
+    except (OverflowError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _filesystem_backup_retention_candidates(
+    records: list[dict[str, Any]],
+    keep_latest: int | None,
+    older_than_days: int | None,
+    now_epoch_seconds: int,
+) -> tuple[list[dict[str, Any]], int]:
+    ordered = sorted(records, key=lambda record: record["id"], reverse=True)
+    ordered = sorted(ordered, key=lambda record: record["createdAt"], reverse=True)
+    ordered = sorted(ordered, key=lambda record: record["path"])
+    cutoff = (
+        max(0, now_epoch_seconds - older_than_days * 86_400)
+        if older_than_days is not None
+        else None
+    )
+    candidates: list[dict[str, Any]] = []
+    previous_path: str | None = None
+    index_in_path = 0
+    for record in ordered:
+        path = record["path"]
+        if path != previous_path:
+            previous_path = path
+            index_in_path = 0
+        beyond_keep = keep_latest is not None and index_in_path >= keep_latest
+        created_at = _parse_backup_created_at(record["createdAt"])
+        old_enough = cutoff is not None and created_at is not None and created_at < cutoff
+        is_candidate = (
+            beyond_keep and old_enough
+            if keep_latest is not None and older_than_days is not None
+            else beyond_keep
+            if keep_latest is not None
+            else old_enough
+        )
+        if is_candidate:
+            candidates.append(record)
+        index_in_path += 1
+    return candidates, len(ordered) - len(candidates)
+
+
+async def _desktop_filesystem_backup_retention(
+    host: HostRpcClient,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, Any]:
+    server_id, target = _filesystem_backup_query_scope(context)
+    try:
+        response = await host.request(
+            "host.filesystem.backup.retention_scan",
+            {
+                "toolCall": _filesystem_backup_query_call(
+                    "filesystem.backup.retention", arguments, context, target
+                ),
+            },
+            timeout_seconds=20.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError("host_unavailable", "The desktop host could not scan the backup ledger") from None
+    payload = _filesystem_backup_query_output(response)
+    records = payload.get("records")
+    scan_truncated = payload.get("truncated")
+    evaluated_at_epoch_seconds = payload.get("evaluatedAtEpochSeconds")
+    if (
+        set(payload) != {"records", "truncated", "evaluatedAtEpochSeconds"}
+        or not isinstance(records, list)
+        or len(records) > 512
+        or not isinstance(scan_truncated, bool)
+        or isinstance(evaluated_at_epoch_seconds, bool)
+        or not isinstance(evaluated_at_epoch_seconds, int)
+        or not 0 <= evaluated_at_epoch_seconds <= 253_402_300_799
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid retention scan")
+    checked_records: list[dict[str, Any]] = []
+    required_fields = {
+        "id", "path", "backupPath", "revision", "taskId", "createdAt", "bytesBackedUp"
+    }
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or set(record) != required_fields
+            or not isinstance(record.get("id"), str)
+            or not isinstance(record.get("path"), str)
+            or not isinstance(record.get("backupPath"), str)
+            or not isinstance(record.get("revision"), str)
+            or (record.get("taskId") is not None and not isinstance(record.get("taskId"), str))
+            or not isinstance(record.get("createdAt"), str)
+            or not record["id"]
+            or (record["taskId"] is not None and not record["taskId"])
+            or len(record["id"]) > 256
+            or not record["path"].startswith("/")
+            or not record["backupPath"].startswith("/")
+            or len(record["path"].encode("utf-8")) > 4096
+            or len(record["backupPath"].encode("utf-8")) > 4096
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in record["path"])
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in record["backupPath"])
+            or re.fullmatch(r"[a-f0-9]{64}", record["revision"]) is None
+            or (record["taskId"] is not None and len(record["taskId"]) > 256)
+            or not record["createdAt"]
+            or len(record["createdAt"]) > 80
+            or isinstance(record.get("bytesBackedUp"), bool)
+            or not isinstance(record.get("bytesBackedUp"), int)
+            or not 0 <= record["bytesBackedUp"] <= 1_048_576
+        ):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid retention record")
+        checked_records.append(record)
+    path_prefix = arguments.get("pathPrefix")
+    filtered = [
+        record for record in checked_records
+        if path_prefix is None or record["path"].startswith(path_prefix)
+    ]
+    candidates, kept_count = _filesystem_backup_retention_candidates(
+        filtered,
+        arguments.get("keepLatest"),
+        arguments.get("olderThanDays"),
+        evaluated_at_epoch_seconds,
+    )
+    candidate_truncated = len(candidates) > 32
+    output_candidates = []
+    for record in candidates[:32]:
+        candidate = {
+            "path": record["path"],
+            "backupPath": record["backupPath"],
+            "revision": record["revision"],
+            "createdAt": record["createdAt"],
+            "bytesBackedUp": record["bytesBackedUp"],
+        }
+        if record["taskId"] is not None:
+            candidate["taskId"] = record["taskId"]
+        output_candidates.append(candidate)
+    output = {
+        "candidates": output_candidates,
+        "truncated": scan_truncated or candidate_truncated,
+        "keptCount": kept_count,
+        "scannedCount": len(filtered),
+    }
+    _validate_filesystem_backup_output("filesystem.backup.retention", output)
+    return output
+
+
+def register_desktop_backup_metadata_tools(
+    registry: ToolRegistry,
+    host: HostRpcClient,
+) -> frozenset[str]:
+    """Run bounded backup ledger queries in Python while the host retains database ownership."""
+    existing_names = {spec.name for spec in registry.list()}
+    definitions = (
+        (
+            "filesystem.backup.list",
+            "Read bounded metadata for backups owned by the current investigation task. An available row does not prove the remote file still exists.",
+            _FILESYSTEM_BACKUP_LIST_INPUT_SCHEMA,
+            _desktop_filesystem_backup_list,
+            20_000,
+        ),
+        (
+            "filesystem.backup.retention",
+            "Preview bounded cross-task retention candidates from the host ledger. This Python planner never deletes or probes remote files.",
+            _FILESYSTEM_BACKUP_RETENTION_INPUT_SCHEMA,
+            _desktop_filesystem_backup_retention,
+            25_000,
+        ),
+    )
+    for name, description, schema, handler, timeout_ms in definitions:
+        if name in existing_names:
+            continue
+        registry.register(ToolSpec(
+            name=name,
+            description=description,
+            input_schema=schema,
+            risk_level="read",
+            requires_approval=False,
+            handler=lambda arguments, context, tool_handler=handler: tool_handler(
+                host, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=timeout_ms,
+            cancellable=True,
+        ))
+    return frozenset({"filesystem.backup.list", "filesystem.backup.retention"})
 
 
 async def _execute_on_host(

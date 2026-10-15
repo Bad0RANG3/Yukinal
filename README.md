@@ -59,7 +59,9 @@ the C++ SFTP service on supported target routes. The host validates durable
 action plans and owns backup metadata; backup creation is bounded to 1 MiB and
 uses exclusive sibling-file creation, restore verifies both revisions before
 guarded atomic replace, and cleanup verifies the backup digest before removing
-the remote copy and consuming its host ledger row.
+the remote copy and consuming its host ledger row. Backup listing and retention
+use Python for result formatting and per-path planning over bounded host-owned
+ledger queries.
 
 The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service
