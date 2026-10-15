@@ -254,6 +254,7 @@ the new SSH service.
 - [Product definition](./docs/product.md)
 - [Security and data boundaries](./docs/security.md)
 - [Rewrite plan and current status](./docs/rewrite-cpp-python.md)
+- [SSH + Agent acceptance handoff](./docs/acceptance-handoff.md)
 - [C++ desktop host migration](./docs/native-desktop-host.md)
 - [Architecture and acceptance criteria](./docs/architecture-and-build-plan.md)
 - [Release status](./docs/release.md)
