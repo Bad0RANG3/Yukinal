@@ -38,19 +38,21 @@ validates the RPC framing and each migrated command's inputs. Events are subscri
 by name and delivered through the same bridge. Commands return a stable error until
 their C++ implementation is migrated; they must not silently fall back to Rust.
 
-The first storage slice opens the same `yukinal.db` used by the current desktop.
+The C++ host opens or creates the same `yukinal.db` used by the current desktop.
 `YUKINAL_DATA_DIR` overrides the platform app-data directory, matching the legacy
-host. The C++ host reads server and workspace records without writing to the
-database or changing its migration version. If the database is absent, those list
-commands return empty lists. Database migrations and all write commands remain
-part of the C++ migration work.
+host. It applies the ordered schema migrations through version 36, one transaction
+per version, refuses newer databases, and makes a checksummed SQLite backup before
+migrating a nonempty existing database. If an upgrade fails, it restores that copy
+and removes the failed connection's WAL/SHM files. Server CRUD, OS credential
+storage, and migration execution now run in C++; the React UI keeps using the
+shared IPC contract.
 
 ## Migration order
 
 1. Complete the C++ WebView shell, command bridge, event subscriptions, UI loading,
    and the first shared-SQLite read commands.
-2. Move server CRUD and OS credential storage into C++, then migrate proxy/provider/
-   MCP settings and the remaining SQLite repositories.
+2. Move server CRUD, OS credential storage, and schema migrations into C++, then
+   migrate proxy/provider/MCP settings and the remaining SQLite repositories.
 3. Move server lifecycle, host-key trust, terminal, SFTP and transfer orchestration
    to C++. Continue using the C++ SSH service implementation already in `native/`.
 4. Connect the Python sidecar to the C++ host RPC. C++ remains the authority for
@@ -61,13 +63,14 @@ part of the C++ migration work.
 6. Build and smoke-test Windows, macOS, and Linux installers. Remove Tauri/Rust and
    the retired TypeScript Agent runtime after parity is demonstrated.
 
-## First native-host slice
+## Native-host storage and server CRUD
 
-The initial C++ shell opens the existing React UI, exposes `core_ping`, reads
-`server_list` and `workspace_list` from the existing SQLite database, routes
-external links through the OS without invoking a shell, and provides event
-subscription plumbing. Unmigrated commands return `NOT_IMPLEMENTED`; they never
-invoke the Tauri host. The application can be launched with `--dev-url
+The C++ shell opens the existing React UI, exposes `core_ping`, and routes
+external links through the OS without invoking a shell. It also initializes and
+migrates the local SQLite database, handles server CRUD and OS credential storage,
+reads `server_list` and `workspace_list`, and provides event subscription plumbing.
+Unmigrated commands return `NOT_IMPLEMENTED`; they never invoke the Tauri host.
+The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.
 

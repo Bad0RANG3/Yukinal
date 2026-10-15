@@ -1,21 +1,34 @@
 #include "yukinal/desktop_host/database.hpp"
 
+#include "schema_migrations.hpp"
+
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <bcrypt.h>
+#elif defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#else
+#include <glib.h>
 #endif
 
 namespace yukinal::desktop_host {
@@ -151,6 +164,184 @@ class Transaction {
   sqlite3* connection_;
   bool active_ = true;
 };
+
+std::filesystem::path with_suffix(const std::filesystem::path& path,
+                                  const char* suffix) {
+  auto result = path;
+  result += suffix;
+  return result;
+}
+
+void remove_file_if_present(const std::filesystem::path& path) {
+  std::error_code error;
+  if (std::filesystem::remove(path, error) || !error) return;
+  throw std::runtime_error("Could not remove " + path_as_utf8(path) + ": " + error.message());
+}
+
+std::string sha256_file(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("Could not read " + path_as_utf8(path));
+  std::array<unsigned char, 64 * 1024> buffer{};
+#ifdef _WIN32
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  DWORD object_length = 0;
+  DWORD bytes_written = 0;
+  std::vector<unsigned char> object;
+  std::array<unsigned char, 32> digest{};
+  auto status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                             nullptr, 0);
+  if (status < 0) throw std::runtime_error("Could not initialize SHA-256");
+  status = BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                             reinterpret_cast<PUCHAR>(&object_length),
+                             sizeof(object_length), &bytes_written, 0);
+  if (status >= 0) {
+    object.resize(object_length);
+    status = BCryptCreateHash(algorithm, &hash, object.data(), object_length,
+                              nullptr, 0, 0);
+  }
+  if (status < 0) {
+    if (algorithm != nullptr) BCryptCloseAlgorithmProvider(algorithm, 0);
+    throw std::runtime_error("Could not initialize SHA-256");
+  }
+  while (input) {
+    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    const auto count = static_cast<ULONG>(input.gcount());
+    if (count != 0 && BCryptHashData(hash, buffer.data(), count, 0) < 0) {
+      BCryptDestroyHash(hash);
+      BCryptCloseAlgorithmProvider(algorithm, 0);
+      throw std::runtime_error("Could not compute the backup checksum");
+    }
+  }
+  if (input.bad()) {
+    BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    throw std::runtime_error("Could not read " + path_as_utf8(path));
+  }
+  status = BCryptFinishHash(hash, digest.data(), digest.size(), 0);
+  BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  if (status < 0) throw std::runtime_error("Could not compute the backup checksum");
+#elif defined(__APPLE__)
+  CC_SHA256_CTX context;
+  CC_SHA256_Init(&context);
+  while (input) {
+    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    const auto count = static_cast<std::size_t>(input.gcount());
+    if (count != 0 && CC_SHA256_Update(&context, buffer.data(),
+                                       static_cast<CC_LONG>(count)) != 1) {
+      throw std::runtime_error("Could not compute the backup checksum");
+    }
+  }
+  if (input.bad()) throw std::runtime_error("Could not read " + path_as_utf8(path));
+  std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest{};
+  if (CC_SHA256_Final(digest.data(), &context) != 1) {
+    throw std::runtime_error("Could not compute the backup checksum");
+  }
+#else
+  auto* checksum = g_checksum_new(G_CHECKSUM_SHA256);
+  if (checksum == nullptr) throw std::runtime_error("Could not initialize SHA-256");
+  while (input) {
+    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    const auto count = static_cast<std::size_t>(input.gcount());
+    if (count != 0) g_checksum_update(checksum, buffer.data(), count);
+  }
+  if (input.bad()) {
+    g_checksum_free(checksum);
+    throw std::runtime_error("Could not read " + path_as_utf8(path));
+  }
+  const auto* value = g_checksum_get_string(checksum);
+  const std::string digest = value == nullptr ? std::string() : value;
+  g_checksum_free(checksum);
+  if (digest.size() != 64) throw std::runtime_error("Could not compute the backup checksum");
+  return digest;
+#endif
+  std::ostringstream rendered;
+  rendered << std::hex << std::setfill('0');
+  for (const auto byte : digest) rendered << std::setw(2) << static_cast<unsigned>(byte);
+  return rendered.str();
+}
+
+std::string utc_timestamp() {
+  const auto now = std::chrono::system_clock::now();
+  const auto time = std::chrono::system_clock::to_time_t(now);
+  std::tm utc{};
+#ifdef _WIN32
+  gmtime_s(&utc, &time);
+#else
+  gmtime_r(&time, &utc);
+#endif
+  std::ostringstream rendered;
+  rendered << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+  return rendered.str();
+}
+
+std::int64_t database_user_version(sqlite3* connection) {
+  Statement statement(connection, "PRAGMA user_version;");
+  if (sqlite3_step(statement.get()) != SQLITE_ROW) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+  return sqlite3_column_int64(statement.get(), 0);
+}
+
+void create_pre_migration_backup(sqlite3* connection,
+                                 const std::filesystem::path& database,
+                                 std::int64_t source_version) {
+  const auto backup = with_suffix(database, ".pre-migration.bak");
+  const auto manifest = with_suffix(database, ".pre-migration.json");
+  remove_file_if_present(backup);
+  remove_file_if_present(manifest);
+
+  Statement vacuum(connection, "VACUUM INTO ?1;");
+  bind_text(connection, vacuum.get(), 1, path_as_utf8(backup));
+  const auto result = sqlite3_step(vacuum.get());
+  if (result != SQLITE_DONE) {
+    throw std::runtime_error(std::string("Could not create migration backup: ") +
+                             sqlite3_errmsg(connection));
+  }
+  std::error_code error;
+  const auto bytes = std::filesystem::file_size(backup, error);
+  if (error) throw std::runtime_error("Could not inspect migration backup: " + error.message());
+  const nlohmann::json record = {
+      {"sourceVersion", source_version},
+      {"targetVersion", detail::kSchemaMigrations.size()},
+      {"sha256", sha256_file(backup)},
+      {"bytes", bytes},
+      {"createdAt", utc_timestamp()},
+  };
+  std::ofstream output(manifest, std::ios::binary | std::ios::trunc);
+  if (!output || !(output << record.dump(2) << '\n')) {
+    throw std::runtime_error("Could not write migration manifest " + path_as_utf8(manifest));
+  }
+}
+
+void apply_schema_migrations(sqlite3* connection) {
+  const auto current = database_user_version(connection);
+  const auto supported = static_cast<std::int64_t>(detail::kSchemaMigrations.size());
+  if (current > supported) {
+    throw std::runtime_error("Database schema is version " + std::to_string(current) +
+                             ", this build supports " + std::to_string(supported));
+  }
+  for (std::int64_t version = std::max<std::int64_t>(1, current + 1);
+       version <= supported; ++version) {
+    try {
+      Transaction transaction(connection);
+      char* error = nullptr;
+      const auto& sql = detail::kSchemaMigrations[static_cast<std::size_t>(version - 1)];
+      const auto result = sqlite3_exec(connection, sql.data(), nullptr, nullptr, &error);
+      if (result != SQLITE_OK) {
+        const std::string message = error == nullptr ? sqlite3_errmsg(connection) : error;
+        sqlite3_free(error);
+        throw std::runtime_error(message);
+      }
+      execute_sql(connection, ("PRAGMA user_version=" + std::to_string(version) + ";").c_str());
+      transaction.commit();
+    } catch (const std::exception& error) {
+      throw std::runtime_error("Migration to schema version " + std::to_string(version) +
+                               " failed: " + error.what());
+    }
+  }
+}
 
 constexpr const char* kChatSessionSelect = R"SQL(
   SELECT s.id, s.workspace_id, s.server_id, s.title, s.created_at, s.updated_at,
@@ -547,14 +738,21 @@ DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
     throw std::runtime_error("The Yukinal data directory must be an absolute path");
   }
   std::error_code error;
+  std::filesystem::create_directories(data_directory, error);
+  if (error) {
+    throw std::runtime_error("Could not create the Yukinal data directory: " + error.message());
+  }
   const auto file_path = data_directory / "yukinal.db";
   const bool database_exists = std::filesystem::exists(file_path, error);
   if (error) throw std::runtime_error("Could not inspect the Yukinal database path");
-  if (!database_exists) return;
+  const bool existing_nonempty = database_exists &&
+      std::filesystem::file_size(file_path, error) > 0;
+  if (error) throw std::runtime_error("Could not inspect the Yukinal database file");
 
   const auto database_path = path_as_utf8(file_path);
   const auto result = sqlite3_open_v2(database_path.c_str(), &connection_,
-                                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                                          SQLITE_OPEN_FULLMUTEX,
                                       nullptr);
   if (result != SQLITE_OK) {
     const std::string message = connection_ == nullptr
@@ -565,28 +763,39 @@ DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
     throw std::runtime_error(message);
   }
   sqlite3_busy_timeout(connection_, 5000);
-  sqlite3_db_config(connection_, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
-  char* error_message = nullptr;
-  const auto pragma_result = sqlite3_exec(connection_, "PRAGMA trusted_schema=OFF;", nullptr,
-                                          nullptr, &error_message);
-  if (pragma_result != SQLITE_OK) {
-    const std::string message = error_message == nullptr ? "Could not configure the database"
-                                                          : error_message;
-    sqlite3_free(error_message);
+  bool backup_ready = false;
+  try {
+    execute_sql(connection_, "PRAGMA foreign_keys=ON;");
+    execute_sql(connection_, "PRAGMA journal_mode=WAL;");
+    execute_sql(connection_, "PRAGMA trusted_schema=OFF;");
+    const auto current = database_user_version(connection_);
+    const auto supported = static_cast<std::int64_t>(detail::kSchemaMigrations.size());
+    if (existing_nonempty && current < supported) {
+      create_pre_migration_backup(connection_, file_path, current);
+      backup_ready = true;
+    }
+    apply_schema_migrations(connection_);
+    sqlite3_db_config(connection_, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
+  } catch (const std::exception& migration_error) {
+    const std::string message = migration_error.what();
     sqlite3_close_v2(connection_);
     connection_ = nullptr;
-    throw std::runtime_error(message);
-  }
-  char* foreign_key_error = nullptr;
-  if (sqlite3_exec(connection_, "PRAGMA foreign_keys=ON;", nullptr, nullptr,
-                   &foreign_key_error) != SQLITE_OK) {
-    const std::string message = foreign_key_error == nullptr
-                                    ? "Could not enable database referential integrity"
-                                    : foreign_key_error;
-    sqlite3_free(foreign_key_error);
-    sqlite3_close_v2(connection_);
-    connection_ = nullptr;
-    throw std::runtime_error(message);
+    if (backup_ready) {
+      const auto backup = with_suffix(file_path, ".pre-migration.bak");
+      try {
+        std::filesystem::copy_file(backup, file_path,
+                                   std::filesystem::copy_options::overwrite_existing);
+        remove_file_if_present(with_suffix(file_path, "-wal"));
+        remove_file_if_present(with_suffix(file_path, "-shm"));
+      } catch (const std::exception& rollback_error) {
+        throw std::runtime_error("Migration failed and rollback from " +
+                                 path_as_utf8(backup) + " also failed: " +
+                                 rollback_error.what() + " (migration: " + message + ")");
+      }
+      throw std::runtime_error("Migration failed and the database was restored from " +
+                               path_as_utf8(backup) + ": " + message);
+    }
+    throw;
   }
 }
 
