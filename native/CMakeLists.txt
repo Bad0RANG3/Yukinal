@@ -40,6 +40,7 @@ if(YUKINAL_FETCH_DEPS)
 
     set(YUKINAL_OPENSSL_INSTALL_DIR "${CMAKE_BINARY_DIR}/_deps/openssl-install")
     set(YUKINAL_OPENSSL_CRYPTO_LIBRARY "${YUKINAL_OPENSSL_INSTALL_DIR}/lib/libcrypto.lib")
+    set(YUKINAL_OPENSSL_SSL_LIBRARY "${YUKINAL_OPENSSL_INSTALL_DIR}/lib/libssl.lib")
     set(YUKINAL_OPENSSL_INCLUDE_DIR "${YUKINAL_OPENSSL_INSTALL_DIR}/include")
     file(MAKE_DIRECTORY "${YUKINAL_OPENSSL_INCLUDE_DIR}")
     set(YUKINAL_USE_BUNDLED_OPENSSL TRUE)
@@ -47,6 +48,8 @@ if(YUKINAL_FETCH_DEPS)
     set(OPENSSL_INCLUDE_DIR "${YUKINAL_OPENSSL_INCLUDE_DIR}")
     set(OPENSSL_CRYPTO_LIBRARY "${YUKINAL_OPENSSL_CRYPTO_LIBRARY}")
     set(OPENSSL_CRYPTO_LIBRARIES "${YUKINAL_OPENSSL_CRYPTO_LIBRARY}")
+    set(OPENSSL_SSL_LIBRARY "${YUKINAL_OPENSSL_SSL_LIBRARY}")
+    set(OPENSSL_SSL_LIBRARIES "${YUKINAL_OPENSSL_SSL_LIBRARY};${YUKINAL_OPENSSL_CRYPTO_LIBRARY}")
     set(OPENSSL_VERSION "3.5.9")
     set(OpenSSL_VERSION "3.5.9")
     list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -143,7 +146,7 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
-find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 
 add_library(yukinal_ssh_core
   src/config.cpp
@@ -161,8 +164,12 @@ else()
 endif()
 target_link_libraries(yukinal_ssh_core
   PUBLIC nlohmann_json::nlohmann_json
-  PRIVATE libssh2::libssh2 Threads::Threads OpenSSL::Crypto
+  PRIVATE libssh2::libssh2 Threads::Threads OpenSSL::SSL OpenSSL::Crypto
 )
+target_compile_definitions(yukinal_ssh_core PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+if(WIN32 AND YUKINAL_FETCH_DEPS AND YUKINAL_BUNDLE_WINDOWS_OPENSSL)
+  add_dependencies(yukinal_ssh_core yukinal_openssl)
+endif()
 if(WIN32)
   target_compile_definitions(yukinal_ssh_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(yukinal_ssh_core PRIVATE ws2_32 bcrypt)
@@ -181,7 +188,13 @@ if(YUKINAL_BUILD_TESTS)
     tests/test_network.cpp
   )
   target_include_directories(yukinal_ssh_tests PRIVATE tests src)
-  target_link_libraries(yukinal_ssh_tests PRIVATE yukinal_ssh_core OpenSSL::Crypto)
+  if(YUKINAL_FETCH_DEPS)
+    target_include_directories(yukinal_ssh_tests PRIVATE ${cpp_httplib_SOURCE_DIR})
+  else()
+    target_include_directories(yukinal_ssh_tests PRIVATE ${HTTPLIB_INCLUDE_DIR})
+  endif()
+  target_compile_definitions(yukinal_ssh_tests PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+  target_link_libraries(yukinal_ssh_tests PRIVATE yukinal_ssh_core OpenSSL::SSL OpenSSL::Crypto)
   add_test(NAME yukinal_ssh_tests COMMAND yukinal_ssh_tests)
 
   find_package(Python3 3.11 COMPONENTS Interpreter REQUIRED)

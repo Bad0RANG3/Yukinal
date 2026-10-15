@@ -382,9 +382,13 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     } else if (has_host_ca) {
       const Json& authority = entry["host_certificate_authority"];
       require_object(authority, label + ".host_certificate_authority");
-      require_only_keys(authority, {"ca_public_key", "principals"}, label + ".host_certificate_authority");
+      require_only_keys(authority,
+                        {"ca_public_key", "principals", "revocation_list_path",
+                         "revocation_list_url", "revocation_list_signers"},
+                        label + ".host_certificate_authority");
       target.host_ca_public_key = required_string(authority, "ca_public_key", label + ".host_certificate_authority");
-      if (!detail::valid_host_ca_public_key(target.host_ca_public_key)) {
+      const auto ca_blob = detail::host_ca_public_key_blob(target.host_ca_public_key);
+      if (!ca_blob) {
         throw std::runtime_error(label + ".host_certificate_authority.ca_public_key is not a supported OpenSSH public key");
       }
       const auto principals = authority.find("principals");
@@ -401,6 +405,51 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
           throw std::runtime_error(label + ".host_certificate_authority.principals contains an invalid pattern");
         }
         target.host_principals.push_back(value);
+      }
+      const auto optional_path = [&](const char* key, std::string* destination) {
+        const auto it = authority.find(key);
+        if (it == authority.end()) return;
+        if (!it->is_string()) {
+          throw std::runtime_error(label + ".host_certificate_authority." + key + " must be a string");
+        }
+        *destination = it->get<std::string>();
+        const auto first = destination->find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+          throw std::runtime_error(label + ".host_certificate_authority." + key + " is invalid");
+        }
+        const auto last = destination->find_last_not_of(" \t\r\n");
+        *destination = destination->substr(first, last - first + 1);
+        if (destination->empty() || destination->size() > 4096 ||
+            destination->find('\0') != std::string::npos) {
+          throw std::runtime_error(label + ".host_certificate_authority." + key + " is invalid");
+        }
+      };
+      optional_path("revocation_list_path", &target.host_ca_revocation_list_path);
+      optional_path("revocation_list_url", &target.host_ca_revocation_list_url);
+      if (!target.host_ca_revocation_list_path.empty() &&
+          !std::filesystem::path(target.host_ca_revocation_list_path).is_absolute()) {
+        throw std::runtime_error(label + ".host_certificate_authority.revocation_list_path must be absolute");
+      }
+      if (!target.host_ca_revocation_list_path.empty() &&
+          !target.host_ca_revocation_list_url.empty()) {
+        throw std::runtime_error(label + ".host_certificate_authority KRL path and URL are mutually exclusive");
+      }
+      const auto signers = authority.find("revocation_list_signers");
+      if (signers != authority.end()) {
+        if (!signers->is_array() || signers->size() > 16) {
+          throw std::runtime_error(label + ".host_certificate_authority.revocation_list_signers must contain at most 16 keys");
+        }
+        std::set<std::string> signer_blobs{*ca_blob};
+        for (const Json& signer : *signers) {
+          if (!signer.is_string() || signer.get_ref<const std::string&>().empty()) {
+            throw std::runtime_error(label + ".host_certificate_authority.revocation_list_signers must contain public-key strings");
+          }
+          const auto signer_blob = detail::host_ca_public_key_blob(signer.get<std::string>());
+          if (!signer_blob || !signer_blobs.insert(*signer_blob).second) {
+            throw std::runtime_error(label + ".host_certificate_authority.revocation_list_signers contains an invalid or duplicate key");
+          }
+          target.host_ca_revocation_list_signers.push_back(signer.get<std::string>());
+        }
       }
     }
     if (!valid_target_id(target.target_id)) throw std::runtime_error(label + ".target_id is invalid");

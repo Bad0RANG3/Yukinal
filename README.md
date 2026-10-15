@@ -118,6 +118,12 @@ replace the target fields, create its OpenSSH `known_hosts` entry, and set
 configuration keeps SSH credentials as a private-key path or a reference to an
 environment variable; it never stores a password value.
 
+For host certificates, `host_certificate_authority` can replace the pinned key
+or `known_hosts` trust source. The C++ service verifies the host CA signature,
+certificate validity and principal patterns, and optional local or HTTPS OpenSSH
+KRL revocations before authenticating. HTTPS KRL downloads verify the server
+certificate; plain HTTP is restricted to loopback URLs.
+
 Desktop SSH targets also follow the app's selected proxy route. The C++ service
 accepts an optional target `proxy` with `type: "http_connect"`, a proxy `host`
 and `port`, an optional `auth_env` reference, and `no_proxy` host patterns.

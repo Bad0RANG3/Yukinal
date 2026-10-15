@@ -1,12 +1,24 @@
 #include "host_key.hpp"
+#include "yukinal/config.hpp"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
+
+#include <httplib.h>
 
 #include <openssl/bn.h>
 #include <openssl/ec.h>
@@ -14,11 +26,23 @@
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
+
 namespace yukinal::ssh_service::detail {
 namespace {
 
 constexpr std::size_t kMaxCertificateBytes = 1024 * 1024;
+constexpr std::size_t kMaxKrlBytes = 16 * 1024 * 1024;
 constexpr std::string_view kCertificateSuffix = "-cert-v01@openssh.com";
+constexpr std::string_view kKrlMagic("SSHKRL\n\0", 8);
 
 bool read_string(std::string_view input, std::size_t* offset, std::string_view* value) {
   if (!offset || !value || *offset > input.size() || input.size() - *offset < 4) return false;
@@ -260,13 +284,15 @@ bool parse_certificate(std::string_view blob, std::vector<std::string>* principa
                        std::uint64_t* valid_after, std::uint64_t* valid_before,
                        std::string_view* critical_options, std::string_view* ca_blob,
                        std::string_view* signature_blob, std::size_t* signed_length,
-                       std::uint32_t* certificate_type) {
+                       std::uint32_t* certificate_type, std::uint64_t* serial_out,
+                       std::string_view* key_id_out, std::string* subject_key_blob) {
   std::size_t offset = 0;
   std::string_view algorithm, nonce;
   if (!read_string(blob, &offset, &algorithm) || algorithm.size() <= kCertificateSuffix.size() ||
       algorithm.substr(algorithm.size() - kCertificateSuffix.size()) != kCertificateSuffix ||
       !read_string(blob, &offset, &nonce) || nonce.size() < 16 || nonce.size() > 1024) return false;
   const auto plain = algorithm.substr(0, algorithm.size() - kCertificateSuffix.size());
+  const std::size_t subject_fields_start = offset;
   std::string_view field;
   if (plain == "ssh-rsa") {
     if (!read_string(blob, &offset, &field) || field.empty() ||
@@ -281,10 +307,11 @@ bool parse_certificate(std::string_view blob, std::vector<std::string>* principa
     if (!read_string(blob, &offset, &curve) || curve != expected ||
         !read_string(blob, &offset, &field) || field.empty()) return false;
   } else return false;
-  std::uint64_t serial = 0;
-  std::string_view key_id, principal_blob;
-  if (!read_u64(blob, &offset, &serial) || !read_u32(blob, &offset, certificate_type) ||
-      !read_string(blob, &offset, &key_id) || key_id.size() > 4096 ||
+  if (!append_string(plain, subject_key_blob)) return false;
+  subject_key_blob->append(blob.substr(subject_fields_start, offset - subject_fields_start));
+  std::string_view principal_blob;
+  if (!read_u64(blob, &offset, serial_out) || !read_u32(blob, &offset, certificate_type) ||
+      !read_string(blob, &offset, key_id_out) || key_id_out->size() > 4096 ||
       !read_string(blob, &offset, &principal_blob) || !parse_principal_list(principal_blob, principals) ||
       !read_u64(blob, &offset, valid_after) || !read_u64(blob, &offset, valid_before) ||
       !read_string(blob, &offset, critical_options)) return false;
@@ -295,16 +322,525 @@ bool parse_certificate(std::string_view blob, std::vector<std::string>* principa
   return read_string(blob, &offset, signature_blob) && offset == blob.size();
 }
 
+class KrlReader {
+ public:
+  explicit KrlReader(std::string_view bytes) : bytes_(bytes) {}
+  bool empty() const { return offset_ == bytes_.size(); }
+  std::size_t offset() const { return offset_; }
+  std::string_view exact(std::size_t length) {
+    if (length > bytes_.size() - offset_) throw std::runtime_error("KRL is truncated");
+    const auto value = bytes_.substr(offset_, length);
+    offset_ += length;
+    return value;
+  }
+  std::uint8_t u8() {
+    if (offset_ == bytes_.size()) throw std::runtime_error("KRL is truncated");
+    return static_cast<std::uint8_t>(bytes_[offset_++]);
+  }
+  std::uint32_t u32() {
+    std::string_view bytes = exact(4);
+    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
+    return (static_cast<std::uint32_t>(data[0]) << 24) |
+        (static_cast<std::uint32_t>(data[1]) << 16) |
+        (static_cast<std::uint32_t>(data[2]) << 8) | data[3];
+  }
+  std::uint64_t u64() {
+    std::string_view bytes = exact(8);
+    const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
+    std::uint64_t value = 0;
+    for (int index = 0; index < 8; ++index) value = (value << 8) | data[index];
+    return value;
+  }
+  std::string_view string() {
+    const auto length = static_cast<std::size_t>(u32());
+    return exact(length);
+  }
+  void finish() const {
+    if (!empty()) throw std::runtime_error("KRL section contains unparsed data");
+  }
+
+ private:
+  std::string_view bytes_;
+  std::size_t offset_ = 0;
+};
+
+struct KrlBitmap {
+  std::uint64_t offset = 0;
+  std::string bits;
+};
+
+struct KrlCertificateSection {
+  std::string ca_key;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> serial_ranges;
+  std::vector<KrlBitmap> serial_bitmaps;
+  std::unordered_set<std::string> key_ids;
+};
+
+struct KrlSignature {
+  std::size_t signed_length = 0;
+  std::string key_blob;
+  std::string signature_blob;
+};
+
+struct KrlData {
+  std::vector<KrlCertificateSection> certificate_sections;
+  std::unordered_set<std::string> explicit_keys;
+  std::unordered_set<std::string> sha1_fingerprints;
+  std::unordered_set<std::string> sha256_fingerprints;
+};
+
+bool valid_utf8(std::string_view value) {
+  std::size_t index = 0;
+  while (index < value.size()) {
+    const auto first = static_cast<unsigned char>(value[index++]);
+    if (first <= 0x7f) continue;
+    std::uint32_t code = 0;
+    std::size_t continuation = 0;
+    if (first >= 0xc2 && first <= 0xdf) { code = first & 0x1f; continuation = 1; }
+    else if (first >= 0xe0 && first <= 0xef) { code = first & 0x0f; continuation = 2; }
+    else if (first >= 0xf0 && first <= 0xf4) { code = first & 0x07; continuation = 3; }
+    else return false;
+    if (continuation > value.size() - index) return false;
+    for (std::size_t part = 0; part < continuation; ++part) {
+      const auto next = static_cast<unsigned char>(value[index++]);
+      if ((next & 0xc0) != 0x80) return false;
+      code = (code << 6) | (next & 0x3f);
+    }
+    if ((continuation == 2 && code < 0x800) || (continuation == 3 && code < 0x10000) ||
+        (code >= 0xd800 && code <= 0xdfff) || code > 0x10ffff) return false;
+  }
+  return true;
+}
+
+void parse_krl_extension(KrlReader* reader) {
+  const auto name = reader->string();
+  if (!valid_utf8(name)) throw std::runtime_error("KRL extension name is not UTF-8");
+  const bool critical = reader->u8() != 0;
+  (void)reader->string();
+  if (critical) throw std::runtime_error("unsupported critical KRL extension");
+}
+
+std::string_view positive_mpint(std::string_view encoded) {
+  if (!encoded.empty() && (static_cast<unsigned char>(encoded.front()) & 0x80) != 0)
+    throw std::runtime_error("KRL bitmap mpint is negative");
+  if (encoded.size() > 1 && encoded.front() == '\0') {
+    if ((static_cast<unsigned char>(encoded[1]) & 0x80) == 0)
+      throw std::runtime_error("KRL bitmap mpint has a non-canonical leading zero");
+    return encoded.substr(1);
+  }
+  return encoded == std::string_view("\0", 1) ? std::string_view{} : encoded;
+}
+
+void parse_certificate_krl_section(KrlReader* reader, KrlData* krl) {
+  KrlCertificateSection section;
+  section.ca_key = std::string(reader->string());
+  (void)reader->string();
+  while (!reader->empty()) {
+    const auto type = reader->u8();
+    KrlReader data(reader->string());
+    switch (type) {
+      case 0x20: {  // serial list
+        while (!data.empty()) {
+          const auto serial = data.u64();
+          if (serial == 0) throw std::runtime_error("KRL serial list contains zero");
+          section.serial_ranges.emplace_back(serial, serial);
+        }
+        break;
+      }
+      case 0x21: {  // serial range
+        const auto low = data.u64();
+        const auto high = data.u64();
+        if (low == 0 || low > high) throw std::runtime_error("KRL serial range is invalid");
+        section.serial_ranges.emplace_back(low, high);
+        break;
+      }
+      case 0x22: {  // serial bitmap
+        KrlBitmap bitmap;
+        bitmap.offset = data.u64();
+        bitmap.bits = std::string(positive_mpint(data.string()));
+        for (std::size_t byte_index = 0; byte_index < bitmap.bits.size(); ++byte_index) {
+          const auto byte = static_cast<unsigned char>(bitmap.bits[bitmap.bits.size() - 1 - byte_index]);
+          for (unsigned int bit = 0; bit < 8; ++bit) {
+            if ((byte & (1U << bit)) == 0) continue;
+            const auto index = byte_index * 8 + bit;
+            if (index > std::numeric_limits<std::uint64_t>::max() - bitmap.offset)
+              throw std::runtime_error("KRL serial overflow");
+            if (bitmap.offset + index == 0) throw std::runtime_error("KRL bitmap revokes serial zero");
+          }
+        }
+        section.serial_bitmaps.push_back(std::move(bitmap));
+        break;
+      }
+      case 0x23: {  // key IDs
+        while (!data.empty()) {
+          const auto key_id = data.string();
+          if (!valid_utf8(key_id)) throw std::runtime_error("KRL key ID is not UTF-8");
+          section.key_ids.emplace(key_id);
+        }
+        break;
+      }
+      case 0x39:
+        parse_krl_extension(&data);
+        break;
+      default:
+        throw std::runtime_error("unsupported KRL certificate subsection " + std::to_string(type));
+    }
+    data.finish();
+  }
+  reader->finish();
+  krl->certificate_sections.push_back(std::move(section));
+}
+
+bool canonical_positive_mpint(std::string_view value) {
+  if (value.empty() || std::all_of(value.begin(), value.end(), [](char byte) { return byte == '\0'; }))
+    return false;
+  const auto first = static_cast<unsigned char>(value.front());
+  if (first & 0x80) return false;
+  if (first == 0 && (value.size() < 2 ||
+      (static_cast<unsigned char>(value[1]) & 0x80) == 0)) return false;
+  return true;
+}
+
+bool canonical_signature(std::string_view signature_blob) {
+  std::size_t offset = 0;
+  std::string_view algorithm, signature;
+  if (!read_string(signature_blob, &offset, &algorithm) ||
+      !read_string(signature_blob, &offset, &signature) || offset != signature_blob.size()) return false;
+  if (algorithm.rfind("ecdsa-", 0) != 0) return true;
+  std::size_t signature_offset = 0;
+  std::string_view r, s;
+  return read_string(signature, &signature_offset, &r) && canonical_positive_mpint(r) &&
+      read_string(signature, &signature_offset, &s) && canonical_positive_mpint(s) &&
+      signature_offset == signature.size();
+}
+
+KrlData parse_krl(std::string_view bytes, const std::vector<std::string>& trusted_signers,
+                  std::string_view ca_blob) {
+  if (bytes.size() > kMaxKrlBytes) throw std::runtime_error("KRL exceeds the 16 MiB limit");
+  KrlReader header(bytes);
+  if (header.exact(kKrlMagic.size()) != kKrlMagic) throw std::runtime_error("KRL magic is missing");
+  if (header.u32() != 1) throw std::runtime_error("unsupported KRL format version");
+  (void)header.u64();  // KRL version
+  (void)header.u64();  // generated timestamp
+  if (header.u64() != 0) throw std::runtime_error("KRL carries unsupported flags");
+  (void)header.string();
+  (void)header.string();
+
+  KrlData krl;
+  std::vector<KrlSignature> signatures;
+  std::unordered_set<std::string> signature_keys;
+  bool signatures_started = false;
+  while (!header.empty()) {
+    const auto type = header.u8();
+    if (type == 4) {
+      signatures_started = true;
+      if (signatures.size() >= 16) throw std::runtime_error("KRL contains more than 16 signatures");
+      KrlSignature signature;
+      signature.key_blob = std::string(header.string());
+      signature.signed_length = header.offset();
+      signature.signature_blob = std::string(header.string());
+      if (!parse_key_blob(signature.key_blob))
+        throw std::runtime_error("KRL signature public key is invalid or unsupported");
+      if (!canonical_signature(signature.signature_blob))
+        throw std::runtime_error("KRL signature encoding is not canonical");
+      if (!signature_keys.insert(signature.key_blob).second)
+        throw std::runtime_error("KRL is signed more than once by the same key");
+      signatures.push_back(std::move(signature));
+      continue;
+    }
+    if (signatures_started)
+      throw std::runtime_error("KRL contains a non-signature section after a signature");
+    KrlReader section(header.string());
+    switch (type) {
+      case 1:
+        parse_certificate_krl_section(&section, &krl);
+        break;
+      case 2:
+        while (!section.empty()) {
+          const auto key = section.string();
+          if (key.empty()) throw std::runtime_error("KRL contains an empty explicit key");
+          krl.explicit_keys.emplace(key);
+        }
+        break;
+      case 3:
+      case 5: {
+        auto& fingerprints = type == 3 ? krl.sha1_fingerprints : krl.sha256_fingerprints;
+        const std::size_t expected_length = type == 3 ? 20 : 32;
+        while (!section.empty()) {
+          const auto fingerprint = section.string();
+          if (fingerprint.size() != expected_length)
+            throw std::runtime_error("KRL fingerprint must be " + std::to_string(expected_length) + " bytes");
+          fingerprints.emplace(fingerprint);
+        }
+        break;
+      }
+      case 255:
+        parse_krl_extension(&section);
+        break;
+      default:
+        throw std::runtime_error("unsupported KRL section " + std::to_string(type));
+    }
+    section.finish();
+  }
+
+  if (signatures.empty()) return krl;
+  bool trusted_signature_found = false;
+  for (std::size_t index = 0; index < signatures.size(); ++index) {
+    const auto& signature = signatures[index];
+    auto key = parse_key_blob(signature.key_blob);
+    if (!verify_signature(key.get(), signature.key_blob,
+            bytes.substr(0, signature.signed_length), signature.signature_blob)) {
+      throw std::runtime_error("KRL signature " + std::to_string(index + 1) + " is invalid");
+    }
+    if (signature.key_blob == ca_blob) trusted_signature_found = true;
+    for (const auto& trusted_line : trusted_signers) {
+      std::string trusted_blob;
+      if (!parse_authorized_key(trusted_line, &trusted_blob))
+        throw std::runtime_error("trusted KRL signer public key is invalid or unsupported");
+      if (signature.key_blob == trusted_blob) trusted_signature_found = true;
+    }
+  }
+  if (!trusted_signature_found)
+    throw std::runtime_error("signed KRL is not signed by the configured CA or a trusted KRL signer");
+  return krl;
+}
+
+struct KrlUrl {
+  bool https = false;
+  std::string host;
+  int port = 0;
+  std::string path;
+};
+
+std::optional<KrlUrl> parse_krl_url(std::string_view value, std::string* error) {
+  const auto reject = [error](const char* message) -> std::optional<KrlUrl> {
+    if (error) *error = message;
+    return std::nullopt;
+  };
+  if (value.empty() || value.size() > 4096 ||
+      std::any_of(value.begin(), value.end(), [](unsigned char ch) { return ch <= 0x20 || ch == 0x7f; }) ||
+      value.find_first_of("?#") != std::string_view::npos) {
+    return reject("host certificate KRL URL is malformed");
+  }
+  KrlUrl result;
+  std::string_view rest;
+  std::string scheme(value.substr(0, std::min<std::size_t>(value.size(), 8)));
+  std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char ch) {
+    return static_cast<char>(ascii_lower(ch));
+  });
+  if (scheme == "https://") {
+    result.https = true;
+    result.port = 443;
+    rest = value.substr(8);
+  } else if (scheme == "http://") {
+    result.port = 80;
+    rest = value.substr(7);
+  } else {
+    return reject("host certificate KRL URL must use HTTPS; HTTP is allowed only on loopback");
+  }
+  const auto path_start = rest.find('/');
+  const auto authority = rest.substr(0, path_start);
+  result.path = path_start == std::string_view::npos ? "/" : std::string(rest.substr(path_start));
+  if (authority.empty() || authority.find('@') != std::string_view::npos)
+    return reject("host certificate KRL URL must have a host and no credentials");
+  std::string_view port_text;
+  if (authority.front() == '[') {
+    const auto close = authority.find(']');
+    if (close == std::string_view::npos || close == 1)
+      return reject("host certificate KRL URL contains an invalid IPv6 host");
+    result.host = std::string(authority.substr(1, close - 1));
+    if (close + 1 < authority.size()) {
+      if (authority[close + 1] != ':') return reject("host certificate KRL URL port is invalid");
+      port_text = authority.substr(close + 2);
+    }
+  } else {
+    const auto colon = authority.rfind(':');
+    if (colon != std::string_view::npos) {
+      if (authority.find(':') != colon) return reject("IPv6 hosts in KRL URLs must be bracketed");
+      result.host = std::string(authority.substr(0, colon));
+      port_text = authority.substr(colon + 1);
+    } else {
+      result.host = std::string(authority);
+    }
+  }
+  if (!port_text.empty()) {
+    unsigned int port = 0;
+    const auto parsed = std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
+    if (parsed.ec != std::errc{} || parsed.ptr != port_text.data() + port_text.size() ||
+        port == 0 || port > 65535) return reject("host certificate KRL URL port is invalid");
+    result.port = static_cast<int>(port);
+  } else if ((!authority.empty() && authority.back() == ':') ||
+             (authority.front() == '[' && authority.back() == ':')) {
+    return reject("host certificate KRL URL port is empty");
+  }
+  if (result.host.empty() || result.host.size() > 253 || result.path.empty() || result.path.front() != '/')
+    return reject("host certificate KRL URL is invalid");
+  if (error) error->clear();
+  return result;
+}
+
+bool is_loopback_host(std::string_view host) {
+  std::string lowered(host);
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+    return static_cast<char>(ascii_lower(ch));
+  });
+  if (lowered == "localhost" || lowered.ends_with(".localhost")) return true;
+  in_addr ipv4{};
+  if (inet_pton(AF_INET, lowered.c_str(), &ipv4) == 1) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&ipv4);
+    return bytes[0] == 127;
+  }
+  in6_addr ipv6{};
+  if (inet_pton(AF_INET6, lowered.c_str(), &ipv6) == 1) return IN6_IS_ADDR_LOOPBACK(&ipv6) != 0;
+  return false;
+}
+
+void wipe_secret(std::string* value) {
+  volatile char* bytes = value->empty() ? nullptr : value->data();
+  for (std::size_t index = 0; index < value->size(); ++index) bytes[index] = '\0';
+  value->clear();
+}
+
+template <typename Client>
+std::optional<std::string> perform_krl_http_request(Client& client, const KrlUrl& url,
+    const yukinal::ssh_service::TargetConfig& target, std::string* error) {
+  client.set_connection_timeout(std::chrono::seconds(10));
+  client.set_read_timeout(std::chrono::seconds(15));
+  client.set_write_timeout(std::chrono::seconds(15));
+  client.set_follow_location(false);
+  yukinal::ssh_service::TargetConfig proxy_target = target;
+  proxy_target.host = url.host;
+  const bool use_proxy = !target.proxy_host.empty() &&
+      !yukinal::ssh_service::proxy_bypasses_target(proxy_target);
+  std::string credential;
+  bool proxy_auth_configured = false;
+  if (use_proxy) {
+    client.set_proxy(target.proxy_host, target.proxy_port);
+    if (!target.proxy_auth_env.empty()) {
+      const char* value = std::getenv(target.proxy_auth_env.c_str());
+      if (!value || !*value || std::strlen(value) > 1024) {
+        if (error) *error = "proxy authentication credential is unavailable";
+        return std::nullopt;
+      }
+      credential = value;
+      const auto separator = credential.find(':');
+      if (separator == std::string::npos) {
+        wipe_secret(&credential);
+        if (error) *error = "proxy authentication credential is invalid";
+        return std::nullopt;
+      }
+      client.set_proxy_basic_auth(credential.substr(0, separator), credential.substr(separator + 1));
+      proxy_auth_configured = true;
+    }
+  }
+  std::string body;
+  bool oversized = false;
+  auto response = client.Get(url.path,
+      [&](const httplib::Response& headers) {
+        const auto content_length = headers.get_header_value("Content-Length");
+        if (!content_length.empty()) {
+          std::uint64_t parsed_length = 0;
+          const auto parsed = std::from_chars(content_length.data(),
+              content_length.data() + content_length.size(), parsed_length);
+          if (parsed.ec == std::errc{} && parsed.ptr == content_length.data() + content_length.size() &&
+              parsed_length > kMaxKrlBytes) {
+            oversized = true;
+            return false;
+          }
+        }
+        return true;
+      },
+      [&](const char* data, std::size_t length) {
+        if (length > kMaxKrlBytes - body.size()) {
+          oversized = true;
+          return false;
+        }
+        body.append(data, length);
+        return true;
+      });
+  if (proxy_auth_configured) client.set_proxy_basic_auth("", "");
+  if (!credential.empty()) wipe_secret(&credential);
+  if (oversized) {
+    if (error) *error = "host certificate KRL exceeds the 16 MiB limit";
+    return std::nullopt;
+  }
+  if (!response) {
+    if (error) *error = "host certificate KRL request failed";
+    return std::nullopt;
+  }
+  if (response->status < 200 || response->status >= 300) {
+    if (error) *error = "host certificate KRL URL returned a non-success HTTP status";
+    return std::nullopt;
+  }
+  if (body.empty()) {
+    if (error) *error = "host certificate KRL response is empty";
+    return std::nullopt;
+  }
+  return body;
+}
+
+bool key_is_revoked(const KrlData& krl, std::string_view key_blob) {
+  if (krl.explicit_keys.contains(std::string(key_blob))) return true;
+  std::array<unsigned char, 32> digest{};
+  unsigned int digest_length = 0;
+  if (EVP_Digest(key_blob.data(), key_blob.size(), digest.data(), &digest_length, EVP_sha1(), nullptr) == 1 &&
+      digest_length == 20 && krl.sha1_fingerprints.contains(
+          std::string(reinterpret_cast<const char*>(digest.data()), digest_length))) return true;
+  digest_length = 0;
+  if (EVP_Digest(key_blob.data(), key_blob.size(), digest.data(), &digest_length, EVP_sha256(), nullptr) == 1 &&
+      digest_length == digest.size() && krl.sha256_fingerprints.contains(
+          std::string(reinterpret_cast<const char*>(digest.data()), digest_length))) return true;
+  return false;
+}
+
+const char* revoked_reason(const KrlData& krl, std::string_view subject_key,
+                           std::string_view ca_key, std::string_view key_id,
+                           std::uint64_t serial) {
+  if (key_is_revoked(krl, subject_key)) return "certificate public key is revoked";
+  if (key_is_revoked(krl, ca_key)) return "certificate signing CA is revoked";
+  for (const auto& section : krl.certificate_sections) {
+    if (!section.ca_key.empty() && section.ca_key != ca_key) continue;
+    if (section.key_ids.contains(std::string(key_id))) return "certificate key ID is revoked";
+    if (serial != 0 && std::any_of(section.serial_ranges.begin(), section.serial_ranges.end(),
+        [serial](const auto& range) { return range.first <= serial && serial <= range.second; }))
+      return "certificate serial is revoked";
+    if (serial != 0 && std::any_of(section.serial_bitmaps.begin(), section.serial_bitmaps.end(),
+        [serial](const KrlBitmap& bitmap) {
+          if (serial < bitmap.offset) return false;
+          const auto bit_index = serial - bitmap.offset;
+          const auto byte_index = static_cast<std::size_t>(bit_index / 8);
+          if (byte_index >= bitmap.bits.size()) return false;
+          const auto byte = static_cast<unsigned char>(bitmap.bits[bitmap.bits.size() - 1 - byte_index]);
+          return (byte & (1U << (bit_index % 8))) != 0;
+        })) return "certificate serial is revoked";
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 bool valid_host_ca_public_key(std::string_view ca_public_key) {
+  return host_ca_public_key_blob(ca_public_key).has_value();
+}
+
+std::optional<std::string> host_ca_public_key_blob(std::string_view ca_public_key) {
   std::string blob;
-  return parse_authorized_key(ca_public_key, &blob);
+  if (!parse_authorized_key(ca_public_key, &blob)) return std::nullopt;
+  return blob;
 }
 
 bool verify_host_certificate(std::string_view blob, std::string_view ca_public_key,
                              const std::vector<std::string>& allowed_principals,
                              std::string* error) {
+  return verify_host_certificate_with_krl(blob, ca_public_key, allowed_principals,
+                                          {}, {}, error);
+}
+
+bool verify_host_certificate_with_krl(std::string_view blob, std::string_view ca_public_key,
+                                      const std::vector<std::string>& allowed_principals,
+                                      std::string_view revocation_list,
+                                      const std::vector<std::string>& revocation_signers,
+                                      std::string* error) {
   const auto reject = [error](const char* message) {
     if (error) *error = message;
     return false;
@@ -319,13 +855,20 @@ bool verify_host_certificate(std::string_view blob, std::string_view ca_public_k
   auto ca_key = parse_key_blob(ca_blob);
   std::vector<std::string> certificate_principals;
   std::uint64_t valid_after = 0, valid_before = 0;
+  std::uint64_t serial = 0;
+  std::string_view key_id;
+  std::string subject_key_blob;
   std::string_view critical_options, certificate_ca_blob, signature_blob;
   std::size_t signed_length = 0;
   std::uint32_t certificate_type = 0;
   if (!parse_certificate(blob, &certificate_principals, &valid_after, &valid_before,
                          &critical_options, &certificate_ca_blob, &signature_blob,
-                         &signed_length, &certificate_type))
+                         &signed_length, &certificate_type, &serial, &key_id,
+                         &subject_key_blob))
     return reject("host certificate is malformed");
+  if (!valid_utf8(key_id) || std::any_of(certificate_principals.begin(), certificate_principals.end(),
+      [](const auto& principal) { return !valid_utf8(principal); }))
+    return reject("host certificate contains invalid UTF-8 metadata");
   if (certificate_type != 2) return reject("certificate is not a host certificate");
   if (certificate_ca_blob != ca_blob) return reject("certificate is signed by a different CA");
   if (!verify_signature(ca_key.get(), ca_blob, blob.substr(0, signed_length), signature_blob))
@@ -342,8 +885,73 @@ bool verify_host_certificate(std::string_view blob, std::string_view ca_public_k
             [&](const auto& allowed) { return principal_matches(allowed, certificate_principal); });
       });
   if (!principal_match) return reject("host certificate principal does not match configured host patterns");
+  if (!revocation_list.empty()) {
+    try {
+      const KrlData krl = parse_krl(revocation_list, revocation_signers, ca_blob);
+      if (const char* reason = revoked_reason(krl, subject_key_blob, certificate_ca_blob,
+                                               key_id, serial)) return reject(reason);
+    } catch (const std::exception& exception) {
+      if (error) *error = std::string("host certificate revocation list is invalid: ") + exception.what();
+      return false;
+    }
+  }
   if (error) error->clear();
   return true;
+}
+
+std::optional<std::string> load_host_revocation_list(
+    const yukinal::ssh_service::TargetConfig& target, std::string* error) {
+  if (error) error->clear();
+  if (!target.host_ca_revocation_list_path.empty()) {
+    const std::filesystem::path path(target.host_ca_revocation_list_path);
+    if (!path.is_absolute()) {
+      if (error) *error = "host certificate KRL path must be absolute";
+      return std::nullopt;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      if (error) *error = "could not open the configured host certificate KRL";
+      return std::nullopt;
+    }
+    std::string bytes;
+    std::array<char, 8192> buffer{};
+    while (input) {
+      input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+      const auto count = static_cast<std::size_t>(input.gcount());
+      if (count > kMaxKrlBytes - bytes.size()) {
+        if (error) *error = "host certificate KRL exceeds the 16 MiB limit";
+        return std::nullopt;
+      }
+      bytes.append(buffer.data(), count);
+    }
+    if (!input.eof()) {
+      if (error) *error = "could not read the configured host certificate KRL";
+      return std::nullopt;
+    }
+    if (bytes.empty()) {
+      if (error) *error = "configured host certificate KRL is empty";
+      return std::nullopt;
+    }
+    return bytes;
+  }
+  if (target.host_ca_revocation_list_url.empty()) return std::string{};
+
+  auto url = parse_krl_url(target.host_ca_revocation_list_url, error);
+  if (!url) return std::nullopt;
+  if (!url->https && !is_loopback_host(url->host)) {
+    if (error) *error = "host certificate KRL URL must use HTTPS; HTTP is allowed only on loopback";
+    return std::nullopt;
+  }
+  if (url->https) {
+    httplib::SSLClient client(url->host, url->port);
+    if (!client.is_valid()) {
+      if (error) *error = "could not create an HTTPS client for the host certificate KRL";
+      return std::nullopt;
+    }
+    return perform_krl_http_request(client, *url, target, error);
+  }
+  httplib::Client client(url->host, url->port);
+  return perform_krl_http_request(client, *url, target, error);
 }
 
 }  // namespace yukinal::ssh_service::detail

@@ -434,16 +434,6 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         .get(&request.server_id)
         .map_err(|_| "the selected SSH server is not available".to_string())?;
     let authority = server.connection.host_certificate_authority.as_ref();
-    if authority.is_some_and(|authority| {
-        authority.revocation_list_path.is_some()
-            || authority.revocation_list_url.is_some()
-            || !authority.revocation_list_signers.is_empty()
-    }) {
-        return Err(
-            "the C++ SSH service does not yet support host certificate revocation settings"
-                .into(),
-        );
-    }
     let fingerprint = if authority.is_none() {
         Some(
             state
@@ -581,10 +571,18 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         target["host_key_fingerprint"] = json!(fingerprint);
     }
     if let Some(authority) = authority {
-        target["host_certificate_authority"] = json!({
+        let mut authority_config = json!({
             "ca_public_key": authority.ca_public_key,
             "principals": authority.principals,
+            "revocation_list_signers": authority.revocation_list_signers,
         });
+        if let Some(path) = &authority.revocation_list_path {
+            authority_config["revocation_list_path"] = json!(path);
+        }
+        if let Some(url) = &authority.revocation_list_url {
+            authority_config["revocation_list_url"] = json!(url);
+        }
+        target["host_certificate_authority"] = authority_config;
     }
     match proxy_route {
         super::ssh_service::CppProxyRoute::Direct => {}

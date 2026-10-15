@@ -17,6 +17,9 @@ struct TargetConfig {
   std::string host_key_fingerprint;
   std::string host_ca_public_key;
   std::vector<std::string> host_principals;
+  std::string host_ca_revocation_list_path;
+  std::string host_ca_revocation_list_url;
+  std::vector<std::string> host_ca_revocation_list_signers;
   std::string private_key_file;
   std::string public_key_file;
   std::string private_key_env;

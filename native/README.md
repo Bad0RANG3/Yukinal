@@ -4,8 +4,14 @@ The rewrite uses a standalone C++ service. It binds only to `127.0.0.1`, accepts
 structured requests, resolves `target_id` from a configured allowlist and
 exposes service queries, probe-only host-key discovery, and bounded SFTP list, stat, read, write,
 exclusive-create, remove, guarded atomic replacement, and link-count operations.
-Host keys can be checked against an OpenSSH `known_hosts` file or an exact
-`SHA256:` pin from the desktop trust store. Authentication supports password,
+Host keys can be checked against an OpenSSH `known_hosts` file, an exact
+`SHA256:` pin from the desktop trust store, or an OpenSSH host CA certificate.
+Host CA verification checks the certificate signature, host certificate type,
+validity interval, configured principal patterns, critical options, and optional
+OpenSSH KRL revocations in C++. KRL files must use absolute paths and stay below
+16 MiB. Remote KRLs use HTTPS with certificate verification; plain HTTP is
+allowed only for loopback URLs. Redirects, URL credentials, queries, and
+fragments are rejected. Signed KRLs require a valid configured signer. Authentication supports password,
 private key (file or named environment reference), and the local SSH agent.
 Agent authentication uses `SSH_AUTH_SOCK` on Unix and libssh2's platform Agent
 integration on Windows. The socket path is forwarded only when a target in the
@@ -29,15 +35,15 @@ calls the one-path remove operation only after it checks backup ownership and
 revision. The link-count operation runs a fixed, quoted `stat` probe. The
 desktop routes supported Agent file operations, file browsing, and manual
 transfers through C++ for password, private-key, OpenSSH user-certificate, and
-agent identities when the target has a confirmed host-key pin and uses a
+agent identities when the target uses a supported host-key trust mode and a
 supported direct or HTTP CONNECT route. Supported interactive terminal sessions
 use the dedicated C++ PTY worker. The C++ terminal worker forwards
 keyboard-interactive challenges through the existing desktop prompt UI. Rust
-remains the compatibility path for Host CA signature policy and KRL handling,
-HTTPS proxies, unsupported proxy bypass patterns, and other SSH configurations
-the C++ service cannot yet represent. For a host certificate, C++ fingerprints
-the certified public key, matching the desktop trust store; this supports key
-pins and `known_hosts` entries containing that plain key.
+remains the compatibility path for unsupported host CA algorithms, HTTPS
+proxies, unsupported proxy bypass patterns, and other SSH configurations the
+C++ service cannot yet represent. When pin or `known_hosts` trust is used with a
+host certificate, C++ fingerprints the certified public key, matching the
+desktop trust store.
 
 ## Build
 
@@ -48,9 +54,10 @@ ctest --test-dir native/build -C Release --output-on-failure
 ```
 
 The default CMake build fetches pinned source releases of nlohmann/json,
-cpp-httplib, and libssh2. Windows also builds a pinned OpenSSL 3.5.9 static
-crypto library and configures libssh2 to use it. This enables Ed25519 alongside
-the RSA and ECDSA algorithms and keeps OpenSSL inside the standalone service.
+cpp-httplib, and libssh2. Windows also builds pinned OpenSSL 3.5.9 static crypto
+and TLS libraries and configures libssh2 to use them. This enables Ed25519
+alongside RSA and ECDSA, verifies host certificates, downloads HTTPS KRLs, and
+keeps OpenSSL inside the standalone service.
 The Windows build requires a full Perl distribution with `IPC::Cmd` and
 `Locale::Maketext::Simple` (Strawberry Perl works; Git for Windows' minimal
 Perl is incomplete) and a Visual Studio 2022 Developer Command
@@ -92,8 +99,8 @@ dedicated C++ worker when the selected SSH configuration is supported.
 
 Copy `configs/ssh-service.example.json`, set `YUKINAL_SSH_API_TOKEN` to a random
 value of at least 32 characters, and fill in an allow-listed target. The target
-must specify exactly one trust source (`known_hosts_file` or
-`host_key_fingerprint`) and one authentication source (private-key file,
+must specify exactly one trust source (`known_hosts_file`,
+`host_key_fingerprint`, or `host_certificate_authority`) and one authentication source (private-key file,
 private-key environment reference, password environment reference, or
 `{"type":"agent"}`). Then run:
 
@@ -103,3 +110,19 @@ native/build/Release/yukinal-ssh-service.exe --config path/to/ssh-service.json
 
 The service does not print request bodies or credentials. The Python client is
 in `agent/`; see its README for a call example.
+
+Host CA targets use this trust object instead of `known_hosts_file` or
+`host_key_fingerprint`:
+
+```json
+{
+  "ca_public_key": "ssh-ed25519 AAAA... optional-comment",
+  "principals": ["*.example.test"],
+  "revocation_list_path": "/etc/ssh/host-revoked.krl",
+  "revocation_list_signers": ["ssh-ed25519 AAAA... signer-comment"]
+}
+```
+
+Use either `revocation_list_path` or `revocation_list_url`. A KRL URL must use
+HTTPS; plain HTTP is permitted only for a loopback URL. Every KRL signature must
+verify, and at least one signer must match the host CA or a configured KRL signer.

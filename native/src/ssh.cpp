@@ -635,6 +635,18 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     return false;
   }
 
+  std::string revocation_list;
+  if (!target.host_ca_public_key.empty()) {
+    std::string revocation_error;
+    auto loaded = detail::load_host_revocation_list(target, &revocation_error);
+    if (!loaded) {
+      const std::string message = "Could not load the host certificate revocation list: " + revocation_error;
+      fail(result, "host_key_unverified", message.c_str());
+      return false;
+    }
+    revocation_list = std::move(*loaded);
+  }
+
   const SocketConnection connection = connect_socket(target, deadline);
   resources->socket_ = connection.socket;
   if (resources->socket_ == kInvalidSocket) {
@@ -702,8 +714,9 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
       return false;
     }
     std::string certificate_error;
-    if (!detail::verify_host_certificate(std::string_view(host_key, host_key_length),
-            target.host_ca_public_key, target.host_principals, &certificate_error)) {
+    if (!detail::verify_host_certificate_with_krl(std::string_view(host_key, host_key_length),
+            target.host_ca_public_key, target.host_principals, revocation_list,
+            target.host_ca_revocation_list_signers, &certificate_error)) {
       const std::string message = "The SSH host certificate could not be verified: " + certificate_error;
       fail(result, "host_key_unverified", message.c_str());
       return false;

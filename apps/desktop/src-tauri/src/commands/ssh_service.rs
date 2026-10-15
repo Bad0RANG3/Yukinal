@@ -530,12 +530,6 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
         .get(server_id)
         .map_err(|error| error.to_string())?;
     if let Some(authority) = server.connection.host_certificate_authority.as_ref() {
-        if authority.revocation_list_path.is_some()
-            || authority.revocation_list_url.is_some()
-            || !authority.revocation_list_signers.is_empty()
-        {
-            return Ok(false);
-        }
         let algorithm = authority
             .ca_public_key
             .split_ascii_whitespace()

@@ -140,6 +140,40 @@ YUKINAL_TEST(config_rejects_ambiguous_or_invalid_host_certificate_authority_trus
   YUKINAL_REQUIRE(rejected);
 }
 
+YUKINAL_TEST(config_accepts_host_certificate_krl_path_or_url) {
+  auto value = valid_config();
+  auto& target = value["targets"][0];
+  target.erase("known_hosts_file");
+  target["host_certificate_authority"] = {
+      {"ca_public_key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test-ca"},
+      {"principals", json::array({"*.example.test"})},
+      {"revocation_list_url", "https://example.test/revoked.krl"},
+      {"revocation_list_signers", json::array()}};
+  auto parsed = parse_config(value);
+  YUKINAL_REQUIRE(parsed.targets.at("staging-web-01").host_ca_revocation_list_url ==
+                  "https://example.test/revoked.krl");
+  YUKINAL_REQUIRE(parsed.targets.at("staging-web-01").host_ca_revocation_list_signers.empty());
+
+  target["host_certificate_authority"].erase("revocation_list_url");
+  target["host_certificate_authority"]["revocation_list_path"] =
+      (std::filesystem::temp_directory_path() / "yukinal-test.krl").string();
+  parsed = parse_config(value);
+  YUKINAL_REQUIRE(parsed.targets.at("staging-web-01").host_ca_revocation_list_path ==
+                  (std::filesystem::temp_directory_path() / "yukinal-test.krl").string());
+
+  target["host_certificate_authority"]["revocation_list_url"] = "https://example.test/revoked.krl";
+  bool rejected = false;
+  try { (void)parse_config(value); } catch (const std::runtime_error&) { rejected = true; }
+  YUKINAL_REQUIRE(rejected);
+
+  target["host_certificate_authority"].erase("revocation_list_path");
+  target["host_certificate_authority"]["revocation_list_signers"] = json::array({
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA other-comment"});
+  rejected = false;
+  try { (void)parse_config(value); } catch (const std::runtime_error&) { rejected = true; }
+  YUKINAL_REQUIRE(rejected);
+}
+
 YUKINAL_TEST(config_accepts_public_certificate_with_memory_private_key) {
   auto value = valid_config();
   value["targets"][0]["auth"] = {
