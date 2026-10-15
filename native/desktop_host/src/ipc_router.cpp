@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/network_proxy.hpp"
 
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
@@ -595,6 +596,10 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "network_proxy_get" || method == "network_proxy_save") {
     return network_proxy_command(method, params);
+  }
+
+  if (method == "server_host_key_status" || method == "server_host_key_forget") {
+    return host_key_command(method, params);
   }
 
   if (method == "core_ping") {
@@ -1305,6 +1310,52 @@ IpcReply IpcRouter::network_proxy_command(const std::string& method,
     return {true, describe_network_proxy(database_->network_proxy_config(), *credentials_)};
   } catch (...) {
     return failure("STORAGE_ERROR", "The local network proxy setting could not be read back");
+  }
+}
+
+IpcReply IpcRouter::host_key_command(const std::string& method,
+                                     const nlohmann::json& params) {
+  if (database_ == nullptr || !database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+  if (!only_fields(params, {"serverId"}, {"serverId"})) {
+    return failure("INVALID_PARAMS", method + " requires exactly serverId");
+  }
+  std::string server_id;
+  if (!valid_request_text(params, "serverId", 256, true, server_id) ||
+      !valid_server_id(server_id)) {
+    return failure("INVALID_PARAMS", method + " serverId is invalid");
+  }
+
+  std::optional<nlohmann::json> endpoint;
+  try {
+    endpoint = database_->get_server_endpoint(server_id);
+  } catch (...) {
+    return failure("STORAGE_ERROR", "The local server database could not read the server");
+  }
+  if (!endpoint.has_value()) return failure("NOT_FOUND", "The server was not found");
+  const auto host = endpoint->at("host").get<std::string>();
+  const auto port_value = endpoint->at("port").get<int>();
+  if (host.empty() || port_value < 1 || port_value > 65535) {
+    return failure("STORAGE_ERROR", "The stored server endpoint is invalid");
+  }
+  const auto port = static_cast<std::uint16_t>(port_value);
+
+  try {
+    auto store = HostTrustStore::load(database_->data_directory() / "known_hosts");
+    if (method == "server_host_key_status") {
+      const auto pinned = store.pinned_fingerprint(host, port);
+      nlohmann::json response = {{"host", host}, {"port", port}, {"pinned", pinned.has_value()}};
+      if (pinned.has_value()) response["pinnedFingerprint"] = *pinned;
+      return {true, std::move(response)};
+    }
+    const auto outcome = store.forget(host, port);
+    return {true, {{"host", host},
+                   {"port", port},
+                   {"forgotten", outcome == HostKeyForgetOutcome::Removed}}};
+  } catch (const std::exception&) {
+    return failure("STORAGE_ERROR",
+                   "The local known-hosts store could not be read or written");
   }
 }
 

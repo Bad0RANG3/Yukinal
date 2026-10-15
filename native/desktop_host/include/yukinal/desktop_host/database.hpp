@@ -23,6 +23,9 @@ class DesktopDatabase {
   DesktopDatabase& operator=(const DesktopDatabase&) = delete;
 
   [[nodiscard]] nlohmann::json list_servers() const;
+  [[nodiscard]] std::optional<nlohmann::json> get_server_endpoint(
+      const std::string& server_id) const;
+  [[nodiscard]] std::filesystem::path data_directory() const;
   [[nodiscard]] bool is_available() const;
   [[nodiscard]] std::optional<nlohmann::json> get_identity(
       const std::string& identity_id) const;
@@ -72,6 +75,7 @@ class DesktopDatabase {
 
  private:
   sqlite3* connection_ = nullptr;
+  std::filesystem::path data_directory_;
   mutable std::recursive_mutex mutex_;
 };
 

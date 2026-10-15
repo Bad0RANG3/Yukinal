@@ -31,6 +31,8 @@ class IpcRouter {
                           const nlohmann::json& params);
   IpcReply network_proxy_command(const std::string& method,
                                  nlohmann::json& params);
+  IpcReply host_key_command(const std::string& method,
+                            const nlohmann::json& params);
 
   mutable std::mutex mutex_;
   DesktopDatabase* database_;

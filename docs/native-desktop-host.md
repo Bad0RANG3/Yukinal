@@ -73,8 +73,11 @@ reads `server_list` and `workspace_list`, and provides event subscription plumbi
 The outbound network-proxy setting is migrated too: `network_proxy_get` reads the
 stored mode and reports whether a credential exists in the OS store, and
 `network_proxy_save` keeps the write-only `user:password` credential out of SQLite
-and out of every response. Unmigrated commands return `NOT_IMPLEMENTED`; they never
-invoke the Tauri host.
+and out of every response. Local host-key trust is partially migrated:
+`server_host_key_status` and `server_host_key_forget` read and write the same
+`known_hosts` v1 file as the connection path, with a changed fingerprint reported
+as a mismatch rather than silently replaced. Unmigrated commands return
+`NOT_IMPLEMENTED`; they never invoke the Tauri host.
 The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.

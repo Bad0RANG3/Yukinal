@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "schema_migrations.hpp"
 
@@ -297,6 +298,44 @@ int main() {
     check(!database.network_proxy_config().credential_ref.has_value() &&
               memory_credentials.size() == 0,
           "a cleared credential must be reclaimed from the credential store");
+
+    // Host-key trust: status and forget are local-only and must round-trip through
+    // the same `known_hosts` file the connection path reads.
+    const auto unpinned_status =
+        router.invoke("server_host_key_status", {{"serverId", "srv_01abc"}});
+    check(unpinned_status.ok &&
+              unpinned_status.value == nlohmann::json{{"host", "ssh.example.test"},
+                                                       {"port", 2222},
+                                                       {"pinned", false}},
+          "host-key status should resolve the server endpoint without a pin");
+    check(!router.invoke("server_host_key_status", {{"serverId", "srv_missing"}}).ok,
+          "host-key status should report an unknown server");
+    check(!router.invoke("server_host_key_status",
+                         {{"serverId", "srv_01abc"}, {"extra", true}}).ok,
+          "host-key status should reject unexpected parameters");
+    const auto forget_unpinned =
+        router.invoke("server_host_key_forget", {{"serverId", "srv_01abc"}});
+    check(forget_unpinned.ok && forget_unpinned.value.at("forgotten") == false,
+          "forgetting an unpinned host is not an error and does not claim a removal");
+
+    {
+      auto store = yukinal::desktop_host::HostTrustStore::load(temporary.path / "known_hosts");
+      store.pin("ssh.example.test", 2222, "SHA256:abc");
+      check(store.check("ssh.example.test", 2222, "SHA256:other").comparison ==
+                yukinal::desktop_host::HostKeyComparison::Mismatch,
+            "a different presented key must be a mismatch, not a silent replacement");
+    }
+    const auto pinned_status =
+        router.invoke("server_host_key_status", {{"serverId", "srv_01abc"}});
+    check(pinned_status.ok && pinned_status.value.at("pinned") == true &&
+              pinned_status.value.at("pinnedFingerprint") == "SHA256:abc",
+          "host-key status should report the persisted pin");
+    const auto forgot = router.invoke("server_host_key_forget", {{"serverId", "srv_01abc"}});
+    check(forgot.ok && forgot.value.at("forgotten") == true,
+          "forgetting a pinned host should report the removal");
+    check(router.invoke("server_host_key_status", {{"serverId", "srv_01abc"}})
+                  .value.at("pinned") == false,
+          "the pin must be gone after forget");
   }
 
   sqlite3* readback = nullptr;

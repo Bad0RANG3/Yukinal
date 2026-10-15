@@ -36,9 +36,9 @@ Python Agent ── LangGraph / models / tools / MCP
 
 ## C++ 宿主已有命令
 
-当前 IPC router 已处理 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`，以及聊天会话的 list/get/create、消息追加、归档、重命名和删除。事件订阅桥已提供通用 plumbing；未实现的命令返回 `NOT_IMPLEMENTED`，不会回退调用 Tauri。
+当前 IPC router 已处理 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`，以及聊天会话的 list/get/create、消息追加、归档、重命名和删除。事件订阅桥已提供通用 plumbing；未实现的命令返回 `NOT_IMPLEMENTED`，不会回退调用 Tauri。
 
-Provider、MCP、服务器连接与主机信任、终端、文件浏览/传输、桌面任务恢复和 Python Agent 桥接还没有全部迁入 C++ 桌面宿主。独立 SSH 服务中已有的能力不等于 UI 到 C++ 宿主的命令路径已经完成。
+Provider、MCP、服务器连接与主机信任（探针/确认）、终端、文件浏览/传输、桌面任务恢复和 Python Agent 桥接还没有全部迁入 C++ 桌面宿主。独立 SSH 服务中已有的能力不等于 UI 到 C++ 宿主的命令路径已经完成。
 
 ## 构建和本机启动
 
@@ -76,6 +76,8 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 每一轮只纳入已完成且可复核的文件，更新相应文档，构建受影响的 C++ 目标，再按用户要求推送。不要把 `ssh_agent_development_brief.md` 加入提交；它是工作区中的任务输入。Git author 和 committer 必须设为 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 
 ## 完成标准
+
+命令级盘点、依赖顺序与删除清理清单见 [`rust-removal-plan.md`](./rust-removal-plan.md)；在它的完成标准全部勾上之前不要删除 Rust/Tauri。
 
 - React 的现有外观和交互由 C++ WebView 宿主承载；所有 UI 命令都由 C++ 实现或明确标记为尚未迁移，不再依赖 Tauri/Rust 执行。
 - 现有数据库能从新安装和旧版本安全迁移；凭据、失败恢复、审计和数据兼容有明确实现。

@@ -833,3 +833,15 @@ passed. The `yukinal-desktop --lib` test binary still cannot launch in this
 Windows environment (`STATUS_ENTRYPOINT_NOT_FOUND`, an embedded-manifest/`comctl32`
 limitation that predates this change), so the desktop crate's own unit tests
 remain unrun here.
+
+On 2026-10-15, the C++ desktop host took over the local host-key trust reads and
+forgets: `server_host_key_status` and `server_host_key_forget` use a new
+`native/desktop_host/src/host_trust.cpp` store that reproduces the `crates/host-trust`
+`v1:host:port:SHA256:...` format (header, sorted lines, atomic replace with
+Windows sharing-violation retry). A pending pin is reported, a changed presented
+key is a `mismatch` rather than a silent overwrite, and forgetting an unpinned
+host reports `forgotten: false` instead of claiming a removal. Probe and trust
+(the SSH handshake and the one-time probe ticket) remain on the Rust path. The
+C++ build and all ten CTest targets passed, including the new pin/status/forget
+round trip in `desktop_host_database_tests`. The command-level C++/Rust parity and
+deletion plan is tracked in `docs/rust-removal-plan.md`.

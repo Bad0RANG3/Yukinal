@@ -737,6 +737,7 @@ DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
   if (!data_directory.is_absolute()) {
     throw std::runtime_error("The Yukinal data directory must be an absolute path");
   }
+  data_directory_ = data_directory;
   std::error_code error;
   std::filesystem::create_directories(data_directory, error);
   if (error) {
@@ -806,6 +807,22 @@ DesktopDatabase::~DesktopDatabase() {
 bool DesktopDatabase::is_available() const {
   std::lock_guard lock(mutex_);
   return connection_ != nullptr;
+}
+
+std::filesystem::path DesktopDatabase::data_directory() const {
+  std::lock_guard lock(mutex_);
+  return data_directory_;
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_server_endpoint(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Statement statement(connection_, "SELECT host, port FROM servers WHERE id = ?1;");
+  bind_text(connection_, statement.get(), 1, server_id);
+  if (sqlite3_step(statement.get()) != SQLITE_ROW) return std::nullopt;
+  return nlohmann::json{{"host", column_text(statement.get(), 0)},
+                        {"port", sqlite3_column_int(statement.get(), 1)}};
 }
 
 nlohmann::json DesktopDatabase::list_servers() const {
