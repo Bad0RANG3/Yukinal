@@ -1,9 +1,12 @@
 #include "yukinal/desktop_host/database.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstdint>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -97,6 +100,171 @@ class Statement {
   sqlite3_stmt* statement_ = nullptr;
 };
 
+void bind_text(sqlite3* connection, sqlite3_stmt* statement, int index,
+               const std::string& value) {
+  if (value.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("A local database text value exceeds SQLite's size limit");
+  }
+  if (sqlite3_bind_text(statement, index, value.data(), static_cast<int>(value.size()),
+                        SQLITE_TRANSIENT) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
+void bind_optional_text(sqlite3* connection, sqlite3_stmt* statement, int index,
+                        const std::optional<std::string>& value) {
+  if (!value.has_value()) {
+    if (sqlite3_bind_null(statement, index) != SQLITE_OK) {
+      throw std::runtime_error(sqlite3_errmsg(connection));
+    }
+    return;
+  }
+  bind_text(connection, statement, index, *value);
+}
+
+void execute_sql(sqlite3* connection, const char* sql) {
+  char* error = nullptr;
+  if (sqlite3_exec(connection, sql, nullptr, nullptr, &error) == SQLITE_OK) return;
+  const std::string message = error == nullptr ? sqlite3_errmsg(connection) : error;
+  sqlite3_free(error);
+  throw std::runtime_error(message);
+}
+
+class Transaction {
+ public:
+  explicit Transaction(sqlite3* connection) : connection_(connection) {
+    execute_sql(connection_, "BEGIN IMMEDIATE;");
+  }
+  ~Transaction() {
+    if (active_) sqlite3_exec(connection_, "ROLLBACK;", nullptr, nullptr, nullptr);
+  }
+  Transaction(const Transaction&) = delete;
+  Transaction& operator=(const Transaction&) = delete;
+
+  void commit() {
+    execute_sql(connection_, "COMMIT;");
+    active_ = false;
+  }
+
+ private:
+  sqlite3* connection_;
+  bool active_ = true;
+};
+
+constexpr const char* kChatSessionSelect = R"SQL(
+  SELECT s.id, s.workspace_id, s.server_id, s.title, s.created_at, s.updated_at,
+         s.archived_at, COUNT(m.id),
+         (SELECT substr(last_message.content, 1, 240)
+            FROM chat_messages last_message
+           WHERE last_message.session_id = s.id
+           ORDER BY last_message.created_at DESC, last_message.id DESC
+           LIMIT 1)
+    FROM chat_sessions s
+    LEFT JOIN chat_messages m ON m.session_id = s.id
+)SQL";
+
+std::string normalized_preview(std::string value) {
+  std::string preview;
+  preview.reserve(value.size());
+  bool pending_space = false;
+  for (const auto character : value) {
+    if (std::isspace(static_cast<unsigned char>(character))) {
+      pending_space = !preview.empty();
+      continue;
+    }
+    if (pending_space) preview.push_back(' ');
+    pending_space = false;
+    preview.push_back(character);
+  }
+  return preview;
+}
+
+nlohmann::json chat_session_from_row(sqlite3* connection, sqlite3_stmt* row) {
+  const auto message_count = sqlite3_column_int64(row, 7);
+  if (message_count < 0 ||
+      static_cast<std::uint64_t>(message_count) > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::runtime_error("Stored chat message count is out of range");
+  }
+  nlohmann::json session = {
+      {"id", column_text(row, 0)},
+      {"title", column_text(row, 3)},
+      {"createdAt", column_text(row, 4)},
+      {"updatedAt", column_text(row, 5)},
+      {"messageCount", static_cast<std::uint32_t>(message_count)},
+  };
+  add_optional_text(session, "workspaceId", row, 1);
+  add_optional_text(session, "serverId", row, 2);
+  add_optional_text(session, "archivedAt", row, 6);
+  if (sqlite3_column_type(row, 8) != SQLITE_NULL) {
+    session["lastMessagePreview"] = normalized_preview(column_text(row, 8));
+  }
+  (void)connection;
+  return session;
+}
+
+nlohmann::json chat_message_from_row(sqlite3* connection, sqlite3_stmt* row) {
+  const std::string role = column_text(row, 2);
+  if (!is_one_of(role, {"user", "assistant", "tool", "system"})) {
+    throw std::runtime_error("Stored chat message has an unknown role");
+  }
+  nlohmann::json message = {
+      {"id", column_text(row, 0)},
+      {"sessionId", column_text(row, 1)},
+      {"role", role},
+      {"content", column_text(row, 3)},
+      {"createdAt", column_text(row, 6)},
+  };
+  if (sqlite3_column_type(row, 4) != SQLITE_NULL) {
+    try {
+      auto parts = nlohmann::json::parse(column_text(row, 4));
+      if (!parts.is_array()) throw std::runtime_error("Stored chat prompt parts are not an array");
+      message["parts"] = std::move(parts);
+    } catch (const nlohmann::json::exception&) {
+      throw std::runtime_error("Stored chat prompt parts are invalid JSON");
+    }
+  }
+  add_optional_text(message, "traceId", row, 5);
+  (void)connection;
+  return message;
+}
+
+nlohmann::json query_chat_session(sqlite3* connection, const std::string& session_id) {
+  const std::string session_sql = std::string(kChatSessionSelect) +
+      " WHERE s.id = ?1 GROUP BY s.id";
+  Statement session_query(connection, session_sql.c_str());
+  bind_text(connection, session_query.get(), 1, session_id);
+  const auto session_result = sqlite3_step(session_query.get());
+  if (session_result == SQLITE_DONE) throw std::runtime_error("Chat session was not found");
+  if (session_result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  auto session = chat_session_from_row(connection, session_query.get());
+
+  Statement message_query(connection, R"SQL(
+    SELECT id, session_id, role, content, parts_json, trace_id, created_at
+      FROM chat_messages
+     WHERE session_id = ?1
+     ORDER BY created_at ASC, id ASC
+  )SQL");
+  bind_text(connection, message_query.get(), 1, session_id);
+  nlohmann::json messages = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(message_query.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+    messages.push_back(chat_message_from_row(connection, message_query.get()));
+  }
+  return {{"session", std::move(session)}, {"messages", std::move(messages)}};
+}
+
+std::string escape_like(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char character : value) {
+    if (character == '\\' || character == '%' || character == '_') escaped.push_back('\\');
+    escaped.push_back(character);
+  }
+  return escaped;
+}
+
 }  // namespace
 
 DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
@@ -111,7 +279,7 @@ DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
 
   const auto database_path = path_as_utf8(file_path);
   const auto result = sqlite3_open_v2(database_path.c_str(), &connection_,
-                                      SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
                                       nullptr);
   if (result != SQLITE_OK) {
     const std::string message = connection_ == nullptr
@@ -134,6 +302,17 @@ DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
     connection_ = nullptr;
     throw std::runtime_error(message);
   }
+  char* foreign_key_error = nullptr;
+  if (sqlite3_exec(connection_, "PRAGMA foreign_keys=ON;", nullptr, nullptr,
+                   &foreign_key_error) != SQLITE_OK) {
+    const std::string message = foreign_key_error == nullptr
+                                    ? "Could not enable database referential integrity"
+                                    : foreign_key_error;
+    sqlite3_free(foreign_key_error);
+    sqlite3_close_v2(connection_);
+    connection_ = nullptr;
+    throw std::runtime_error(message);
+  }
 }
 
 DesktopDatabase::~DesktopDatabase() {
@@ -141,6 +320,7 @@ DesktopDatabase::~DesktopDatabase() {
 }
 
 nlohmann::json DesktopDatabase::list_servers() const {
+  std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};
   std::set<std::string> columns;
   {
@@ -238,6 +418,7 @@ nlohmann::json DesktopDatabase::list_servers() const {
 }
 
 nlohmann::json DesktopDatabase::list_workspaces() const {
+  std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"workspaces", nlohmann::json::array()}};
   Statement rows(connection_, R"SQL(
     SELECT id, name, server_ids, repositories, provider_ids, default_environment
@@ -269,6 +450,7 @@ nlohmann::json DesktopDatabase::list_workspaces() const {
 
 nlohmann::json DesktopDatabase::list_activities(
     const std::optional<std::string>& server_id, int limit) const {
+  std::lock_guard lock(mutex_);
   if (limit < 1 || limit > 100) {
     throw std::invalid_argument("Activity limit must be between 1 and 100");
   }
@@ -346,6 +528,7 @@ nlohmann::json DesktopDatabase::list_activities(
 nlohmann::json DesktopDatabase::list_tool_executions(
     const std::optional<std::string>& trace_id,
     const std::optional<std::string>& server_id, int limit) const {
+  std::lock_guard lock(mutex_);
   if (limit < 1 || limit > 100) {
     throw std::invalid_argument("Tool execution limit must be between 1 and 100");
   }
@@ -454,6 +637,199 @@ nlohmann::json DesktopDatabase::list_tool_executions(
     executions.push_back(std::move(execution));
   }
   return {{"executions", std::move(executions)}};
+}
+
+nlohmann::json DesktopDatabase::list_chat_sessions(
+    const std::optional<std::string>& query, const std::optional<bool>& archived,
+    int limit, int offset) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100 || offset < 0 || offset > 10'000) {
+    throw std::invalid_argument("Chat session paging is out of range");
+  }
+  if (connection_ == nullptr) {
+    return {{"sessions", nlohmann::json::array()},
+            {"counts", {{"active", 0}, {"archived", 0}}}};
+  }
+
+  std::string pattern = "%";
+  pattern += escape_like(query.value_or(""));
+  pattern += "%";
+  std::string archive_clause;
+  if (archived == true) archive_clause = "AND s.archived_at IS NOT NULL";
+  else if (archived == false) archive_clause = "AND s.archived_at IS NULL";
+
+  const std::string list_sql = std::string(kChatSessionSelect) + R"SQL(
+     WHERE (s.title LIKE ?1 ESCAPE '\'
+        OR EXISTS (
+          SELECT 1 FROM chat_messages search_messages
+           WHERE search_messages.session_id = s.id
+             AND search_messages.content LIKE ?1 ESCAPE '\'
+        ))
+  )SQL" + archive_clause + R"SQL(
+     GROUP BY s.id
+     ORDER BY s.updated_at DESC, s.id DESC
+     LIMIT ?2 OFFSET ?3
+  )SQL";
+  Statement rows(connection_, list_sql.c_str());
+  bind_text(connection_, rows.get(), 1, pattern);
+  if (sqlite3_bind_int(rows.get(), 2, limit) != SQLITE_OK ||
+      sqlite3_bind_int(rows.get(), 3, offset) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  nlohmann::json sessions = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    sessions.push_back(chat_session_from_row(connection_, rows.get()));
+  }
+
+  Statement count_query(connection_, R"SQL(
+    SELECT COALESCE(SUM(CASE WHEN s.archived_at IS NULL THEN 1 ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN s.archived_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+      FROM chat_sessions s
+     WHERE (s.title LIKE ?1 ESCAPE '\'
+        OR EXISTS (
+          SELECT 1 FROM chat_messages search_messages
+           WHERE search_messages.session_id = s.id
+             AND search_messages.content LIKE ?1 ESCAPE '\'
+        ))
+  )SQL");
+  bind_text(connection_, count_query.get(), 1, pattern);
+  if (sqlite3_step(count_query.get()) != SQLITE_ROW) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  const auto active = sqlite3_column_int64(count_query.get(), 0);
+  const auto archived_count = sqlite3_column_int64(count_query.get(), 1);
+  if (active < 0 || archived_count < 0 ||
+      static_cast<std::uint64_t>(active) > std::numeric_limits<std::uint32_t>::max() ||
+      static_cast<std::uint64_t>(archived_count) > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::runtime_error("Stored chat session count is out of range");
+  }
+  return {{"sessions", std::move(sessions)},
+          {"counts", {{"active", static_cast<std::uint32_t>(active)},
+                       {"archived", static_cast<std::uint32_t>(archived_count)}}}};
+}
+
+nlohmann::json DesktopDatabase::get_chat_session(const std::string& session_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  return query_chat_session(connection_, session_id);
+}
+
+nlohmann::json DesktopDatabase::create_chat_session(
+    const std::string& id, const std::optional<std::string>& workspace_id,
+    const std::optional<std::string>& server_id, const std::string& title,
+    const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  Transaction transaction(connection_);
+  Statement insert(connection_, R"SQL(
+    INSERT INTO chat_sessions (
+      id, workspace_id, server_id, title, created_at, updated_at, archived_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL)
+  )SQL");
+  bind_text(connection_, insert.get(), 1, id);
+  bind_optional_text(connection_, insert.get(), 2, workspace_id);
+  bind_optional_text(connection_, insert.get(), 3, server_id);
+  bind_text(connection_, insert.get(), 4, title);
+  bind_text(connection_, insert.get(), 5, timestamp);
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  transaction.commit();
+  const auto detail = query_chat_session(connection_, id);
+  return {{"session", detail.at("session")}};
+}
+
+nlohmann::json DesktopDatabase::append_chat_message(
+    const std::string& id, const std::string& session_id, const std::string& role,
+    const std::string& content, const std::optional<nlohmann::json>& parts,
+    const std::optional<std::string>& trace_id, const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  if (!is_one_of(role, {"user", "assistant", "tool", "system"})) {
+    throw std::invalid_argument("Chat message role is invalid");
+  }
+  std::optional<std::string> encoded_parts;
+  if (parts.has_value()) {
+    if (!parts->is_array() || parts->empty() || parts->size() > 25) {
+      throw std::invalid_argument("Chat prompt parts are out of range");
+    }
+    encoded_parts = parts->dump();
+    if (encoded_parts->size() > 24 * 1024 * 1024) {
+      throw std::invalid_argument("Chat prompt parts exceed the frame limit");
+    }
+  }
+
+  Transaction transaction(connection_);
+  Statement insert(connection_, R"SQL(
+    INSERT INTO chat_messages (
+      id, session_id, role, content, parts_json, trace_id, created_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+  )SQL");
+  bind_text(connection_, insert.get(), 1, id);
+  bind_text(connection_, insert.get(), 2, session_id);
+  bind_text(connection_, insert.get(), 3, role);
+  bind_text(connection_, insert.get(), 4, content);
+  bind_optional_text(connection_, insert.get(), 5, encoded_parts);
+  bind_optional_text(connection_, insert.get(), 6, trace_id);
+  bind_text(connection_, insert.get(), 7, timestamp);
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+
+  Statement update(connection_, "UPDATE chat_sessions SET updated_at = ?2 WHERE id = ?1");
+  bind_text(connection_, update.get(), 1, session_id);
+  bind_text(connection_, update.get(), 2, timestamp);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Chat session was not found");
+  transaction.commit();
+
+  nlohmann::json message = {
+      {"id", id}, {"sessionId", session_id}, {"role", role}, {"content", content},
+      {"createdAt", timestamp},
+  };
+  if (parts.has_value()) message["parts"] = *parts;
+  if (trace_id.has_value()) message["traceId"] = *trace_id;
+  return {{"message", std::move(message)}};
+}
+
+nlohmann::json DesktopDatabase::set_chat_session_archived(
+    const std::string& session_id,
+    const std::optional<std::string>& archived_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  Transaction transaction(connection_);
+  Statement update(connection_, "UPDATE chat_sessions SET archived_at = ?2 WHERE id = ?1");
+  bind_text(connection_, update.get(), 1, session_id);
+  bind_optional_text(connection_, update.get(), 2, archived_at);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Chat session was not found");
+  transaction.commit();
+  return {{"session", query_chat_session(connection_, session_id).at("session")}};
+}
+
+nlohmann::json DesktopDatabase::rename_chat_session(
+    const std::string& session_id, const std::string& title) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  Transaction transaction(connection_);
+  Statement update(connection_, "UPDATE chat_sessions SET title = ?2 WHERE id = ?1");
+  bind_text(connection_, update.get(), 1, session_id);
+  bind_text(connection_, update.get(), 2, title);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Chat session was not found");
+  transaction.commit();
+  return {{"session", query_chat_session(connection_, session_id).at("session")}};
+}
+
+nlohmann::json DesktopDatabase::delete_chat_session(const std::string& session_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  Transaction transaction(connection_);
+  Statement remove(connection_, "DELETE FROM chat_sessions WHERE id = ?1");
+  bind_text(connection_, remove.get(), 1, session_id);
+  if (sqlite3_step(remove.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Chat session was not found");
+  transaction.commit();
+  return {{"deleted", true}};
 }
 
 std::filesystem::path default_data_directory() {

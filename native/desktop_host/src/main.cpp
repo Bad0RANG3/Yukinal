@@ -166,7 +166,7 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
   nlohmann::json reply;
   bool ok = false;
   try {
-    if (request == nullptr || std::char_traits<char>::length(request) > 1024 * 1024) {
+    if (request == nullptr || std::char_traits<char>::length(request) > 24 * 1024 * 1024) {
       reply = {{"code", "INVALID_REQUEST"}, {"message", "Desktop IPC request is invalid"}};
     } else {
       const auto arguments = nlohmann::json::parse(request);
