@@ -3519,6 +3519,24 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
     return result;
   }
   if (status != LIBSSH2_FX_OK) {
+    bool destination_exists = false;
+    if (status == LIBSSH2_FX_FAILURE) {
+      std::vector<unsigned char> stat_body{7};  // SSH_FXP_LSTAT
+      append_sftp_u32(&stat_body, 2);
+      append_sftp_string(&stat_body, destination);
+      std::vector<unsigned char> stat_frame;
+      append_sftp_u32(&stat_frame, static_cast<std::uint32_t>(stat_body.size()));
+      stat_frame.insert(stat_frame.end(), stat_body.begin(), stat_body.end());
+      if (write_sftp_channel(&resources, stat_frame, deadline) &&
+          read_sftp_channel_packet(&resources, &packet, deadline) && packet.size() >= 9 &&
+          read_sftp_u32(packet.data() + 1) == 2) {
+        destination_exists = packet[0] == 105;  // SSH_FXP_ATTRS
+      }
+    }
+    if (destination_exists) {
+      fail(&result, "already_exists", "The remote destination already exists");
+      return result;
+    }
     fail(&result, "sftp_error", "The SFTP server refused no-replace publication");
     return result;
   }
