@@ -245,11 +245,18 @@ test("the local check gate smokes the Python Agent sidecar over stdio", async ()
   const root = fileURLToPath(new URL("..", import.meta.url));
   const checkScript = await readFile(path.join(root, "scripts", "check.mjs"), "utf8");
   const smokeScript = await readFile(path.join(root, "scripts", "smoke-python-dev-agent.mjs"), "utf8");
+  const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
   assert.match(checkScript, /Python Agent source sidecar smoke/);
   assert.match(checkScript, /scripts\/smoke-python-dev-agent\.mjs/);
   assert.match(smokeScript, /-m", "yukinal_agent\.sidecar/);
   assert.match(smokeScript, /runSidecarSmoke\(python/);
+  assert.doesNotMatch(checkScript, /smoke-sidecar\.mjs|@yukinal\/agent", "build/);
+  assert.match(checkScript, /YUKINAL_TEST_PYTHON/);
+  assert.match(checkScript, /YUKINAL_TEST_AGENT_SOURCE/);
+  assert.match(manifest.scripts["agent:dev"], /dev-python-agent\.mjs/);
+  assert.match(manifest.scripts["smoke:sidecar"], /smoke-python-dev-agent\.mjs/);
+  assert.match(manifest.scripts["smoke:legacy-node-agent"], /smoke-sidecar\.mjs/);
 });
 
 test("installer-sensitive pull requests run the Windows lifecycle gate without packaging macOS or Linux", async () => {

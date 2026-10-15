@@ -1,11 +1,12 @@
-//! Cross-language test: the **real** Rust supervisor launching the **real** Node
+//! Cross-language test: the **real** Rust supervisor launching the **real** Python
 //! sidecar over stdio (ADR 0001/0006).
 //!
-//! Needs two inputs, which `pnpm check` always provides:
-//!   YUKINAL_TEST_NODE   path to the node executable
-//!   YUKINAL_TEST_ENTRY  path to apps/agent/dist/index.js
+//! The Python integration needs two inputs, which `pnpm check` always provides:
+//!   YUKINAL_TEST_PYTHON        path to the Python executable
+//!   YUKINAL_TEST_AGENT_SOURCE  path to agent/src
+//! YUKINAL_TEST_NODE is used only by the protocol supervisor's Node fixture tests.
 //!
-//! Without them the test skips (so a bare `cargo test` on a machine without the bundle
+//! Without them the test skips (so a bare `cargo test` on a machine without Python dependencies
 //! still passes). With `YUKINAL_TEST_REQUIRED=1` a missing input is a **failure**:
 //! a green CI must not be able to mean "the cross-language test never ran".
 
@@ -22,14 +23,14 @@ use tokio::net::{TcpListener, TcpStream};
 use yukinal_core::sidecar::{self, SidecarConfig, SidecarEvent, PROTOCOL_VERSION};
 use yukinal_core::supervisor::{RestartPolicy, Supervisor};
 
-fn env_path(key: &str) -> Option<PathBuf> {
+fn env_file(key: &str) -> Option<PathBuf> {
     std::env::var(key).ok().map(PathBuf::from).filter(|path| {
-        if key.ends_with("_ENTRY") {
-            path.is_file()
-        } else {
-            true
-        }
+        path.is_file()
     })
+}
+
+fn env_directory(key: &str) -> Option<PathBuf> {
+    std::env::var(key).ok().map(PathBuf::from).filter(|path| path.is_dir())
 }
 
 /// True when the runner declares that these tests must actually execute.
@@ -84,34 +85,47 @@ fn pid_is_alive(pid: u32) -> bool {
 }
 
 fn config() -> Option<SidecarConfig> {
-    let node = env_path("YUKINAL_TEST_NODE");
-    let entry = env_path("YUKINAL_TEST_ENTRY");
-    if node.is_none() || entry.is_none() {
-        skip_or_fail("YUKINAL_TEST_NODE / YUKINAL_TEST_ENTRY");
+    let python = std::env::var_os("YUKINAL_TEST_PYTHON").map(PathBuf::from);
+    let source = env_directory("YUKINAL_TEST_AGENT_SOURCE");
+    if python.is_none() || source.is_none() {
+        skip_or_fail("YUKINAL_TEST_PYTHON / YUKINAL_TEST_AGENT_SOURCE");
     }
-    let node = node?;
-    let entry = entry?;
+    let python = python?;
+    let source = source?;
     Some(SidecarConfig {
-        program: node,
-        args: vec![entry.into_os_string()],
-        env: Vec::new(),
+        program: python,
+        args: vec!["-m".into(), "yukinal_agent.sidecar".into()],
+        env: vec![
+            (
+                "PYTHONPATH".into(),
+                source.display().to_string(),
+            ),
+            (
+                "YUKINAL_SSH_API_TOKEN".into(),
+                "integration-smoke-token-0123456789abcdef".into(),
+            ),
+            (
+                "YUKINAL_SSH_API_URL".into(),
+                "http://127.0.0.1:9".into(),
+            ),
+        ],
         request_timeout: Duration::from_secs(10),
-        entry_label: String::from("integration test bundle"),
+        entry_label: String::from("-m yukinal_agent.sidecar"),
         client_version: String::from("test"),
         data_dir: std::env::temp_dir().display().to_string(),
-        is_python_agent: false,
+        is_python_agent: true,
     })
 }
 
 #[tokio::test]
-async fn handshakes_pings_and_reports_the_real_sidecar() {
+async fn handshakes_pings_and_reports_the_real_python_sidecar() {
     let Some(config) = config() else { return };
 
     let launched = sidecar::launch(&config)
         .await
         .expect("launch + initialize + describe must succeed");
     assert_eq!(launched.protocol_version, PROTOCOL_VERSION);
-    assert!(launched.tool_count >= 1, "system.echo must be registered");
+    assert!(launched.tool_count >= 1, "Python Agent tools must be registered");
     assert_ne!(launched.agent_version, "unknown");
 
     let pid = launched.handle.info().pid;
@@ -133,7 +147,7 @@ async fn handshakes_pings_and_reports_the_real_sidecar() {
         "the pid Rust holds must be the pid that answered"
     );
 
-    // tools.list must expose the internal dot name and its JSON Schema.
+    // tools.list must expose the Python server tool and its JSON Schema.
     let tools = launched
         .handle
         .request("tools.list", json!({}), Duration::from_secs(5))
@@ -148,10 +162,13 @@ async fn handshakes_pings_and_reports_the_real_sidecar() {
                 .collect()
         })
         .unwrap_or_default();
-    assert!(names.contains(&"system.echo"), "{names:?}");
     assert!(
         names.contains(&"server.info"),
         "host-backed server.info missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"ssh.service_status"),
+        "C++-backed ssh.service_status missing: {names:?}"
     );
     assert!(
         names.contains(&"server.logs"),
@@ -190,24 +207,12 @@ async fn handshakes_pings_and_reports_the_real_sidecar() {
         "host-backed package.install missing: {names:?}"
     );
     assert!(
-        names.contains(&"filesystem.backup"),
-        "host-backed filesystem.backup missing: {names:?}"
+        names.contains(&"filesystem.read"),
+        "host-backed filesystem.read missing: {names:?}"
     );
     assert!(
-        names.contains(&"filesystem.restore"),
-        "host-backed filesystem.restore missing: {names:?}"
-    );
-    assert!(
-        names.contains(&"filesystem.backup.cleanup"),
-        "host-backed filesystem.backup.cleanup missing: {names:?}"
-    );
-    assert!(
-        names.contains(&"investigation.evidence.search"),
-        "host-backed investigation.evidence.search missing: {names:?}"
-    );
-    assert!(
-        names.contains(&"investigation.evidence.compare"),
-        "host-backed investigation.evidence.compare missing: {names:?}"
+        names.contains(&"server.exec"),
+        "approval-gated server.exec missing: {names:?}"
     );
     assert!(
         names.iter().all(|name| !name.contains("__")),
@@ -238,7 +243,7 @@ async fn handshakes_pings_and_reports_the_real_sidecar() {
 
 #[tokio::test]
 async fn a_bad_entry_reports_the_build_step_instead_of_hanging() {
-    let Some(node) = env_path("YUKINAL_TEST_NODE").or_else(|| {
+    let Some(node) = env_file("YUKINAL_TEST_NODE").or_else(|| {
         skip_or_fail("YUKINAL_TEST_NODE");
         None
     }) else {
@@ -255,7 +260,7 @@ async fn a_bad_entry_reports_the_build_step_instead_of_hanging() {
         is_python_agent: false,
     };
 
-    // node exits non-zero without answering: launch must fail fast, not wait forever.
+    // The test-only Node process exits non-zero without answering: launch must fail fast.
     let error = sidecar::launch(&config)
         .await
         .expect_err("a missing entry must not look like a healthy start");
@@ -387,7 +392,7 @@ async fn the_supervisor_tracks_its_own_child_including_the_exit_record() {
 
 #[tokio::test]
 async fn shutdown_fails_pending_requests_and_reaps_the_child_exactly_once() {
-    let Some(node) = env_path("YUKINAL_TEST_NODE").or_else(|| {
+    let Some(node) = env_file("YUKINAL_TEST_NODE").or_else(|| {
         skip_or_fail("YUKINAL_TEST_NODE");
         None
     }) else {

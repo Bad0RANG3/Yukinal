@@ -17,12 +17,13 @@
     "smoke:python-agent": "node scripts/smoke-python-agent.mjs",
     "smoke:python-dev-agent": "node scripts/smoke-python-dev-agent.mjs",
     "test": "pnpm -r --if-present test && node --test scripts/lib/tauri-agent-command.test.mjs",
-    "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
+    "smoke:sidecar": "node scripts/smoke-python-dev-agent.mjs",
+    "smoke:legacy-node-agent": "node scripts/smoke-sidecar.mjs",
     "package": "node scripts/package.mjs",
     "release:manifest": "node scripts/write-release-manifest.mjs",
     "desktop:dev": "pnpm --filter @yukinal/desktop dev",
     "desktop:dev:python": "node scripts/dev-python-agent.mjs",
-    "agent:dev": "pnpm --filter @yukinal/agent dev",
+    "agent:dev": "node scripts/dev-python-agent.mjs",
     "clean": "node scripts/clean.mjs"
   },
   "devDependencies": {

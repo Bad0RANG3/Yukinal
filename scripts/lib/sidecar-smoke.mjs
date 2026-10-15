@@ -28,6 +28,20 @@ export async function runSidecarSmoke(entry, options = {}) {
   const label = options.label ?? entry;
   const program = options.program ?? process.execPath;
   const expectedTool = options.agentKind === "python" ? "server.info" : "system.echo";
+  const expectedPythonTools = [
+    "server.info",
+    "server.logs",
+    "server.services",
+    "docker.ps",
+    "docker.logs",
+    "docker.inspect",
+    "systemd.inspect",
+    "package.inspect",
+    "package.install",
+    "filesystem.read",
+    "server.exec",
+    "ssh.service_status",
+  ];
   const dataDir = options.dataDir ?? options.env?.YUKINAL_DATA_DIR ?? "/tmp/yukinal-smoke";
   console.log(`── sidecar smoke: ${program} ${label}`);
 
@@ -116,8 +130,10 @@ export async function runSidecarSmoke(entry, options = {}) {
 
   await ask({ jsonrpc: "2.0", id: 3, method: "tools.list", params: {} }, (frame) =>
     assert(
-      frame.result?.tools?.some((tool) => tool.name === expectedTool && tool.timeoutMs > 0),
-      `tools.list: ${JSON.stringify(frame)}`,
+      frame.result?.tools?.some((tool) => tool.name === expectedTool && tool.timeoutMs > 0) &&
+        (options.agentKind !== "python" || expectedPythonTools.every((name) =>
+          frame.result.tools.some((tool) => tool.name === name))),
+      `tools.list did not expose the expected ${options.agentKind === "python" ? "Python host tools" : "Node fixture tool"}: ${JSON.stringify(frame)}`,
     ),
   );
 

@@ -16,8 +16,7 @@
 > `service_status` operation when configured; the desktop Agent routes server
 > logs, Docker inspection, systemd inspection, and package inspection through a
 > short-lived C++ process using the saved desktop target and identity. The desktop file browser and
-> supported Agent file reads/writes/backups and guarded atomic edit/restore use
-> C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
+> manual transfers use C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
 > SSH-agent identities on direct or supported HTTP CONNECT routes with a confirmed host-key pin and
 > without Host CA. The same identities use C++ for
 > structured SSH operations. Host-key probes use C++ on direct and supported HTTP
@@ -81,6 +80,11 @@ consumes the exact approval ticket or reserves the bounded task command grant,
 then starts a one-shot C++ service config that enables `server.exec` for that
 target only. Persistent service target configs deny it by default. Targets that
 still require a Rust-only SSH route retain the existing Rust compatibility path.
+The Python sidecar's current filesystem catalog includes bounded `filesystem.read`
+only. `filesystem.write`, backup/restore/cleanup and durable investigation evidence
+tools are still present in the desktop host and legacy TypeScript Agent reference,
+but have not been ported into the Python Agent; the cross-language smoke does not
+count these capabilities as migrated.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes

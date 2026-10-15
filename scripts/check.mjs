@@ -6,8 +6,8 @@
  * Order is deliberate:
  *   1. check repository hygiene, docs, and packaging contracts
  *   2. build the contract libs   (consumers import their dist/*.d.ts)
- *   3. typecheck and test every JavaScript workspace
- *   4. smoke the legacy Node fixture, Python Agent, and configured C++/Python CTest targets
+ *   3. typecheck and test JavaScript sources (including retained legacy Agent tests)
+ *   4. smoke the Python Agent and configured C++/Python CTest targets
  *   5. rust fmt + clippy + check, when a Rust toolchain is installed
  *
  * Exits non-zero on the first failure.
@@ -20,6 +20,14 @@ import { spawnCommandSync } from "./lib/commands.mjs";
 import { fileURLToPath } from "node:url";
 
 const hasCargo = spawnSync("cargo", ["--version"], { stdio: "ignore" }).status === 0;
+const venvPython = join(
+  "agent",
+  ".venv",
+  process.platform === "win32" ? "Scripts" : "bin",
+  process.platform === "win32" ? "python.exe" : "python",
+);
+const testPython = process.env.YUKINAL_PYTHON
+  ?? (existsSync(venvPython) ? resolve(venvPython) : (process.platform === "win32" ? "python" : "python3"));
 const nativeBuildCandidates = process.env.YUKINAL_SSH_CMAKE_BUILD_DIR
   ? [resolve(process.env.YUKINAL_SSH_CMAKE_BUILD_DIR)]
   : ["native/build-check", "native/build-desktop", "native/build", "native/build-vs", "native/build-nmake"];
@@ -42,13 +50,9 @@ const steps = [
     required: true,
   },
   { name: "typecheck", command: "pnpm", args: ["-r", "--if-present", "typecheck"], required: true },
-  { name: "agent bundle (esbuild)", command: "pnpm", args: ["--filter", "@yukinal/agent", "build"], required: true },
-  // The legacy Node sidecar is still covered as a development/compatibility route.
-  // Tauri packaging and installed-layout smoke use the frozen Python Agent.
   { name: "packaging contract", command: process.execPath, args: ["scripts/check-packaging.mjs"], required: true },
   { name: "unit tests", command: "pnpm", args: ["-r", "--if-present", "test"], required: true },
   { name: "desktop bundle (vite build)", command: "pnpm", args: ["--filter", "@yukinal/desktop", "build"], required: true },
-  { name: "sidecar stdio smoke", command: process.execPath, args: ["scripts/smoke-sidecar.mjs"], required: true },
   { name: "Python Agent source sidecar smoke", command: process.execPath, args: ["scripts/smoke-python-dev-agent.mjs"], required: true },
   {
     name: "C++ SSH service and Python Agent tests",
@@ -75,11 +79,13 @@ const steps = [
     required: false,
     skip: !hasCargo,
     skipReason: "no cargo on PATH",
-    // Opt the cross-language test in: the real supervisor launches the real bundle.
+    // Opt the cross-language test in: the real supervisor launches the Python Agent.
     env: {
+      YUKINAL_TEST_PYTHON: testPython,
+      YUKINAL_TEST_AGENT_SOURCE: fileURLToPath(new URL("../agent/src", import.meta.url)),
+      // The supervisor also has protocol-only process fixtures written in JavaScript.
       YUKINAL_TEST_NODE: process.execPath,
-      YUKINAL_TEST_ENTRY: fileURLToPath(new URL("../apps/agent/dist/index.js", import.meta.url)),
-      // If the bundle path stops resolving, CI must go red instead of quietly skipping.
+      // CI must go red instead of quietly skipping the real Python-sidecar integration.
       YUKINAL_TEST_REQUIRED: "1",
     },
   },

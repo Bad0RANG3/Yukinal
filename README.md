@@ -64,8 +64,9 @@ repository for protocol and migration checks only.
 To run the existing desktop UI with the Python Agent sidecar, create
 `agent/.venv` and install `agent[agent,models]`. Then run
 `pnpm --filter @yukinal/desktop tauri dev`. The `pnpm desktop:dev:python` command
-is an equivalent shortcut. The Tauri host continues to own the process and
-execute host-mediated tools.
+is an equivalent shortcut. `pnpm agent:dev` starts the same source Python Agent,
+and `pnpm smoke:sidecar` exercises its stdio protocol. The Tauri host continues
+to own the process and execute host-mediated tools.
 
 To create an installer, install `agent[agent,models,package]` into that virtual
 environment and run `pnpm package`. The build creates a frozen Python Agent and
