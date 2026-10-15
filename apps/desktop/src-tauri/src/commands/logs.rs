@@ -1,86 +1,16 @@
-//! Bounded, read-only remote log access.
-
-use std::time::Duration;
+//! Read-only remote log access through the C++ SSH service and Python normalizer.
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
-use tokio_util::sync::CancellationToken;
-use yukinal_ssh::SshBackend;
 
 use crate::commands::ssh_service;
-use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
-
-const SOURCE_PREFIX: &str = "__YUKINAL_SOURCE__=";
-/// Lines requested from `journalctl`/`tail`, and the parse cap. ADR 0075 raised this
-/// from 120 so a real incident is not cut off before its first error.
-const MAX_LOG_LINES: usize = 500;
-/// The widest time window `server.logs` accepts: 7 days (ADR 0075; was 24 hours).
-const MAX_LOG_SINCE_SECONDS: u32 = 604_800;
-
-pub(crate) fn log_discovery_command() -> String {
-    log_discovery_command_for(&ServerLogsInput::default())
-        .expect("the filter-free discovery command is always valid")
-}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ServerLogsInput {
     pub since_seconds: Option<u32>,
     pub unit: Option<String>,
-}
-
-/// Build the fixed read-only probe with optional numeric/unit filters. The values are
-/// validated before interpolation; no model-provided shell fragment reaches the command.
-pub(crate) fn log_discovery_command_for(input: &ServerLogsInput) -> Result<String, String> {
-    if input
-        .since_seconds
-        .is_some_and(|seconds| !(1..=MAX_LOG_SINCE_SECONDS).contains(&seconds))
-    {
-        return Err(format!(
-            "server.logs sinceSeconds must be between 1 and {MAX_LOG_SINCE_SECONDS}"
-        ));
-    }
-    if let Some(unit) = input.unit.as_deref() {
-        if !is_safe_systemd_unit(unit) {
-            return Err("server.logs unit must be a bounded .service reference".into());
-        }
-    }
-    let since = input
-        .since_seconds
-        .map(|seconds| format!(" --since '-{seconds} seconds'"))
-        .unwrap_or_default();
-    let unit = input
-        .unit
-        .as_deref()
-        .map(|value| format!(" --unit '{}'", shell_single_quote(value)))
-        .unwrap_or_default();
-    // The line count is interpolated from the constant in both places; a literal `120`
-    // here used to drift away from `MAX_LOG_LINES`.
-    Ok(format!(
-        "if command -v journalctl >/dev/null 2>&1; then journalctl -n {MAX_LOG_LINES} --no-pager -o short-iso{since}{unit} 2>/dev/null; if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=journalctl\\n'; exit 0; fi; fi; for file in /var/log/syslog /var/log/messages; do if [ -r \"$file\" ]; then tail -n {MAX_LOG_LINES} \"$file\"; if [ $? -eq 0 ]; then case \"$file\" in /var/log/syslog) printf '\\n__YUKINAL_SOURCE__=syslog\\n' ;; /var/log/messages) printf '\\n__YUKINAL_SOURCE__=messages\\n' ;; esac; exit 0; fi; fi; done; printf '__YUKINAL_SOURCE__=unavailable\\n'"
-    ))
-}
-
-fn is_safe_systemd_unit(value: &str) -> bool {
-    let length = value.chars().count();
-    if !(1..=128).contains(&length) || !value.ends_with(".service") {
-        return false;
-    }
-    let mut chars = value.chars();
-    if !chars
-        .next()
-        .is_some_and(|character| character.is_ascii_alphanumeric())
-    {
-        return false;
-    }
-    chars.all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '@' | ':' | '-')
-    })
-}
-
-fn shell_single_quote(value: &str) -> String {
-    value.replace('\'', "'\\''")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -116,45 +46,26 @@ pub struct ServerLogsResponse {
     pub message: Option<String>,
 }
 
-/// `server_logs`: connect if necessary, then read only the most recent
-/// [`MAX_LOG_LINES`] lines.
+/// `server_logs` gets remote output from C++ and applies the shared Python parser.
 #[tauri::command]
 pub async fn server_logs(
     app: AppHandle,
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<ServerLogsResponse, String> {
-    if ssh_service::supports_cpp_target(&state, &server_id)? {
-        let output = ssh_service::server_logs(&app, &state, &server_id, None, None).await?;
-        let normalized = crate::commands::server::normalize_ssh_output_via_python(
-            &app,
-            &state,
-            "server.logs.normalize",
-            &output,
-            serde_json::json!({}),
-        )
-        .await?;
-        return deserialize_python_normalized_logs(normalized)
-            .map_err(|error| format!("log discovery returned an invalid response: {error}"));
+    if !ssh_service::supports_cpp_target(&state, &server_id)? {
+        return Err("server.logs target is not supported by the C++ SSH service".into());
     }
-    ensure_session(&state, &server_id).await?;
-    let session = state
-        .terminals
-        .cached_session(&server_id)
-        .map_err(|error| error.to_string())?;
-    let command = log_discovery_command();
-    let output = state
-        .ssh
-        .execute(
-            &session,
-            &command,
-            Some(Duration::from_secs(10)),
-            &CancellationToken::new(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-
-    parse_logs_output(&output.stdout_lossy())
+    let output = ssh_service::server_logs(&app, &state, &server_id, None, None).await?;
+    let normalized = crate::commands::server::normalize_ssh_output_via_python(
+        &app,
+        &state,
+        "server.logs.normalize",
+        &output,
+        serde_json::json!({}),
+    )
+    .await?;
+    deserialize_python_normalized_logs(normalized)
         .map_err(|error| format!("log discovery returned an invalid response: {error}"))
 }
 
@@ -176,131 +87,12 @@ fn deserialize_python_normalized_logs(
         .map_err(|_| "Python Agent returned invalid normalized logs".to_string())
 }
 
-pub(crate) fn parse_logs_output(raw: &str) -> Result<ServerLogsResponse, String> {
-    let source = raw
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(SOURCE_PREFIX))
-        .map(parse_source)
-        .transpose()?
-        .ok_or_else(|| "missing log source marker".to_string())?;
-
-    let lines = match source {
-        LogSource::Unavailable => Vec::new(),
-        LogSource::Journalctl | LogSource::Syslog | LogSource::Messages => raw
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with(SOURCE_PREFIX))
-            .map(|line| ServerLogLine {
-                text: line.to_string(),
-                level: classify_level(line),
-            })
-            .take(MAX_LOG_LINES)
-            .collect(),
-    };
-    let message = (source == LogSource::Unavailable)
-        .then(|| "未检测到可读取的 journalctl 或系统日志文件".to_string());
-    Ok(ServerLogsResponse {
-        source,
-        lines,
-        message,
-    })
-}
-
-fn parse_source(source: &str) -> Result<LogSource, String> {
-    match source {
-        "journalctl" => Ok(LogSource::Journalctl),
-        "syslog" => Ok(LogSource::Syslog),
-        "messages" => Ok(LogSource::Messages),
-        "unavailable" => Ok(LogSource::Unavailable),
-        other => Err(format!("unknown log source `{other}`")),
-    }
-}
-
-fn classify_level(line: &str) -> LogLevel {
-    let lower = line.to_ascii_lowercase();
-    if [
-        "panic", "emerg", "alert", "crit", "error", "failed", "failure",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-    {
-        LogLevel::Error
-    } else if ["warning", "warn", "degraded"]
-        .iter()
-        .any(|marker| lower.contains(marker))
-    {
-        LogLevel::Warning
-    } else {
-        LogLevel::Info
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        log_discovery_command_for, parse_logs_output, LogLevel, LogSource, ServerLogLine,
-        ServerLogsInput, ServerLogsResponse,
-    };
+    use super::{LogLevel, LogSource, ServerLogLine, ServerLogsResponse};
 
     const FIXTURE: &str =
         include_str!("../../../../../packages/shared/fixtures/ipc/server_logs.json");
-
-    #[test]
-    fn parses_bounded_journal_lines_and_classifies_severity() {
-        let response = parse_logs_output(concat!(
-            "2026-09-04T06:00:00+0800 host sshd[10]: Accepted publickey\n",
-            "2026-09-04T06:01:00+0800 host nginx[12]: warning: worker restarted\n",
-            "2026-09-04T06:02:00+0800 host app[13]: Failed to connect to database\n",
-            "__YUKINAL_SOURCE__=journalctl\n",
-        ))
-        .expect("journal output");
-
-        assert_eq!(response.source, LogSource::Journalctl);
-        assert_eq!(response.lines.len(), 3);
-        assert_eq!(response.lines[0].level, LogLevel::Info);
-        assert_eq!(response.lines[1].level, LogLevel::Warning);
-        assert_eq!(response.lines[2].level, LogLevel::Error);
-        assert!(response.lines[2].text.contains("Failed to connect"));
-    }
-
-    #[test]
-    fn unavailable_source_is_explicit_and_has_no_fake_lines() {
-        let response = parse_logs_output("__YUKINAL_SOURCE__=unavailable\n").expect("marker");
-
-        assert_eq!(response.source, LogSource::Unavailable);
-        assert!(response.lines.is_empty());
-        assert!(response.message.is_some());
-    }
-
-    #[test]
-    fn filtered_log_command_is_bounded_and_does_not_accept_shell_fragments() {
-        let command = log_discovery_command_for(&ServerLogsInput {
-            since_seconds: Some(3_600),
-            unit: Some("nginx.service".into()),
-        })
-        .expect("filtered command");
-        assert!(command.contains("--since '-3600 seconds'"));
-        assert!(command.contains("--unit 'nginx.service'"));
-        assert!(
-            command.contains("-n 500"),
-            "the journal line count comes from MAX_LOG_LINES"
-        );
-        assert!(
-            command.contains("tail -n 500"),
-            "the syslog tail count comes from MAX_LOG_LINES"
-        );
-        assert!(log_discovery_command_for(&ServerLogsInput {
-            since_seconds: Some(604_801),
-            unit: None,
-        })
-        .is_err());
-        assert!(log_discovery_command_for(&ServerLogsInput {
-            since_seconds: None,
-            unit: Some("nginx.service;id".into()),
-        })
-        .is_err());
-    }
 
     #[test]
     fn serializes_to_the_shared_contract_fixture() {

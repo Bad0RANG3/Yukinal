@@ -183,7 +183,6 @@ pub fn run() {
                     // operation can race the sidecar/MCP teardown that follows.
                     transfers.shutdown().await;
                     let _ = state.cpp_terminals.close_all().await;
-                    state.terminals.shutdown().await;
                     state.auth.cancel_all().await;
                     state.oauth.cancel_all();
                     let _ = state.supervisor.stop().await;

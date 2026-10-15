@@ -14,8 +14,11 @@ use tauri::{AppHandle, State};
 
 use crate::commands::{ssh_service, EmptyResponse};
 use crate::state::AppState;
+#[cfg(test)]
 use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
+#[cfg(test)]
 use yukinal_database::models::{Identity, Server};
+#[cfg(test)]
 use yukinal_ssh::{
     Authentication, ConnectionSecrets, HostCertificateAuthority as SshHostCertificateAuthority,
     KnownHostsPolicy, SshBackend, SshConfig,
@@ -28,6 +31,7 @@ pub struct TerminalOpenResponse {
 }
 
 /// 确保 `server_id` 有一条已认证的 ssh 连接（缓存命中 → 直接复用）。
+#[cfg(test)]
 pub(crate) async fn ensure_session(state: &AppState, server_id: &str) -> Result<(), String> {
     if state.terminals.cached_session(server_id).is_ok() {
         return Ok(());
@@ -61,6 +65,7 @@ pub(crate) async fn ensure_session(state: &AppState, server_id: &str) -> Result<
 
 /// Server/identity/credential → `SshConfig` + 已解析 `ConnectionSecrets`。
 /// 凭据引用在 SQLite，材料在 OS keychain，解析点在这里（使用点）。
+#[cfg(test)]
 fn resolve_capabilities(
     state: &AppState,
     server: &Server,
@@ -124,6 +129,7 @@ fn resolve_capabilities(
 /// 「口令引用被解析成 `private_key_passphrase`」这些真正会连错服务器的分支，可以用
 /// `MemoryCredentialStore` 直接驱动。凭据仍然只在使用点解析 —— 这一层没有把任何
 /// 材料交给 IPC。
+#[cfg(test)]
 fn resolve_identity_authentication(
     identity: &Identity,
     credentials: &dyn CredentialStore,
@@ -194,6 +200,7 @@ fn resolve_identity_authentication(
     }
 }
 
+#[cfg(test)]
 fn secret_to_string(secret: &Secret) -> Result<String, String> {
     secret
         .as_utf8()

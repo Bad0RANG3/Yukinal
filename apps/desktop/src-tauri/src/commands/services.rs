@@ -1,23 +1,10 @@
-//! Read-only remote service discovery over the already authenticated SSH session.
-
-use std::time::Duration;
+//! Read-only remote service discovery through the C++ SSH service and Python normalizer.
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
-use tokio_util::sync::CancellationToken;
-use yukinal_ssh::SshBackend;
 
 use crate::commands::ssh_service;
-use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
-
-const SERVICE_DISCOVERY_COMMAND: &str = r#"if command -v systemctl >/dev/null 2>&1; then systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null; if [ $? -eq 0 ]; then printf '\n__YUKINAL_SOURCE__=systemd\n'; exit 0; fi; fi; if command -v docker >/dev/null 2>&1; then docker ps -a --format '{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}' 2>/dev/null; if [ $? -eq 0 ]; then printf '\n__YUKINAL_SOURCE__=docker\n'; exit 0; fi; fi; printf '__YUKINAL_SOURCE__=unavailable\n'"#;
-const SOURCE_PREFIX: &str = "__YUKINAL_SOURCE__=";
-const MAX_SERVICES: usize = 200;
-
-pub(crate) fn service_discovery_command() -> &'static str {
-    SERVICE_DISCOVERY_COMMAND
-}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -62,39 +49,7 @@ pub struct ServerServicesResponse {
     pub message: Option<String>,
 }
 
-pub(crate) fn filter_services(
-    response: &mut ServerServicesResponse,
-    input: &ServerServicesInput,
-) -> Result<(), String> {
-    if let Some(name) = input.name.as_deref() {
-        if name.trim().is_empty()
-            || name.chars().count() > 128
-            || name.chars().any(char::is_control)
-            || !name.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(character, '_' | '.' | '@' | ':' | '/' | '-')
-            })
-            || !name
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-        {
-            return Err(
-                "server.services name must be a bounded service or container reference".into(),
-            );
-        }
-    }
-    response.services.retain(|service| {
-        input
-            .name
-            .as_deref()
-            .is_none_or(|name| service.name == name)
-            && input.state.is_none_or(|state| service.state == state)
-    });
-    Ok(())
-}
-
-/// `server_services`: connect if necessary, then run one fixed read-only probe.
+/// `server_services` gets remote output from C++ and applies the shared Python parser.
 #[tauri::command]
 pub async fn server_services(
     app: AppHandle,
@@ -102,7 +57,7 @@ pub async fn server_services(
     server_id: String,
 ) -> Result<ServerServicesResponse, String> {
     if !ssh_service::supports_cpp_target(&state, &server_id)? {
-        return legacy_service_inventory(&state, &server_id).await;
+        return Err("server.services target is not supported by the C++ SSH service".into());
     }
     let output = ssh_service::service_inventory(&app, &state, &server_id).await?;
     let normalized = crate::commands::server::normalize_ssh_output_via_python(
@@ -135,219 +90,14 @@ fn deserialize_python_normalized_services(
         .map_err(|_| "Python Agent returned invalid normalized services".to_string())
 }
 
-/// Keep using the legacy transport for any endpoint or authentication mode the C++ service
-/// cannot yet validate itself.
-async fn legacy_service_inventory(
-    state: &AppState,
-    server_id: &str,
-) -> Result<ServerServicesResponse, String> {
-    ensure_session(state, server_id).await?;
-    let session = state
-        .terminals
-        .cached_session(server_id)
-        .map_err(|error| error.to_string())?;
-    let output = state
-        .ssh
-        .execute(
-            &session,
-            SERVICE_DISCOVERY_COMMAND,
-            Some(Duration::from_secs(10)),
-            &CancellationToken::new(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    parse_services_output(&output.stdout_lossy())
-        .map_err(|error| format!("service discovery returned an invalid response: {error}"))
-}
-
-pub(crate) fn parse_services_output(raw: &str) -> Result<ServerServicesResponse, String> {
-    let source = raw
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(SOURCE_PREFIX))
-        .map(parse_source)
-        .transpose()?
-        .ok_or_else(|| "missing service source marker".to_string())?;
-
-    let services = match source {
-        ServiceSource::Systemd => parse_systemd_services(raw),
-        ServiceSource::Docker => parse_docker_services(raw),
-        ServiceSource::Unavailable => Vec::new(),
-    };
-    let message = (source == ServiceSource::Unavailable)
-        .then(|| "未检测到可读取的 systemd 或 Docker 服务管理器".to_string());
-    Ok(ServerServicesResponse {
-        source,
-        services,
-        message,
-    })
-}
-
-fn parse_source(source: &str) -> Result<ServiceSource, String> {
-    match source {
-        "systemd" => Ok(ServiceSource::Systemd),
-        "docker" => Ok(ServiceSource::Docker),
-        "unavailable" => Ok(ServiceSource::Unavailable),
-        other => Err(format!("unknown service source `{other}`")),
-    }
-}
-
-fn parse_systemd_services(raw: &str) -> Vec<ServerService> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with(SOURCE_PREFIX))
-        .filter_map(parse_systemd_line)
-        .take(MAX_SERVICES)
-        .collect()
-}
-
-fn parse_systemd_line(line: &str) -> Option<ServerService> {
-    let fields = line.split_whitespace().collect::<Vec<_>>();
-    let offset = usize::from(fields.first() == Some(&"●"));
-    if fields.len() < offset + 4 {
-        return None;
-    }
-    let name = fields[offset].to_string();
-    let active = fields[offset + 2];
-    let sub = fields[offset + 3];
-    let description = (fields.len() > offset + 4).then(|| fields[offset + 4..].join(" "));
-    Some(ServerService {
-        name,
-        state: state_from_systemd(active, sub),
-        status: format!("{active}/{sub}"),
-        description,
-    })
-}
-
-fn state_from_systemd(active: &str, sub: &str) -> ServiceState {
-    if active == "failed" || sub == "failed" {
-        ServiceState::Failed
-    } else if active == "active" && sub == "running" {
-        ServiceState::Running
-    } else if matches!(active, "inactive" | "deactivating") || matches!(sub, "dead" | "exited") {
-        ServiceState::Stopped
-    } else {
-        ServiceState::Unknown
-    }
-}
-
-fn parse_docker_services(raw: &str) -> Vec<ServerService> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with(SOURCE_PREFIX))
-        .filter_map(parse_docker_line)
-        .take(MAX_SERVICES)
-        .collect()
-}
-
-fn parse_docker_line(line: &str) -> Option<ServerService> {
-    let mut fields = line.splitn(4, '\t');
-    let name = fields.next()?.trim();
-    let state = fields.next()?.trim();
-    let status = fields.next()?.trim();
-    let description = fields.next()?.trim();
-    if name.is_empty() || state.is_empty() || status.is_empty() {
-        return None;
-    }
-    Some(ServerService {
-        name: name.to_string(),
-        state: state_from_docker(state),
-        status: status.to_string(),
-        description: (!description.is_empty()).then(|| description.to_string()),
-    })
-}
-
-fn state_from_docker(state: &str) -> ServiceState {
-    match state {
-        "running" | "restarting" => ServiceState::Running,
-        "dead" => ServiceState::Failed,
-        "created" | "exited" | "paused" | "removing" => ServiceState::Stopped,
-        _ => ServiceState::Unknown,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_services, parse_services_output, ServerService, ServerServicesInput,
-        ServerServicesResponse, ServiceSource, ServiceState,
+        ServerService, ServerServicesResponse, ServiceSource, ServiceState,
     };
 
     const FIXTURE: &str =
         include_str!("../../../../../packages/shared/fixtures/ipc/server_services.json");
-
-    #[test]
-    fn parses_systemd_rows_and_maps_states() {
-        let response = parse_services_output(concat!(
-            "sshd.service loaded active running OpenSSH server daemon\n",
-            "nginx.service loaded active running A high performance web server\n",
-            "broken.service loaded failed failed Broken service\n",
-            "stopped.service loaded inactive dead Stopped service\n",
-            "__YUKINAL_SOURCE__=systemd\n",
-        ))
-        .expect("systemd output");
-
-        assert_eq!(response.source, ServiceSource::Systemd);
-        assert_eq!(response.services.len(), 4);
-        assert_eq!(response.services[0].name, "sshd.service");
-        assert_eq!(response.services[0].state, ServiceState::Running);
-        assert_eq!(response.services[0].status, "active/running");
-        assert_eq!(
-            response.services[0].description.as_deref(),
-            Some("OpenSSH server daemon")
-        );
-        assert_eq!(response.services[2].state, ServiceState::Failed);
-        assert_eq!(response.services[3].state, ServiceState::Stopped);
-    }
-
-    #[test]
-    fn filters_service_inventory_without_changing_the_source_shape() {
-        let mut response = parse_services_output(concat!(
-            "nginx.service loaded active running Nginx\n",
-            "worker.service loaded failed failed Worker\n",
-            "__YUKINAL_SOURCE__=systemd\n",
-        ))
-        .expect("service output");
-        filter_services(
-            &mut response,
-            &ServerServicesInput {
-                name: None,
-                state: Some(ServiceState::Failed),
-            },
-        )
-        .expect("filter");
-        assert_eq!(response.source, ServiceSource::Systemd);
-        assert_eq!(response.services.len(), 1);
-        assert_eq!(response.services[0].name, "worker.service");
-        assert!(filter_services(
-            &mut response,
-            &ServerServicesInput {
-                name: Some("worker.service;id".into()),
-                state: None,
-            },
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn parses_docker_rows_without_splitting_status_spaces() {
-        let response = parse_services_output(concat!(
-            "web\trunning\tUp 3 hours\tnginx:1.27\n",
-            "db\texited\tExited (0) 2 days ago\tpostgres:16\n",
-            "__YUKINAL_SOURCE__=docker\n",
-        ))
-        .expect("docker output");
-
-        assert_eq!(response.source, ServiceSource::Docker);
-        assert_eq!(response.services.len(), 2);
-        assert_eq!(response.services[0].state, ServiceState::Running);
-        assert_eq!(response.services[0].status, "Up 3 hours");
-        assert_eq!(
-            response.services[0].description.as_deref(),
-            Some("nginx:1.27")
-        );
-        assert_eq!(response.services[1].state, ServiceState::Stopped);
-    }
 
     #[test]
     fn serializes_to_the_shared_contract_fixture() {

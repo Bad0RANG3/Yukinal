@@ -1,9 +1,9 @@
 //! Shared process state owned by Rust only.
 //!
-//! Grows in order: the SQLite pool, a credential store handle, `SshManager`,
-//! `PtyManager`, then the collector scheduler. Sidecar supervision itself lives in
-//! `yukinal_core::supervisor`; this struct only holds the instances so commands can
-//! reach them. Nothing here is reachable from React except through `commands`.
+//! Holds the database, OS credential store, local host-key trust store, C++ PTY
+//! sessions, authorization ledgers, and process supervisors. Sidecar supervision
+//! itself lives in `yukinal_core::supervisor`; nothing here is reachable from
+//! React except through `commands`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use yukinal_core::mcp::McpSupervisor;
 use yukinal_core::supervisor::Supervisor;
+#[cfg(test)]
 use yukinal_core::terminal::TerminalService;
 use yukinal_credentials::os::OsCredentialStore;
 use yukinal_database::Database;
@@ -56,8 +57,10 @@ pub struct AppState {
     pub(crate) host_action_approvals: HostApprovalLedger,
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
+    /// Local OpenSSH known_hosts store used by the trust UI; remote SSH runs in C++.
     pub ssh: Arc<RusshBackend>,
-    /// Legacy Rust SSH session and SFTP manager. UI terminals now use `cpp_terminals`.
+    /// Test-only Rust SSH session manager used to cover removed compatibility paths.
+    #[cfg(test)]
     pub terminals: TerminalService,
     /// C++-owned interactive SSH PTYs; all UI terminal session IDs route here.
     pub cpp_terminals: TerminalManager<crate::commands::ssh_service::SshTerminalPty>,
@@ -73,14 +76,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// 在 Tauri setup 中一次性装配：数据目录下开 SQLite、加载 known_hosts、
-    /// 挂上 ssh 后端与终端服务。
+    /// 在 Tauri setup 中一次性装配 SQLite、加载本机 known_hosts、启动 C++ PTY 管理。
     pub fn bootstrap(data_dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
         let database =
             Database::open(data_dir.join("yukinal.db")).map_err(|error| error.to_string())?;
         let ssh =
             Arc::new(RusshBackend::from_data_dir(data_dir).map_err(|error| error.to_string())?);
+        #[cfg(test)]
         let terminals = TerminalService::new(Arc::clone(&ssh));
         let cpp_terminals = TerminalManager::with_id_prefix("tc");
         let credentials = Arc::new(OsCredentialStore);
@@ -95,6 +98,7 @@ impl AppState {
             host_action_approvals: HostApprovalLedger::default(),
             credentials,
             ssh,
+            #[cfg(test)]
             terminals,
             cpp_terminals,
             auth: AuthChallengeBroker::new(),

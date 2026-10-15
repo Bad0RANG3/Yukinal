@@ -14,8 +14,7 @@
 //! Agent filesystem mutations are approved by Python and get a narrowly scoped C++ SFTP target only
 //! after this module revalidates their durable action plan. Backup ownership and restore/cleanup
 //! consumption metadata remain in the host database. Listing and retention use bounded host
-//! reads with Python formatting and planning. Other remote file operations continue through the
-//! Rust executor. `filesystem.edit` is a guarded read-then-modify, `filesystem.backup` creates a
+//! reads with Python formatting and planning. `filesystem.edit` is a guarded read-then-modify, `filesystem.backup` creates a
 //! host-owned sibling copy, `filesystem.restore` publishes it only with a current revision guard,
 //! and cleanup verifies exact backup metadata before consuming ownership. The capability's crate
 //! docs state what these guarantees do **not** cover (SFTP has no compare-and-swap, so checks and
@@ -31,19 +30,17 @@ use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 use yukinal_core::docker::{
-    bounded_log_lines, docker_restart_command, is_safe_container_ref, parse_docker_inspect,
-    parse_docker_ps, shell_quote, truncate_text, DockerLogsResult, DockerRestartResult,
-    DEFAULT_LOG_TAIL, DEFAULT_RESTART_TIMEOUT, DOCKER_PS_ALL_COMMAND, DOCKER_PS_COMMAND,
-    MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
+    is_safe_container_ref, truncate_text, DockerLogsResult, DockerRestartResult,
+    DEFAULT_LOG_TAIL, DEFAULT_RESTART_TIMEOUT, MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
 };
+#[cfg(test)]
+use yukinal_core::docker::shell_quote;
 use yukinal_core::package::{
     is_safe_package_ref, is_safe_package_version, is_supported_package_manager,
-    package_inspect_command, package_install_command, parse_package_inspect, PackageInstallResult,
-    DEFAULT_PACKAGE_INSTALL_TIMEOUT, MAX_PACKAGE_INSTALL_TIMEOUT,
+    PackageInstallResult, DEFAULT_PACKAGE_INSTALL_TIMEOUT, MAX_PACKAGE_INSTALL_TIMEOUT,
 };
 use yukinal_core::service::{
-    is_safe_systemd_service_ref, parse_systemd_inspect, systemd_inspect_command,
-    systemd_restart_command, SystemdRestartResult, DEFAULT_SYSTEMD_RESTART_TIMEOUT,
+    is_safe_systemd_service_ref, SystemdRestartResult, DEFAULT_SYSTEMD_RESTART_TIMEOUT,
     MAX_SYSTEMD_RESTART_TIMEOUT,
 };
 use yukinal_database::models::{
@@ -65,12 +62,14 @@ use yukinal_filesystem::{
     validate_remote_path, AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest,
     AgentReadRequest, AgentRestoreRequest, AgentWriteRequest, Error as FilesystemError,
 };
+#[cfg(test)]
 use yukinal_ssh::SshBackend;
 
 use crate::commands::files::remote_file_service;
 use crate::commands::logs::ServerLogsInput;
 use crate::commands::mcp;
 use crate::commands::services::ServerServicesInput;
+#[cfg(test)]
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use crate::state::{HostActionExecutionBinding, HostActionTicketError};
@@ -2358,10 +2357,33 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
                         None,
                     )
                 })?;
-            if let Err(message) =
-                package_install_command(&input.manager, &input.package, input.version.as_deref())
+            if !is_supported_package_manager(&input.manager) {
+                return Err(failed(
+                    "invalid_input",
+                    "package manager must be apt or dnf",
+                    false,
+                    None,
+                ));
+            }
+            if !is_safe_package_ref(&input.package) {
+                return Err(failed(
+                    "invalid_input",
+                    "package must be a safe reference without shell metacharacters",
+                    false,
+                    None,
+                ));
+            }
+            if input
+                .version
+                .as_deref()
+                .is_some_and(|version| !is_safe_package_version(version))
             {
-                return Err(failed("invalid_input", message, false, None));
+                return Err(failed(
+                    "invalid_input",
+                    "package version contains unsupported characters",
+                    false,
+                    None,
+                ));
             }
             let timeout = input
                 .timeout_seconds

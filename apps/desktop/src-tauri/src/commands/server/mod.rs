@@ -8,7 +8,6 @@ use tauri::{AppHandle, State};
 
 use crate::commands::activity::record_user_activity;
 use crate::commands::ssh_service;
-use crate::commands::terminal::ensure_session;
 use crate::commands::EmptyResponse;
 use crate::state::AppState;
 use yukinal_core::identity::{insert_server_and_attach_identity, IdentityWrite};
@@ -123,8 +122,7 @@ pub struct ServerSnapshotResponse {
 }
 
 /// `server_snapshot`: C++ SSH reads a fixed command set, Python normalizes it, and
-/// the desktop persists the UI contract. Legacy SSH-only configurations retain the
-/// Rust collector fallback until their transport path is migrated.
+/// the desktop persists the UI contract.
 #[tauri::command]
 pub async fn server_snapshot(
     app: AppHandle,
@@ -132,30 +130,12 @@ pub async fn server_snapshot(
     server_id: String,
 ) -> Result<ServerSnapshotResponse, String> {
     let collected_at = yukinal_core::sidecar::iso8601_now();
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let (snapshot, _samples) = if ssh_service::supports_cpp_target(&state, &server_id)? {
-        let outputs = ssh_service::system_snapshot(&app, &state, &server_id).await?;
-        let data = normalize_snapshot_outputs_via_python(&app, &state, outputs).await?;
-        (
-            server_snapshot_from_normalized_data(&server_id, &collected_at, &data)?,
-            Vec::new(),
-        )
-    } else {
-        ensure_session(&state, &server_id).await?;
-        let session = state
-            .terminals
-            .cached_session(&server_id)
-            .map_err(|error| error.to_string())?;
-        yukinal_core::collector::collect_snapshot(
-            &state.ssh,
-            &session,
-            &server_id,
-            &collected_at,
-            &cancel,
-        )
-        .await
-        .map_err(|error| error.to_string())?
-    };
+    if !ssh_service::supports_cpp_target(&state, &server_id)? {
+        return Err("server.info target is not supported by the C++ SSH service".into());
+    }
+    let outputs = ssh_service::system_snapshot(&app, &state, &server_id).await?;
+    let data = normalize_snapshot_outputs_via_python(&app, &state, outputs).await?;
+    let snapshot = server_snapshot_from_normalized_data(&server_id, &collected_at, &data)?;
 
     // 先入库（audit / 趋势都靠 snapshots 行），再返回给 UI。
     state
@@ -178,8 +158,7 @@ pub async fn server_list(state: State<'_, AppState>) -> Result<ServerListRespons
     Ok(ServerListResponse { servers })
 }
 
-/// Validate SSH authentication and host trust using the supported C++ path, or establish the
-/// legacy cached session for configurations that still require Rust-only features.
+/// Validate SSH authentication and host trust through the C++ SSH service.
 #[tauri::command]
 pub async fn server_connect(
     app: AppHandle,
@@ -189,7 +168,7 @@ pub async fn server_connect(
     let connection = if ssh_service::supports_cpp_target(&state, &server_id)? {
         ssh_service::connection_check(&app, &state, &server_id).await
     } else {
-        ensure_session(&state, &server_id).await
+        Err("server target is not supported by the C++ SSH service".into())
     };
     match connection {
         Ok(()) => {
@@ -233,17 +212,15 @@ pub async fn server_connect(
     }
 }
 
-/// Close the cached session and every PTY attached to it. This operation is
-/// idempotent so a stale UI can safely request disconnect twice.
+/// Close every C++ PTY attached to the server. This operation is idempotent so
+/// a stale UI can safely request disconnect twice.
 #[tauri::command]
 pub async fn server_disconnect(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<EmptyResponse, String> {
     let cpp_disconnect = state.cpp_terminals.close_for_server(&server_id).await;
-    let rust_disconnect = state.terminals.disconnect(&server_id).await;
     cpp_disconnect.map_err(|error| error.to_string())?;
-    rust_disconnect.map_err(|error| error.to_string())?;
     state
         .database
         .servers()
@@ -355,15 +332,9 @@ pub async fn server_update(
         None => old_identity_id.clone(),
     };
 
-    // A changed endpoint or credential must not leave the old authenticated
-    // connection cached under the same stable server id.
+    // A changed endpoint or credential must not leave an old C++ PTY attached
+    // to the stable server id.
     if let Err(error) = state.cpp_terminals.close_for_server(&input.server_id).await {
-        if let Some(identity_id) = staged_identity_id.as_deref() {
-            let _ = reclaim_identity(&state, identity_id, &server.id);
-        }
-        return Err(error.to_string());
-    }
-    if let Err(error) = state.terminals.disconnect(&input.server_id).await {
         if let Some(identity_id) = staged_identity_id.as_deref() {
             let _ = reclaim_identity(&state, identity_id, &server.id);
         }
@@ -416,11 +387,6 @@ pub async fn server_delete(
     state
         .cpp_terminals
         .close_for_server(&server_id)
-        .await
-        .map_err(|error| error.to_string())?;
-    state
-        .terminals
-        .disconnect(&server_id)
         .await
         .map_err(|error| error.to_string())?;
     state

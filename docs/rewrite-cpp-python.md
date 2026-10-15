@@ -7,8 +7,9 @@
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; installer resources contain Python Agent and C++ SSH assets only.
 > The desktop resolver has no legacy Node resource or runtime fallback; old Node paths below refer only to historical migration evidence.
-> Rust still hosts native UI IPC, local trust-store updates, final approvals, and
-> compatibility paths for configurations outside current C++ coverage. C++ verifies
+> Rust still hosts native UI IPC, local trust-store updates, and final approvals.
+> SSH network operations use C++; configurations outside current C++ coverage fail
+> explicitly instead of falling back to the Rust SSH backend. C++ verifies
 > configured OpenSSH host CAs and optional KRLs for supported CA algorithms; remote
 > HTTPS KRL downloads use the configured SOCKS5/SOCKS5H tunnel and verify the KRL
 > server certificate; loopback-only HTTP KRL downloads must bypass the proxy.
@@ -17,8 +18,7 @@
 > proxy URLs, verifies HTTPS proxy certificates, applies bypass rules, and establishes
 > CONNECT or SOCKS5 tunnels. SOCKS5 resolves target names locally; SOCKS5H delegates
 > name resolution to the proxy. SOCKS4, PAC, unsupported CA algorithms, and other
-> SSH modes remain
-> on the compatibility path.
+> SSH modes currently fail explicitly until the C++ service supports them.
 > Keyboard-interactive terminal prompts are forwarded by the C++ PTY worker to
 > the existing desktop prompt UI. Desktop terminals use a dedicated C++ PTY
 > child process; configurations outside C++ support fail closed instead of
@@ -31,8 +31,8 @@
 > confirmed host-key pin or a supported host CA. The same identities use C++ for
 > structured SSH operations. Host-key probes use C++ on direct and supported
 > HTTP/HTTPS CONNECT and SOCKS5/SOCKS5H routes; the probe reports the certified public-key fingerprint without
-> treating it as trusted. Unsupported host-key modes retain the Rust compatibility
-> path. The desktop file browser fails explicitly when its target is outside C++ SFTP support.
+> treating it as trusted. Unsupported host-key modes fail explicitly. The desktop
+> file browser fails explicitly when its target is outside C++ SFTP support.
 > Manual uploads, downloads, recovery cleanup, and native drag-out use bounded C++ SFTP
 > streams on supported direct, HTTP/HTTPS CONNECT, or SOCKS5/SOCKS5H routes with either
 > a confirmed pin or supported host CA. Unsupported targets fail explicitly instead
@@ -58,13 +58,12 @@
 > operations. The `server.exec` one-shot target is enabled only after Rust
 > validates the plan and consumes the exact approval; `server.exec` now requires
 > a C++-supported target in production and fails explicitly when the target is
-> unsupported. Its former Rust route is retained only in unit-test builds while
-> the host integration is migrated.
+> unsupported. Its former Rust route is retained only in unit-test builds.
 > The host checks the durable action plan before
 > claiming the call and consuming its ticket. A successful result is cached only
 > after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
-> and cannot be replayed. Other SSH operations still retain compatibility paths
-> for routes that C++ explicitly reports as unsupported.
+> and cannot be replayed. SSH operations outside current C++ support fail
+> explicitly; the desktop no longer runs a second Rust SSH backend.
 > Raw approval input is removed before persistence and UI emission.
 > Agent `filesystem.write` and `filesystem.edit` now run as Python desktop tools
 > through the C++ SFTP service when the target route supports it. The host checks
@@ -116,19 +115,19 @@ existing structured result shapes. Rust supplies the
 saved target, selected trust source (confirmed host-key pin or configured host CA),
 and credential material from the OS store;
 the Python process passes credentials only through the C++ child environment and
-cleans up its temporary configuration when the call ends. For `server.info`,
-`server.logs`, `server.services`, `server.exec`, and the migrated file and
-terminal routes, an unsupported target fails explicitly instead of running a
-second Rust SSH implementation. Other operations that have not yet migrated
-still retain their documented compatibility executors. SSH connection and
-host-key errors never trigger an alternate SSH backend.
+cleans up its temporary configuration when the call ends. Desktop
+`server.connect`, `server.info`, `server.logs`, and `server.services`, Agent
+Docker/systemd/package tools, `server.exec`, file operations, terminal sessions,
+and host-key probes now fail explicitly when C++ cannot represent the target.
+No production route falls back to remote Rust SSH execution. Rust still owns the
+Tauri bridge, local trust-store operations, approval checks, and UI result
+persistence.
 The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
 recomputes a fingerprint from the exact raw input and consumes the corresponding
 one-time ticket. All three actions are routed through the Python caller to
-structured C++ SSH operations on supported targets; the host records their
-terminal outcomes in the durable execution fence. Rust keeps the compatibility
-executor for routes it explicitly reports as unsupported.
+structured C++ SSH operations; the host records their terminal outcomes in the
+durable execution fence. Unsupported targets fail before any remote operation.
 `server.exec` remains separately guarded and exposed only when the host supplies
 the current remote action-plan binding. The host validates the plan, consumes
 the exact approval ticket, then starts a one-shot C++ service config that enables
@@ -672,14 +671,23 @@ normalization layer. Rust remains the Tauri host bridge for input validation,
 authorization, cancellation, and persistence. The Rust edits could not be
 compiled here because Cargo and rustc are unavailable on `PATH`.
 
+On 2026-10-15, desktop `server.connect`, snapshot, logs, services, host-key
+probes, and Agent Docker/systemd/package operations were made C++-only. Rust
+command construction and output parsing for those SSH paths were removed; the
+old Rust session connector is compiled only for tests. Unsupported C++ target
+configurations now fail explicitly. Rust host-key pin reads/writes remain local
+trust-store operations. Compilation could not be checked because Cargo and
+rustc are unavailable on `PATH`.
+
 ## Deliberately deferred
 
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- moving remaining compatibility SSH routes into C++;
+- expanding C++ support for remaining identity, host-key, and proxy modes that
+  currently fail closed;
 - full durable task/plan recovery beyond the pending-approval reattach path;
-- full C++ SFTP and PTY coverage for compatibility-only SSH configurations;
+- complete C++ SFTP and PTY support for currently unsupported SSH configurations;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
 The next milestones are new-layout Tauri installer parity checks, durable

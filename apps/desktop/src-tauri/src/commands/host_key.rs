@@ -159,17 +159,11 @@ pub async fn server_host_key_probe(
     let port = server.connection.port;
     let presented_fingerprint = match ssh_service::probe_host_key(&app, &state, &server_id).await {
         Ok(Some(fingerprint)) => fingerprint,
-        Ok(None) => state
-            .ssh
-            .probe_host_key(&host, port)
-            .await
-            .map(|probe| probe.fingerprint)
-            .map_err(|error| {
-                format!(
-                    "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
-             并且本机允许出站 SSH 连接。探针只读取指纹，失败不代表指纹有问题。"
-                )
-            })?,
+        Ok(None) => {
+            return Err(format!(
+                "探针连接 {host}:{port} 失败：当前目标或代理配置不受 C++ SSH 探针支持。请调整连接配置后重试。"
+            ));
+        }
         Err(error) => {
             return Err(format!(
                 "探针连接 {host}:{port} 失败：{error}。请确认主机名/端口填对了、这台机器现在可达，\
