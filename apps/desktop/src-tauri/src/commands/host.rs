@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
+use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_core::docker::{
     is_safe_container_ref, truncate_text, DockerLogsResult, DockerRestartResult, DEFAULT_LOG_TAIL,
     DEFAULT_RESTART_TIMEOUT, MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
@@ -1393,6 +1394,15 @@ async fn handle_sidecar_request_with_context(
     params: Value,
     cancel: CancellationToken,
 ) -> Result<Value, String> {
+    if method == "host.credentials.set" {
+        return set_provider_credential(state, params);
+    }
+    if method == "host.credentials.get" {
+        return get_provider_credential(state, params);
+    }
+    if method == "host.credentials.reclaim" {
+        return reclaim_provider_credential(state, params);
+    }
     if method == HOST_SSH_SERVICE_TARGET {
         return crate::commands::sidecar::resolve_ssh_service_target(state, params);
     }
@@ -1669,6 +1679,117 @@ async fn handle_sidecar_request_with_context(
     };
     finish_host_tool_call(state, &request, token, &response)?;
     response
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderCredentialSetRequest {
+    service: String,
+    account: String,
+    secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProviderCredentialReferenceRequest {
+    reference: String,
+}
+
+fn set_provider_credential(state: &AppState, params: Value) -> Result<Value, String> {
+    let request = serde_json::from_value::<ProviderCredentialSetRequest>(params)
+        .map_err(|_| "invalid provider credential request".to_string())?;
+    if request.service != "openai" || !valid_provider_credential_account(&request.account) {
+        return Err("provider credential request is outside the supported scope".into());
+    }
+    let credential_ref = CredentialRef::new(request.service, request.account);
+    if state
+        .credentials
+        .has(&credential_ref)
+        .map_err(|_| "provider credential store is unavailable".to_string())?
+    {
+        return Err("provider credential account already exists".into());
+    }
+    let stored = state
+        .credentials
+        .set(
+            credential_ref.service(),
+            credential_ref.account(),
+            &Secret::from_utf8(request.secret),
+        )
+        .map_err(|_| "could not store provider credential".to_string())?;
+    Ok(json!({ "credentialRef": stored.to_string_ref() }))
+}
+
+fn get_provider_credential(state: &AppState, params: Value) -> Result<Value, String> {
+    let request = serde_json::from_value::<ProviderCredentialReferenceRequest>(params)
+        .map_err(|_| "invalid provider credential request".to_string())?;
+    let reference = parse_provider_credential_reference(&request.reference)?;
+    let is_attached = state
+        .database
+        .providers()
+        .list_ai()
+        .map_err(|_| "could not check provider credential references".to_string())?
+        .iter()
+        .any(|provider| {
+            provider.api_key_credential_ref.as_deref() == Some(request.reference.as_str())
+        });
+    if !is_attached {
+        return Err("provider credential is not attached to a saved configuration".into());
+    }
+    let secret = state
+        .credentials
+        .get(&reference)
+        .map_err(|_| "provider credential is unavailable".to_string())?;
+    let value = secret
+        .as_utf8()
+        .map_err(|_| "provider credential is not valid UTF-8".to_string())?;
+    Ok(json!({ "secret": value.as_ref() }))
+}
+
+fn reclaim_provider_credential(state: &AppState, params: Value) -> Result<Value, String> {
+    let request = serde_json::from_value::<ProviderCredentialReferenceRequest>(params)
+        .map_err(|_| "invalid provider credential request".to_string())?;
+    let reference = parse_provider_credential_reference(&request.reference)?;
+    if state
+        .database
+        .providers()
+        .credential_ref_used_elsewhere(&request.reference, "")
+        .map_err(|_| "could not check provider credential references".to_string())?
+    {
+        return Ok(json!({ "reclaimed": false }));
+    }
+    crate::state::credential_cleanup::reclaim(
+        &state.database,
+        state.credentials.as_ref(),
+        &reference,
+    )?;
+    Ok(json!({ "reclaimed": true }))
+}
+
+fn parse_provider_credential_reference(reference: &str) -> Result<CredentialRef, String> {
+    let parsed = CredentialRef::parse(reference)
+        .map_err(|_| "invalid provider credential reference".to_string())?;
+    if parsed.service() != "openai"
+        || !(parsed.account().starts_with("provider_")
+            || parsed.account().starts_with("ccswitch_"))
+    {
+        return Err("provider credential reference is outside the supported scope".into());
+    }
+    Ok(parsed)
+}
+
+fn valid_provider_credential_account(account: &str) -> bool {
+    let Some((provider_part, nonce)) = account.rsplit_once('_') else {
+        return false;
+    };
+    account.starts_with("provider_")
+        && provider_part.len() > "provider_".len()
+        && account.len() <= 512
+        && nonce.len() == 32
+        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && account
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
 }
 
 fn record_failure(code: &str, message: impl Into<String>, retryable: bool) -> Value {

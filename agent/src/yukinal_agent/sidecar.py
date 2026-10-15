@@ -28,6 +28,7 @@ from .host_tools import (
 )
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
+from .provider_store import ProviderStore, ProviderStoreError, validate_provider_save
 from .ssh_tools import (
     _parse_docker_logs,
     _parse_docker_inspect,
@@ -70,6 +71,10 @@ METHODS = {
     "agent.approval.respond": True,
     "provider.models": True,
     "provider.test": True,
+    "provider.list": True,
+    "provider.save": True,
+    "provider.delete": True,
+    "provider.activate": True,
 }
 
 
@@ -101,6 +106,7 @@ class PythonSidecar:
         approval_ttl_seconds: int = 120,
         checkpointer: Any | None = None,
         managed_ssh_service_binary: Path | None = None,
+        provider_store: ProviderStore | None = None,
     ) -> None:
         if isinstance(approval_ttl_seconds, bool) or not isinstance(approval_ttl_seconds, int) or not 1 <= approval_ttl_seconds <= 3600:
             raise ValueError("approval_ttl_seconds must be between 1 and 3600")
@@ -121,6 +127,7 @@ class PythonSidecar:
         self._pending_approvals: dict[str, _PendingApproval] = {}
         self._managed_ssh_service_binary = managed_ssh_service_binary
         self._managed_ssh_tools_registered = False
+        self._provider_store = provider_store
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -218,7 +225,8 @@ class PythonSidecar:
             or request.get("jsonrpc") != "2.0"
             or not isinstance(request.get("method"), str)
             or request.get("method") not in (
-                "initialize", "provider.models", "provider.test", "agent.run.start", "agent.run.stop",
+                "initialize", "provider.models", "provider.test", "provider.list", "provider.save",
+                "provider.delete", "provider.activate", "agent.run.start", "agent.run.stop",
                 "agent.approval.respond",
             )
             or not isinstance(request.get("id"), int)
@@ -243,9 +251,17 @@ class PythonSidecar:
             elif not self._initialized:
                 raise _RpcFault(RPC_INVALID_REQUEST, "initialize must be the first call")
             elif method == "provider.models":
-                result = await self._list_provider_models(request.get("params", {}))
+                result = await self._provider_models(request.get("params", {}))
             elif method == "provider.test":
-                result = await self._test_provider(request.get("params", {}))
+                result = await self._provider_test(request.get("params", {}))
+            elif method == "provider.list":
+                result = await self._provider_list(request.get("params", {}))
+            elif method == "provider.save":
+                result = await self._provider_save(request.get("params", {}))
+            elif method == "provider.delete":
+                result = await self._provider_delete(request.get("params", {}))
+            elif method == "provider.activate":
+                result = await self._provider_activate(request.get("params", {}))
             elif method == "agent.run.start":
                 result = await self._run_start(request.get("params", {}))
             elif method == "agent.run.stop":
@@ -298,6 +314,211 @@ class PythonSidecar:
         except Exception:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog request failed") from None
         return {"models": models}
+
+    def _require_provider_store(self) -> ProviderStore:
+        if self._provider_store is None:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider storage is unavailable")
+        return self._provider_store
+
+    async def _provider_credential(self, reference: str) -> str:
+        if self._host_rpc is None:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential service is unavailable")
+        try:
+            result = await self._host_rpc.request(
+                "host.credentials.get", {"reference": reference}, timeout_seconds=8.0
+            )
+        except Exception:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential is unavailable") from None
+        secret = result.get("secret") if isinstance(result, dict) else None
+        if not isinstance(secret, str):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential is unavailable")
+        return secret
+
+    async def _provider_key(self, provider: dict[str, Any]) -> str | None:
+        reference = provider.get("apiKeyCredentialRef")
+        if reference is None:
+            return None
+        if not isinstance(reference, str):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential reference is invalid")
+        return await self._provider_credential(reference)
+
+    def _provider_runtime_config(
+        self, provider: dict[str, Any], api_key: str | None, timeout_ms: int = 30_000
+    ) -> dict[str, Any]:
+        kind = provider["kind"]
+        base_url = provider.get("baseUrl") or ""
+        if kind == "anthropic" and not base_url.strip():
+            base_url = "https://api.anthropic.com"
+        elif kind == "gemini" and not base_url.strip():
+            base_url = "https://generativelanguage.googleapis.com"
+        runtime: dict[str, Any] = {
+            "kind": kind,
+            "baseUrl": base_url,
+            "model": provider["model"],
+            "timeoutMs": timeout_ms,
+        }
+        if api_key is not None:
+            runtime["apiKey"] = api_key
+        if provider.get("customHeaders") is not None:
+            runtime["customHeaders"] = provider["customHeaders"]
+        if kind == "anthropic" and provider.get("apiVersion"):
+            runtime["apiVersion"] = provider["apiVersion"]
+        if kind == "openai-compatible":
+            runtime["wireApi"] = provider.get("wireApi", "chat")
+        return runtime
+
+    async def _provider_list(self, params: object) -> dict[str, Any]:
+        _strict_object(params, set())
+        store = self._require_provider_store()
+        providers = store.list_ai()
+        usable_ids: set[str] = set()
+        for provider in providers:
+            reference = provider.get("apiKeyCredentialRef")
+            if isinstance(reference, str):
+                try:
+                    key = await self._provider_credential(reference)
+                except _RpcFault:
+                    continue
+                if key.strip():
+                    usable_ids.add(provider["id"])
+            elif _is_local_provider_endpoint(provider.get("baseUrl", "")):
+                usable_ids.add(provider["id"])
+        return {"providers": store.normalize_ai_state(usable_ids)}
+
+    async def _provider_save(self, params: object) -> dict[str, Any]:
+        store = self._require_provider_store()
+        try:
+            config = validate_provider_save(params)
+            existing = store.get_save_target(config["providerId"])
+        except ProviderStoreError as error:
+            raise _provider_store_fault(error) from None
+        provider_id = (
+            existing["id"] if existing is not None else config["providerId"]
+        ) or f"prv_{uuid.uuid4().hex}"
+        if config["kind"] == "openai-compatible":
+            config["wireApi"] = config["wireApi"] or (existing or {}).get("wireApi") or "chat"
+        new_reference: str | None = None
+        api_key = config["apiKey"]
+        if isinstance(api_key, str):
+            account = f"provider_{provider_id}_{uuid.uuid4().hex}"
+            if self._host_rpc is None:
+                raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential service is unavailable")
+            try:
+                stored = await self._host_rpc.request(
+                    "host.credentials.set",
+                    {"service": "openai", "account": account, "secret": api_key},
+                    timeout_seconds=8.0,
+                )
+            except Exception:
+                raise _RpcFault(RPC_INTERNAL_ERROR, "Could not store provider credential") from None
+            new_reference = stored.get("credentialRef") if isinstance(stored, dict) else None
+            if not isinstance(new_reference, str):
+                raise _RpcFault(RPC_INTERNAL_ERROR, "Could not store provider credential")
+        try:
+            saved, old_reference = store.save_ai(provider_id, config, new_reference)
+        except ProviderStoreError as error:
+            if new_reference is not None:
+                await self._try_reclaim_provider_credential(new_reference)
+            raise _provider_store_fault(error) from None
+        if old_reference and old_reference != new_reference:
+            try:
+                if not store.credential_ref_used_elsewhere(old_reference, provider_id):
+                    await self._reclaim_provider_credential(old_reference)
+            except _RpcFault:
+                # The provider is already saved; matching the desktop behavior, a failed
+                # cleanup must not undo the successful configuration update.
+                pass
+        return {"provider": saved}
+
+    async def _provider_delete(self, params: object) -> dict[str, Any]:
+        parsed = _strict_object(params, {"providerId"})
+        provider_id = parsed.get("providerId")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        store = self._require_provider_store()
+        try:
+            reference, shared = store.delete_ai(provider_id)
+        except ProviderStoreError as error:
+            raise _provider_store_fault(error) from None
+        reclaimed = False
+        if reference and not shared:
+            result = await self._reclaim_provider_credential(reference)
+            reclaimed = result
+        return {"deleted": True, "credentialReclaimed": reclaimed}
+
+    async def _provider_activate(self, params: object) -> dict[str, Any]:
+        parsed = _strict_object(params, {"providerId"})
+        provider_id = parsed.get("providerId")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        try:
+            provider = self._require_provider_store().activate_ai(provider_id)
+        except ProviderStoreError as error:
+            raise _provider_store_fault(error) from None
+        return {"provider": provider}
+
+    async def _provider_models(self, params: object) -> dict[str, Any]:
+        parsed = _strict_object(params, {"providerId"})
+        provider_id = parsed.get("providerId")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        store = self._require_provider_store()
+        try:
+            provider = store.get_ai(provider_id)
+        except ProviderStoreError as error:
+            raise _provider_store_fault(error) from None
+        if provider is None:
+            raise _RpcFault(RPC_INTERNAL_ERROR, f"Provider `{provider_id}` was not found")
+        cached = provider.get("models") or [{
+            "id": provider["model"], "label": provider["model"],
+            "supportsToolCalling": True, "supportsStreaming": True,
+        }]
+        try:
+            api_key = await self._provider_key(provider)
+            response = await self._list_provider_models(
+                self._provider_runtime_config(provider, api_key)
+            )
+        except _RpcFault:
+            raise
+        models = response.get("models") if isinstance(response, dict) else None
+        if not isinstance(models, list) or not models:
+            models = cached
+        try:
+            store.update_models(provider_id, models)
+        except ProviderStoreError as error:
+            raise _provider_store_fault(error) from None
+        return {"models": models}
+
+    async def _provider_test(self, params: object) -> dict[str, bool]:
+        parsed = _strict_object(params, {"providerId"})
+        provider_id = parsed.get("providerId")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        try:
+            provider = self._require_provider_store().get_ai(provider_id)
+        except ProviderStoreError as error:
+            raise _provider_store_fault(error) from None
+        if provider is None:
+            raise _RpcFault(RPC_INTERNAL_ERROR, f"Provider `{provider_id}` was not found")
+        api_key = await self._provider_key(provider)
+        return await self._test_provider(self._provider_runtime_config(provider, api_key))
+
+    async def _reclaim_provider_credential(self, reference: str) -> bool:
+        if self._host_rpc is None:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential service is unavailable")
+        try:
+            result = await self._host_rpc.request(
+                "host.credentials.reclaim", {"reference": reference}, timeout_seconds=8.0
+            )
+        except Exception:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Could not reclaim provider credential") from None
+        return isinstance(result, dict) and result.get("reclaimed") is True
+
+    async def _try_reclaim_provider_credential(self, reference: str) -> None:
+        try:
+            await self._reclaim_provider_credential(reference)
+        except _RpcFault:
+            pass
 
     def _create_runtime_model(self, params: object) -> tuple[Any, int]:
         config, api_key, timeout_ms = _parse_runtime_model_config(params)
@@ -922,6 +1143,32 @@ def _parse_runtime_model_config(params: object) -> tuple[ModelConfig, str | None
     return config, api_key, timeout_ms
 
 
+def _provider_store_fault(error: ProviderStoreError) -> _RpcFault:
+    code = RPC_INVALID_PARAMS if error.code == "invalid_params" else RPC_INTERNAL_ERROR
+    if error.code == "not_found":
+        message = str(error)
+    elif error.code == "conflict":
+        message = str(error)
+    else:
+        message = str(error)
+    return _RpcFault(code, message)
+
+
+def _is_local_provider_endpoint(value: str) -> bool:
+    normalized = value.strip().lower()
+    prefixes = (
+        "http://localhost", "https://localhost",
+        "http://127.0.0.1", "https://127.0.0.1",
+        "http://[::1]", "https://[::1]",
+    )
+    return any(
+        normalized == prefix
+        or normalized.startswith(f"{prefix}:")
+        or normalized.startswith(f"{prefix}/")
+        for prefix in prefixes
+    )
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, request: Request, file: Any, code: int, message: str, headers: Any, new_url: str) -> None:
         return None
@@ -1422,7 +1669,12 @@ def main() -> None:
             managed_ssh_service_binary = Path(binary_value).expanduser()
         else:
             print("C++ SSH service is unavailable; desktop SSH tools are disabled", file=sys.stderr, flush=True)
-    sidecar = PythonSidecar(registry, managed_ssh_service_binary=managed_ssh_service_binary)
+    provider_store = ProviderStore(Path(data_dir) / "yukinal.db") if data_dir else None
+    sidecar = PythonSidecar(
+        registry,
+        managed_ssh_service_binary=managed_ssh_service_binary,
+        provider_store=provider_store,
+    )
     try:
         asyncio.run(_serve_runtime(sidecar, data_dir, len(registry.list())))
     except SshServiceProcessError as error:

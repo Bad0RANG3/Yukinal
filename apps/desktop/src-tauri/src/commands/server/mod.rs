@@ -51,6 +51,7 @@ pub(crate) async fn normalize_snapshot_outputs_via_python(
         state,
         "server.snapshot.normalize",
         serde_json::json!({ "outputs": outputs }),
+        std::time::Duration::from_secs(15),
     )
     .await?;
     response
@@ -71,22 +72,24 @@ pub(crate) async fn normalize_ssh_output_via_python(
         state,
         method,
         serde_json::json!({ "stdout": stdout, "arguments": arguments }),
+        std::time::Duration::from_secs(15),
     )
     .await
 }
 
-async fn call_python_sidecar(
+pub(crate) async fn call_python_sidecar(
     app: &AppHandle,
     state: &AppState,
     method: &str,
     params: serde_json::Value,
+    timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
     if !state.supervisor.status().await.running {
         crate::commands::start_sidecar(app).await?;
     }
     state
         .supervisor
-        .request(method, params, std::time::Duration::from_secs(15))
+        .request(method, params, timeout)
         .await
         .map_err(|error| error.to_string())
 }
