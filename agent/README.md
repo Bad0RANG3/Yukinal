@@ -6,8 +6,8 @@ target/risk policy, parameter-bound approvals, append-only audit events, MCP
 clients and a bounded LangGraph workflow. The model loop supports OpenAI
 compatible endpoints, Anthropic and Gemini through their official LangChain
 adapters. The desktop approval response RPC is wired through the Python sidecar;
-the current desktop tool catalog remains read-only. Durable task storage and
-broader write-capable desktop tools remain future work.
+its catalog includes read-only tools and plan-bound, approval-required actions.
+Durable task storage and broader write-capable desktop tools remain future work.
 
 ## Install
 
@@ -92,8 +92,9 @@ Python sidecar implements `initialize`, `system.ping`, `tools.list`,
 `provider.models` returns model catalogs for all three providers. Over the same
 NDJSON connection it can request host-side tool
 execution and fetch the host's MCP catalog. The first integrated set contains
-read-only server, Docker, systemd, package and file tools, plus MCP tools the
-host marks low-risk. The host remains the final authorization boundary. When a
+read-only server, Docker, systemd, package and file tools, plus `docker.restart`,
+`systemd.restart`, and MCP tools the host marks low-risk. The host remains the
+final authorization boundary. When a
 registered tool requires approval, the sidecar emits the approval event, accepts
 the desktop's response RPC, and resumes the paused call; rejection and expiry
 stop the graph without retrying. With `YUKINAL_DATA_DIR` set, the production
@@ -139,16 +140,17 @@ stable tool error instead of being copied into the Agent result.
 
 `SshServiceClient` provides Python wrappers for the C++ service's fixed
 read-only connection check, service inventory, Docker listing/logs/inspection,
-systemd inspection, package inspection, and bounded server logs. Each wrapper
-validates its parameters before sending a structured operation. These client
-methods do not automatically add Agent tools; the embedding host still chooses
-which operations to register and authorize.
+systemd inspection, package inspection, and bounded server logs, plus structured
+Docker and systemd restart operations. Each wrapper validates its parameters
+before sending a structured operation. These client methods do not automatically
+add Agent tools; the embedding host still chooses which operations to register
+and authorize.
 
 The standalone `ModelDrivenAgent` API receives the identity and allowlists from
-its embedding host. In the desktop bridge, the Python sidecar exposes only its
-registered read-only tools and passes the resolved target and call to the
-desktop host, which remains responsible for its authenticated permission and
-approval checks. The model never supplies those claims.
+its embedding host. In the desktop bridge, the Python sidecar exposes registered
+read-only tools and plan-bound write actions. It passes the resolved target and
+action call to the desktop host, which remains responsible for authenticated
+permission, plan, and approval checks. The model never supplies those claims.
 
 ```python
 import asyncio

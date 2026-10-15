@@ -50,9 +50,9 @@ during migration. The approved desktop actions remain behind host-side plan
 checks and one-time call grants. Python exposes approval-required host tools
 only while a durable remote-goal action step authorizes them; approval requests,
 rejection, expiry, and accepted calls round-trip through the desktop host.
-On C++-supported targets, `systemd.restart` now runs as a structured operation
-through the Python caller; the host still checks the durable plan and consumes
-the exact one-time approval before returning the selected target credentials.
+On C++-supported targets, `systemd.restart` and `docker.restart` now run as
+structured operations through the Python caller; the host checks the durable
+plan and consumes the exact one-time approval before returning target credentials.
 Durable task recovery and broader tool coverage remain in progress. The
 existing React/Tauri UI remains intact while those paths are migrated.
 

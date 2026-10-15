@@ -101,8 +101,8 @@ const HOST_SSH_FILESYSTEM_CLEANUP_TARGET: &str = "host.ssh.filesystem_cleanup_ta
 const HOST_FILESYSTEM_BACKUP_DELETED: &str = "host.investigation.filesystem_backup.deleted";
 const HOST_FILESYSTEM_BACKUP_LIST_QUERY: &str = "host.filesystem.backup.list_query";
 const HOST_FILESYSTEM_BACKUP_RETENTION_SCAN: &str = "host.filesystem.backup.retention_scan";
-const HOST_SSH_SYSTEMD_RESTART_TARGET: &str = "host.ssh.systemd_restart_target";
-const HOST_SSH_SYSTEMD_RESTART_FINISHED: &str = "host.ssh.systemd_restart_finished";
+const HOST_SSH_EFFECTFUL_ACTION_TARGET: &str = "host.ssh.effectful_action_target";
+const HOST_SSH_EFFECTFUL_ACTION_FINISHED: &str = "host.ssh.effectful_action_finished";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -304,13 +304,13 @@ struct HostFilesystemBackupRetentionScanRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct HostSshSystemdRestartTargetRequest {
+struct HostSshEffectfulActionTargetRequest {
     tool_call: HostToolExecuteRequest,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct HostSshSystemdRestartFinishedRequest {
+struct HostSshEffectfulActionFinishedRequest {
     tool_call: HostToolExecuteRequest,
     outcome: String,
 }
@@ -1407,11 +1407,11 @@ async fn handle_sidecar_request_with_context(
     if method == HOST_FILESYSTEM_BACKUP_RETENTION_SCAN {
         return scan_ssh_filesystem_backups_for_retention(state, params).await;
     }
-    if method == HOST_SSH_SYSTEMD_RESTART_TARGET {
-        return resolve_ssh_systemd_restart_action_target(state, params).await;
+    if method == HOST_SSH_EFFECTFUL_ACTION_TARGET {
+        return resolve_ssh_effectful_action_target(state, params).await;
     }
-    if method == HOST_SSH_SYSTEMD_RESTART_FINISHED {
-        return finish_ssh_systemd_restart_action(state, params);
+    if method == HOST_SSH_EFFECTFUL_ACTION_FINISHED {
+        return finish_ssh_effectful_action(state, params);
     }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
@@ -2238,58 +2238,85 @@ async fn scan_ssh_filesystem_backups_for_retention(
     Ok(response)
 }
 
-async fn resolve_ssh_systemd_restart_action_target(
+fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Result<(), Value> {
+    match tool_call.tool_name.as_str() {
+        SYSTEMD_RESTART => {
+            let input = serde_json::from_value::<SystemdRestartInput>(tool_call.input.clone())
+                .map_err(|_| {
+                    failed("invalid_input", "systemd.restart input is invalid", false, None)
+                })?;
+            if !is_safe_systemd_service_ref(&input.service) {
+                return Err(failed(
+                    "invalid_input",
+                    "service must be a .service unit without shell metacharacters",
+                    false,
+                    None,
+                ));
+            }
+            let timeout = input
+                .timeout_seconds
+                .unwrap_or(DEFAULT_SYSTEMD_RESTART_TIMEOUT);
+            if !(1..=MAX_SYSTEMD_RESTART_TIMEOUT).contains(&timeout) {
+                return Err(failed(
+                    "invalid_input",
+                    format!("timeoutSeconds must be between 1 and {MAX_SYSTEMD_RESTART_TIMEOUT}"),
+                    false,
+                    None,
+                ));
+            }
+            Ok(())
+        }
+        DOCKER_RESTART => {
+            let input = serde_json::from_value::<DockerRestartInput>(tool_call.input.clone())
+                .map_err(|_| {
+                    failed("invalid_input", "docker.restart input is invalid", false, None)
+                })?;
+            if !is_safe_container_ref(&input.container) {
+                return Err(failed(
+                    "invalid_input",
+                    "container must be a Docker name or id without shell metacharacters",
+                    false,
+                    None,
+                ));
+            }
+            let timeout = input.timeout_seconds.unwrap_or(DEFAULT_RESTART_TIMEOUT);
+            if !(1..=MAX_RESTART_TIMEOUT).contains(&timeout) {
+                return Err(failed(
+                    "invalid_input",
+                    format!("timeoutSeconds must be between 1 and {MAX_RESTART_TIMEOUT}"),
+                    false,
+                    None,
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(failed(
+            "denied_by_policy",
+            "the requested SSH action is not supported by this route",
+            false,
+            None,
+        )),
+    }
+}
+
+async fn resolve_ssh_effectful_action_target(
     state: &AppState,
     params: Value,
 ) -> Result<Value, String> {
-    let request = serde_json::from_value::<HostSshSystemdRestartTargetRequest>(params)
-        .map_err(|_| "the systemd restart target request is invalid".to_string())?;
+    let request = serde_json::from_value::<HostSshEffectfulActionTargetRequest>(params)
+        .map_err(|_| "the SSH action target request is invalid".to_string())?;
     let tool_call = request.tool_call;
-    if tool_call.tool_name != SYSTEMD_RESTART {
-        return Ok(failed(
-            "denied_by_policy",
-            "systemd restart target request has an unexpected tool name",
-            false,
-            None,
-        ));
+    if let Err(response) = validate_ssh_effectful_action_input(&tool_call) {
+        return Ok(response);
     }
-    let input = match serde_json::from_value::<SystemdRestartInput>(tool_call.input.clone()) {
-        Ok(input) => input,
-        Err(_) => {
-            return Ok(failed(
-                "invalid_input",
-                "systemd.restart input is invalid",
-                false,
-                None,
-            ));
-        }
-    };
-    if !is_safe_systemd_service_ref(&input.service) {
-        return Ok(failed(
-            "invalid_input",
-            "service must be a .service unit without shell metacharacters",
-            false,
-            None,
-        ));
-    }
-    let timeout = input
-        .timeout_seconds
-        .unwrap_or(DEFAULT_SYSTEMD_RESTART_TIMEOUT);
-    if !(1..=MAX_SYSTEMD_RESTART_TIMEOUT).contains(&timeout) {
-        return Ok(failed(
-            "invalid_input",
-            format!("timeoutSeconds must be between 1 and {MAX_SYSTEMD_RESTART_TIMEOUT}"),
-            false,
-            None,
-        ));
-    }
+    let tool_name = tool_call.tool_name.as_str();
     let (Some(server_id), Some(task_id)) = (
         tool_call.target.server_id.as_deref(),
         tool_call.task_id.as_deref(),
     ) else {
         return Ok(failed(
             "durable_plan_required",
-            "systemd.restart requires a durable remote action plan",
+            "this SSH action requires a durable remote action plan",
             false,
             None,
         ));
@@ -2297,7 +2324,7 @@ async fn resolve_ssh_systemd_restart_action_target(
     if tool_call.target.host != "remote" || !server_id.starts_with("srv_") {
         return Ok(failed(
             "denied_by_policy",
-            "systemd.restart requires a resolved remote server",
+            "this SSH action requires a resolved remote server",
             false,
             None,
         ));
@@ -2309,7 +2336,7 @@ async fn resolve_ssh_systemd_restart_action_target(
     }) {
         return Ok(failed(
             "invalid_input",
-            "systemd.restart requires a valid durable run identity",
+            "the SSH action requires a valid durable run identity",
             false,
             None,
         ));
@@ -2317,7 +2344,7 @@ async fn resolve_ssh_systemd_restart_action_target(
     if effectful_tool_requires_durable_plan(state, &tool_call).await {
         return Ok(failed(
             "durable_plan_required",
-            "systemd.restart requires a durable task, ChangePlan and action step",
+            "this SSH action requires a durable task, ChangePlan and action step",
             false,
             Some(json!({ "code": "durable_plan_required" })),
         ));
@@ -2329,7 +2356,7 @@ async fn resolve_ssh_systemd_restart_action_target(
     if server.metadata.environment != tool_call.target.environment {
         return Ok(failed(
             "denied_by_policy",
-            "systemd.restart target environment does not match the selected server",
+            "the SSH action target environment does not match the selected server",
             false,
             None,
         ));
@@ -2343,7 +2370,7 @@ async fn resolve_ssh_systemd_restart_action_target(
         {
             return Ok(failed(
                 "denied_by_policy",
-                "systemd.restart target is not attached to that workspace",
+                "the SSH action target is not attached to that workspace",
                 false,
                 None,
             ));
@@ -2364,7 +2391,7 @@ async fn resolve_ssh_systemd_restart_action_target(
     if task.server_id.as_deref() != Some(server_id) {
         return Ok(failed(
             "denied_by_policy",
-            "systemd.restart target does not match the task's registered server",
+            "the SSH action target does not match the task's registered server",
             false,
             None,
         ));
@@ -2374,7 +2401,7 @@ async fn resolve_ssh_systemd_restart_action_target(
         Err(_) => {
             return Ok(failed(
                 "denied_by_policy",
-                "systemd.restart target is invalid",
+                "the SSH action target is invalid",
                 false,
                 None,
             ));
@@ -2383,12 +2410,12 @@ async fn resolve_ssh_systemd_restart_action_target(
     if !same_investigation_target(&task.scope, &requested_scope) {
         return Ok(failed(
             "denied_by_policy",
-            "systemd.restart target does not match the task scope",
+            "the SSH action target does not match the task scope",
             false,
             None,
         ));
     }
-    if let Some(violation) = task_guardrail_violation(&task, SYSTEMD_RESTART, &tool_call.input) {
+    if let Some(violation) = task_guardrail_violation(&task, tool_name, &tool_call.input) {
         return Ok(failed(
             "denied_by_policy",
             violation.message,
@@ -2399,7 +2426,7 @@ async fn resolve_ssh_systemd_restart_action_target(
     match check_plan_for_tool(
         state,
         task_id,
-        SYSTEMD_RESTART,
+        tool_name,
         &tool_call.target,
         PlanCheckBinding {
             input: &tool_call.input,
@@ -2459,46 +2486,11 @@ async fn resolve_ssh_systemd_restart_action_target(
     Ok(json!({ "status": "success", "targetData": target_data }))
 }
 
-fn finish_ssh_systemd_restart_action(state: &AppState, params: Value) -> Result<Value, String> {
-    let request = serde_json::from_value::<HostSshSystemdRestartFinishedRequest>(params)
-        .map_err(|_| "the systemd restart completion request is invalid".to_string())?;
-    if request.tool_call.tool_name != SYSTEMD_RESTART {
-        return Ok(failed(
-            "denied_by_policy",
-            "systemd restart completion has an unexpected tool name",
-            false,
-            None,
-        ));
-    }
-    let input = match serde_json::from_value::<SystemdRestartInput>(request.tool_call.input.clone()) {
-        Ok(input) => input,
-        Err(_) => {
-            return Ok(failed(
-                "invalid_input",
-                "systemd.restart input is invalid",
-                false,
-                None,
-            ));
-        }
-    };
-    if !is_safe_systemd_service_ref(&input.service) {
-        return Ok(failed(
-            "invalid_input",
-            "systemd.restart completion input is invalid",
-            false,
-            None,
-        ));
-    }
-    let timeout = input
-        .timeout_seconds
-        .unwrap_or(DEFAULT_SYSTEMD_RESTART_TIMEOUT);
-    if !(1..=MAX_SYSTEMD_RESTART_TIMEOUT).contains(&timeout) {
-        return Ok(failed(
-            "invalid_input",
-            "systemd.restart completion timeout is invalid",
-            false,
-            None,
-        ));
+fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostSshEffectfulActionFinishedRequest>(params)
+        .map_err(|_| "the SSH action completion request is invalid".to_string())?;
+    if let Err(response) = validate_ssh_effectful_action_input(&request.tool_call) {
+        return Ok(response);
     }
     if [
         request.tool_call.call_id.as_str(),
@@ -2510,26 +2502,43 @@ fn finish_ssh_systemd_restart_action(state: &AppState, params: Value) -> Result<
     }) {
         return Ok(failed(
             "invalid_input",
-            "systemd restart completion call identity is invalid",
+            "SSH action completion call identity is invalid",
             false,
             None,
         ));
     }
+    let output = match request.tool_call.tool_name.as_str() {
+        SYSTEMD_RESTART => {
+            let input = serde_json::from_value::<SystemdRestartInput>(
+                request.tool_call.input.clone(),
+            )
+                .map_err(|_| "systemd.restart completion input is invalid".to_string())?;
+            json!({ "service": input.service, "restarted": true })
+        }
+        DOCKER_RESTART => {
+            let input = serde_json::from_value::<DockerRestartInput>(
+                request.tool_call.input.clone(),
+            )
+                .map_err(|_| "docker.restart completion input is invalid".to_string())?;
+            json!({ "container": input.container, "restarted": true })
+        }
+        _ => return Ok(failed("denied_by_policy", "unsupported SSH action", false, None)),
+    };
     let response = match request.outcome.as_str() {
-        "succeeded" => success(json!({ "service": input.service, "restarted": true })),
+        "succeeded" => success(output),
         "failed" => failed(
             "execution_failed",
-            "systemd restart did not complete successfully",
+            format!("{} did not complete successfully", request.tool_call.tool_name),
             false,
             None,
         ),
         "unknown" => failed(
             "transport",
-            "systemd restart outcome is unknown",
+            format!("{} outcome is unknown", request.tool_call.tool_name),
             true,
             None,
         ),
-        _ => return Ok(failed("invalid_input", "systemd restart outcome is invalid", false, None)),
+        _ => return Ok(failed("invalid_input", "SSH action outcome is invalid", false, None)),
     };
     let token = HostToolCallToken {
         key: (

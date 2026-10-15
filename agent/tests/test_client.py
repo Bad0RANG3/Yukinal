@@ -278,6 +278,32 @@ class ClientTests(unittest.TestCase):
                 invoke()
         self.assertIsNone(self.server.last_request)
 
+    def test_docker_restart_uses_a_structured_bounded_operation(self) -> None:
+        self.server.response_body["operation"] = "docker_restart"
+        result = self.client.docker_restart("staging-web-01", "api-1", 20)
+        self.assertEqual(result.operation, "docker_restart")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "docker_restart",
+                "parameters": {"container": "api-1", "grace_period_seconds": 20},
+                "timeout_seconds": 30,
+            },
+        )
+
+    def test_docker_restart_rejects_invalid_containers_and_grace_periods(self) -> None:
+        invalid_calls = (
+            lambda: self.client.docker_restart("staging-web-01", "api;id"),
+            lambda: self.client.docker_restart("staging-web-01", "api-1", True),
+            lambda: self.client.docker_restart("staging-web-01", "api-1", 0),
+            lambda: self.client.docker_restart("staging-web-01", "api-1", 121),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke), self.assertRaises(ValueError):
+                invoke()
+        self.assertIsNone(self.server.last_request)
+
     def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
         self.server.response_body["operation"] = "sftp_write"
         self.server.response_body["stdout"] = '{"bytes_written":4}'

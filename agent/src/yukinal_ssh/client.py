@@ -178,6 +178,25 @@ class SshServiceClient:
             target_id, "docker_inspect", {"container": container}, timeout_seconds
         )
 
+    def docker_restart(
+        self, target_id: str, container: str, grace_period_seconds: int = 10
+    ) -> SshOperationResult:
+        """Restart one validated Docker container through the structured operation."""
+        if not isinstance(container, str) or not _CONTAINER_REF.fullmatch(container):
+            raise ValueError("container must be a safe container reference")
+        if (
+            isinstance(grace_period_seconds, bool)
+            or not isinstance(grace_period_seconds, int)
+            or not 1 <= grace_period_seconds <= 120
+        ):
+            raise ValueError("grace_period_seconds must be an integer from 1 to 120")
+        return self._execute_operation(
+            target_id,
+            "docker_restart",
+            {"container": container, "grace_period_seconds": grace_period_seconds},
+            30,
+        )
+
     def systemd_inspect(
         self, target_id: str, service: str, timeout_seconds: int = 10
     ) -> SshOperationResult:

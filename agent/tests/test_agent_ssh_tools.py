@@ -41,7 +41,7 @@ class FakeDesktopHost:
         self, method: str, params: dict[str, Any], *, timeout_seconds: float
     ) -> dict[str, Any]:
         self.calls.append((method, params))
-        if method == "host.ssh.systemd_restart_finished":
+        if method == "host.ssh.effectful_action_finished":
             return {"status": "success", "finished": True}
         if method == "host.investigation.plan.check":
             return {
@@ -79,7 +79,7 @@ class FakeDesktopHost:
             },
             "credentials": {"SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"},
         }
-        if method == "host.ssh.systemd_restart_target":
+        if method == "host.ssh.effectful_action_target":
             return {"status": "success", "targetData": payload}
         if method == "host.ssh.filesystem_read_target":
             payload["filesystemRead"] = {
@@ -261,6 +261,9 @@ class FakeDesktopSshClient:
             stderr="", duration_ms=3, output_truncated=False,
         )
 
+    def docker_restart(self, *arguments: Any) -> Any:
+        return self._result("docker_restart", *arguments)
+
     def systemd_inspect(self, *arguments: Any) -> Any:
         self.calls.append(("systemd_inspect", arguments))
         return SimpleNamespace(
@@ -382,7 +385,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
-            "filesystem.backup.cleanup", "systemd.restart",
+            "filesystem.backup.cleanup", "systemd.restart", "docker.restart",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -580,7 +583,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [method for method, _params in host.calls],
-            ["host.ssh.systemd_restart_target", "host.ssh.systemd_restart_finished"],
+            ["host.ssh.effectful_action_target", "host.ssh.effectful_action_finished"],
         )
         tool_call = host.calls[0][1]["toolCall"]
         self.assertEqual(tool_call["approvalId"], "apr-approved-systemd")
@@ -588,6 +591,62 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_call["planStepId"], "step-1")
         self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
         self.assertEqual(len(FakeDesktopSshProcess.instances), 1)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_desktop_docker_restart_uses_approved_host_route_and_cpp_operation(self) -> None:
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {"container": "api-1", "timeoutSeconds": 10}
+        fingerprint = approval_fingerprint(
+            "docker.restart",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"docker.restart"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-docker"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-docker-1",
+            trace_id="trace-docker-1",
+            call_id="call-docker-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            result = await registry.execute(
+                "docker.restart", arguments, context, call_id=context.call_id
+            )
+
+        self.assertEqual(result.value, {"container": "api-1", "restarted": True})
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [("docker_restart", ("srv_stage1", "api-1", 10))],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            ["host.ssh.effectful_action_target", "host.ssh.effectful_action_finished"],
+        )
+        self.assertEqual(host.calls[0][1]["toolCall"]["toolName"], "docker.restart")
+        self.assertEqual(host.calls[0][1]["toolCall"]["approvalId"], "apr-approved-docker")
+        self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 
