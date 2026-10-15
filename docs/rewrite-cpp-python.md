@@ -450,5 +450,11 @@ The next milestones are installed-app parity checks, removing the Node fallback,
 durable task/plan state, and automatic selected-target synchronization to the C++
 service configuration, while keeping
 host authorization as the final gate. A real SSH success against an OpenSSH
-server and installed frozen-Agent lifecycle remain unverified. Do not mark later
-product requirements as delivered by the scaffold or documentation.
+server remains unverified because Docker is unavailable. The frozen Python
+Agent build and installed-resource layout smoke passed on Windows 11 / Python
+3.14.8 with a restricted `PATH`, including provider/MCP imports and the JSON-RPC
+stdio lifecycle. The full Tauri installer smoke and Rust-to-Python host
+integration remain unverified because Cargo and rustc are unavailable in this
+environment. Keep the Node fallback until that full installer path is verified.
+Do not mark later product requirements as delivered by the scaffold or
+documentation.
