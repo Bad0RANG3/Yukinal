@@ -17,6 +17,7 @@ from .host_tools import (
     _FILESYSTEM_EDIT_INPUT_SCHEMA,
     _FILESYSTEM_RESTORE_INPUT_SCHEMA,
     _FILESYSTEM_WRITE_INPUT_SCHEMA,
+    _SERVER_EXEC_SCHEMA,
     _execute_on_host,
 )
 from .filesystem_action_ledger import FilesystemActionLedger, FilesystemActionLedgerError
@@ -598,12 +599,31 @@ def register_desktop_ssh_tools(
             timeout_ms=60_000,
             cancellable=True,
         ))
+    if "server.exec" not in existing_names:
+        registry.register(ToolSpec(
+            name="server.exec",
+            description=(
+                "Run one host-approved, plan-bound command through the one-shot C++ SSH service. "
+                "The desktop host validates the input and supplies the command wrapper and capability."
+            ),
+            input_schema=_SERVER_EXEC_SCHEMA,
+            risk_level="destructive",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_ssh_effectful_action(
+                host, binary, "server.exec", arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=45_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
         | {
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
             "filesystem.backup.cleanup", "systemd.restart", "docker.restart",
-            "package.install",
+            "package.install", "server.exec",
         }
     )
 
@@ -656,11 +676,15 @@ async def _finish_desktop_ssh_effectful_action(
     host: HostRpcClient,
     tool_call: dict[str, Any],
     outcome: str,
+    result: dict[str, Any] | None = None,
 ) -> None:
+    params: dict[str, Any] = {"toolCall": tool_call, "outcome": outcome}
+    if result is not None:
+        params["result"] = result
     try:
         response = await host.request(
             "host.ssh.effectful_action_finished",
-            {"toolCall": tool_call, "outcome": outcome},
+            params,
             timeout_seconds=8.0,
         )
     except asyncio.CancelledError:
@@ -692,8 +716,9 @@ async def _desktop_ssh_effectful_action(
         "systemd.restart": "service",
         "docker.restart": "container",
         "package.install": "package",
+        "server.exec": "command",
     }[tool_name]
-    resource = arguments[resource_key]
+    resource = arguments.get(resource_key)
     tool_call = _ssh_effectful_action_host_call(tool_name, arguments, context)
     try:
         response = await host.request(
@@ -710,6 +735,8 @@ async def _desktop_ssh_effectful_action(
     if not isinstance(response, dict):
         raise ToolCallError("invalid_host_response", "the desktop host returned an invalid SSH action target")
     if response.get("status") == "already_completed":
+        if tool_name == "server.exec":
+            return _validate_server_exec_output(response.get("output"), arguments["maxOutputBytes"])
         if tool_name == "package.install":
             completed = {"manager": arguments["manager"], "package": resource, "installed": True}
             if "version" in arguments:
@@ -729,7 +756,12 @@ async def _desktop_ssh_effectful_action(
             message if isinstance(message, str) else "the desktop host rejected the SSH action request",
         )
     payload = response.get("targetData")
-    if response.get("status") != "success" or not isinstance(payload, dict):
+    remote_command = response.get("command") if tool_name == "server.exec" else None
+    if (
+        response.get("status") != "success"
+        or not isinstance(payload, dict)
+        or (tool_name == "server.exec" and (not isinstance(remote_command, str) or not remote_command))
+    ):
         if response.get("status") == "success":
             await _finish_desktop_ssh_effectful_action(host, tool_call, "failed")
         raise ToolCallError("invalid_host_response", "the desktop host returned an invalid SSH action target")
@@ -761,7 +793,7 @@ async def _desktop_ssh_effectful_action(
                 resource,
                 arguments["timeoutSeconds"],
             )
-        else:
+        elif tool_name == "package.install":
             result = await asyncio.to_thread(
                 client.package_install,
                 target_id,
@@ -769,6 +801,14 @@ async def _desktop_ssh_effectful_action(
                 resource,
                 arguments.get("version"),
                 arguments["timeoutSeconds"],
+            )
+        else:
+            result = await asyncio.to_thread(
+                client.server_exec,
+                target_id,
+                remote_command,
+                arguments["timeoutMs"],
+                arguments["maxOutputBytes"],
             )
         outcome = "succeeded" if result.exit_code == 0 else "failed"
     except asyncio.CancelledError:
@@ -793,11 +833,26 @@ async def _desktop_ssh_effectful_action(
             "transport", "the approved SSH action did not return a usable result"
         ) from None
     else:
-        await _finish_desktop_ssh_effectful_action(host, tool_call, outcome)
+        completion_result = None
+        if tool_name == "server.exec":
+            completion_result = {
+                "state": "completed",
+                "exitCode": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "stdoutTruncated": result.stdout_truncated,
+                "stderrTruncated": result.stderr_truncated,
+                "durationMs": result.duration_ms,
+            }
+        await _finish_desktop_ssh_effectful_action(
+            host, tool_call, outcome, completion_result
+        )
         if result.exit_code != 0:
             raise ToolCallError(
                 "execution_failed", f"could not execute the approved {tool_name} action"
             )
+        if tool_name == "server.exec":
+            return _validate_server_exec_output(completion_result, arguments["maxOutputBytes"])
         if tool_name == "package.install":
             completed = {
                 "manager": arguments["manager"],
@@ -818,6 +873,33 @@ async def _desktop_ssh_effectful_action(
             except Exception:
                 if not cancelled:
                     raise
+
+
+def _validate_server_exec_output(value: object, max_output_bytes: int) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "state", "exitCode", "stdout", "stderr", "stdoutTruncated", "stderrTruncated", "durationMs"
+    }:
+        raise ToolCallError("invalid_host_response", "the host returned an invalid server.exec result")
+    exit_code = value.get("exitCode")
+    stdout = value.get("stdout")
+    stderr = value.get("stderr")
+    duration_ms = value.get("durationMs")
+    if (
+        value.get("state") != "completed"
+        or isinstance(exit_code, bool)
+        or not isinstance(exit_code, int)
+        or not 0 <= exit_code <= 255
+        or not isinstance(stdout, str)
+        or not isinstance(stderr, str)
+        or not isinstance(value.get("stdoutTruncated"), bool)
+        or not isinstance(value.get("stderrTruncated"), bool)
+        or isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 0
+        or len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) > max_output_bytes * 3
+    ):
+        raise ToolCallError("invalid_host_response", "the host returned an invalid server.exec result")
+    return dict(value)
 
 
 async def _desktop_filesystem_write(

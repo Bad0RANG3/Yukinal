@@ -80,7 +80,11 @@ class FakeDesktopHost:
             "credentials": {"SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"},
         }
         if method == "host.ssh.effectful_action_target":
-            return {"status": "success", "targetData": payload}
+            response = {"status": "success", "targetData": payload}
+            if isinstance(tool_call, dict) and tool_call.get("toolName") == "server.exec":
+                payload["target"]["allow_server_exec"] = True
+                response["command"] = "cd '/srv/app' && /bin/sh -c 'printf hello'"
+            return response
         if method == "host.ssh.filesystem_read_target":
             payload["filesystemRead"] = {
                 "path": params["path"],
@@ -157,6 +161,7 @@ class FakeDesktopHost:
 
 class FakeDesktopSshProcess:
     instances: list[FakeDesktopSshProcess] = []
+    payloads: list[object] = []
 
     def __init__(self) -> None:
         self.started = False
@@ -167,6 +172,7 @@ class FakeDesktopSshProcess:
     def for_desktop_target(
         cls, _binary: Path, _payload: object
     ) -> tuple[FakeDesktopSshProcess, str, str]:
+        cls.payloads.append(_payload)
         return cls(), "x" * 40, "http://127.0.0.1:54321"
 
     async def start(self) -> None:
@@ -277,6 +283,17 @@ class FakeDesktopSshClient:
 
     def package_install(self, *arguments: Any) -> Any:
         return self._result("package_install", *arguments)
+
+    def server_exec(self, *arguments: Any) -> Any:
+        self.calls.append(("server_exec", arguments))
+        return SimpleNamespace(
+            exit_code=0,
+            stdout="hello\n",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            duration_ms=9,
+        )
 
     def package_inspect(self, *arguments: Any) -> Any:
         self.calls.append(("package_inspect", arguments))
@@ -389,6 +406,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
             "filesystem.backup.cleanup", "systemd.restart", "docker.restart", "package.install",
+            "server.exec",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -716,6 +734,81 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             host.calls[0][1]["toolCall"]["approvalId"], "apr-approved-package-install"
         )
         self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_desktop_server_exec_uses_approved_one_shot_cpp_operation(self) -> None:
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {
+            "command": "printf hello",
+            "purpose": "check deployment output",
+            "timeoutMs": 1000,
+            "maxOutputBytes": 4096,
+            "workdir": "/srv/app",
+        }
+        fingerprint = approval_fingerprint(
+            "server.exec",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"server.exec"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-server-exec"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-server-exec-1",
+            trace_id="trace-server-exec-1",
+            call_id="call-server-exec-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+        FakeDesktopSshProcess.payloads.clear()
+
+        with (
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            result = await registry.execute("server.exec", arguments, context)
+
+        expected_output = {
+            "state": "completed",
+            "exitCode": 0,
+            "stdout": "hello\n",
+            "stderr": "",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
+            "durationMs": 9,
+        }
+        self.assertEqual(result.value, expected_output)
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [("server_exec", ("srv_stage1", "cd '/srv/app' && /bin/sh -c 'printf hello'", 1000, 4096))],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            ["host.ssh.effectful_action_target", "host.ssh.effectful_action_finished"],
+        )
+        tool_call = host.calls[0][1]["toolCall"]
+        self.assertEqual(tool_call["approvalId"], "apr-approved-server-exec")
+        self.assertEqual(tool_call["toolName"], "server.exec")
+        self.assertTrue(
+            FakeDesktopSshProcess.payloads[0]["target"]["allow_server_exec"]  # type: ignore[index]
+        )
+        self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
+        self.assertEqual(host.calls[1][1]["result"], expected_output)
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 

@@ -23,13 +23,13 @@ const SERVER_EXEC_MAX_OUTPUT_BYTES: usize = 65_536;
 const SERVER_EXEC_MAX_ENV_VARS: usize = 16;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ServerExecInput {
-    command: String,
-    purpose: String,
-    timeout_ms: u64,
-    max_output_bytes: usize,
-    workdir: Option<String>,
-    env: Option<std::collections::BTreeMap<String, String>>,
+pub(super) struct ServerExecInput {
+    pub(super) command: String,
+    pub(super) purpose: String,
+    pub(super) timeout_ms: u64,
+    pub(super) max_output_bytes: usize,
+    pub(super) workdir: Option<String>,
+    pub(super) env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -522,7 +522,7 @@ fn server_exec_interruption(state: &'static str, duration_ms: u64) -> ServerExec
     }
 }
 
-fn validate_server_exec_input(input: &ServerExecInput) -> std::result::Result<(), String> {
+pub(super) fn validate_server_exec_input(input: &ServerExecInput) -> std::result::Result<(), String> {
     if input.command.trim().is_empty()
         || input.command.chars().count() > SERVER_EXEC_MAX_COMMAND_CHARS
         || input.command.contains('\0')
@@ -589,7 +589,7 @@ fn validate_server_exec_input(input: &ServerExecInput) -> std::result::Result<()
     Ok(())
 }
 
-fn server_exec_command(input: &ServerExecInput) -> String {
+pub(super) fn server_exec_command(input: &ServerExecInput) -> String {
     let mut command = String::new();
     if let Some(workdir) = input.workdir.as_deref() {
         command.push_str("cd ");

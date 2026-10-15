@@ -62,6 +62,16 @@ class SshOperationResult:
     output_truncated: bool
 
 
+@dataclass(frozen=True)
+class SshServerExecResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    stdout_truncated: bool
+    stderr_truncated: bool
+    duration_ms: int
+
+
 ServiceStatusResult = SshOperationResult
 
 
@@ -278,6 +288,94 @@ class SshServiceClient:
             parameters,
             timeout_seconds,
             max_timeout_seconds=600,
+        )
+
+    def server_exec(
+        self,
+        target_id: str,
+        command: str,
+        timeout_ms: int,
+        max_output_bytes: int,
+    ) -> SshServerExecResult:
+        """Run one approved, bounded command through the one-shot server.exec capability."""
+        if not isinstance(target_id, str) or not _TARGET_ID.fullmatch(target_id):
+            raise ValueError("target_id has an invalid format")
+        if (
+            not isinstance(command, str)
+            or not command.strip()
+            or "\x00" in command
+            or len(command.encode("utf-8")) > 131_072
+        ):
+            raise ValueError("command must contain 1 to 131072 UTF-8 bytes and no NUL")
+        if (
+            isinstance(timeout_ms, bool)
+            or not isinstance(timeout_ms, int)
+            or not 1 <= timeout_ms <= 120_000
+        ):
+            raise ValueError("timeout_ms must be an integer from 1 to 120000")
+        if (
+            isinstance(max_output_bytes, bool)
+            or not isinstance(max_output_bytes, int)
+            or not 1 <= max_output_bytes <= 65_536
+        ):
+            raise ValueError("max_output_bytes must be an integer from 1 to 65536")
+
+        timeout_seconds = (timeout_ms + 999) // 1000
+        body = self._request(
+            "POST",
+            "/v1/ssh/exec",
+            {
+                "target_id": target_id,
+                "operation": "server_exec",
+                "parameters": {
+                    "command": command,
+                    "max_output_bytes": max_output_bytes,
+                    "timeout_ms": timeout_ms,
+                },
+                "timeout_seconds": timeout_seconds,
+            },
+            timeout=timeout_seconds + 5,
+            authorized=True,
+        )
+        expected = {
+            "status", "target_id", "operation", "exit_code", "stdout", "stderr",
+            "stdout_truncated", "stderr_truncated", "duration_ms", "output_truncated", "error",
+        }
+        if not isinstance(body, dict) or set(body) != expected:
+            raise SshServiceTransportError("invalid_response", "SSH service returned an invalid server.exec result")
+        exit_code = body.get("exit_code")
+        stdout = body.get("stdout")
+        stderr = body.get("stderr")
+        stdout_truncated = body.get("stdout_truncated")
+        stderr_truncated = body.get("stderr_truncated")
+        duration_ms = body.get("duration_ms")
+        if (
+            body.get("status") != "succeeded"
+            or body.get("target_id") != target_id
+            or body.get("operation") != "server_exec"
+            or isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or not 0 <= exit_code <= 255
+            or not isinstance(stdout, str)
+            or not isinstance(stderr, str)
+            or not isinstance(stdout_truncated, bool)
+            or not isinstance(stderr_truncated, bool)
+            or isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or duration_ms < 0
+            or not isinstance(body.get("output_truncated"), bool)
+            or body["output_truncated"] != (stdout_truncated or stderr_truncated)
+            or body.get("error") is not None
+            or len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) > max_output_bytes * 3
+        ):
+            raise SshServiceTransportError("invalid_response", "SSH service returned an invalid server.exec result")
+        return SshServerExecResult(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+            duration_ms=duration_ms,
         )
 
     def server_logs(

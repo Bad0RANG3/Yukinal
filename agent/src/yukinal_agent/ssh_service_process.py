@@ -171,9 +171,11 @@ class SshServiceProcess:
         required_target_fields = {
             "target_id", "host", "port", "username", "host_key_fingerprint", "auth",
         }
+        optional_target_fields = {"proxy", "allow_server_exec"}
         if (
             not required_target_fields.issubset(target)
-            or set(target) - required_target_fields not in (set(), {"proxy"})
+            or not (set(target) - required_target_fields).issubset(optional_target_fields)
+            or ("allow_server_exec" in target and not isinstance(target["allow_server_exec"], bool))
         ):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
         target_id = target.get("target_id")

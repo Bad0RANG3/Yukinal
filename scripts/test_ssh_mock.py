@@ -19,7 +19,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1208,37 +1207,18 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if result.stdout != "active\n" or result.exit_code != 0:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
 
-            def run_server_exec(command: str, max_output_bytes: int) -> dict[str, object]:
-                request = urllib.request.Request(
-                    client._base_url + "/v1/ssh/exec",
-                    data=json.dumps({
-                        "target_id": "srv_server_exec_enabled",
-                        "operation": "server_exec",
-                        "parameters": {
-                            "command": command,
-                            "max_output_bytes": max_output_bytes,
-                            "timeout_ms": 5000,
-                        },
-                        "timeout_seconds": 5,
-                    }).encode("utf-8"),
-                    headers={
-                        "Authorization": f"Bearer {TOKEN}",
-                        "Content-Type": "application/json",
-                    },
-                    method="POST",
+            def run_server_exec(command: str, max_output_bytes: int):
+                return client.server_exec(
+                    "srv_server_exec_enabled", command, 5000, max_output_bytes
                 )
-                with urllib.request.urlopen(request, timeout=8) as response:
-                    return json.loads(response.read())
 
             exec_result = run_server_exec("printf server-exec-ok", 4096)
-            if exec_result.get("status") != "succeeded" or exec_result.get("stdout") != "authorized-output\n":
+            if exec_result.exit_code != 0 or exec_result.stdout != "authorized-output\n":
                 raise AssertionError(f"C++ server.exec returned an unexpected result: {exec_result!r}")
             bounded_result = run_server_exec("server-exec-large-output", 4096)
             if (
-                bounded_result.get("status") != "succeeded"
-                or len(str(bounded_result.get("stdout", "")).encode("utf-8")) > 4096
-                or not bounded_result.get("output_truncated")
-                or not bounded_result.get("stdout_truncated")
+                len(bounded_result.stdout.encode("utf-8")) > 4096
+                or not bounded_result.stdout_truncated
             ):
                 raise AssertionError(f"C++ server.exec did not preserve its combined output cap: {bounded_result!r}")
 

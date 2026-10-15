@@ -142,6 +142,21 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     {"target": target, "credentials": {"UNRELATED": "value"}},
                 )
 
+            one_shot_target = {**target, "allow_server_exec": True}
+            service, _, _ = SshServiceProcess.for_desktop_target(
+                binary,
+                {"target": one_shot_target, "credentials": {"SSH_AUTH_SOCK": "/tmp/agent.sock"}},
+            )
+            configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
+            self.assertIs(configured_target["allow_server_exec"], True)
+            await service.stop()
+
+            with self.assertRaises(SshServiceProcessError):
+                SshServiceProcess.for_desktop_target(
+                    binary,
+                    {"target": {**target, "allow_server_exec": "true"}, "credentials": {}},
+                )
+
     async def test_desktop_target_accepts_a_public_certificate_with_private_key_auth(self) -> None:
         target = {
             "target_id": "srv_example1",

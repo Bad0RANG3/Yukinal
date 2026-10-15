@@ -338,6 +338,72 @@ class ClientTests(unittest.TestCase):
                 invoke()
         self.assertIsNone(self.server.last_request)
 
+    def test_server_exec_uses_bounded_one_shot_operation(self) -> None:
+        self.server.response_body = {
+            "status": "succeeded",
+            "target_id": "staging-web-01",
+            "operation": "server_exec",
+            "exit_code": 0,
+            "stdout": "hello\n",
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "duration_ms": 12,
+            "output_truncated": False,
+            "error": None,
+        }
+        result = self.client.server_exec("staging-web-01", "printf hello", 1_250, 4096)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout, "hello\n")
+        self.assertEqual(
+            self.server.last_request,
+            {
+                "authorization": f"Bearer {TOKEN}",
+                "body": {
+                    "target_id": "staging-web-01",
+                    "operation": "server_exec",
+                    "parameters": {
+                        "command": "printf hello",
+                        "max_output_bytes": 4096,
+                        "timeout_ms": 1250,
+                    },
+                    "timeout_seconds": 2,
+                },
+            },
+        )
+
+    def test_server_exec_rejects_unsafe_inputs_before_network_call(self) -> None:
+        invalid_calls = (
+            lambda: self.client.server_exec("staging-web-01", " ", 1000, 1024),
+            lambda: self.client.server_exec("staging-web-01", "echo\x00bad", 1000, 1024),
+            lambda: self.client.server_exec("staging-web-01", "echo ok", True, 1024),
+            lambda: self.client.server_exec("staging-web-01", "echo ok", 0, 1024),
+            lambda: self.client.server_exec("staging-web-01", "echo ok", 1000, True),
+            lambda: self.client.server_exec("staging-web-01", "echo ok", 1000, 0),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke), self.assertRaises(ValueError):
+                invoke()
+        self.assertIsNone(self.server.last_request)
+
+    def test_server_exec_rejects_malformed_or_oversized_response(self) -> None:
+        self.server.response_body = {
+            "status": "succeeded",
+            "target_id": "staging-web-01",
+            "operation": "server_exec",
+            "exit_code": 0,
+            "stdout": "x" * 20,
+            "stderr": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "duration_ms": 12,
+            "output_truncated": False,
+            "error": None,
+        }
+        with self.assertRaises(SshServiceError) as caught:
+            self.client.server_exec("staging-web-01", "printf x", 1000, 4)
+        self.assertEqual(caught.exception.code, "invalid_response")
+
     def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
         self.server.response_body["operation"] = "sftp_write"
         self.server.response_body["stdout"] = '{"bytes_written":4}'

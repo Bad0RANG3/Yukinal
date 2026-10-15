@@ -264,9 +264,14 @@ unit and `timeout_seconds` from 1 to 120. `package_install` accepts only `apt`
 or `dnf`, a safe package name, an optional validated version, and
 `timeout_seconds` from 1 to 600. For the latter two operations, the nested
 timeout must equal the request's top-level timeout. The Python Agent runs
-approved restart and package-install operations through the C++ SSH service;
-the desktop host continues to enforce approval, parameter binding, and one-time
-call handling before dispatching these actions.
+approved restart, package-install, and `server.exec` operations through the C++
+SSH service. For `server.exec`, Rust still validates the durable plan and exact
+approval, builds the remote shell wrapper, and grants the one-shot C++ target
+capability; Python transports that command and returns bounded output for
+host-side validation and idempotent replay. The Rust compatibility executor is
+used only when the C++ target route is unsupported. The desktop host continues
+to enforce approval, parameter binding, and one-time call handling before
+dispatching these actions.
 Every authenticated operation runs only after the target host key matches the
 configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
 keys fail closed. The separate `probe_only` operation intentionally does not

@@ -313,6 +313,20 @@ struct HostSshEffectfulActionTargetRequest {
 struct HostSshEffectfulActionFinishedRequest {
     tool_call: HostToolExecuteRequest,
     outcome: String,
+    #[serde(default)]
+    result: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostServerExecResult {
+    state: String,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    duration_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -620,6 +634,26 @@ async fn consume_python_host_action_approval(
     ) {
         return Ok(());
     }
+    consume_host_action_approval(state, request).await
+}
+
+async fn consume_effectful_ssh_action_approval(
+    state: &AppState,
+    request: &HostToolExecuteRequest,
+) -> Result<(), HostActionTicketError> {
+    if !matches!(
+        request.tool_name.as_str(),
+        DOCKER_RESTART | SYSTEMD_RESTART | PACKAGE_INSTALL | SERVER_EXEC
+    ) {
+        return Ok(());
+    }
+    consume_host_action_approval(state, request).await
+}
+
+async fn consume_host_action_approval(
+    state: &AppState,
+    request: &HostToolExecuteRequest,
+) -> Result<(), HostActionTicketError> {
     let Some(approval_id) = request.approval_id.as_deref() else {
         return Err(HostActionTicketError::Missing);
     };
@@ -2315,6 +2349,14 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
             }
             Ok(())
         }
+        SERVER_EXEC => {
+            let input = serde_json::from_value::<ServerExecInput>(tool_call.input.clone())
+                .map_err(|_| failed("invalid_input", "server.exec input is invalid", false, None))?;
+            if let Err(message) = validate_server_exec_input(&input) {
+                return Err(failed("invalid_input", message, false, None));
+            }
+            Ok(())
+        }
         _ => Err(failed(
             "denied_by_policy",
             "the requested SSH action is not supported by this route",
@@ -2322,6 +2364,23 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
             None,
         )),
     }
+}
+
+fn parse_host_server_exec_result(
+    value: &Value,
+    input: &ServerExecInput,
+) -> Result<HostServerExecResult, ()> {
+    let result = serde_json::from_value::<HostServerExecResult>(value.clone()).map_err(|_| ())?;
+    if result.state != "completed"
+        || !(0..=255).contains(&result.exit_code)
+        || result.stdout.len().saturating_add(result.stderr.len())
+            > input.max_output_bytes.saturating_mul(3)
+        || result.duration_ms > input.timeout_ms.saturating_add(10_000)
+    {
+        return Err(());
+    }
+    let _stream_truncation = (result.stdout_truncated, result.stderr_truncated);
+    Ok(result)
 }
 
 async fn resolve_ssh_effectful_action_target(
@@ -2486,13 +2545,34 @@ async fn resolve_ssh_effectful_action_target(
     let token = match prepare_host_tool_call(state, &tool_call).await? {
         HostToolCallDecision::Respond(response) => {
             if response.get("status").and_then(Value::as_str) == Some("success") {
+                if tool_name == SERVER_EXEC {
+                    let input = serde_json::from_value::<ServerExecInput>(tool_call.input.clone())
+                        .map_err(|_| "server.exec input became invalid during replay".to_string())?;
+                    let Some(output) = response.get("output") else {
+                        return Ok(failed(
+                            "invalid_response",
+                            "the cached server.exec result is unavailable",
+                            false,
+                            None,
+                        ));
+                    };
+                    if parse_host_server_exec_result(output, &input).is_err() {
+                        return Ok(failed(
+                            "invalid_response",
+                            "the cached server.exec result is invalid",
+                            false,
+                            None,
+                        ));
+                    }
+                    return Ok(json!({ "status": "already_completed", "output": output }));
+                }
                 return Ok(json!({ "status": "already_completed" }));
             }
             return Ok(response);
         }
         HostToolCallDecision::Execute(token) => token,
     };
-    if let Err(error) = consume_python_host_action_approval(state, &tool_call).await {
+    if let Err(error) = consume_effectful_ssh_action_approval(state, &tool_call).await {
         let response = host_action_approval_failure(error);
         finish_host_tool_call(state, &tool_call, token, &Ok(response.clone()))?;
         return Ok(response);
@@ -2508,7 +2588,28 @@ async fn resolve_ssh_effectful_action_target(
             return Ok(response);
         }
     };
-    Ok(json!({ "status": "success", "targetData": target_data }))
+    let mut response = json!({ "status": "success", "targetData": target_data });
+    if tool_name == SERVER_EXEC {
+        let input = serde_json::from_value::<ServerExecInput>(tool_call.input.clone())
+            .map_err(|_| "server.exec input became invalid during target resolution".to_string())?;
+        let target = response
+            .get_mut("targetData")
+            .and_then(Value::as_object_mut)
+            .and_then(|target_data| target_data.get_mut("target"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "the resolved SSH target is invalid".to_string())?;
+        if target.get("target_id").and_then(Value::as_str) != Some(server_id) {
+            return Ok(failed(
+                "denied_by_policy",
+                "the resolved SSH target does not match the approved server",
+                false,
+                None,
+            ));
+        }
+        target.insert("allow_server_exec".to_string(), Value::Bool(true));
+        response["command"] = Value::String(server_exec_command(&input));
+    }
+    Ok(response)
 }
 
 fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value, String> {
@@ -2532,44 +2633,123 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
             None,
         ));
     }
-    let output = match request.tool_call.tool_name.as_str() {
+    if request.tool_call.tool_name != SERVER_EXEC && request.result.is_some() {
+        return Ok(failed(
+            "invalid_input",
+            "only server.exec accepts a command result payload",
+            false,
+            None,
+        ));
+    }
+    if request.tool_call.tool_name == SERVER_EXEC
+        && request.outcome == "unknown"
+        && request.result.is_some()
+    {
+        return Ok(failed(
+            "invalid_input",
+            "an unknown server.exec outcome cannot include a completed result",
+            false,
+            None,
+        ));
+    }
+    let (output, server_exec_exit_code) = match request.tool_call.tool_name.as_str() {
         SYSTEMD_RESTART => {
             let input = serde_json::from_value::<SystemdRestartInput>(
                 request.tool_call.input.clone(),
             )
                 .map_err(|_| "systemd.restart completion input is invalid".to_string())?;
-            json!({ "service": input.service, "restarted": true })
+            (Some(json!({ "service": input.service, "restarted": true })), None)
         }
         DOCKER_RESTART => {
             let input = serde_json::from_value::<DockerRestartInput>(
                 request.tool_call.input.clone(),
             )
                 .map_err(|_| "docker.restart completion input is invalid".to_string())?;
-            json!({ "container": input.container, "restarted": true })
+            (Some(json!({ "container": input.container, "restarted": true })), None)
         }
         PACKAGE_INSTALL => {
             let input = serde_json::from_value::<PackageInstallInput>(
                 request.tool_call.input.clone(),
             )
             .map_err(|_| "package.install completion input is invalid".to_string())?;
-            serde_json::to_value(PackageInstallResult {
-                manager: input.manager,
-                package: input.package,
-                version: input.version,
-                installed: true,
-            })
-            .map_err(|error| error.to_string())?
+            (
+                Some(serde_json::to_value(PackageInstallResult {
+                    manager: input.manager,
+                    package: input.package,
+                    version: input.version,
+                    installed: true,
+                })
+                .map_err(|error| error.to_string())?),
+                None,
+            )
+        }
+        SERVER_EXEC => {
+            let input = serde_json::from_value::<ServerExecInput>(request.tool_call.input.clone())
+                .map_err(|_| "server.exec completion input is invalid".to_string())?;
+            let parsed = match request.result.as_ref() {
+                Some(value) => match parse_host_server_exec_result(value, &input) {
+                    Ok(result) => Some(result),
+                    Err(()) => {
+                        return Ok(failed(
+                            "invalid_input",
+                            "server.exec completion result is invalid",
+                            false,
+                            None,
+                        ));
+                    }
+                },
+                None => None,
+            };
+            if parsed.is_none() && request.outcome == "succeeded" {
+                return Ok(failed(
+                    "invalid_input",
+                    "server.exec success requires its bounded command result",
+                    false,
+                    None,
+                ));
+            }
+            (
+                request.result.clone(),
+                parsed.map(|result| result.exit_code),
+            )
         }
         _ => return Ok(failed("denied_by_policy", "unsupported SSH action", false, None)),
     };
     let response = match request.outcome.as_str() {
-        "succeeded" => success(output),
-        "failed" => failed(
-            "execution_failed",
-            format!("{} did not complete successfully", request.tool_call.tool_name),
-            false,
-            None,
-        ),
+        "succeeded" => {
+            if request.tool_call.tool_name == SERVER_EXEC && server_exec_exit_code != Some(0) {
+                return Ok(failed(
+                    "invalid_input",
+                    "server.exec success must have exit code zero",
+                    false,
+                    None,
+                ));
+            }
+            let Some(output) = output else {
+                return Ok(failed("invalid_input", "SSH action result is missing", false, None));
+            };
+            success(output)
+        }
+        "failed" => {
+            if request.tool_call.tool_name == SERVER_EXEC && server_exec_exit_code == Some(0) {
+                return Ok(failed(
+                    "invalid_input",
+                    "server.exec failure cannot carry a successful exit code",
+                    false,
+                    None,
+                ));
+            }
+            failed(
+                "execution_failed",
+                format!("{} did not complete successfully", request.tool_call.tool_name),
+                false,
+                if request.tool_call.tool_name == SERVER_EXEC {
+                    output
+                } else {
+                    None
+                },
+            )
+        }
         "unknown" => failed(
             "transport",
             format!("{} outcome is unknown", request.tool_call.tool_name),
