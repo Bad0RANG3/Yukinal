@@ -7,6 +7,7 @@ from typing import Any
 from yukinal_ssh import SshServiceClient, SshServiceError
 
 from .host_rpc import HostRpcClient
+from .host_tools import _execute_on_host
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
 
@@ -170,14 +171,22 @@ def register_desktop_ssh_tools(
         except asyncio.CancelledError:
             raise
         except Exception:
-            raise ToolCallError("host_unavailable", "The desktop could not resolve the selected SSH identity") from None
+            return await _execute_on_host(host, tool_name, arguments, context)
         try:
             process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
-        except SshServiceProcessError as error:
-            raise ToolCallError("ssh_service_unavailable", str(error)) from None
+        except SshServiceProcessError:
+            return await _execute_on_host(host, tool_name, arguments, context)
 
         try:
             await process.start()
+        except asyncio.CancelledError:
+            await process.stop()
+            raise
+        except SshServiceProcessError:
+            await process.stop()
+            return await _execute_on_host(host, tool_name, arguments, context)
+
+        try:
             client = SshServiceClient(token, base_url=base_url)
             if operation == "service_status":
                 result = await asyncio.to_thread(
@@ -223,8 +232,6 @@ def register_desktop_ssh_tools(
                 raise ToolCallError("unknown_tool", f"Unsupported C++ SSH operation for {tool_name}")
         except asyncio.CancelledError:
             raise
-        except SshServiceProcessError as error:
-            raise ToolCallError("ssh_service_unavailable", str(error)) from None
         except SshServiceError as error:
             raise ToolCallError(error.code, str(error)) from None
         finally:

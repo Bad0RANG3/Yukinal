@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from yukinal_agent import AgentWorkflow, ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
 from yukinal_agent.ssh_tools import register_desktop_ssh_tools, register_ssh_tools
@@ -128,6 +128,29 @@ def _context(target_id: str | None, allowed_targets: set[str]) -> ExecutionConte
 
 
 class SshToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_desktop_read_tool_falls_back_when_cpp_target_resolution_is_unsupported(self) -> None:
+        host = FakeDesktopHost()
+        host.request = AsyncMock(side_effect=RuntimeError("unsupported proxy"))  # type: ignore[method-assign]
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"docker.ps"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            context_target_id="srv_stage1",
+        )
+        fallback = AsyncMock(return_value={"available": True, "containers": []})
+
+        with patch("yukinal_agent.ssh_tools._execute_on_host", fallback):
+            result = await registry.execute("docker.ps", {}, context)
+
+        self.assertEqual(result.value, {"available": True, "containers": []})
+        fallback.assert_awaited_once()
+
     async def test_desktop_read_tools_use_the_selected_target_and_cpp_operations(self) -> None:
         host = FakeDesktopHost()
         registry = ToolRegistry(MemoryAuditSink())

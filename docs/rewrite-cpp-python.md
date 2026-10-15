@@ -59,7 +59,10 @@ the existing transcript UI. With the packaged C++ service available, desktop
 `ssh.service_status` use a short-lived, one-target C++ process. Rust supplies the
 saved target, confirmed host-key pin, and credential material from the OS store;
 the Python process passes credentials only through the C++ child environment and
-cleans up its temporary configuration when the call ends.
+cleans up its temporary configuration when the call ends. If Rust reports that
+the target route is unsupported or the local C++ process cannot start, the same
+read-only request falls back to the existing host route. SSH connection and
+host-key errors do not trigger a fallback.
 The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
 recomputes a fingerprint from the exact raw input, consumes the corresponding
@@ -370,7 +373,7 @@ Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. The C++ build and all six CTest targets passed on the preceding
 verified revision. On the current Python tool-routing changes, full Agent-focused
-discovery ran 51 tests and all passed; the focused SSH tool/process run passed 9
+discovery ran 52 tests and all passed; the focused SSH tool/process run passed 10
 tests. An earlier full Python
 unittest discovery ran 45 tests: 42 passed and 3 service integration cases were
 skipped because the service binary path was not configured for that standalone
