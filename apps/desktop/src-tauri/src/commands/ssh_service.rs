@@ -522,6 +522,9 @@ fn cpp_has_supported_trust_source(
 
 /// Execute a host-authorized server.exec call with a one-shot C++ target config.
 /// The generic C++ service config never enables this capability by default.
+// The host passes the already-validated command fields straight through; splitting them into a
+// struct here would only move the same argument list one level down.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_server_command(
     app: &AppHandle,
     state: &AppState,

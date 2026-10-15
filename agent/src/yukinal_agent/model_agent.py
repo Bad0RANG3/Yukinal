@@ -25,6 +25,27 @@ approval-pending actions with altered arguments. A completed nonzero server.exec
 inspect its output and verify remote state with read-only tools before proposing another action.
 Never repeat that command automatically. Explain when an action needs human approval."""
 
+# ADR 0004: tools are dot-namespaced internally (`server.info`) but most
+# OpenAI-compatible endpoints restrict function names to `[A-Za-z0-9_-]`. The
+# provider boundary uses `__`, and the mapping is applied in both directions so a
+# trace never shows a name the registry does not know.
+_PROVIDER_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _to_provider_tool_name(internal_name: str) -> str:
+    provider_name = internal_name.replace(".", "__")
+    if not _PROVIDER_TOOL_NAME_PATTERN.fullmatch(provider_name):
+        raise ValueError(
+            f"tool name {internal_name!r} cannot be represented at the provider boundary"
+        )
+    return provider_name
+
+
+def _from_provider_tool_name(provider_name: str) -> str:
+    if not isinstance(provider_name, str) or not _PROVIDER_TOOL_NAME_PATTERN.fullmatch(provider_name):
+        raise ValueError("invalid provider tool name")
+    return provider_name.replace("__", ".")
+
 
 @dataclass(frozen=True)
 class AgentBudget:
@@ -124,11 +145,19 @@ class ModelDrivenAgent:
         self._event_sink = event_sink
         self._approval_checkpoints: set[str] = set()
         tool_specs = registry.list()
+        provider_to_internal: dict[str, str] = {}
+        for spec in tool_specs:
+            provider_name = _to_provider_tool_name(spec.name)
+            existing = provider_to_internal.get(provider_name)
+            if existing is not None and existing != spec.name:
+                raise ValueError("registered tool names collide at the provider boundary")
+            provider_to_internal[provider_name] = spec.name
+        self._provider_to_internal = provider_to_internal
         tool_definitions = [
             {
                 "type": "function",
                 "function": {
-                    "name": spec.name,
+                    "name": _to_provider_tool_name(spec.name),
                     "description": spec.description[:2000],
                     "parameters": spec.input_schema,
                 },
@@ -416,11 +445,21 @@ class ModelDrivenAgent:
                 or any(not isinstance(key, str) for key in call["args"])
             ):
                 return {"messages": [*state["messages"], response], "status": "failed", "error_code": "invalid_model_tool_call"}
+            provider_name = call["name"]
+            internal_name = self._provider_to_internal.get(provider_name)
+            if internal_name is None:
+                # Be lenient about a model that echoed the internal dotted spelling or
+                # named an unregistered tool: the registry reports `unknown_tool` later.
+                if _PROVIDER_TOOL_NAME_PATTERN.fullmatch(provider_name):
+                    internal_name = provider_name.replace("__", ".")
+                else:
+                    internal_name = provider_name
             call_id = call.get("id")
             if not isinstance(call_id, str) or not call_id:
                 call_id = f"call-{next_round}-{len(clean_calls)}"
             clean_calls.append({
-                "name": call["name"],
+                "name": internal_name,
+                "provider_name": provider_name,
                 "arguments": call["args"],
                 "id": call_id,
                 "call_id": f"call-{uuid.uuid4().hex}",
@@ -583,7 +622,7 @@ class ModelDrivenAgent:
                         ToolMessage(
                             content=encoded,
                             tool_call_id=request["id"],
-                            name=request["name"],
+                            name=request.get("provider_name", request["name"]),
                         ),
                     ],
                     "calls": [],
@@ -663,7 +702,7 @@ class ModelDrivenAgent:
         tool_message = ToolMessage(
             content=json.dumps(result.value, ensure_ascii=False, separators=(",", ":")),
             tool_call_id=request["id"],
-            name=request["name"],
+            name=request.get("provider_name", request["name"]),
         )
         next_index = state["call_index"] + 1
         update: dict[str, Any] = {

@@ -11,7 +11,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::{agent_run, investigation, tauri_event_name};
+use crate::commands::{investigation, tauri_event_name};
 use crate::state::AppState;
 use yukinal_database::models::{
     InvestigationRun, InvestigationRunMode, InvestigationRunStatus, InvestigationSchedule,

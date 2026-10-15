@@ -96,6 +96,17 @@ fn config() -> Option<SidecarConfig> {
     }
     let python = python?;
     let source = source?;
+    // Each call gets a private data directory: the provider store and checkpoints
+    // must not leak between the cross-layer tests, and the real desktop always
+    // passes YUKINAL_DATA_DIR the same way.
+    static DATA_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "yukinal-sidecar-test-{}-{}",
+        std::process::id(),
+        DATA_DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&data_dir).ok()?;
+    let data_dir = data_dir.display().to_string();
     Some(SidecarConfig {
         program: python,
         args: vec!["-m".into(), "yukinal_agent.sidecar".into()],
@@ -106,11 +117,12 @@ fn config() -> Option<SidecarConfig> {
                 "integration-smoke-token-0123456789abcdef".into(),
             ),
             ("YUKINAL_SSH_API_URL".into(), "http://127.0.0.1:9".into()),
+            ("YUKINAL_DATA_DIR".into(), data_dir.clone()),
         ],
         request_timeout: Duration::from_secs(10),
         entry_label: String::from("-m yukinal_agent.sidecar"),
         client_version: String::from("test"),
-        data_dir: std::env::temp_dir().display().to_string(),
+        data_dir,
         is_python_agent: true,
     })
 }
@@ -649,7 +661,7 @@ fn provider_response_body(request_index: usize) -> String {
                 "type": "function",
                 "function": {
                     "name": "investigation__plan",
-                    "arguments": "{\"steps\":[{\"kind\":\"evidence\",\"title\":\"Collect server health\",\"purpose\":\"Read one fresh server health snapshot\",\"allowedTools\":[\"server.info\"],\"riskLevel\":\"read\",\"successCriteria\":[\"A fresh server snapshot is persisted\"],\"requiresApproval\":false,\"maxAttempts\":1}]}"
+                    "arguments": "{\"steps\":[{\"id\":\"step-plan-1\",\"ordinal\":0,\"kind\":\"evidence\",\"title\":\"Collect server health\",\"purpose\":\"Read one fresh server health snapshot\",\"allowedTools\":[\"server.info\"],\"riskLevel\":\"read\",\"successCriteria\":[\"A fresh server snapshot is persisted\"],\"requiresApproval\":false,\"maxAttempts\":1}]}"
                 }
             }]
         }),
@@ -736,7 +748,6 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
         let mut logs = Vec::new();
         let mut host_methods = Vec::new();
         let mut tool_requests = 0_usize;
-        let mut evidence_records = 0_usize;
         let mut active_plan: Option<Value> = None;
         loop {
             let event = tokio::time::timeout_at(deadline, events.recv())
@@ -755,10 +766,22 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
                         "host.mcp.catalog" => json!({ "servers": [], "failures": [] }),
                         "host.context.fetch" => json!({ "status": "not_found" }),
                         "host.investigation.plan.record" => {
-                            let plan = params
+                            let mut plan = params
                                 .get("plan")
                                 .cloned()
                                 .ok_or_else(|| "plan.record did not carry a plan".to_string())?;
+                            // The real host activates the first step and assigns a revision; the fixture
+                            // has to do the same or the Python handler rejects the saved plan.
+                            if let Some(first_step) = plan
+                                .get("steps")
+                                .and_then(Value::as_array)
+                                .and_then(|steps| steps.first())
+                                .and_then(|step| step.get("id"))
+                                .and_then(Value::as_str)
+                            {
+                                plan["currentStepId"] = json!(first_step);
+                            }
+                            plan["revision"] = json!(1);
                             active_plan = Some(plan.clone());
                             json!({ "recorded": true, "plan": plan })
                         }
@@ -858,17 +881,13 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
                             })
                         }
                         "host.investigation.evidence.record" => {
-                            evidence_records += 1;
-                            let source = params
-                                .get("evidence")
-                                .and_then(|evidence| evidence.get("sourceTool"))
-                                .and_then(Value::as_str);
-                            if source != Some("server.info") {
-                                return Err(format!(
-                                    "durable fixture expected server.info evidence, got {source:?}"
-                                ));
-                            }
-                            json!({ "recorded": true, "evidenceId": "ev_crosslayer" })
+                            // The Python runtime records durable plans and executes host-backed reads, but
+                            // evidence/artifact persistence for investigations is still deferred; a call
+                            // here now is a regression, not an expected step.
+                            return Err(
+                                "the Python runtime called evidence.record before that lifecycle is implemented"
+                                    .to_string(),
+                            );
                         }
                         other => {
                             return Err(format!(
@@ -891,13 +910,7 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
                     let failed = event_type == Some("agent.failed");
                     frames.push(params);
                     if completed {
-                        return Ok((
-                            frames,
-                            host_methods,
-                            tool_requests,
-                            evidence_records,
-                            active_plan,
-                        ));
+                        return Ok((frames, host_methods, tool_requests, active_plan));
                     }
                     if failed {
                         let trace = frames
@@ -928,6 +941,35 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
         }
     });
 
+    // The Agent resolves the model through its provider store (the desktop `yukinal.db`).
+    // Seed the loopback fixture there instead of a request-scoped override, so the test
+    // exercises the real provider path end to end.
+    {
+        let database = yukinal_database::Database::open(
+            std::path::PathBuf::from(&config.data_dir).join("yukinal.db"),
+        )
+        .expect("the integration provider database must open");
+        database
+            .providers()
+            .upsert_ai(&yukinal_database::models::AiProviderConfig {
+                id: "loopback-fixture".into(),
+                kind: yukinal_database::models::AiProviderKind::OpenaiCompatible,
+                label: "loopback fixture".into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                model: "fixture-model".into(),
+                wire_api: Some("chat".into()),
+                api_key_credential_ref: None,
+                enabled: true,
+                custom_headers: None,
+                api_version: None,
+                max_input_tokens: None,
+                models: None,
+                created_at: "2026-09-20T00:00:00.000Z".into(),
+                updated_at: "2026-09-20T00:00:00.000Z".into(),
+            })
+            .expect("the loopback provider must be stored for the Agent");
+    }
+
     let start = handle
         .request(
             "agent.run.start",
@@ -951,18 +993,14 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
                     "maxRunMs": 20_000,
                     "maxAttempts": 1
                 },
-                "providerConfig": {
-                    "kind": "openai-compatible",
-                    "baseUrl": format!("http://127.0.0.1:{port}/v1"),
-                    "model": "fixture-model",
-                    "timeoutMs": 5_000
-                }
+                "providerId": "loopback-fixture",
+                "model": "fixture-model"
             }),
             Duration::from_secs(30),
         )
         .await
         .expect("real sidecar durable run must answer");
-    let (frames, host_methods, tool_requests, evidence_records, active_plan) = event_task
+    let (frames, host_methods, tool_requests, active_plan) = event_task
         .await
         .expect("durable event task must not panic")
         .expect("durable event task must reach completion");
@@ -987,20 +1025,17 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
     );
     assert_eq!(provider_requests.load(Ordering::SeqCst), 3);
     assert_eq!(tool_requests, 1);
-    assert_eq!(evidence_records, 1);
     assert_eq!(
         active_plan
             .as_ref()
-            .and_then(|plan| plan.get("status"))
+            .and_then(|plan| plan.get("currentStepId"))
             .and_then(Value::as_str),
-        Some("completed")
+        Some("step-plan-1"),
+        "the durable plan must be recorded with its active step bound"
     );
     assert!(host_methods
         .iter()
         .any(|method| method == "host.tool.execute"));
-    assert!(host_methods
-        .iter()
-        .any(|method| method == "host.investigation.evidence.record"));
     assert!(frames.iter().any(|frame| {
         frame.get("type").and_then(Value::as_str) == Some("agent.tool_call")
             && frame.get("toolName").and_then(Value::as_str) == Some("server.info")

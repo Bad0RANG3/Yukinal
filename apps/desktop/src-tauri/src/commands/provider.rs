@@ -231,8 +231,14 @@ mod tests {
             serde_json::to_value(AiProviderKind::OpenaiCompatible).unwrap(),
             json!("openai-compatible")
         );
-        assert_eq!(serde_json::to_value(AiProviderKind::Anthropic).unwrap(), json!("anthropic"));
-        assert_eq!(serde_json::to_value(AiProviderKind::Gemini).unwrap(), json!("gemini"));
+        assert_eq!(
+            serde_json::to_value(AiProviderKind::Anthropic).unwrap(),
+            json!("anthropic")
+        );
+        assert_eq!(
+            serde_json::to_value(AiProviderKind::Gemini).unwrap(),
+            json!("gemini")
+        );
     }
 
     #[test]

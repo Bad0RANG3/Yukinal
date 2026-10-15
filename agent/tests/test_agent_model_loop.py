@@ -175,7 +175,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
 
         model = ScriptedModel([
             AIMessage(content="", tool_calls=[{
-                "name": "ops.read", "args": {"target_id": "stage-1"}, "id": "call-1", "type": "tool_call"
+                "name": "ops__read", "args": {"target_id": "stage-1"}, "id": "call-1", "type": "tool_call"
             }]),
             AIMessage(content="The service is active."),
         ])
@@ -191,9 +191,10 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [{"target_id": "stage-1"}])
         self.assertFalse(model.parallel_tool_calls)
         self.assertEqual(model.max_tokens, 2048)
-        self.assertEqual(model.tools[0]["function"]["name"], "ops.read")
+        self.assertEqual(model.tools[0]["function"]["name"], "ops__read")
         self.assertIn("untrusted data", model.seen_messages[0][0].content)
         self.assertEqual(model.seen_messages[1][-1].type, "tool")
+        self.assertEqual(model.seen_messages[1][-1].name, "ops__read")
 
     async def test_completed_nonzero_server_exec_result_returns_to_model_for_replanning(self) -> None:
         executed: list[str] = []

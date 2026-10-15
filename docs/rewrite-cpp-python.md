@@ -812,3 +812,24 @@ The Tauri host remains responsible for UI IPC, local credentials, approvals,
 and persistence, while SSH transport and SFTP operations use C++ and Agent
 normalization stays in Python. Rust formatting, desktop test compilation, the
 core and host-trust suites, and all six CTest targets passed after the removal.
+
+On 2026-10-15, the Python `ModelDrivenAgent` began applying the ADR 0004
+internal/provider tool-name mapping: registered dot-namespaced names
+(`server.info`) are declared to the model as `server__info`, model tool calls are
+mapped back to the internal name before registry lookup, provider-name
+collisions are rejected at construction, and `ToolMessage` frames carry the
+provider spelling the model used. Before this, dotted names went straight to
+OpenAI-compatible endpoints, which reject them. The Rust cross-language test now
+registers its loopback provider in the real `YUKINAL_DATA_DIR/yukinal.db`
+provider store and sends `providerId`/`model` instead of an unsupported
+request-scoped `providerConfig`, so the durable read exercises the production
+provider path end to end. Evidence/artifact persistence for investigation steps
+is still not implemented in the Python runtime and is no longer asserted as
+passing by that test. Verification on this revision: the C++ build and all ten
+CTest targets passed; the Python Agent suite passed 88 tests; the Rust workspace
+tests passed, including `real_sidecar_runs_a_durable_read_through_provider_and_host`;
+`cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`
+passed. The `yukinal-desktop --lib` test binary still cannot launch in this
+Windows environment (`STATUS_ENTRYPOINT_NOT_FOUND`, an embedded-manifest/`comctl32`
+limitation that predates this change), so the desktop crate's own unit tests
+remain unrun here.

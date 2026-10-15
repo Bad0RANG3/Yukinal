@@ -35,7 +35,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
-use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_core::docker::{
     is_safe_container_ref, truncate_text, DockerLogsResult, DockerRestartResult, DEFAULT_LOG_TAIL,
     DEFAULT_RESTART_TIMEOUT, MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
@@ -48,6 +47,7 @@ use yukinal_core::service::{
     is_safe_systemd_service_ref, SystemdRestartResult, DEFAULT_SYSTEMD_RESTART_TIMEOUT,
     MAX_SYSTEMD_RESTART_TIMEOUT,
 };
+use yukinal_credentials::{CredentialRef, CredentialStore, Secret};
 use yukinal_database::models::{
     DecisionBrief, Environment, Evidence, EvidenceContentType, EvidenceKind,
     EvidenceRedactionStatus, FailureOptionAction, Finding, FindingKind, InvestigationArtifact,
@@ -1770,8 +1770,7 @@ fn parse_provider_credential_reference(reference: &str) -> Result<CredentialRef,
     let parsed = CredentialRef::parse(reference)
         .map_err(|_| "invalid provider credential reference".to_string())?;
     if parsed.service() != "openai"
-        || !(parsed.account().starts_with("provider_")
-            || parsed.account().starts_with("ccswitch_"))
+        || !(parsed.account().starts_with("provider_") || parsed.account().starts_with("ccswitch_"))
     {
         return Err("provider credential reference is outside the supported scope".into());
     }
