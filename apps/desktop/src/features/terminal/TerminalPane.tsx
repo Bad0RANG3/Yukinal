@@ -11,7 +11,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { IPC_COMMANDS } from "@yukinal/shared";
-import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
@@ -110,7 +109,7 @@ export function TerminalPane({ active }: { active: boolean }) {
     term.open(container);
     fit.fit();
 
-    const unlisteners: UnlistenFn[] = [];
+    const unlisteners: Array<() => void> = [];
     let sessionId: string | null = null;
     let disposed = false;
     const pendingData: Array<{ terminalSessionId: string; data: string }> = [];

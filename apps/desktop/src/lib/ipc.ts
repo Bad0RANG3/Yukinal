@@ -3,16 +3,14 @@
  *
  * Design constraints:
  * - `command` is keyed by the shared allow-list, so the UI cannot invent native surface.
- * - params/response types come from `IpcCommandMap`, the single contract both sides
- *   compile against. Rust mirrors the same names and shapes.
+ * - params/response types come from `IpcCommandMap`, the shared contract for the
+ *   React-to-native boundary.
  * - When a command starts returning data that the UI branches on, a zod schema from
  *   `@yukinal/shared` is passed to `parse` — parse, never cast.
  * - Events go through `listenDesktop`, gated by `EVENT_SCHEMAS`, so a native
  *   payload is parsed before a component sees it for the same reason.
  */
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   EVENT_SCHEMAS,
   IPC_COMMANDS,
@@ -25,6 +23,8 @@ import {
 import type { z } from "zod";
 
 import { isPreviewFixture, previewResponse } from "./preview-fixtures.js";
+
+type UnlistenFn = () => void;
 
 type NativeDesktopHost = {
   invoke: (command: string, params: Record<string, unknown>) => Promise<unknown>;
@@ -79,17 +79,21 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
 ): Promise<T> {
   if (!isDesktopShell()) throw new IpcUnavailableError(command);
   const validatedParams = IPC_SCHEMAS[command].params.parse(params);
-  // The retired Rust host accepts one structured `input`; the C++ host follows
+  // The legacy desktop adapter accepts one structured `input`; the C++ host follows
   // the shared flat contract. Keep this temporary compatibility detail at the edge.
-  const tauriArgs = command === IPC_COMMANDS.serverAdd || command === IPC_COMMANDS.serverUpdate
+  const legacyArgs = command === IPC_COMMANDS.serverAdd || command === IPC_COMMANDS.serverUpdate
     ? { input: validatedParams }
     : { ...(validatedParams as Record<string, unknown>) };
   const nativeArgs = { ...(validatedParams as Record<string, unknown>) };
   try {
     if (isPreviewFixture()) return parse(previewResponse(command, validatedParams));
-    const raw = window.__YUKINAL_HOST__
-      ? await window.__YUKINAL_HOST__.invoke(command, nativeArgs)
-      : await invoke<unknown>(command, tauriArgs);
+    let raw: unknown;
+    if (window.__YUKINAL_HOST__) {
+      raw = await window.__YUKINAL_HOST__.invoke(command, nativeArgs);
+    } else {
+      const { invoke } = await import("@tauri-apps/api/core");
+      raw = await invoke<unknown>(command, legacyArgs);
+    }
     return parse(raw);
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error));
@@ -147,9 +151,9 @@ export async function listenDesktop<E extends DesktopEventName>(
     }
     handler(parsed.data as DesktopEventPayload<E>);
   };
-  return window.__YUKINAL_HOST__
-    ? window.__YUKINAL_HOST__.listen(name, deliver)
-    : listen<unknown>(tauriEventName(name), (event) => deliver(event.payload));
+  if (window.__YUKINAL_HOST__) return window.__YUKINAL_HOST__.listen(name, deliver);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<unknown>(tauriEventName(name), (event) => deliver(event.payload));
 }
 
 const reportedDroppedEvents = new Set<string>();
