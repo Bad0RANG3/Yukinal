@@ -12,6 +12,8 @@ const buildDirectory = resolve(
 );
 const resourceDirectory = join(root, "apps", "desktop", "src-tauri", "resources", "ssh-service");
 const executableName = `yukinal-ssh-service${process.platform === "win32" ? ".exe" : ""}`;
+const opensslLicense = join(root, "native", "licenses", "OPENSSL-LICENSE.txt");
+const cmakeExecutable = process.env.CMAKE_EXECUTABLE || "cmake";
 const sourceCandidates = process.platform === "win32"
   ? [join(buildDirectory, "Release", executableName), join(buildDirectory, executableName)]
   : [join(buildDirectory, executableName), join(buildDirectory, "Release", executableName)];
@@ -31,14 +33,17 @@ if (!existsSync(join(root, "native", "CMakeLists.txt"))) {
 }
 
 console.log(`Configuring C++ SSH service in ${buildDirectory}`);
-run("cmake", [
+run(cmakeExecutable, [
   "-S", join(root, "native"),
   "-B", buildDirectory,
   "-DYUKINAL_BUILD_TESTS=OFF",
   "-DYUKINAL_FETCH_DEPS=ON",
   "-DCMAKE_BUILD_TYPE=Release",
+  ...(process.env.YUKINAL_PERL_EXECUTABLE
+    ? [`-DYUKINAL_PERL_EXECUTABLE=${process.env.YUKINAL_PERL_EXECUTABLE}`]
+    : []),
 ]);
-run("cmake", [
+run(cmakeExecutable, [
   "--build", buildDirectory,
   "--config", "Release",
   "--target", "yukinal-ssh-service",
@@ -55,4 +60,5 @@ mkdirSync(resourceDirectory, { recursive: true });
 const staged = join(resourceDirectory, executableName);
 copyFileSync(built, staged);
 if (process.platform !== "win32") chmodSync(staged, 0o755);
+copyFileSync(opensslLicense, join(resourceDirectory, "OPENSSL-LICENSE.txt"));
 console.log(`Staged C++ SSH service at ${staged}`);

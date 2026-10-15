@@ -21,6 +21,9 @@ import threading
 import time
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "agent" / "src"))
 
@@ -289,7 +292,7 @@ class FsyncSftpServer(paramiko.SFTPServer):
 
 
 def start_ssh_mock(
-    host_key: paramiko.RSAKey,
+    host_key: paramiko.PKey,
     user_key: paramiko.PKey,
     *,
     keyboard_interactive_only: bool = False,
@@ -929,9 +932,30 @@ def exercise_agent_runtime(
 
 def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     logging.getLogger("paramiko").setLevel(logging.CRITICAL)
-    host_key = paramiko.RSAKey.generate(2048)
-    wrong_host_key = paramiko.RSAKey.generate(2048)
-    user_key = paramiko.RSAKey.generate(2048)
+
+    def ed25519_key() -> tuple[paramiko.Ed25519Key, str]:
+        private_key = Ed25519PrivateKey.generate().private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.OpenSSH,
+            serialization.NoEncryption(),
+        )
+        private_key_text = private_key.decode("ascii")
+        return (
+            paramiko.Ed25519Key.from_private_key(io.StringIO(private_key_text)),
+            private_key_text,
+        )
+
+    if agent_runtime_only:
+        host_key, _ = ed25519_key()
+        wrong_host_key, _ = ed25519_key()
+        user_key, private_key_pem = ed25519_key()
+    else:
+        host_key = paramiko.RSAKey.generate(2048)
+        wrong_host_key = paramiko.RSAKey.generate(2048)
+        user_key = paramiko.RSAKey.generate(2048)
+        private_key_buffer = io.StringIO()
+        user_key.write_private_key(private_key_buffer)
+        private_key_pem = private_key_buffer.getvalue()
     listener, stopping = start_ssh_mock(host_key, user_key)
     ssh_port = listener.getsockname()[1]
     keyboard_listener, keyboard_stopping = start_ssh_mock(
@@ -946,7 +970,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
         root = Path(temp)
         known_hosts = root / "known_hosts"
 
-        def write_known_host(key: paramiko.RSAKey) -> None:
+        def write_known_host(key: paramiko.PKey) -> None:
             known_hosts.write_text(
                 f"[127.0.0.1]:{ssh_port} {key.get_name()} "
                 f"{base64.b64encode(key.asbytes()).decode()}\n",
@@ -954,9 +978,6 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
 
         write_known_host(host_key)
-        private_key_buffer = io.StringIO()
-        user_key.write_private_key(private_key_buffer)
-        private_key_pem = private_key_buffer.getvalue()
         pinned_fingerprint = "SHA256:" + base64.b64encode(
             hashlib.sha256(host_key.asbytes()).digest()
         ).decode("ascii").rstrip("=")

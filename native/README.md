@@ -47,12 +47,24 @@ cmake --build native/build --config Release
 ctest --test-dir native/build -C Release --output-on-failure
 ```
 
-CMake fetches pinned source releases of nlohmann/json, cpp-httplib, and libssh2.
-On Windows libssh2 uses WinCNG; on macOS/Linux it uses the system OpenSSL
-development package and links static OpenSSL archives for the standalone binary.
-A C++20 compiler and CMake 3.24+ are required.
-On Windows, run the commands from a Visual Studio 2022 Developer Command
-Prompt/PowerShell so MSVC and the Windows SDK are available. The 2026-10-15
+The default CMake build fetches pinned source releases of nlohmann/json,
+cpp-httplib, and libssh2. Windows also builds a pinned OpenSSL 3.5.9 static
+crypto library and configures libssh2 to use it. This enables Ed25519 alongside
+the RSA and ECDSA algorithms and keeps OpenSSL inside the standalone service.
+The Windows build requires a full Perl distribution with `IPC::Cmd` and
+`Locale::Maketext::Simple` (Strawberry Perl works; Git for Windows' minimal
+Perl is incomplete) and a Visual Studio 2022 Developer Command
+Prompt/PowerShell with MSVC, NMake, and the Windows SDK. OpenSSL is built
+without assembly optimizations so NASM is not required. Set
+`-DYUKINAL_BUNDLE_WINDOWS_OPENSSL=OFF` only when you intentionally want the
+legacy WinCNG backend. On macOS/Linux CMake uses the system OpenSSL development
+package and links static OpenSSL archives for the standalone binary. A C++20
+compiler and CMake 3.24+ are required.
+If the full Perl distribution is not on `PATH`, pass its executable with
+`-DYUKINAL_PERL_EXECUTABLE=/path/to/perl.exe` or set the same environment
+variable when running `pnpm build:ssh-service`. The build script also accepts
+`CMAKE_EXECUTABLE` when multiple CMake installations are on `PATH`.
+The 2026-10-15
 Windows verification used the NMake generator and passed all six registered
 CTest targets with the Agent and optional Paramiko test dependencies installed:
 the C++ config/policy/network tests, Python client tests, service HTTP
