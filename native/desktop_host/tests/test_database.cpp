@@ -59,6 +59,13 @@ void seed_legacy_database(const std::filesystem::path& path) {
       title TEXT NOT NULL, description TEXT, source TEXT NOT NULL, actor TEXT NOT NULL,
       reason TEXT, outcome TEXT, trace_id TEXT, created_at TEXT NOT NULL
     );
+    CREATE TABLE tool_executions (
+      trace_id TEXT NOT NULL, step_id TEXT NOT NULL, call_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL, server_id TEXT, environment TEXT NOT NULL,
+      risk_level TEXT NOT NULL, decision TEXT NOT NULL, approved_by TEXT,
+      status TEXT NOT NULL, input TEXT NOT NULL, output TEXT, error TEXT,
+      started_at TEXT NOT NULL, ended_at TEXT, duration_ms INTEGER
+    );
     INSERT INTO servers VALUES (
       'srv_01abc', 'Staging', 'ssh.example.test', 2222, 'operator', NULL,
       'group_a', '{"linux":true,"docker":false}', 'disconnected', 'staging',
@@ -77,6 +84,17 @@ void seed_legacy_database(const std::filesystem::path& path) {
     INSERT INTO activities VALUES (
       'act_02', NULL, NULL, 'configuration', 'Provider updated', 'Updated default model',
       'system', 'core', NULL, 'success', NULL, '2026-01-01T00:01:00.000Z'
+    );
+    INSERT INTO tool_executions VALUES (
+      'trc_01', 'step_01', 'call_01', 'ssh.host_snapshot', 'srv_01abc',
+      'staging', 'read', 'auto', NULL, 'success', '{"target":"all"}',
+      '{"healthy":true}', NULL, '2026-01-01T00:02:00.000Z',
+      '2026-01-01T00:02:01.000Z', 17
+    );
+    INSERT INTO tool_executions VALUES (
+      'trc_02', 'step_02', 'call_02', 'service.status', NULL,
+      'unknown', 'low', 'ask', NULL, 'waiting_approval', '{"service":"nginx"}',
+      NULL, NULL, '2026-01-01T00:03:00.000Z', NULL, NULL
     );
     PRAGMA user_version=8;
   )SQL");
@@ -159,6 +177,39 @@ int main() {
           "the C++ IPC router should expose the activity database response");
     check(!router.invoke("activity_list", {{"serverId", "srv_01abc"}, {"extra", true}}).ok,
           "activity_list should reject unknown parameters");
+
+    const nlohmann::json expected_executions = {{"executions", nlohmann::json::array({
+      {{"traceId", "trc_02"}, {"stepId", "step_02"}, {"callId", "call_02"},
+       {"toolName", "service.status"}, {"environment", "unknown"}, {"riskLevel", "low"},
+       {"decision", "ask"}, {"status", "waiting_approval"},
+       {"input", {{"service", "nginx"}}}, {"startedAt", "2026-01-01T00:03:00.000Z"}},
+      {{"traceId", "trc_01"}, {"stepId", "step_01"}, {"callId", "call_01"},
+       {"toolName", "ssh.host_snapshot"}, {"serverId", "srv_01abc"},
+       {"environment", "staging"}, {"riskLevel", "read"}, {"decision", "auto"},
+       {"status", "success"}, {"input", {{"target", "all"}}},
+       {"output", {{"healthy", true}}}, {"startedAt", "2026-01-01T00:02:00.000Z"},
+       {"endedAt", "2026-01-01T00:02:01.000Z"}, {"durationMs", 17}}
+    })}};
+    check(database.list_tool_executions(std::nullopt, std::nullopt, 50) == expected_executions,
+          "tool_execution_list should preserve the record contract and sort newest first");
+    const nlohmann::json expected_trace = {{"executions", nlohmann::json::array({
+      expected_executions["executions"][1]
+    })}};
+    check(database.list_tool_executions(std::string("trc_01"), std::string("srv_other"), 50) ==
+              expected_trace,
+          "trace filtering should take precedence over server filtering");
+    check(database.list_tool_executions(std::nullopt, std::string("srv_01abc"), 50) ==
+              expected_trace,
+          "tool_execution_list should filter by server id");
+    check(database.list_tool_executions(std::nullopt, std::nullopt, 1) ==
+              nlohmann::json{{"executions", nlohmann::json::array({
+                expected_executions["executions"][0]
+              })}},
+          "tool_execution_list should honor its bounded limit");
+    const auto executions_response = router.invoke("tool_execution_list",
+        {{"traceId", "trc_01"}, {"serverId", "srv_other"}, {"limit", 5}});
+    check(executions_response.ok && executions_response.value == expected_trace,
+          "the C++ IPC router should expose tool execution records");
   }
 
   sqlite3* readback = nullptr;

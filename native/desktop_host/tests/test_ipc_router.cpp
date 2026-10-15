@@ -34,6 +34,14 @@ int main() {
         "activity_list should reject malformed server ids");
   check(!router.invoke("activity_list", json::object()).ok,
         "activity_list should report a missing local database");
+  check(!router.invoke("tool_execution_list", {{"traceId", ""}}).ok,
+        "tool_execution_list should reject an empty trace id");
+  check(!router.invoke("tool_execution_list", {{"serverId", "invalid"}}).ok,
+        "tool_execution_list should reject malformed server ids");
+  check(!router.invoke("tool_execution_list", {{"limit", 0}}).ok,
+        "tool_execution_list should reject a zero limit");
+  check(!router.invoke("tool_execution_list", json::object()).ok,
+        "tool_execution_list should report a missing local database");
   check(!router.invoke("shell.open_url", {{"url", "javascript:alert(1)"}}).ok,
         "external URL opening should reject executable schemes");
   check(yukinal::desktop_host::is_external_url("https://example.com/path"),

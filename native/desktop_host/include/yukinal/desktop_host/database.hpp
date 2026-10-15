@@ -19,6 +19,9 @@ class DesktopDatabase {
   [[nodiscard]] nlohmann::json list_workspaces() const;
   [[nodiscard]] nlohmann::json list_activities(
       const std::optional<std::string>& server_id, int limit) const;
+  [[nodiscard]] nlohmann::json list_tool_executions(
+      const std::optional<std::string>& trace_id,
+      const std::optional<std::string>& server_id, int limit) const;
 
  private:
   sqlite3* connection_ = nullptr;

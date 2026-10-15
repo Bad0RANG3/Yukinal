@@ -1,6 +1,8 @@
 #include "yukinal/desktop_host/database.hpp"
 
 #include <cstdlib>
+#include <cstdint>
+#include <initializer_list>
 #include <iterator>
 #include <optional>
 #include <set>
@@ -339,6 +341,119 @@ nlohmann::json DesktopDatabase::list_activities(
     activities.push_back(std::move(activity));
   }
   return {{"activities", std::move(activities)}};
+}
+
+nlohmann::json DesktopDatabase::list_tool_executions(
+    const std::optional<std::string>& trace_id,
+    const std::optional<std::string>& server_id, int limit) const {
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Tool execution limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"executions", nlohmann::json::array()}};
+
+  const char* sql = trace_id.has_value()
+      ? R"SQL(
+          SELECT trace_id, step_id, call_id, tool_name, server_id, environment, risk_level,
+                 decision, approved_by, status, input, output, error, started_at, ended_at,
+                 duration_ms
+            FROM tool_executions
+           WHERE trace_id = ?1
+           ORDER BY started_at
+           LIMIT ?2
+        )SQL"
+      : server_id.has_value()
+          ? R"SQL(
+              SELECT trace_id, step_id, call_id, tool_name, server_id, environment, risk_level,
+                     decision, approved_by, status, input, output, error, started_at, ended_at,
+                     duration_ms
+                FROM tool_executions
+               WHERE server_id = ?1
+               ORDER BY started_at DESC
+               LIMIT ?2
+            )SQL"
+          : R"SQL(
+              SELECT trace_id, step_id, call_id, tool_name, server_id, environment, risk_level,
+                     decision, approved_by, status, input, output, error, started_at, ended_at,
+                     duration_ms
+                FROM tool_executions
+               ORDER BY started_at DESC
+               LIMIT ?1
+            )SQL";
+  Statement rows(connection_, sql);
+  int limit_parameter = 1;
+  const auto& filter = trace_id.has_value() ? trace_id : server_id;
+  if (filter.has_value()) {
+    const auto bind_result = sqlite3_bind_text(rows.get(), 1, filter->c_str(),
+                                               static_cast<int>(filter->size()),
+                                               SQLITE_TRANSIENT);
+    if (bind_result != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(connection_));
+    limit_parameter = 2;
+  }
+  if (sqlite3_bind_int(rows.get(), limit_parameter, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+
+  nlohmann::json executions = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+
+    const std::string environment = column_text(rows.get(), 5);
+    const std::string risk_level = column_text(rows.get(), 6);
+    const std::string decision = column_text(rows.get(), 7);
+    const std::string status = column_text(rows.get(), 9);
+    if (!is_one_of(environment, {"local", "development", "staging", "production", "unknown"}) ||
+        !is_one_of(risk_level, {"read", "low", "medium", "high", "critical"}) ||
+        !is_one_of(decision, {"auto", "ask", "deny"}) ||
+        !is_one_of(status, {"pending", "running", "waiting_approval", "success", "failed",
+                            "cancelled"})) {
+      throw std::runtime_error("Stored tool execution has an unknown enum value");
+    }
+
+    nlohmann::json input;
+    try {
+      input = nlohmann::json::parse(column_text(rows.get(), 10));
+    } catch (const nlohmann::json::exception&) {
+      throw std::runtime_error("Stored tool execution input is invalid JSON");
+    }
+    nlohmann::json execution = {
+        {"traceId", column_text(rows.get(), 0)},
+        {"stepId", column_text(rows.get(), 1)},
+        {"callId", column_text(rows.get(), 2)},
+        {"toolName", column_text(rows.get(), 3)},
+        {"environment", environment},
+        {"riskLevel", risk_level},
+        {"decision", decision},
+        {"status", status},
+        {"input", std::move(input)},
+        {"startedAt", column_text(rows.get(), 13)},
+    };
+    add_optional_text(execution, "serverId", rows.get(), 4);
+    add_optional_text(execution, "approvedBy", rows.get(), 8);
+    add_optional_text(execution, "error", rows.get(), 12);
+    add_optional_text(execution, "endedAt", rows.get(), 14);
+    if (sqlite3_column_type(rows.get(), 8) != SQLITE_NULL) {
+      const std::string approved_by = column_text(rows.get(), 8);
+      if (!is_one_of(approved_by, {"user", "policy"})) {
+        throw std::runtime_error("Stored tool execution has an unknown approval source");
+      }
+    }
+    if (sqlite3_column_type(rows.get(), 11) != SQLITE_NULL) {
+      try {
+        execution["output"] = nlohmann::json::parse(column_text(rows.get(), 11));
+      } catch (const nlohmann::json::exception&) {
+        throw std::runtime_error("Stored tool execution output is invalid JSON");
+      }
+    }
+    if (sqlite3_column_type(rows.get(), 15) != SQLITE_NULL) {
+      const auto duration = sqlite3_column_int64(rows.get(), 15);
+      if (duration < 0) throw std::runtime_error("Stored tool execution duration is invalid");
+      execution["durationMs"] = static_cast<std::uint64_t>(duration);
+    }
+    executions.push_back(std::move(execution));
+  }
+  return {{"executions", std::move(executions)}};
 }
 
 std::filesystem::path default_data_directory() {
