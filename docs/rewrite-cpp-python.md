@@ -730,3 +730,12 @@ Also on 2026-10-15, added direct C++ coverage for KRL HTTP loopback address
 classification, including IPv4 `127/8`, IPv6 `::1`, malformed addresses, and
 non-loopback addresses. The rebuilt C++ test executable passed all 55 tests, and
 all six CTest targets passed.
+
+On 2026-10-15, aligned the Python desktop SSH caller with the target payloads
+already emitted by Tauri. It now accepts either a confirmed host-key pin or a
+configured Host CA, plus the C++ service's typed or URL-based HTTP, HTTPS, SOCKS5,
+and SOCKS5H proxy forms with string or array `no_proxy` rules. This lets the
+Python Agent keep supported CA and proxy targets on its Python-to-C++ path instead
+of rejecting the payload and handing the operation back to the desktop host. The
+focused process suite passed all six tests, and the Agent SSH mock passed selected
+target status and snapshot operations through an authenticated SOCKS5H tunnel.

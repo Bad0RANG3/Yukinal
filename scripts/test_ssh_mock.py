@@ -987,6 +987,7 @@ def exercise_agent_runtime(
     registry = ToolRegistry(MemoryAuditSink())
     register_ssh_tools(registry, client)
     workflow = AgentWorkflow(registry)
+    socks_target_count = len(SOCKS5_CONNECT_TARGETS)
 
     async def run() -> None:
         succeeded = await workflow.run(
@@ -1103,6 +1104,17 @@ def exercise_agent_runtime(
             or desktop_host.snapshot_data is None
         ):
             raise AssertionError(f"desktop-managed snapshot result was not preserved: {snapshot_output!r}")
+        target_payload = desktop_target.get("target")
+        if isinstance(target_payload, dict) and "proxy" in target_payload:
+            desktop_socks_targets = SOCKS5_CONNECT_TARGETS[socks_target_count:]
+            if len(desktop_socks_targets) < 2 or any(
+                target != ("localhost", target_payload.get("port"), 3)
+                for target in desktop_socks_targets
+            ):
+                raise AssertionError(
+                    "desktop Agent operations did not use the configured SOCKS5H route: "
+                    f"{desktop_socks_targets!r}"
+                )
 
     asyncio.run(run())
 
@@ -1518,13 +1530,31 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             desktop_target = {
                 "target": {
                     "target_id": "srv_stage1",
-                    "host": "127.0.0.1",
+                    "host": "localhost" if agent_runtime_only else "127.0.0.1",
                     "port": ssh_port,
                     "username": "test-user",
                     "host_key_fingerprint": pinned_fingerprint,
                     "auth": {"type": "private_key", "private_key_env": "YK_SSH_PRIVATE_KEY"},
+                    **(
+                        {
+                            "proxy": {
+                                "url": f"socks5h://127.0.0.1:{socks_port}",
+                                "auth_env": "YK_SSH_PROXY_CREDENTIAL",
+                                "no_proxy": "*.corp,10.0.0.0/8",
+                            }
+                        }
+                        if agent_runtime_only
+                        else {}
+                    ),
                 },
-                "credentials": {"YK_SSH_PRIVATE_KEY": private_key_pem},
+                "credentials": {
+                    "YK_SSH_PRIVATE_KEY": private_key_pem,
+                    **(
+                        {"YK_SSH_PROXY_CREDENTIAL": "proxy-user:proxy-password"}
+                        if agent_runtime_only
+                        else {}
+                    ),
+                },
             }
 
             if agent_runtime_only:

@@ -94,7 +94,7 @@ class SshServiceProcess:
                     secret_env.add(name)
                     auth_env_names.add(name)
             if "proxy" in target:
-                proxy_auth_env = _validate_http_connect_proxy(target["proxy"])
+                proxy_auth_env = _validate_cpp_proxy(target["proxy"])
                 if proxy_auth_env is not None:
                     if any(
                         existing != proxy_auth_env
@@ -168,13 +168,15 @@ class SshServiceProcess:
         credentials = payload.get("credentials")
         if not isinstance(target, dict) or not isinstance(credentials, dict):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
-        required_target_fields = {
-            "target_id", "host", "port", "username", "host_key_fingerprint", "auth",
+        required_target_fields = {"target_id", "host", "port", "username", "auth"}
+        optional_target_fields = {
+            "host_key_fingerprint", "host_certificate_authority", "proxy", "allow_server_exec",
         }
-        optional_target_fields = {"proxy", "allow_server_exec"}
+        trust_sources = {"host_key_fingerprint", "host_certificate_authority"} & set(target)
         if (
             not required_target_fields.issubset(target)
             or not (set(target) - required_target_fields).issubset(optional_target_fields)
+            or len(trust_sources) != 1
             or ("allow_server_exec" in target and not isinstance(target["allow_server_exec"], bool))
         ):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
@@ -196,8 +198,17 @@ class SshServiceProcess:
             or not 1 <= port <= 65535
             or not isinstance(username, str)
             or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", username)
-            or not isinstance(fingerprint, str)
-            or not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint)
+            or (
+                "host_key_fingerprint" in target
+                and (
+                    not isinstance(fingerprint, str)
+                    or not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint)
+                )
+            )
+            or (
+                "host_certificate_authority" in target
+                and not _valid_host_certificate_authority(target["host_certificate_authority"])
+            )
             or not isinstance(auth, dict)
         ):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
@@ -239,7 +250,7 @@ class SshServiceProcess:
         else:
             raise SshServiceProcessError("the desktop host returned an unsupported SSH identity")
         if "proxy" in target:
-            proxy_auth_env = _validate_http_connect_proxy(target["proxy"])
+            proxy_auth_env = _validate_cpp_proxy(target["proxy"])
             if proxy_auth_env is not None:
                 credential_names.add(proxy_auth_env)
         if (
@@ -394,45 +405,142 @@ def _valid_credential_env_name(value: object) -> bool:
     return value.upper() not in reserved
 
 
-def _validate_http_connect_proxy(value: object) -> str | None:
+def _validate_cpp_proxy(value: object) -> str | None:
     if not isinstance(value, dict):
-        raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
-    required = frozenset({"type", "host", "port"})
-    allowed = {
-        required,
-        required | {"auth_env"},
-        required | {"no_proxy"},
-        required | {"auth_env", "no_proxy"},
-    }
-    if frozenset(value) not in allowed:
-        raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
-    host = value.get("host")
-    port = value.get("port")
-    if (
-        value.get("type") != "http_connect"
-        or not isinstance(host, str)
-        or not host
-        or len(host) > 253
-        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in host)
-        or isinstance(port, bool)
-        or not isinstance(port, int)
-        or not 1 <= port <= 65535
-    ):
-        raise SshServiceProcessError("the SSH service HTTP proxy configuration is invalid")
+        raise SshServiceProcessError("the SSH service proxy configuration is invalid")
+    auth_env = value.get("auth_env")
+    allowed_suffix = {"auth_env", "no_proxy"}
+    if "url" in value:
+        if not set(value).issubset({"url", *allowed_suffix}) or not _valid_cpp_proxy_url(value["url"]):
+            raise SshServiceProcessError("the SSH service proxy URL is invalid")
+    else:
+        if not set(value).issubset({"type", "host", "port", *allowed_suffix}):
+            raise SshServiceProcessError("the SSH service proxy configuration is invalid")
+        proxy_type = value.get("type")
+        host = value.get("host")
+        port = value.get("port")
+        if (
+            proxy_type not in {"http_connect", "https_connect", "socks5", "socks5h"}
+            or not _valid_cpp_proxy_host(host)
+            or (
+                port is not None
+                and (isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535)
+            )
+        ):
+            raise SshServiceProcessError("the SSH service proxy configuration is invalid")
     if "no_proxy" in value:
         bypasses = value["no_proxy"]
-        if (
-            not isinstance(bypasses, list)
-            or len(bypasses) > 256
-            or not all(_valid_cpp_no_proxy_entry(entry) for entry in bypasses)
+        if isinstance(bypasses, str) and len(bypasses) <= 65536:
+            bypasses = [entry.strip() for entry in bypasses.split(",") if entry.strip()]
+        if not isinstance(bypasses, list) or len(bypasses) > 256 or not all(
+            _valid_cpp_no_proxy_entry(entry) for entry in bypasses
         ):
-            raise SshServiceProcessError("the SSH service HTTP proxy bypass configuration is invalid")
+            raise SshServiceProcessError("the SSH service proxy bypass configuration is invalid")
     if "auth_env" not in value:
         return None
-    auth_env = value["auth_env"]
     if not _valid_credential_env_name(auth_env):
         raise SshServiceProcessError("the SSH service proxy credential reference is invalid")
     return auth_env
+
+
+def _valid_cpp_proxy_url(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value)
+        or "?" in value
+        or "#" in value
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    defaults = {"http": 80, "https": 443, "socks5": 1080, "socks5h": 1080}
+    return (
+        parsed.scheme.lower() in defaults
+        and bool(parsed.netloc)
+        and parsed.username is None
+        and parsed.password is None
+        and "@" not in parsed.netloc
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+        and _valid_cpp_proxy_host(host)
+        and (port is None or 1 <= port <= 65535)
+    )
+
+
+def _valid_cpp_proxy_host(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 253 or not value.isascii():
+        return False
+    if any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value):
+        return False
+    if ":" in value:
+        if "%" in value:
+            return False
+        try:
+            return isinstance(ipaddress.ip_address(value), ipaddress.IPv6Address)
+        except ValueError:
+            return False
+    return all(character.isalnum() or character in ".-_" for character in value)
+
+
+def _valid_host_certificate_authority(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = {"ca_public_key", "principals"}
+    optional = {"revocation_list_path", "revocation_list_url", "revocation_list_signers"}
+    if not required.issubset(value) or not set(value).issubset(required | optional):
+        return False
+    ca_public_key = value["ca_public_key"]
+    principals = value["principals"]
+    if (
+        not isinstance(ca_public_key, str)
+        or not ca_public_key.strip()
+        or len(ca_public_key) > 16384
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in ca_public_key)
+        or not isinstance(principals, list)
+        or not 1 <= len(principals) <= 256
+        or not all(
+            isinstance(principal, str)
+            and 0 < len(principal) <= 253
+            and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in principal)
+            for principal in principals
+        )
+        or len(set(principals)) != len(principals)
+    ):
+        return False
+    revocation_path = value.get("revocation_list_path")
+    revocation_url = value.get("revocation_list_url")
+    for optional_value in (revocation_path, revocation_url):
+        if optional_value is not None and (
+            not isinstance(optional_value, str)
+            or not optional_value.strip()
+            or len(optional_value) > 4096
+            or "\x00" in optional_value
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in optional_value)
+        ):
+            return False
+    if revocation_path and not Path(revocation_path).is_absolute():
+        return False
+    if revocation_path and revocation_url:
+        return False
+    signers = value.get("revocation_list_signers", [])
+    return (
+        isinstance(signers, list)
+        and len(signers) <= 16
+        and all(
+            isinstance(signer, str)
+            and bool(signer.strip())
+            and len(signer) <= 16384
+            and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in signer)
+            for signer in signers
+        )
+    )
 
 
 def _valid_cpp_no_proxy_entry(value: object) -> bool:
@@ -442,7 +550,7 @@ def _valid_cpp_no_proxy_entry(value: object) -> bool:
         return True
     if "/" in value:
         try:
-            ipaddress.IPv4Network(value, strict=False)
+            ipaddress.ip_network(value, strict=False)
         except ValueError:
             return False
         return True

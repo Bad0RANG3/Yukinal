@@ -227,6 +227,65 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     binary, {"target": invalid_target, "credentials": credentials}
                 )
 
+    async def test_desktop_ca_target_forwards_socks5h_url_to_cpp_child(self) -> None:
+        target = {
+            "target_id": "srv_example1",
+            "host": "stage.example.test",
+            "port": 22,
+            "username": "ops",
+            "auth": {"type": "agent"},
+            "host_certificate_authority": {
+                "ca_public_key": (
+                    "ssh-ed25519 "
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test-ca"
+                ),
+                "principals": ["stage.example.test"],
+                "revocation_list_signers": [],
+            },
+            "proxy": {
+                "url": "socks5h://proxy.example.test:1080",
+                "auth_env": "YK_SSH_PROXY_CREDENTIAL",
+                "no_proxy": "*.corp,10.0.0.0/8,2001:db8::/32",
+            },
+        }
+        credentials = {
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "YK_SSH_PROXY_CREDENTIAL": "proxy-user:proxy-password",
+        }
+        with tempfile.TemporaryDirectory(prefix="yukinal-ssh-process-") as temporary:
+            binary = Path(temporary) / "service.exe"
+            binary.write_text("service", encoding="utf-8")
+            service, _, _ = SshServiceProcess.for_desktop_target(
+                binary, {"target": target, "credentials": credentials}
+            )
+            configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
+            self.assertEqual(
+                configured_target["host_certificate_authority"],
+                target["host_certificate_authority"],
+            )
+            self.assertEqual(configured_target["proxy"], target["proxy"])
+            config_text = service._config.read_text(encoding="utf-8")
+            self.assertNotIn("proxy-password", config_text)
+            self.assertEqual(service._secret_values, credentials)
+            await service.stop()
+
+            invalid_target = {
+                **target,
+                "proxy": {**target["proxy"], "url": "socks4://proxy.example.test:1080"},
+            }
+            with self.assertRaises(SshServiceProcessError):
+                SshServiceProcess.for_desktop_target(
+                    binary, {"target": invalid_target, "credentials": credentials}
+                )
+
+            invalid_target = {
+                **target,
+                "proxy": {**target["proxy"], "url": "socks5h://user:secret@proxy.example.test:1080"},
+            }
+            with self.assertRaises(SshServiceProcessError):
+                SshServiceProcess.for_desktop_target(
+                    binary, {"target": invalid_target, "credentials": credentials}
+                )
 
 if __name__ == "__main__":
     unittest.main()
