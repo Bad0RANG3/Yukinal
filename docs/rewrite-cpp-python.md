@@ -339,8 +339,9 @@ the markers, parses the seven snapshot sections, computes health and collector
 results, and sends normalized data through the existing guarded
 `host.tool.execute` route. The host validates the typed snapshot shape, adds its
 own target identity and collection timestamp, and persists the existing UI
-contract to SQLite. Direct UI snapshot requests and legacy SSH configurations
-still use the Rust collector path while those call sites are migrated.
+contract to SQLite. The Overview's direct snapshot request uses this same
+Python normalization RPC. Legacy SSH-only configurations still use the Rust
+collector fallback while their transport path is migrated.
 
 ## Build and verification
 

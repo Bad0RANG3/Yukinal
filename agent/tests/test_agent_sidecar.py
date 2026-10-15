@@ -24,6 +24,7 @@ from yukinal_agent.sidecar import (
     _RpcFault,
     serve_stdio,
 )
+from yukinal_agent.system_snapshot import SYSTEM_SNAPSHOT_COMMAND_IDS
 
 
 def _registry() -> ToolRegistry:
@@ -111,6 +112,32 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(unknown["error"]["code"], RPC_METHOD_NOT_FOUND)
         self.assertEqual(not_ready["error"]["code"], RPC_NOT_IMPLEMENTED)
         self.assertEqual(duplicate["error"]["code"], RPC_INVALID_REQUEST)
+
+    def test_snapshot_normalization_rpc_is_strict_and_returns_ui_shape(self) -> None:
+        sidecar = PythonSidecar(_registry())
+        sidecar.handle(_request(1, "initialize", {
+            "protocolVersion": "1.0", "clientVersion": "desktop", "dataDir": "C:/data",
+        }))
+        outputs = {
+            command_id: {"exitCode": 0, "stdout": f"{command_id}\n"}
+            for command_id in SYSTEM_SNAPSHOT_COMMAND_IDS
+        }
+        outputs["os_detect"] = {"exitCode": 0, "stdout": "Linux\n"}
+        outputs["os_release"] = {
+            "exitCode": 0, "stdout": 'NAME="Fixture Linux"\nVERSION_ID="9"\n'
+        }
+        result = sidecar.handle(_request(2, "server.snapshot.normalize", {"outputs": outputs}))
+        data = result["result"]["snapshotData"]
+        self.assertEqual(data["os"]["distribution"], "Fixture Linux")
+        self.assertEqual(data["os"]["version"], "9")
+        self.assertEqual(data["health"], "unknown")
+        self.assertEqual(len(data["collectors"]), 7)
+        self.assertNotIn("snapshotOutputs", data)
+
+        invalid = sidecar.handle(_request(3, "server.snapshot.normalize", {
+            "outputs": {**outputs, "extra": {"exitCode": 0, "stdout": ""}},
+        }))
+        self.assertEqual(invalid["error"]["code"], RPC_INVALID_PARAMS)
 
     def test_approval_rpc_resumes_the_matching_pending_call(self) -> None:
         async def run_approval() -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[Any, ...]], dict[str, Any]]:

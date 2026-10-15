@@ -24,6 +24,7 @@ from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import register_desktop_ssh_tools, register_ssh_tools
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
+from .system_snapshot import SYSTEM_SNAPSHOT_COMMAND_IDS, normalize_system_snapshot
 from .tools import ToolRegistry
 
 RPC_VERSION = "1.0"
@@ -38,6 +39,7 @@ RPC_NOT_IMPLEMENTED = -32604
 METHODS = {
     "initialize": True,
     "system.ping": True,
+    "server.snapshot.normalize": True,
     "tools.list": True,
     "system.describe": True,
     "agent.run.start": True,
@@ -139,6 +141,8 @@ class PythonSidecar:
                 result = self._initialize(params)
             elif method == "system.ping":
                 result = self._ping(params)
+            elif method == "server.snapshot.normalize":
+                result = self._normalize_snapshot(params)
             elif method == "tools.list":
                 _strict_object(params, set())
                 result = {"tools": [self._declaration(spec) for spec in self._registry.list()]}
@@ -610,6 +614,40 @@ class PythonSidecar:
         if not isinstance(echo, str) or len(echo) > 1000:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
         return {"pong": echo, "agentPid": os.getpid()}
+
+    @staticmethod
+    def _normalize_snapshot(params: object) -> dict[str, Any]:
+        parsed = _strict_object(params, {"outputs"})
+        outputs = parsed.get("outputs")
+        if (
+            not isinstance(outputs, dict)
+            or set(outputs) != set(SYSTEM_SNAPSHOT_COMMAND_IDS)
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command set")
+        normalized_outputs: dict[str, tuple[int, str]] = {}
+        total_bytes = 0
+        for command_id in SYSTEM_SNAPSHOT_COMMAND_IDS:
+            result = outputs[command_id]
+            if not isinstance(result, dict) or set(result) != {"exitCode", "stdout"}:
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command result")
+            exit_code = result["exitCode"]
+            stdout = result["stdout"]
+            if (
+                isinstance(exit_code, bool)
+                or not isinstance(exit_code, int)
+                or not 0 <= exit_code <= 255
+                or not isinstance(stdout, str)
+            ):
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command result")
+            total_bytes += len(stdout.encode("utf-8"))
+            normalized_outputs[command_id] = (exit_code, stdout)
+        if total_bytes > 64 * 1024:
+            raise _RpcFault(RPC_INVALID_PARAMS, "snapshot command output exceeds its limit")
+        try:
+            snapshot_data = normalize_system_snapshot(normalized_outputs)
+        except ValueError:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command output") from None
+        return {"snapshotData": snapshot_data}
 
     @staticmethod
     def _declaration(spec: Any) -> dict[str, Any]:

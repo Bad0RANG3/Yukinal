@@ -42,8 +42,9 @@ read-only server tools through the host and can use MCP tools the host marks
 low-risk. On the desktop, `server.info` gathers its fixed SSH command batch
 through the C++ service, normalizes its snapshot in Python, and sends the
 validated result through the existing guarded host tool and snapshot database
-path. Direct UI snapshot requests and legacy SSH configurations still use the
-Rust collector path during migration. The three approved desktop actions above
+path. The Overview's direct snapshot refresh uses the same Python normalizer for
+C++ targets; legacy SSH-only configurations retain a Rust collector fallback
+during migration. The three approved desktop actions above
 remain behind the existing host approval and one-time call checks; they are not
 exposed as Python Agent tools. The Python sidecar now round-trips approvals for
 tools that explicitly require them, including reject and expiry handling; the

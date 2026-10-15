@@ -22,8 +22,10 @@ use yukinal_ssh::{validate_host_ca_public_key, MAX_KRL_SIGNERS};
 
 /// 身份写入与回收的 keychain 侧（需要 `CredentialStore` 句柄，所以住不进 `crates/core`）。
 mod identity;
+mod snapshot;
 
 use identity::{reclaim_identity, store_identity};
+pub(crate) use snapshot::server_snapshot_from_normalized_data;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,9 +63,9 @@ pub struct ServerSnapshotResponse {
     pub snapshot: yukinal_database::models::ServerSnapshot,
 }
 
-/// `server_snapshot`: connect（如未连）→ detect + collect（MVP 7 采集器）→
-/// 组装成 `snapshots` 行并入库 → 返回。失败诚实上抛（服务器不可达 / 认证失败 /
-/// 采集器整组失败都会以错误结束，不会返回假数据）。
+/// `server_snapshot`: C++ SSH reads a fixed command set, Python normalizes it, and
+/// the desktop persists the UI contract. Legacy SSH-only configurations retain the
+/// Rust collector fallback until their transport path is migrated.
 #[tauri::command]
 pub async fn server_snapshot(
     app: AppHandle,
@@ -74,14 +76,34 @@ pub async fn server_snapshot(
     let cancel = tokio_util::sync::CancellationToken::new();
     let (snapshot, _samples) = if ssh_service::supports_cpp_target(&state, &server_id)? {
         let outputs = ssh_service::system_snapshot(&app, &state, &server_id).await?;
-        yukinal_core::collector::collect_snapshot_with_command_results(
-            &server_id,
-            &collected_at,
-            &cancel,
-            outputs,
+        if !state.supervisor.status().await.running {
+            crate::commands::start_sidecar(&app).await?;
+        }
+        let outputs = outputs
+            .into_iter()
+            .map(|(command_id, (exit_code, stdout))| {
+                (
+                    command_id,
+                    serde_json::json!({ "exitCode": exit_code, "stdout": stdout }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let response = state
+            .supervisor
+            .request(
+                "server.snapshot.normalize",
+                serde_json::json!({ "outputs": outputs }),
+                std::time::Duration::from_secs(15),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let data = response
+            .get("snapshotData")
+            .ok_or_else(|| "Python Agent returned invalid snapshot data".to_string())?;
+        (
+            server_snapshot_from_normalized_data(&server_id, &collected_at, data)?,
+            Vec::new(),
         )
-        .await
-        .map_err(|error| error.to_string())?
     } else {
         ensure_session(&state, &server_id).await?;
         let session = state
