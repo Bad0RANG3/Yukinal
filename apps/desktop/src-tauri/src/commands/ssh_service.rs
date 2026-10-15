@@ -411,8 +411,8 @@ pub(crate) enum CppProxyRoute {
     Unsupported,
 }
 
-/// Forward the selected proxy configuration to the C++ transport. This bridge
-/// only routes HTTP(S) schemes; C++ parses the URL and applies bypass patterns.
+/// Forward the selected proxy configuration to the C++ transport. The C++
+/// service parses HTTP(S) and SOCKS5 URLs and applies bypass patterns.
 pub(crate) fn resolve_cpp_proxy_route(state: &AppState) -> Result<CppProxyRoute, String> {
     let outbound =
         super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
@@ -425,7 +425,8 @@ fn cpp_proxy_route(outbound: yukinal_net::OutboundProxy) -> CppProxyRoute {
         yukinal_net::NetworkProxy::Unusable { .. } => CppProxyRoute::Unsupported,
         yukinal_net::NetworkProxy::Proxy { url, no_proxy, .. } => {
             let scheme = url.split_once("://").map(|(scheme, _)| scheme);
-            if !matches!(scheme, Some(scheme) if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            if !matches!(scheme, Some(scheme) if ["http", "https", "socks5", "socks5h"]
+                .iter().any(|supported| scheme.eq_ignore_ascii_case(supported)))
             {
                 return CppProxyRoute::Unsupported;
             }
@@ -2286,6 +2287,16 @@ mod tests {
                 credential: Some(value),
             } if url == "https://proxy.example.test:8443"
                 && no_proxy == "*.corp,10.*"
+                && value == "proxy-user:proxy-password"
+        ));
+        assert!(matches!(
+            proxy_route("socks5h://proxy.example.test:1080", Some("*.corp")),
+            CppProxyRoute::ConfiguredProxy {
+                url,
+                no_proxy: Some(no_proxy),
+                credential: Some(value),
+            } if url == "socks5h://proxy.example.test:1080"
+                && no_proxy == "*.corp"
                 && value == "proxy-user:proxy-password"
         ));
     }

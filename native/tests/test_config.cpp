@@ -256,7 +256,23 @@ YUKINAL_TEST(config_accepts_tls_http_connect_proxy) {
   const auto& target = config.targets.at("staging-web-01");
   YUKINAL_REQUIRE(target.proxy_host == "proxy.example.test");
   YUKINAL_REQUIRE(target.proxy_port == 8443);
-  YUKINAL_REQUIRE(target.proxy_tls);
+  YUKINAL_REQUIRE(target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::https_connect);
+}
+
+YUKINAL_TEST(config_accepts_socks5_proxy_routes) {
+  auto value = valid_config();
+  value["targets"][0]["proxy"] = {{"url", "socks5h://proxy.example.test"}};
+  auto config = parse_config(value);
+  const auto& remote_dns = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(remote_dns.proxy_host == "proxy.example.test");
+  YUKINAL_REQUIRE(remote_dns.proxy_port == 1080);
+  YUKINAL_REQUIRE(remote_dns.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_remote_dns);
+
+  value["targets"][0]["proxy"] = {
+      {"type", "socks5"}, {"host", "proxy.example.test"}, {"port", 1080}};
+  config = parse_config(value);
+  YUKINAL_REQUIRE(config.targets.at("staging-web-01").proxy_protocol ==
+                  yukinal::ssh_service::ProxyProtocol::socks5_local_dns);
 }
 
 YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
@@ -322,7 +338,7 @@ YUKINAL_TEST(config_rejects_invalid_no_proxy_patterns) {
 YUKINAL_TEST(config_rejects_unsupported_or_malformed_proxy) {
   auto unsupported = valid_config();
   unsupported["targets"][0]["proxy"] = {
-      {"type", "socks5"}, {"host", "proxy.example.test"}, {"port", 1080}};
+      {"type", "socks4"}, {"host", "proxy.example.test"}, {"port", 1080}};
   bool unsupported_rejected = false;
   try {
     (void)parse_config(unsupported);

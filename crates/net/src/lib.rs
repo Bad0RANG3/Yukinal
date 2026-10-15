@@ -127,6 +127,9 @@ pub fn apply(
         NetworkProxy::Unusable { reason } => Err(reason.clone()),
         NetworkProxy::Proxy { url, no_proxy, .. } => {
             let url = normalized(url)?;
+            if url.starts_with("socks5://") || url.starts_with("socks5h://") {
+                return Err("SOCKS 代理仅由 C++ SSH 服务支持".to_string());
+            }
             let mut configured = reqwest::Proxy::all(url.clone())
                 .map_err(|_| "代理地址无法用于 HTTP 客户端".to_string())?;
             if let Some(credential) = credential {
@@ -213,9 +216,9 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-/// 把读到的代理值变成可以交给 HTTP 客户端的 URL。
+/// 把读到的代理值变成可以交给 HTTP 客户端或 C++ SSH 传输的 URL。
 ///
-/// 规则与 endpoint 的 URL 规则一致：只认 `http`/`https`，拒绝内嵌凭据、query 与 fragment ——
+/// 规则与 endpoint 的 URL 规则一致：只认 `http`/`https`/`socks5`/`socks5h`，拒绝内嵌凭据、query 与 fragment ——
 /// 代理凭据属于系统凭据库，不属于一个可以被打印出来的字符串。
 fn normalized(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
@@ -231,11 +234,10 @@ fn normalized(raw: &str) -> Result<String, String> {
     let parsed =
         reqwest::Url::parse(&with_scheme).map_err(|_| "代理地址不是合法 URL".to_string())?;
     match parsed.scheme() {
-        "http" | "https" => {}
+        "http" | "https" | "socks5" | "socks5h" => {}
         other => {
             return Err(format!(
-                "代理地址的 scheme `{other}` 不支持；只支持 http 与 https \
-                 （SOCKS 需要另一套协议栈）"
+                "代理地址的 scheme `{other}` 不支持；只支持 http、https、socks5 与 socks5h"
             ))
         }
     }
@@ -559,9 +561,14 @@ mod tests {
             normalized("http://proxy.corp:3128/").expect("trailing slash"),
             "http://proxy.corp:3128"
         );
-        assert!(normalized("socks5://proxy.corp:1080")
-            .expect_err("socks")
-            .contains("不支持"));
+        assert_eq!(
+            normalized("socks5://proxy.corp:1080").expect("SOCKS5 local DNS"),
+            "socks5://proxy.corp:1080"
+        );
+        assert_eq!(
+            normalized("socks5h://proxy.corp:1080").expect("SOCKS5 remote DNS"),
+            "socks5h://proxy.corp:1080"
+        );
         let scheme_error = normalized("socks5://user:secret@proxy.corp:1080")
             .expect_err("socks with embedded credentials");
         assert!(!scheme_error.contains("secret"), "{scheme_error}");
@@ -575,6 +582,20 @@ mod tests {
             .expect_err("query")
             .contains("query"));
         assert!(normalized("").expect_err("empty").contains("空"));
+    }
+
+    #[test]
+    fn socks_proxy_is_not_configured_for_rust_http_clients() {
+        let proxy = NetworkProxy::Proxy {
+            url: "socks5h://proxy.corp:1080".to_string(),
+            no_proxy: None,
+            source: ProxySource::EnvironmentVariable,
+        };
+        let credential = ProxyCredential::new("proxy-user:proxy-password".to_string())
+            .expect("valid credential");
+        let error = apply(reqwest::Client::builder(), &proxy, Some(&credential))
+            .expect_err("SOCKS remains on the C++ SSH route");
+        assert!(error.contains("C++ SSH"));
     }
 
     #[test]

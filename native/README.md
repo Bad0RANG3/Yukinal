@@ -36,9 +36,10 @@ revision. The link-count operation runs a fixed, quoted `stat` probe. The
 desktop routes supported Agent file operations, file browsing, and manual
 transfers through C++ for password, private-key, OpenSSH user-certificate, and
 agent identities when the target uses a supported host-key trust mode and a
-supported direct or HTTP/HTTPS CONNECT route. The desktop passes the configured
-proxy URL through as data; URL parsing, HTTPS certificate verification, bypass
-matching, and CONNECT negotiation run in C++. Supported interactive terminal
+supported direct, HTTP/HTTPS CONNECT, or SOCKS5/SOCKS5H route. SOCKS5 resolves
+target names locally; SOCKS5H delegates name resolution to the proxy. The desktop
+passes the configured proxy URL through as data; URL parsing, HTTPS certificate
+verification, bypass matching, and CONNECT/SOCKS5 negotiation run in C++. Supported interactive terminal
 sessions use the dedicated C++ PTY worker. The C++ terminal worker forwards
 keyboard-interactive challenges through the existing desktop prompt UI. Rust
 remains the compatibility path for other SSH configurations the C++ service
@@ -79,7 +80,9 @@ the C++ config/policy/network tests, Python client tests, service HTTP
 integration, Python Agent tests, SSH mock integration, and Agent-to-SSH
 integration. The real OpenSSH container test is separate and requires Docker.
 The SSH mock also exercises HTTPS CONNECT through a locally trusted CA and
-confirms that a certificate with a mismatched proxy hostname is rejected.
+confirms that a certificate with a mismatched proxy hostname is rejected. It
+verifies authenticated SOCKS5 and SOCKS5H tunnels, including local versus proxy
+DNS resolution and rejection of an incorrect credential.
 
 `pnpm build:ssh-service` builds only the C++ executable and stages it under
 `apps/desktop/src-tauri/resources/ssh-service/`; `pnpm package` and the direct

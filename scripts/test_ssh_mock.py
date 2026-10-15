@@ -51,6 +51,7 @@ AUTH_EVENTS: list[str] = []
 TERMINAL_DIMENSIONS: list[tuple[int, int]] = []
 PROXY_CONNECT_TARGETS: list[str] = []
 HTTPS_PROXY_CONNECT_TARGETS: list[str] = []
+SOCKS5_CONNECT_TARGETS: list[tuple[str, int, int]] = []
 
 
 def unused_port() -> int:
@@ -647,6 +648,95 @@ def start_http_connect_proxy(
     return listener, stopping
 
 
+def start_socks5_proxy(
+    expected_credential: str,
+) -> tuple[socket.socket, threading.Event]:
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    stopping = threading.Event()
+
+    def receive_exact(connection: socket.socket, size: int) -> bytes:
+        result = bytearray()
+        while len(result) < size:
+            chunk = connection.recv(size - len(result))
+            if not chunk:
+                raise ConnectionError("SOCKS client closed during a handshake")
+            result.extend(chunk)
+        return bytes(result)
+
+    def handle_connection(connection: socket.socket) -> None:
+        upstream: socket.socket | None = None
+        try:
+            connection.settimeout(5)
+            version, method_count = receive_exact(connection, 2)
+            methods = receive_exact(connection, method_count)
+            if version != 5 or 2 not in methods:
+                connection.sendall(b"\x05\xff")
+                return
+            connection.sendall(b"\x05\x02")
+
+            auth_version, username_length = receive_exact(connection, 2)
+            username = receive_exact(connection, username_length)
+            password_length = receive_exact(connection, 1)[0]
+            password = receive_exact(connection, password_length)
+            received_credential = username.decode("utf-8") + ":" + password.decode("utf-8")
+            if auth_version != 1 or received_credential != expected_credential:
+                connection.sendall(b"\x01\x01")
+                return
+            connection.sendall(b"\x01\x00")
+
+            version, command, reserved, address_type = receive_exact(connection, 4)
+            if version != 5 or command != 1 or reserved != 0:
+                connection.sendall(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+                return
+            if address_type == 1:
+                host = socket.inet_ntop(socket.AF_INET, receive_exact(connection, 4))
+            elif address_type == 4:
+                host = socket.inet_ntop(socket.AF_INET6, receive_exact(connection, 16))
+            elif address_type == 3:
+                host_length = receive_exact(connection, 1)[0]
+                host = receive_exact(connection, host_length).decode("ascii")
+            else:
+                connection.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+                return
+            port = int.from_bytes(receive_exact(connection, 2), "big")
+            SOCKS5_CONNECT_TARGETS.append((host, port, address_type))
+            upstream_host = "127.0.0.1" if host == "::1" else host
+            upstream = socket.create_connection((upstream_host, port), timeout=3)
+            upstream.settimeout(None)
+            connection.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+            while not stopping.is_set():
+                readable, _, _ = select.select([connection, upstream], [], [], 1)
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    destination = upstream if source is connection else connection
+                    destination.sendall(data)
+        except (OSError, UnicodeError, ConnectionError):
+            pass
+        finally:
+            if upstream is not None:
+                upstream.close()
+            connection.close()
+
+    def accept_connections() -> None:
+        while not stopping.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=handle_connection, args=(connection,), daemon=True).start()
+
+    threading.Thread(target=accept_connections, daemon=True).start()
+    return listener, stopping
+
+
 def expect_error(client: SshServiceClient, target_id: str, service: str,
                  timeout: int, expected_code: str, *, max_elapsed: float | None = None) -> None:
     started = time.monotonic()
@@ -1051,8 +1141,11 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     keyboard_ssh_port = keyboard_listener.getsockname()[1]
     proxy_listener, proxy_stopping = start_http_connect_proxy("proxy-user:proxy-password")
     proxy_port = proxy_listener.getsockname()[1]
+    socks_listener, socks_stopping = start_socks5_proxy("proxy-user:proxy-password")
+    socks_port = socks_listener.getsockname()[1]
     PROXY_CONNECT_TARGETS.clear()
     HTTPS_PROXY_CONNECT_TARGETS.clear()
+    SOCKS5_CONNECT_TARGETS.clear()
 
     with tempfile.TemporaryDirectory(prefix="yukinal-paramiko-ssh-") as temp:
         root = Path(temp)
@@ -1081,11 +1174,12 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
         known_hosts = root / "known_hosts"
 
         def write_known_host(key: paramiko.PKey) -> None:
-            known_hosts.write_text(
-                f"[127.0.0.1]:{ssh_port} {key.get_name()} "
-                f"{base64.b64encode(key.asbytes()).decode()}\n",
-                encoding="ascii",
-            )
+            encoded_key = base64.b64encode(key.asbytes()).decode()
+            with known_hosts.open("a", encoding="ascii") as known_hosts_file:
+                known_hosts_file.write(
+                    f"[127.0.0.1]:{ssh_port} {key.get_name()} {encoded_key}\n"
+                    f"[localhost]:{ssh_port} {key.get_name()} {encoded_key}\n"
+                )
 
         write_known_host(host_key)
         pinned_fingerprint = "SHA256:" + base64.b64encode(
@@ -1216,6 +1310,42 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "auth": {"type": "probe"},
                 },
                 {
+                    "target_id": "srv_socks5_local_dns",
+                    "host": "localhost",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "url": f"socks5://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_socks5_remote_dns",
+                    "host": "localhost",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "url": f"socks5h://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_socks5_bad_auth",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "url": f"socks5://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_BAD_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
                     "target_id": "srv_https_proxy",
                     "host": "127.0.0.1",
                     "port": ssh_port,
@@ -1320,6 +1450,37 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     raise AssertionError("proxy error response exposed the credential") from error
             else:
                 raise AssertionError("C++ SSH accepted a rejected HTTP proxy credential")
+
+            socks_local_result = client.service_status(
+                "srv_socks5_local_dns", "nginx.service", timeout_seconds=8
+            )
+            if socks_local_result.exit_code != 0 or socks_local_result.stdout != "active\n":
+                raise AssertionError(f"SOCKS5 local-DNS proxy did not carry SSH: {socks_local_result!r}")
+            socks_remote_result = client.service_status(
+                "srv_socks5_remote_dns", "nginx.service", timeout_seconds=8
+            )
+            if socks_remote_result.exit_code != 0 or socks_remote_result.stdout != "active\n":
+                raise AssertionError(f"SOCKS5 remote-DNS proxy did not carry SSH: {socks_remote_result!r}")
+            if len(SOCKS5_CONNECT_TARGETS) != 2:
+                raise AssertionError(f"SOCKS5 proxy used an unexpected number of tunnels: {SOCKS5_CONNECT_TARGETS!r}")
+            local_dns_target = SOCKS5_CONNECT_TARGETS[0]
+            if (
+                local_dns_target[0] not in {"127.0.0.1", "::1"}
+                or local_dns_target[1] != ssh_port
+                or local_dns_target[2] not in {1, 4}
+            ):
+                raise AssertionError(f"SOCKS5 did not resolve its target locally: {SOCKS5_CONNECT_TARGETS!r}")
+            if SOCKS5_CONNECT_TARGETS[1] != ("localhost", ssh_port, 3):
+                raise AssertionError(f"SOCKS5H did not delegate DNS resolution: {SOCKS5_CONNECT_TARGETS!r}")
+            try:
+                client.service_status("srv_socks5_bad_auth", "nginx.service", timeout_seconds=5)
+            except SshServiceError as error:
+                if error.code != "proxy_auth_required":
+                    raise AssertionError(f"SOCKS proxy rejection used the wrong error: {error.code}") from error
+                if "bad-proxy-password" in str(error):
+                    raise AssertionError("SOCKS proxy error response exposed the credential") from error
+            else:
+                raise AssertionError("C++ SSH accepted a rejected SOCKS proxy credential")
 
             https_probe = client._execute_operation(
                 "srv_https_proxy_probe_only", "host_key_probe", {}, timeout_seconds=8
@@ -1707,6 +1868,8 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             keyboard_listener.close()
             proxy_stopping.set()
             proxy_listener.close()
+            socks_stopping.set()
+            socks_listener.close()
             https_proxy_stopping.set()
             https_proxy_listener.close()
             bad_tls_proxy_stopping.set()

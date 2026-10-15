@@ -760,6 +760,12 @@ std::optional<std::string> perform_krl_http_request(Client& client, const KrlUrl
   proxy_target.host = url.host;
   const bool use_proxy = !target.proxy_host.empty() &&
       !yukinal::ssh_service::proxy_bypasses_target(proxy_target);
+  if (use_proxy &&
+      (target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_local_dns ||
+       target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_remote_dns)) {
+    if (error) *error = "SOCKS proxy routes are not supported for host certificate KRL downloads";
+    return std::nullopt;
+  }
   std::string credential;
   bool proxy_auth_configured = false;
   if (use_proxy) {

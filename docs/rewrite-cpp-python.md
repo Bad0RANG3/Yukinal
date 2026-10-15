@@ -9,11 +9,14 @@
 > The desktop resolver has no legacy Node resource or runtime fallback; old Node paths below refer only to historical migration evidence.
 > Rust still hosts native UI IPC, local trust-store updates, final approvals, and
 > compatibility paths for configurations outside current C++ coverage. C++ verifies
-> configured OpenSSH host CAs and optional KRLs for supported CA algorithms; a CA is
+> configured OpenSSH host CAs and optional KRLs for supported CA algorithms; remote
+> KRL download through SOCKS is not implemented yet and fails closed. A CA is
 > itself a valid trust source and does not also require a leaf host-key pin. The
-> desktop passes proxy configuration as data; C++ parses HTTP/HTTPS proxy URLs,
-> verifies HTTPS proxy certificates, applies bypass rules, and establishes CONNECT
-> tunnels. Unsupported proxy protocols, CA algorithms, and other SSH modes remain
+> desktop passes proxy configuration as data; C++ parses HTTP/HTTPS and SOCKS5/SOCKS5H
+> proxy URLs, verifies HTTPS proxy certificates, applies bypass rules, and establishes
+> CONNECT or SOCKS5 tunnels. SOCKS5 resolves target names locally; SOCKS5H delegates
+> name resolution to the proxy. SOCKS4, PAC, unsupported CA algorithms, and other
+> SSH modes remain
 > on the compatibility path.
 > Keyboard-interactive terminal prompts are forwarded by the C++ PTY worker to
 > the existing desktop prompt UI. Supported desktop
@@ -22,14 +25,15 @@
 > logs, Docker inspection, systemd inspection, and package inspection through a
 > short-lived C++ process using the saved desktop target and identity. The desktop file browser and
 > manual transfers use C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
-> SSH-agent identities on direct or supported HTTP/HTTPS CONNECT routes with either a
+> SSH-agent identities on direct, supported HTTP/HTTPS CONNECT, or SOCKS5/SOCKS5H routes with either a
 > confirmed host-key pin or a supported host CA. The same identities use C++ for
-> structured SSH operations. Host-key probes use C++ on direct and supported HTTP/HTTPS
-> CONNECT routes; the probe reports the certified public-key fingerprint without
+> structured SSH operations. Host-key probes use C++ on direct and supported
+> HTTP/HTTPS CONNECT and SOCKS5/SOCKS5H routes; the probe reports the certified public-key fingerprint without
 > treating it as trusted. Unsupported host-key modes retain the Rust compatibility
 > path.
-> Manual transfers use bounded C++ SFTP streams on supported direct or HTTP/HTTPS CONNECT
-> routes with either a confirmed pin or supported host CA. The Rust compatibility path
+> Manual transfers use bounded C++ SFTP streams on supported direct, HTTP/HTTPS CONNECT,
+> or SOCKS5/SOCKS5H routes with either a confirmed pin or supported host CA. The
+> Rust compatibility path
 > remains for unsupported targets.
 > Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
@@ -703,6 +707,18 @@ protocols remain on the compatibility path. The C++ service and Tauri library
 compiled after this change. The SSH mock integration passed with a locally trusted
 CA, a complete HTTPS CONNECT SSH operation, and rejection of a proxy certificate
 whose SAN did not match the configured proxy host.
+
+Also on 2026-10-15, the C++ SSH transport added authenticated SOCKS5 and SOCKS5H
+tunnels. SOCKS5 resolves destination names locally, while SOCKS5H sends domain
+names to the proxy; both preserve the configured bypass rules and connection
+deadline. The Tauri bridge forwards the selected route as configuration data
+only; SOCKS handshake, authentication, DNS routing, and tunneling stay in C++.
+The Rust HTTP client does not implement SOCKS, and other HTTP traffic retains its
+existing HTTP/HTTPS proxy support.
+The SSH mock passed authenticated local- and remote-DNS tunnels and rejected a
+bad proxy password without exposing it. The C++ test executable passed all 56
+tests, all six CTest targets passed, the Python SSH mock passed, 12 `yukinal-net`
+tests passed, and `cargo check -p yukinal-desktop --lib` passed.
 
 On 2026-10-15, fixed C++ KRL URL parsing that incorrectly rejected loopback HTTP
 URLs before applying the loopback-only HTTP rule. Loopback IPv4 and IPv6

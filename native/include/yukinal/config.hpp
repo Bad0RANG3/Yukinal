@@ -8,6 +8,13 @@
 
 namespace yukinal::ssh_service {
 
+enum class ProxyProtocol {
+  http_connect,
+  https_connect,
+  socks5_local_dns,
+  socks5_remote_dns,
+};
+
 struct TargetConfig {
   std::string target_id;
   std::string host;
@@ -27,7 +34,7 @@ struct TargetConfig {
   std::string passphrase_env;
   std::string proxy_host;
   int proxy_port = 0;
-  bool proxy_tls = false;
+  ProxyProtocol proxy_protocol = ProxyProtocol::http_connect;
   std::string proxy_auth_env;
   std::vector<std::string> proxy_no_proxy;
   bool agent_auth = false;

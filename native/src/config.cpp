@@ -296,8 +296,9 @@ bool valid_host(const std::string& host) {
   return true;
 }
 
-bool parse_proxy_url(const std::string& value, std::string* host, int* port, bool* tls) {
-  if (!host || !port || !tls || value.empty() || value.size() > 4096) return false;
+bool parse_proxy_url(const std::string& value, std::string* host, int* port,
+                     ProxyProtocol* protocol) {
+  if (!host || !port || !protocol || value.empty() || value.size() > 4096) return false;
   for (const unsigned char ch : value) {
     if (ch <= 0x20 || ch == 0x7f) return false;
   }
@@ -309,11 +310,17 @@ bool parse_proxy_url(const std::string& value, std::string* host, int* port, boo
     return static_cast<char>(std::tolower(ch));
   });
   if (scheme == "http") {
-    *tls = false;
+    *protocol = ProxyProtocol::http_connect;
     *port = 80;
   } else if (scheme == "https") {
-    *tls = true;
+    *protocol = ProxyProtocol::https_connect;
     *port = 443;
+  } else if (scheme == "socks5") {
+    *protocol = ProxyProtocol::socks5_local_dns;
+    *port = 1080;
+  } else if (scheme == "socks5h") {
+    *protocol = ProxyProtocol::socks5_remote_dns;
+    *port = 1080;
   } else {
     return false;
   }
@@ -539,17 +546,29 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
       if (proxy.contains("url")) {
         if (proxy.contains("type") || proxy.contains("host") || proxy.contains("port") ||
             !parse_proxy_url(required_string(proxy, "url", label + ".proxy"),
-                             &target.proxy_host, &target.proxy_port, &target.proxy_tls)) {
-          throw std::runtime_error(label + ".proxy.url must be an HTTP or HTTPS proxy URL without credentials, query, or fragment");
+                             &target.proxy_host, &target.proxy_port, &target.proxy_protocol)) {
+          throw std::runtime_error(label + ".proxy.url must be an HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL without credentials, query, or fragment");
         }
       } else {
         const std::string proxy_type = required_string(proxy, "type", label + ".proxy");
-        if (proxy_type != "http_connect" && proxy_type != "https_connect") {
-          throw std::runtime_error(label + ".proxy.type must be http_connect or https_connect");
+        if (proxy_type != "http_connect" && proxy_type != "https_connect" &&
+            proxy_type != "socks5" && proxy_type != "socks5h") {
+          throw std::runtime_error(label + ".proxy.type must be http_connect, https_connect, socks5, or socks5h");
         }
-        target.proxy_tls = proxy_type == "https_connect";
+        if (proxy_type == "http_connect") target.proxy_protocol = ProxyProtocol::http_connect;
+        else if (proxy_type == "https_connect") target.proxy_protocol = ProxyProtocol::https_connect;
+        else if (proxy_type == "socks5") target.proxy_protocol = ProxyProtocol::socks5_local_dns;
+        else target.proxy_protocol = ProxyProtocol::socks5_remote_dns;
+        if (!proxy.contains("port")) {
+          target.proxy_port = target.proxy_protocol == ProxyProtocol::socks5_local_dns ||
+                                      target.proxy_protocol == ProxyProtocol::socks5_remote_dns
+                                  ? 1080
+                                  : target.proxy_protocol == ProxyProtocol::https_connect ? 443 : 80;
+        }
         target.proxy_host = required_string(proxy, "host", label + ".proxy");
-        target.proxy_port = required_integer(proxy, "port", 1, 65535, label + ".proxy");
+        if (proxy.contains("port")) {
+          target.proxy_port = required_integer(proxy, "port", 1, 65535, label + ".proxy");
+        }
         if (!valid_host(target.proxy_host)) {
           throw std::runtime_error(label + ".proxy.host is invalid");
         }
