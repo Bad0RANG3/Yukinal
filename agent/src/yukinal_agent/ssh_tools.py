@@ -12,6 +12,9 @@ from .host_tools import _execute_on_host
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_MAX_SERVER_LOG_LINES = 500
+
 
 def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None:
     async def service_status(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, object]:
@@ -270,6 +273,7 @@ def register_desktop_ssh_tools(
                     arguments.get("sinceSeconds"),
                     arguments.get("unit"),
                 )
+                return _parse_server_logs(result.stdout, arguments)
             elif operation == "service_inventory":
                 result = await asyncio.to_thread(client.service_inventory, target_id)
                 return _parse_service_inventory(result.stdout, arguments)
@@ -406,6 +410,56 @@ def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, o
     if source_value == "unavailable":
         result["message"] = "未检测到可读取的 systemd 或 Docker 服务管理器"
     return result
+
+
+def _parse_server_logs(raw: str, arguments: dict[str, Any]) -> dict[str, object]:
+    source_marker = "__YUKINAL_SOURCE__="
+    source = next(
+        (
+            line.strip()[len(source_marker):]
+            for line in raw.splitlines()
+            if line.strip().startswith(source_marker)
+        ),
+        None,
+    )
+    if source not in {"journalctl", "syslog", "messages", "unavailable"}:
+        raise ToolCallError(
+            "execution_failed", "The C++ SSH service returned an invalid log response"
+        )
+    if (
+        arguments.get("sinceSeconds") is not None or arguments.get("unit") is not None
+    ) and source != "journalctl":
+        raise ToolCallError(
+            "unsupported",
+            "server.logs filters require journalctl; the fallback log source was not "
+            "returned unfiltered",
+        )
+    if source == "unavailable":
+        return {
+            "source": source,
+            "lines": [],
+            "message": "未检测到可读取的 journalctl 或系统日志文件",
+        }
+
+    lines: list[dict[str, str]] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip() or line.strip().startswith(source_marker):
+            continue
+        lowered = line.translate(_ASCII_LOWER)
+        if any(
+            marker in lowered
+            for marker in ("panic", "emerg", "alert", "crit", "error", "failed", "failure")
+        ):
+            level = "error"
+        elif any(marker in lowered for marker in ("warning", "warn", "degraded")):
+            level = "warning"
+        else:
+            level = "info"
+        lines.append({"text": line, "level": level})
+        if len(lines) == _MAX_SERVER_LOG_LINES:
+            break
+    return {"source": source, "lines": lines}
 
 
 def _systemd_service_state(active: str, sub: str) -> str:

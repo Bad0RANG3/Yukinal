@@ -59,7 +59,8 @@ the existing transcript UI. With the packaged C++ service available, desktop
 `ssh.service_status` use a short-lived, one-target C++ process. Agent
 `filesystem.read` also runs through Python and the C++ bounded SFTP read; before
 the desktop returns a target to Python, Rust checks the requested path and byte
-limit with the existing `AgentReadRequest` policy. Rust supplies the
+limit with the existing `AgentReadRequest` policy. Python parses `server.logs`
+into the existing source, line, and severity result shape. Rust supplies the
 saved target, confirmed host-key pin, and credential material from the OS store;
 the Python process passes credentials only through the C++ child environment and
 cleans up its temporary configuration when the call ends. If Rust reports that
@@ -376,10 +377,11 @@ Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. The C++ build and all six CTest targets passed on the preceding
 verified revision. On the current Python tool-routing changes, full Agent
-discovery ran 72 tests: 69 passed and 3 service integration cases were skipped
+discovery ran 73 tests: 70 passed and 3 service integration cases were skipped
 because no service binary path was configured for that standalone run. The
 focused SSH client suite passed 16 tests, and the desktop SSH routing and process
-suite passed 11 tests. CTest was rerun for this round. An earlier full Python
+suite passed 12 tests. CTest was rerun for this round; all six targets passed. An
+earlier full Python
 unittest discovery ran 45 tests: 42 passed and 3 service integration cases were
 skipped because the service binary path was not configured for that standalone
 run. Rust host bridge unit tests were added but could not be run in this shell

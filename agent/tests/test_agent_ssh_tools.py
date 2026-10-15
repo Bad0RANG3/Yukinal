@@ -8,7 +8,12 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from yukinal_agent import AgentWorkflow, ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
-from yukinal_agent.ssh_tools import _parse_service_inventory, register_desktop_ssh_tools, register_ssh_tools
+from yukinal_agent.ssh_tools import (
+    _parse_server_logs,
+    _parse_service_inventory,
+    register_desktop_ssh_tools,
+    register_ssh_tools,
+)
 
 
 class FakeDesktopHost:
@@ -81,7 +86,20 @@ class FakeDesktopSshClient:
         return self._result("service_status", *arguments)
 
     def server_logs(self, *arguments: Any) -> Any:
-        return self._result("server_logs", *arguments)
+        self.calls.append(("server_logs", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0],
+            operation="server_logs",
+            exit_code=0,
+            stdout=(
+                "2026-01-02T03:04:05Z host app[12]: ERROR failed to start\n"
+                "2026-01-02T03:04:06Z host app[12]: warning retrying\n"
+                "__YUKINAL_SOURCE__=journalctl\n"
+            ),
+            stderr="",
+            duration_ms=3,
+            output_truncated=False,
+        )
 
     def service_inventory(self, *arguments: Any) -> Any:
         self.calls.append(("service_inventory", arguments))
@@ -234,6 +252,14 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                         "truncated": True,
                         "revision": hashlib.sha256(b"hello").hexdigest(),
                     })
+                elif tool_name == "server.logs":
+                    self.assertEqual(result.value, {
+                        "source": "journalctl",
+                        "lines": [
+                            {"text": "2026-01-02T03:04:05Z host app[12]: ERROR failed to start", "level": "error"},
+                            {"text": "2026-01-02T03:04:06Z host app[12]: warning retrying", "level": "warning"},
+                        ],
+                    })
                 else:
                     self.assertEqual(result.value["operation"], operation)
                     self.assertEqual(result.value["target_id"], "srv_stage1")
@@ -276,6 +302,31 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unavailable["source"], "unavailable")
         self.assertEqual(unavailable["services"], [])
         self.assertEqual(unavailable["message"], "未检测到可读取的 systemd 或 Docker 服务管理器")
+
+    async def test_server_log_parser_preserves_levels_filters_and_unavailable_shape(self) -> None:
+        parsed = _parse_server_logs(
+            "panic: service failed\nwarning: retrying\nplain info\n__YUKINAL_SOURCE__=journalctl\n",
+            {"sinceSeconds": 60},
+        )
+        self.assertEqual(parsed, {
+            "source": "journalctl",
+            "lines": [
+                {"text": "panic: service failed", "level": "error"},
+                {"text": "warning: retrying", "level": "warning"},
+                {"text": "plain info", "level": "info"},
+            ],
+        })
+        unavailable = _parse_server_logs("__YUKINAL_SOURCE__=unavailable\n", {})
+        self.assertEqual(unavailable, {
+            "source": "unavailable",
+            "lines": [],
+            "message": "未检测到可读取的 journalctl 或系统日志文件",
+        })
+        with self.assertRaises(ToolCallError) as unsupported:
+            _parse_server_logs(
+                "plain log\n__YUKINAL_SOURCE__=syslog\n", {"unit": "nginx.service"}
+            )
+        self.assertEqual(unsupported.exception.code, "unsupported")
 
     async def test_selected_server_is_bound_by_host_context(self) -> None:
         client = FakeSshServiceClient()
