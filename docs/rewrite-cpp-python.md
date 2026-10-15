@@ -617,7 +617,14 @@ rejection. Python syntax parsing and `git diff --check` passed. This revision
 was rebuilt with the installed Visual Studio Build Tools environment, and all
 six CTest targets passed, including the SSH mock replay check and Agent-to-C++
 integration. The initial build failure was only caused by the shell not loading
-the MSVC environment; no project or build configuration change was needed.
+the MSVC environment; no project or build configuration change was needed. A
+repo-wide `pnpm check` passed publication/secret checks, Node command and
+packaging tests, documentation links, contract builds, typechecks, and the
+packaging contract, then stopped before JavaScript tests because Node 26.5.1
+threw `uv_os_get_passwd returned ENOMEM` from `os.userInfo()` inside `tsx`.
+The independent CTest run above passed; the full gate's later Python sidecar
+smoke was not reached. Cargo is not on `PATH`, so Rust formatting, lint, and
+workspace checks remain unavailable in this environment.
 
 ## Deliberately deferred
 
