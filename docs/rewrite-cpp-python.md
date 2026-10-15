@@ -608,6 +608,16 @@ service-path skips, and CTest passed all six targets. Rust formatting and
 compilation remain unverified because Cargo, rustfmt, and rustc are unavailable
 on this machine.
 
+On 2026-10-15, the C++ HTTP service began consuming `server.exec` authorization
+atomically per configured target before starting SSH. A second or concurrent
+request for the same one-shot target is rejected with `operation_not_allowed`,
+including when the first SSH attempt fails. The SSH mock now uses separate
+one-shot targets for the successful and output-cap cases and verifies replay
+rejection. Python syntax parsing and `git diff --check` passed. This revision
+could not be rebuilt here: `build-nmake` has no `nmake` executable and
+`build-vs` contains no generated Visual Studio project, so its C++ integration
+test was not run; results from the preceding revision do not verify this change.
+
 ## Deliberately deferred
 
 - keeping a persistent C++ SSH service alive across desktop requests;
