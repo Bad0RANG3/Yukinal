@@ -494,7 +494,7 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
         return Ok(cpp_has_supported_trust_source(host_ca_algorithm, false));
     }
     let pin = state
-        .ssh
+        .host_trust
         .host_key_pin(&server.connection.host, server.connection.port)
         .map_err(|error| error.to_string())?;
     Ok(cpp_has_supported_trust_source(None, pin.is_some()))

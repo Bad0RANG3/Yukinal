@@ -296,6 +296,8 @@ class SshServiceClient:
         command: str,
         timeout_ms: int,
         max_output_bytes: int,
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> SshServerExecResult:
         """Run one approved, bounded command through the one-shot server.exec capability."""
         if not isinstance(target_id, str) or not _TARGET_ID.fullmatch(target_id):
@@ -319,19 +321,49 @@ class SshServiceClient:
             or not 1 <= max_output_bytes <= 65_536
         ):
             raise ValueError("max_output_bytes must be an integer from 1 to 65536")
+        if workdir is not None:
+            if (
+                not isinstance(workdir, str)
+                or not workdir.startswith("/")
+                or len(workdir.encode("utf-8")) > 4096
+                or "\x00" in workdir
+                or any(ord(character) < 0x20 or ord(character) == 0x7F for character in workdir)
+                or any(part in {".", ".."} for part in workdir.split("/"))
+            ):
+                raise ValueError("workdir must be a bounded absolute path without traversal or controls")
+        if env is not None:
+            allowed_env = {
+                "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_TIME", "LC_NUMERIC",
+                "LC_COLLATE", "TZ", "TERM",
+            }
+            if not isinstance(env, dict) or len(env) > 16:
+                raise ValueError("env must contain at most 16 allowlisted variables")
+            for key, value in env.items():
+                if (
+                    key not in allowed_env
+                    or not isinstance(value, str)
+                    or len(value.encode("utf-8")) > 256
+                    or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+                ):
+                    raise ValueError("env contains a non-allowlisted variable or invalid value")
 
         timeout_seconds = (timeout_ms + 999) // 1000
+        parameters: dict[str, Any] = {
+            "command": command,
+            "max_output_bytes": max_output_bytes,
+            "timeout_ms": timeout_ms,
+        }
+        if workdir is not None:
+            parameters["workdir"] = workdir
+        if env is not None:
+            parameters["env"] = env
         body = self._request(
             "POST",
             "/v1/ssh/exec",
             {
                 "target_id": target_id,
                 "operation": "server_exec",
-                "parameters": {
-                    "command": command,
-                    "max_output_bytes": max_output_bytes,
-                    "timeout_ms": timeout_ms,
-                },
+                "parameters": parameters,
                 "timeout_seconds": timeout_seconds,
             },
             timeout=timeout_seconds + 5,

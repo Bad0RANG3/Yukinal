@@ -437,7 +437,7 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
     let fingerprint = if authority.is_none() {
         Some(
             state
-                .ssh
+                .host_trust
                 .host_key_pin(&server.connection.host, server.connection.port)
                 .map_err(|_| "the selected server host-key pin could not be read".to_string())?
                 .ok_or_else(|| "the selected server has no confirmed host-key pin".to_string())?,

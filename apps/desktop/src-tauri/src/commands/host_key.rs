@@ -21,7 +21,6 @@ use tauri::{AppHandle, State};
 use crate::commands::ssh_service;
 use crate::state::AppState;
 use yukinal_ssh::known_hosts::{Check, ForgetOutcome, TrustDecision};
-use yukinal_ssh::SshBackend;
 
 /// `server_host_key_status`：这台服务器对应的 `host:port` 现在钉的是什么。
 ///
@@ -122,12 +121,15 @@ pub async fn server_host_key_status(
     server_id: String,
 ) -> Result<ServerHostKeyStatusResponse, String> {
     let (host, port) = resolve_endpoint(&state, &server_id)?;
-    let pinned = state.ssh.host_key_pin(&host, port).map_err(|error| {
-        format!(
-            "读取 known_hosts 失败：{error}。这是本机数据目录下的文件；请确认它没有被别的程序\
+    let pinned = state
+        .host_trust
+        .host_key_pin(&host, port)
+        .map_err(|error| {
+            format!(
+                "读取 known_hosts 失败：{error}。这是本机数据目录下的文件；请确认它没有被别的程序\
              占用、也没有被改成无法解析的内容，然后重试。"
-        )
-    })?;
+            )
+        })?;
 
     Ok(ServerHostKeyStatusResponse {
         host,
@@ -174,7 +176,7 @@ pub async fn server_host_key_probe(
 
     // 比较用的是 store 自己的比较（`check`），不是这里重写一遍的 `if`。
     let check = state
-        .ssh
+        .host_trust
         .host_key_check(&host, port, &presented_fingerprint)
         .map_err(|error| format!("读取 known_hosts 失败：{error}。请重试；持续失败请检查数据目录下 known_hosts 的权限。"))?;
 
@@ -227,7 +229,7 @@ pub async fn server_host_key_trust(
             }
         })?;
 
-    let decision = state.ssh.trust_host(&host, port, &fingerprint).map_err(|error| {
+    let decision = state.host_trust.trust_host(&host, port, &fingerprint).map_err(|error| {
         format!("写入 known_hosts 失败：{error}。指纹**没有**被记住；请检查数据目录是否可写，然后重试。")
     })?;
 
@@ -269,7 +271,7 @@ pub async fn server_host_key_forget(
     let (host, port) = resolve_endpoint(&state, &server_id)?;
     state.host_keys.invalidate(&server_id);
 
-    let outcome = state.ssh.forget_host(&host, port).map_err(|error| {
+    let outcome = state.host_trust.forget_host(&host, port).map_err(|error| {
         format!("从 known_hosts 删除 {host}:{port} 失败：{error}。钉子仍然在，连接行为没有改变；请检查数据目录是否可写，然后重试。")
     })?;
 

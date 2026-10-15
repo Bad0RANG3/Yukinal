@@ -83,7 +83,6 @@ class FakeDesktopHost:
             response = {"status": "success", "targetData": payload}
             if isinstance(tool_call, dict) and tool_call.get("toolName") == "server.exec":
                 payload["target"]["allow_server_exec"] = True
-                response["command"] = "cd '/srv/app' && /bin/sh -c 'printf hello'"
             return response
         if method == "host.ssh.filesystem_read_target":
             payload["filesystemRead"] = {
@@ -284,8 +283,18 @@ class FakeDesktopSshClient:
     def package_install(self, *arguments: Any) -> Any:
         return self._result("package_install", *arguments)
 
-    def server_exec(self, *arguments: Any) -> Any:
-        self.calls.append(("server_exec", arguments))
+    def server_exec(
+        self,
+        target_id: str,
+        command: str,
+        timeout_ms: int,
+        max_output_bytes: int,
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Any:
+        self.calls.append(
+            ("server_exec", (target_id, command, timeout_ms, max_output_bytes, workdir, env))
+        )
         return SimpleNamespace(
             exit_code=0,
             stdout="hello\n",
@@ -747,6 +756,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "timeoutMs": 1000,
             "maxOutputBytes": 4096,
             "workdir": "/srv/app",
+            "env": {"LANG": "C"},
         }
         fingerprint = approval_fingerprint(
             "server.exec",
@@ -795,7 +805,12 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.value, expected_output)
         self.assertEqual(
             FakeDesktopSshClient.calls,
-            [("server_exec", ("srv_stage1", "cd '/srv/app' && /bin/sh -c 'printf hello'", 1000, 4096))],
+            [
+                (
+                    "server_exec",
+                    ("srv_stage1", "printf hello", 1000, 4096, "/srv/app", {"LANG": "C"}),
+                )
+            ],
         )
         self.assertEqual(
             [method for method, _params in host.calls],

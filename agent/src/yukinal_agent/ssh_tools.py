@@ -756,11 +756,9 @@ async def _desktop_ssh_effectful_action(
             message if isinstance(message, str) else "the desktop host rejected the SSH action request",
         )
     payload = response.get("targetData")
-    remote_command = response.get("command") if tool_name == "server.exec" else None
     if (
         response.get("status") != "success"
         or not isinstance(payload, dict)
-        or (tool_name == "server.exec" and (not isinstance(remote_command, str) or not remote_command))
     ):
         if response.get("status") == "success":
             await _finish_desktop_ssh_effectful_action(host, tool_call, "failed")
@@ -806,9 +804,11 @@ async def _desktop_ssh_effectful_action(
             result = await asyncio.to_thread(
                 client.server_exec,
                 target_id,
-                remote_command,
+                arguments["command"],
                 arguments["timeoutMs"],
                 arguments["maxOutputBytes"],
+                workdir=arguments.get("workdir"),
+                env=arguments.get("env"),
             )
         outcome = "succeeded" if result.exit_code == 0 else "failed"
     except asyncio.CancelledError:

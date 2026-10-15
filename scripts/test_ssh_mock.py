@@ -427,7 +427,7 @@ def start_ssh_mock(
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
-            elif command == b"/bin/sh -c 'printf server-exec-ok'":
+            elif command == b"cd '/srv/app' && env LANG='C' /bin/sh -c 'printf server-exec-ok'":
                 channel.sendall(b"authorized-output\n")
                 channel.send_exit_status(0)
             elif command == b"/bin/sh -c 'server-exec-large-output'":
@@ -1812,13 +1812,29 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if result.stdout != "active\n" or result.exit_code != 0:
                 raise AssertionError(f"unexpected read-only result: {result!r}")
 
-            def run_server_exec(target_id: str, command: str, max_output_bytes: int):
+            def run_server_exec(
+                target_id: str,
+                command: str,
+                max_output_bytes: int,
+                *,
+                workdir: str | None = None,
+                env: dict[str, str] | None = None,
+            ):
                 return client.server_exec(
-                    target_id, command, 5000, max_output_bytes
+                    target_id,
+                    command,
+                    5000,
+                    max_output_bytes,
+                    workdir=workdir,
+                    env=env,
                 )
 
             exec_result = run_server_exec(
-                "srv_server_exec_enabled", "printf server-exec-ok", 4096
+                "srv_server_exec_enabled",
+                "printf server-exec-ok",
+                4096,
+                workdir="/srv/app",
+                env={"LANG": "C"},
             )
             if exec_result.exit_code != 0 or exec_result.stdout != "authorized-output\n":
                 raise AssertionError(f"C++ server.exec returned an unexpected result: {exec_result!r}")

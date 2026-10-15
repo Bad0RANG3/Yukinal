@@ -352,7 +352,14 @@ class ClientTests(unittest.TestCase):
             "output_truncated": False,
             "error": None,
         }
-        result = self.client.server_exec("staging-web-01", "printf hello", 1_250, 4096)
+        result = self.client.server_exec(
+            "staging-web-01",
+            "printf hello",
+            1_250,
+            4096,
+            workdir="/srv/app",
+            env={"LANG": "C"},
+        )
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout, "hello\n")
         self.assertEqual(
@@ -366,6 +373,8 @@ class ClientTests(unittest.TestCase):
                         "command": "printf hello",
                         "max_output_bytes": 4096,
                         "timeout_ms": 1250,
+                        "workdir": "/srv/app",
+                        "env": {"LANG": "C"},
                     },
                     "timeout_seconds": 2,
                 },
@@ -380,6 +389,8 @@ class ClientTests(unittest.TestCase):
             lambda: self.client.server_exec("staging-web-01", "echo ok", 0, 1024),
             lambda: self.client.server_exec("staging-web-01", "echo ok", 1000, True),
             lambda: self.client.server_exec("staging-web-01", "echo ok", 1000, 0),
+            lambda: self.client.server_exec("staging-web-01", "echo ok", 1000, 1024, workdir="/tmp/../etc"),
+            lambda: self.client.server_exec("staging-web-01", "echo ok", 1000, 1024, env={"PATH": "/tmp"}),
         )
         for invoke in invalid_calls:
             with self.subTest(invoke=invoke), self.assertRaises(ValueError):

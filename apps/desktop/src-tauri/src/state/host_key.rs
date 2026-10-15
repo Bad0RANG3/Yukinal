@@ -1,10 +1,71 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::Rng as _;
+use yukinal_ssh::known_hosts::{
+    Check, ForgetOutcome, KnownHostsError, KnownHostsStore, TrustDecision,
+};
 
 const PROBE_TTL: Duration = Duration::from_secs(120);
+
+/// 本机 host-key pin 持久化。网络探针和 SSH 握手由 C++ 服务执行；该类型只保存
+/// UI 明确确认过的 endpoint 指纹，不拥有任何 SSH 会话或网络能力。
+#[derive(Clone)]
+pub struct HostTrustStore {
+    store: Arc<Mutex<KnownHostsStore>>,
+}
+
+impl HostTrustStore {
+    pub fn load(data_dir: &Path) -> Result<Self, KnownHostsError> {
+        Ok(Self {
+            store: Arc::new(Mutex::new(KnownHostsStore::load(
+                data_dir.join("known_hosts"),
+            )?)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_store(&self) -> Arc<Mutex<KnownHostsStore>> {
+        Arc::clone(&self.store)
+    }
+
+    pub fn host_key_pin(&self, host: &str, port: u16) -> Result<Option<String>, KnownHostsError> {
+        Ok(self.lock()?.pinned_fingerprint(host, port))
+    }
+
+    pub fn host_key_check(
+        &self,
+        host: &str,
+        port: u16,
+        presented: &str,
+    ) -> Result<Check, KnownHostsError> {
+        Ok(self.lock()?.check(host, port, presented))
+    }
+
+    pub fn trust_host(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+    ) -> Result<TrustDecision, KnownHostsError> {
+        self.lock()?.trust(host, port, fingerprint)
+    }
+
+    pub fn forget_host(&self, host: &str, port: u16) -> Result<ForgetOutcome, KnownHostsError> {
+        self.lock()?.forget(host, port)
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, KnownHostsStore>, KnownHostsError> {
+        self.store.lock().map_err(|_| {
+            KnownHostsError::Io(
+                "known_hosts lock poisoned".into(),
+                std::io::Error::other("poisoned"),
+            )
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeClaimError {

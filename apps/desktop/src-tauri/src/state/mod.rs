@@ -18,6 +18,7 @@ use yukinal_core::supervisor::Supervisor;
 use yukinal_core::terminal::TerminalService;
 use yukinal_credentials::os::OsCredentialStore;
 use yukinal_database::Database;
+#[cfg(test)]
 use yukinal_ssh::RusshBackend;
 use yukinal_terminal::TerminalManager;
 
@@ -32,7 +33,7 @@ pub(crate) use approval::{
     HostApprovalLedger,
 };
 pub use auth::AuthChallengeBroker;
-pub use host_key::HostKeyProbeBroker;
+pub use host_key::{HostKeyProbeBroker, HostTrustStore};
 pub use oauth::OAuthFlowBroker;
 
 /// Bounded live responses for host action retries. The durable ledger lives in
@@ -57,7 +58,10 @@ pub struct AppState {
     pub(crate) host_action_approvals: HostApprovalLedger,
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
-    /// Local OpenSSH known_hosts store used by the trust UI; remote SSH runs in C++.
+    /// Local confirmed host-key pins; this store has no SSH connection capability.
+    pub host_trust: HostTrustStore,
+    /// Retained only for legacy unit fixtures; production SSH runs in C++.
+    #[cfg(test)]
     pub ssh: Arc<RusshBackend>,
     /// Test-only Rust SSH session manager used to cover removed compatibility paths.
     #[cfg(test)]
@@ -81,8 +85,9 @@ impl AppState {
         std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
         let database =
             Database::open(data_dir.join("yukinal.db")).map_err(|error| error.to_string())?;
-        let ssh =
-            Arc::new(RusshBackend::from_data_dir(data_dir).map_err(|error| error.to_string())?);
+        let host_trust = HostTrustStore::load(data_dir).map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        let ssh = Arc::new(RusshBackend::new(host_trust.shared_store()));
         #[cfg(test)]
         let terminals = TerminalService::new(Arc::clone(&ssh));
         let cpp_terminals = TerminalManager::with_id_prefix("tc");
@@ -97,6 +102,8 @@ impl AppState {
             host_tool_replays: Arc::new(Mutex::new(HashMap::new())),
             host_action_approvals: HostApprovalLedger::default(),
             credentials,
+            host_trust,
+            #[cfg(test)]
             ssh,
             #[cfg(test)]
             terminals,

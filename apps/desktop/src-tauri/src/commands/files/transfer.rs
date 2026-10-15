@@ -354,14 +354,8 @@ impl RemoteTransferBackend for SftpTransferBackend {
         Box::pin(async move {
             let state = self.app.state::<AppState>();
             ensure_cpp_transfer_target(&state, server_id)?;
-            ssh_service::sftp_publish_no_replace(
-                &self.app,
-                &state,
-                server_id,
-                source,
-                destination,
-            )
-            .await
+            ssh_service::sftp_publish_no_replace(&self.app, &state, server_id, source, destination)
+                .await
         })
     }
 
@@ -391,10 +385,11 @@ impl RemoteTransferBackend for SftpTransferBackend {
                 .map_err(TransferError::Remote)?
             {
                 None => Ok(()),
-                Some(stat) if stat.kind == RemoteEntryKind::File => ssh_service
-                    .sftp_remove_file(&self.app, &state, server_id, path)
-                    .await
-                    .map_err(TransferError::Remote),
+                Some(stat) if stat.kind == RemoteEntryKind::File => {
+                    ssh_service::sftp_remove_file(&self.app, &state, server_id, path)
+                        .await
+                        .map_err(TransferError::Remote)
+                }
                 Some(_) => Err(TransferError::InvalidInput(
                     "recovered remote staging entry is not a regular file".into(),
                 )),

@@ -23,18 +23,26 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
+use crate::commands::files::remote_file_service;
+use crate::commands::logs::ServerLogsInput;
+use crate::commands::mcp;
+use crate::commands::services::ServerServicesInput;
+#[cfg(test)]
+use crate::commands::terminal::ensure_session;
+use crate::state::AppState;
+use crate::state::{HostActionExecutionBinding, HostActionTicketError};
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
-use yukinal_core::docker::{
-    is_safe_container_ref, truncate_text, DockerLogsResult, DockerRestartResult,
-    DEFAULT_LOG_TAIL, DEFAULT_RESTART_TIMEOUT, MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
-};
 #[cfg(test)]
 use yukinal_core::docker::shell_quote;
+use yukinal_core::docker::{
+    is_safe_container_ref, truncate_text, DockerLogsResult, DockerRestartResult, DEFAULT_LOG_TAIL,
+    DEFAULT_RESTART_TIMEOUT, MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,
+};
 use yukinal_core::package::{
     is_safe_package_ref, is_safe_package_version, is_supported_package_manager,
     PackageInstallResult, DEFAULT_PACKAGE_INSTALL_TIMEOUT, MAX_PACKAGE_INSTALL_TIMEOUT,
@@ -62,17 +70,6 @@ use yukinal_filesystem::{
     validate_remote_path, AgentBackupRequest, AgentCleanupBackupRequest, AgentEditRequest,
     AgentReadRequest, AgentRestoreRequest, AgentWriteRequest, Error as FilesystemError,
 };
-#[cfg(test)]
-use yukinal_ssh::SshBackend;
-
-use crate::commands::files::remote_file_service;
-use crate::commands::logs::ServerLogsInput;
-use crate::commands::mcp;
-use crate::commands::services::ServerServicesInput;
-#[cfg(test)]
-use crate::commands::terminal::ensure_session;
-use crate::state::AppState;
-use crate::state::{HostActionExecutionBinding, HostActionTicketError};
 
 mod context;
 mod evidence;
@@ -2590,7 +2587,7 @@ async fn resolve_ssh_effectful_action_target(
         Ok(false) => {
             return Ok(failed(
                 "unsupported_route",
-                "the selected SSH target requires the Rust compatibility path",
+                "the selected SSH target is not supported by the C++ SSH service",
                 false,
                 None,
             ));
@@ -2648,8 +2645,6 @@ async fn resolve_ssh_effectful_action_target(
     };
     let mut response = json!({ "status": "success", "targetData": target_data });
     if tool_name == SERVER_EXEC {
-        let input = serde_json::from_value::<ServerExecInput>(tool_call.input.clone())
-            .map_err(|_| "server.exec input became invalid during target resolution".to_string())?;
         let target = response
             .get_mut("targetData")
             .and_then(Value::as_object_mut)
@@ -2665,7 +2660,6 @@ async fn resolve_ssh_effectful_action_target(
             ));
         }
         target.insert("allow_server_exec".to_string(), Value::Bool(true));
-        response["command"] = Value::String(server_exec_command(&input));
     }
     Ok(response)
 }

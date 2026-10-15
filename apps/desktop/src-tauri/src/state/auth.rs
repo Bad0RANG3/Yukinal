@@ -4,7 +4,9 @@
 //! Challenges are ordinary UI events; responses arrive through a command and a oneshot.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::future::Future;
+#[cfg(test)]
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,10 +15,9 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, Mutex};
 
-use yukinal_ssh::{
-    Error as SshError, KeyboardInteractiveChallenge, KeyboardInteractiveHandler,
-    KeyboardInteractivePrompt,
-};
+#[cfg(test)]
+use yukinal_ssh::KeyboardInteractiveHandler;
+use yukinal_ssh::{Error as SshError, KeyboardInteractiveChallenge, KeyboardInteractivePrompt};
 
 const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(120);
 const EVENT_CAPACITY: usize = 32;
@@ -72,6 +73,7 @@ impl AuthChallengeBroker {
         self.events.subscribe()
     }
 
+    #[cfg(test)]
     pub fn handler(
         &self,
         server_id: String,
@@ -193,6 +195,7 @@ impl AuthChallengeBroker {
     }
 }
 
+#[cfg(test)]
 struct DesktopKeyboardInteractiveHandler {
     broker: AuthChallengeBroker,
     server_id: String,
@@ -200,6 +203,7 @@ struct DesktopKeyboardInteractiveHandler {
     host: String,
 }
 
+#[cfg(test)]
 impl KeyboardInteractiveHandler for DesktopKeyboardInteractiveHandler {
     fn respond<'a>(
         &'a self,
