@@ -377,8 +377,14 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/credential_store.cpp
     desktop_host/src/database.cpp
     desktop_host/src/ipc_router.cpp
+    desktop_host/src/network_proxy.cpp
   )
   target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
+  if(MSVC)
+    # The host surfaces user-facing reasons (network proxy, credentials) in UTF-8
+    # Chinese; MSVC otherwise reads them in the active code page and derails.
+    target_compile_options(yukinal_desktop_host_core PUBLIC /utf-8)
+  endif()
   target_link_libraries(yukinal_desktop_host_core
     PUBLIC nlohmann_json::nlohmann_json SQLite::SQLite3
   )
@@ -400,7 +406,10 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     target_compile_definitions(yukinal-desktop-host PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   elseif(APPLE)
     find_library(SECURITY_FRAMEWORK Security REQUIRED)
-    target_link_libraries(yukinal_desktop_host_core PRIVATE ${SECURITY_FRAMEWORK})
+    find_library(SYSTEM_CONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE
+      ${SECURITY_FRAMEWORK} ${SYSTEM_CONFIGURATION_FRAMEWORK}
+    )
   else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
@@ -424,6 +433,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     add_executable(yukinal_desktop_host_database_tests
       desktop_host/tests/test_database.cpp
     )
+    target_include_directories(yukinal_desktop_host_database_tests PRIVATE desktop_host/src)
     target_link_libraries(yukinal_desktop_host_database_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME desktop_host_database_tests COMMAND yukinal_desktop_host_database_tests)
     add_test(NAME desktop_host_self_check COMMAND yukinal-desktop-host --self-check)

@@ -1,5 +1,7 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#include "yukinal/desktop_host/network_proxy.hpp"
+
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
 #include "host_key.hpp"
 #endif
@@ -444,7 +446,7 @@ bool normalize_server_input(const std::string& method, const nlohmann::json& par
 }
 
 bool clean_credential_references(DesktopDatabase* database,
-                                 const DesktopCredentialStore& credentials,
+                                 const CredentialStore& credentials,
                                  const std::vector<std::string>& references,
                                  std::string& error) {
   bool all_recovered = true;
@@ -465,6 +467,68 @@ bool clean_credential_references(DesktopDatabase* database,
   }
   return all_recovered;
 }
+
+bool proxy_credential_has_control_characters(const std::string& value) {
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const auto byte = static_cast<unsigned char>(value[index]);
+    if (byte < 0x20 || byte == 0x7f) return true;
+    // U+0080..U+009F are the C1 controls; Rust's `char::is_control` rejects them too.
+    if (byte == 0xc2 && index + 1 < value.size()) {
+      const auto next = static_cast<unsigned char>(value[index + 1]);
+      if (next >= 0x80 && next <= 0x9f) return true;
+    }
+  }
+  return false;
+}
+
+// Mirrors `ProxyCredential::new`: a credential is `user:password`, at most 1024 bytes,
+// with a non-empty user and no control characters.
+bool valid_proxy_credential(const std::string& value, std::string& reason) {
+  if (value.size() > 1'024) {
+    reason = "proxy credential is longer than 1024 characters";
+    return false;
+  }
+  const auto colon = value.find(':');
+  if (colon == std::string::npos || colon == 0) {
+    reason = "proxy credential must be `user:password` without control characters";
+    return false;
+  }
+  if (proxy_credential_has_control_characters(value)) {
+    reason = "proxy credential must be `user:password` without control characters";
+    return false;
+  }
+  return true;
+}
+
+nlohmann::json describe_network_proxy(const DesktopNetworkProxyConfig& config,
+                                      const CredentialStore& credentials) {
+  bool has_credential = false;
+  if (config.credential_ref) {
+    has_credential = credentials.has(CredentialReference::parse(*config.credential_ref));
+  }
+  return {{"mode", config.mode},
+          {"hasCredential", has_credential},
+          {"resolution", resolve_network_proxy(config.mode == "system")}};
+}
+
+// The write-only proxy credential never survives the command call.
+class NetworkProxyCredentialScrubber {
+ public:
+  explicit NetworkProxyCredentialScrubber(nlohmann::json& params) : params_(params) {}
+  ~NetworkProxyCredentialScrubber() {
+    if (!params_.is_object() || !params_.contains("input") || !params_.at("input").is_object()) {
+      return;
+    }
+    auto& input = params_.at("input");
+    if (!input.contains("credential") || !input.at("credential").is_string()) return;
+    auto& value = input["credential"].get_ref<std::string&>();
+    volatile char* bytes = value.data();
+    for (std::size_t index = 0; index < value.size(); ++index) bytes[index] = 0;
+  }
+
+ private:
+  nlohmann::json& params_;
+};
 
 class IpcSecretParamScrubber {
  public:
@@ -502,12 +566,14 @@ std::wstring utf8_to_wide(const std::string& value) {
 
 }  // namespace
 
-IpcRouter::IpcRouter(DesktopDatabase* database) : database_(database) {
+IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
+    : database_(database),
+      credentials_(credentials == nullptr ? &default_credentials_ : credentials) {
   if (database_ == nullptr) return;
   try {
     const auto pending = database_->credential_cleanup_references();
     std::string ignored_error;
-    (void)clean_credential_references(database_, credentials_, pending, ignored_error);
+    (void)clean_credential_references(database_, *credentials_, pending, ignored_error);
   } catch (...) {
   }
 }
@@ -525,6 +591,10 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   if (method == "server_add" || method == "server_update" || method == "server_delete") {
     IpcSecretParamScrubber scrubber(params);
     return server_command(method, params);
+  }
+
+  if (method == "network_proxy_get" || method == "network_proxy_save") {
+    return network_proxy_command(method, params);
   }
 
   if (method == "core_ping") {
@@ -945,7 +1015,7 @@ IpcReply IpcRouter::server_command(const std::string& method,
       try {
         const auto references = database_->delete_identity_if_unshared(*identity_id, server_id);
         std::string cleanup_error;
-        if (!clean_credential_references(database_, credentials_, references, cleanup_error)) {
+        if (!clean_credential_references(database_, *credentials_, references, cleanup_error)) {
           return failure("STORAGE_ERROR", cleanup_error);
         }
       } catch (...) {
@@ -1006,7 +1076,7 @@ IpcReply IpcRouter::server_command(const std::string& method,
         auto store_secret = [this, &staged_references](const std::string& account,
                                                       const std::string& value) {
           Secret secret{std::string_view(value)};
-          auto reference = credentials_.set("ssh", account, secret).to_string();
+          auto reference = credentials_->set("ssh", account, secret).to_string();
           staged_references.push_back(reference);
           return reference;
         };
@@ -1053,7 +1123,7 @@ IpcReply IpcRouter::server_command(const std::string& method,
       } catch (const std::exception&) {
         std::string cleanup_error;
         const bool cleaned = clean_credential_references(
-            database_, credentials_, staged_references, cleanup_error);
+            database_, *credentials_, staged_references, cleanup_error);
         return failure("CREDENTIAL_ERROR", cleaned
             ? "The operating system credential store could not save the SSH identity"
             : "The SSH identity could not be saved or queued for cleanup");
@@ -1105,7 +1175,7 @@ IpcReply IpcRouter::server_command(const std::string& method,
   } catch (const std::exception&) {
     std::string cleanup_error;
     const bool cleaned = clean_credential_references(
-        database_, credentials_, staged_references, cleanup_error);
+        database_, *credentials_, staged_references, cleanup_error);
     return failure("STORAGE_ERROR", cleaned
         ? "The local database could not save the server"
         : "The server was not saved and staged credentials could not be queued for cleanup");
@@ -1116,7 +1186,7 @@ IpcReply IpcRouter::server_command(const std::string& method,
       try {
         const auto references = database_->delete_identity_if_unshared(old_identity_id, server_id);
         std::string cleanup_error;
-        if (!clean_credential_references(database_, credentials_, references, cleanup_error)) {
+        if (!clean_credential_references(database_, *credentials_, references, cleanup_error)) {
           return failure("STORAGE_ERROR", cleanup_error);
         }
       } catch (...) {
@@ -1125,6 +1195,117 @@ IpcReply IpcRouter::server_command(const std::string& method,
     }
   }
   return {true, {{"server", std::move(server)}}};
+}
+
+IpcReply IpcRouter::network_proxy_command(const std::string& method,
+                                        nlohmann::json& params) {
+  if (database_ == nullptr || !database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+
+  if (method == "network_proxy_get") {
+    if (!params.empty()) {
+      return failure("INVALID_PARAMS", "network_proxy_get does not accept parameters");
+    }
+    try {
+      return {true, describe_network_proxy(database_->network_proxy_config(), *credentials_)};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local network proxy setting could not be read");
+    }
+  }
+
+  if (!only_fields(params, {"input"}, {"input"})) {
+    return failure("INVALID_PARAMS", "network_proxy_save requires exactly one input object");
+  }
+  NetworkProxyCredentialScrubber scrubber(params);
+  auto& input = params.at("input");
+  if (!only_fields(input, {"mode", "credential", "clearCredential"}, {"mode"})) {
+    return failure("INVALID_PARAMS", "network_proxy_save input does not match the contract");
+  }
+  if (!input.at("mode").is_string() ||
+      !is_one_of(input.at("mode").get<std::string>(), {"direct", "system"})) {
+    return failure("INVALID_PARAMS", "network_proxy_save mode must be direct or system");
+  }
+  const auto mode = input.at("mode").get<std::string>();
+
+  bool clear_credential = false;
+  if (input.contains("clearCredential")) {
+    if (!input.at("clearCredential").is_boolean()) {
+      return failure("INVALID_PARAMS", "network_proxy_save clearCredential must be a boolean");
+    }
+    clear_credential = input.at("clearCredential").get<bool>();
+  }
+  std::optional<std::string> credential;
+  if (input.contains("credential")) {
+    if (!input.at("credential").is_string()) {
+      return failure("INVALID_PARAMS", "network_proxy_save credential must be a string");
+    }
+    credential = input.at("credential").get<std::string>();
+  }
+  if (credential.has_value() && clear_credential) {
+    return failure("INVALID_PARAMS", "代理凭据与清除操作不能同时提交");
+  }
+  if (mode == "direct" && credential.has_value() && !credential->empty()) {
+    return failure("INVALID_PARAMS", "直连模式不能提交新的代理凭据，请先选择系统代理");
+  }
+
+  DesktopNetworkProxyConfig existing;
+  try {
+    existing = database_->network_proxy_config();
+  } catch (...) {
+    return failure("STORAGE_ERROR", "The local network proxy setting could not be read");
+  }
+
+  std::optional<std::string> staged_reference;
+  std::optional<std::string> credential_ref;
+  if (clear_credential) {
+    credential_ref = std::nullopt;
+  } else if (credential.has_value() && !credential->empty()) {
+    std::string reason;
+    if (!valid_proxy_credential(*credential, reason)) {
+      return failure("INVALID_PARAMS", "代理凭据无法使用：" + reason);
+    }
+    try {
+      const auto account = "network-proxy-" + next_id("credential");
+      const auto reference = credentials_->set(
+          "mcp", account, Secret{std::string_view(*credential)}).to_string();
+      staged_reference = reference;
+      credential_ref = reference;
+    } catch (const std::exception&) {
+      return failure("CREDENTIAL_ERROR",
+                     "The operating system credential store could not save the proxy credential");
+    }
+  } else {
+    credential_ref = existing.credential_ref;
+  }
+
+  DesktopNetworkProxyConfig config{mode, credential_ref};
+  try {
+    database_->save_network_proxy_config(config);
+  } catch (const std::exception&) {
+    if (staged_reference) {
+      std::string ignored_error;
+      (void)clean_credential_references(database_, *credentials_, {*staged_reference}, ignored_error);
+    }
+    return failure("STORAGE_ERROR", "The local network proxy setting could not be saved");
+  }
+
+  // A previous credential is only reclaimed once nothing points at it any more.
+  if (existing.credential_ref && credential_ref != existing.credential_ref) {
+    try {
+      const auto previous = CredentialReference::parse(*existing.credential_ref);
+      std::string ignored_error;
+      (void)clean_credential_references(database_, *credentials_, {previous.to_string()}, ignored_error);
+    } catch (const std::exception&) {
+      // Leave a malformed reference for startup reconciliation; the save already succeeded.
+    }
+  }
+
+  try {
+    return {true, describe_network_proxy(database_->network_proxy_config(), *credentials_)};
+  } catch (...) {
+    return failure("STORAGE_ERROR", "The local network proxy setting could not be read back");
+  }
 }
 
 IpcReply IpcRouter::subscribe(const nlohmann::json& params, bool add) {

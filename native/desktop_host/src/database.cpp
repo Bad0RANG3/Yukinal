@@ -1112,6 +1112,61 @@ nlohmann::json DesktopDatabase::list_workspaces() const {
   return {{"workspaces", std::move(workspaces)}};
 }
 
+DesktopNetworkProxyConfig DesktopDatabase::network_proxy_config() const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Statement setting(connection_,
+                    "SELECT value FROM app_settings WHERE key = 'network.proxy';");
+  const auto result = sqlite3_step(setting.get());
+  if (result == SQLITE_DONE) return {};
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+
+  nlohmann::json stored;
+  try {
+    stored = nlohmann::json::parse(column_text(setting.get(), 0));
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("Stored network proxy setting is invalid JSON");
+  }
+  if (!stored.is_object() || !stored.contains("mode") || !stored.at("mode").is_string()) {
+    throw std::runtime_error("Stored network proxy setting is malformed");
+  }
+  DesktopNetworkProxyConfig config;
+  config.mode = stored.at("mode").get<std::string>();
+  if (config.mode != "direct" && config.mode != "system") {
+    throw std::runtime_error("Stored network proxy mode is unknown");
+  }
+  if (stored.contains("credentialRef") && !stored.at("credentialRef").is_null()) {
+    if (!stored.at("credentialRef").is_string() ||
+        stored.at("credentialRef").get_ref<const std::string&>().empty()) {
+      throw std::runtime_error("Stored network proxy credential reference is malformed");
+    }
+    config.credential_ref = stored.at("credentialRef").get<std::string>();
+  }
+  return config;
+}
+
+void DesktopDatabase::save_network_proxy_config(
+    const DesktopNetworkProxyConfig& config) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (config.mode != "direct" && config.mode != "system") {
+    throw std::invalid_argument("Network proxy mode must be direct or system");
+  }
+  nlohmann::json stored = {{"mode", config.mode}};
+  if (config.credential_ref) stored["credentialRef"] = *config.credential_ref;
+  const auto value = stored.dump();
+  Statement save(connection_, R"SQL(
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES ('network.proxy', ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  )SQL");
+  bind_text(connection_, save.get(), 1, value);
+  if (sqlite3_step(save.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
 nlohmann::json DesktopDatabase::list_activities(
     const std::optional<std::string>& server_id, int limit) const {
   std::lock_guard lock(mutex_);

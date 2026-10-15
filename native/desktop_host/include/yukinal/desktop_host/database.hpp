@@ -10,6 +10,11 @@
 
 namespace yukinal::desktop_host {
 
+struct DesktopNetworkProxyConfig {
+  std::string mode = "direct";
+  std::optional<std::string> credential_ref;
+};
+
 class DesktopDatabase {
  public:
   explicit DesktopDatabase(const std::filesystem::path& data_directory);
@@ -39,6 +44,8 @@ class DesktopDatabase {
   [[nodiscard]] std::vector<std::string> credential_cleanup_references() const;
   void clear_credential_cleanup(const std::string& reference) const;
   [[nodiscard]] nlohmann::json list_workspaces() const;
+  [[nodiscard]] DesktopNetworkProxyConfig network_proxy_config() const;
+  void save_network_proxy_config(const DesktopNetworkProxyConfig& config) const;
   [[nodiscard]] nlohmann::json list_activities(
       const std::optional<std::string>& server_id, int limit) const;
   [[nodiscard]] nlohmann::json list_tool_executions(

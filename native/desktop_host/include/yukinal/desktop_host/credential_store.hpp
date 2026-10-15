@@ -36,14 +36,27 @@ struct CredentialReference {
   [[nodiscard]] std::string to_string() const;
 };
 
-class DesktopCredentialStore {
+// The credential boundary. The desktop host only ever talks to this interface so
+// commands can be tested without touching the operating system credential store.
+class CredentialStore {
+ public:
+  virtual ~CredentialStore() = default;
+  [[nodiscard]] virtual CredentialReference set(const std::string& service,
+                                                const std::string& account,
+                                                const Secret& secret) const = 0;
+  [[nodiscard]] virtual Secret get(const CredentialReference& reference) const = 0;
+  [[nodiscard]] virtual bool has(const CredentialReference& reference) const = 0;
+  virtual void erase(const CredentialReference& reference) const = 0;
+};
+
+class DesktopCredentialStore : public CredentialStore {
  public:
   [[nodiscard]] CredentialReference set(const std::string& service,
                                         const std::string& account,
-                                        const Secret& secret) const;
-  [[nodiscard]] Secret get(const CredentialReference& reference) const;
-  [[nodiscard]] bool has(const CredentialReference& reference) const;
-  void erase(const CredentialReference& reference) const;
+                                        const Secret& secret) const override;
+  [[nodiscard]] Secret get(const CredentialReference& reference) const override;
+  [[nodiscard]] bool has(const CredentialReference& reference) const override;
+  void erase(const CredentialReference& reference) const override;
 };
 
 class CredentialStoreError : public std::runtime_error {
