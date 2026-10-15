@@ -26,7 +26,10 @@ pub(crate) mod credential_cleanup;
 pub(crate) mod host_key;
 mod oauth;
 
-pub(crate) use approval::{HostApprovalLedger, ServerExecExecutionBinding, ServerExecTicketError};
+pub(crate) use approval::{
+    is_host_approval_tool_name, HostApprovalLedger, HostActionExecutionBinding,
+    HostActionTicketError,
+};
 pub use auth::AuthChallengeBroker;
 pub use host_key::HostKeyProbeBroker;
 pub use oauth::OAuthFlowBroker;
@@ -49,8 +52,8 @@ pub struct AppState {
     /// to execute the remote action again.
     pub(crate) host_tool_replays: HostToolReplayCache,
     /// Process-local, one-time host tickets created only after the user approves a
-    /// concrete `server.exec` request. Automatic task grants remain in SQLite.
-    pub(crate) server_exec_approvals: HostApprovalLedger,
+    /// concrete host action request. Automatic task grants remain in SQLite.
+    pub(crate) host_action_approvals: HostApprovalLedger,
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
     pub ssh: Arc<RusshBackend>,
@@ -89,7 +92,7 @@ impl AppState {
             supervisor: Supervisor::new(),
             database,
             host_tool_replays: Arc::new(Mutex::new(HashMap::new())),
-            server_exec_approvals: HostApprovalLedger::default(),
+            host_action_approvals: HostApprovalLedger::default(),
             credentials,
             ssh,
             terminals,

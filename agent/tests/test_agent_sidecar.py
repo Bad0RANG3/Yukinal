@@ -144,7 +144,14 @@ class PythonSidecarTests(unittest.TestCase):
                 "awaiting_approval",
                 "",
                 ({"call_id": "call-ui-1", "status": "awaiting_approval"},),
-                (ApprovalRequest("a" * 64, "server.exec", "srv_stage1", "destructive", {"password": "[redacted]"}),),
+                (ApprovalRequest(
+                    "a" * 64,
+                    "server.exec",
+                    "srv_stage1",
+                    "destructive",
+                    {"password": "[redacted]"},
+                    {"command": "systemctl restart api.service"},
+                ),),
                 1,
                 0,
                 "approval_required",
@@ -175,6 +182,8 @@ class PythonSidecarTests(unittest.TestCase):
             self.assertEqual(event["type"], "agent.waiting_approval")
             self.assertEqual(event["approval"]["callId"], "call-ui-1")
             self.assertEqual(event["approval"]["inputFingerprint"], "a" * 64)
+            self.assertEqual(event["approval"]["input"], {"password": "[redacted]"})
+            self.assertEqual(event["approval"]["hostInput"], {"command": "systemctl restart api.service"})
             self.assertEqual(event["approval"]["planId"], "plan-ui")
             self.assertEqual(event["approval"]["planStepId"], "step-ui")
             self.assertEqual(event["approval"]["evidenceIds"], ["ev-ui"])

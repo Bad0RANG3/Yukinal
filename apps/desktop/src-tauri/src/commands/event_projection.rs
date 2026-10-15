@@ -50,22 +50,39 @@ pub(crate) fn forward_agent_frame(app: &AppHandle, frame: &Value) {
         return;
     }
     if event_type == "agent.waiting_approval"
-        && params.pointer("/approval/toolName").and_then(Value::as_str) == Some("server.exec")
+        && params
+            .pointer("/approval/toolName")
+            .and_then(Value::as_str)
+            .is_some_and(crate::state::is_host_approval_tool_name)
     {
         let state = app.state::<AppState>();
         if let Err(error) = state
-            .server_exec_approvals
+            .host_action_approvals
             .record_waiting_event(params, yukinal_time::now_epoch_seconds())
         {
-            eprintln!("[yukinal] server.exec approval was not recorded: {error}");
+            eprintln!("[yukinal] host action approval was not recorded: {error}");
         }
     }
-    sync_investigation_task_status(app, event_type, params);
-    persist_investigation_event(app, event_type, params);
+    // `hostInput` crosses the local sidecar pipe only so the host can fingerprint
+    // the exact executor input. Keep it out of SQLite, audit projections, and UI events.
+    let projected_params = without_host_input(params);
+    sync_investigation_task_status(app, event_type, &projected_params);
+    persist_investigation_event(app, event_type, &projected_params);
     if event_type == "agent.tool_result" {
-        persist_agent_tool_result(app, params);
+        persist_agent_tool_result(app, &projected_params);
     }
-    let _ = app.emit(&tauri_event_name(event_type), params.clone());
+    let _ = app.emit(&tauri_event_name(event_type), projected_params);
+}
+
+fn without_host_input(params: &Value) -> Value {
+    let mut projected = params.clone();
+    if let Some(approval) = projected
+        .get_mut("approval")
+        .and_then(Value::as_object_mut)
+    {
+        approval.remove("hostInput");
+    }
+    projected
 }
 
 /// Keep the durable task row in step with the terminal/approval events emitted by a run.

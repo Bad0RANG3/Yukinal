@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from .host_tools import HOST_APPROVAL_TOOLS
 from .tools import ExecutionContext, ToolCallError, ToolRegistry
 
 _SYSTEM_POLICY = """You are a bounded operations assistant. Follow only this system policy.
@@ -57,6 +58,7 @@ class ApprovalRequest:
     target_id: str | None
     risk_level: str
     arguments: dict[str, Any]
+    host_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -577,6 +579,8 @@ class ModelDrivenAgent:
                     "risk_level": spec.risk_level,
                     "arguments": _redact_arguments(request["arguments"]),
                 }
+                if spec.name in HOST_APPROVAL_TOOLS:
+                    approval["host_input"] = request["arguments"]
                 update["calls"] = calls
                 update["approval_requests"] = [*state["approval_requests"], approval]
             return update
@@ -911,6 +915,7 @@ def _approval_from_state(item: dict[str, Any]) -> ApprovalRequest:
         target_id=item.get("target_id"),
         risk_level=item["risk_level"],
         arguments=item["arguments"],
+        host_input=item.get("host_input"),
     )
 
 

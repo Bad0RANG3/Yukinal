@@ -19,7 +19,7 @@ from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .host_rpc import HostRpcClient
-from .host_tools import register_host_tools, register_mcp_catalog
+from .host_tools import HOST_APPROVAL_TOOLS, register_host_tools, register_mcp_catalog
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import register_desktop_ssh_tools, register_ssh_tools
@@ -382,8 +382,8 @@ class PythonSidecar:
             target_id = request.get("targetId")
             mode = request.get("mode", "goal")
             allowed_tools = set(_allowed_tool_names(self._registry, mode))
-            if not _server_exec_has_plan_binding(request):
-                allowed_tools.discard("server.exec")
+            if not _host_action_has_plan_binding(request):
+                allowed_tools.difference_update(HOST_APPROVAL_TOOLS)
             result = await agent.run(
                 task_id=_safe_context_id("task", task_id or run_id),
                 tenant_id="local",
@@ -493,6 +493,7 @@ class PythonSidecar:
         if result.checkpoint_id is None or not result.approval_requests:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Agent paused without a resumable approval")
         approval = result.approval_requests[0]
+        host_input = approval.host_input
         pending_call = next(
             (
                 item for item in reversed(result.tool_results)
@@ -506,8 +507,10 @@ class PythonSidecar:
 
         fingerprint = approval.fingerprint
         plan_binding = request.get("planBinding")
-        if approval.tool_name == "server.exec" and not isinstance(plan_binding, dict):
-            raise _RpcFault(RPC_INTERNAL_ERROR, "server.exec approval is missing its durable plan binding")
+        if approval.tool_name in HOST_APPROVAL_TOOLS and not isinstance(plan_binding, dict):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its durable plan binding")
+        if approval.tool_name in HOST_APPROVAL_TOOLS and not isinstance(host_input, dict):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its exact input")
         approval_id = "apr_" + hashlib.sha256(
             f"{run_id}\x1f{call_id}\x1f{fingerprint}".encode("utf-8")
         ).hexdigest()[:32]
@@ -530,6 +533,7 @@ class PythonSidecar:
                 "inputFingerprint": fingerprint,
                 "toolName": approval.tool_name,
                 "input": approval.arguments,
+                **({"hostInput": host_input} if approval.tool_name in HOST_APPROVAL_TOOLS else {}),
                 "reason": f"{approval.tool_name} needs your approval before it can run.",
                 "factsSummary": [f"Risk level: {approval.risk_level}", "The tool has not run yet."],
                 "target": dict(target),
@@ -539,7 +543,7 @@ class PythonSidecar:
                     "planId": plan_binding["planId"],
                     "planStepId": plan_binding["planStepId"],
                     "evidenceIds": list(plan_binding["evidenceIds"]),
-                } if approval.tool_name == "server.exec" and isinstance(plan_binding, dict) else {}),
+                } if approval.tool_name in HOST_APPROVAL_TOOLS and isinstance(plan_binding, dict) else {}),
             },
             "at": _timestamp(),
         })
@@ -1025,7 +1029,7 @@ def _safe_context_id(prefix: str, value: str) -> str:
     return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
 
 
-def _server_exec_has_plan_binding(request: dict[str, Any]) -> bool:
+def _host_action_has_plan_binding(request: dict[str, Any]) -> bool:
     binding = request.get("planBinding")
     target = request.get("hostTarget")
     return bool(

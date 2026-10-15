@@ -31,11 +31,12 @@
 > approval ticket; other interrupted actions stay outcome-unknown and are never
 > automatically replayed. The Python sidecar supports approval events and
 > response RPCs for registered tools that require approval, including reject
-> and expiry handling. Its desktop catalog includes read-only tools plus a
-> plan-bound `server.exec` action only for a remote goal run with an active action
-> step that allows it. That action always requires exact per-call approval; Rust
-> recomputes the input fingerprint and consumes a one-time ticket before its
-> current SSH executor runs the command.
+> and expiry handling. Its desktop catalog includes read-only tools plus
+> plan-bound `server.exec`, `docker.restart`, `systemd.restart`, and
+> `package.install` actions only for a remote goal run with an active action step
+> that allows them. These actions require exact per-call approval; Rust fingerprints
+> the exact host input and consumes a one-time ticket before dispatch. Raw approval
+> input is removed before persistence and UI emission.
 
 ## Repository baseline and migration boundary
 
@@ -54,13 +55,12 @@ MCP tools from the host catalog, and emit the tool-call/result events that the
 existing transcript UI displays. When the C++ service token is configured, the
 Python sidecar also registers `ssh.service_status`; it binds the call to the
 selected `host_target.serverId`, so the model cannot choose a different target.
-The desktop host also routes its existing `docker.restart`, `systemd.restart`,
-and `package.install` actions through structured C++ SSH operations after the
-host approval and one-time call checks. Those structured actions are not yet
-registered in the Python Agent tool catalog; the separately guarded
-`server.exec` task action is exposed only when the host supplies the current
-remote action-plan binding. This remains a Rust execution path and is not a
-replacement for the structured C++ operations.
+The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
+`package.install` as structured actions with exact per-call approval. The host
+recomputes a fingerprint from the exact raw input, consumes the corresponding
+one-time ticket, and dispatches through its existing structured C++ SSH routing.
+`server.exec` remains separately guarded, exposed only when the host supplies the
+current remote action-plan binding, and still uses the Rust command executor.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
@@ -93,10 +93,11 @@ The bridge uses the existing sidecar request path: Python sends
 desktop host replies over that same pipe. Python does not open SSH sessions or
 start MCP processes through this bridge. The host continues to resolve the
 server, enforce its current authorization and approval checks, and execute the
-operation. For `server.exec`, Python carries the host-issued approval ID and
-current plan/evidence binding; Rust derives the command-input fingerprint from
-the approval event itself and checks it again before opening SSH. MCP entries
-are exposed to the model only when the host catalog classifies them as low-risk.
+operation. For host actions, Python carries the host-issued approval ID and
+current plan/evidence binding. The approval event carries raw host input only
+across the local pipe; Rust fingerprints it and removes it before persistence or
+UI emission, then checks the fingerprint again before dispatch. MCP entries are
+exposed to the model only when the host catalog classifies them as low-risk.
 
 The direct C++ caller is enabled only when `YUKINAL_SSH_API_TOKEN` is explicitly
 forwarded to the Python Agent sidecar. The C++ configuration's `target_id` must

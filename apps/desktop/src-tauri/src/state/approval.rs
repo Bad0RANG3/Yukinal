@@ -1,4 +1,4 @@
-//! Rust-owned, one-time tickets for exact `server.exec` approvals.
+//! Rust-owned, one-time tickets for exact Python-to-host action approvals.
 //!
 //! Approval events are observations from the sidecar, but the UI cannot create a
 //! ticket: this ledger records the event in host memory, moves it to an approved
@@ -13,11 +13,18 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Notify;
 
-use crate::commands::host::server_exec_input_fingerprint;
+use crate::commands::host::host_tool_input_fingerprint;
 
 const SERVER_EXEC: &str = "server.exec";
 const MAX_TICKETS: usize = 256;
 const MAX_APPROVAL_TTL_SECONDS: u64 = 180;
+
+pub(crate) fn is_host_approval_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        SERVER_EXEC | "docker.restart" | "systemd.restart" | "package.install"
+    )
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct HostApprovalLedger {
@@ -75,7 +82,7 @@ struct ApprovalEvent {
     trace_id: String,
     call_id: String,
     tool_name: String,
-    input: Value,
+    host_input: Option<Value>,
     input_fingerprint: String,
     target: ApprovalTarget,
     expires_at: String,
@@ -106,8 +113,8 @@ pub(crate) struct ApprovalResponseToken {
 }
 
 /// Fields supplied by the host-tool request and compared with the approval ticket.
-/// The command input itself is represented by a host-recomputed SHA-256 fingerprint.
-pub(crate) struct ServerExecExecutionBinding<'a> {
+/// The action input is represented by a host-recomputed SHA-256 fingerprint.
+pub(crate) struct HostActionExecutionBinding<'a> {
     pub approval_id: &'a str,
     pub run_id: Option<&'a str>,
     pub trace_id: &'a str,
@@ -125,7 +132,7 @@ pub(crate) struct ServerExecExecutionBinding<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ServerExecTicketError {
+pub(crate) enum HostActionTicketError {
     Missing,
     Expired,
     Mismatch,
@@ -133,13 +140,13 @@ pub(crate) enum ServerExecTicketError {
 }
 
 impl HostApprovalLedger {
-    /// Capture only well-formed server command approvals. Retain a host-computed
+    /// Capture only well-formed host action approvals. Retain a host-computed
     /// fingerprint instead of copying command text into this in-memory ledger.
     pub(crate) fn record_waiting_event(&self, params: &Value, now: u64) -> Result<bool, String> {
         let event = serde_json::from_value::<WaitingApprovalEvent>(params.clone())
             .map_err(|_| "approval event is missing host binding fields".to_string())?;
         if event.event_type != "agent.waiting_approval"
-            || event.approval.tool_name != SERVER_EXEC
+            || !is_host_approval_tool_name(&event.approval.tool_name)
             || event.approval.run_id != event.run_id
             || event.run_id.trim().is_empty()
             || event.run_id.len() > 256
@@ -160,40 +167,40 @@ impl HostApprovalLedger {
             || event.approval.target.environment.trim().is_empty()
             || event.approval.target.environment.len() > 64
         {
-            return Err("approval event does not describe a valid server.exec binding".into());
+            return Err("approval event does not describe a supported host action binding".into());
         }
         let Some(task_id) = event.task_id.filter(|value| !value.trim().is_empty()) else {
-            return Err("server.exec approval requires a durable task".into());
+            return Err("host action approval requires a durable task".into());
         };
         let Some(plan_id) = event
             .approval
             .plan_id
             .filter(|value| !value.trim().is_empty())
         else {
-            return Err("server.exec approval requires an approved plan".into());
+            return Err("host action approval requires a current plan".into());
         };
         let Some(plan_step_id) = event
             .approval
             .plan_step_id
             .filter(|value| !value.trim().is_empty())
         else {
-            return Err("server.exec approval requires an approved plan step".into());
+            return Err("host action approval requires a current plan step".into());
         };
         let expires_at = yukinal_time::parse_iso8601_utc(&event.approval.expires_at)
-            .ok_or_else(|| "server.exec approval expiry is invalid".to_string())?;
+            .ok_or_else(|| "host action approval expiry is invalid".to_string())?;
         if expires_at <= now || expires_at.saturating_sub(now) > MAX_APPROVAL_TTL_SECONDS {
-            return Err("server.exec approval is expired or exceeds the host TTL limit".into());
+            return Err("host action approval is expired or exceeds the host TTL limit".into());
         }
         let Some(server_id) = event.approval.target.server_id else {
-            return Err("server.exec approval requires a resolved server".into());
+            return Err("host action approval requires a resolved server".into());
         };
-        if !event.approval.input.is_object() {
-            return Err("server.exec approval input must be an object".into());
+        let Some(host_input) = event.approval.host_input.filter(Value::is_object) else {
+            return Err("host action approval is missing its exact host input".into());
         }
         // The sidecar fingerprint includes Python authorization context. Tickets
         // instead bind to the exact host-tool input, using the same canonical JSON
-        // fingerprint that the Rust executor recomputes before it opens SSH.
-        let input_fingerprint = server_exec_input_fingerprint(&event.approval.input)?;
+        // fingerprint that the Rust host recomputes before dispatch.
+        let input_fingerprint = host_tool_input_fingerprint(&host_input)?;
 
         let binding = ApprovalBinding {
             approval_id: event.approval.approval_id,
@@ -216,11 +223,11 @@ impl HostApprovalLedger {
         let mut entries = self
             .entries
             .lock()
-            .map_err(|_| "server.exec approval ledger is poisoned".to_string())?;
+            .map_err(|_| "host action approval ledger is poisoned".to_string())?;
         entries.retain(|_, entry| entry.binding.expires_at > now);
         if let Some(existing) = entries.get_mut(&binding.approval_id) {
             if !existing.binding.same_request(&binding) {
-                return Err("approval id is already bound to another server.exec request".into());
+                return Err("approval id is already bound to another host action".into());
             }
             if existing.phase != ApprovalPhase::Pending {
                 return Err("approval request is already being answered".into());
@@ -231,7 +238,7 @@ impl HostApprovalLedger {
             return Ok(true);
         }
         if entries.len() >= MAX_TICKETS {
-            return Err("server.exec approval ledger is full".into());
+            return Err("host action approval ledger is full".into());
         }
         entries.insert(
             binding.approval_id.clone(),
@@ -244,7 +251,7 @@ impl HostApprovalLedger {
         Ok(true)
     }
 
-    /// Mark a known server.exec ticket as waiting for the matching sidecar ack.
+    /// Mark a known host action ticket as waiting for the matching sidecar ack.
     /// `None` means the approval belongs to another tool, which keeps existing
     /// approvals on their current round trip without granting this host ticket.
     pub(crate) fn begin_response(
@@ -257,26 +264,26 @@ impl HostApprovalLedger {
         let mut entries = self
             .entries
             .lock()
-            .map_err(|_| "server.exec approval ledger is poisoned".to_string())?;
+            .map_err(|_| "host action approval ledger is poisoned".to_string())?;
         let Some(entry) = entries.get_mut(approval_id) else {
             return Ok(None);
         };
         if entry.binding.expires_at <= now {
             entries.remove(approval_id);
-            return Err("server.exec approval has expired".into());
+            return Err("host action approval has expired".into());
         }
         if entry.binding.run_id != run_id {
-            return Err("server.exec approval run id does not match".into());
+            return Err("host action approval run id does not match".into());
         }
         if entry.phase != ApprovalPhase::Pending {
-            return Err("server.exec approval was already answered".into());
+            return Err("host action approval was already answered".into());
         }
         let decision = match decision {
             "approve_once" => UserDecision::ApproveOnce,
             "reject" => UserDecision::Reject,
             "approve_session" => {
                 return Err(
-                    "server.exec approvals are per call and cannot be session grants".into(),
+                    "host action approvals are per call and cannot be session grants".into(),
                 )
             }
             _ => return Err("approval decision is invalid".into()),
@@ -299,12 +306,12 @@ impl HostApprovalLedger {
         let mut entries = self
             .entries
             .lock()
-            .map_err(|_| "server.exec approval ledger is poisoned".to_string())?;
+            .map_err(|_| "host action approval ledger is poisoned".to_string())?;
         let Some(entry) = entries.get_mut(&token.approval_id) else {
             return Ok(());
         };
         if entry.phase != ApprovalPhase::Responding {
-            return Err("server.exec approval response is no longer active".into());
+            return Err("host action approval response is no longer active".into());
         }
         let approved = accepted
             && token.decision == UserDecision::ApproveOnce
@@ -324,24 +331,24 @@ impl HostApprovalLedger {
     /// for its host-side acknowledgement; a mismatch burns the approved ticket.
     pub(crate) async fn consume(
         &self,
-        request: ServerExecExecutionBinding<'_>,
+        request: HostActionExecutionBinding<'_>,
         now: impl Fn() -> u64,
-    ) -> Result<(), ServerExecTicketError> {
+    ) -> Result<(), HostActionTicketError> {
         loop {
             let wait_for_response = {
                 let mut entries = self
                     .entries
                     .lock()
-                    .map_err(|_| ServerExecTicketError::Missing)?;
+                    .map_err(|_| HostActionTicketError::Missing)?;
                 let Some(entry) = entries.get(request.approval_id) else {
-                    return Err(ServerExecTicketError::Missing);
+                    return Err(HostActionTicketError::Missing);
                 };
                 if entry.binding.expires_at <= now() {
                     entries.remove(request.approval_id);
-                    return Err(ServerExecTicketError::Expired);
+                    return Err(HostActionTicketError::Expired);
                 }
                 match entry.phase {
-                    ApprovalPhase::Pending => return Err(ServerExecTicketError::NotApproved),
+                    ApprovalPhase::Pending => return Err(HostActionTicketError::NotApproved),
                     ApprovalPhase::Responding => Some(entry.changed.clone()),
                     ApprovalPhase::Approved => {
                         let entry = entries
@@ -350,7 +357,7 @@ impl HostApprovalLedger {
                         return if entry.binding.matches(&request) {
                             Ok(())
                         } else {
-                            Err(ServerExecTicketError::Mismatch)
+                            Err(HostActionTicketError::Mismatch)
                         };
                     }
                 }
@@ -383,13 +390,13 @@ impl ApprovalBinding {
             && self.evidence_ids == other.evidence_ids
     }
 
-    fn matches(&self, request: &ServerExecExecutionBinding<'_>) -> bool {
+    fn matches(&self, request: &HostActionExecutionBinding<'_>) -> bool {
         self.approval_id == request.approval_id
             && request.run_id == Some(self.run_id.as_str())
             && self.trace_id == request.trace_id
             && self.call_id == request.call_id
             && self.tool_name == request.tool_name
-            && request.tool_name == SERVER_EXEC
+            && is_host_approval_tool_name(request.tool_name)
             && self.input_fingerprint == request.input_fingerprint
             && self.target_host == request.target_host
             && request.server_id == Some(self.server_id.as_str())
@@ -408,9 +415,10 @@ fn is_sha256_hex(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostApprovalLedger, ServerExecExecutionBinding, ServerExecTicketError};
+    use super::{HostApprovalLedger, HostActionExecutionBinding, HostActionTicketError};
     use serde_json::json;
     use std::time::Duration;
+    use crate::commands::host::host_tool_input_fingerprint;
 
     const NOW: u64 = 1_800_000_000;
     const EXPIRY: &str = "2027-01-15T08:02:00Z";
@@ -431,6 +439,7 @@ mod tests {
                 "callId": "call_1",
                 "toolName": "server.exec",
                 "input": { "command": "systemctl restart api" },
+                "hostInput": { "command": "systemctl restart api" },
                 "inputFingerprint": SIDECAR_INPUT_FINGERPRINT,
                 "target": {
                     "host": "remote",
@@ -447,8 +456,8 @@ mod tests {
         })
     }
 
-    fn execution_binding<'a>() -> ServerExecExecutionBinding<'a> {
-        ServerExecExecutionBinding {
+    fn execution_binding<'a>() -> HostActionExecutionBinding<'a> {
+        HostActionExecutionBinding {
             approval_id: "apr_1",
             run_id: Some("run_1"),
             trace_id: "trace_1",
@@ -487,8 +496,48 @@ mod tests {
         assert_eq!(ledger.consume(execution_binding(), || NOW).await, Ok(()));
         assert_eq!(
             ledger.consume(execution_binding(), || NOW).await,
-            Err(ServerExecTicketError::Missing)
+            Err(HostActionTicketError::Missing)
         );
+    }
+
+    #[tokio::test]
+    async fn structured_restart_approval_is_host_bound_and_consumed_once() {
+        let ledger = HostApprovalLedger::default();
+        let mut event = waiting_event();
+        event["approval"]["approvalId"] = json!("apr_docker");
+        event["approval"]["toolName"] = json!("docker.restart");
+        event["approval"]["input"] = json!({"container": "api", "timeoutSeconds": 20});
+        event["approval"]["hostInput"] = json!({"container": "api", "timeoutSeconds": 20});
+        ledger
+            .record_waiting_event(&event, NOW)
+            .expect("record the structured action approval");
+        let token = ledger
+            .begin_response("apr_docker", "run_1", "approve_once", NOW)
+            .expect("begin response")
+            .expect("structured action response token");
+        ledger
+            .finish_response(token, true, NOW)
+            .expect("finish accepted response");
+
+        let input = json!({"container": "api", "timeoutSeconds": 20});
+        let input_fingerprint = host_tool_input_fingerprint(&input).expect("input fingerprint");
+        let binding = HostActionExecutionBinding {
+            approval_id: "apr_docker",
+            run_id: Some("run_1"),
+            trace_id: "trace_1",
+            call_id: "call_1",
+            tool_name: "docker.restart",
+            input_fingerprint: &input_fingerprint,
+            target_host: "remote",
+            server_id: Some("srv_1"),
+            workspace_id: Some("workspace_1"),
+            environment: "staging",
+            task_id: Some("task_1"),
+            plan_id: Some("plan_1"),
+            plan_step_id: Some("step_1"),
+            evidence_ids: Some(vec!["ev_1".to_string()]),
+        };
+        assert_eq!(ledger.consume(binding, || NOW).await, Ok(()));
     }
 
     #[tokio::test]
@@ -519,7 +568,7 @@ mod tests {
         let ledger = HostApprovalLedger::default();
         assert_eq!(
             ledger.consume(execution_binding(), || NOW).await,
-            Err(ServerExecTicketError::Missing)
+            Err(HostActionTicketError::Missing)
         );
 
         ledger
@@ -527,25 +576,25 @@ mod tests {
             .expect("record waiting approval");
         assert_eq!(
             ledger.consume(execution_binding(), || NOW).await,
-            Err(ServerExecTicketError::NotApproved)
+            Err(HostActionTicketError::NotApproved)
         );
         approve_once(&ledger);
         assert_eq!(
             ledger
                 .consume(
-                    ServerExecExecutionBinding {
+                    HostActionExecutionBinding {
                         approval_id: "apr_forged",
                         ..execution_binding()
                     },
                     || NOW,
                 )
                 .await,
-            Err(ServerExecTicketError::Missing)
+            Err(HostActionTicketError::Missing)
         );
         assert_eq!(ledger.consume(execution_binding(), || NOW).await, Ok(()));
         assert_eq!(
             ledger.consume(execution_binding(), || NOW).await,
-            Err(ServerExecTicketError::Missing)
+            Err(HostActionTicketError::Missing)
         );
     }
 
@@ -558,52 +607,52 @@ mod tests {
         approve_once(&ledger);
 
         let mismatches = [
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 run_id: Some("run_other"),
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 trace_id: "trace_other",
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 call_id: "call_other",
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 tool_name: "package.install",
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 input_fingerprint:
                     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 server_id: Some("srv_other"),
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 workspace_id: None,
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 environment: "production",
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 task_id: Some("task_other"),
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 plan_id: Some("plan_other"),
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 plan_step_id: Some("step_other"),
                 ..execution_binding()
             },
-            ServerExecExecutionBinding {
+            HostActionExecutionBinding {
                 evidence_ids: None,
                 ..execution_binding()
             },
@@ -616,11 +665,11 @@ mod tests {
             approve_once(&isolated);
             assert_eq!(
                 isolated.consume(mismatch, || NOW).await,
-                Err(ServerExecTicketError::Mismatch)
+                Err(HostActionTicketError::Mismatch)
             );
             assert_eq!(
                 isolated.consume(execution_binding(), || NOW).await,
-                Err(ServerExecTicketError::Missing)
+                Err(HostActionTicketError::Missing)
             );
         }
     }
@@ -646,7 +695,7 @@ mod tests {
             .expect("finish rejection");
         assert_eq!(
             ledger.consume(execution_binding(), || NOW).await,
-            Err(ServerExecTicketError::Missing)
+            Err(HostActionTicketError::Missing)
         );
 
         let mut expired = waiting_event();
@@ -664,7 +713,7 @@ mod tests {
             .expect("finish accepted response");
         assert_eq!(
             late.consume(execution_binding(), || NOW + 121).await,
-            Err(ServerExecTicketError::Expired)
+            Err(HostActionTicketError::Expired)
         );
 
         let unaccepted = HostApprovalLedger::default();
@@ -680,7 +729,7 @@ mod tests {
             .expect("finish unaccepted response");
         assert_eq!(
             unaccepted.consume(execution_binding(), || NOW).await,
-            Err(ServerExecTicketError::Missing)
+            Err(HostActionTicketError::Missing)
         );
     }
 

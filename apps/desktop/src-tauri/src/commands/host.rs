@@ -70,6 +70,7 @@ use crate::commands::services::{
 };
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
+use crate::state::{HostActionExecutionBinding, HostActionTicketError};
 
 mod context;
 mod evidence;
@@ -313,7 +314,7 @@ fn host_tool_request_fingerprint(request: &HostToolExecuteRequest) -> Result<Str
 
 /// Match the sidecar's `actionFingerprint` for JSON inputs. `serde_json::Map`
 /// uses lexicographically ordered keys, as does the Agent's UTF-8 canonicalizer.
-pub(crate) fn server_exec_input_fingerprint(input: &Value) -> Result<String, String> {
+pub(crate) fn host_tool_input_fingerprint(input: &Value) -> Result<String, String> {
     fn canonicalize(value: &Value) -> Value {
         match value {
             Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
@@ -442,6 +443,60 @@ async fn prepare_host_tool_call(
             )))
         }
     }
+}
+
+async fn consume_python_host_action_approval(
+    state: &AppState,
+    request: &HostToolExecuteRequest,
+) -> Result<(), HostActionTicketError> {
+    if !matches!(
+        request.tool_name.as_str(),
+        DOCKER_RESTART | SYSTEMD_RESTART | PACKAGE_INSTALL
+    ) {
+        return Ok(());
+    }
+    let Some(approval_id) = request.approval_id.as_deref() else {
+        return Err(HostActionTicketError::Missing);
+    };
+    let input_fingerprint =
+        host_tool_input_fingerprint(&request.input).map_err(|_| HostActionTicketError::Mismatch)?;
+    let binding = HostActionExecutionBinding {
+        approval_id,
+        run_id: request.run_id.as_deref(),
+        trace_id: &request.trace_id,
+        call_id: &request.call_id,
+        tool_name: &request.tool_name,
+        input_fingerprint: &input_fingerprint,
+        target_host: &request.target.host,
+        server_id: request.target.server_id.as_deref(),
+        workspace_id: request.target.workspace_id.as_deref(),
+        environment: request.target.environment.as_str(),
+        task_id: request.task_id.as_deref(),
+        plan_id: request.plan_id.as_deref(),
+        plan_step_id: request.plan_step_id.as_deref(),
+        evidence_ids: request.evidence_ids.clone(),
+    };
+    state
+        .host_action_approvals
+        .consume(binding, yukinal_time::now_epoch_seconds)
+        .await
+}
+
+fn host_action_approval_failure(error: HostActionTicketError) -> Value {
+    let message = match error {
+        HostActionTicketError::Missing => "host action has no host-issued approval ticket",
+        HostActionTicketError::Expired => "host action approval ticket has expired",
+        HostActionTicketError::Mismatch => {
+            "host action does not match the approved run, call, target, plan, or input"
+        }
+        HostActionTicketError::NotApproved => "host action approval has not been accepted",
+    };
+    failed(
+        "denied_by_policy",
+        message,
+        false,
+        Some(json!({ "code": "approval_ticket" })),
+    )
 }
 
 fn host_tool_call_status(response: &Result<Value, String>) -> HostToolCallStatus {
@@ -1377,44 +1432,47 @@ async fn handle_sidecar_request_with_context(
         HostToolCallDecision::Respond(response) => return Ok(response),
         HostToolCallDecision::Execute(token) => token,
     };
-    let response = match request.tool_name.as_str() {
-        SERVER_INFO => server_info(app, state, server_id, &request.input, &cancel).await,
-        SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
-        SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
-        SERVER_SERVICES => server_services(app, state, server_id, &request.input, &cancel).await,
-        DOCKER_PS => docker_ps(app, state, server_id, &request.input, &cancel).await,
-        DOCKER_LOGS => docker_logs(app, state, server_id, &request.input, &cancel).await,
-        DOCKER_INSPECT => docker_inspect(app, state, server_id, &request.input, &cancel).await,
-        DOCKER_RESTART => docker_restart(app, state, server_id, &request.input, &cancel).await,
-        SYSTEMD_INSPECT => systemd_inspect(app, state, server_id, &request.input, &cancel).await,
-        SYSTEMD_RESTART => systemd_restart(app, state, server_id, &request.input, &cancel).await,
-        PACKAGE_INSPECT => package_inspect(app, state, server_id, &request.input, &cancel).await,
-        PACKAGE_INSTALL => package_install(app, state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_READ => filesystem_read(app, state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_WRITE => filesystem_write(app, state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_EDIT => filesystem_edit(app, state, server_id, &request.input, &cancel).await,
-        FILESYSTEM_BACKUP_LIST => {
-            filesystem_backup_list(state, server_id, &request.input, &request).await
-        }
-        FILESYSTEM_BACKUP_RETENTION => {
-            filesystem_backup_retention(state, server_id, &request.input, &request).await
-        }
-        FILESYSTEM_BACKUP => {
-            filesystem_backup(app, state, server_id, &request.input, &cancel, &request).await
-        }
-        FILESYSTEM_BACKUP_CLEANUP => {
-            filesystem_backup_cleanup(app, state, server_id, &request.input, &cancel, &request)
-                .await
-        }
-        FILESYSTEM_RESTORE => {
-            filesystem_restore(app, state, server_id, &request.input, &cancel, &request).await
-        }
-        other => Ok(failed(
-            "not_found",
-            format!("host tool `{other}` is not enabled"),
-            false,
-            None,
-        )),
+    let response = match consume_python_host_action_approval(state, &request).await {
+        Err(error) => Ok(host_action_approval_failure(error)),
+        Ok(()) => match request.tool_name.as_str() {
+            SERVER_INFO => server_info(app, state, server_id, &request.input, &cancel).await,
+            SERVER_EXEC => server_exec(state, server_id, &request, &cancel).await,
+            SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
+            SERVER_SERVICES => server_services(app, state, server_id, &request.input, &cancel).await,
+            DOCKER_PS => docker_ps(app, state, server_id, &request.input, &cancel).await,
+            DOCKER_LOGS => docker_logs(app, state, server_id, &request.input, &cancel).await,
+            DOCKER_INSPECT => docker_inspect(app, state, server_id, &request.input, &cancel).await,
+            DOCKER_RESTART => docker_restart(app, state, server_id, &request.input, &cancel).await,
+            SYSTEMD_INSPECT => systemd_inspect(app, state, server_id, &request.input, &cancel).await,
+            SYSTEMD_RESTART => systemd_restart(app, state, server_id, &request.input, &cancel).await,
+            PACKAGE_INSPECT => package_inspect(app, state, server_id, &request.input, &cancel).await,
+            PACKAGE_INSTALL => package_install(app, state, server_id, &request.input, &cancel).await,
+            FILESYSTEM_READ => filesystem_read(app, state, server_id, &request.input, &cancel).await,
+            FILESYSTEM_WRITE => filesystem_write(app, state, server_id, &request.input, &cancel).await,
+            FILESYSTEM_EDIT => filesystem_edit(app, state, server_id, &request.input, &cancel).await,
+            FILESYSTEM_BACKUP_LIST => {
+                filesystem_backup_list(state, server_id, &request.input, &request).await
+            }
+            FILESYSTEM_BACKUP_RETENTION => {
+                filesystem_backup_retention(state, server_id, &request.input, &request).await
+            }
+            FILESYSTEM_BACKUP => {
+                filesystem_backup(app, state, server_id, &request.input, &cancel, &request).await
+            }
+            FILESYSTEM_BACKUP_CLEANUP => {
+                filesystem_backup_cleanup(app, state, server_id, &request.input, &cancel, &request)
+                    .await
+            }
+            FILESYSTEM_RESTORE => {
+                filesystem_restore(app, state, server_id, &request.input, &cancel, &request).await
+            }
+            other => Ok(failed(
+                "not_found",
+                format!("host tool `{other}` is not enabled"),
+                false,
+                None,
+            )),
+        },
     };
     finish_host_tool_call(state, &request, token, &response)?;
     response

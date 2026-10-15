@@ -28,7 +28,7 @@ use super::{
     host_tool_call_status, input_bindings_match, is_effectful_host_tool, merge_plan_runtime,
     normalize_new_plan_runtime, observation_configuration_matches,
     plan_allows_repeated_observation, plan_binding_matches, plan_definition,
-    prepare_host_tool_call, reset_observation_window, server_exec_input_fingerprint, success,
+    prepare_host_tool_call, reset_observation_window, host_tool_input_fingerprint, success,
     task_allows_auto_medium_action, task_guardrail_violation, validate_observation_window,
     validate_playbook_step, BackupCleanupRequest, FilesystemBackupCleanupInput,
     FilesystemBackupCleanupItemInput, HostCancellationRegistry, HostToolCallDecision,
@@ -639,7 +639,7 @@ async fn desktop_host_rpc_executes_server_command_once_and_persists_unknown_outc
 }
 
 #[test]
-fn server_exec_input_fingerprint_matches_agent_canonical_json() {
+fn host_tool_input_fingerprint_matches_agent_canonical_json() {
     let input = json!({
         "command": "printf '%s' hello",
         "env": { "LC_ALL": "C", "LANG": "C.UTF-8" },
@@ -648,7 +648,7 @@ fn server_exec_input_fingerprint_matches_agent_canonical_json() {
         "timeoutMs": 1_000,
     });
     assert_eq!(
-        server_exec_input_fingerprint(&input).expect("canonical fingerprint"),
+        host_tool_input_fingerprint(&input).expect("canonical fingerprint"),
         "6a3e1291bf14b90df757000da0a3c14545d82fe1563bd795f40499c2d0e52fda"
     );
 }

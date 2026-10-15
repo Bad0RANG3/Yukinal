@@ -10,7 +10,7 @@
 //! 协议分发与共享类型，这里只放执行体。
 
 use super::*;
-use crate::state::{ServerExecExecutionBinding, ServerExecTicketError};
+use crate::state::{HostActionExecutionBinding, HostActionTicketError};
 use tauri::AppHandle;
 use yukinal_database::repositories::TaskCommandBudgetReservation;
 
@@ -183,11 +183,11 @@ pub(super) async fn server_exec(
         if cancel.is_cancelled() {
             return Ok(cancelled_failure());
         }
-        let input_fingerprint = match server_exec_input_fingerprint(&request.input) {
+        let input_fingerprint = match host_tool_input_fingerprint(&request.input) {
             Ok(fingerprint) => fingerprint,
             Err(error) => return Ok(failed("internal", error, false, None)),
         };
-        let execution_binding = ServerExecExecutionBinding {
+        let execution_binding = HostActionExecutionBinding {
             approval_id,
             run_id: request.run_id.as_deref(),
             trace_id: &request.trace_id,
@@ -204,19 +204,19 @@ pub(super) async fn server_exec(
             evidence_ids: request.evidence_ids.clone(),
         };
         if let Err(error) = state
-            .server_exec_approvals
+            .host_action_approvals
             .consume(execution_binding, yukinal_time::now_epoch_seconds)
             .await
         {
             let message = match error {
-                ServerExecTicketError::Missing => {
+                HostActionTicketError::Missing => {
                     "server.exec has no host-issued approval ticket for this call"
                 }
-                ServerExecTicketError::Expired => "server.exec approval ticket has expired",
-                ServerExecTicketError::Mismatch => {
+                HostActionTicketError::Expired => "server.exec approval ticket has expired",
+                HostActionTicketError::Mismatch => {
                     "server.exec request does not match the approved run, call, tool, target, plan, or input"
                 }
-                ServerExecTicketError::NotApproved => {
+                HostActionTicketError::NotApproved => {
                     "server.exec approval has not been accepted by the host"
                 }
             };

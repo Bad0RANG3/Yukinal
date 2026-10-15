@@ -36,6 +36,50 @@ class ScriptedModel:
 
 
 class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structured_write_tools_forward_exact_host_approval_tickets(self) -> None:
+        host = FakeHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        cases = {
+            "docker.restart": {"container": "api", "timeoutSeconds": 20},
+            "systemd.restart": {"service": "api.service", "timeoutSeconds": 20},
+            "package.install": {"manager": "apt", "package": "nginx", "timeoutSeconds": 25},
+        }
+
+        for index, (tool_name, arguments) in enumerate(cases.items(), start=1):
+            fingerprint = approval_fingerprint(
+                tool_name, "srv_stage1", arguments,
+                task_id=f"agent-task-{index}", tenant_id="local", user_id="agent-session-1",
+            )
+            context = ExecutionContext(
+                task_id=f"agent-task-{index}",
+                tenant_id="local",
+                user_id="agent-session-1",
+                allowed_tools=frozenset({tool_name}),
+                allowed_target_ids=frozenset({"srv_stage1"}),
+                approved_actions={fingerprint: f"apr-host-ticket-{index}"},
+                host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+                host_task_id=f"task-durable-{index}",
+                plan_id="plan-current-1",
+                plan_step_id=f"step-action-{index}",
+                evidence_ids=("ev-1",),
+                run_id=f"run-{index}",
+                trace_id=f"trace-{index}",
+                context_target_id="srv_stage1",
+            )
+
+            await registry.execute(tool_name, arguments, context, call_id=f"call-{index}")
+
+        self.assertEqual(len(host.calls), 3)
+        for index, (tool_name, arguments) in enumerate(cases.items(), start=1):
+            request = host.calls[index - 1][1]
+            self.assertEqual(request["toolName"], tool_name)
+            self.assertEqual(request["approvalId"], f"apr-host-ticket-{index}")
+            self.assertEqual(request["planId"], "plan-current-1")
+            self.assertEqual(request["planStepId"], f"step-action-{index}")
+            self.assertEqual(request["evidenceIds"], ["ev-1"])
+            self.assertEqual(request["input"], arguments)
+
     async def test_resumed_model_approval_reaches_the_host_with_its_exact_ticket(self) -> None:
         host = FakeHost()
         registry = ToolRegistry(MemoryAuditSink())

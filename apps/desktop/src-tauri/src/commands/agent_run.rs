@@ -769,7 +769,15 @@ pub(crate) async fn start_agent_run(
                     .and_then(|step_id| plan.steps.iter().find(|step| step.id == step_id))
                     .filter(|step| {
                         step.kind == yukinal_database::models::PlanStepKind::Action
-                            && step.allowed_tools.iter().any(|tool| tool == "server.exec")
+                            && step.allowed_tools.iter().any(|tool| {
+                                matches!(
+                                    tool.as_str(),
+                                    "server.exec"
+                                        | "docker.restart"
+                                        | "systemd.restart"
+                                        | "package.install"
+                                )
+                            })
                     })
                 {
                     params["planBinding"] = json!({
@@ -1003,7 +1011,7 @@ pub async fn agent_approval_respond(
     let now = yukinal_time::now_epoch_seconds();
     let response_token =
         state
-            .server_exec_approvals
+            .host_action_approvals
             .begin_response(&approval_id, &run_id, &decision, now)?;
     let response = tokio::select! {
         biased;
@@ -1025,7 +1033,7 @@ pub async fn agent_approval_respond(
         Ok(response) => response,
         Err(error) => {
             if let Some(token) = response_token {
-                let _ = state.server_exec_approvals.finish_response(
+                let _ = state.host_action_approvals.finish_response(
                     token,
                     false,
                     yukinal_time::now_epoch_seconds(),
@@ -1041,7 +1049,7 @@ pub async fn agent_approval_respond(
         Some(accepted) => accepted,
         None => {
             if let Some(token) = response_token {
-                let _ = state.server_exec_approvals.finish_response(
+                let _ = state.host_action_approvals.finish_response(
                     token,
                     false,
                     yukinal_time::now_epoch_seconds(),
@@ -1051,7 +1059,7 @@ pub async fn agent_approval_respond(
         }
     };
     if let Some(token) = response_token {
-        state.server_exec_approvals.finish_response(
+        state.host_action_approvals.finish_response(
             token,
             accepted,
             yukinal_time::now_epoch_seconds(),
