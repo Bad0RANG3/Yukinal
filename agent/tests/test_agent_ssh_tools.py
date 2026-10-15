@@ -80,6 +80,16 @@ class FakeDesktopHost:
                 "path": params["path"],
                 "bytesWritten": len(params["content"].encode("utf-8")),
             }
+        if method == "host.ssh.filesystem_backup_target":
+            payload["filesystemBackup"] = {
+                "path": params["path"],
+                "backupPath": (
+                    f"/etc/.yukinal-backup-{hashlib.sha256(params['path'].encode()).hexdigest()[:16]}-"
+                    f"{'0' * 32}"
+                ),
+            }
+        if method == "host.investigation.filesystem_backup.register":
+            return {"registered": True, "backupPath": params["backupPath"]}
         return payload
 
 
@@ -212,6 +222,17 @@ class FakeDesktopSshClient:
     def sftp_write(self, *arguments: Any) -> Any:
         return self._result("sftp_write", *arguments)
 
+    def sftp_stat(self, *arguments: Any) -> dict[str, Any]:
+        self.calls.append(("sftp_stat", arguments))
+        return {"kind": "file", "size": 7, "modified": 123}
+
+    def sftp_link_count(self, *arguments: Any) -> int:
+        self.calls.append(("sftp_link_count", arguments))
+        return 1
+
+    def sftp_create_exclusive(self, *arguments: Any) -> Any:
+        return self._result("sftp_create_exclusive", *arguments)
+
 
 class FakeSshServiceClient:
     def __init__(self) -> None:
@@ -279,7 +300,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct_names, {
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
-            "filesystem.write", "filesystem.edit",
+            "filesystem.write", "filesystem.edit", "filesystem.backup",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -500,6 +521,86 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "evidenceIds": ["evidence-1"],
             "target": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
         })
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_filesystem_backup_uses_cpp_and_registers_host_ownership_once(self) -> None:
+        import os
+        import tempfile
+
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {"path": "/etc/app.conf"}
+        fingerprint = approval_fingerprint(
+            "filesystem.backup",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"filesystem.backup"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-backup"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-1",
+            trace_id="trace-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"YUKINAL_DATA_DIR": temporary}),
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            first = await registry.execute("filesystem.backup", arguments, context, call_id="call-backup-1")
+            second = await registry.execute("filesystem.backup", arguments, context, call_id="call-backup-1")
+
+        backup_path = (
+            f"/etc/.yukinal-backup-{hashlib.sha256(arguments['path'].encode()).hexdigest()[:16]}-"
+            f"{'0' * 32}"
+        )
+        expected = {
+            "path": "/etc/app.conf",
+            "backupPath": backup_path,
+            "revision": hashlib.sha256(b"hello\x00x").hexdigest(),
+            "bytesBackedUp": 7,
+        }
+        self.assertEqual(first.value, expected)
+        self.assertEqual(second.value, expected)
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [
+                ("sftp_stat", ("srv_stage1", "/etc/app.conf")),
+                ("sftp_link_count", ("srv_stage1", "/etc/app.conf")),
+                ("sftp_read", ("srv_stage1", "/etc/app.conf", 1_048_576)),
+                ("sftp_stat", ("srv_stage1", "/etc/app.conf")),
+                ("sftp_create_exclusive", ("srv_stage1", backup_path, b"hello\x00x")),
+            ],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            [
+                "host.investigation.plan.check",
+                "host.ssh.filesystem_backup_target",
+                "host.investigation.filesystem_backup.register",
+                "host.investigation.plan.check",
+            ],
+        )
+        self.assertEqual(host.calls[2][1]["revision"], expected["revision"])
+        self.assertEqual(host.calls[2][1]["bytesBackedUp"], 7)
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 

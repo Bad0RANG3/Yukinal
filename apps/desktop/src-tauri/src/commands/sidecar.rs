@@ -392,6 +392,14 @@ struct SshServiceFilesystemEditTargetRequest {
     new_string: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshServiceFilesystemBackupTargetRequest {
+    server_id: String,
+    path: String,
+    backup_path: String,
+}
+
 /// Resolve one selected desktop target for a short-lived C++ SSH service process.
 /// Secrets leave the OS credential store only for this local sidecar request and
 /// are returned separately from the non-secret target allowlist.
@@ -628,6 +636,21 @@ pub(super) fn resolve_ssh_service_filesystem_edit_target(
     payload["filesystemEdit"] = json!({
         "path": request.path,
         "expectedRevision": request.expected_revision,
+    });
+    Ok(payload)
+}
+
+/// Resolve a C++ target for a host-derived backup path after host policy validation.
+pub(super) fn resolve_ssh_service_filesystem_backup_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request: SshServiceFilesystemBackupTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH filesystem backup target request is invalid".to_string())?;
+    let mut payload = resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    payload["filesystemBackup"] = json!({
+        "path": request.path,
+        "backupPath": request.backup_path,
     });
     Ok(payload)
 }

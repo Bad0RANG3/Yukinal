@@ -49,8 +49,14 @@
 > requires exact per-call approval and records each call fingerprint in a private
 > SQLite action ledger before SFTP starts. A completed call returns its cached
 > result; an interrupted call stays outcome-unknown and is never replayed.
-> Unsupported routes use the Rust host executor. The remaining filesystem
-> mutations still use Rust orchestration.
+> `filesystem.backup` now follows the same Python/C++ path: the host creates the
+> sibling backup name and validates the plan, Python checks file type, size,
+> stability and single-link ownership, and C++ creates the copy exclusively.
+> The host then rechecks the plan and stores ownership metadata in its durable
+> SQLite ledger. If registration is uncertain, Python preserves the remote
+> copy and leaves the call outcome unknown. Unsupported routes use the Rust
+> host executor. Backup listing/retention, restore and cleanup still use Rust
+> orchestration.
 
 ## Repository baseline and migration boundary
 
@@ -90,13 +96,14 @@ consumes the exact approval ticket or reserves the bounded task command grant,
 then starts a one-shot C++ service config that enables `server.exec` for that
 target only. Persistent service target configs deny it by default. Targets that
 still require a Rust-only SSH route retain the existing Rust compatibility path.
-The Python sidecar exposes bounded `filesystem.read`; Agent `filesystem.write`
-and revision-guarded `filesystem.edit` use Python approval, host plan/path checks,
-a durable exact-call ledger, and the C++ SFTP transport for supported routes.
-Unsupported routes use the existing Rust host executor. Host-owned
-backup/list/retention/restore/cleanup still use Rust orchestration; those tools
-remain plan-bound and approved. Moving those workflows is the next filesystem
-migration step.
+The Python sidecar exposes bounded `filesystem.read`; Agent `filesystem.write`,
+revision-guarded `filesystem.edit`, and `filesystem.backup` use Python approval,
+host plan/path checks, a durable exact-call ledger, and the C++ SFTP transport
+for supported routes. Backup ownership metadata stays in the host database;
+the host chooses its unguessable sibling name and confirms registration after
+the remote exclusive create. Unsupported routes use the existing Rust host
+executor. Backup listing/retention, restore, and cleanup remain plan-bound,
+approved Rust host operations and are the next filesystem migration work.
 Task-scoped, body-free `investigation.evidence.search`/`compare` also run through
 the desktop host.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
@@ -130,12 +137,16 @@ C++ service executes migrated structured SSH and SFTP operations
 The bridge uses the existing sidecar request path: Python sends
 `host.tool.execute` (or `host.mcp.catalog`) over the child process pipe, and the
 desktop host replies over that same pipe. Python does not start MCP processes
-through this bridge. For `filesystem.write` and `filesystem.edit`, the host checks
-the current plan, validates the path and request limits, and returns a one-target
-credential context; Python then starts the C++ service and performs bounded SFTP.
-Edit reads and checks the requested revision in Python before asking C++ to publish
-with its size/mtime/content digest guard. Other host tools continue through the
-host executor. For
+through this bridge. For `filesystem.write`, `filesystem.edit`, and
+`filesystem.backup`, the host checks the current plan, validates the path and
+request limits, and returns a one-target credential context; Python then starts
+the C++ service and performs bounded SFTP. Edit reads and checks the requested
+revision in Python before asking C++ to publish with its size/mtime/content
+digest guard. Backup reads a stable regular file no larger than 1 MiB, requires
+exactly one hard link, and creates the host-derived sibling with exclusive SFTP
+creation. A separate host RPC revalidates its action binding before adding the
+remote copy's metadata to the ownership ledger. Other host tools continue through
+the host executor. For
 investigation calls, Python carries the current durable plan,
 step, and evidence binding; high-risk host actions also carry the host-issued
 per-call approval ID. The approval event carries raw host input only
@@ -489,6 +500,15 @@ independent plan recheck and the Python edit migration were added. The latest
 Python files pass `py_compile`, the documentation link check and `git diff --check`;
 the Python test suite was not rerun for this edit, and the new Rust code remains
 uncompiled because Cargo is unavailable.
+
+On 2026-10-15, `filesystem.backup` moved to Python/C++ for supported desktop SSH
+routes. Python checks a stable regular file, its 1 MiB cap and single-link count,
+then creates the host-selected sibling exclusively; Rust revalidates the action
+binding and stores ownership metadata. Full Python Agent discovery ran 97 tests:
+93 passed and 4 C++ service integration cases were skipped because no service
+binary path was configured. `py_compile`, the documentation link checker
+(15 Markdown files, 48 links), and `git diff --check` passed. The Rust host bridge
+could not be compiled because Cargo and rustc are unavailable on `PATH`.
 
 ## Deliberately deferred
 

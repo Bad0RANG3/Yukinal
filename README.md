@@ -53,6 +53,11 @@ rejection, expiry, and accepted calls round-trip through the desktop host.
 Durable task recovery and broader tool coverage remain in progress. The
 existing React/Tauri UI remains intact while those paths are migrated.
 
+Desktop `filesystem.write`, `filesystem.edit`, and `filesystem.backup` now use
+Python approval and the C++ SFTP service on supported target routes. The host
+continues to validate the durable action plan and owns backup metadata; backup
+creation is bounded to 1 MiB and uses exclusive sibling-file creation.
+
 The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service
 panel uses the same short-lived service process for read-only service inventory.

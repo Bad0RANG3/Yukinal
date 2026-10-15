@@ -12,6 +12,7 @@ from yukinal_ssh import SshServiceClient, SshServiceError
 
 from .host_rpc import HostRpcClient
 from .host_tools import (
+    _FILESYSTEM_BACKUP_INPUT_SCHEMA,
     _FILESYSTEM_EDIT_INPUT_SCHEMA,
     _FILESYSTEM_WRITE_INPUT_SCHEMA,
     _execute_on_host,
@@ -26,6 +27,7 @@ _MAX_SERVER_LOG_LINES = 500
 _MAX_DOCKER_PS_CONTAINERS = 200
 _MAX_DOCKER_LOG_LINE_CHARS = 4_000
 _MAX_AGENT_EDIT_BYTES = 512 * 1024
+_MAX_AGENT_BACKUP_BYTES = 1024 * 1024
 
 
 def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None:
@@ -442,9 +444,28 @@ def register_desktop_ssh_tools(
             timeout_ms=45_000,
             cancellable=True,
         ))
+    if "filesystem.backup" not in existing_names:
+        registry.register(ToolSpec(
+            name="filesystem.backup",
+            description=(
+                "Create one bounded recovery copy through the Python Agent and C++ SFTP service. "
+                "The desktop host chooses the sibling path and records ownership in its durable ledger."
+            ),
+            input_schema=_FILESYSTEM_BACKUP_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_filesystem_backup(
+                host, binary, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=45_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
-        | {"filesystem.write", "filesystem.edit"}
+        | {"filesystem.write", "filesystem.edit", "filesystem.backup"}
     )
 
 
@@ -794,6 +815,215 @@ async def _desktop_filesystem_edit(
         # A transport failure can arrive after the atomic rename; do not retry automatically.
         code = "unsafe_remote_write" if error.code == "replace_unsupported" else error.code
         raise ToolCallError(code, str(error)) from None
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    finally:
+        await process.stop()
+
+
+async def _desktop_filesystem_backup(
+    host: HostRpcClient,
+    binary: Path,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, object]:
+    """Copy one stable, bounded remote file through C++ and register host ownership."""
+    target_id = context.context_target_id
+    target = context.host_target
+    if (
+        not isinstance(target_id, str)
+        or not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or target.get("serverId") != target_id
+        or not context.run_id
+        or not context.trace_id
+        or not context.call_id
+        or not context.host_task_id
+        or not context.plan_id
+        or not context.plan_step_id
+    ):
+        raise ToolCallError(
+            "durable_plan_required", "filesystem.backup requires a durable remote action plan"
+        )
+
+    plan_request = {
+        "taskId": context.host_task_id,
+        "toolName": "filesystem.backup",
+        "input": arguments,
+        "target": dict(target),
+    }
+    try:
+        plan = await host.request(
+            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError("host_unavailable", "The desktop host could not validate the backup plan") from None
+    if (
+        not isinstance(plan, dict)
+        or plan.get("status") != "allowed"
+        or plan.get("planId") != context.plan_id
+        or plan.get("stepId") != context.plan_step_id
+        or plan.get("stepKind") != "action"
+        or plan.get("evidenceIds") != list(context.evidence_ids)
+    ):
+        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this backup")
+
+    ledger = FilesystemActionLedger.from_environment()
+    if ledger is None:
+        return await _execute_on_host(host, "filesystem.backup", arguments, context)
+    ledger_scope = {
+        "run_id": context.run_id,
+        "trace_id": context.trace_id,
+        "call_id": context.call_id,
+        "tool_name": "filesystem.backup",
+        "target_id": target_id,
+        "arguments": arguments,
+        "plan_id": context.plan_id,
+        "plan_step_id": context.plan_step_id,
+        "evidence_ids": context.evidence_ids,
+    }
+    try:
+        cached = await ledger.claim(**ledger_scope)
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    if cached is not None:
+        return cached
+
+    async def run_host_compatibility_path() -> dict[str, object]:
+        output = await _execute_on_host(host, "filesystem.backup", arguments, context)
+        if not isinstance(output, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup result")
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+
+    try:
+        payload = await host.request(
+            "host.ssh.filesystem_backup_target",
+            {
+                "serverId": target_id,
+                "path": arguments["path"],
+                "taskId": context.host_task_id,
+                "planId": context.plan_id,
+                "planStepId": context.plan_step_id,
+                "evidenceIds": list(context.evidence_ids),
+                "target": dict(target),
+            },
+            timeout_seconds=8.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return await run_host_compatibility_path()
+
+    binding = payload.get("filesystemBackup") if isinstance(payload, dict) else None
+    if (
+        not isinstance(binding, dict)
+        or binding.get("path") != arguments["path"]
+        or not isinstance(binding.get("backupPath"), str)
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup binding")
+    backup_path = binding["backupPath"]
+    parent = arguments["path"].rsplit("/", 1)[0] or "/"
+    source_fingerprint = hashlib.sha256(arguments["path"].encode("utf-8")).hexdigest()[:16]
+    backup_name_prefix = f".yukinal-backup-{source_fingerprint}-"
+    backup_prefix = (
+        f"/{backup_name_prefix}"
+        if parent == "/"
+        else f"{parent}/{backup_name_prefix}"
+    )
+    if (
+        len(backup_path.encode("utf-8")) > 4096
+        or re.fullmatch(re.escape(backup_prefix) + r"[a-f0-9]{32}", backup_path) is None
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup path")
+    try:
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+    except SshServiceProcessError:
+        return await run_host_compatibility_path()
+    try:
+        await process.start()
+    except asyncio.CancelledError:
+        await process.stop()
+        raise
+    except SshServiceProcessError:
+        await process.stop()
+        return await run_host_compatibility_path()
+
+    def create_remote_backup() -> dict[str, object]:
+        client = SshServiceClient(token, base_url=base_url)
+        before = client.sftp_stat(target_id, arguments["path"])
+        if before["kind"] != "file":
+            raise ToolCallError("unsafe_remote_write", "Only a regular remote file can be backed up")
+        if client.sftp_link_count(target_id, arguments["path"]) != 1:
+            raise ToolCallError(
+                "unsafe_remote_write", "The server cannot prove this file has exactly one name"
+            )
+        content = client.sftp_read(target_id, arguments["path"], _MAX_AGENT_BACKUP_BYTES)
+        if len(content) > _MAX_AGENT_BACKUP_BYTES:
+            raise ToolCallError("invalid_input", "The remote file exceeds the 1 MiB backup limit")
+        after = client.sftp_stat(target_id, arguments["path"])
+        if before["size"] != after["size"] or before["modified"] != after["modified"]:
+            raise ToolCallError("concurrent_change", "The remote file changed while it was being backed up")
+        if len(content) != before["size"]:
+            raise ToolCallError("concurrent_change", "The remote file size changed while it was being read")
+        revision = hashlib.sha256(content).hexdigest()
+        result = client.sftp_create_exclusive(target_id, backup_path, content)
+        if result.exit_code != 0:
+            raise ToolCallError("execution_failed", "The C++ SSH service could not create the backup file")
+        return {
+            "path": arguments["path"],
+            "backupPath": backup_path,
+            "revision": revision,
+            "bytesBackedUp": len(content),
+        }
+
+    try:
+        output = await asyncio.to_thread(create_remote_backup)
+        try:
+            registration = await host.request(
+                "host.investigation.filesystem_backup.register",
+                {
+                    "serverId": target_id,
+                    "path": output["path"],
+                    "backupPath": output["backupPath"],
+                    "revision": output["revision"],
+                    "bytesBackedUp": output["bytesBackedUp"],
+                    "taskId": context.host_task_id,
+                    "planId": context.plan_id,
+                    "planStepId": context.plan_step_id,
+                    "traceId": context.trace_id,
+                    "callId": context.call_id,
+                    "evidenceIds": list(context.evidence_ids),
+                    "target": dict(target),
+                },
+                timeout_seconds=8.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ToolCallError(
+                "backup_registration_unknown",
+                f"The remote backup at {backup_path} was created, but host ledger registration could not be confirmed; preserve it and reconcile before restoring",
+            ) from None
+        if registration != {"registered": True, "backupPath": backup_path}:
+            raise ToolCallError(
+                "backup_registration_unknown",
+                f"The remote backup at {backup_path} was created, but host ledger registration could not be confirmed; preserve it and reconcile before restoring",
+            )
+        await ledger.complete(**ledger_scope, output=output)
+        return output
+    except asyncio.CancelledError:
+        # The exclusive remote create may have committed before cancellation; retain the unknown ledger row.
+        raise
+    except ToolCallError:
+        raise
+    except SshServiceError as error:
+        raise ToolCallError(error.code, str(error)) from None
     except FilesystemActionLedgerError as error:
         raise ToolCallError(error.code, str(error)) from None
     finally:
