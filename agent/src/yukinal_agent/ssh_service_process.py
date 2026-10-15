@@ -209,8 +209,19 @@ class SshServiceProcess:
         elif auth.get("type") == "private_key" and set(auth) in (
             {"type", "private_key_env"},
             {"type", "private_key_env", "passphrase_env"},
+            {"type", "private_key_env", "public_key_file"},
+            {"type", "private_key_env", "passphrase_env", "public_key_file"},
         ) and isinstance(auth.get("private_key_env"), str) and (
             "passphrase_env" not in auth or isinstance(auth.get("passphrase_env"), str)
+        ) and (
+            "public_key_file" not in auth
+            or (
+                isinstance(auth.get("public_key_file"), str)
+                and bool(auth["public_key_file"])
+                and len(auth["public_key_file"]) <= 4096
+                and not any(ord(character) <= 0x1F or ord(character) == 0x7F for character in auth["public_key_file"])
+                and "\x00" not in auth["public_key_file"]
+            )
         ):
             credential_names = {auth["private_key_env"]}
             if "passphrase_env" in auth:

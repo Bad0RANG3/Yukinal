@@ -73,8 +73,13 @@ _STRUCTURED_ACTIONS: tuple[tuple[str, str, dict[str, Any]], ...] = (
 )
 
 
-def register_host_tools(registry: ToolRegistry, host: HostRpcClient) -> None:
-    """Register the read-only tools already exposed by the desktop host."""
+def register_host_tools(
+    registry: ToolRegistry,
+    host: HostRpcClient,
+    *,
+    excluded_names: frozenset[str] = frozenset(),
+) -> None:
+    """Register desktop host tools that are not routed through the C++ service."""
     definitions: tuple[tuple[str, str, dict[str, Any]], ...] = (
         ("server.info", "Collect a fresh read-only health snapshot for the resolved remote server.", _BASE_SCHEMA),
         (
@@ -182,6 +187,7 @@ def register_host_tools(registry: ToolRegistry, host: HostRpcClient) -> None:
             cancellable=True,
         )
         for name, description, schema in definitions
+        if name not in excluded_names
     ])
     registry.register(ToolSpec(
         name="server.exec",

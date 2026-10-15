@@ -101,18 +101,19 @@ class PythonSidecar:
 
     def set_host_rpc(self, host: HostRpcClient | None) -> None:
         self._host_rpc = host
-        if host is not None and not self._host_tools_registered:
-            register_host_tools(self._registry, host)
-            self._host_tools_registered = True
+        direct_tool_names: frozenset[str] = frozenset()
         if (
             host is not None
             and self._managed_ssh_service_binary is not None
             and not self._managed_ssh_tools_registered
         ):
-            register_desktop_ssh_tools(
+            direct_tool_names = register_desktop_ssh_tools(
                 self._registry, host, self._managed_ssh_service_binary
             )
             self._managed_ssh_tools_registered = True
+        if host is not None and not self._host_tools_registered:
+            register_host_tools(self._registry, host, excluded_names=direct_tool_names)
+            self._host_tools_registered = True
 
     def set_checkpointer(self, checkpointer: Any | None) -> None:
         if self._active_runs:

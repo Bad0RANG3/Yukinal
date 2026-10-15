@@ -142,6 +142,31 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     {"target": target, "credentials": {"UNRELATED": "value"}},
                 )
 
+    async def test_desktop_target_accepts_a_public_certificate_with_private_key_auth(self) -> None:
+        target = {
+            "target_id": "srv_example1",
+            "host": "stage.example.test",
+            "port": 22,
+            "username": "ops",
+            "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "auth": {
+                "type": "private_key",
+                "private_key_env": "YK_SSH_PRIVATE_KEY",
+                "public_key_file": "C:/keys/id-cert.pub",
+            },
+        }
+        credentials = {"YK_SSH_PRIVATE_KEY": "test-only-private-key"}
+        with tempfile.TemporaryDirectory(prefix="yukinal-ssh-process-") as temporary:
+            binary = Path(temporary) / "service.exe"
+            binary.write_text("service", encoding="utf-8")
+            service, _, _ = SshServiceProcess.for_desktop_target(
+                binary, {"target": target, "credentials": credentials}
+            )
+            configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
+            self.assertEqual(configured_target["auth"]["public_key_file"], "C:/keys/id-cert.pub")
+            self.assertEqual(service._secret_values, credentials)
+            await service.stop()
+
     async def test_desktop_target_forwards_http_proxy_credentials_to_cpp_child(self) -> None:
         target = {
             "target_id": "srv_example1",

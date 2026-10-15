@@ -3,14 +3,16 @@
 > **Current scope:** the standalone C++ SSH service and Python caller are in
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
-> desktop-host bridge for read-only tools and one plan-bound task action, plus tool lifecycle events consumed by the
+> desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
 > hosts native UI IPC, local trust-store updates, approvals, and PTY/SFTP
 > compatibility paths for Host CA, HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
 > known-hosts-only trust, and other unsupported SSH modes. Supported desktop terminals use a dedicated C++
 > PTY child process. The Python sidecar can call the C++
-> `service_status` operation when configured; the desktop file browser and
+> `service_status` operation when configured; the desktop Agent routes server
+> logs, Docker inspection, systemd inspection, and package inspection through a
+> short-lived C++ process using the saved desktop target and identity. The desktop file browser and
 > supported Agent file reads/writes/backups and guarded atomic edit/restore use
 > C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
 > SSH-agent identities on direct or supported HTTP CONNECT routes with a confirmed host-key pin and
@@ -49,12 +51,15 @@ preserved; the Rust/Tauri host remains responsible for the native UI bridge,
 OS credential store, and final host authorization while Agent execution moves
 to Python and structured Agent SSH calls move to the C++ service.
 
-The Python runtime speaks the desktop host's bidirectional JSON-RPC protocol. It
-can execute a first set of read-only server tools through the host, load low-risk
-MCP tools from the host catalog, and emit the tool-call/result events that the
-existing transcript UI displays. When the C++ service token is configured, the
-Python sidecar also registers `ssh.service_status`; it binds the call to the
-selected `host_target.serverId`, so the model cannot choose a different target.
+The Python runtime speaks the desktop host's bidirectional JSON-RPC protocol for
+approval, target resolution, and remaining host operations; it also loads low-risk
+MCP tools from the host catalog and emits the tool-call/result events consumed by
+the existing transcript UI. With the packaged C++ service available, desktop
+`server.logs`, Docker read operations, `systemd.inspect`, `package.inspect`, and
+`ssh.service_status` use a short-lived, one-target C++ process. Rust supplies the
+saved target, confirmed host-key pin, and credential material from the OS store;
+the Python process passes credentials only through the C++ child environment and
+cleans up its temporary configuration when the call ends.
 The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
 recomputes a fingerprint from the exact raw input, consumes the corresponding
@@ -363,9 +368,10 @@ compatibility with an OpenSSH server remains unverified.
 
 Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
-environment. After configuring CMake to use that interpreter, the C++ build
-completed and all six CTest targets passed on the current source revision. Full
-Python Agent-focused discovery ran 48 tests: all passed. An earlier full Python
+environment. The C++ build and all six CTest targets passed on the preceding
+verified revision. On the current Python tool-routing changes, full Agent-focused
+discovery ran 51 tests and all passed; the focused SSH tool/process run passed 9
+tests. An earlier full Python
 unittest discovery ran 45 tests: 42 passed and 3 service integration cases were
 skipped because the service binary path was not configured for that standalone
 run. The Agent suite covers live stdio and Streamable HTTP MCP
