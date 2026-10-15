@@ -13,10 +13,12 @@ from yukinal_agent import (
     ModelDrivenAgent,
     PolicyEngine,
     PrincipalScope,
+    ToolCallError,
     ToolRegistry,
     ToolSpec,
 )
 from yukinal_agent.checkpoints import open_checkpoint_store
+from yukinal_agent.tools import approval_fingerprint
 
 
 class ScriptedModel:
@@ -72,6 +74,25 @@ def _registry(handler: Any, *, write: bool = False, audit: MemoryAuditSink | Non
         requires_approval=write,
         handler=handler,
         target_required=True,
+    ))
+    return registry
+
+
+def _server_exec_registry(handler: Any) -> ToolRegistry:
+    registry = ToolRegistry(MemoryAuditSink())
+    registry.register(ToolSpec(
+        name="server.exec",
+        description="Run one approved command.",
+        input_schema={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        risk_level="destructive",
+        requires_approval=True,
+        handler=handler,
+        target_id_argument=None,
     ))
     return registry
 
@@ -173,6 +194,76 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.tools[0]["function"]["name"], "ops.read")
         self.assertIn("untrusted data", model.seen_messages[0][0].content)
         self.assertEqual(model.seen_messages[1][-1].type, "tool")
+
+    async def test_completed_nonzero_server_exec_result_returns_to_model_for_replanning(self) -> None:
+        executed: list[str] = []
+        command_result = {
+            "state": "completed",
+            "exitCode": 2,
+            "stdout": "config check failed\n",
+            "stderr": "invalid directive\n",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
+            "durationMs": 18,
+        }
+
+        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, Any]:
+            executed.append("check-config")
+            raise ToolCallError("execution_failed", "the command exited with code 2", result=command_result)
+
+        registry = _server_exec_registry(handler)
+        fingerprint = approval_fingerprint(
+            "server.exec", None, {"command": "check-config"},
+            task_id="task-nonzero-exec", tenant_id="tenant-1", user_id="user-1",
+        )
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "server.exec", "args": {"command": "check-config"},
+                "id": "exec-1", "type": "tool_call",
+            }, {
+                "name": "server.exec", "args": {"command": "check-config"},
+                "id": "exec-2", "type": "tool_call",
+            }]),
+            AIMessage(content="The check failed; I will revise the plan before changing anything."),
+        ])
+
+        result = await ModelDrivenAgent(registry, model).run(
+            task_id="task-nonzero-exec", tenant_id="tenant-1", user_id="user-1",
+            prompt="Validate the service configuration.", allowed_tools={"server.exec"},
+            allowed_target_ids=set(), approved_actions={fingerprint: "approval-1"},
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.answer, "The check failed; I will revise the plan before changing anything.")
+        self.assertEqual(result.tool_results[0]["status"], "failed")
+        self.assertEqual(result.tool_results[0]["result"], command_result)
+        self.assertEqual(executed, ["check-config"])
+        self.assertEqual(model.seen_messages[1][-1].type, "tool")
+        self.assertIn("invalid directive", model.seen_messages[1][-1].content)
+
+    async def test_unknown_server_exec_result_stops_without_model_retry(self) -> None:
+        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, Any]:
+            raise ToolCallError("transport", "the remote result is unknown")
+
+        registry = _server_exec_registry(handler)
+        arguments = {"command": "check-config"}
+        fingerprint = approval_fingerprint(
+            "server.exec", None, arguments,
+            task_id="task-unknown-exec", tenant_id="tenant-1", user_id="user-1",
+        )
+        model = ScriptedModel([AIMessage(content="", tool_calls=[{
+            "name": "server.exec", "args": {"command": "check-config"},
+            "id": "exec-unknown", "type": "tool_call",
+        }])])
+        result = await ModelDrivenAgent(registry, model).run(
+            task_id="task-unknown-exec", tenant_id="tenant-1", user_id="user-1",
+            prompt="Validate the service configuration.", allowed_tools={"server.exec"},
+            allowed_target_ids=set(), approved_actions={fingerprint: "approval-1"},
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_code, "transport")
+        self.assertEqual(len(model.seen_messages), 1)
 
     async def test_tool_lifecycle_events_share_call_identity_and_redact_secrets(self) -> None:
         events: list[dict[str, Any]] = []

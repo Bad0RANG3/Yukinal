@@ -903,7 +903,9 @@ async def _desktop_ssh_effectful_action(
         )
         if result.exit_code != 0:
             raise ToolCallError(
-                "execution_failed", f"could not execute the approved {tool_name} action"
+                "execution_failed",
+                f"the approved {tool_name} command exited with code {result.exit_code}",
+                result=completion_result if tool_name == "server.exec" else None,
             )
         if tool_name == "server.exec":
             return _validate_server_exec_output(completion_result, arguments["maxOutputBytes"])

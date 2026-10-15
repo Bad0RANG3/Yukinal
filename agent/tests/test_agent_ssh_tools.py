@@ -886,6 +886,78 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 
+    async def test_desktop_server_exec_nonzero_preserves_result_for_agent(self) -> None:
+        host = FakeDesktopHost()
+        audit = MemoryAuditSink()
+        registry = ToolRegistry(audit)
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {
+            "command": "check-config",
+            "purpose": "inspect the validator failure",
+            "timeoutMs": 1000,
+            "maxOutputBytes": 4096,
+        }
+        fingerprint = approval_fingerprint(
+            "server.exec",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-nonzero",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-nonzero",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"server.exec"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-server-exec"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-nonzero",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            run_id="run-server-exec-nonzero",
+            trace_id="trace-server-exec-nonzero",
+            call_id="call-server-exec-nonzero",
+            context_target_id="srv_stage1",
+        )
+        command_result = SimpleNamespace(
+            exit_code=2,
+            stdout="config check failed\n",
+            stderr="invalid directive\n",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            duration_ms=18,
+        )
+        expected_output = {
+            "state": "completed",
+            "exitCode": 2,
+            "stdout": "config check failed\n",
+            "stderr": "invalid directive\n",
+            "stdoutTruncated": False,
+            "stderrTruncated": False,
+            "durationMs": 18,
+        }
+        FakeDesktopSshProcess.instances.clear()
+        FakeDesktopSshProcess.payloads.clear()
+
+        with (
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+            patch.object(FakeDesktopSshClient, "server_exec", return_value=command_result),
+            self.assertRaises(ToolCallError) as caught,
+        ):
+            await registry.execute("server.exec", arguments, context)
+
+        self.assertEqual(caught.exception.code, "execution_failed")
+        self.assertEqual(caught.exception.result, expected_output)
+        self.assertEqual(host.calls[1][1]["outcome"], "failed")
+        self.assertEqual(host.calls[1][1]["result"], expected_output)
+        self.assertEqual(audit.events[-1].status, "failed")
+        self.assertEqual(audit.events[-1].error_code, "execution_failed")
+        self.assertEqual(audit.events[-1].result_summary["keys"], sorted(expected_output))
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
     async def test_desktop_systemd_restart_does_not_fallback_after_target_rpc_failure(self) -> None:
         host = FakeDesktopHost()
         host.request = AsyncMock(side_effect=RuntimeError("host timeout"))  # type: ignore[method-assign]

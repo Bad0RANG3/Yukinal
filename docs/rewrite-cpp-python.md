@@ -61,8 +61,10 @@
 > The former Rust route was later removed entirely.
 > The host checks the durable action plan before
 > claiming the call and consuming its ticket. A successful result is cached only
-> after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
-> and cannot be replayed. SSH operations outside current C++ support fail
+> after C++ reports exit code zero. A completed nonzero `server.exec` returns its
+> bounded exit code and output to the Agent for diagnosis or replanning, while the
+> failed action remains non-replayable; transport outcomes stay unknown and cannot
+> be automatically replayed. SSH operations outside current C++ support fail
 > explicitly; the desktop no longer runs a second Rust SSH backend.
 > Raw approval input is removed before persistence and UI emission.
 > Agent `filesystem.write` and `filesystem.edit` now run as Python desktop tools

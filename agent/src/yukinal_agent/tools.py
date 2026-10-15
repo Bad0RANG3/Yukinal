@@ -30,11 +30,13 @@ class ToolCallError(RuntimeError):
         *,
         approval_fingerprint: str | None = None,
         target_id: str | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else "tool_failed"
         self.approval_fingerprint = approval_fingerprint
         self.target_id = target_id
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -344,6 +346,7 @@ class ToolRegistry:
                 "denied" if error.code in {"tool_not_allowed", "target_required", "target_not_allowed", "risk_not_allowed", "authorization_failed"}
                 else "failed"
             )
+            error_result = _bounded_error_result(error.result, max_output_bytes)
             if error.code == "approval_required" and spec is not None and isinstance(arguments, dict):
                 target_for_approval = context.context_target_id
                 if spec.target_id_argument is not None and spec.target_id_argument in arguments:
@@ -360,7 +363,13 @@ class ToolRegistry:
                 approval_status = "awaiting_approval"
             await self._record_finished(
                 context, event_id, status, spec.name if spec is not None else "<unregistered>", target_id, started, safe_arguments,
-                started_clock, error_code=error.code, approval_status=approval_status,
+                started_clock,
+                result_summary=(
+                    _result_summary(error_result[0], error_result[1])
+                    if error_result is not None else None
+                ),
+                error_code=error.code,
+                approval_status=approval_status,
             )
             raise
         except Exception:
@@ -527,6 +536,21 @@ def _result_summary(value: Any, encoded_size: int) -> dict[str, object]:
     if isinstance(value, list):
         return {"kind": "array", "items": len(value), "bytes": encoded_size}
     return {"kind": type(value).__name__[:48], "bytes": encoded_size}
+
+
+def _bounded_error_result(value: object, max_output_bytes: int) -> tuple[Any, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        json_value = _to_json_value(value)
+        encoded = json.dumps(
+            json_value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (ToolCallError, TypeError, ValueError):
+        return None
+    if len(encoded) > max_output_bytes:
+        return None
+    return json_value, len(encoded)
 
 
 def _to_json_value(value: Any) -> Any:
