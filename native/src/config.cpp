@@ -11,6 +11,7 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 #include "yukinal/policy.hpp"
 
@@ -109,6 +110,82 @@ bool parse_ipv4_cidr(std::string_view value, std::array<unsigned char, 4>* addre
   return true;
 }
 
+bool parse_ipv6(std::string_view value, std::array<unsigned char, 16>* address) {
+  if (!address || value.empty()) return false;
+  const auto compression = value.find("::");
+  if (compression != std::string_view::npos && value.find("::", compression + 2) != std::string_view::npos) {
+    return false;
+  }
+
+  const auto parse_side = [](std::string_view side, bool allow_ipv4_tail,
+                             std::vector<std::uint16_t>* groups) {
+    if (!groups) return false;
+    if (side.empty()) return true;
+    std::size_t start = 0;
+    while (start <= side.size()) {
+      const auto end = side.find(':', start);
+      const auto token = side.substr(start, end == std::string_view::npos ? side.size() - start : end - start);
+      if (token.empty()) return false;
+      if (token.find('.') != std::string_view::npos) {
+        if (!allow_ipv4_tail || end != std::string_view::npos) return false;
+        std::array<unsigned char, 4> ipv4{};
+        if (!parse_ipv4(token, &ipv4)) return false;
+        groups->push_back(static_cast<std::uint16_t>((ipv4[0] << 8) | ipv4[1]));
+        groups->push_back(static_cast<std::uint16_t>((ipv4[2] << 8) | ipv4[3]));
+      } else {
+        if (token.size() > 4) return false;
+        unsigned int parsed = 0;
+        const auto result = std::from_chars(token.data(), token.data() + token.size(), parsed, 16);
+        if (result.ec != std::errc{} || result.ptr != token.data() + token.size()) return false;
+        groups->push_back(static_cast<std::uint16_t>(parsed));
+      }
+      if (end == std::string_view::npos) break;
+      start = end + 1;
+    }
+    return true;
+  };
+
+  std::vector<std::uint16_t> left;
+  std::vector<std::uint16_t> right;
+  if (compression == std::string_view::npos) {
+    if (!parse_side(value, true, &left) || left.size() != 8) return false;
+  } else {
+    const auto left_text = value.substr(0, compression);
+    const auto right_text = value.substr(compression + 2);
+    if (!parse_side(left_text, false, &left) || !parse_side(right_text, true, &right) ||
+        left.size() + right.size() >= 8) {
+      return false;
+    }
+  }
+
+  std::array<std::uint16_t, 8> words{};
+  std::copy(left.begin(), left.end(), words.begin());
+  std::copy(right.begin(), right.end(), words.end() - static_cast<std::ptrdiff_t>(right.size()));
+  for (std::size_t index = 0; index < words.size(); ++index) {
+    (*address)[index * 2] = static_cast<unsigned char>(words[index] >> 8);
+    (*address)[index * 2 + 1] = static_cast<unsigned char>(words[index] & 0xffU);
+  }
+  return true;
+}
+
+bool parse_ipv6_cidr(std::string_view value, std::array<unsigned char, 16>* address,
+                     unsigned int* prefix) {
+  const auto slash = value.find('/');
+  if (slash == std::string_view::npos || value.find('/', slash + 1) != std::string_view::npos || !prefix ||
+      !parse_ipv6(value.substr(0, slash), address)) {
+    return false;
+  }
+  const auto prefix_text = value.substr(slash + 1);
+  if (prefix_text.empty()) return false;
+  unsigned int parsed = 0;
+  const auto result = std::from_chars(prefix_text.data(), prefix_text.data() + prefix_text.size(), parsed);
+  if (result.ec != std::errc{} || result.ptr != prefix_text.data() + prefix_text.size() || parsed > 128) {
+    return false;
+  }
+  *prefix = parsed;
+  return true;
+}
+
 bool ipv4_matches_cidr(std::string_view host, std::string_view cidr) {
   std::array<unsigned char, 4> address{};
   std::array<unsigned char, 4> network{};
@@ -127,13 +204,34 @@ bool ipv4_matches_cidr(std::string_view host, std::string_view cidr) {
   return true;
 }
 
+bool ipv6_matches_cidr(std::string_view host, std::string_view cidr) {
+  std::array<unsigned char, 16> address{};
+  std::array<unsigned char, 16> network{};
+  unsigned int prefix = 0;
+  if (!parse_ipv6(host, &address) || !parse_ipv6_cidr(cidr, &network, &prefix)) return false;
+  for (std::size_t index = 0; index < address.size(); ++index) {
+    if (prefix >= 8) {
+      if (address[index] != network[index]) return false;
+      prefix -= 8;
+    } else if (prefix > 0) {
+      const auto mask = static_cast<unsigned char>(0xffU << (8 - prefix));
+      if ((address[index] & mask) != (network[index] & mask)) return false;
+      prefix = 0;
+    }
+  }
+  return true;
+}
+
 bool valid_proxy_bypass_entry(const std::string& entry) {
   if (entry.empty() || entry.size() > 253) return false;
   if (entry == "*") return true;
   if (entry.find('/') != std::string::npos) {
     std::array<unsigned char, 4> network{};
-    unsigned int prefix = 0;
-    return parse_ipv4_cidr(entry, &network, &prefix);
+    unsigned int prefix4 = 0;
+    if (parse_ipv4_cidr(entry, &network, &prefix4)) return true;
+    std::array<unsigned char, 16> network6{};
+    unsigned int prefix6 = 0;
+    return parse_ipv6_cidr(entry, &network6, &prefix6);
   }
 
   std::string_view host = entry;
@@ -398,7 +496,7 @@ bool proxy_bypasses_target(const TargetConfig& target) {
     const std::string entry = lowercase(raw_entry);
     if (entry == "*") return true;
     if (entry.find('/') != std::string::npos) {
-      if (ipv4_matches_cidr(host, entry)) return true;
+      if (ipv4_matches_cidr(host, entry) || ipv6_matches_cidr(host, entry)) return true;
       continue;
     }
     if (entry.rfind("*.", 0) == 0) {

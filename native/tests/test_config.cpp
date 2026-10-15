@@ -180,10 +180,10 @@ YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   auto value = valid_config();
   value["targets"][0]["proxy"] = {
       {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
-      {"no_proxy", json::array({"*.corp", ".internal", "10.*", "[::1]", "localhost", "example.test", "192.168.0.0/16"})}};
+      {"no_proxy", json::array({"*.corp", ".internal", "10.*", "[::1]", "localhost", "example.test", "192.168.0.0/16", "2001:db8:abcd::/48", "::ffff:192.0.2.0/120"})}};
   auto config = parse_config(value);
   auto& target = config.targets.at("staging-web-01");
-  YUKINAL_REQUIRE(target.proxy_no_proxy.size() == 7);
+  YUKINAL_REQUIRE(target.proxy_no_proxy.size() == 9);
 
   target.host = "api.corp";
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
@@ -201,6 +201,12 @@ YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
   target.host = "[::1]";
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+  target.host = "[2001:db8:abcd:42::1]";
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+  target.host = "2001:db8:abce::1";
+  YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
+  target.host = "[::ffff:192.0.2.4]";
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
   target.host = "stage.example.test";
   YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
   target.host = "badexample.test";
@@ -211,8 +217,17 @@ YUKINAL_TEST(config_rejects_invalid_no_proxy_patterns) {
   auto value = valid_config();
   value["targets"][0]["proxy"] = {
       {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
-      {"no_proxy", json::array({"10.0.0.0/33"})}};
+      {"no_proxy", json::array({"2001:db8::/129"})}};
   bool rejected = false;
+  try {
+    (void)parse_config(value);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  YUKINAL_REQUIRE(rejected);
+
+  value["targets"][0]["proxy"]["no_proxy"] = json::array({"10.0.0.0/33"});
+  rejected = false;
   try {
     (void)parse_config(value);
   } catch (const std::runtime_error&) {

@@ -323,7 +323,8 @@ configuration.
 
 The desktop may also add a target-level `proxy` object with `type: "http_connect"`,
 proxy `host` and `port`, an optional `auth_env`, and supported `no_proxy` host
-patterns. Exact hosts, domain suffixes, IPv4 prefixes, IPv4 CIDR ranges, and `*` are evaluated by
+patterns. Exact hosts, domain suffixes, IPv4 prefixes, IPv4 and IPv6 CIDR ranges,
+and `*` are evaluated by
 the C++ service against its single target; unsupported patterns retain the Rust
 path. Proxy credentials are forwarded to the child environment separately from
 the target JSON. HTTPS proxies also stay on the Rust path. The C++ service bounds the

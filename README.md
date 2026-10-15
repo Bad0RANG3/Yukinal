@@ -95,7 +95,7 @@ accepts an optional target `proxy` with `type: "http_connect"`, a proxy `host`
 and `port`, an optional `auth_env` reference, and `no_proxy` host patterns.
 Supported bypass patterns include exact hosts, domain suffixes (`.corp` or
 `*.corp`), IPv4 prefixes such as `10.*`, IPv4 CIDR ranges such as
-`10.0.0.0/8`, and `*`. Proxy credentials belong in
+`10.0.0.0/8`, IPv6 CIDR ranges such as `2001:db8:abcd::/48`, and `*`. Proxy credentials belong in
 the environment variable, not in the JSON file. HTTPS proxies and unsupported
 bypass patterns stay on the Rust compatibility path.
 

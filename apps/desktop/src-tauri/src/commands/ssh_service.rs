@@ -446,9 +446,10 @@ fn parse_cpp_no_proxy(value: &str) -> Option<Vec<String>> {
                 if address.contains('/') {
                     return None;
                 }
-                return (address.parse::<std::net::Ipv4Addr>().is_ok()
-                    && prefix.parse::<u8>().is_ok_and(|prefix| prefix <= 32))
-                .then(|| entry.to_string());
+                let prefix = prefix.parse::<u8>().ok()?;
+                let valid_ipv4 = address.parse::<std::net::Ipv4Addr>().is_ok() && prefix <= 32;
+                let valid_ipv6 = address.parse::<std::net::Ipv6Addr>().is_ok() && prefix <= 128;
+                return (valid_ipv4 || valid_ipv6).then(|| entry.to_string());
             }
             if let Some(host) = entry.strip_prefix("*.") {
                 return valid_host(host).then(|| entry.to_string());
@@ -2237,7 +2238,16 @@ mod tests {
                 if no_proxy.len() == 1 && no_proxy[0] == "10.0.0.0/8"
         ));
         assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("2001:db8:abcd::/48")),
+            CppProxyRoute::HttpConnect { no_proxy, .. }
+                if no_proxy.len() == 1 && no_proxy[0] == "2001:db8:abcd::/48"
+        ));
+        assert!(matches!(
             proxy_route("http://proxy.example.test:8080", Some("10.0.0.0/33")),
+            CppProxyRoute::Unsupported
+        ));
+        assert!(matches!(
+            proxy_route("http://proxy.example.test:8080", Some("2001:db8::/129")),
             CppProxyRoute::Unsupported
         ));
         assert!(matches!(
