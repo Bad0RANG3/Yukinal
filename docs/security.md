@@ -2,7 +2,7 @@
 
 本页说明 Yukinal 当前实现和[目标架构](./architecture-and-build-plan.md)必须保持的信任边界。目标功能尚未全部实现；发现漏洞或需要私下报告时，请使用仓库根目录的[安全策略](../SECURITY.md)。
 
-当前重写包含独立 C++ SSH 服务和 Python Agent。桌面为选中的 `serverId` 从 SQLite、系统凭据库和已确认的主机密钥 pin 生成单目标配置，再启动短时 C++ 服务进程。服务只监听回环地址并要求随机 bearer token；请求不能指定任意主机、凭据或原始命令。受支持 SSH 路由上的主机指纹探测由 C++ 完成：探测目标没有 SSH 身份凭据和信任 pin，且只能执行握手探测；它只返回未验证指纹，不写本地状态。不支持的 Host CA 算法、代理协议或 host-key 格式仍使用 Rust 兼容探针。服务状态查询使用固定操作；桌面文件浏览和 Agent 文件读取、覆盖写入、备份创建、清理以及编辑/恢复使用 C++ SFTP 操作，适用于直连或受支持 bypass 规则的 HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理、已确认主机密钥 pin、未配置 Host CA 且使用密码、私钥、OpenSSH 用户证书或 SSH Agent 身份的服务器。代理凭据通过 C++ 子进程环境变量传递，不写进目标 JSON；不支持的代理协议与 bypass 规则仍需兼容路径。HTTPS Host CA KRL 下载通过 C++ 验证 KRL 服务器证书后支持 SOCKS5/SOCKS5H；仅 loopback 的 HTTP KRL 必须绕过 SOCKS 代理，无法安全路由时服务拒绝连接且不会跳过撤销检查。KRL `NO_PROXY` 端口匹配使用 KRL URL 的目标端口。SSH Agent socket 仅在目标选择 Agent 认证时传给 C++ 子进程（Unix 使用 `SSH_AUTH_SOCK`，Windows 使用平台 Agent 接口）。支持的终端会话通过独立 C++ PTY 子进程连接，输入、尺寸变化和输出使用有界 JSON-lines 管道；该入口只由手动终端 UI 调用，不暴露给 Agent 工具。C++ 密码认证不适用时，键盘交互认证会回到 Rust 的用户确认流程。不支持的 Host CA 算法、代理协议、bypass 规则、仅有 known_hosts 信任及其他未覆盖 SSH 模式仍使用 Rust；支持终端的键盘交互提示由 C++ PTY worker 转发到 UI。守卫式替换会复核目标的大小、mtime 和 SHA-256，在同目录独占创建暂存文件，保留并复核 mode/mtime/owner/group，再通过 OpenSSH POSIX 原子重命名发布；服务器不支持安全原子替换时会拒绝发布。受支持目标的手动文件传输使用 C++ SFTP 流式子进程：适用于直连或受支持 bypass 规则的 HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 路由，以及已确认主机密钥 pin、无 Host CA 且身份受支持的目标；数据通过有界本机 JSON-lines 管道转发，不经过模型或 Agent sidecar；其他不兼容目标保留 Rust SFTP 回退。
+当前重写包含独立 C++ SSH/SFTP 服务和 Python Agent。桌面宿主依据选定的 `serverId`，从 SQLite、系统凭据库和已核验的信任配置生成单目标服务配置。C++ 服务只监听回环地址并要求随机 bearer token；请求不能替换目标、凭据或信任设置。Agent 的结构化操作由 Python caller 发送到 C++ 服务，原始命令只有在桌面授权链为单个目标启用一次性能力后才能执行，并受 C++ 参数、超时和输出上限约束。主机指纹探测由 C++ 完成：探测配置没有 SSH 身份凭据和信任 pin，只执行握手并返回未验证指纹，不写入信任状态。桌面文件浏览、Agent 文件读取/写入/备份/清理/编辑/恢复、终端和手动传输都由 C++ 承担 SSH/SFTP/PTY 会话。服务支持直连或受支持 bypass 规则的 HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H，以及密码、私钥、OpenSSH 用户证书或 SSH Agent 身份；支持配置的 Host CA、KRL 和 pin/known_hosts 信任模式。代理凭据通过 C++ 子进程环境变量传递，不写入目标 JSON；HTTPS KRL 下载验证服务器证书，loopback HTTP KRL 必须绕过 SOCKS 代理，无法安全路由时拒绝连接而不跳过撤销检查。KRL `NO_PROXY` 端口匹配使用 KRL URL 的目标端口。SSH Agent socket 只在目标选择 Agent 认证时传给 C++ 子进程（Unix 使用 `SSH_AUTH_SOCK`，Windows 使用平台 Agent 接口）。交互式终端由独立 C++ PTY 子进程连接，通过有界 JSON-lines 管道向 UI 转发键盘交互挑战、尺寸和输出；终端入口只由手动 UI 调用，不暴露给 Agent 工具。C++ 不支持的认证、Host CA 算法、信任或代理配置明确失败，不回退到 Rust SSH/SFTP。守卫式文件替换会复核目标大小、mtime 和 SHA-256，在同目录独占创建暂存文件，保留并复核 mode/mtime/owner/group，再通过 OpenSSH POSIX 原子重命名发布；服务器不支持安全替换时拒绝发布。手动传输通过桌面宿主与 C++ 流式 worker 之间的有界本机管道转发，不经过模型或 Agent sidecar。
 
 ## 谁能做决定
 
@@ -25,7 +25,7 @@ Python sidecar 在 `YUKINAL_DATA_DIR/agent-state/langgraph-checkpoints.sqlite` �
 
 远端读取、日志、附件和 IPC 帧有大小或数量限制。MCP 响应在进入工具结果归一化前须为有效 JSON，限制为 32 层、100,000 个节点、10,000 个内容块和 4 MiB；超限、循环或无效结果会在 sidecar 内拒绝。提供给模型的内容必须受限并脱敏；审计记录应保留操作与结果的可追溯信息，避免写入凭据、完整远端正文和不必要的模型上下文。连接外部 Provider 或 MCP 服务器前，用户应知道相关数据会离开本机；MCP 自报的描述、schema 和风险注解不能单独成为授权依据。
 
-本机↔远端的手动文件传输由用户在工作区发起。只有直连或受支持 bypass 规则的 HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H、已确认主机密钥 pin、未配置 Host CA 且使用受支持身份的目标才通过 Rust 宿主启动 C++ SFTP 流式子进程；数据以有界 JSON-lines 帧在本机进程间转发，不经过模型或 Agent sidecar。未支持的代理协议、bypass 规则、Host CA 算法或其他不兼容目标仍使用 Rust SFTP 兼容路径。原生选择/拖放授予的本机来源要绑定到短期传输句柄，远端目标绑定已核验的 `serverId` 和路径。上传/下载都要防路径穿越、符号链接越界、静默覆盖、不完整文件被当成完成；预览上限和传输上限分开。文件名、日志和预览内容仍按不可信输入显示。
+本机↔远端的手动文件传输由用户在工作区发起。桌面宿主启动 C++ SFTP 流式 worker，并以有界 JSON-lines 帧在本机进程间转发数据；SSH/SFTP 会话留在 C++。不支持的代理、认证或信任配置明确失败，不运行 Rust SFTP 回退。原生选择/拖放授予的本机来源要绑定到短期传输句柄，远端目标绑定已核验的 `serverId` 和路径。上传/下载都要防路径穿越、符号链接越界、静默覆盖、不完整文件被当成完成；预览上限和传输上限分开。文件名、日志和预览内容仍按不可信输入显示。
 
 ## 明确的限制
 

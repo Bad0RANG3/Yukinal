@@ -1,6 +1,6 @@
 # 目标架构与施工交接
 
-> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文 Rust/Node 路径名仅指 1.0 基线或明确标注的测试。当前重建包含独立 C++ SSH 服务、Python caller 与 Agent Runtime、多 Provider 适配、MCP 和只读桌面宿主桥接；Tauri 开发与新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。Windows 最近一次 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器验收尚未运行。支持的终端已使用 C++ PTY 子进程；使用受支持认证方式且有已确认主机密钥 pin 或受支持 Host CA 的桌面 SSH/SFTP 与手动传输由 C++ 执行，支持直连、HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书身份。Tauri 把所选代理 URL 和 bypass 配置交给 C++；URL 校验、HTTPS 证书验证、bypass 匹配、CONNECT 和 SOCKS5 隧道都在 C++，HTTPS Host CA KRL 下载也使用已验证的 SOCKS5/SOCKS5H 路由。SOCKS5 在本机解析目标域名，SOCKS5H 由代理解析；SOCKS4、PAC 等未支持协议仍走兼容路径。Rust/Tauri 仍保留 C++ 尚未支持的 Host CA 算法、键盘交互认证、known_hosts-only 信任等兼容路径，以及审批、任务生命周期和其他尚未迁移的 SSH/SFTP 路径。主机指纹探测由 C++ 处理直连及受支持的 HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 路由；其他尚未迁移的信任模式仍走兼容路径。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
+> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文旧 Rust/Node 路径仅表示历史基线或明确标注的测试。当前运行链路由独立 C++ SSH/SFTP 服务和 Python caller/Agent Runtime 承担；React/Tauri 保留现有界面、原生 IPC、系统凭据库接入及桌面授权桥接。Tauri 开发与新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。SSH、SFTP、PTY 和主机指纹探测没有 Rust 传输回退；C++ 不支持的认证、信任或代理配置明确失败。Windows 最近一次 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器验收尚未运行。C++ 支持直连、HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书和受支持的 Host CA；代理 URL、HTTPS 验证、bypass 匹配、CONNECT/SOCKS5 隧道及 Host CA KRL 下载均由 C++ 处理。SOCKS5 在本机解析目标域名，SOCKS5H 由代理解析。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
 
 ## 目标与角色
 
@@ -17,12 +17,12 @@
   → Agent 获取有时间和来源的状态、内建工具与已启用的 MCP 目录
   → Agent 形成可见任务步骤（读取、变更、验证和失败处理）
   → 权限引擎对每次具体工具输入、目标和委托范围作决定
-  → Rust 宿主再次核验目标、任务/计划、批准票据和参数
-  → SSH 命令 / SFTP / 内建运维能力，或受控 MCP 调用
+  → 桌面宿主复核目标、任务/计划、批准票据和参数
+  → Python caller → C++ SSH/SFTP 服务，或受控 MCP 调用
   → 有界结果和证据返回 Agent → 继续、重计划或交还用户
   → 工作区展示当前状态、实际操作、验证结果和活动记录
 
-系统文件管理器 ↔ 本机文件选择/拖放 ↔ Rust 文件传输模块 ↔ SFTP ↔ 目标服务器
+系统文件管理器 ↔ 本机文件选择/拖放 ↔ 桌面原生桥接 ↔ C++ SFTP 服务 ↔ 目标服务器
                                       ↘ 进度、冲突、预览、取消和活动记录
 ```
 
@@ -32,11 +32,11 @@
 
 | 位置 | 已有能力 | 为目标尚需完成 |
 | --- | --- | --- |
-| `apps/agent/src/runtime/create-runtime.ts` 与 `apps/agent/src/tools/` | 注册服务器信息、日志、Docker、systemd、包管理和受限文件工具；可加载 MCP 目录；工作树已加入 `server.exec` | 核实目标驱动的工具选择、实际审批、验证、失败恢复及真实 Provider/MCP/SSH 端到端路径 |
-| `apps/agent/src/permissions/` 与 `apps/desktop/src-tauri/src/commands/host.rs` | 按模式、风险、环境、计划和具体输入复核工具；命令任务委托由宿主绑定并重验 | 用真实服务器验证授权生命周期、跨目标拒绝、预算、撤销、未知结果处置和审计 |
-| `crates/ssh` 与 `crates/core/src/terminal.rs` | 已有有界、可取消的 SSH exec 与 SFTP；项目回环协议测试覆盖命令和文件操作 | 核实真实 OpenSSH 对命令、文件扩展、断连和 staging 的行为 |
+| `agent/src/yukinal_agent/` 与 `agent/src/yukinal_ssh/` | Python Agent、权限/审批工具链、MCP/Provider 适配及 C++ 服务 caller 已接入；C++ 支持的 SSH 操作经回环 HTTP 接口执行 | 核实目标驱动的工具选择、实际审批、验证、失败恢复及真实 Provider/MCP/OpenSSH 端到端路径 |
+| `apps/desktop/src-tauri/` | 现有桌面桥接提供 UI IPC、凭据读取、目标解析、审批和持久任务衔接；它不再建立 Rust SSH/SFTP 会话 | 继续收敛到 UI/原生桥接职责，并验证授权生命周期、跨目标拒绝、预算、撤销、未知结果处置和审计 |
+| `native/` 与 `agent/src/yukinal_ssh/` | C++ SSH/SFTP/PTY 服务和 Python caller；C++ 回环测试覆盖结构化命令、SFTP 和安全发布 | 核实真实 OpenSSH 对认证、命令、文件扩展、断连和 staging 的行为 |
 | `apps/desktop/src/features/overview/` | 服务器健康快照、资源与容器信息、来源/新鲜度状态、活动入口及近期动态；步骤记录在任务页展示 | 真实 GUI、断连恢复、多服务器切换和完整任务过程验收 |
-| `apps/desktop/src/features/files/RemoteFilesPane.tsx` 与文件 IPC | 目录浏览、限长文本/图片预览、流式双向传输、本机队列、预览上传、列表内拖放、进度/取消和远端原生拖出准备 | 验收系统文件管理器和三平台安装版操作；真实服务器兼容、碰撞/崩溃恢复与大文件行为 |
+| `apps/desktop/src/features/files/RemoteFilesPane.tsx` 与文件 IPC | 目录浏览、限长文本/图片预览、经 C++ SFTP 服务的双向传输、本机队列、预览上传、列表内拖放、进度/取消和远端原生拖出准备 | 验收系统文件管理器和三平台安装版操作；真实服务器兼容、碰撞/崩溃恢复与大文件行为 |
 | 安装包 | 三平台 CI 安装或复制及随包 Agent 握手已有证据 | 干净用户环境与上述三条产品路径的安装后验收 |
 
 现有 `filesystem.read/write/edit/backup/restore` 为 Agent 的小型文本配置及恢复能力，限制和修订守卫有其用途。新文件传输模块须使用流式字节接口，保留这些工具的契约，不得靠提高 1 MiB 预览上限或把文件转成 base64 JSON 来实现传输。
@@ -103,7 +103,7 @@
 | 1. Agent 命令链 | 先审查现有共享 schema、`server.exec`、任务命令票据、宿主一次性批准、SSH executor 和错误持久化；只补契约缺口。核对命令目标只能由宿主任务解析，明确区分拒绝、超时、取消、执行结果未知、非零退出；启动恢复须禁止未知结果自动重放并撤销旧任务命令票据 | 自动回归覆盖未授权、过期、超预算、跨目标、审批重放、拒绝/停止、超时、非零退出、断连结果未知及进程重开；真实 SSH 验收确认远端事实与审计一致 |
 | 2. 目标驱动编排 | 从用户自然语言目标创建任务；Agent 读取服务器与工具/MCP目录，自动产生可见计划并选择工具，执行后调用独立验证步骤。只在信息缺失、能力未配置、审批边界或无法核实现场时打断用户。工作区显示每步的工具、目标、开始/结束时间、输入/输出摘要和状态 | 用真实 Provider/MCP 和可重置开发/预发布主机完成依赖步骤任务；批准后的既定任务范围无需逐条确认普通高风险命令；Agent 依据远端读回证据报告结果 |
 | 3. 观测工作区 | 复核现有刷新/过期/来源状态、服务/日志/文件导航、服务器近期动态和持久任务时间线；补齐订阅恢复、serverId 隔离、审批等待、验证失败和结果未知后的操作入口。人工终端仍是独立显式操作 | 不进入聊天视图即可判断所选服务器状态和数据新鲜度；从异常卡片进入实际活动/步骤记录，重启后仍能查看历史过程 |
-| 4. 传输模块 | 复核 `crates/filesystem`、宿主生命周期、SQLite 快照及文件 IPC；保持字节只在 Rust 本机/SFTP 分块流动。新目标发布使用已协商的 `hardlink@openssh.com:1` 同目录 no-replace 发布；扩展缺失必须失败关闭，不能退化为普通 SFTP v3 `RENAME`。协议参考 [OpenSSH hardlink 扩展 v1](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL#L2285-L2306) 与 [POSIX `link()`](https://pubs.opengroup.org/onlinepubs/009695399/functions/link.html)。覆盖保持关闭 | 回环测试通过并有真实 OpenSSH 核验；失败、取消、目标碰撞、进程退出、staging 清理和部分完成状态均能准确恢复/展示；覆盖未实现前不提供覆盖上传 |
+| 4. 传输模块 | 复核桌面宿主生命周期、SQLite 快照及文件 IPC；远端 SSH/SFTP 会话和字节收发由 C++ 服务执行，宿主只转发有界本机流与元数据。新目标发布使用已协商的 `hardlink@openssh.com:1` 同目录 no-replace 发布；扩展缺失必须失败关闭，不能退化为普通 SFTP v3 `RENAME`。协议参考 [OpenSSH hardlink 扩展 v1](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL#L2285-L2306) 与 [POSIX `link()`](https://pubs.opengroup.org/onlinepubs/009695399/functions/link.html)。覆盖保持关闭 | 回环测试通过并有真实 OpenSSH 核验；失败、取消、目标碰撞、进程退出、staging 清理和部分完成状态均能准确恢复/展示；覆盖未实现前不提供覆盖上传 |
 | 5. 文件界面 | 复核当前本机待传队列、系统文件拖入、队列↔当前远端目录拖放、预览页上传/下载动作和原生远端文件拖出；检查无效/过期句柄、路径越权、冲突对话框和逐文件进度。预览上限不限制完整传输 | Windows、macOS、Linux 安装版分别从系统文件管理器拖入上传、远端拖出、双栏传输、预览中发起传输，并完成中止/重开验证；无假预览或假成功 |
 | 6. 整体验收与发布 | 跑自动门禁、真实 Provider/MCP/OpenSSH、可重置主机和安装后 GUI 路径；执行下面的正反例，留脱敏证据；更新 `docs/release.md` 的逐项状态 | 所有必需条件有对应提交、测试环境、产物哈希和操作证据；未通过项继续标未完成 |
 
