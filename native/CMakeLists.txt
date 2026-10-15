@@ -299,6 +299,40 @@ endif()
 
 if(YUKINAL_BUILD_DESKTOP_HOST)
   if(YUKINAL_FETCH_DEPS)
+    FetchContent_Declare(
+      yukinal_sqlite
+      URL https://www.sqlite.org/2026/sqlite-amalgamation-3540000.zip
+      URL_HASH SHA3_256=7b670a62fdfbd672b75fef004cb703c8a3e87d3a5cc7d675b4a08337004a2d93
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(yukinal_sqlite)
+    if(NOT yukinal_sqlite_POPULATED)
+      if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+      endif()
+      FetchContent_Populate(yukinal_sqlite)
+      if(POLICY CMP0169)
+        cmake_policy(POP)
+      endif()
+    endif()
+    add_library(yukinal_sqlite STATIC
+      "${yukinal_sqlite_SOURCE_DIR}/sqlite3.c"
+    )
+    target_include_directories(yukinal_sqlite PUBLIC
+      "${yukinal_sqlite_SOURCE_DIR}"
+    )
+    target_compile_definitions(yukinal_sqlite PRIVATE
+      SQLITE_THREADSAFE=1
+      SQLITE_DQS=0
+      SQLITE_OMIT_LOAD_EXTENSION
+    )
+    add_library(SQLite::SQLite3 ALIAS yukinal_sqlite)
+  else()
+    find_package(SQLite3 REQUIRED)
+  endif()
+
+  if(YUKINAL_FETCH_DEPS)
     set(WEBVIEW_BUILD ON CACHE BOOL "" FORCE)
     set(WEBVIEW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(WEBVIEW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -324,10 +358,13 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   set(YUKINAL_DESKTOP_VERSION "${CMAKE_MATCH_1}")
 
   add_library(yukinal_desktop_host_core
+    desktop_host/src/database.cpp
     desktop_host/src/ipc_router.cpp
   )
   target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
-  target_link_libraries(yukinal_desktop_host_core PUBLIC nlohmann_json::nlohmann_json)
+  target_link_libraries(yukinal_desktop_host_core
+    PUBLIC nlohmann_json::nlohmann_json SQLite::SQLite3
+  )
   target_link_libraries(yukinal_desktop_host_core PRIVATE Threads::Threads)
   target_compile_definitions(yukinal_desktop_host_core PUBLIC
     YUKINAL_DESKTOP_VERSION="${YUKINAL_DESKTOP_VERSION}"
@@ -353,6 +390,12 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     )
     target_link_libraries(yukinal_desktop_host_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME desktop_host_tests COMMAND yukinal_desktop_host_tests)
+
+    add_executable(yukinal_desktop_host_database_tests
+      desktop_host/tests/test_database.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_database_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME desktop_host_database_tests COMMAND yukinal_desktop_host_database_tests)
     add_test(NAME desktop_host_self_check COMMAND yukinal-desktop-host --self-check)
   endif()
 endif()

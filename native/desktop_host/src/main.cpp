@@ -17,12 +17,14 @@
 #endif
 
 #include "yukinal/desktop_host/ipc_router.hpp"
+#include "yukinal/desktop_host/database.hpp"
 
 namespace {
 
 struct Options {
   std::optional<std::string> dev_url;
   std::optional<std::filesystem::path> ui_directory;
+  std::optional<std::filesystem::path> data_directory;
   bool self_check = false;
   bool help = false;
 };
@@ -30,6 +32,9 @@ struct Options {
 struct BridgeContext {
   webview_t view = nullptr;
   yukinal::desktop_host::IpcRouter router;
+
+  explicit BridgeContext(yukinal::desktop_host::DesktopDatabase& database)
+      : router(&database) {}
 
   void publish_event(const std::string& event, const nlohmann::json& payload) {
     if (router.subscribers(event).empty()) return;
@@ -116,6 +121,8 @@ std::optional<Options> parse_options(const std::vector<std::string>& arguments) 
       options.dev_url = arguments[++index];
     } else if (arguments[index] == "--ui-dir" && index + 1 < arguments.size()) {
       options.ui_directory = std::filesystem::u8path(arguments[++index]);
+    } else if (arguments[index] == "--data-dir" && index + 1 < arguments.size()) {
+      options.data_directory = std::filesystem::u8path(arguments[++index]);
     } else if (arguments[index] == "--self-check") {
       options.self_check = true;
     } else if (arguments[index] == "--help") {
@@ -246,9 +253,17 @@ int run(const std::vector<std::string>& arguments) {
   const auto url = resolve_ui_url(*options, ui_server);
   if (!url) return 2;
 
+  std::unique_ptr<yukinal::desktop_host::DesktopDatabase> database;
+  try {
+    database = std::make_unique<yukinal::desktop_host::DesktopDatabase>(
+        options->data_directory.value_or(yukinal::desktop_host::default_data_directory()));
+  } catch (const std::exception&) {
+    return 4;
+  }
+
   try {
     const bool debug = options->dev_url.has_value();
-    BridgeContext context;
+    BridgeContext context(*database);
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
     if (webview_set_title(context.view, "Yukinal") != WEBVIEW_ERROR_OK ||

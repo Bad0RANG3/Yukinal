@@ -222,7 +222,8 @@ image afterward.
 ## Existing desktop UI
 
 The React UI is shared by the existing Tauri shell and the new C++ WebView host.
-The C++ host currently provides the initial window and IPC slice; most desktop
+The C++ host currently provides the window, IPC bridge, and read-only server and
+workspace listings from the existing SQLite database. Writes and operational
 commands are still migrating, so the packaged default remains Tauri until parity
 is verified. See [the C++ desktop host migration plan](./docs/native-desktop-host.md).
 

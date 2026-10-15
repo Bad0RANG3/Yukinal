@@ -1,5 +1,7 @@
 #pragma once
 
+#include "yukinal/desktop_host/database.hpp"
+
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -15,6 +17,8 @@ struct IpcReply {
 
 class IpcRouter {
  public:
+  explicit IpcRouter(DesktopDatabase* database = nullptr) : database_(database) {}
+
   IpcReply invoke(const std::string& method, const nlohmann::json& params);
   [[nodiscard]] std::set<std::string> subscribers(const std::string& event) const;
 
@@ -22,6 +26,7 @@ class IpcRouter {
   IpcReply subscribe(const nlohmann::json& params, bool add);
 
   mutable std::mutex mutex_;
+  DesktopDatabase* database_;
   std::unordered_map<std::string, std::set<std::string>> subscriptions_;
 };
 

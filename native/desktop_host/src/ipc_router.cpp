@@ -82,6 +82,34 @@ IpcReply IpcRouter::invoke(const std::string& method, const nlohmann::json& para
     return {true, {{"version", YUKINAL_DESKTOP_VERSION}, {"os", operating_system()}}};
   }
 
+  if (method == "server_list") {
+    if (!params.empty()) {
+      return failure("INVALID_PARAMS", "server_list does not accept parameters");
+    }
+    if (database_ == nullptr) {
+      return failure("STORAGE_UNAVAILABLE", "The local server database is unavailable");
+    }
+    try {
+      return {true, database_->list_servers()};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local server database could not read servers");
+    }
+  }
+
+  if (method == "workspace_list") {
+    if (!params.empty()) {
+      return failure("INVALID_PARAMS", "workspace_list does not accept parameters");
+    }
+    if (database_ == nullptr) {
+      return failure("STORAGE_UNAVAILABLE", "The local workspace database is unavailable");
+    }
+    try {
+      return {true, database_->list_workspaces()};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local workspace database could not read workspaces");
+    }
+  }
+
   if (method == "__events.subscribe") return subscribe(params, true);
   if (method == "__events.unsubscribe") return subscribe(params, false);
 
