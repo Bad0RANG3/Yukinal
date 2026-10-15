@@ -19,6 +19,7 @@ _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
 _CONTAINER_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _PACKAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$")
+_PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:~^-]{0,127}$")
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 _MAX_SFTP_WRITE_BYTES = 512 * 1024
@@ -242,6 +243,41 @@ class SshServiceClient:
             raise ValueError("package must be a safe package reference")
         return self._execute_operation(
             target_id, "package_inspect", {"manager": manager, "package": package}, timeout_seconds
+        )
+
+    def package_install(
+        self,
+        target_id: str,
+        manager: str,
+        package: str,
+        version: str | None = None,
+        timeout_seconds: int = 180,
+    ) -> SshOperationResult:
+        """Install one validated apt or dnf package through the structured operation."""
+        if manager not in ("apt", "dnf"):
+            raise ValueError("manager must be apt or dnf")
+        if not isinstance(package, str) or not _PACKAGE_REF.fullmatch(package):
+            raise ValueError("package must be a safe package reference")
+        if version is not None and (
+            not isinstance(version, str) or not _PACKAGE_VERSION.fullmatch(version)
+        ):
+            raise ValueError("version must be a safe package version")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int)
+            or not 1 <= timeout_seconds <= 600
+        ):
+            raise ValueError("timeout_seconds must be an integer from 1 to 600")
+        parameters: dict[str, Any] = {"manager": manager, "package": package}
+        if version is not None:
+            parameters["version"] = version
+        parameters["timeout_seconds"] = timeout_seconds
+        return self._execute_operation(
+            target_id,
+            "package_install",
+            parameters,
+            timeout_seconds,
+            max_timeout_seconds=600,
         )
 
     def server_logs(
@@ -485,12 +521,24 @@ class SshServiceClient:
             raise ValueError("path must be a non-empty SFTP path of at most 4096 bytes")
 
     def _execute_operation(
-        self, target_id: str, operation: str, parameters: dict[str, Any], timeout_seconds: int
+        self,
+        target_id: str,
+        operation: str,
+        parameters: dict[str, Any],
+        timeout_seconds: int,
+        *,
+        max_timeout_seconds: int = 30,
     ) -> SshOperationResult:
         if not isinstance(target_id, str) or not _TARGET_ID.fullmatch(target_id):
             raise ValueError("target_id has an invalid format")
-        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 30:
-            raise ValueError("timeout_seconds must be an integer from 1 to 30")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int)
+            or not 1 <= timeout_seconds <= max_timeout_seconds
+        ):
+            raise ValueError(
+                f"timeout_seconds must be an integer from 1 to {max_timeout_seconds}"
+            )
 
         payload = {
             "target_id": target_id,

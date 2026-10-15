@@ -93,8 +93,8 @@ Python sidecar implements `initialize`, `system.ping`, `tools.list`,
 NDJSON connection it can request host-side tool
 execution and fetch the host's MCP catalog. The first integrated set contains
 read-only server, Docker, systemd, package and file tools, plus `docker.restart`,
-`systemd.restart`, and MCP tools the host marks low-risk. The host remains the
-final authorization boundary. When a
+`systemd.restart`, `package.install`, and MCP tools the host marks low-risk. The
+host remains the final authorization boundary. When a
 registered tool requires approval, the sidecar emits the approval event, accepts
 the desktop's response RPC, and resumes the paused call; rejection and expiry
 stop the graph without retrying. With `YUKINAL_DATA_DIR` set, the production
@@ -141,8 +141,8 @@ stable tool error instead of being copied into the Agent result.
 `SshServiceClient` provides Python wrappers for the C++ service's fixed
 read-only connection check, service inventory, Docker listing/logs/inspection,
 systemd inspection, package inspection, and bounded server logs, plus structured
-Docker and systemd restart operations. Each wrapper validates its parameters
-before sending a structured operation. These client methods do not automatically
+Docker and systemd restart and package installation operations. Each wrapper
+validates its parameters before sending a structured operation. These client methods do not automatically
 add Agent tools; the embedding host still chooses which operations to register
 and authorize.
 

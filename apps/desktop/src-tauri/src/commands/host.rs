@@ -2290,6 +2290,31 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
             }
             Ok(())
         }
+        PACKAGE_INSTALL => {
+            let input = serde_json::from_value::<PackageInstallInput>(tool_call.input.clone())
+                .map_err(|_| {
+                    failed("invalid_input", "package.install input is invalid", false, None)
+                })?;
+            if let Err(message) = package_install_command(
+                &input.manager,
+                &input.package,
+                input.version.as_deref(),
+            ) {
+                return Err(failed("invalid_input", message, false, None));
+            }
+            let timeout = input
+                .timeout_seconds
+                .unwrap_or(DEFAULT_PACKAGE_INSTALL_TIMEOUT);
+            if !(1..=MAX_PACKAGE_INSTALL_TIMEOUT).contains(&timeout) {
+                return Err(failed(
+                    "invalid_input",
+                    format!("timeoutSeconds must be between 1 and {MAX_PACKAGE_INSTALL_TIMEOUT}"),
+                    false,
+                    None,
+                ));
+            }
+            Ok(())
+        }
         _ => Err(failed(
             "denied_by_policy",
             "the requested SSH action is not supported by this route",
@@ -2521,6 +2546,19 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
             )
                 .map_err(|_| "docker.restart completion input is invalid".to_string())?;
             json!({ "container": input.container, "restarted": true })
+        }
+        PACKAGE_INSTALL => {
+            let input = serde_json::from_value::<PackageInstallInput>(
+                request.tool_call.input.clone(),
+            )
+            .map_err(|_| "package.install completion input is invalid".to_string())?;
+            serde_json::to_value(PackageInstallResult {
+                manager: input.manager,
+                package: input.package,
+                version: input.version,
+                installed: true,
+            })
+            .map_err(|error| error.to_string())?
         }
         _ => return Ok(failed("denied_by_policy", "unsupported SSH action", false, None)),
     };

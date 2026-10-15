@@ -102,11 +102,11 @@ read-only request falls back to the existing host route. SSH connection and
 host-key errors do not trigger a fallback.
 The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
-recomputes a fingerprint from the exact raw input, consumes the corresponding
-one-time ticket. `systemd.restart` and `docker.restart` are routed through the
-Python caller to structured C++ SSH operations on supported targets; the host
-records their terminal outcomes in the durable execution fence. Package
-installation continues through the host executor.
+recomputes a fingerprint from the exact raw input and consumes the corresponding
+one-time ticket. All three actions are routed through the Python caller to
+structured C++ SSH operations on supported targets; the host records their
+terminal outcomes in the durable execution fence. Rust keeps the compatibility
+executor for routes it explicitly reports as unsupported.
 `server.exec` remains separately guarded and exposed only when the host supplies
 the current remote action-plan binding. On C++-supported targets, the host first
 consumes the exact approval ticket or reserves the bounded task command grant,
@@ -262,9 +262,10 @@ deadline remains 1–30 seconds. `systemd_restart` accepts a safe `.service`
 unit and `timeout_seconds` from 1 to 120. `package_install` accepts only `apt`
 or `dnf`, a safe package name, an optional validated version, and
 `timeout_seconds` from 1 to 600. For the latter two operations, the nested
-timeout must equal the request's top-level timeout. The desktop host continues
-to enforce approval, parameter binding, and one-time call handling before
-dispatching these actions.
+timeout must equal the request's top-level timeout. The Python Agent runs
+approved restart and package-install operations through the C++ SSH service;
+the desktop host continues to enforce approval, parameter binding, and one-time
+call handling before dispatching these actions.
 Every authenticated operation runs only after the target host key matches the
 configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
 keys fail closed. The separate `probe_only` operation intentionally does not

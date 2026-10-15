@@ -57,6 +57,17 @@ _DOCKER_RESTART_INPUT_SCHEMA = {
     "required": ["container", "timeoutSeconds"],
     "additionalProperties": False,
 }
+_PACKAGE_INSTALL_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "manager": {"type": "string", "enum": ["apt", "dnf"]},
+        "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
+        "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:~^-]{0,127}$"},
+        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 25},
+    },
+    "required": ["manager", "package", "timeoutSeconds"],
+    "additionalProperties": False,
+}
 
 
 def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None:
@@ -540,7 +551,7 @@ def register_desktop_ssh_tools(
             input_schema=_SYSTEMD_RESTART_INPUT_SCHEMA,
             risk_level="write",
             requires_approval=True,
-            handler=lambda arguments, context: _desktop_ssh_restart(
+            handler=lambda arguments, context: _desktop_ssh_effectful_action(
                 host, binary, "systemd.restart", arguments, context
             ),
             target_id_argument=None,
@@ -559,7 +570,7 @@ def register_desktop_ssh_tools(
             input_schema=_DOCKER_RESTART_INPUT_SCHEMA,
             risk_level="write",
             requires_approval=True,
-            handler=lambda arguments, context: _desktop_ssh_restart(
+            handler=lambda arguments, context: _desktop_ssh_effectful_action(
                 host, binary, "docker.restart", arguments, context
             ),
             target_id_argument=None,
@@ -568,16 +579,36 @@ def register_desktop_ssh_tools(
             timeout_ms=40_000,
             cancellable=True,
         ))
+    if "package.install" not in existing_names:
+        registry.register(ToolSpec(
+            name="package.install",
+            description=(
+                "Install one apt or dnf package after exact per-call approval and host plan checks. "
+                "Python runs the structured operation through the C++ SSH service."
+            ),
+            input_schema=_PACKAGE_INSTALL_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_ssh_effectful_action(
+                host, binary, "package.install", arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=60_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
         | {
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
             "filesystem.backup.cleanup", "systemd.restart", "docker.restart",
+            "package.install",
         }
     )
 
 
-def _ssh_restart_host_call(
+def _ssh_effectful_action_host_call(
     tool_name: str, arguments: dict[str, Any], context: ExecutionContext
 ) -> dict[str, Any]:
     target = context.host_target
@@ -621,7 +652,7 @@ def _ssh_restart_host_call(
     }
 
 
-async def _finish_desktop_ssh_restart(
+async def _finish_desktop_ssh_effectful_action(
     host: HostRpcClient,
     tool_call: dict[str, Any],
     outcome: str,
@@ -650,16 +681,20 @@ async def _finish_desktop_ssh_restart(
         )
 
 
-async def _desktop_ssh_restart(
+async def _desktop_ssh_effectful_action(
     host: HostRpcClient,
     binary: Path,
     tool_name: str,
     arguments: dict[str, Any],
     context: ExecutionContext,
 ) -> dict[str, Any]:
-    resource_key = "service" if tool_name == "systemd.restart" else "container"
+    resource_key = {
+        "systemd.restart": "service",
+        "docker.restart": "container",
+        "package.install": "package",
+    }[tool_name]
     resource = arguments[resource_key]
-    tool_call = _ssh_restart_host_call(tool_name, arguments, context)
+    tool_call = _ssh_effectful_action_host_call(tool_name, arguments, context)
     try:
         response = await host.request(
             "host.ssh.effectful_action_target",
@@ -675,6 +710,11 @@ async def _desktop_ssh_restart(
     if not isinstance(response, dict):
         raise ToolCallError("invalid_host_response", "the desktop host returned an invalid SSH action target")
     if response.get("status") == "already_completed":
+        if tool_name == "package.install":
+            completed = {"manager": arguments["manager"], "package": resource, "installed": True}
+            if "version" in arguments:
+                completed["version"] = arguments["version"]
+            return completed
         return {resource_key: resource, "restarted": True}
     if response.get("status") == "failed":
         error = response.get("error")
@@ -691,7 +731,7 @@ async def _desktop_ssh_restart(
     payload = response.get("targetData")
     if response.get("status") != "success" or not isinstance(payload, dict):
         if response.get("status") == "success":
-            await _finish_desktop_ssh_restart(host, tool_call, "failed")
+            await _finish_desktop_ssh_effectful_action(host, tool_call, "failed")
         raise ToolCallError("invalid_host_response", "the desktop host returned an invalid SSH action target")
 
     process = None
@@ -714,11 +754,20 @@ async def _desktop_ssh_restart(
                 resource,
                 arguments["timeoutSeconds"],
             )
-        else:
+        elif tool_name == "docker.restart":
             result = await asyncio.to_thread(
                 client.docker_restart,
                 target_id,
                 resource,
+                arguments["timeoutSeconds"],
+            )
+        else:
+            result = await asyncio.to_thread(
+                client.package_install,
+                target_id,
+                arguments["manager"],
+                resource,
+                arguments.get("version"),
                 arguments["timeoutSeconds"],
             )
         outcome = "succeeded" if result.exit_code == 0 else "failed"
@@ -726,29 +775,38 @@ async def _desktop_ssh_restart(
         cancelled = True
         if operation_started:
             outcome = "unknown"
-        await asyncio.shield(_finish_desktop_ssh_restart(host, tool_call, outcome))
+        await asyncio.shield(_finish_desktop_ssh_effectful_action(host, tool_call, outcome))
         raise
     except SshServiceError as error:
         outcome = "unknown" if operation_started else "failed"
-        await _finish_desktop_ssh_restart(host, tool_call, outcome)
+        await _finish_desktop_ssh_effectful_action(host, tool_call, outcome)
         raise ToolCallError(error.code, str(error)) from None
     except SshServiceProcessError:
-        await _finish_desktop_ssh_restart(host, tool_call, "failed")
+        await _finish_desktop_ssh_effectful_action(host, tool_call, "failed")
         raise ToolCallError(
             "host_unavailable", "the C++ SSH service could not start for the approved action"
         ) from None
     except Exception:
         outcome = "unknown" if operation_started else "failed"
-        await _finish_desktop_ssh_restart(host, tool_call, outcome)
+        await _finish_desktop_ssh_effectful_action(host, tool_call, outcome)
         raise ToolCallError(
             "transport", "the approved SSH action did not return a usable result"
         ) from None
     else:
-        await _finish_desktop_ssh_restart(host, tool_call, outcome)
+        await _finish_desktop_ssh_effectful_action(host, tool_call, outcome)
         if result.exit_code != 0:
             raise ToolCallError(
                 "execution_failed", f"could not execute the approved {tool_name} action"
             )
+        if tool_name == "package.install":
+            completed = {
+                "manager": arguments["manager"],
+                "package": resource,
+                "installed": True,
+            }
+            if "version" in arguments:
+                completed["version"] = arguments["version"]
+            return completed
         return {resource_key: resource, "restarted": True}
     finally:
         if process is not None:
