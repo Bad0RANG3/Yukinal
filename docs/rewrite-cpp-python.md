@@ -23,8 +23,9 @@
 > SSH-agent identities on direct or supported HTTP CONNECT routes with either a
 > confirmed host-key pin or a supported host CA. The same identities use C++ for
 > structured SSH operations. Host-key probes use C++ on direct and supported HTTP
-> CONNECT routes when the selected trust mode is supported; CA-specific fingerprint
-> displays and unsupported proxy or host-key modes retain the Rust compatibility path.
+> CONNECT routes; the probe reports the certified public-key fingerprint without
+> treating it as trusted. Unsupported proxy or host-key modes retain the Rust
+> compatibility path.
 > Manual transfers use bounded C++ SFTP streams on supported direct or HTTP CONNECT
 > routes with either a confirmed pin or supported host CA. The Rust compatibility path
 > remains for unsupported targets.
@@ -420,9 +421,9 @@ CONNECT response and shares the SSH operation deadline.
 Desktop host-key probes use a separate short-lived `probe_only` target with no
 credential and no trust entry. The service permits that target to perform only
 `host_key_probe`; the returned fingerprint remains untrusted until the user
-confirms it through the existing UI. Targets configured with a host CA retain
-the Rust probe path because it reports the certificate's underlying
-public-key fingerprint.
+confirms it through the existing UI. For host certificates, C++ reports the
+certified public-key fingerprint; the probe itself does not validate trust or
+change the configured CA or host-key pin.
 
 Set the configured API token environment variable before starting the service.
 Never commit credentials or a real production target configuration.
@@ -631,13 +632,19 @@ targets. In the restricted shell Node 26.5.1 throws
 the gate under the normal user context passed. Rust formatting, lint, Cargo
 check, and Rust-to-sidecar tests were skipped because Cargo is not on `PATH`.
 
+Later on 2026-10-15, the installed Rust toolchain was invoked directly and the
+VS 2022 environment was loaded. `cargo check --manifest-path
+apps/desktop/src-tauri/Cargo.toml --lib --locked` passed. The desktop unit-test
+binary linked, but stalled before listing or running tests, including with
+`--list`; the focused CA-route test is not counted as passed.
+
 ## Deliberately deferred
 
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- moving Rust-only Host CA signature/revocation policy, HTTPS proxy,
-  unsupported proxy bypass, and other compatibility SSH routes into C++;
+- moving HTTPS proxy, unsupported proxy bypass, and other remaining compatibility
+  SSH routes into C++;
 - full durable task/plan recovery beyond the pending-approval reattach path;
 - full C++ SFTP and PTY coverage for compatibility-only SSH configurations;
 - control plane, PostgreSQL, and multi-tenant deployment.
