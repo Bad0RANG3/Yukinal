@@ -21,7 +21,8 @@ export function isExternalOpenUrl(url: string): boolean {
 export async function openExternalUrl(url: string): Promise<void> {
   if (!isExternalOpenUrl(url)) throw new Error("Only http(s) and mailto links can be opened");
   if (isNativeDesktopShell()) {
-    await openUrl(url);
+    if (window.__YUKINAL_HOST__) await window.__YUKINAL_HOST__.openUrl(url);
+    else await openUrl(url);
     return;
   }
   const opened = window.open(url, "_blank", "noopener,noreferrer");

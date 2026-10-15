@@ -221,8 +221,12 @@ image afterward.
 
 ## Existing desktop UI
 
-The current desktop app is still built from the React/Tauri baseline. From the
-repository root, install the locked dependencies and run the checks/UI with:
+The React UI is shared by the existing Tauri shell and the new C++ WebView host.
+The C++ host currently provides the initial window and IPC slice; most desktop
+commands are still migrating, so the packaged default remains Tauri until parity
+is verified. See [the C++ desktop host migration plan](./docs/native-desktop-host.md).
+
+The current Tauri app can still be launched from the repository root with:
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -244,6 +248,7 @@ the new SSH service.
 - [Product definition](./docs/product.md)
 - [Security and data boundaries](./docs/security.md)
 - [Rewrite plan and current status](./docs/rewrite-cpp-python.md)
+- [C++ desktop host migration](./docs/native-desktop-host.md)
 - [Architecture and acceptance criteria](./docs/architecture-and-build-plan.md)
 - [Release status](./docs/release.md)
 - [Documentation index](./docs/README.md)

@@ -26,9 +26,23 @@ import type { z } from "zod";
 
 import { isPreviewFixture, previewResponse } from "./preview-fixtures.js";
 
-/** True only when a real Tauri runtime is present. */
+type NativeDesktopHost = {
+  invoke: (command: string, params: Record<string, unknown>) => Promise<unknown>;
+  listen: (event: string, handler: (payload: unknown) => void) => Promise<UnlistenFn>;
+  openUrl: (url: string) => Promise<unknown>;
+};
+
+declare global {
+  interface Window {
+    __YUKINAL_HOST__?: NativeDesktopHost;
+  }
+}
+
+/** True only when a native Yukinal desktop host is present. */
 export function isNativeDesktopShell(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return typeof window !== "undefined" && (
+    window.__YUKINAL_HOST__ !== undefined || "__TAURI_INTERNALS__" in window
+  );
 }
 
 /**
@@ -37,7 +51,7 @@ export function isNativeDesktopShell(): boolean {
  * The development fixture is a local, schema-validated adapter used only for
  * visual audits. It is intentionally kept separate from `isNativeDesktopShell`
  * so code that needs an actual native API (for example opening an external URL)
- * cannot mistake preview data for a Tauri capability.
+ * cannot mistake preview data for a native host capability.
  */
 export function isDesktopShell(): boolean {
   return isNativeDesktopShell() || isPreviewFixture();
@@ -65,14 +79,18 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
 ): Promise<T> {
   if (!isDesktopShell()) throw new IpcUnavailableError(command);
   const validatedParams = IPC_SCHEMAS[command].params.parse(params);
-  // These Rust commands accept one structured `input`; the typed UI contract
-  // deliberately stays flat. Keep this transport detail at the IPC boundary.
-  const args = command === IPC_COMMANDS.serverAdd || command === IPC_COMMANDS.serverUpdate
+  // The retired Rust host accepts one structured `input`; the C++ host follows
+  // the shared flat contract. Keep this temporary compatibility detail at the edge.
+  const tauriArgs = command === IPC_COMMANDS.serverAdd || command === IPC_COMMANDS.serverUpdate
     ? { input: validatedParams }
     : { ...(validatedParams as Record<string, unknown>) };
+  const nativeArgs = { ...(validatedParams as Record<string, unknown>) };
   try {
     if (isPreviewFixture()) return parse(previewResponse(command, validatedParams));
-    return parse(await invoke<unknown>(command, args));
+    const raw = window.__YUKINAL_HOST__
+      ? await window.__YUKINAL_HOST__.invoke(command, nativeArgs)
+      : await invoke<unknown>(command, tauriArgs);
+    return parse(raw);
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error));
   }
@@ -116,19 +134,22 @@ export async function listenDesktop<E extends DesktopEventName>(
   name: E,
   handler: (payload: DesktopEventPayload<E>) => void,
 ): Promise<UnlistenFn> {
-  // Browser preview cannot install Tauri event listeners. Returning a no-op
+  // Browser preview cannot install native event listeners. Returning a no-op
   // subscription keeps components that always mount a listener (such as the
   // SSH authentication modal) from producing an unhandled browser rejection.
   if (!isNativeDesktopShell()) return () => {};
   const schema = EVENT_SCHEMAS[name];
-  return listen<unknown>(tauriEventName(name), (event) => {
-    const parsed = schema.safeParse(event.payload);
+  const deliver = (payload: unknown) => {
+    const parsed = schema.safeParse(payload);
     if (!parsed.success) {
       warnDroppedEvent(name, parsed.error);
       return;
     }
     handler(parsed.data as DesktopEventPayload<E>);
-  });
+  };
+  return window.__YUKINAL_HOST__
+    ? window.__YUKINAL_HOST__.listen(name, deliver)
+    : listen<unknown>(tauriEventName(name), (event) => deliver(event.payload));
 }
 
 const reportedDroppedEvents = new Set<string>();

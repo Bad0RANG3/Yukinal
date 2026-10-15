@@ -17,6 +17,7 @@ option(YUKINAL_BUNDLE_WINDOWS_OPENSSL "Build a static OpenSSL crypto backend for
 option(YUKINAL_ENABLE_SSH_MOCK_TEST "Register the Paramiko SSH mock test when Paramiko is installed" ON)
 option(YUKINAL_ENABLE_SSH_CONTAINER_TEST "Register the real OpenSSH container integration test" OFF)
 option(YUKINAL_ENABLE_AGENT_TESTS "Register Python Agent Runtime tests when dependencies are installed" ON)
+option(YUKINAL_BUILD_DESKTOP_HOST "Build the C++ desktop host that embeds the React UI" ON)
 
 if(YUKINAL_FETCH_DEPS)
   include(FetchContent)
@@ -293,5 +294,65 @@ if(YUKINAL_BUILD_TESTS)
       ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
       TIMEOUT 180
     )
+  endif()
+endif()
+
+if(YUKINAL_BUILD_DESKTOP_HOST)
+  if(YUKINAL_FETCH_DEPS)
+    set(WEBVIEW_BUILD ON CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(WEBVIEW_ENABLE_PACKAGING OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+      webview
+      GIT_REPOSITORY https://github.com/webview/webview.git
+      GIT_TAG 3ab4b5d722438fc8a13e6ca830c5e2372d19a01d
+      GIT_SHALLOW FALSE
+    )
+    FetchContent_MakeAvailable(webview)
+  else()
+    find_package(webview 0.12 CONFIG REQUIRED)
+  endif()
+
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../package.json" YUKINAL_ROOT_PACKAGE_JSON)
+  string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([^\"]+)\"" YUKINAL_VERSION_MATCH
+    "${YUKINAL_ROOT_PACKAGE_JSON}")
+  if(NOT YUKINAL_VERSION_MATCH)
+    message(FATAL_ERROR "Could not read the desktop version from the root package.json")
+  endif()
+  set(YUKINAL_DESKTOP_VERSION "${CMAKE_MATCH_1}")
+
+  add_library(yukinal_desktop_host_core
+    desktop_host/src/ipc_router.cpp
+  )
+  target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
+  target_link_libraries(yukinal_desktop_host_core PUBLIC nlohmann_json::nlohmann_json)
+  target_link_libraries(yukinal_desktop_host_core PRIVATE Threads::Threads)
+  target_compile_definitions(yukinal_desktop_host_core PUBLIC
+    YUKINAL_DESKTOP_VERSION="${YUKINAL_DESKTOP_VERSION}"
+  )
+  if(WIN32)
+    target_compile_definitions(yukinal_desktop_host_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE shell32)
+    add_executable(yukinal-desktop-host WIN32 desktop_host/src/main.cpp)
+    target_compile_definitions(yukinal-desktop-host PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  else()
+    add_executable(yukinal-desktop-host desktop_host/src/main.cpp)
+  endif()
+  target_link_libraries(yukinal-desktop-host PRIVATE yukinal_desktop_host_core webview::core)
+  if(YUKINAL_FETCH_DEPS)
+    target_link_libraries(yukinal-desktop-host PRIVATE httplib::httplib)
+  else()
+    target_include_directories(yukinal-desktop-host PRIVATE ${HTTPLIB_INCLUDE_DIR})
+  endif()
+
+  if(YUKINAL_BUILD_TESTS)
+    add_executable(yukinal_desktop_host_tests
+      desktop_host/tests/test_ipc_router.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME desktop_host_tests COMMAND yukinal_desktop_host_tests)
+    add_test(NAME desktop_host_self_check COMMAND yukinal-desktop-host --self-check)
   endif()
 endif()
