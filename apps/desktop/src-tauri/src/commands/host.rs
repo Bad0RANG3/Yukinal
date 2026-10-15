@@ -68,11 +68,9 @@ use yukinal_filesystem::{
 use yukinal_ssh::SshBackend;
 
 use crate::commands::files::remote_file_service;
-use crate::commands::logs::{log_discovery_command_for, parse_logs_output, ServerLogsInput};
+use crate::commands::logs::ServerLogsInput;
 use crate::commands::mcp;
-use crate::commands::services::{
-    filter_services, parse_services_output, service_discovery_command, ServerServicesInput,
-};
+use crate::commands::services::ServerServicesInput;
 use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use crate::state::{HostActionExecutionBinding, HostActionTicketError};

@@ -805,68 +805,57 @@ pub(super) async fn server_info(
     }
 
     let collected_at = yukinal_core::sidecar::iso8601_now();
-    let cpp_supported = match app {
-        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
-            Ok(supported) => supported,
+    if cancel.is_cancelled() {
+        return Ok(cancelled_failure());
+    }
+    let app = match app {
+        Some(app) => app,
+        None => {
+            return Ok(failed(
+                "unsupported_target",
+                "server.info requires the C++ SSH service",
+                true,
+                None,
+            ));
+        }
+    };
+    match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(failed(
+                "unsupported_target",
+                "server.info target is not supported by the C++ SSH service",
+                true,
+                None,
+            ));
+        }
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
+    }
+    let outputs = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        result = crate::commands::ssh_service::system_snapshot(app, state, server_id) => match result {
+            Ok(outputs) => outputs,
             Err(error) => return Ok(transport_or_cancel(error, cancel)),
         },
-        None => false,
     };
-    let snapshot = if cpp_supported {
-        let outputs = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = crate::commands::ssh_service::system_snapshot(
-                app.expect("C++ SSH support requires an app handle"),
-                state,
-                server_id,
-            ) => match result {
-                Ok(outputs) => outputs,
-                Err(error) => return Ok(transport_or_cancel(error, cancel)),
-            },
-        };
-        let data = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = crate::commands::server::normalize_snapshot_outputs_via_python(
-                app.expect("C++ SSH support requires an app handle"),
-                state,
-                outputs,
-            ) => match result {
-                Ok(data) => data,
-                Err(error) => return Ok(transport_or_cancel(error, cancel)),
-            },
-        };
-        match crate::commands::server::server_snapshot_from_normalized_data(
-            server_id,
-            &collected_at,
-            &data,
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return Ok(failed("invalid_response", error, true, None)),
-        }
-    } else {
-        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-            return Ok(transport_or_cancel(error, cancel));
-        }
-        let session = match state.terminals.cached_session(server_id) {
-            Ok(session) => session,
+    let data = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        result = crate::commands::server::normalize_snapshot_outputs_via_python(
+            app, state, outputs
+        ) => match result {
+            Ok(data) => data,
             Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        };
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = yukinal_core::collector::collect_snapshot(
-                &state.ssh,
-                &session,
-                server_id,
-                &collected_at,
-                cancel,
-            ) => match result {
-                Ok((snapshot, _samples)) => snapshot,
-                Err(error) => return Ok(transport_or_cancel(error, cancel)),
-            },
-        }
+        },
+    };
+    let snapshot = match crate::commands::server::server_snapshot_from_normalized_data(
+        server_id,
+        &collected_at,
+        &data,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Ok(failed("invalid_response", error, true, None)),
     };
 
     if let Err(error) = state.database.snapshots().insert(&snapshot) {
@@ -910,129 +899,85 @@ pub(super) async fn server_logs(
             ));
         }
     };
-    let command = match log_discovery_command_for(&input) {
-        Ok(command) => command,
-        Err(error) => return Ok(failed("invalid_input", error, true, None)),
-    };
-    let cpp_supported = match app {
-        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
-            Ok(supported) => supported,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        },
-        None => false,
-    };
-    let output = if cpp_supported {
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = crate::commands::ssh_service::server_logs(
-                app.expect("C++ SSH support requires an app handle"),
-                state,
-                server_id,
-                input.since_seconds,
-                input.unit.as_deref(),
-            ) => result,
-        };
-        match result {
-            Ok(output) => output,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        }
-    } else {
-        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-            return Ok(transport_or_cancel(error, cancel));
-        }
-        let session = match state.terminals.cached_session(server_id) {
-            Ok(session) => session,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        };
-        let result = match state
-            .ssh
-            .execute(
-                &session,
-                &command,
-                Some(std::time::Duration::from_secs(10)),
-                cancel,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        };
-        result.stdout_lossy()
-    };
-    if cpp_supported {
-        let arguments = json!({
-            "sinceSeconds": input.since_seconds,
-            "unit": input.unit.as_deref(),
-        });
-        let normalized = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = crate::commands::server::normalize_ssh_output_via_python(
-                app.expect("C++ SSH support requires an app handle"),
-                state,
-                "server.logs.normalize",
-                &output,
-                arguments,
-            ) => match result {
-                Ok(response) => response,
-                Err(error) => return Ok(transport_or_cancel(error, cancel)),
-            },
-        };
-        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
-            let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
-            let code = if code == "unsupported" {
-                "unsupported"
-            } else {
-                "execution_failed"
-            };
-            let message = normalized
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("server.logs returned an invalid response");
-            return Ok(failed(code, message, false, None));
-        }
-        let output = normalized
-            .get("output")
-            .cloned()
-            .ok_or_else(|| "Python Agent returned no normalized server.logs output".to_string())?;
-        let parsed =
-            match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output) {
-                Ok(parsed) => parsed,
-                Err(_) => {
-                    return Ok(failed(
-                        "execution_failed",
-                        "Python Agent returned invalid normalized server.logs output",
-                        false,
-                        None,
-                    ));
-                }
-            };
-        return Ok(success(
-            serde_json::to_value(parsed).map_err(|error| error.to_string())?,
-        ));
+    if cancel.is_cancelled() {
+        return Ok(cancelled_failure());
     }
-    let parsed = match parse_logs_output(&output) {
-        Ok(parsed) => parsed,
-        Err(error) => {
+    let app = match app {
+        Some(app) => app,
+        None => {
             return Ok(failed(
-                "execution_failed",
-                format!("server.logs returned an invalid response: {error}"),
-                false,
+                "unsupported_target",
+                "server.logs requires the C++ SSH service",
+                true,
                 None,
             ));
         }
     };
-    if (input.since_seconds.is_some() || input.unit.is_some())
-        && parsed.source != crate::commands::logs::LogSource::Journalctl
-    {
-        return Ok(failed(
-            "unsupported",
-            "server.logs filters require journalctl; the fallback log source was not returned unfiltered",
-            false,
-            Some(json!({ "source": parsed.source })),
-        ));
+    match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(failed(
+                "unsupported_target",
+                "server.logs target is not supported by the C++ SSH service",
+                true,
+                None,
+            ));
+        }
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     }
+    let output = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        result = crate::commands::ssh_service::server_logs(
+            app, state, server_id, input.since_seconds, input.unit.as_deref()
+        ) => match result {
+            Ok(output) => output,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+    };
+    let arguments = json!({
+        "sinceSeconds": input.since_seconds,
+        "unit": input.unit.as_deref(),
+    });
+    let normalized = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        result = crate::commands::server::normalize_ssh_output_via_python(
+            app, state, "server.logs.normalize", &output, arguments,
+        ) => match result {
+            Ok(response) => response,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+    };
+    if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+        let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
+        let code = if code == "unsupported" {
+            "unsupported"
+        } else {
+            "execution_failed"
+        };
+        let message = normalized
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("server.logs returned an invalid response");
+        return Ok(failed(code, message, false, None));
+    }
+    let output = normalized
+        .get("output")
+        .cloned()
+        .ok_or_else(|| "Python Agent returned no normalized server.logs output".to_string())?;
+    let parsed =
+        match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized server.logs output",
+                    false,
+                    None,
+                ));
+            }
+        };
     Ok(success(
         serde_json::to_value(parsed).map_err(|error| error.to_string())?,
     ))
@@ -1056,114 +1001,85 @@ pub(super) async fn server_services(
             ));
         }
     };
-    let cpp_supported = match app {
-        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
-            Ok(supported) => supported,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        },
-        None => false,
-    };
-    let (output, exit_code) = if cpp_supported {
-        let output = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = crate::commands::ssh_service::service_inventory(
-                app.expect("C++ SSH support requires an app handle"), state, server_id
-            ) => result,
-        };
-        match output {
-            Ok(output) => (output, 0),
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        }
-    } else {
-        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-            return Ok(transport_or_cancel(error, cancel));
-        }
-        let session = match state.terminals.cached_session(server_id) {
-            Ok(session) => session,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        };
-        let result = match state
-            .ssh
-            .execute(
-                &session,
-                service_discovery_command(),
-                Some(std::time::Duration::from_secs(10)),
-                cancel,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        };
-        (result.stdout_lossy(), result.exit_code)
-    };
-    if cpp_supported {
-        let arguments = json!({
-            "name": input.name.as_deref(),
-            "state": input.state,
-        });
-        let normalized = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = crate::commands::server::normalize_ssh_output_via_python(
-                app.expect("C++ SSH support requires an app handle"),
-                state,
-                "server.services.normalize",
-                &output,
-                arguments,
-            ) => match result {
-                Ok(response) => response,
-                Err(error) => return Ok(transport_or_cancel(error, cancel)),
-            },
-        };
-        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
-            let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
-            let code = if code == "invalid_arguments" {
-                "invalid_input"
-            } else {
-                "execution_failed"
-            };
-            let message = normalized
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("server.services returned an invalid response");
-            return Ok(failed(code, message, code == "invalid_input", None));
-        }
-        let output = normalized.get("output").cloned().ok_or_else(|| {
-            "Python Agent returned no normalized server.services output".to_string()
-        })?;
-        let parsed = match serde_json::from_value::<crate::commands::services::ServerServicesResponse>(
-            output,
-        ) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized server.services output",
-                    false,
-                    None,
-                ));
-            }
-        };
-        return Ok(success(
-            serde_json::to_value(parsed).map_err(|error| error.to_string())?,
-        ));
+    if cancel.is_cancelled() {
+        return Ok(cancelled_failure());
     }
-    let mut parsed = match parse_services_output(&output) {
-        Ok(parsed) => parsed,
-        Err(error) => {
+    let app = match app {
+        Some(app) => app,
+        None => {
             return Ok(failed(
-                "execution_failed",
-                format!("server.services returned an invalid response: {error}"),
-                false,
-                Some(json!({ "exitCode": exit_code })),
+                "unsupported_target",
+                "server.services requires the C++ SSH service",
+                true,
+                None,
             ));
         }
     };
-    if let Err(error) = filter_services(&mut parsed, &input) {
-        return Ok(failed("invalid_input", error, true, None));
+    match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(failed(
+                "unsupported_target",
+                "server.services target is not supported by the C++ SSH service",
+                true,
+                None,
+            ));
+        }
+        Err(error) => return Ok(transport_or_cancel(error, cancel)),
     }
+    let output = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        result = crate::commands::ssh_service::service_inventory(app, state, server_id) => match result {
+            Ok(output) => output,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+    };
+    let arguments = json!({
+        "name": input.name.as_deref(),
+        "state": input.state,
+    });
+    let normalized = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(cancelled_failure()),
+        result = crate::commands::server::normalize_ssh_output_via_python(
+            app, state, "server.services.normalize", &output, arguments,
+        ) => match result {
+            Ok(response) => response,
+            Err(error) => return Ok(transport_or_cancel(error, cancel)),
+        },
+    };
+    if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+        let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
+        let code = if code == "invalid_arguments" {
+            "invalid_input"
+        } else {
+            "execution_failed"
+        };
+        let message = normalized
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("server.services returned an invalid response");
+        return Ok(failed(code, message, code == "invalid_input", None));
+    }
+    let output = normalized
+        .get("output")
+        .cloned()
+        .ok_or_else(|| "Python Agent returned no normalized server.services output".to_string())?;
+    let parsed = match serde_json::from_value::<
+        crate::commands::services::ServerServicesResponse,
+    >(output)
+    {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return Ok(failed(
+                "execution_failed",
+                "Python Agent returned invalid normalized server.services output",
+                false,
+                None,
+            ));
+        }
+    };
     Ok(success(
         serde_json::to_value(parsed).map_err(|error| error.to_string())?,
     ))

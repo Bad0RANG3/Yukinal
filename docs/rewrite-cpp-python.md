@@ -116,10 +116,12 @@ existing structured result shapes. Rust supplies the
 saved target, selected trust source (confirmed host-key pin or configured host CA),
 and credential material from the OS store;
 the Python process passes credentials only through the C++ child environment and
-cleans up its temporary configuration when the call ends. If Rust reports that
-the target route is unsupported or the local C++ process cannot start, the same
-read-only request falls back to the existing host route. SSH connection and
-host-key errors do not trigger a fallback.
+cleans up its temporary configuration when the call ends. For `server.info`,
+`server.logs`, `server.services`, `server.exec`, and the migrated file and
+terminal routes, an unsupported target fails explicitly instead of running a
+second Rust SSH implementation. Other operations that have not yet migrated
+still retain their documented compatibility executors. SSH connection and
+host-key errors never trigger an alternate SSH backend.
 The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
 recomputes a fingerprint from the exact raw input and consumes the corresponding
@@ -455,8 +457,8 @@ results, and sends normalized data through the existing guarded
 `host.tool.execute` route. The host validates the typed snapshot shape, adds its
 own target identity and collection timestamp, and persists the existing UI
 contract to SQLite. The Overview's direct snapshot request uses this same
-Python normalization RPC. Legacy SSH-only configurations still use the Rust
-collector fallback while their transport path is migrated.
+Python normalization RPC. A target that cannot be represented by the C++ SSH
+service now fails explicitly; this route has no Rust collector fallback.
 
 ## Build and verification
 
@@ -662,6 +664,13 @@ tests. The supported route sends raw command/workdir/environment parameters to
 C++, where policy validation and shell quoting run. The C++ service builds;
 Rust formatting and compilation could not be checked because Cargo and rustfmt
 are absent from `PATH` and the usual per-user Cargo bin directory is absent.
+
+On 2026-10-15, `server.info`, `server.logs`, and `server.services` also stopped
+running Rust SSH commands or collectors. They now require a C++-supported
+target, acquire remote output through the C++ service, and keep Python as the
+normalization layer. Rust remains the Tauri host bridge for input validation,
+authorization, cancellation, and persistence. The Rust edits could not be
+compiled here because Cargo and rustc are unavailable on `PATH`.
 
 ## Deliberately deferred
 
