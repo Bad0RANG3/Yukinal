@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ class FakeDesktopHost:
         self, method: str, params: dict[str, Any], *, timeout_seconds: float
     ) -> dict[str, Any]:
         self.calls.append((method, params))
-        return {
+        payload = {
             "target": {
                 "target_id": params["serverId"],
                 "host": "stage.example.test",
@@ -29,6 +30,12 @@ class FakeDesktopHost:
             },
             "credentials": {"SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"},
         }
+        if method == "host.ssh.filesystem_read_target":
+            payload["filesystemRead"] = {
+                "path": params["path"],
+                "maxBytes": params.get("maxBytes") or 131072,
+            }
+        return payload
 
 
 class FakeDesktopSshProcess:
@@ -107,6 +114,10 @@ class FakeDesktopSshClient:
     def package_inspect(self, *arguments: Any) -> Any:
         return self._result("package_inspect", *arguments)
 
+    def sftp_read(self, *arguments: Any) -> bytes:
+        self.calls.append(("sftp_read", arguments))
+        return b"hello\x00x"
+
 
 class FakeSshServiceClient:
     def __init__(self) -> None:
@@ -173,7 +184,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         direct_names = register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
         self.assertEqual(direct_names, {
             "server.logs", "server.services", "docker.ps", "docker.logs", "docker.inspect",
-            "systemd.inspect", "package.inspect",
+            "systemd.inspect", "package.inspect", "filesystem.read",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -187,6 +198,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             ("docker.inspect", {"container": "api"}, "docker_inspect", ("srv_stage1", "api")),
             ("systemd.inspect", {"service": "nginx.service"}, "systemd_inspect", ("srv_stage1", "nginx.service")),
             ("package.inspect", {"manager": "apt", "package": "nginx"}, "package_inspect", ("srv_stage1", "apt", "nginx")),
+            ("filesystem.read", {"path": "/srv/app/data.bin", "maxBytes": 5}, "filesystem_read", ("srv_stage1", "/srv/app/data.bin", 5)),
         ]
         context = ExecutionContext(
             task_id="task-ssh-1",
@@ -215,17 +227,33 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                             "description": "API service",
                         }],
                     })
+                elif tool_name == "filesystem.read":
+                    self.assertEqual(result.value, {
+                        "path": "/srv/app/data.bin",
+                        "content": "hello",
+                        "truncated": True,
+                        "revision": hashlib.sha256(b"hello").hexdigest(),
+                    })
                 else:
                     self.assertEqual(result.value["operation"], operation)
                     self.assertEqual(result.value["target_id"], "srv_stage1")
 
         self.assertEqual(
             FakeDesktopSshClient.calls,
-            [(operation, expected_arguments) for _, _, operation, expected_arguments in cases],
+            [("sftp_read" if operation == "filesystem_read" else operation, expected_arguments)
+             for _, _, operation, expected_arguments in cases],
         )
         self.assertEqual(
             host.calls,
-            [("host.ssh.service_target", {"serverId": "srv_stage1"})] * len(cases),
+            [
+                (
+                    "host.ssh.filesystem_read_target",
+                    {"serverId": "srv_stage1", "path": "/srv/app/data.bin", "maxBytes": 5},
+                )
+                if operation == "filesystem_read"
+                else ("host.ssh.service_target", {"serverId": "srv_stage1"})
+                for _, _, operation, _ in cases
+            ],
         )
         self.assertEqual(len(FakeDesktopSshProcess.instances), len(cases))
         self.assertTrue(all(process.started and process.stopped for process in FakeDesktopSshProcess.instances))

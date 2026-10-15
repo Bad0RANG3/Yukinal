@@ -7,6 +7,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use yukinal_credentials::{CredentialRef, CredentialStore};
+use yukinal_filesystem::{AgentReadRequest, DEFAULT_AGENT_READ_BYTES};
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -363,6 +364,14 @@ struct SshServiceTargetRequest {
     server_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshServiceFilesystemReadTargetRequest {
+    server_id: String,
+    path: String,
+    max_bytes: Option<usize>,
+}
+
 /// Resolve one selected desktop target for a short-lived C++ SSH service process.
 /// Secrets leave the OS credential store only for this local sidecar request and
 /// are returned separately from the non-secret target allowlist.
@@ -547,6 +556,28 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
     }))
 }
 
+/// Resolve a C++ target only after the existing host-owned Agent file policy accepts the exact read.
+pub(super) fn resolve_ssh_service_filesystem_read_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request: SshServiceFilesystemReadTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH filesystem read target request is invalid".to_string())?;
+    let (path, max_bytes) = checked_agent_filesystem_read(&request.path, request.max_bytes)?;
+    let mut payload =
+        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    payload["filesystemRead"] = json!({ "path": path, "maxBytes": max_bytes });
+    Ok(payload)
+}
+
+fn checked_agent_filesystem_read(
+    path: &str,
+    max_bytes: Option<usize>,
+) -> Result<(String, usize), String> {
+    AgentReadRequest::check(path, max_bytes).map_err(|error| error.to_string())?;
+    Ok((path.to_string(), max_bytes.unwrap_or(DEFAULT_AGENT_READ_BYTES)))
+}
+
 /// Resolve a single endpoint into a target that can perform only a host-key handshake.
 /// It has no SSH identity and no configured trust source; the result is reported to the
 /// existing user-confirmation flow and is never persisted by this resolver.
@@ -633,6 +664,31 @@ fn read_ssh_secret(
         ));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_agent_filesystem_read;
+    use yukinal_filesystem::DEFAULT_AGENT_READ_BYTES;
+
+    #[test]
+    fn cpp_file_read_binding_uses_the_validated_default_and_limit() {
+        assert_eq!(
+            checked_agent_filesystem_read("/etc/hosts", None).expect("default read is valid"),
+            ("/etc/hosts".to_string(), DEFAULT_AGENT_READ_BYTES)
+        );
+        assert_eq!(
+            checked_agent_filesystem_read("/etc/hosts", Some(64)).expect("bounded read is valid"),
+            ("/etc/hosts".to_string(), 64)
+        );
+    }
+
+    #[test]
+    fn cpp_file_read_binding_rejects_blocked_paths_and_oversized_limits() {
+        assert!(checked_agent_filesystem_read("/home/deploy/.ssh/id_rsa", None).is_err());
+        assert!(checked_agent_filesystem_read("relative/path", None).is_err());
+        assert!(checked_agent_filesystem_read("/etc/hosts", Some(1_048_577)).is_err());
+    }
 }
 
 /// One task per launched sidecar: keeps stderr visible and maps sidecar notifications

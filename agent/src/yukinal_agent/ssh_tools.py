@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +167,25 @@ def register_desktop_ssh_tools(
             },
             "package_inspect",
         ),
+        (
+            "filesystem.read",
+            "Read a bounded text file on the selected remote server without changing state.",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["path"],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^/[^\\u0000-\\u001f]*$",
+                    },
+                    "maxBytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+                },
+            },
+            "filesystem_read",
+        ),
     )
 
     async def execute(
@@ -178,8 +198,18 @@ def register_desktop_ssh_tools(
         if not isinstance(target_id, str):
             raise ToolCallError("target_required", "A selected remote server is required")
         try:
+            method = (
+                "host.ssh.filesystem_read_target"
+                if operation == "filesystem_read"
+                else "host.ssh.service_target"
+            )
+            params: dict[str, Any] = {"serverId": target_id}
+            if operation == "filesystem_read":
+                params.update(
+                    {"path": arguments["path"], "maxBytes": arguments.get("maxBytes")}
+                )
             payload = await host.request(
-                "host.ssh.service_target", {"serverId": target_id}, timeout_seconds=8.0
+                method, params, timeout_seconds=8.0
             )
         except asyncio.CancelledError:
             raise
@@ -201,7 +231,32 @@ def register_desktop_ssh_tools(
 
         try:
             client = SshServiceClient(token, base_url=base_url)
-            if operation == "service_status":
+            if operation == "filesystem_read":
+                read_binding = (
+                    payload.get("filesystemRead") if isinstance(payload, dict) else None
+                )
+                max_bytes = (
+                    read_binding.get("maxBytes") if isinstance(read_binding, dict) else None
+                )
+                if (
+                    not isinstance(read_binding, dict)
+                    or read_binding.get("path") != arguments["path"]
+                    or isinstance(max_bytes, bool)
+                    or not isinstance(max_bytes, int)
+                    or not 1 <= max_bytes <= 1024 * 1024
+                ):
+                    return await _execute_on_host(host, tool_name, arguments, context)
+                raw = await asyncio.to_thread(
+                    client.sftp_read, target_id, arguments["path"], max_bytes
+                )
+                kept = raw[:max_bytes]
+                return {
+                    "path": arguments["path"],
+                    "content": kept.decode("utf-8", errors="replace"),
+                    "truncated": len(raw) > max_bytes,
+                    "revision": hashlib.sha256(kept).hexdigest(),
+                }
+            elif operation == "service_status":
                 result = await asyncio.to_thread(
                     client.service_status,
                     target_id,

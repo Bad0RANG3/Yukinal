@@ -206,6 +206,38 @@ class ClientTests(unittest.TestCase):
         )
         self.assertEqual(base64.b64decode(self.server.last_request["body"]["parameters"]["content_base64"]), b"\x00\x01\x02\xff")
 
+    def test_bounded_sftp_reads_decode_binary_and_allow_one_truncation_byte(self) -> None:
+        self.server.response_body["operation"] = "sftp_read"
+        self.server.response_body["stdout"] = base64.b64encode(b"alpha\x00").decode("ascii")
+        result = self.client.sftp_read("staging-web-01", "/srv/app/data.bin", 5, 8)
+        self.assertEqual(result, b"alpha\x00")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "sftp_read",
+                "parameters": {"path": "/srv/app/data.bin", "max_bytes": 5},
+                "timeout_seconds": 8,
+            },
+        )
+
+    def test_sftp_read_rejects_invalid_limits_and_responses(self) -> None:
+        for max_bytes in (True, -1, 1024 * 1024 + 1):
+            with self.subTest(max_bytes=max_bytes), self.assertRaises(ValueError):
+                self.client.sftp_read("staging-web-01", "/srv/app/data.bin", max_bytes)
+        self.assertIsNone(self.server.last_request)
+
+        self.server.response_body["operation"] = "sftp_read"
+        self.server.response_body["stdout"] = base64.b64encode(b"1234567").decode("ascii")
+        with self.assertRaises(SshServiceError) as oversize:
+            self.client.sftp_read("staging-web-01", "/srv/app/data.bin", 5)
+        self.assertEqual(oversize.exception.code, "invalid_response")
+
+        self.server.response_body["stdout"] = "not base64"
+        with self.assertRaises(SshServiceError) as invalid:
+            self.client.sftp_read("staging-web-01", "/srv/app/data.bin", 5)
+        self.assertEqual(invalid.exception.code, "invalid_response")
+
     def test_sftp_mutation_limits_are_checked_before_network_call(self) -> None:
         with self.assertRaises(ValueError):
             self.client.sftp_write("staging-web-01", "/srv/app/data.bin", b"x" * (512 * 1024 + 1))

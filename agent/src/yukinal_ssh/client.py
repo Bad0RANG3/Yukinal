@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import http.client
 import json
 import re
@@ -21,6 +22,7 @@ _MAX_BODY_BYTES = 2 * 1024 * 1024
 _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 _MAX_SFTP_WRITE_BYTES = 512 * 1024
 _MAX_SFTP_EXCLUSIVE_BYTES = 1024 * 1024
+_MAX_SFTP_READ_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,32 @@ class SshServiceClient:
             {"path": path, "content_base64": base64.b64encode(content).decode("ascii")},
             timeout_seconds,
         )
+
+    def sftp_read(
+        self, target_id: str, path: str, max_bytes: int, timeout_seconds: int = 10
+    ) -> bytes:
+        """Read at most max_bytes plus one truncation byte from a remote file."""
+        if (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or not 0 <= max_bytes <= _MAX_SFTP_READ_BYTES
+        ):
+            raise ValueError("max_bytes must be an integer from 0 to 1 MiB")
+        self._validate_sftp_path(path)
+        result = self._execute_operation(
+            target_id, "sftp_read", {"path": path, "max_bytes": max_bytes}, timeout_seconds
+        )
+        try:
+            content = base64.b64decode(result.stdout, validate=True)
+        except (ValueError, binascii.Error):
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned invalid SFTP file contents"
+            ) from None
+        if len(content) > max_bytes + 1:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service exceeded the requested SFTP read limit"
+            )
+        return content
 
     def sftp_create_exclusive(
         self, target_id: str, path: str, content: bytes, timeout_seconds: int = 10

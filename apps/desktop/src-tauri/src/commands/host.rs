@@ -85,6 +85,7 @@ use tools::*;
 
 const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
 const HOST_SSH_SERVICE_TARGET: &str = "host.ssh.service_target";
+const HOST_SSH_FILESYSTEM_READ_TARGET: &str = "host.ssh.filesystem_read_target";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -1251,6 +1252,11 @@ async fn handle_sidecar_request_with_context(
 ) -> Result<Value, String> {
     if method == HOST_SSH_SERVICE_TARGET {
         return crate::commands::sidecar::resolve_ssh_service_target(state, params);
+    }
+    if method == HOST_SSH_FILESYSTEM_READ_TARGET {
+        return crate::commands::sidecar::resolve_ssh_service_filesystem_read_target(
+            state, params,
+        );
     }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
