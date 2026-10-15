@@ -36,14 +36,15 @@ revision. The link-count operation runs a fixed, quoted `stat` probe. The
 desktop routes supported Agent file operations, file browsing, and manual
 transfers through C++ for password, private-key, OpenSSH user-certificate, and
 agent identities when the target uses a supported host-key trust mode and a
-supported direct or HTTP CONNECT route. Supported interactive terminal sessions
-use the dedicated C++ PTY worker. The C++ terminal worker forwards
+supported direct or HTTP/HTTPS CONNECT route. The desktop passes the configured
+proxy URL through as data; URL parsing, HTTPS certificate verification, bypass
+matching, and CONNECT negotiation run in C++. Supported interactive terminal
+sessions use the dedicated C++ PTY worker. The C++ terminal worker forwards
 keyboard-interactive challenges through the existing desktop prompt UI. Rust
-remains the compatibility path for unsupported host CA algorithms, HTTPS
-proxies, unsupported proxy bypass patterns, and other SSH configurations the
-C++ service cannot yet represent. When pin or `known_hosts` trust is used with a
-host certificate, C++ fingerprints the certified public key, matching the
-desktop trust store.
+remains the compatibility path for other SSH configurations the C++ service
+cannot yet represent. When pin or `known_hosts` trust is used with a host
+certificate, C++ fingerprints the certified public key, matching the desktop
+trust store.
 
 ## Build
 

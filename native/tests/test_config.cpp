@@ -247,6 +247,18 @@ YUKINAL_TEST(config_accepts_authenticated_http_connect_proxy) {
   YUKINAL_REQUIRE(target.proxy_auth_env == "YK_SSH_PROXY_CREDENTIAL");
 }
 
+YUKINAL_TEST(config_accepts_tls_http_connect_proxy) {
+  auto value = valid_config();
+  value["targets"][0]["proxy"] = {
+      {"type", "https_connect"}, {"host", "proxy.example.test"}, {"port", 8443}};
+
+  const auto config = parse_config(value);
+  const auto& target = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(target.proxy_host == "proxy.example.test");
+  YUKINAL_REQUIRE(target.proxy_port == 8443);
+  YUKINAL_REQUIRE(target.proxy_tls);
+}
+
 YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   auto value = valid_config();
   value["targets"][0]["proxy"] = {

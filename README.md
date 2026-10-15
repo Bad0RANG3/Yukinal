@@ -125,13 +125,16 @@ KRL revocations before authenticating. HTTPS KRL downloads verify the server
 certificate; plain HTTP is restricted to loopback URLs.
 
 Desktop SSH targets also follow the app's selected proxy route. The C++ service
-accepts an optional target `proxy` with `type: "http_connect"`, a proxy `host`
-and `port`, an optional `auth_env` reference, and `no_proxy` host patterns.
+accepts an optional target `proxy` with the configured HTTP or HTTPS proxy `url`,
+an optional `auth_env` reference, and `no_proxy` host patterns. The C++ service
+parses and validates the URL, verifies HTTPS proxy certificates, and establishes
+the CONNECT tunnel.
 Supported bypass patterns include exact hosts, domain suffixes (`.corp` or
 `*.corp`), IPv4 prefixes such as `10.*`, IPv4 CIDR ranges such as
 `10.0.0.0/8`, IPv6 CIDR ranges such as `2001:db8:abcd::/48`, and `*`. Proxy credentials belong in
-the environment variable, not in the JSON file. HTTPS proxies and unsupported
-bypass patterns stay on the Rust compatibility path.
+the environment variable, not in the JSON file. Unsupported proxy protocols use
+the compatibility route; invalid HTTP(S) proxy URLs or bypass patterns fail
+configuration validation in the C++ service.
 
 The Python client can be installed for development with:
 

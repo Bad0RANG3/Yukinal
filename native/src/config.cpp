@@ -296,6 +296,82 @@ bool valid_host(const std::string& host) {
   return true;
 }
 
+bool parse_proxy_url(const std::string& value, std::string* host, int* port, bool* tls) {
+  if (!host || !port || !tls || value.empty() || value.size() > 4096) return false;
+  for (const unsigned char ch : value) {
+    if (ch <= 0x20 || ch == 0x7f) return false;
+  }
+
+  const auto scheme_end = value.find("://");
+  if (scheme_end == std::string::npos) return false;
+  std::string scheme = value.substr(0, scheme_end);
+  std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  if (scheme == "http") {
+    *tls = false;
+    *port = 80;
+  } else if (scheme == "https") {
+    *tls = true;
+    *port = 443;
+  } else {
+    return false;
+  }
+
+  const std::size_t authority_start = scheme_end + 3;
+  const std::size_t suffix_start = value.find_first_of("/?#", authority_start);
+  const std::size_t authority_end = suffix_start == std::string::npos ? value.size() : suffix_start;
+  if (authority_end <= authority_start) return false;
+  if (suffix_start != std::string::npos &&
+      (value[suffix_start] != '/' || value.substr(suffix_start) != "/")) {
+    return false;
+  }
+  const std::string authority = value.substr(authority_start, authority_end - authority_start);
+  if (authority.find('@') != std::string::npos) return false;
+
+  std::string parsed_host;
+  std::string_view port_text;
+  bool has_port = false;
+  if (authority.front() == '[') {
+    const auto close = authority.find(']');
+    if (close == std::string::npos || close == 1) return false;
+    parsed_host = authority.substr(1, close - 1);
+    std::array<unsigned char, 16> address{};
+    if (!parse_ipv6(parsed_host, &address)) return false;
+    if (close + 1 < authority.size()) {
+      if (authority[close + 1] != ':') return false;
+      port_text = std::string_view(authority).substr(close + 2);
+      has_port = true;
+    }
+  } else {
+    const auto colon = authority.find(':');
+    if (colon == std::string::npos) {
+      parsed_host = authority;
+    } else {
+      if (authority.find(':', colon + 1) != std::string::npos) return false;
+      parsed_host = authority.substr(0, colon);
+      port_text = std::string_view(authority).substr(colon + 1);
+      has_port = true;
+    }
+  }
+  if (!valid_host(parsed_host)) return false;
+  for (const unsigned char ch : parsed_host) {
+    if (!(std::isalnum(ch) || ch == '.' || ch == '-' || ch == '_' || ch == ':')) return false;
+  }
+  if (has_port) {
+    if (port_text.empty()) return false;
+    int parsed_port = 0;
+    const auto result = std::from_chars(port_text.data(), port_text.data() + port_text.size(), parsed_port);
+    if (result.ec != std::errc{} || result.ptr != port_text.data() + port_text.size() ||
+        parsed_port < 1 || parsed_port > 65535) {
+      return false;
+    }
+    *port = parsed_port;
+  }
+  *host = std::move(parsed_host);
+  return true;
+}
+
 bool valid_username(const std::string& username) {
   static const std::regex pattern("^[A-Za-z_][A-Za-z0-9_.-]{0,63}$");
   return std::regex_match(username, pattern);
@@ -459,14 +535,24 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     if (entry.contains("proxy")) {
       const Json& proxy = entry["proxy"];
       require_object(proxy, label + ".proxy");
-      require_only_keys(proxy, {"type", "host", "port", "auth_env", "no_proxy"}, label + ".proxy");
-      if (required_string(proxy, "type", label + ".proxy") != "http_connect") {
-        throw std::runtime_error(label + ".proxy.type must be http_connect");
-      }
-      target.proxy_host = required_string(proxy, "host", label + ".proxy");
-      target.proxy_port = required_integer(proxy, "port", 1, 65535, label + ".proxy");
-      if (!valid_host(target.proxy_host)) {
-        throw std::runtime_error(label + ".proxy.host is invalid");
+      require_only_keys(proxy, {"url", "type", "host", "port", "auth_env", "no_proxy"}, label + ".proxy");
+      if (proxy.contains("url")) {
+        if (proxy.contains("type") || proxy.contains("host") || proxy.contains("port") ||
+            !parse_proxy_url(required_string(proxy, "url", label + ".proxy"),
+                             &target.proxy_host, &target.proxy_port, &target.proxy_tls)) {
+          throw std::runtime_error(label + ".proxy.url must be an HTTP or HTTPS proxy URL without credentials, query, or fragment");
+        }
+      } else {
+        const std::string proxy_type = required_string(proxy, "type", label + ".proxy");
+        if (proxy_type != "http_connect" && proxy_type != "https_connect") {
+          throw std::runtime_error(label + ".proxy.type must be http_connect or https_connect");
+        }
+        target.proxy_tls = proxy_type == "https_connect";
+        target.proxy_host = required_string(proxy, "host", label + ".proxy");
+        target.proxy_port = required_integer(proxy, "port", 1, 65535, label + ".proxy");
+        if (!valid_host(target.proxy_host)) {
+          throw std::runtime_error(label + ".proxy.host is invalid");
+        }
       }
       if (proxy.contains("auth_env")) {
         target.proxy_auth_env = required_string(proxy, "auth_env", label + ".proxy");
@@ -476,14 +562,38 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
       }
       if (proxy.contains("no_proxy")) {
         const Json& bypasses = proxy["no_proxy"];
-        if (!bypasses.is_array() || bypasses.size() > 256) {
-          throw std::runtime_error(label + ".proxy.no_proxy must be an array of at most 256 entries");
-        }
-        for (const auto& bypass : bypasses) {
-          if (!bypass.is_string() || !valid_proxy_bypass_entry(bypass.get<std::string>())) {
+        const auto append_bypass = [&](std::string bypass) {
+          const auto first = bypass.find_first_not_of(" \t\r\n");
+          if (first == std::string::npos) return;
+          const auto last = bypass.find_last_not_of(" \t\r\n");
+          bypass = bypass.substr(first, last - first + 1);
+          if (target.proxy_no_proxy.size() >= 256 || !valid_proxy_bypass_entry(bypass)) {
             throw std::runtime_error(label + ".proxy.no_proxy contains an unsupported entry");
           }
-          target.proxy_no_proxy.push_back(bypass.get<std::string>());
+          target.proxy_no_proxy.push_back(std::move(bypass));
+        };
+        if (bypasses.is_string()) {
+          const std::string& raw = bypasses.get_ref<const std::string&>();
+          if (raw.size() > 65536) throw std::runtime_error(label + ".proxy.no_proxy is too long");
+          std::size_t start = 0;
+          while (start <= raw.size()) {
+            const auto end = raw.find(',', start);
+            append_bypass(raw.substr(start, end == std::string::npos ? raw.size() - start : end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+          }
+        } else if (bypasses.is_array()) {
+          if (bypasses.size() > 256) {
+            throw std::runtime_error(label + ".proxy.no_proxy must contain at most 256 entries");
+          }
+          for (const auto& bypass : bypasses) {
+            if (!bypass.is_string()) {
+              throw std::runtime_error(label + ".proxy.no_proxy contains an unsupported entry");
+            }
+            append_bypass(bypass.get<std::string>());
+          }
+        } else {
+          throw std::runtime_error(label + ".proxy.no_proxy must be a string or array");
         }
       }
     }

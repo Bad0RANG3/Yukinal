@@ -27,6 +27,7 @@ struct TargetConfig {
   std::string passphrase_env;
   std::string proxy_host;
   int proxy_port = 0;
+  bool proxy_tls = false;
   std::string proxy_auth_env;
   std::vector<std::string> proxy_no_proxy;
   bool agent_auth = false;

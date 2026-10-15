@@ -44,6 +44,7 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 #include <nlohmann/json.hpp>
+#include <openssl/ssl.h>
 
 namespace yukinal::ssh_service {
 namespace {
@@ -239,11 +240,24 @@ enum class ConnectFailure {
   resolver_unavailable,
   proxy_auth_required,
   proxy_connect_failed,
+  proxy_tls_failed,
 };
+
+using SslPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
 
 struct SocketConnection {
   Socket socket = kInvalidSocket;
   ConnectFailure failure = ConnectFailure::connection_failed;
+  SslPtr proxy_tls{nullptr, SSL_free};
+};
+
+struct TerminalAuthContext;
+
+struct Libssh2SessionContext {
+  SSL* proxy_tls = nullptr;
+  Socket socket = kInvalidSocket;
+  Clock::time_point deadline = Clock::time_point::max();
+  TerminalAuthContext* terminal_auth = nullptr;
 };
 
 std::string read_environment(const std::string& name);
@@ -294,8 +308,99 @@ bool wait_socket_ready(Socket socket, bool writing, Clock::time_point deadline) 
 #endif
 }
 
+bool wait_for_tls_retry(SSL* tls, Socket socket, int result,
+                       Clock::time_point deadline) {
+  const int error = SSL_get_error(tls, result);
+  if (error == SSL_ERROR_WANT_READ) {
+    return wait_socket_ready(socket, false, deadline);
+  }
+  if (error == SSL_ERROR_WANT_WRITE) {
+    return wait_socket_ready(socket, true, deadline);
+  }
+  return false;
+}
+
+bool tls_write_all(SSL* tls, Socket socket, const void* data, std::size_t length,
+                   Clock::time_point deadline) {
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  std::size_t offset = 0;
+  while (offset < length) {
+    std::size_t written = 0;
+    const int result = SSL_write_ex(tls, bytes + offset, length - offset, &written);
+    if (result == 1 && written > 0) {
+      offset += written;
+      continue;
+    }
+    if (result != 1 && wait_for_tls_retry(tls, socket, result, deadline)) continue;
+    return false;
+  }
+  return true;
+}
+
+bool tls_read_one(SSL* tls, Socket socket, char* byte, Clock::time_point deadline) {
+  while (remaining_ms(deadline) > 0) {
+    std::size_t received = 0;
+    const int result = SSL_read_ex(tls, byte, 1, &received);
+    if (result == 1) return received == 1;
+    if (result != 1 && wait_for_tls_retry(tls, socket, result, deadline)) continue;
+    return false;
+  }
+  return false;
+}
+
+SslPtr establish_verified_proxy_tls(const TargetConfig& target, Socket socket,
+                                    Clock::time_point deadline) {
+  using SslContextPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
+  SslContextPtr context(SSL_CTX_new(TLS_client_method()), SSL_CTX_free);
+  if (!context || SSL_CTX_set_default_verify_paths(context.get()) != 1) {
+    return SslPtr(nullptr, SSL_free);
+  }
+  SSL_CTX_set_verify(context.get(), SSL_VERIFY_PEER, nullptr);
+  if (SSL_CTX_set_min_proto_version(context.get(), TLS1_2_VERSION) != 1) {
+    return SslPtr(nullptr, SSL_free);
+  }
+
+  SslPtr tls(SSL_new(context.get()), SSL_free);
+  if (!tls) return tls;
+  std::string verify_host = target.proxy_host;
+  if (verify_host.size() >= 2 && verify_host.front() == '[' && verify_host.back() == ']') {
+    verify_host = verify_host.substr(1, verify_host.size() - 2);
+  }
+  const bool ip_literal = verify_host.find(':') != std::string::npos ||
+      (!verify_host.empty() && verify_host.find('.') != std::string::npos &&
+       std::all_of(verify_host.begin(), verify_host.end(), [](unsigned char ch) {
+         return (ch >= '0' && ch <= '9') || ch == '.';
+       }));
+  X509_VERIFY_PARAM* verify_parameters = SSL_get0_param(tls.get());
+  if (ip_literal) {
+    if (X509_VERIFY_PARAM_set1_ip_asc(verify_parameters, verify_host.c_str()) != 1) {
+      return SslPtr(nullptr, SSL_free);
+    }
+  } else if (SSL_set1_host(tls.get(), verify_host.c_str()) != 1 ||
+             SSL_set_tlsext_host_name(tls.get(), verify_host.c_str()) != 1) {
+    return SslPtr(nullptr, SSL_free);
+  }
+  if (SSL_set_fd(tls.get(), static_cast<int>(socket)) != 1) {
+    return SslPtr(nullptr, SSL_free);
+  }
+  SSL_set_connect_state(tls.get());
+  SSL_set_mode(tls.get(), SSL_MODE_ENABLE_PARTIAL_WRITE |
+                          SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+  while (remaining_ms(deadline) > 0) {
+    const int result = SSL_connect(tls.get());
+    if (result == 1) {
+      if (SSL_get_verify_result(tls.get()) != X509_V_OK) {
+        return SslPtr(nullptr, SSL_free);
+      }
+      return tls;
+    }
+    if (!wait_for_tls_retry(tls.get(), socket, result, deadline)) break;
+  }
+  return SslPtr(nullptr, SSL_free);
+}
+
 ProxyTunnelFailure establish_http_connect_tunnel(const TargetConfig& target, Socket socket,
-                                                  Clock::time_point deadline) {
+                                                  Clock::time_point deadline, SSL* tls) {
   std::string authority = target.host;
   if (authority.find(':') != std::string::npos && authority.front() != '[') {
     authority = "[" + authority + "]";
@@ -328,6 +433,14 @@ ProxyTunnelFailure establish_http_connect_tunnel(const TargetConfig& target, Soc
   wipe(&encoded_credential);
 
   std::size_t sent_total = 0;
+  if (tls) {
+    if (!tls_write_all(tls, socket, request.data(), request.size(), deadline)) {
+      wipe(&request);
+      return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
+                                         : ProxyTunnelFailure::rejected;
+    }
+    sent_total = request.size();
+  }
   while (sent_total < request.size()) {
     if (!wait_socket_ready(socket, true, deadline)) {
       wipe(&request);
@@ -354,13 +467,15 @@ ProxyTunnelFailure establish_http_connect_tunnel(const TargetConfig& target, Soc
   std::string response;
   response.reserve(512);
   while (response.size() < 8192 && response.find("\r\n\r\n") == std::string::npos) {
-    if (!wait_socket_ready(socket, false, deadline)) {
+    if (!tls && !wait_socket_ready(socket, false, deadline)) {
       return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
                                          : ProxyTunnelFailure::rejected;
     }
     char byte = 0;
-    const int received = recv(socket, &byte, 1, 0);
-    if (received != 1) {
+    const bool received = tls
+        ? tls_read_one(tls, socket, &byte, deadline)
+        : recv(socket, &byte, 1, 0) == 1;
+    if (!received) {
       return remaining_ms(deadline) == 0 ? ProxyTunnelFailure::timeout
                                          : ProxyTunnelFailure::rejected;
     }
@@ -399,6 +514,7 @@ SocketConnection connect_socket(const TargetConfig& target, Clock::time_point de
   hints.ai_socktype = SOCK_STREAM;
   addrinfo* addresses = nullptr;
   const bool use_proxy = !target.proxy_host.empty() && !proxy_bypasses_target(target);
+  const bool use_tls_proxy = use_proxy && target.proxy_tls;
   const std::string& connect_host = use_proxy ? target.proxy_host : target.host;
   const int connect_port = use_proxy ? target.proxy_port : target.port;
   const std::string port_text = std::to_string(connect_port);
@@ -429,7 +545,9 @@ SocketConnection connect_socket(const TargetConfig& target, Clock::time_point de
     const int connect_result = connect(candidate, address->ai_addr, address->ai_addrlen);
 #endif
     if (connect_result == 0 || (socket_would_block() && wait_connect(candidate, time_left))) {
-      if (set_nonblocking(candidate, false) && prevent_sigpipe(candidate)) connected = candidate;
+      if ((use_tls_proxy || set_nonblocking(candidate, false)) && prevent_sigpipe(candidate)) {
+        connected = candidate;
+      }
       if (connected != kInvalidSocket) break;
     }
     close_socket(candidate);
@@ -437,8 +555,22 @@ SocketConnection connect_socket(const TargetConfig& target, Clock::time_point de
   freeaddrinfo(addresses);
   if (connected != kInvalidSocket) {
     if (!use_proxy) return {connected, ConnectFailure::none};
-    const auto tunnel = establish_http_connect_tunnel(target, connected, deadline);
-    if (tunnel == ProxyTunnelFailure::none) return {connected, ConnectFailure::none};
+    SslPtr proxy_tls(nullptr, SSL_free);
+    if (use_tls_proxy) {
+      proxy_tls = establish_verified_proxy_tls(target, connected, deadline);
+      if (!proxy_tls) {
+        close_socket(connected);
+        return {kInvalidSocket, ConnectFailure::proxy_tls_failed};
+      }
+    }
+    const auto tunnel = establish_http_connect_tunnel(target, connected, deadline, proxy_tls.get());
+    if (tunnel == ProxyTunnelFailure::none) {
+      SocketConnection result;
+      result.socket = connected;
+      result.failure = ConnectFailure::none;
+      result.proxy_tls = std::move(proxy_tls);
+      return result;
+    }
     close_socket(connected);
     if (tunnel == ProxyTunnelFailure::timeout) return {kInvalidSocket, ConnectFailure::timeout};
     if (tunnel == ProxyTunnelFailure::authentication) {
@@ -471,10 +603,20 @@ bool wait_for_ssh(Socket socket, LIBSSH2_SESSION* session, Clock::time_point dea
 #endif
 }
 
+void set_session_timeout_ms(LIBSSH2_SESSION* session, int timeout_ms) {
+  if (!session || timeout_ms <= 0) return;
+  libssh2_session_set_timeout(session, timeout_ms);
+  void** abstract = libssh2_session_abstract(session);
+  if (abstract && *abstract) {
+    auto* context = static_cast<Libssh2SessionContext*>(*abstract);
+    context->deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+  }
+}
+
 bool set_session_timeout(LIBSSH2_SESSION* session, Clock::time_point deadline) {
   const int time_left = remaining_ms(deadline);
   if (time_left <= 0) return false;
-  libssh2_session_set_timeout(session, time_left);
+  set_session_timeout_ms(session, time_left);
   return true;
 }
 
@@ -516,6 +658,45 @@ bool read_public_key_file(const std::string& path, std::string* public_key) {
   return printable;
 }
 
+ssize_t proxy_tls_read(libssh2_socket_t, void* buffer, std::size_t length,
+                       int, void** abstract) {
+  auto* context = abstract ? static_cast<Libssh2SessionContext*>(*abstract) : nullptr;
+  if (!context || !context->proxy_tls || length == 0) return -EIO;
+  while (remaining_ms(context->deadline) > 0) {
+    std::size_t received = 0;
+    const int result = SSL_read_ex(context->proxy_tls, buffer, length, &received);
+    if (result == 1) return static_cast<ssize_t>(received);
+    const int error = SSL_get_error(context->proxy_tls, result);
+    if (error == SSL_ERROR_ZERO_RETURN) return 0;
+    if (error == SSL_ERROR_WANT_READ) return -EAGAIN;
+    if (error == SSL_ERROR_WANT_WRITE &&
+        wait_socket_ready(context->socket, true, context->deadline)) {
+      continue;
+    }
+    return -EIO;
+  }
+  return -EAGAIN;
+}
+
+ssize_t proxy_tls_write(libssh2_socket_t, const void* buffer, std::size_t length,
+                        int, void** abstract) {
+  auto* context = abstract ? static_cast<Libssh2SessionContext*>(*abstract) : nullptr;
+  if (!context || !context->proxy_tls || length == 0) return -EIO;
+  while (remaining_ms(context->deadline) > 0) {
+    std::size_t written = 0;
+    const int result = SSL_write_ex(context->proxy_tls, buffer, length, &written);
+    if (result == 1) return static_cast<ssize_t>(written);
+    const int error = SSL_get_error(context->proxy_tls, result);
+    if (error == SSL_ERROR_WANT_WRITE) return -EAGAIN;
+    if (error == SSL_ERROR_WANT_READ &&
+        wait_socket_ready(context->socket, false, context->deadline)) {
+      continue;
+    }
+    return -EIO;
+  }
+  return -EAGAIN;
+}
+
 class SshResources {
  public:
   ~SshResources() {
@@ -535,10 +716,27 @@ class SshResources {
       libssh2_session_set_blocking(session_, 0);
       libssh2_session_free(session_);
     }
+    proxy_tls_.reset();
     close_socket(socket_);
   }
 
+  bool initialize_session() {
+    session_ = libssh2_session_init_ex(nullptr, nullptr, nullptr, &session_context_);
+    if (!session_) return false;
+    if (proxy_tls_) {
+      libssh2_session_callback_set2(
+          session_, LIBSSH2_CALLBACK_SEND,
+          reinterpret_cast<libssh2_cb_generic*>(proxy_tls_write));
+      libssh2_session_callback_set2(
+          session_, LIBSSH2_CALLBACK_RECV,
+          reinterpret_cast<libssh2_cb_generic*>(proxy_tls_read));
+    }
+    return true;
+  }
+
   Socket socket_ = kInvalidSocket;
+  SslPtr proxy_tls_{nullptr, SSL_free};
+  Libssh2SessionContext session_context_;
   LIBSSH2_SESSION* session_ = nullptr;
   LIBSSH2_KNOWNHOSTS* known_hosts_ = nullptr;
   LIBSSH2_AGENT* agent_ = nullptr;
@@ -647,7 +845,7 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     revocation_list = std::move(*loaded);
   }
 
-  const SocketConnection connection = connect_socket(target, deadline);
+  SocketConnection connection = connect_socket(target, deadline);
   resources->socket_ = connection.socket;
   if (resources->socket_ == kInvalidSocket) {
     switch (connection.failure) {
@@ -666,6 +864,9 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
       case ConnectFailure::proxy_connect_failed:
         fail(result, "proxy_connect_failed", "Could not establish an HTTP CONNECT tunnel to the SSH target");
         break;
+      case ConnectFailure::proxy_tls_failed:
+        fail(result, "proxy_tls_failed", "Could not establish a verified TLS connection to the HTTP proxy");
+        break;
       default:
         fail(result, "connection_failed", "Could not connect to the configured SSH target");
         break;
@@ -673,8 +874,11 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     return false;
   }
 
-  resources->session_ = libssh2_session_init();
-  if (!resources->session_) {
+  resources->proxy_tls_ = std::move(connection.proxy_tls);
+  resources->session_context_.proxy_tls = resources->proxy_tls_.get();
+  resources->session_context_.socket = resources->socket_;
+  resources->session_context_.deadline = deadline;
+  if (!resources->initialize_session()) {
     fail(result, "ssh_unavailable", "Could not create an SSH session");
     return false;
   }
@@ -847,13 +1051,12 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     if (!timed_out && terminal_auth) {
       const auto interactive_deadline = Clock::now() + std::chrono::seconds(125);
       if (set_session_timeout(resources->session_, interactive_deadline)) {
-        void** abstract = libssh2_session_abstract(resources->session_);
-        if (abstract) *abstract = terminal_auth;
+        resources->session_context_.terminal_auth = terminal_auth;
         auth_result = libssh2_userauth_keyboard_interactive_ex(
             resources->session_, target.username.c_str(),
             static_cast<unsigned int>(target.username.size()),
             terminal_keyboard_interactive_callback);
-        if (abstract) *abstract = nullptr;
+        resources->session_context_.terminal_auth = nullptr;
         timed_out = remaining_ms(interactive_deadline) == 0 ||
             libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
       }
@@ -1056,7 +1259,10 @@ void terminal_keyboard_interactive_callback(
     const char* name, int name_length, const char* instruction, int instruction_length,
     int prompt_count, const LIBSSH2_USERAUTH_KBDINT_PROMPT* prompts,
     LIBSSH2_USERAUTH_KBDINT_RESPONSE* responses, void** abstract) {
-  auto* context = abstract ? static_cast<TerminalAuthContext*>(*abstract) : nullptr;
+  auto* session_context = abstract
+      ? static_cast<Libssh2SessionContext*>(*abstract)
+      : nullptr;
+  auto* context = session_context ? session_context->terminal_auth : nullptr;
   if (!context || !context->input || prompt_count < 0 || prompt_count > 16 ||
       (prompt_count > 0 && (!prompts || !responses)) || name_length < 0 ||
       instruction_length < 0 || name_length > 4096 || instruction_length > 4096 ||
@@ -2012,7 +2218,7 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
   }
 
   const auto deadline = started + std::chrono::seconds(timeout_seconds);
-  const SocketConnection connection = connect_socket(target, deadline);
+  SocketConnection connection = connect_socket(target, deadline);
   SshResources resources;
   resources.socket_ = connection.socket;
   if (resources.socket_ == kInvalidSocket) {
@@ -2032,6 +2238,9 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
       case ConnectFailure::proxy_connect_failed:
         fail(&result, "proxy_connect_failed", "Could not establish an HTTP CONNECT tunnel to the SSH host");
         break;
+      case ConnectFailure::proxy_tls_failed:
+        fail(&result, "proxy_tls_failed", "Could not establish a verified TLS connection to the HTTP proxy");
+        break;
       default:
         fail(&result, "connection_failed", "Could not connect to the SSH host for probing");
         break;
@@ -2039,8 +2248,11 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
     return result;
   }
 
-  resources.session_ = libssh2_session_init();
-  if (!resources.session_) {
+  resources.proxy_tls_ = std::move(connection.proxy_tls);
+  resources.session_context_.proxy_tls = resources.proxy_tls_.get();
+  resources.session_context_.socket = resources.socket_;
+  resources.session_context_.deadline = deadline;
+  if (!resources.initialize_session()) {
     fail(&result, "ssh_unavailable", "Could not create an SSH session");
     return result;
   }
@@ -2364,7 +2576,7 @@ ExecResult sftp_write_impl(const TargetConfig& target, const std::string& path,
   if (!set_session_timeout(resources.session_, deadline)) {
     // Close a partially-created recovery file even when its main operation reached the deadline.
     // The cleanup grace is bounded and is not used to continue the requested write.
-    libssh2_session_set_timeout(resources.session_, 1000);
+    set_session_timeout(resources.session_, Clock::now() + std::chrono::milliseconds(1000));
   }
   if (resources.sftp_handle_) {
     LIBSSH2_SFTP_HANDLE* handle = resources.sftp_handle_;
@@ -2381,7 +2593,9 @@ ExecResult sftp_write_impl(const TargetConfig& target, const std::string& path,
   }
 
   if (!write_succeeded && exclusive) {
-    if (!set_session_timeout(resources.session_, deadline)) libssh2_session_set_timeout(resources.session_, 1000);
+    if (!set_session_timeout(resources.session_, deadline)) {
+      set_session_timeout(resources.session_, Clock::now() + std::chrono::milliseconds(1000));
+    }
     libssh2_sftp_unlink_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size()));
     return result;
   }
@@ -2497,7 +2711,7 @@ class StagingFileCleanup {
       : resources_(resources), path_(std::move(path)) {}
   ~StagingFileCleanup() {
     if (!resources_ || !resources_->sftp_ || !created_ || published_) return;
-    libssh2_session_set_timeout(resources_->session_, 1000);
+    set_session_timeout(resources_->session_, Clock::now() + std::chrono::milliseconds(1000));
     libssh2_sftp_unlink_ex(resources_->sftp_, path_.data(),
                            static_cast<unsigned int>(path_.size()));
   }
@@ -2627,7 +2841,9 @@ ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecReque
   if (resources.sftp_handle_) {
     LIBSSH2_SFTP_HANDLE* handle = resources.sftp_handle_;
     resources.sftp_handle_ = nullptr;
-    if (!set_session_timeout(resources.session_, deadline)) libssh2_session_set_timeout(resources.session_, 1000);
+    if (!set_session_timeout(resources.session_, deadline)) {
+      set_session_timeout(resources.session_, Clock::now() + std::chrono::milliseconds(1000));
+    }
     if (libssh2_sftp_close_handle(handle) != 0 && stage_ok) {
       const bool timed_out = remaining_ms(deadline) == 0;
       fail(&result, timed_out ? "timeout" : "sftp_error",
@@ -2704,7 +2920,9 @@ ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecReque
     current.insert(current.end(), reinterpret_cast<const unsigned char*>(buffer.data()),
                    reinterpret_cast<const unsigned char*>(buffer.data()) + static_cast<std::size_t>(count));
   }
-  if (!set_session_timeout(resources.session_, deadline)) libssh2_session_set_timeout(resources.session_, 1000);
+  if (!set_session_timeout(resources.session_, deadline)) {
+    set_session_timeout(resources.session_, Clock::now() + std::chrono::milliseconds(1000));
+  }
   const int read_close = libssh2_sftp_close_handle(read_handle);
   if (read_ok && read_close != 0) {
     const bool timed_out = remaining_ms(deadline) == 0;

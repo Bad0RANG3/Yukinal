@@ -27,8 +27,8 @@ use yukinal_filesystem::transfer::{TransferError, TransferReader, TransferWriter
 use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
 };
-use yukinal_terminal::{TerminalPty, TerminalPtyEvent};
 use yukinal_ssh::{KeyboardInteractiveChallenge, KeyboardInteractivePrompt};
+use yukinal_terminal::{TerminalPty, TerminalPtyEvent};
 use zeroize::Zeroize;
 
 use crate::state::AppState;
@@ -349,7 +349,9 @@ fn decode_terminal_auth_challenge(message: &Value) -> Result<KeyboardInteractive
     let object = message
         .as_object()
         .filter(|object| object.len() == 4)
-        .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication challenge".to_string())?;
+        .ok_or_else(|| {
+            "the C++ SSH terminal returned an invalid authentication challenge".to_string()
+        })?;
     if object.get("type").and_then(Value::as_str) != Some("auth_prompt") {
         return Err("the C++ SSH terminal returned an invalid authentication challenge".into());
     }
@@ -358,7 +360,9 @@ fn decode_terminal_auth_challenge(message: &Value) -> Result<KeyboardInteractive
             .get(key)
             .and_then(Value::as_str)
             .filter(|value| value.len() <= 4096)
-            .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication challenge".to_string())?;
+            .ok_or_else(|| {
+                "the C++ SSH terminal returned an invalid authentication challenge".to_string()
+            })?;
         Ok(value.to_string())
     };
     let prompts = object
@@ -371,16 +375,19 @@ fn decode_terminal_auth_challenge(message: &Value) -> Result<KeyboardInteractive
             let prompt = prompt
                 .as_object()
                 .filter(|prompt| prompt.len() == 2)
-                .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication prompt".to_string())?;
+                .ok_or_else(|| {
+                    "the C++ SSH terminal returned an invalid authentication prompt".to_string()
+                })?;
             let text = prompt
                 .get("prompt")
                 .and_then(Value::as_str)
                 .filter(|text| text.len() <= 4096)
-                .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication prompt".to_string())?;
-            let echo = prompt
-                .get("echo")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication prompt".to_string())?;
+                .ok_or_else(|| {
+                    "the C++ SSH terminal returned an invalid authentication prompt".to_string()
+                })?;
+            let echo = prompt.get("echo").and_then(Value::as_bool).ok_or_else(|| {
+                "the C++ SSH terminal returned an invalid authentication prompt".to_string()
+            })?;
             Ok(KeyboardInteractivePrompt {
                 prompt: text.to_string(),
                 echo,
@@ -396,17 +403,16 @@ fn decode_terminal_auth_challenge(message: &Value) -> Result<KeyboardInteractive
 
 pub(crate) enum CppProxyRoute {
     Direct,
-    HttpConnect {
-        host: String,
-        port: u16,
+    ConfiguredProxy {
+        url: String,
+        no_proxy: Option<String>,
         credential: Option<String>,
-        no_proxy: Vec<String>,
     },
     Unsupported,
 }
 
-/// Resolve the app's selected proxy route for the C++ transport. The C++ service
-/// applies supported bypass patterns against its one configured target.
+/// Forward the selected proxy configuration to the C++ transport. This bridge
+/// only routes HTTP(S) schemes; C++ parses the URL and applies bypass patterns.
 pub(crate) fn resolve_cpp_proxy_route(state: &AppState) -> Result<CppProxyRoute, String> {
     let outbound =
         super::network::resolve_outbound_proxy(&state.database, state.credentials.as_ref())?;
@@ -418,108 +424,21 @@ fn cpp_proxy_route(outbound: yukinal_net::OutboundProxy) -> CppProxyRoute {
         yukinal_net::NetworkProxy::Direct => CppProxyRoute::Direct,
         yukinal_net::NetworkProxy::Unusable { .. } => CppProxyRoute::Unsupported,
         yukinal_net::NetworkProxy::Proxy { url, no_proxy, .. } => {
-            let no_proxy = match no_proxy.as_deref() {
-                Some(value) => match parse_cpp_no_proxy(value) {
-                    Some(entries) => entries,
-                    None => return CppProxyRoute::Unsupported,
-                },
-                None => Vec::new(),
-            };
-            let Ok(url) = reqwest::Url::parse(&url) else {
-                return CppProxyRoute::Unsupported;
-            };
-            if url.scheme() != "http"
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.path() != "/"
-                || url.query().is_some()
-                || url.fragment().is_some()
+            let scheme = url.split_once("://").map(|(scheme, _)| scheme);
+            if !matches!(scheme, Some(scheme) if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
             {
                 return CppProxyRoute::Unsupported;
             }
-            let Some(host) = url.host_str() else {
-                return CppProxyRoute::Unsupported;
-            };
-            let host = host
-                .strip_prefix('[')
-                .and_then(|host| host.strip_suffix(']'))
-                .unwrap_or(host)
-                .to_string();
-            let Some(port) = url.port_or_known_default() else {
-                return CppProxyRoute::Unsupported;
-            };
-            CppProxyRoute::HttpConnect {
-                host,
-                port,
+            CppProxyRoute::ConfiguredProxy {
+                url,
+                no_proxy,
                 credential: outbound
                     .credential
                     .as_ref()
                     .map(|credential| credential.expose().to_string()),
-                no_proxy,
             }
         }
     }
-}
-
-fn parse_cpp_no_proxy(value: &str) -> Option<Vec<String>> {
-    let entries = value
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    if entries.len() > 256 || entries.iter().any(|entry| entry.len() > 253) {
-        return None;
-    }
-    let valid_host = |host: &str| {
-        let bracketed_ipv6 =
-            host.len() >= 4 && host.starts_with('[') && host.ends_with(']') && host.contains(':');
-        !host.is_empty()
-            && host.len() <= 253
-            && !host.starts_with('.')
-            && !host.ends_with('.')
-            && !host.contains("..")
-            && (!host.contains(':') || bracketed_ipv6)
-            && host.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
-            })
-    };
-    entries
-        .into_iter()
-        .map(|entry| {
-            if entry == "*" {
-                return Some(entry.to_string());
-            }
-            if let Some((address, prefix)) = entry.split_once('/') {
-                if address.contains('/') {
-                    return None;
-                }
-                let prefix = prefix.parse::<u8>().ok()?;
-                let valid_ipv4 = address.parse::<std::net::Ipv4Addr>().is_ok() && prefix <= 32;
-                let valid_ipv6 = address.parse::<std::net::Ipv6Addr>().is_ok() && prefix <= 128;
-                return (valid_ipv4 || valid_ipv6).then(|| entry.to_string());
-            }
-            if let Some(host) = entry.strip_prefix("*.") {
-                return valid_host(host).then(|| entry.to_string());
-            }
-            if let Some(host) = entry.strip_prefix('.') {
-                return valid_host(host).then(|| entry.to_string());
-            }
-            if let Some(prefix) = entry.strip_suffix(".*") {
-                let octets = prefix.split('.').collect::<Vec<_>>();
-                return (!prefix.is_empty()
-                    && octets.len() <= 3
-                    && octets.iter().all(|octet| {
-                        !octet.is_empty()
-                            && octet.len() <= 3
-                            && octet.bytes().all(|byte| byte.is_ascii_digit())
-                            && octet.parse::<u16>().is_ok_and(|value| value <= 255)
-                    }))
-                .then(|| entry.to_string());
-            }
-            valid_host(entry).then(|| entry.to_string())
-        })
-        .collect()
 }
 
 /// Whether the configured connection uses auth and trust modes supported by C++.
@@ -839,11 +758,8 @@ pub(crate) async fn open_terminal(
     let mut output = BufReader::new(output);
     loop {
         let mut first_line = String::new();
-        let startup = tokio::time::timeout(
-            Duration::from_secs(125),
-            output.read_line(&mut first_line),
-        )
-        .await;
+        let startup =
+            tokio::time::timeout(Duration::from_secs(125), output.read_line(&mut first_line)).await;
         match startup {
             Ok(Ok(count)) if count > 0 && first_line.len() <= 512 * 1024 => {}
             Ok(Ok(_)) => {
@@ -859,7 +775,9 @@ pub(crate) async fn open_terminal(
             Err(_) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                return Err("the C++ SSH terminal did not connect or finish authentication in time".into());
+                return Err(
+                    "the C++ SSH terminal did not connect or finish authentication in time".into(),
+                );
             }
         }
         let startup: Value = match serde_json::from_str(first_line.trim_end()) {
@@ -884,11 +802,12 @@ pub(crate) async fn open_terminal(
                 let username = target
                     .get("username")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| "the desktop returned an invalid SSH terminal username".to_string())?;
-                let host = target
-                    .get("host")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "the desktop returned an invalid SSH terminal host".to_string())?;
+                    .ok_or_else(|| {
+                        "the desktop returned an invalid SSH terminal username".to_string()
+                    })?;
+                let host = target.get("host").and_then(Value::as_str).ok_or_else(|| {
+                    "the desktop returned an invalid SSH terminal host".to_string()
+                })?;
                 let responses = match state
                     .auth
                     .request(server_id, username, host, &challenge)
@@ -2338,8 +2257,8 @@ fn api_token() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CppProxyRoute, cpp_has_supported_trust_source, cpp_proxy_route, decode_sftp_read_output,
-        valid_host_key_fingerprint,
+        cpp_has_supported_trust_source, cpp_proxy_route, decode_sftp_read_output,
+        valid_host_key_fingerprint, CppProxyRoute,
     };
     use yukinal_net::{NetworkProxy, OutboundProxy, ProxyCredential, ProxySource};
 
@@ -2358,50 +2277,16 @@ mod tests {
     }
 
     #[test]
-    fn cpp_proxy_route_accepts_plain_http_and_supported_bypass_rules() {
+    fn cpp_proxy_route_forwards_proxy_config_to_the_native_service() {
         assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", None),
-            CppProxyRoute::HttpConnect { host, port: 8080, credential: Some(value), .. }
-                if host == "proxy.example.test" && value == "proxy-user:proxy-password"
-        ));
-        assert!(matches!(
-            proxy_route("http://[::1]:8080", Some("  ")),
-            CppProxyRoute::HttpConnect { host, port: 8080, .. } if host == "::1"
-        ));
-        assert!(matches!(
-            proxy_route("https://proxy.example.test:8443", None),
-            CppProxyRoute::Unsupported
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("localhost")),
-            CppProxyRoute::HttpConnect { no_proxy, .. }
-                if no_proxy.len() == 1 && no_proxy[0] == "localhost"
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("10.0.0.0/8")),
-            CppProxyRoute::HttpConnect { no_proxy, .. }
-                if no_proxy.len() == 1 && no_proxy[0] == "10.0.0.0/8"
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("2001:db8:abcd::/48")),
-            CppProxyRoute::HttpConnect { no_proxy, .. }
-                if no_proxy.len() == 1 && no_proxy[0] == "2001:db8:abcd::/48"
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("10.0.0.0/33")),
-            CppProxyRoute::Unsupported
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("2001:db8::/129")),
-            CppProxyRoute::Unsupported
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("*.corp,10.*,localhost")),
-            CppProxyRoute::HttpConnect { no_proxy, .. } if no_proxy.len() == 3
-        ));
-        assert!(matches!(
-            proxy_route("http://proxy.example.test:8080", Some("192.168.999.*")),
-            CppProxyRoute::Unsupported
+            proxy_route("https://proxy.example.test:8443", Some("*.corp,10.*")),
+            CppProxyRoute::ConfiguredProxy {
+                url,
+                no_proxy: Some(no_proxy),
+                credential: Some(value),
+            } if url == "https://proxy.example.test:8443"
+                && no_proxy == "*.corp,10.*"
+                && value == "proxy-user:proxy-password"
         ));
     }
 

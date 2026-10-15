@@ -586,18 +586,17 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
     }
     match proxy_route {
         super::ssh_service::CppProxyRoute::Direct => {}
-        super::ssh_service::CppProxyRoute::HttpConnect {
-            host,
-            port,
-            credential,
+        super::ssh_service::CppProxyRoute::ConfiguredProxy {
+            url,
             no_proxy,
+            credential,
         } => {
             let mut proxy = json!({
-                "type": "http_connect",
-                "host": host,
-                "port": port,
-                "no_proxy": no_proxy,
+                "url": url,
             });
+            if let Some(no_proxy) = no_proxy {
+                proxy["no_proxy"] = json!(no_proxy);
+            }
             if let Some(credential) = credential {
                 credentials.insert(
                     "YK_SSH_PROXY_CREDENTIAL".into(),
@@ -766,18 +765,17 @@ pub(super) fn resolve_ssh_service_probe_target(
     let mut credentials = serde_json::Map::new();
     match proxy_route {
         super::ssh_service::CppProxyRoute::Direct => {}
-        super::ssh_service::CppProxyRoute::HttpConnect {
-            host,
-            port,
-            credential,
+        super::ssh_service::CppProxyRoute::ConfiguredProxy {
+            url,
             no_proxy,
+            credential,
         } => {
             let mut proxy = json!({
-                "type": "http_connect",
-                "host": host,
-                "port": port,
-                "no_proxy": no_proxy,
+                "url": url,
             });
+            if let Some(no_proxy) = no_proxy {
+                proxy["no_proxy"] = json!(no_proxy);
+            }
             if let Some(credential) = credential {
                 credentials.insert(
                     "YK_SSH_PROXY_CREDENTIAL".into(),

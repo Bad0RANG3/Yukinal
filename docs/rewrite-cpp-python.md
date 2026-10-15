@@ -10,9 +10,11 @@
 > Rust still hosts native UI IPC, local trust-store updates, final approvals, and
 > compatibility paths for configurations outside current C++ coverage. C++ verifies
 > configured OpenSSH host CAs and optional KRLs for supported CA algorithms; a CA is
-> itself a valid trust source and does not also require a leaf host-key pin. HTTPS
-> proxies, unsupported proxy bypass rules, unsupported CA algorithms, and other
-> unsupported SSH modes remain on the compatibility path.
+> itself a valid trust source and does not also require a leaf host-key pin. The
+> desktop passes proxy configuration as data; C++ parses HTTP/HTTPS proxy URLs,
+> verifies HTTPS proxy certificates, applies bypass rules, and establishes CONNECT
+> tunnels. Unsupported proxy protocols, CA algorithms, and other SSH modes remain
+> on the compatibility path.
 > Keyboard-interactive terminal prompts are forwarded by the C++ PTY worker to
 > the existing desktop prompt UI. Supported desktop
 > terminals use a dedicated C++ PTY child process. The Python sidecar can call the C++
@@ -20,13 +22,13 @@
 > logs, Docker inspection, systemd inspection, and package inspection through a
 > short-lived C++ process using the saved desktop target and identity. The desktop file browser and
 > manual transfers use C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
-> SSH-agent identities on direct or supported HTTP CONNECT routes with either a
+> SSH-agent identities on direct or supported HTTP/HTTPS CONNECT routes with either a
 > confirmed host-key pin or a supported host CA. The same identities use C++ for
-> structured SSH operations. Host-key probes use C++ on direct and supported HTTP
+> structured SSH operations. Host-key probes use C++ on direct and supported HTTP/HTTPS
 > CONNECT routes; the probe reports the certified public-key fingerprint without
-> treating it as trusted. Unsupported proxy or host-key modes retain the Rust
-> compatibility path.
-> Manual transfers use bounded C++ SFTP streams on supported direct or HTTP CONNECT
+> treating it as trusted. Unsupported host-key modes retain the Rust compatibility
+> path.
+> Manual transfers use bounded C++ SFTP streams on supported direct or HTTP/HTTPS CONNECT
 > routes with either a confirmed pin or supported host CA. The Rust compatibility path
 > remains for unsupported targets.
 > Every C++ operation resolves its `target_id` through the service
@@ -409,14 +411,13 @@ Private-key environment references let the desktop pass decrypted keychain
 material directly to the C++ child without writing key material into the JSON
 configuration.
 
-The desktop may also add a target-level `proxy` object with `type: "http_connect"`,
-proxy `host` and `port`, an optional `auth_env`, and supported `no_proxy` host
-patterns. Exact hosts, domain suffixes, IPv4 prefixes, IPv4 and IPv6 CIDR ranges,
-and `*` are evaluated by
-the C++ service against its single target; unsupported patterns retain the Rust
-path. Proxy credentials are forwarded to the child environment separately from
-the target JSON. HTTPS proxies also stay on the Rust path. The C++ service bounds the
-CONNECT response and shares the SSH operation deadline.
+The desktop passes the selected proxy URL and optional `no_proxy` string to the
+C++ service without parsing them in Rust. C++ validates HTTP and HTTPS proxy URLs,
+verifies HTTPS proxy certificates, evaluates exact-host, domain-suffix, IPv4
+prefix, IPv4/IPv6 CIDR, and `*` bypass patterns, and performs the CONNECT tunnel.
+Proxy credentials are forwarded to the child environment separately from the
+target JSON. The C++ service bounds the CONNECT response and shares the SSH
+operation deadline.
 
 Desktop host-key probes use a separate short-lived `probe_only` target with no
 credential and no trust entry. The service permits that target to perform only
@@ -643,8 +644,7 @@ binary linked, but stalled before listing or running tests, including with
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
-- moving HTTPS proxy, unsupported proxy bypass, and other remaining compatibility
-  SSH routes into C++;
+- moving remaining compatibility SSH routes into C++;
 - full durable task/plan recovery beyond the pending-approval reattach path;
 - full C++ SFTP and PTY coverage for compatibility-only SSH configurations;
 - control plane, PostgreSQL, and multi-tenant deployment.
@@ -694,4 +694,10 @@ including the new host-key parser coverage.
 Later on 2026-10-15, C++ host CA signature and KRL verification moved into the
 service. Desktop routing now accepts a supported configured CA as the target's
 trust source without requiring a redundant leaf-key pin. Unsupported CA
-algorithms and proxy routes still use the compatibility path.
+algorithms and proxy protocols still use the compatibility path.
+
+Also on 2026-10-15, HTTP/HTTPS proxy URL validation, HTTPS certificate
+verification, bypass matching, and CONNECT transport moved into C++. The desktop
+passes the selected proxy configuration through the Tauri bridge; other proxy
+protocols remain on the compatibility path. The C++ service and Tauri library
+compiled after this change; the test suites were not run in this round.
