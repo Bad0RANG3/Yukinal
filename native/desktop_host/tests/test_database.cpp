@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/ipc_router.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -53,6 +54,11 @@ void seed_legacy_database(const std::filesystem::path& path) {
       repositories TEXT NOT NULL, provider_ids TEXT NOT NULL,
       default_environment TEXT NOT NULL
     );
+    CREATE TABLE activities (
+      id TEXT PRIMARY KEY, server_id TEXT, workspace_id TEXT, type TEXT NOT NULL,
+      title TEXT NOT NULL, description TEXT, source TEXT NOT NULL, actor TEXT NOT NULL,
+      reason TEXT, outcome TEXT, trace_id TEXT, created_at TEXT NOT NULL
+    );
     INSERT INTO servers VALUES (
       'srv_01abc', 'Staging', 'ssh.example.test', 2222, 'operator', NULL,
       'group_a', '{"linux":true,"docker":false}', 'disconnected', 'staging',
@@ -63,6 +69,14 @@ void seed_legacy_database(const std::filesystem::path& path) {
       'ws_01', 'Checkout', '["srv_01abc"]',
       '[{"id":"repo_01","name":"api","host":"remote","path":"/srv/api","serverId":"srv_01abc","gitUrl":"https://example.test/api.git","defaultBranch":"main"}]',
       '["provider_01"]', 'staging'
+    );
+    INSERT INTO activities VALUES (
+      'act_01', 'srv_01abc', NULL, 'connection', 'Connected to server', NULL,
+      'user', 'user', 'User requested connection', 'success', NULL, '2026-01-01T00:00:00.000Z'
+    );
+    INSERT INTO activities VALUES (
+      'act_02', NULL, NULL, 'configuration', 'Provider updated', 'Updated default model',
+      'system', 'core', NULL, 'success', NULL, '2026-01-01T00:01:00.000Z'
     );
     PRAGMA user_version=8;
   )SQL");
@@ -116,6 +130,35 @@ int main() {
     })}};
     check(database.list_workspaces() == expected_workspaces,
           "workspace_list should preserve nested repository data");
+
+    const nlohmann::json expected_activities = {{"activities", nlohmann::json::array({
+      {{"id", "act_02"}, {"type", "configuration"}, {"title", "Provider updated"},
+       {"source", "system"}, {"actor", "core"}, {"description", "Updated default model"},
+       {"outcome", "success"}, {"createdAt", "2026-01-01T00:01:00.000Z"}},
+      {{"id", "act_01"}, {"serverId", "srv_01abc"}, {"type", "connection"},
+       {"title", "Connected to server"}, {"source", "user"}, {"actor", "user"},
+       {"reason", "User requested connection"}, {"outcome", "success"},
+       {"createdAt", "2026-01-01T00:00:00.000Z"}}
+    })}};
+    check(database.list_activities(std::nullopt, 50) == expected_activities,
+          "activity_list should preserve the shared activity JSON contract and sort newest first");
+    check(database.list_activities(std::string("srv_01abc"), 50) ==
+              nlohmann::json{{"activities", nlohmann::json::array({
+                expected_activities["activities"][1]
+              })}},
+          "activity_list should filter by server id");
+    check(database.list_activities(std::nullopt, 1) ==
+              nlohmann::json{{"activities", nlohmann::json::array({
+                expected_activities["activities"][0]
+              })}},
+          "activity_list should honor its bounded limit");
+
+    yukinal::desktop_host::IpcRouter router(&database);
+    const auto response = router.invoke("activity_list", {{"limit", 2}});
+    check(response.ok && response.value == expected_activities,
+          "the C++ IPC router should expose the activity database response");
+    check(!router.invoke("activity_list", {{"serverId", "srv_01abc"}, {"extra", true}}).ok,
+          "activity_list should reject unknown parameters");
   }
 
   sqlite3* readback = nullptr;

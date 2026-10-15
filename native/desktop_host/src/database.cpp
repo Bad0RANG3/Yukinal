@@ -55,6 +55,12 @@ void add_optional_text(nlohmann::json& object, const char* key,
   }
 }
 
+bool is_one_of(const std::string& value, std::initializer_list<const char*> options) {
+  return std::any_of(options.begin(), options.end(), [&value](const char* option) {
+    return value == option;
+  });
+}
+
 std::filesystem::path environment_path(const char* name) {
 #ifdef _WIN32
   wchar_t buffer[32768];
@@ -257,6 +263,82 @@ nlohmann::json DesktopDatabase::list_workspaces() const {
     });
   }
   return {{"workspaces", std::move(workspaces)}};
+}
+
+nlohmann::json DesktopDatabase::list_activities(
+    const std::optional<std::string>& server_id, int limit) const {
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Activity limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"activities", nlohmann::json::array()}};
+
+  const char* sql = server_id.has_value()
+      ? R"SQL(
+          SELECT id, server_id, workspace_id, type, title, description, source, actor,
+                 reason, outcome, trace_id, created_at
+            FROM activities
+           WHERE server_id = ?1
+           ORDER BY created_at DESC
+           LIMIT ?2
+        )SQL"
+      : R"SQL(
+          SELECT id, server_id, workspace_id, type, title, description, source, actor,
+                 reason, outcome, trace_id, created_at
+            FROM activities
+           ORDER BY created_at DESC
+           LIMIT ?1
+        )SQL";
+  Statement rows(connection_, sql);
+  int limit_parameter = 1;
+  if (server_id.has_value()) {
+    const auto bind_result = sqlite3_bind_text(rows.get(), 1, server_id->c_str(),
+                                               static_cast<int>(server_id->size()),
+                                               SQLITE_TRANSIENT);
+    if (bind_result != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(connection_));
+    limit_parameter = 2;
+  }
+  if (sqlite3_bind_int(rows.get(), limit_parameter, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+
+  nlohmann::json activities = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+
+    const std::string type = column_text(rows.get(), 3);
+    const std::string source = column_text(rows.get(), 6);
+    if (!is_one_of(type, {"connection", "authentication", "configuration", "deployment",
+                          "service", "container", "file_change", "agent_action",
+                          "approval", "health"}) ||
+        !is_one_of(source, {"agent", "user", "system", "docker", "git", "cloud"})) {
+      throw std::runtime_error("Stored activity has an unknown type or source");
+    }
+
+    nlohmann::json activity = {
+        {"id", column_text(rows.get(), 0)},
+        {"type", type},
+        {"title", column_text(rows.get(), 4)},
+        {"source", source},
+        {"actor", column_text(rows.get(), 7)},
+        {"createdAt", column_text(rows.get(), 11)},
+    };
+    add_optional_text(activity, "serverId", rows.get(), 1);
+    add_optional_text(activity, "workspaceId", rows.get(), 2);
+    add_optional_text(activity, "description", rows.get(), 5);
+    add_optional_text(activity, "reason", rows.get(), 8);
+    add_optional_text(activity, "traceId", rows.get(), 10);
+    if (sqlite3_column_type(rows.get(), 9) != SQLITE_NULL) {
+      const std::string outcome = column_text(rows.get(), 9);
+      if (!is_one_of(outcome, {"success", "failure", "cancelled", "denied"})) {
+        throw std::runtime_error("Stored activity has an unknown outcome");
+      }
+      activity["outcome"] = outcome;
+    }
+    activities.push_back(std::move(activity));
+  }
+  return {{"activities", std::move(activities)}};
 }
 
 std::filesystem::path default_data_directory() {

@@ -27,7 +27,13 @@ int main() {
   check(!router.invoke("core_ping", {{"unexpected", true}}).ok,
         "core_ping should reject unexpected parameters");
   check(!router.invoke("server_list", json::object()).ok,
-        "commands should fail clearly until migrated");
+        "server_list should report an unavailable database");
+  check(!router.invoke("activity_list", {{"limit", 101}}).ok,
+        "activity_list should reject limits greater than 100");
+  check(!router.invoke("activity_list", {{"serverId", "not-a-server-id"}}).ok,
+        "activity_list should reject malformed server ids");
+  check(!router.invoke("activity_list", json::object()).ok,
+        "activity_list should report a missing local database");
   check(!router.invoke("shell.open_url", {{"url", "javascript:alert(1)"}}).ok,
         "external URL opening should reject executable schemes");
   check(yukinal::desktop_host::is_external_url("https://example.com/path"),

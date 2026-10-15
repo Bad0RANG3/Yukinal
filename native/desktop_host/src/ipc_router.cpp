@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <regex>
 #include <utility>
 
@@ -46,6 +47,11 @@ bool valid_subscription_token(const std::string& value) {
 bool valid_method_name(const std::string& value) {
   static const std::regex pattern(R"(^[a-z][a-z0-9_.-]{0,127}$)");
   return std::regex_match(value, pattern);
+}
+
+bool valid_server_id(const std::string& value) {
+  static const std::regex pattern(R"(^srv_[a-z0-9]+$)");
+  return value.size() <= 256 && std::regex_match(value, pattern);
 }
 
 #ifdef _WIN32
@@ -107,6 +113,52 @@ IpcReply IpcRouter::invoke(const std::string& method, const nlohmann::json& para
       return {true, database_->list_workspaces()};
     } catch (...) {
       return failure("STORAGE_ERROR", "The local workspace database could not read workspaces");
+    }
+  }
+
+  if (method == "activity_list") {
+    for (auto item = params.begin(); item != params.end(); ++item) {
+      if (item.key() != "serverId" && item.key() != "limit") {
+        return failure("INVALID_PARAMS", "activity_list received an unexpected parameter");
+      }
+    }
+    std::optional<std::string> server_id;
+    if (params.contains("serverId")) {
+      if (!params.at("serverId").is_string()) {
+        return failure("INVALID_PARAMS", "activity_list serverId must be a string");
+      }
+      const auto value = params.at("serverId").get<std::string>();
+      if (!valid_server_id(value)) {
+        return failure("INVALID_PARAMS", "activity_list serverId is invalid");
+      }
+      server_id = value;
+    }
+    int limit = 50;
+    if (params.contains("limit")) {
+      const auto& value = params.at("limit");
+      if (value.is_number_unsigned()) {
+        const auto requested_limit = value.get<std::uint64_t>();
+        if (requested_limit < 1 || requested_limit > 100) {
+          return failure("INVALID_PARAMS", "activity_list limit must be between 1 and 100");
+        }
+        limit = static_cast<int>(requested_limit);
+      } else if (value.is_number_integer()) {
+        const auto requested_limit = value.get<std::int64_t>();
+        if (requested_limit < 1 || requested_limit > 100) {
+          return failure("INVALID_PARAMS", "activity_list limit must be between 1 and 100");
+        }
+        limit = static_cast<int>(requested_limit);
+      } else {
+        return failure("INVALID_PARAMS", "activity_list limit must be an integer");
+      }
+    }
+    if (database_ == nullptr) {
+      return failure("STORAGE_UNAVAILABLE", "The local activity database is unavailable");
+    }
+    try {
+      return {true, database_->list_activities(server_id, limit)};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local activity database could not read activities");
     }
   }
 
