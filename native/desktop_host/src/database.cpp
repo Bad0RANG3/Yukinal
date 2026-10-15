@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <variant>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -265,6 +266,280 @@ std::string escape_like(const std::string& value) {
   return escaped;
 }
 
+using SqlValue = std::variant<std::monostate, std::int64_t, std::string>;
+using SqlField = std::pair<std::string, SqlValue>;
+
+std::set<std::string> table_columns(sqlite3* connection, const char* table) {
+  const auto sql = std::string("PRAGMA table_info(") + table + ")";
+  Statement metadata(connection, sql.c_str());
+  std::set<std::string> columns;
+  for (;;) {
+    const auto result = sqlite3_step(metadata.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+    columns.emplace(column_text(metadata.get(), 1));
+  }
+  return columns;
+}
+
+std::optional<std::string> optional_json_text(const nlohmann::json& object,
+                                              const char* key) {
+  if (!object.contains(key) || object.at(key).is_null()) return std::nullopt;
+  return object.at(key).dump();
+}
+
+std::optional<std::string> optional_string(const nlohmann::json& object,
+                                           const char* key) {
+  if (!object.contains(key) || object.at(key).is_null()) return std::nullopt;
+  return object.at(key).get<std::string>();
+}
+
+void add_required_field(std::vector<SqlField>& fields, const char* name,
+                        SqlValue value) {
+  fields.emplace_back(name, std::move(value));
+}
+
+void add_optional_field(std::vector<SqlField>& fields,
+                        const std::set<std::string>& columns, const char* name,
+                        std::optional<std::string> value) {
+  if (!columns.contains(name)) {
+    if (value.has_value()) {
+      throw std::runtime_error(std::string("The local database does not support ") + name);
+    }
+    return;
+  }
+  if (value.has_value()) fields.emplace_back(name, std::move(*value));
+  else fields.emplace_back(name, std::monostate{});
+}
+
+std::vector<SqlField> server_fields(const nlohmann::json& server,
+                                   const std::set<std::string>& columns,
+                                   bool include_id) {
+  const auto& connection = server.at("connection");
+  const auto& metadata = server.at("metadata");
+  std::vector<SqlField> fields;
+  if (include_id) add_required_field(fields, "id", server.at("id").get<std::string>());
+  add_required_field(fields, "name", server.at("name").get<std::string>());
+  add_required_field(fields, "host", connection.at("host").get<std::string>());
+  add_required_field(fields, "port", static_cast<std::int64_t>(connection.at("port").get<int>()));
+  add_required_field(fields, "username", connection.at("username").get<std::string>());
+  add_required_field(fields, "identity_id",
+                     optional_string(connection, "identityId").has_value()
+                         ? SqlValue(*optional_string(connection, "identityId"))
+                         : SqlValue(std::monostate{}));
+  add_required_field(fields, "group_id",
+                     optional_string(server, "groupId").has_value()
+                         ? SqlValue(*optional_string(server, "groupId"))
+                         : SqlValue(std::monostate{}));
+  add_required_field(fields, "capabilities", server.at("capabilities").dump());
+  add_required_field(fields, "status", server.at("status").get<std::string>());
+  add_required_field(fields, "environment", metadata.at("environment").get<std::string>());
+  add_optional_field(fields, columns, "region", optional_string(metadata, "region"));
+  add_optional_field(fields, columns, "hostname", optional_string(metadata, "hostname"));
+  add_optional_field(fields, columns, "os", optional_string(metadata, "os"));
+  add_optional_field(fields, columns, "tags", optional_json_text(metadata, "tags"));
+  add_optional_field(fields, columns, "workspace_ids",
+                     optional_json_text(metadata, "workspaceIds"));
+
+  const auto authority = connection.find("hostCertificateAuthority");
+  const bool has_authority = authority != connection.end() && !authority->is_null();
+  std::optional<std::string> ca_public_key;
+  std::optional<std::string> principals;
+  std::optional<std::string> krl_path;
+  std::optional<std::string> krl_url;
+  std::optional<std::string> krl_signers;
+  if (has_authority) {
+    ca_public_key = authority->at("caPublicKey").get<std::string>();
+    principals = authority->at("principals").dump();
+    krl_path = optional_string(*authority, "revocationListPath");
+    krl_url = optional_string(*authority, "revocationListUrl");
+    if (authority->contains("revocationListSigners") &&
+        !authority->at("revocationListSigners").empty()) {
+      krl_signers = authority->at("revocationListSigners").dump();
+    }
+  }
+  add_optional_field(fields, columns, "host_ca_public_key", std::move(ca_public_key));
+  add_optional_field(fields, columns, "host_principals", std::move(principals));
+  add_optional_field(fields, columns, "host_krl_path", std::move(krl_path));
+  add_optional_field(fields, columns, "host_krl_url", std::move(krl_url));
+  add_optional_field(fields, columns, "host_krl_signers", std::move(krl_signers));
+
+  add_required_field(fields, "created_at", server.at("createdAt").get<std::string>());
+  add_required_field(fields, "updated_at", server.at("updatedAt").get<std::string>());
+  return fields;
+}
+
+void bind_sql_value(sqlite3* connection, sqlite3_stmt* statement, int index,
+                    const SqlValue& value) {
+  if (std::holds_alternative<std::monostate>(value)) {
+    if (sqlite3_bind_null(statement, index) != SQLITE_OK) {
+      throw std::runtime_error(sqlite3_errmsg(connection));
+    }
+    return;
+  }
+  if (const auto* integer = std::get_if<std::int64_t>(&value)) {
+    if (sqlite3_bind_int64(statement, index, *integer) != SQLITE_OK) {
+      throw std::runtime_error(sqlite3_errmsg(connection));
+    }
+    return;
+  }
+  bind_text(connection, statement, index, std::get<std::string>(value));
+}
+
+void write_server_row(sqlite3* connection, const nlohmann::json& server,
+                      bool insert) {
+  const auto columns = table_columns(connection, "servers");
+  auto fields = server_fields(server, columns, insert);
+  std::string sql;
+  if (insert) {
+    sql = "INSERT INTO servers (";
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+      if (index != 0) sql += ", ";
+      sql += fields[index].first;
+    }
+    sql += ") VALUES (";
+  } else {
+    sql = "UPDATE servers SET ";
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+      if (index != 0) sql += ", ";
+      sql += fields[index].first + " = ?" + std::to_string(index + 1);
+    }
+    sql += " WHERE id = ?" + std::to_string(fields.size() + 1);
+  }
+  if (insert) {
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+      if (index != 0) sql += ", ";
+      sql += "?" + std::to_string(index + 1);
+    }
+    sql += ")";
+  }
+  Statement statement(connection, sql.c_str());
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    bind_sql_value(connection, statement.get(), static_cast<int>(index + 1),
+                   fields[index].second);
+  }
+  if (!insert) {
+    bind_text(connection, statement.get(), static_cast<int>(fields.size() + 1),
+              server.at("id").get<std::string>());
+  }
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+  if (!insert && sqlite3_changes(connection) == 0) {
+    throw std::runtime_error("Server was not found");
+  }
+}
+
+void insert_identity_row(sqlite3* connection, const nlohmann::json& identity) {
+  const auto columns = table_columns(connection, "identities");
+  std::vector<SqlField> fields;
+  add_required_field(fields, "id", identity.at("id").get<std::string>());
+  add_required_field(fields, "label", identity.at("label").get<std::string>());
+  add_required_field(fields, "method", identity.at("method").get<std::string>());
+  add_required_field(fields, "credential_ref", identity.at("credentialRef").get<std::string>());
+  add_optional_field(fields, columns, "passphrase_ref",
+                     optional_string(identity, "passphraseRef"));
+  add_optional_field(fields, columns, "private_key_path",
+                     optional_string(identity, "privateKeyPath"));
+  add_optional_field(fields, columns, "certificate_path",
+                     optional_string(identity, "certificatePath"));
+  add_required_field(fields, "created_at", identity.at("createdAt").get<std::string>());
+
+  std::string sql = "INSERT INTO identities (";
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    if (index != 0) sql += ", ";
+    sql += fields[index].first;
+  }
+  sql += ") VALUES (";
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    if (index != 0) sql += ", ";
+    sql += "?" + std::to_string(index + 1);
+  }
+  sql += ")";
+  Statement statement(connection, sql.c_str());
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    bind_sql_value(connection, statement.get(), static_cast<int>(index + 1),
+                   fields[index].second);
+  }
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
+void attach_identity(sqlite3* connection, const std::string& server_id,
+                     const nlohmann::json& server) {
+  const auto identity_id = server.at("connection").value("identityId", std::string());
+  if (identity_id.empty()) return;
+  Statement attach(connection, R"SQL(
+    INSERT OR IGNORE INTO server_identities (server_id, identity_id)
+    VALUES (?1, ?2)
+  )SQL");
+  bind_text(connection, attach.get(), 1, server_id);
+  bind_text(connection, attach.get(), 2, identity_id);
+  if (sqlite3_step(attach.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
+void record_server_activity(sqlite3* connection, const std::string& id,
+                            const std::string& server_id, const char* title,
+                            const std::string& timestamp) {
+  Statement activity(connection, R"SQL(
+    INSERT INTO activities (
+      id, server_id, workspace_id, type, title, description, source, actor,
+      reason, outcome, trace_id, created_at
+    ) VALUES (?1, ?2, NULL, 'configuration', ?3, NULL, 'user', 'user',
+              '用户在工作区执行操作', 'success', NULL, ?4)
+  )SQL");
+  bind_text(connection, activity.get(), 1, id);
+  bind_text(connection, activity.get(), 2, server_id);
+  bind_text(connection, activity.get(), 3, title);
+  bind_text(connection, activity.get(), 4, timestamp);
+  if (sqlite3_step(activity.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
+std::optional<std::string> read_server_identity(sqlite3* connection,
+                                               const std::string& server_id) {
+  Statement statement(connection, "SELECT identity_id FROM servers WHERE id = ?1");
+  bind_text(connection, statement.get(), 1, server_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  if (sqlite3_column_type(statement.get(), 0) == SQLITE_NULL) return std::nullopt;
+  return column_text(statement.get(), 0);
+}
+
+std::optional<nlohmann::json> read_identity(sqlite3* connection,
+                                            const std::string& identity_id) {
+  const auto columns = table_columns(connection, "identities");
+  const auto select = [&columns](const char* column) {
+    return columns.contains(column) ? std::string(column)
+                                    : std::string("NULL AS ") + column;
+  };
+  const auto sql = std::string("SELECT id, label, method, credential_ref, ") +
+                   select("passphrase_ref") + ", " + select("private_key_path") +
+                   ", " + select("certificate_path") +
+                   ", created_at FROM identities WHERE id = ?1";
+  Statement statement(connection, sql.c_str());
+  bind_text(connection, statement.get(), 1, identity_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  nlohmann::json identity = {
+      {"id", column_text(statement.get(), 0)},
+      {"label", column_text(statement.get(), 1)},
+      {"method", column_text(statement.get(), 2)},
+      {"credentialRef", column_text(statement.get(), 3)},
+      {"createdAt", column_text(statement.get(), 7)},
+  };
+  add_optional_text(identity, "passphraseRef", statement.get(), 4);
+  add_optional_text(identity, "privateKeyPath", statement.get(), 5);
+  add_optional_text(identity, "certificatePath", statement.get(), 6);
+  return identity;
+}
+
 }  // namespace
 
 DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
@@ -317,6 +592,11 @@ DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
 
 DesktopDatabase::~DesktopDatabase() {
   if (connection_ != nullptr) sqlite3_close_v2(connection_);
+}
+
+bool DesktopDatabase::is_available() const {
+  std::lock_guard lock(mutex_);
+  return connection_ != nullptr;
 }
 
 nlohmann::json DesktopDatabase::list_servers() const {
@@ -415,6 +695,181 @@ nlohmann::json DesktopDatabase::list_servers() const {
     servers.push_back(std::move(server));
   }
   return {{"servers", std::move(servers)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_identity(
+    const std::string& identity_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local identity database is unavailable");
+  return read_identity(connection_, identity_id);
+}
+
+void DesktopDatabase::add_server(
+    const nlohmann::json& server,
+    const std::optional<nlohmann::json>& new_identity,
+    const std::string& activity_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local server database is unavailable");
+  Transaction transaction(connection_);
+  if (new_identity.has_value()) insert_identity_row(connection_, *new_identity);
+  write_server_row(connection_, server, true);
+  const auto identity_id = server.at("connection").value("identityId", std::string());
+  if (!identity_id.empty() && !read_identity(connection_, identity_id).has_value()) {
+    throw std::runtime_error("The selected SSH identity was not found");
+  }
+  attach_identity(connection_, server.at("id").get<std::string>(), server);
+  record_server_activity(connection_, activity_id,
+                         server.at("id").get<std::string>(), "已添加服务器",
+                         server.at("updatedAt").get<std::string>());
+  transaction.commit();
+}
+
+std::optional<std::string> DesktopDatabase::update_server(
+    const nlohmann::json& server,
+    const std::optional<nlohmann::json>& new_identity,
+    const std::string& activity_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local server database is unavailable");
+  const auto server_id = server.at("id").get<std::string>();
+  Transaction transaction(connection_);
+  const auto old_identity_id = read_server_identity(connection_, server_id);
+  if (!old_identity_id.has_value()) {
+    Statement exists(connection_, "SELECT 1 FROM servers WHERE id = ?1");
+    bind_text(connection_, exists.get(), 1, server_id);
+    const auto result = sqlite3_step(exists.get());
+    if (result == SQLITE_DONE) throw std::runtime_error("Server was not found");
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (new_identity.has_value()) insert_identity_row(connection_, *new_identity);
+  write_server_row(connection_, server, false);
+  const auto new_identity_id = server.at("connection").value("identityId", std::string());
+  if (!new_identity_id.empty() && !read_identity(connection_, new_identity_id).has_value()) {
+    throw std::runtime_error("The selected SSH identity was not found");
+  }
+  attach_identity(connection_, server_id, server);
+  if (old_identity_id.has_value() && *old_identity_id != new_identity_id) {
+    Statement detach(connection_, R"SQL(
+      DELETE FROM server_identities WHERE server_id = ?1 AND identity_id = ?2
+    )SQL");
+    bind_text(connection_, detach.get(), 1, server_id);
+    bind_text(connection_, detach.get(), 2, *old_identity_id);
+    if (sqlite3_step(detach.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  record_server_activity(connection_, activity_id, server_id, "已更新服务器配置",
+                         server.at("updatedAt").get<std::string>());
+  transaction.commit();
+  if (old_identity_id.has_value() && *old_identity_id != new_identity_id) {
+    return old_identity_id;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> DesktopDatabase::delete_server(
+    const std::string& server_id, const std::string& activity_id,
+    const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local server database is unavailable");
+  Transaction transaction(connection_);
+  const auto identity_id = read_server_identity(connection_, server_id);
+  Statement remove(connection_, "DELETE FROM servers WHERE id = ?1");
+  bind_text(connection_, remove.get(), 1, server_id);
+  if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Server was not found");
+  record_server_activity(connection_, activity_id, server_id, "已删除服务器", timestamp);
+  transaction.commit();
+  return identity_id;
+}
+
+std::vector<std::string> DesktopDatabase::delete_identity_if_unshared(
+    const std::string& identity_id, const std::string& except_server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local identity database is unavailable");
+  Transaction transaction(connection_);
+  Statement shared(connection_, R"SQL(
+    SELECT EXISTS(
+      SELECT 1 FROM server_identities
+       WHERE identity_id = ?1 AND server_id <> ?2
+      UNION ALL
+      SELECT 1 FROM servers WHERE identity_id = ?1 AND id <> ?2
+    )
+  )SQL");
+  bind_text(connection_, shared.get(), 1, identity_id);
+  bind_text(connection_, shared.get(), 2, except_server_id);
+  const auto shared_result = sqlite3_step(shared.get());
+  if (shared_result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_column_int(shared.get(), 0) != 0) {
+    transaction.commit();
+    return {};
+  }
+  const auto identity = read_identity(connection_, identity_id);
+  if (!identity.has_value()) {
+    transaction.commit();
+    return {};
+  }
+  Statement remove(connection_, "DELETE FROM identities WHERE id = ?1");
+  bind_text(connection_, remove.get(), 1, identity_id);
+  if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  transaction.commit();
+
+  std::vector<std::string> references;
+  const auto credential_ref = identity->at("credentialRef").get<std::string>();
+  if (!credential_ref.empty()) references.push_back(credential_ref);
+  if (identity->contains("passphraseRef")) {
+    const auto passphrase_ref = identity->at("passphraseRef").get<std::string>();
+    if (!passphrase_ref.empty()) references.push_back(passphrase_ref);
+  }
+  return references;
+}
+
+void DesktopDatabase::queue_credential_cleanup(const std::string& reference,
+                                               const std::string& error,
+                                               const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local credential database is unavailable");
+  Statement enqueue(connection_, R"SQL(
+    INSERT INTO credential_cleanup_queue (reference, created_at, attempts, last_error)
+    VALUES (?1, ?2, 1, ?3)
+    ON CONFLICT(reference) DO UPDATE SET
+      attempts = credential_cleanup_queue.attempts + 1,
+      last_error = excluded.last_error
+  )SQL");
+  bind_text(connection_, enqueue.get(), 1, reference);
+  bind_text(connection_, enqueue.get(), 2, timestamp);
+  bind_text(connection_, enqueue.get(), 3, error);
+  if (sqlite3_step(enqueue.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::vector<std::string> DesktopDatabase::credential_cleanup_references() const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local credential database is unavailable");
+  Statement rows(connection_,
+                 "SELECT reference FROM credential_cleanup_queue ORDER BY created_at, reference");
+  std::vector<std::string> references;
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    references.emplace_back(column_text(rows.get(), 0));
+  }
+  return references;
+}
+
+void DesktopDatabase::clear_credential_cleanup(const std::string& reference) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local credential database is unavailable");
+  Statement remove(connection_, "DELETE FROM credential_cleanup_queue WHERE reference = ?1");
+  bind_text(connection_, remove.get(), 1, reference);
+  if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
 }
 
 nlohmann::json DesktopDatabase::list_workspaces() const {

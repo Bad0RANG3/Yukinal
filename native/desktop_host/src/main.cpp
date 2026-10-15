@@ -9,6 +9,7 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -169,11 +170,12 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
     if (request == nullptr || std::char_traits<char>::length(request) > 24 * 1024 * 1024) {
       reply = {{"code", "INVALID_REQUEST"}, {"message", "Desktop IPC request is invalid"}};
     } else {
-      const auto arguments = nlohmann::json::parse(request);
+      auto arguments = nlohmann::json::parse(request);
       if (!arguments.is_array() || arguments.size() != 2 || !arguments[0].is_string()) {
         reply = {{"code", "INVALID_REQUEST"}, {"message", "Desktop IPC request is invalid"}};
       } else {
-        const auto result = context.router.invoke(arguments[0].get<std::string>(), arguments[1]);
+        const auto result = context.router.invoke(arguments[0].get<std::string>(),
+                                                  std::move(arguments[1]));
         ok = result.ok;
         reply = result.value;
       }

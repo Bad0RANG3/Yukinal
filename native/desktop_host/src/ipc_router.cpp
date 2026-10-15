@@ -1,11 +1,16 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+#include "host_key.hpp"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <initializer_list>
 #include <regex>
@@ -259,6 +264,227 @@ bool valid_server_id(const std::string& value) {
   return value.size() <= 256 && std::regex_match(value, pattern);
 }
 
+bool valid_auth_secret(const nlohmann::json& auth, const char* field,
+                       size_t max_characters, bool required) {
+  if (!auth.contains(field)) return !required;
+  if (!auth.at(field).is_string()) return false;
+  const auto& value = auth.at(field).get_ref<const std::string&>();
+  const auto length = utf8_character_count(value);
+  return length > 0 && length <= max_characters;
+}
+
+bool validate_authentication(const nlohmann::json& auth) {
+  if (!auth.is_object() || !auth.contains("method") || !auth.at("method").is_string()) {
+    return false;
+  }
+  const auto method = auth.at("method").get<std::string>();
+  if (method == "password") {
+    return only_fields(auth, {"method", "password"}, {"method", "password"}) &&
+           valid_auth_secret(auth, "password", 4'096, true);
+  }
+  if (method == "privateKey") {
+    return only_fields(auth, {"method", "privateKeyPem", "passphrase"},
+                       {"method", "privateKeyPem"}) &&
+           valid_auth_secret(auth, "privateKeyPem", 1'000'000, true) &&
+           valid_auth_secret(auth, "passphrase", 4'096, false);
+  }
+  if (method == "certificate") {
+    std::string certificate_path;
+    if (!only_fields(auth,
+                     {"method", "privateKeyPem", "passphrase", "certificatePath", "privateKeyPath"},
+                     {"method", "privateKeyPem", "certificatePath"}) ||
+        !valid_auth_secret(auth, "privateKeyPem", 1'000'000, true) ||
+        !valid_auth_secret(auth, "passphrase", 4'096, false)) return false;
+    nlohmann::json path_value = {{"path", auth.at("certificatePath")}};
+    if (!valid_request_text(path_value, "path", 4'096, true, certificate_path)) return false;
+    if (auth.contains("privateKeyPath")) {
+      nlohmann::json private_path = {{"path", auth.at("privateKeyPath")}};
+      std::string normalized;
+      if (!valid_request_text(private_path, "path", 4'096, true, normalized)) return false;
+    }
+    return true;
+  }
+  if (method == "agent") {
+    return only_fields(auth, {"method"}, {"method"});
+  }
+  if (method == "identity") {
+    std::string identity_id;
+    return only_fields(auth, {"method", "identityId"}, {"method", "identityId"}) &&
+           valid_request_text(auth, "identityId", 256, true, identity_id);
+  }
+  return false;
+}
+
+bool normalize_host_certificate_authority(const nlohmann::json& input,
+                                          nlohmann::json& output) {
+  if (!input.is_object() ||
+      !only_fields(input,
+                   {"caPublicKey", "principals", "revocationListPath",
+                    "revocationListUrl", "revocationListSigners"},
+                   {"caPublicKey", "principals"})) return false;
+  nlohmann::json ca_public_key_value = {{"value", input.at("caPublicKey")}};
+  std::string ca_public_key;
+  if (!valid_request_text(ca_public_key_value, "value", 16'384, true, ca_public_key) ||
+      has_control_characters(ca_public_key)) return false;
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (!yukinal::ssh_service::detail::valid_host_ca_public_key(ca_public_key)) return false;
+#else
+  if (!ca_public_key.starts_with("ssh-") && !ca_public_key.starts_with("ecdsa-") &&
+      !ca_public_key.starts_with("sk-")) return false;
+#endif
+
+  const auto& principals = input.at("principals");
+  if (!principals.is_array() || principals.empty() || principals.size() > 32) return false;
+  nlohmann::json normalized_principals = nlohmann::json::array();
+  for (const auto& value : principals) {
+    if (!value.is_string()) return false;
+    nlohmann::json principal_value = {{"value", value}};
+    std::string principal;
+    if (!valid_request_text(principal_value, "value", 253, true, principal) ||
+        has_control_characters(principal)) return false;
+    normalized_principals.push_back(std::move(principal));
+  }
+
+  output = {{"caPublicKey", std::move(ca_public_key)},
+            {"principals", std::move(normalized_principals)}};
+  for (const auto& item : {std::pair<const char*, size_t>{"revocationListPath", 4'096},
+                           std::pair<const char*, size_t>{"revocationListUrl", 2'048}}) {
+    if (!input.contains(item.first)) continue;
+    nlohmann::json value = {{"value", input.at(item.first)}};
+    std::string normalized;
+    if (!valid_request_text(value, "value", item.second, true, normalized) ||
+        has_control_characters(normalized)) return false;
+    if (std::string_view(item.first) == "revocationListPath" &&
+        !std::filesystem::path(normalized).is_absolute()) return false;
+    output[item.first] = std::move(normalized);
+  }
+  if (output.contains("revocationListPath") && output.contains("revocationListUrl")) return false;
+
+  if (input.contains("revocationListSigners")) {
+    const auto& signers = input.at("revocationListSigners");
+    if (!signers.is_array() || signers.size() > 16) return false;
+    std::set<std::string> distinct;
+    nlohmann::json normalized_signers = nlohmann::json::array();
+    for (const auto& value : signers) {
+      if (!value.is_string()) return false;
+      nlohmann::json signer_value = {{"value", value}};
+      std::string signer;
+      if (!valid_request_text(signer_value, "value", 16'384, true, signer) ||
+          has_control_characters(signer) || !distinct.insert(signer).second) return false;
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+      if (!yukinal::ssh_service::detail::valid_host_ca_public_key(signer)) return false;
+#else
+      if (!signer.starts_with("ssh-") && !signer.starts_with("ecdsa-") &&
+          !signer.starts_with("sk-")) return false;
+#endif
+      normalized_signers.push_back(std::move(signer));
+    }
+    if (!normalized_signers.empty()) output["revocationListSigners"] = std::move(normalized_signers);
+  }
+  return true;
+}
+
+bool normalize_server_input(const std::string& method, const nlohmann::json& params,
+                            nlohmann::json& output) {
+  const bool add = method == "server_add";
+  const std::set<std::string> add_allowed = {
+      "name", "host", "port", "username", "environment", "groupId",
+      "hostCertificateAuthority", "authentication"};
+  const std::set<std::string> update_allowed = {
+      "serverId", "name", "host", "port", "username", "environment", "groupId",
+      "hostCertificateAuthority", "clearHostCertificateAuthority", "authentication"};
+  const std::set<std::string> required = add
+      ? std::set<std::string>{"name", "host", "username", "environment", "authentication"}
+      : std::set<std::string>{"serverId", "name", "host", "username", "environment"};
+  if (!only_fields(params, add ? add_allowed : update_allowed, required)) return false;
+
+  std::string name;
+  std::string host;
+  std::string username;
+  if (!valid_request_text(params, "name", 256, true, name) ||
+      !valid_request_text(params, "host", 256, true, host) ||
+      !valid_request_text(params, "username", 256, true, username)) return false;
+  int port = 22;
+  if (params.contains("port") &&
+      !valid_integer_range(params.at("port"), 1, 65'535, port)) return false;
+  if (!params.at("environment").is_string() ||
+      !is_one_of(params.at("environment").get<std::string>(),
+                 {"local", "development", "staging", "production", "unknown"})) return false;
+
+  output = {{"name", std::move(name)}, {"host", std::move(host)},
+            {"port", port}, {"username", std::move(username)},
+            {"environment", params.at("environment")}};
+  if (params.contains("serverId")) {
+    std::string server_id;
+    if (!valid_request_text(params, "serverId", 256, true, server_id) ||
+        !valid_server_id(server_id)) return false;
+    output["serverId"] = std::move(server_id);
+  }
+  if (params.contains("groupId")) {
+    std::string group_id;
+    if (!valid_request_text(params, "groupId", 256, false, group_id)) return false;
+    output["groupId"] = std::move(group_id);
+  }
+  if (params.contains("hostCertificateAuthority")) {
+    nlohmann::json authority;
+    if (!normalize_host_certificate_authority(params.at("hostCertificateAuthority"), authority)) return false;
+    output["hostCertificateAuthority"] = std::move(authority);
+  }
+  if (params.contains("clearHostCertificateAuthority")) {
+    if (!params.at("clearHostCertificateAuthority").is_boolean()) return false;
+    output["clearHostCertificateAuthority"] = params.at("clearHostCertificateAuthority");
+    if (output.at("clearHostCertificateAuthority").get<bool>() &&
+        output.contains("hostCertificateAuthority")) return false;
+  }
+  if (params.contains("authentication")) {
+    if (!validate_authentication(params.at("authentication"))) return false;
+    output["authentication"] = params.at("authentication");
+  }
+  return true;
+}
+
+bool clean_credential_references(DesktopDatabase* database,
+                                 const DesktopCredentialStore& credentials,
+                                 const std::vector<std::string>& references,
+                                 std::string& error) {
+  bool all_recovered = true;
+  for (const auto& raw_reference : references) {
+    try {
+      const auto reference = CredentialReference::parse(raw_reference);
+      credentials.erase(reference);
+      database->clear_credential_cleanup(raw_reference);
+      continue;
+    } catch (const std::exception& cleanup_error) {
+      try {
+        database->queue_credential_cleanup(raw_reference, cleanup_error.what(), iso8601_now());
+      } catch (...) {
+        all_recovered = false;
+        error = "Credential cleanup failed and could not be queued for retry";
+      }
+    }
+  }
+  return all_recovered;
+}
+
+class IpcSecretParamScrubber {
+ public:
+  explicit IpcSecretParamScrubber(nlohmann::json& params) : params_(params) {}
+  ~IpcSecretParamScrubber() {
+    if (!params_.contains("authentication") ||
+        !params_.at("authentication").is_object()) return;
+    auto& authentication = params_["authentication"];
+    for (const auto* field : {"password", "privateKeyPem", "passphrase"}) {
+      if (!authentication.contains(field) || !authentication.at(field).is_string()) continue;
+      auto& value = authentication[field].get_ref<std::string&>();
+      volatile char* bytes = value.data();
+      for (std::size_t index = 0; index < value.size(); ++index) bytes[index] = 0;
+    }
+  }
+
+ private:
+  nlohmann::json& params_;
+};
+
 #ifdef _WIN32
 std::wstring utf8_to_wide(const std::string& value) {
   const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -276,7 +502,17 @@ std::wstring utf8_to_wide(const std::string& value) {
 
 }  // namespace
 
-IpcReply IpcRouter::invoke(const std::string& method, const nlohmann::json& params) {
+IpcRouter::IpcRouter(DesktopDatabase* database) : database_(database) {
+  if (database_ == nullptr) return;
+  try {
+    const auto pending = database_->credential_cleanup_references();
+    std::string ignored_error;
+    (void)clean_credential_references(database_, credentials_, pending, ignored_error);
+  } catch (...) {
+  }
+}
+
+IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   const bool internal_event_method =
       method == "__events.subscribe" || method == "__events.unsubscribe";
   if (!internal_event_method && !valid_method_name(method)) {
@@ -284,6 +520,11 @@ IpcReply IpcRouter::invoke(const std::string& method, const nlohmann::json& para
   }
   if (!params.is_object()) {
     return failure("INVALID_PARAMS", "Desktop IPC parameters must be an object");
+  }
+
+  if (method == "server_add" || method == "server_update" || method == "server_delete") {
+    IpcSecretParamScrubber scrubber(params);
+    return server_command(method, params);
   }
 
   if (method == "core_ping") {
@@ -672,6 +913,218 @@ IpcReply IpcRouter::invoke(const std::string& method, const nlohmann::json& para
 
   return failure("NOT_IMPLEMENTED",
                  "This desktop command has not yet migrated to the C++ host: " + method);
+}
+
+IpcReply IpcRouter::server_command(const std::string& method,
+                                   const nlohmann::json& params) {
+  if (database_ == nullptr) {
+    return failure("STORAGE_UNAVAILABLE", "The local server database is unavailable");
+  }
+  if (!database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+
+  if (method == "server_delete") {
+    if (!exact_string_fields(params, {"serverId"})) {
+      return failure("INVALID_PARAMS", "server_delete requires exactly serverId");
+    }
+    const auto server_id = params.at("serverId").get<std::string>();
+    if (!valid_server_id(server_id)) {
+      return failure("INVALID_PARAMS", "server_delete serverId is invalid");
+    }
+    std::optional<std::string> identity_id;
+    try {
+      identity_id = database_->delete_server(server_id, next_id("act"), iso8601_now());
+    } catch (const std::exception& error) {
+      if (std::string_view(error.what()) == "Server was not found") {
+        return failure("NOT_FOUND", "The server was not found");
+      }
+      return failure("STORAGE_ERROR", "The local server database could not delete the server");
+    }
+    if (identity_id.has_value() && !identity_id->empty()) {
+      try {
+        const auto references = database_->delete_identity_if_unshared(*identity_id, server_id);
+        std::string cleanup_error;
+        if (!clean_credential_references(database_, credentials_, references, cleanup_error)) {
+          return failure("STORAGE_ERROR", cleanup_error);
+        }
+      } catch (...) {
+        return failure("STORAGE_ERROR", "The server was deleted but its identity could not be reclaimed");
+      }
+    }
+    return {true, {{"deleted", true}}};
+  }
+
+  nlohmann::json normalized;
+  IpcSecretParamScrubber normalized_scrubber(normalized);
+  if (!normalize_server_input(method, params, normalized)) {
+    return failure("INVALID_PARAMS", method + " parameters do not match the server contract");
+  }
+
+  const bool add = method == "server_add";
+  const auto timestamp = iso8601_now();
+  const auto server_id = add ? next_id("srv") : normalized.at("serverId").get<std::string>();
+  nlohmann::json existing_server;
+  if (!add) {
+    try {
+      const auto listed = database_->list_servers();
+      const auto& servers = listed.at("servers");
+      const auto found = std::find_if(servers.begin(), servers.end(), [&server_id](const auto& server) {
+        return server.is_object() && server.value("id", std::string()) == server_id;
+      });
+      if (found == servers.end()) return failure("NOT_FOUND", "The server was not found");
+      existing_server = *found;
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local server database could not read the server");
+    }
+  }
+
+  std::vector<std::string> staged_references;
+  std::optional<nlohmann::json> new_identity;
+  std::string selected_identity_id;
+  const bool authentication_present = normalized.contains("authentication");
+  if (!add && !authentication_present) {
+    selected_identity_id = existing_server.at("connection").value("identityId", std::string());
+  } else {
+    const auto& authentication = normalized.at("authentication");
+    const auto auth_method = authentication.at("method").get<std::string>();
+    if (auth_method == "identity") {
+      selected_identity_id = authentication.at("identityId").get<std::string>();
+      try {
+        if (!database_->get_identity(selected_identity_id).has_value()) {
+          return failure("NOT_FOUND", "The selected SSH identity was not found");
+        }
+      } catch (...) {
+        return failure("STORAGE_ERROR", "The local identity database could not read the identity");
+      }
+    } else {
+      const auto credential_account = add ? server_id : server_id + "-" + next_id("cred");
+      const auto identity_id = next_id("idn");
+      std::string credential_ref;
+      std::optional<std::string> passphrase_ref;
+      try {
+        auto store_secret = [this, &staged_references](const std::string& account,
+                                                      const std::string& value) {
+          Secret secret{std::string_view(value)};
+          auto reference = credentials_.set("ssh", account, secret).to_string();
+          staged_references.push_back(reference);
+          return reference;
+        };
+
+        if (auth_method == "password") {
+          credential_ref = store_secret(
+              credential_account,
+              authentication.at("password").get_ref<const std::string&>());
+        } else if (auth_method == "privateKey" || auth_method == "certificate") {
+          credential_ref = store_secret(
+              credential_account,
+              authentication.at("privateKeyPem").get_ref<const std::string&>());
+          if (authentication.contains("passphrase")) {
+            const auto& passphrase =
+                authentication.at("passphrase").get_ref<const std::string&>();
+            const bool meaningful = std::any_of(
+                passphrase.begin(), passphrase.end(), [](unsigned char character) {
+                  return !std::isspace(character);
+                });
+            if (meaningful) {
+              passphrase_ref = store_secret(credential_account + "-passphrase", passphrase);
+            }
+          }
+        }
+
+        nlohmann::json identity = {
+            {"id", identity_id},
+            {"label", normalized.at("name").get<std::string>() + " (" + server_id + ")"},
+            {"method", auth_method},
+            {"credentialRef", credential_ref},
+            {"createdAt", timestamp},
+        };
+        if (passphrase_ref.has_value()) identity["passphraseRef"] = *passphrase_ref;
+        if (auth_method == "certificate") {
+          identity["certificatePath"] = trim_ascii(
+              authentication.at("certificatePath").get<std::string>());
+          if (authentication.contains("privateKeyPath")) {
+            identity["privateKeyPath"] = trim_ascii(
+                authentication.at("privateKeyPath").get<std::string>());
+          }
+        }
+        new_identity = std::move(identity);
+        selected_identity_id = identity_id;
+      } catch (const std::exception&) {
+        std::string cleanup_error;
+        const bool cleaned = clean_credential_references(
+            database_, credentials_, staged_references, cleanup_error);
+        return failure("CREDENTIAL_ERROR", cleaned
+            ? "The operating system credential store could not save the SSH identity"
+            : "The SSH identity could not be saved or queued for cleanup");
+      }
+    }
+  }
+
+  const auto old_identity_id = add
+      ? std::string()
+      : existing_server.at("connection").value("identityId", std::string());
+  nlohmann::json server;
+  if (add) {
+    server = {
+        {"id", server_id},
+        {"name", normalized.at("name")},
+        {"connection", {{"host", normalized.at("host")},
+                         {"port", normalized.at("port")},
+                         {"username", normalized.at("username")}}},
+        {"capabilities", nlohmann::json::object()},
+        {"status", "disconnected"},
+        {"metadata", {{"environment", normalized.at("environment")}}},
+        {"createdAt", timestamp},
+        {"updatedAt", timestamp},
+    };
+  } else {
+    server = std::move(existing_server);
+    server["name"] = normalized.at("name");
+    server["connection"]["host"] = normalized.at("host");
+    server["connection"]["port"] = normalized.at("port");
+    server["connection"]["username"] = normalized.at("username");
+    server["metadata"]["environment"] = normalized.at("environment");
+    server["status"] = "disconnected";
+    server["updatedAt"] = timestamp;
+    if (!normalized.contains("groupId")) server.erase("groupId");
+  }
+  if (normalized.contains("groupId")) server["groupId"] = normalized.at("groupId");
+  auto& connection = server["connection"];
+  if (selected_identity_id.empty()) connection.erase("identityId");
+  else connection["identityId"] = selected_identity_id;
+  if (normalized.contains("hostCertificateAuthority")) {
+    connection["hostCertificateAuthority"] = normalized.at("hostCertificateAuthority");
+  } else if (normalized.value("clearHostCertificateAuthority", false)) {
+    connection.erase("hostCertificateAuthority");
+  }
+
+  try {
+    if (add) database_->add_server(server, new_identity, next_id("act"));
+    else (void)database_->update_server(server, new_identity, next_id("act"));
+  } catch (const std::exception&) {
+    std::string cleanup_error;
+    const bool cleaned = clean_credential_references(
+        database_, credentials_, staged_references, cleanup_error);
+    return failure("STORAGE_ERROR", cleaned
+        ? "The local database could not save the server"
+        : "The server was not saved and staged credentials could not be queued for cleanup");
+  }
+
+  if (!add && authentication_present) {
+    if (!old_identity_id.empty() && old_identity_id != selected_identity_id) {
+      try {
+        const auto references = database_->delete_identity_if_unshared(old_identity_id, server_id);
+        std::string cleanup_error;
+        if (!clean_credential_references(database_, credentials_, references, cleanup_error)) {
+          return failure("STORAGE_ERROR", cleanup_error);
+        }
+      } catch (...) {
+        return failure("STORAGE_ERROR", "The server was updated but the previous identity could not be reclaimed");
+      }
+    }
+  }
+  return {true, {{"server", std::move(server)}}};
 }
 
 IpcReply IpcRouter::subscribe(const nlohmann::json& params, bool add) {

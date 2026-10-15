@@ -1,5 +1,6 @@
 #pragma once
 
+#include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 
 #include <mutex>
@@ -17,16 +18,19 @@ struct IpcReply {
 
 class IpcRouter {
  public:
-  explicit IpcRouter(DesktopDatabase* database = nullptr) : database_(database) {}
+  explicit IpcRouter(DesktopDatabase* database = nullptr);
 
-  IpcReply invoke(const std::string& method, const nlohmann::json& params);
+  IpcReply invoke(const std::string& method, nlohmann::json params);
   [[nodiscard]] std::set<std::string> subscribers(const std::string& event) const;
 
  private:
   IpcReply subscribe(const nlohmann::json& params, bool add);
+  IpcReply server_command(const std::string& method,
+                          const nlohmann::json& params);
 
   mutable std::mutex mutex_;
   DesktopDatabase* database_;
+  DesktopCredentialStore credentials_;
   std::unordered_map<std::string, std::set<std::string>> subscriptions_;
 };
 

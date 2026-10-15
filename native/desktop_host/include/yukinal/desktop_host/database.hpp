@@ -6,6 +6,7 @@
 #include <optional>
 #include <sqlite3.h>
 #include <string>
+#include <vector>
 
 namespace yukinal::desktop_host {
 
@@ -17,6 +18,26 @@ class DesktopDatabase {
   DesktopDatabase& operator=(const DesktopDatabase&) = delete;
 
   [[nodiscard]] nlohmann::json list_servers() const;
+  [[nodiscard]] bool is_available() const;
+  [[nodiscard]] std::optional<nlohmann::json> get_identity(
+      const std::string& identity_id) const;
+  void add_server(const nlohmann::json& server,
+                  const std::optional<nlohmann::json>& new_identity,
+                  const std::string& activity_id) const;
+  [[nodiscard]] std::optional<std::string> update_server(
+      const nlohmann::json& server,
+      const std::optional<nlohmann::json>& new_identity,
+      const std::string& activity_id) const;
+  [[nodiscard]] std::optional<std::string> delete_server(
+      const std::string& server_id, const std::string& activity_id,
+      const std::string& timestamp) const;
+  [[nodiscard]] std::vector<std::string> delete_identity_if_unshared(
+      const std::string& identity_id, const std::string& except_server_id) const;
+  void queue_credential_cleanup(const std::string& reference,
+                                const std::string& error,
+                                const std::string& timestamp) const;
+  [[nodiscard]] std::vector<std::string> credential_cleanup_references() const;
+  void clear_credential_cleanup(const std::string& reference) const;
   [[nodiscard]] nlohmann::json list_workspaces() const;
   [[nodiscard]] nlohmann::json list_activities(
       const std::optional<std::string>& server_id, int limit) const;

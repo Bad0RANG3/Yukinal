@@ -383,6 +383,13 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     PUBLIC nlohmann_json::nlohmann_json SQLite::SQLite3
   )
   target_link_libraries(yukinal_desktop_host_core PRIVATE Threads::Threads)
+  if(YUKINAL_BUILD_SSH_SERVICE)
+    target_include_directories(yukinal_desktop_host_core PRIVATE src)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE yukinal_ssh_core)
+    target_compile_definitions(yukinal_desktop_host_core PRIVATE
+      YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+    )
+  endif()
   target_compile_definitions(yukinal_desktop_host_core PUBLIC
     YUKINAL_DESKTOP_VERSION="${YUKINAL_DESKTOP_VERSION}"
   )
