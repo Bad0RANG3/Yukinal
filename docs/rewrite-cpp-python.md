@@ -33,10 +33,10 @@
 > HTTP/HTTPS CONNECT and SOCKS5/SOCKS5H routes; the probe reports the certified public-key fingerprint without
 > treating it as trusted. Unsupported host-key modes retain the Rust compatibility
 > path. The desktop file browser fails explicitly when its target is outside C++ SFTP support.
-> Manual transfers use bounded C++ SFTP streams on supported direct, HTTP/HTTPS CONNECT,
-> or SOCKS5/SOCKS5H routes with either a confirmed pin or supported host CA. The
-> Rust compatibility path
-> remains for unsupported targets.
+> Manual uploads, downloads, recovery cleanup, and native drag-out use bounded C++ SFTP
+> streams on supported direct, HTTP/HTTPS CONNECT, or SOCKS5/SOCKS5H routes with either
+> a confirmed pin or supported host CA. Unsupported targets fail explicitly instead
+> of running Rust SFTP.
 > Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
@@ -648,6 +648,12 @@ VS 2022 environment was loaded. `cargo check --manifest-path
 apps/desktop/src-tauri/Cargo.toml --lib --locked` passed. The desktop unit-test
 binary linked, but stalled before listing or running tests, including with
 `--list`; the focused CA-route test is not counted as passed.
+
+On 2026-10-15, desktop streaming uploads/downloads, staging recovery cleanup,
+and native drag-out were switched to the existing C++ SFTP service. Their Rust
+SFTP session fallbacks were removed; unsupported targets now fail explicitly.
+The Rust change could not be compiled in this environment because Cargo and
+rustc are unavailable on `PATH`.
 
 On 2026-10-15, production `server.exec` stopped falling back to the Rust SSH
 executor. A target the C++ service cannot represent now fails before consuming

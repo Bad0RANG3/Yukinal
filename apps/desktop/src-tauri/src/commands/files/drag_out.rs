@@ -18,11 +18,9 @@ use tokio::sync::oneshot;
 use tokio::sync::Semaphore;
 use yukinal_filesystem::transfer::{ConflictPolicy, TransferStatus};
 use yukinal_filesystem::RemoteEntryKind;
-use yukinal_ssh::{SftpEntryKind, SshBackend};
 
 use crate::commands::files::transfer::FileTransferState;
 use crate::commands::ssh_service;
-use crate::commands::terminal::ensure_session;
 use crate::commands::EmptyResponse;
 use crate::state::AppState;
 
@@ -162,30 +160,13 @@ pub async fn file_prepare_remote_drag(
         .acquire_owned()
         .await
         .map_err(|_| "native drag preparation is shutting down".to_string())?;
-    let (remote_size, is_regular_file) = if ssh_service::supports_cpp_target(&state, &server_id)? {
-        let stat = ssh_service::sftp_lstat_optional(&app, &state, &server_id, &path)
-            .await?
-            .ok_or_else(|| "remote file no longer exists".to_string())?;
-        (stat.size, stat.kind == RemoteEntryKind::File)
-    } else {
-        ensure_session(&state, &server_id).await?;
-        let session = state
-            .terminals
-            .cached_session(&server_id)
-            .map_err(|error| error.to_string())?;
-        let client = state
-            .ssh
-            .sftp(&session)
-            .await
-            .map_err(|error| error.to_string())?;
-        let stat = state
-            .ssh
-            .sftp_lstat_optional(&client, &path)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "remote file no longer exists".to_string())?;
-        (stat.size, stat.kind == SftpEntryKind::File)
-    };
+    if !ssh_service::supports_cpp_target(&state, &server_id)? {
+        return Err("the selected target is not supported by the C++ SSH service".into());
+    }
+    let stat = ssh_service::sftp_lstat_optional(&app, &state, &server_id, &path)
+        .await?
+        .ok_or_else(|| "remote file no longer exists".to_string())?;
+    let (remote_size, is_regular_file) = (stat.size, stat.kind == RemoteEntryKind::File);
     if !is_regular_file {
         return Err("only regular remote files can be dragged to the desktop".to_string());
     }

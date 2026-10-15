@@ -962,7 +962,7 @@ async fn spawn_sftp_stream_worker(
     String,
 > {
     if !supports_cpp_target(state, server_id)? {
-        return Err("the selected SSH target requires the Rust compatibility path".into());
+        return Err("the selected target is not supported by the C++ SSH service".into());
     }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
@@ -1949,7 +1949,7 @@ async fn run_operation_response(
     parameters: Value,
 ) -> Result<Value, SshServiceFailure> {
     if !supports_cpp_target(state, server_id)? {
-        return Err("the selected SSH target requires the Rust compatibility path".into());
+        return Err("the selected target is not supported by the C++ SSH service".into());
     }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
