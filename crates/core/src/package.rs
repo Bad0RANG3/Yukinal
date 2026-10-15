@@ -6,7 +6,7 @@
 //! command.  The desktop command layer owns SSH I/O and maps failures onto the
 //! host protocol.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::docker::shell_quote;
 
@@ -19,8 +19,8 @@ pub const MAX_PACKAGE_INSPECT_CHARS: usize = 4_096;
 /// Maximum package/version reference length.
 pub const MAX_PACKAGE_REF_CHARS: usize = 128;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PackageInspectResult {
     pub manager: String,
     pub package: String,

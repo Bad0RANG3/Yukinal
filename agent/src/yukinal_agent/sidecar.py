@@ -23,8 +23,13 @@ from .host_tools import HOST_APPROVAL_TOOLS, register_host_tools, register_mcp_c
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import (
+    _parse_docker_logs,
+    _parse_docker_inspect,
+    _parse_docker_ps,
+    _parse_package_inspect,
     _parse_server_logs,
     _parse_service_inventory,
+    _parse_systemd_inspect,
     register_desktop_ssh_tools,
     register_ssh_tools,
 )
@@ -47,6 +52,11 @@ METHODS = {
     "server.snapshot.normalize": True,
     "server.logs.normalize": True,
     "server.services.normalize": True,
+    "docker.ps.normalize": True,
+    "docker.logs.normalize": True,
+    "docker.inspect.normalize": True,
+    "systemd.inspect.normalize": True,
+    "package.inspect.normalize": True,
     "tools.list": True,
     "system.describe": True,
     "agent.run.start": True,
@@ -154,6 +164,16 @@ class PythonSidecar:
                 result = self._normalize_server_logs(params)
             elif method == "server.services.normalize":
                 result = self._normalize_server_services(params)
+            elif method == "docker.ps.normalize":
+                result = self._normalize_docker_ps(params)
+            elif method == "docker.logs.normalize":
+                result = self._normalize_docker_logs(params)
+            elif method == "docker.inspect.normalize":
+                result = self._normalize_docker_inspect(params)
+            elif method == "systemd.inspect.normalize":
+                result = self._normalize_systemd_inspect(params)
+            elif method == "package.inspect.normalize":
+                result = self._normalize_package_inspect(params)
             elif method == "tools.list":
                 _strict_object(params, set())
                 result = {"tools": [self._declaration(spec) for spec in self._registry.list()]}
@@ -669,6 +689,52 @@ class PythonSidecar:
         return _normalize_ssh_inventory(params, _parse_service_inventory, {"name", "state"}, "services")
 
     @staticmethod
+    def _normalize_docker_ps(params: object) -> dict[str, Any]:
+        return _normalize_ssh_parser(
+            params, set(), lambda stdout, _arguments: _parse_docker_ps(stdout)
+        )
+
+    @staticmethod
+    def _normalize_docker_logs(params: object) -> dict[str, Any]:
+        return _normalize_ssh_inventory(
+            params,
+            lambda stdout, arguments: _parse_docker_logs(
+                stdout, arguments["container"], arguments["tail"]
+            ),
+            {"container", "tail"},
+            "docker_logs",
+        )
+
+    @staticmethod
+    def _normalize_docker_inspect(params: object) -> dict[str, Any]:
+        return _normalize_ssh_inventory(
+            params,
+            lambda stdout, _arguments: _parse_docker_inspect(stdout),
+            {"container"},
+            "docker_inspect",
+        )
+
+    @staticmethod
+    def _normalize_systemd_inspect(params: object) -> dict[str, Any]:
+        return _normalize_ssh_inventory(
+            params,
+            lambda stdout, arguments: _parse_systemd_inspect(stdout, arguments["service"]),
+            {"service"},
+            "systemd_inspect",
+        )
+
+    @staticmethod
+    def _normalize_package_inspect(params: object) -> dict[str, Any]:
+        return _normalize_ssh_inventory(
+            params,
+            lambda stdout, arguments: _parse_package_inspect(
+                stdout, arguments["manager"], arguments["package"]
+            ),
+            {"manager", "package"},
+            "package_inspect",
+        )
+
+    @staticmethod
     def _declaration(spec: Any) -> dict[str, Any]:
         return {
             "name": spec.name,
@@ -725,7 +791,71 @@ def _normalize_ssh_inventory(
             or state not in {"running", "stopped", "failed", "unknown"}
         ):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid server.services filters")
+    elif kind == "docker_logs":
+        container = arguments.get("container")
+        tail = arguments.get("tail")
+        if (
+            not isinstance(container, str)
+            or len(container) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container) is None
+            or isinstance(tail, bool)
+            or not isinstance(tail, int)
+            or not 1 <= tail <= 500
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid docker.logs arguments")
+    elif kind == "docker_inspect":
+        container = arguments.get("container")
+        if (
+            not isinstance(container, str)
+            or len(container) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container) is None
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid docker.inspect arguments")
+    elif kind == "systemd_inspect":
+        service = arguments.get("service")
+        if (
+            not isinstance(service, str)
+            or len(service) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*\.service", service) is None
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid systemd.inspect arguments")
+    elif kind == "package_inspect":
+        manager = arguments.get("manager")
+        package = arguments.get("package")
+        if (
+            not isinstance(manager, str)
+            or manager not in {"apt", "dnf"}
+            or not isinstance(package, str)
+            or len(package) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+._:-]*", package) is None
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid package.inspect arguments")
 
+    try:
+        output = parser(stdout, arguments)
+    except ToolCallError as error:
+        return {"ok": False, "code": error.code, "message": str(error)}
+    return {"ok": True, "output": output}
+
+
+def _normalize_ssh_parser(
+    params: object,
+    allowed_arguments: set[str],
+    parser: Callable[[str, dict[str, Any]], Any],
+) -> dict[str, Any]:
+    parsed = _strict_object(params, {"stdout", "arguments"})
+    stdout = parsed.get("stdout")
+    arguments = _strict_object(parsed.get("arguments"), allowed_arguments)
+    if not isinstance(stdout, str) or len(stdout.encode("utf-8")) > 1024 * 1024:
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid SSH command output")
+    return _parser_result(parser, stdout, arguments)
+
+
+def _parser_result(
+    parser: Callable[[str, dict[str, Any]], Any],
+    stdout: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
     try:
         output = parser(stdout, arguments)
     except ToolCallError as error:

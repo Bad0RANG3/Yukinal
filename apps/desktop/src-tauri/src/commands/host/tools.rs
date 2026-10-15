@@ -2014,6 +2014,46 @@ pub(super) async fn docker_ps(
     if exit_code != 0 {
         return Ok(success(json!({ "available": false, "containers": [] })));
     }
+    if cpp_supported {
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "docker.ps.normalize",
+                &stdout,
+                json!({}),
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("docker.ps returned an invalid response");
+            return Ok(failed("execution_failed", message, false, None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized docker.ps output".to_string()
+        })?;
+        let containers = match serde_json::from_value::<Vec<yukinal_database::models::ContainerInfo>>(
+            output,
+        ) {
+            Ok(containers) => containers,
+            Err(_) => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized docker.ps output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(json!({ "available": true, "containers": containers })));
+    }
     Ok(success(json!({
         "available": true,
         "containers": parse_docker_ps(&stdout),
@@ -2120,6 +2160,47 @@ pub(super) async fn docker_logs(
         ));
     }
 
+    if cpp_supported {
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "docker.logs.normalize",
+                &stdout,
+                json!({ "container": input.container.as_str(), "tail": tail }),
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("docker.logs returned an invalid response");
+            return Ok(failed("execution_failed", message, false, None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized docker.logs output".to_string()
+        })?;
+        let parsed = match serde_json::from_value::<DockerLogsResult>(output) {
+            Ok(parsed) if parsed.container == input.container => parsed,
+            _ => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized docker.logs output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(
+            serde_json::to_value(parsed).map_err(|error| error.to_string())?,
+        ));
+    }
+
     let (lines, truncated) = bounded_log_lines(&stdout, tail);
     Ok(success(
         serde_json::to_value(DockerLogsResult {
@@ -2218,6 +2299,48 @@ pub(super) async fn docker_inspect(
                 "exitCode": exit_code,
                 "stderr": truncate_text(&stderr, 1_000),
             })),
+        ));
+    }
+    if cpp_supported {
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "docker.inspect.normalize",
+                &stdout,
+                json!({ "container": input.container.as_str() }),
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("docker.inspect returned an invalid response");
+            return Ok(failed("execution_failed", message, false, None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized docker.inspect output".to_string()
+        })?;
+        let inspected = match serde_json::from_value::<yukinal_core::docker::DockerInspectResult>(
+            output,
+        ) {
+            Ok(inspected) => inspected,
+            Err(_) => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized docker.inspect output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(
+            serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         ));
     }
     let inspected = match parse_docker_inspect(&stdout) {
@@ -2417,6 +2540,49 @@ pub(super) async fn systemd_inspect(
                 "exitCode": exit_code,
                 "stderr": truncate_text(&stderr, 1_000),
             })),
+        ));
+    }
+    if cpp_supported {
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "systemd.inspect.normalize",
+                &stdout,
+                json!({ "service": input.service.as_str() }),
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("systemd.inspect returned an invalid response");
+            return Ok(failed("execution_failed", message, false, None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized systemd.inspect output".to_string()
+        })?;
+        let inspected = match serde_json::from_value::<
+            yukinal_core::service::SystemdInspectResult,
+        >(output)
+        {
+            Ok(inspected) if inspected.service == input.service => inspected,
+            _ => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized systemd.inspect output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(
+            serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         ));
     }
     let inspected = match parse_systemd_inspect(&stdout, &input.service) {
@@ -2631,6 +2797,55 @@ pub(super) async fn package_inspect(
                 "exitCode": exit_code,
                 "stderr": truncate_text(&stderr, 1_000),
             })),
+        ));
+    }
+    if cpp_supported {
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "package.inspect.normalize",
+                &stdout,
+                json!({ "manager": input.manager.as_str(), "package": input.package.as_str() }),
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
+            let mapped_code = if code == "unsupported" { "unsupported" } else { "execution_failed" };
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("package.inspect returned an invalid response");
+            return Ok(failed(mapped_code, message, false, None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized package.inspect output".to_string()
+        })?;
+        let inspected = match serde_json::from_value::<
+            yukinal_core::package::PackageInspectResult,
+        >(output)
+        {
+            Ok(inspected)
+                if inspected.manager == input.manager && inspected.package == input.package =>
+            {
+                inspected
+            }
+            _ => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized package.inspect output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(
+            serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         ));
     }
     match parse_package_inspect(&stdout, &input.manager, &input.package) {

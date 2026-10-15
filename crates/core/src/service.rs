@@ -5,7 +5,7 @@
 //! `.service` unit names are accepted, and every remote command is built from
 //! a shell-quoted value.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::docker::shell_quote;
 
@@ -16,8 +16,8 @@ pub const MAX_SYSTEMD_RESTART_TIMEOUT: usize = 120;
 /// Maximum output accepted by the normalized `systemd.inspect` parser.
 pub const MAX_SYSTEMD_INSPECT_CHARS: usize = 8_192;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SystemdInspectResult {
     pub service: String,
     pub load_state: String,

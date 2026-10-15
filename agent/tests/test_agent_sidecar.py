@@ -185,6 +185,52 @@ class PythonSidecarTests(unittest.TestCase):
         }))
         self.assertEqual(malformed["error"]["code"], RPC_INVALID_PARAMS)
 
+        docker_ps = sidecar.handle(_request(6, "docker.ps.normalize", {
+            "stdout": '{"Names":"web,old","Image":"nginx:1.27","State":"running","Status":"Up"}\n',
+            "arguments": {},
+        }))
+        self.assertEqual(docker_ps["result"]["output"], [{
+            "name": "web", "image": "nginx:1.27", "state": "running",
+            "status": "Up", "restartCount": 0,
+        }])
+
+        docker_logs = sidecar.handle(_request(7, "docker.logs.normalize", {
+            "stdout": "line one\nline two\nline three\n",
+            "arguments": {"container": "web", "tail": 2},
+        }))
+        self.assertEqual(docker_logs["result"]["output"], {
+            "container": "web", "lines": ["line one", "line two"], "truncated": True,
+        })
+
+        systemd = sidecar.handle(_request(8, "systemd.inspect.normalize", {
+            "stdout": "loaded\nactive\nrunning\nNginx web server\n",
+            "arguments": {"service": "nginx.service"},
+        }))
+        self.assertEqual(systemd["result"]["output"], {
+            "service": "nginx.service", "loadState": "loaded", "activeState": "active",
+            "subState": "running", "description": "Nginx web server",
+        })
+
+        package = sidecar.handle(_request(9, "package.inspect.normalize", {
+            "stdout": "installed\t1:1.27.0~bookworm\n",
+            "arguments": {"manager": "apt", "package": "nginx"},
+        }))
+        self.assertEqual(package["result"]["output"], {
+            "manager": "apt", "package": "nginx", "installed": True,
+            "version": "1:1.27.0~bookworm",
+        })
+
+        docker_inspect = sidecar.handle(_request(10, "docker.inspect.normalize", {
+            "stdout": '{"Id":"abc","Name":"/api","Config":{"Image":"nginx"},'
+            '"State":{"Status":"running","StartedAt":"",'
+            '"Health":{"Status":"healthy"}}}\n',
+            "arguments": {"container": "api"},
+        }))
+        self.assertEqual(docker_inspect["result"]["output"], {
+            "id": "abc", "name": "api", "image": "nginx", "state": "running",
+            "status": "running", "restartCount": 0, "health": "healthy",
+        })
+
     def test_approval_rpc_resumes_the_matching_pending_call(self) -> None:
         async def run_approval() -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[Any, ...]], dict[str, Any]]:
             notifications: list[tuple[str, dict[str, Any]]] = []
