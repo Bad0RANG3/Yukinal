@@ -9,8 +9,13 @@ from unittest.mock import AsyncMock, patch
 
 from yukinal_agent import AgentWorkflow, ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
 from yukinal_agent.ssh_tools import (
+    _parse_docker_inspect,
+    _parse_docker_logs,
+    _parse_docker_ps,
+    _parse_package_inspect,
     _parse_server_logs,
     _parse_service_inventory,
+    _parse_systemd_inspect,
     register_desktop_ssh_tools,
     register_ssh_tools,
 )
@@ -118,19 +123,48 @@ class FakeDesktopSshClient:
         )
 
     def docker_ps(self, *arguments: Any) -> Any:
-        return self._result("docker_ps", *arguments)
+        self.calls.append(("docker_ps", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="docker_ps", exit_code=0,
+            stdout='{"Names":"api,api-old","Image":"nginx:1.27","State":"running","Status":"Up 3 hours"}\n',
+            stderr="", duration_ms=3, output_truncated=False,
+        )
 
     def docker_logs(self, *arguments: Any) -> Any:
-        return self._result("docker_logs", *arguments)
+        self.calls.append(("docker_logs", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="docker_logs", exit_code=0,
+            stdout="2026-01-02T03:04:05Z app started\n2026-01-02T03:04:06Z ready\n",
+            stderr="", duration_ms=3, output_truncated=False,
+        )
 
     def docker_inspect(self, *arguments: Any) -> Any:
-        return self._result("docker_inspect", *arguments)
+        self.calls.append(("docker_inspect", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="docker_inspect", exit_code=0,
+            stdout=(
+                '{"Id":"abc123","Name":"/api","Config":{"Image":"nginx:1.27"},'
+                '"State":{"Status":"running","StartedAt":"2026-01-01T00:00:00Z",'
+                '"Health":{"Status":"healthy"}},"RestartCount":2}\n'
+            ),
+            stderr="", duration_ms=3, output_truncated=False,
+        )
 
     def systemd_inspect(self, *arguments: Any) -> Any:
-        return self._result("systemd_inspect", *arguments)
+        self.calls.append(("systemd_inspect", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="systemd_inspect", exit_code=0,
+            stdout="loaded\nactive\nrunning\nNginx web server\n",
+            stderr="", duration_ms=3, output_truncated=False,
+        )
 
     def package_inspect(self, *arguments: Any) -> Any:
-        return self._result("package_inspect", *arguments)
+        self.calls.append(("package_inspect", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="package_inspect", exit_code=0,
+            stdout="installed\t1.27.0-1\n", stderr="", duration_ms=3,
+            output_truncated=False,
+        )
 
     def sftp_read(self, *arguments: Any) -> bytes:
         self.calls.append(("sftp_read", arguments))
@@ -260,6 +294,49 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                             {"text": "2026-01-02T03:04:06Z host app[12]: warning retrying", "level": "warning"},
                         ],
                     })
+                elif tool_name == "docker.ps":
+                    self.assertEqual(result.value, {
+                        "available": True,
+                        "containers": [{
+                            "name": "api",
+                            "image": "nginx:1.27",
+                            "state": "running",
+                            "status": "Up 3 hours",
+                            "restartCount": 0,
+                        }],
+                    })
+                elif tool_name == "docker.logs":
+                    self.assertEqual(result.value, {
+                        "container": "api",
+                        "lines": ["2026-01-02T03:04:05Z app started", "2026-01-02T03:04:06Z ready"],
+                        "truncated": False,
+                    })
+                elif tool_name == "docker.inspect":
+                    self.assertEqual(result.value, {
+                        "id": "abc123",
+                        "name": "api",
+                        "image": "nginx:1.27",
+                        "state": "running",
+                        "status": "running",
+                        "restartCount": 2,
+                        "startedAt": "2026-01-01T00:00:00Z",
+                        "health": "healthy",
+                    })
+                elif tool_name == "systemd.inspect":
+                    self.assertEqual(result.value, {
+                        "service": "nginx.service",
+                        "loadState": "loaded",
+                        "activeState": "active",
+                        "subState": "running",
+                        "description": "Nginx web server",
+                    })
+                elif tool_name == "package.inspect":
+                    self.assertEqual(result.value, {
+                        "manager": "apt",
+                        "package": "nginx",
+                        "installed": True,
+                        "version": "1.27.0-1",
+                    })
                 else:
                     self.assertEqual(result.value["operation"], operation)
                     self.assertEqual(result.value["target_id"], "srv_stage1")
@@ -326,6 +403,41 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             _parse_server_logs(
                 "plain log\n__YUKINAL_SOURCE__=syslog\n", {"unit": "nginx.service"}
             )
+        self.assertEqual(unsupported.exception.code, "unsupported")
+
+    async def test_structured_read_parsers_match_existing_tool_result_shapes(self) -> None:
+        self.assertEqual(
+            _parse_docker_ps(
+                '{"Names":"web,old","Image":"nginx:1.27","State":"running","Status":"Up"}\n'
+                '{"Names":"bad","Image":"","State":"running","Status":"Up"}\nnot-json\n'
+            ),
+            [{
+                "name": "web", "image": "nginx:1.27", "state": "running",
+                "status": "Up", "restartCount": 0,
+            }],
+        )
+        self.assertEqual(
+            _parse_docker_logs("a\nb\nc\n", "api", 2),
+            {"container": "api", "lines": ["a", "b"], "truncated": True},
+        )
+        inspect = _parse_docker_inspect(
+            '{"Id":"abc","Name":"/api","Config":{"Image":"nginx"},'
+            '"State":{"Status":"running","StartedAt":"","Health":{"Status":"healthy"}}}\n'
+        )
+        self.assertEqual(inspect, {
+            "id": "abc", "name": "api", "image": "nginx", "state": "running",
+            "status": "running", "restartCount": 0, "health": "healthy",
+        })
+        self.assertEqual(
+            _parse_systemd_inspect("loaded\ninactive\ndead\n\n", "nginx.service"),
+            {"service": "nginx.service", "loadState": "loaded", "activeState": "inactive", "subState": "dead"},
+        )
+        self.assertEqual(
+            _parse_package_inspect("absent\n", "apt", "nginx"),
+            {"manager": "apt", "package": "nginx", "installed": False},
+        )
+        with self.assertRaises(ToolCallError) as unsupported:
+            _parse_package_inspect("unsupported\n", "dnf", "nginx")
         self.assertEqual(unsupported.exception.code, "unsupported")
 
     async def test_selected_server_is_bound_by_host_context(self) -> None:

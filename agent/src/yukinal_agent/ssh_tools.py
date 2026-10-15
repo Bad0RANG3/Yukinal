@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +17,8 @@ from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _MAX_SERVER_LOG_LINES = 500
+_MAX_DOCKER_PS_CONTAINERS = 200
+_MAX_DOCKER_LOG_LINE_CHARS = 4_000
 
 
 def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None:
@@ -281,6 +286,9 @@ def register_desktop_ssh_tools(
                 result = await asyncio.to_thread(
                     client.docker_ps, target_id, arguments.get("all", False)
                 )
+                if result.exit_code != 0:
+                    return {"available": False, "containers": []}
+                return {"available": True, "containers": _parse_docker_ps(result.stdout)}
             elif operation == "docker_logs":
                 result = await asyncio.to_thread(
                     client.docker_logs,
@@ -288,20 +296,46 @@ def register_desktop_ssh_tools(
                     arguments["container"],
                     arguments.get("tail", 120),
                 )
+                if result.exit_code != 0:
+                    raise ToolCallError(
+                        "execution_failed",
+                        f"could not read logs for container `{arguments['container']}`",
+                    )
+                return _parse_docker_logs(
+                    result.stdout, arguments["container"], arguments.get("tail", 120)
+                )
             elif operation == "docker_inspect":
                 result = await asyncio.to_thread(
                     client.docker_inspect, target_id, arguments["container"]
                 )
+                if result.exit_code != 0:
+                    raise ToolCallError(
+                        "not_found", f"container `{arguments['container']}` was not found"
+                    )
+                return _parse_docker_inspect(result.stdout)
             elif operation == "systemd_inspect":
                 result = await asyncio.to_thread(
                     client.systemd_inspect, target_id, arguments["service"]
                 )
+                if result.exit_code != 0:
+                    raise ToolCallError(
+                        "not_found",
+                        f"systemd service `{arguments['service']}` was not found or could not be inspected",
+                    )
+                return _parse_systemd_inspect(result.stdout, arguments["service"])
             elif operation == "package_inspect":
                 result = await asyncio.to_thread(
                     client.package_inspect,
                     target_id,
                     arguments["manager"],
                     arguments["package"],
+                )
+                if result.exit_code != 0:
+                    raise ToolCallError(
+                        "execution_failed", f"could not inspect package `{arguments['package']}`"
+                    )
+                return _parse_package_inspect(
+                    result.stdout, arguments["manager"], arguments["package"]
                 )
             else:
                 raise ToolCallError("unknown_tool", f"Unsupported C++ SSH operation for {tool_name}")
@@ -460,6 +494,173 @@ def _parse_server_logs(raw: str, arguments: dict[str, Any]) -> dict[str, object]
         if len(lines) == _MAX_SERVER_LOG_LINES:
             break
     return {"source": source, "lines": lines}
+
+
+def _parse_docker_ps(raw: str) -> list[dict[str, object]]:
+    containers: list[dict[str, object]] = []
+    for raw_line in raw.splitlines():
+        try:
+            row = json.loads(raw_line.strip())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict) or any(
+            key in row and not isinstance(row[key], str)
+            for key in ("Names", "Image", "State", "Status")
+        ):
+            continue
+        names, image, state, status = (
+            row.get("Names"), row.get("Image"), row.get("State"), row.get("Status")
+        )
+        if not all(isinstance(value, str) for value in (names, image, state, status)):
+            continue
+        name = names.split(",", 1)[0].strip()
+        image = image.strip()
+        state = state.strip()
+        status = status.strip()
+        if not name or not image or not state or not status:
+            continue
+        containers.append({
+            "name": name,
+            "image": image,
+            "state": state,
+            "status": status,
+            "restartCount": 0,
+        })
+        if len(containers) == _MAX_DOCKER_PS_CONTAINERS:
+            break
+    return containers
+
+
+def _parse_docker_logs(raw: str, container: str, limit: int) -> dict[str, object]:
+    source_lines = raw.splitlines()
+    truncated = len(source_lines) > limit
+    lines: list[str] = []
+    for line in source_lines[:limit]:
+        if len(line) > _MAX_DOCKER_LOG_LINE_CHARS:
+            line = line[:_MAX_DOCKER_LOG_LINE_CHARS] + "…"
+            truncated = True
+        lines.append(line)
+    return {"container": container, "lines": lines, "truncated": truncated}
+
+
+def _parse_docker_inspect(raw: str) -> dict[str, object]:
+    line = next((candidate.strip() for candidate in raw.splitlines() if candidate.strip()), None)
+    if line is None:
+        raise ToolCallError("execution_failed", "docker inspect returned no JSON object")
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        raise ToolCallError("execution_failed", "docker inspect returned invalid JSON") from None
+    if not isinstance(row, dict):
+        raise ToolCallError("execution_failed", "docker inspect returned invalid JSON")
+
+    container_id = _docker_nonempty(row.get("Id"), "Id")
+    raw_name = row.get("Name")
+    if not isinstance(raw_name, str):
+        raise ToolCallError("execution_failed", "docker inspect returned an invalid Name")
+    name = raw_name.lstrip("/")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+        raise ToolCallError("execution_failed", "docker inspect returned an invalid Name")
+
+    config = row.get("Config")
+    image = _docker_nonempty(config.get("Image") if isinstance(config, dict) else None, "Config.Image")
+    state_data = row.get("State")
+    if not isinstance(state_data, dict):
+        raise ToolCallError("execution_failed", "docker inspect omitted State")
+    state = _docker_nonempty(state_data.get("Status"), "State.Status")
+    restart_count = row.get("RestartCount")
+    if restart_count is None:
+        restart_count = 0
+    if (
+        isinstance(restart_count, bool)
+        or not isinstance(restart_count, int)
+        or not 0 <= restart_count <= 4_294_967_295
+    ):
+        raise ToolCallError("execution_failed", "docker inspect returned invalid JSON")
+
+    result: dict[str, object] = {
+        "id": container_id,
+        "name": name,
+        "image": image,
+        "state": state,
+        "status": state,
+        "restartCount": restart_count,
+    }
+    started_at = state_data.get("StartedAt")
+    if started_at is not None:
+        if not isinstance(started_at, str):
+            raise ToolCallError("execution_failed", "docker inspect returned invalid JSON")
+        if started_at.strip():
+            result["startedAt"] = started_at
+    health = state_data.get("Health")
+    if health is not None:
+        if not isinstance(health, dict):
+            raise ToolCallError("execution_failed", "docker inspect returned invalid JSON")
+        health_status = health.get("Status")
+        if health_status is not None:
+            if not isinstance(health_status, str):
+                raise ToolCallError("execution_failed", "docker inspect returned invalid JSON")
+            if health_status.strip():
+                result["health"] = health_status
+    return result
+
+
+def _docker_nonempty(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ToolCallError("execution_failed", f"docker inspect omitted {field}")
+    return value.strip()
+
+
+def _parse_systemd_inspect(raw: str, service: str) -> dict[str, object]:
+    if len(raw) > 8_192:
+        raise ToolCallError("execution_failed", "systemd inspect output exceeded its size limit")
+    values = raw.splitlines()
+    names = ("LoadState", "ActiveState", "SubState")
+    if len(values) < 3:
+        missing = names[len(values)] if len(values) < len(names) else "ActiveState"
+        raise ToolCallError("execution_failed", f"systemd inspect omitted {missing}")
+    required = [value.strip() for value in values[:3]]
+    for value, field in zip(required, names):
+        if not value:
+            raise ToolCallError("execution_failed", f"systemd inspect omitted {field}")
+    if len(values) > 4:
+        raise ToolCallError("execution_failed", "systemd inspect returned unexpected extra fields")
+    description = values[3].strip() if len(values) == 4 else ""
+    result: dict[str, object] = {
+        "service": service,
+        "loadState": required[0],
+        "activeState": required[1],
+        "subState": required[2],
+    }
+    if description:
+        result["description"] = description
+    return result
+
+
+def _parse_package_inspect(raw: str, manager: str, package: str) -> dict[str, object]:
+    if len(raw) > 4_096:
+        raise ToolCallError("execution_failed", "package inspect output exceeded its size limit")
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        raise ToolCallError("execution_failed", "package inspect returned no status")
+    if len(lines) > 1:
+        raise ToolCallError("execution_failed", "package inspect returned unexpected extra fields")
+    line = lines[0]
+    if line == "unsupported":
+        raise ToolCallError("unsupported", f"package manager {manager} is unavailable on the target")
+    if line == "absent":
+        return {"manager": manager, "package": package, "installed": False}
+    version = line.removeprefix("installed\t") if line.startswith("installed\t") else (
+        line.removeprefix("install ok installed\t")
+        if line.startswith("install ok installed\t")
+        else None
+    )
+    if version is None or not version.strip():
+        raise ToolCallError("execution_failed", "package inspect returned an invalid status")
+    version = version.strip()
+    if len(version) > 128 or any(unicodedata.category(character) == "Cc" for character in version):
+        raise ToolCallError("execution_failed", "package inspect returned an invalid version")
+    return {"manager": manager, "package": package, "installed": True, "version": version}
 
 
 def _systemd_service_state(active: str, sub: str) -> str:
