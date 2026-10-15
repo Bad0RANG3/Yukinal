@@ -110,7 +110,7 @@ tools are still being migrated. Tauri builds select the frozen Python sidecar;
 installed-app lifecycle and cross-platform acceptance remain in progress.
 
 When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it
-registers the read-only `ssh.service_status` tool backed by the C++ service. In
+registers the read-only `ssh.service_status` and `ssh.disk_usage` tools backed by the C++ service. Disk usage reads the root filesystem with a fixed command and returns byte counts plus the use percentage. In
 the desktop autoconfiguration path, the Python sidecar resolves the selected
 `host_target.serverId` through Host RPC and starts a one-target C++ service for
 that call. `target_id` is not part of the model-visible input schema. The

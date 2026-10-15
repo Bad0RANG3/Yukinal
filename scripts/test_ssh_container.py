@@ -136,6 +136,22 @@ def main() -> int:
             if result.exit_code != 0 or result.stdout != "active\n":
                 raise RuntimeError(f"unexpected service status result: exit={result.exit_code}, stdout={result.stdout!r}")
 
+            disk_usage = client.disk_usage("test-openssh", timeout_seconds=10)
+            if (
+                disk_usage.exit_code != 0
+                or not disk_usage.stdout.startswith("Filesystem 1024-blocks Used Available Capacity Mounted on\n")
+                or not disk_usage.stdout.rstrip().endswith(" /")
+            ):
+                raise RuntimeError(f"unexpected root disk usage result: {disk_usage.stdout!r}")
+
+            disk_usage = client.disk_usage("test-openssh", timeout_seconds=10)
+            if (
+                disk_usage.exit_code != 0
+                or not disk_usage.stdout.startswith("Filesystem 1024-blocks Used Available Capacity Mounted on\n")
+                or not disk_usage.stdout.rstrip().endswith(" /")
+            ):
+                raise RuntimeError(f"unexpected root disk usage result: {disk_usage.stdout!r}")
+
             transfer_id = uuid.uuid4().hex
             staging_path = f"/home/yukinal/.yukinal-{transfer_id}.part"
             target_path = f"/home/yukinal/yukinal-{transfer_id}.txt"

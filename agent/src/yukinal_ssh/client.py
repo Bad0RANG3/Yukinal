@@ -152,6 +152,10 @@ class SshServiceClient:
             target_id, "service_status", {"service": service}, timeout_seconds
         )
 
+    def disk_usage(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
+        """Read root filesystem capacity using the service's fixed df query."""
+        return self._execute_operation(target_id, "disk_usage", {}, timeout_seconds)
+
     def connection_check(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
         """Verify SSH authentication for the configured target without running a command."""
         return self._execute_operation(target_id, "connection_check", {}, timeout_seconds)

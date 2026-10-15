@@ -48,6 +48,7 @@ export async function runSidecarSmoke(entry, options = {}) {
     "filesystem.restore",
     "server.exec",
     "ssh.service_status",
+    "ssh.disk_usage",
     "investigation.evidence.search",
     "investigation.evidence.compare",
   ];

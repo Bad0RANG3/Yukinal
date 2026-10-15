@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from yukinal_agent import AgentWorkflow, ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
 from yukinal_agent.tools import approval_fingerprint
 from yukinal_agent.ssh_tools import (
+    _parse_disk_usage,
     _parse_docker_inspect,
     _parse_docker_logs,
     _parse_docker_ps,
@@ -202,6 +203,15 @@ class FakeDesktopSshClient:
     def service_status(self, *arguments: Any) -> Any:
         return self._result("service_status", *arguments)
 
+    def disk_usage(self, *arguments: Any) -> Any:
+        self.calls.append(("disk_usage", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="disk_usage", exit_code=0,
+            stdout=("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                    "/dev/root 1000 250 750 25% /\n"),
+            stderr="", duration_ms=3, output_truncated=False,
+        )
+
     def system_snapshot(self, *arguments: Any) -> dict[str, tuple[int, str]]:
         self.calls.append(("system_snapshot", arguments))
         return _SNAPSHOT_OUTPUTS
@@ -363,6 +373,18 @@ class FakeSshServiceClient:
             "output_truncated": False,
         })()
 
+    def disk_usage(self, target_id: str, timeout_seconds: int) -> Any:
+        self.calls.append((target_id, "disk_usage", timeout_seconds))
+        return type("Result", (), {
+            "target_id": target_id,
+            "operation": "disk_usage",
+            "exit_code": 0,
+            "stdout": "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 1000 250 750 25% /\n",
+            "stderr": "",
+            "duration_ms": 12,
+            "output_truncated": False,
+        })()
+
 
 def _context(target_id: str | None, allowed_targets: set[str]) -> ExecutionContext:
     host_target = (
@@ -383,6 +405,31 @@ def _context(target_id: str | None, allowed_targets: set[str]) -> ExecutionConte
 
 
 class SshToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disk_usage_parser_rejects_malformed_or_unbounded_rows(self) -> None:
+        self.assertEqual(
+            _parse_disk_usage(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/root 1000 250 750 25% /\n"
+            ),
+            {
+                "filesystem": "/dev/root",
+                "mount": "/",
+                "total_bytes": 1_024_000,
+                "used_bytes": 256_000,
+                "available_bytes": 768_000,
+                "usage_percent": 25,
+            },
+        )
+        for malformed in (
+            "Filesystem Blocks Used Available Capacity Mounted on\n/dev/root 1000 250 750 25% /\n",
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root -1 250 750 25% /\n",
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 1000 250 750 25% relative\n",
+            "x" * 4097,
+        ):
+            with self.subTest(malformed=malformed[:30]), self.assertRaises(ToolCallError) as raised:
+                _parse_disk_usage(malformed)
+            self.assertEqual(raised.exception.code, "invalid_response")
+
     async def test_desktop_read_tool_falls_back_when_cpp_target_resolution_is_unsupported(self) -> None:
         host = FakeDesktopHost()
         host.request = AsyncMock(side_effect=RuntimeError("unsupported proxy"))  # type: ignore[method-assign]
@@ -411,7 +458,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(MemoryAuditSink())
         direct_names = register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
         self.assertEqual(direct_names, {
-            "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
+            "server.info", "ssh.disk_usage", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
             "filesystem.backup.cleanup", "systemd.restart", "docker.restart", "package.install",
@@ -423,6 +470,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         cases = [
             ("server.info", {}, "system_snapshot", ("srv_stage1",)),
             ("ssh.service_status", {"service": "nginx.service"}, "service_status", ("srv_stage1", "nginx.service", 10)),
+            ("ssh.disk_usage", {}, "disk_usage", ("srv_stage1", 10)),
             ("server.logs", {"sinceSeconds": 60, "unit": "nginx.service"}, "server_logs", ("srv_stage1", 60, "nginx.service")),
             ("server.services", {"name": "api.service", "state": "running"}, "service_inventory", ("srv_stage1",)),
             ("docker.ps", {"all": True}, "docker_ps", ("srv_stage1", True)),
@@ -526,6 +574,17 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                     })
                 elif tool_name == "server.info":
                     self.assertEqual(result.value, _SNAPSHOT_VALUE)
+                elif tool_name == "ssh.disk_usage":
+                    self.assertEqual(result.value, {
+                        "target_id": "srv_stage1",
+                        "filesystem": "/dev/root",
+                        "mount": "/",
+                        "total_bytes": 1_024_000,
+                        "used_bytes": 256_000,
+                        "available_bytes": 768_000,
+                        "usage_percent": 25,
+                        "duration_ms": 3,
+                    })
                 else:
                     self.assertEqual(result.value["operation"], operation)
                     self.assertEqual(result.value["target_id"], "srv_stage1")
@@ -1436,6 +1495,39 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(client.calls, [("srv_stage1", "nginx.service", 10)])
         self.assertEqual(result.results[0]["result"]["target_id"], "srv_stage1")
+
+    async def test_disk_usage_is_a_structured_read_only_cpp_tool(self) -> None:
+        client = FakeSshServiceClient()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_ssh_tools(registry, client)  # type: ignore[arg-type]
+        spec = registry.get("ssh.disk_usage")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.risk_level, "read")
+        self.assertFalse(spec.requires_approval)
+        self.assertNotIn("target_id", spec.input_schema["properties"])
+
+        result = await AgentWorkflow(registry).run(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools={"ssh.disk_usage"},
+            allowed_target_ids={"srv_stage1"},
+            tool_calls=[{"name": "ssh.disk_usage", "arguments": {}}],
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(client.calls, [("srv_stage1", "disk_usage", 10)])
+        self.assertEqual(result.results[0]["result"], {
+            "target_id": "srv_stage1",
+            "filesystem": "/dev/root",
+            "mount": "/",
+            "total_bytes": 1_024_000,
+            "used_bytes": 256_000,
+            "available_bytes": 768_000,
+            "usage_percent": 25,
+            "duration_ms": 12,
+        })
 
     async def test_unselected_server_is_rejected_before_http_call(self) -> None:
         client = FakeSshServiceClient()

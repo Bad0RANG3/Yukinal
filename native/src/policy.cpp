@@ -417,6 +417,11 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
     service = service_it->get<std::string>();
+  } else if (operation == "disk_usage") {
+    if (!parameters_it->empty()) {
+      set_error(error, 422, "invalid_parameters", "disk_usage accepts no parameters");
+      return false;
+    }
   } else if (operation == "host_key_probe") {
     if (!parameters_it->empty()) {
       set_error(error, 422, "invalid_parameters", "host_key_probe accepts no parameters");

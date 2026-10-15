@@ -27,6 +27,7 @@ struct ExecResult {
 /// target's one-shot host-authorization capability is explicitly enabled.
 ExecResult service_status(const TargetConfig& target, const std::string& service,
                           int timeout_seconds);
+ExecResult disk_usage(const TargetConfig& target, int timeout_seconds);
 ExecResult connection_check(const TargetConfig& target, int timeout_seconds);
 ExecResult system_snapshot(const TargetConfig& target, const std::string& nonce,
                            int timeout_seconds);

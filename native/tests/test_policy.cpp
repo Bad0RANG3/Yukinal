@@ -45,6 +45,29 @@ YUKINAL_TEST(policy_accepts_service_inventory_without_parameters) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_accepts_disk_usage_without_parameters) {
+  ExecRequest request;
+  ApiError error;
+  const bool accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "disk_usage"},
+       {"parameters", json::object()},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(accepted);
+  YUKINAL_REQUIRE(request.operation == "disk_usage");
+  YUKINAL_REQUIRE(request.timeout_seconds == 8);
+
+  const bool parameter_accepted = parse_exec_request(
+      {{"target_id", "staging-web-01"},
+       {"operation", "disk_usage"},
+       {"parameters", {{"path", "/etc"}}},
+       {"timeout_seconds", 8}},
+      &request, &error);
+  YUKINAL_REQUIRE(!parameter_accepted);
+  YUKINAL_REQUIRE(error.code == "invalid_parameters");
+}
+
 YUKINAL_TEST(policy_accepts_only_a_bounded_system_snapshot_nonce) {
   ExecRequest request;
   ApiError error;

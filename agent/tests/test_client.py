@@ -87,6 +87,25 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 3)
         self.assertEqual(result.stdout, "inactive\n")
 
+    def test_disk_usage_uses_a_parameterless_structured_operation(self) -> None:
+        self.server.response_body["operation"] = "disk_usage"
+        self.server.response_body["stdout"] = (
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+            "/dev/root 1000 250 750 25% /\n"
+        )
+        result = self.client.disk_usage("staging-web-01", timeout_seconds=8)
+        self.assertEqual(result.operation, "disk_usage")
+        self.assertEqual(result.stdout.splitlines()[-1], "/dev/root 1000 250 750 25% /")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "disk_usage",
+                "parameters": {},
+                "timeout_seconds": 8,
+            },
+        )
+
     def test_service_inventory_is_a_parameterless_structured_operation(self) -> None:
         self.server.response_body["operation"] = "service_inventory"
         self.server.response_body["stdout"] = "nginx.service loaded active running Nginx\n__YUKINAL_SOURCE__=systemd\n"

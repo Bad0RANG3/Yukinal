@@ -267,7 +267,7 @@ The service configuration is the allowlist. Requests cannot provide a hostname,
 port, username, or credential. The service resolves a
 `target_id` to a configured target and accepts only `connection_check`, bounded
 `system_snapshot`, `docker_ps`, bounded `docker_logs` and `docker_inspect`,
-`systemd_inspect`, `package_inspect`, `service_status`, `service_inventory`,
+`systemd_inspect`, `package_inspect`, `service_status`, `disk_usage`, `service_inventory`,
 bounded read-only `server_logs`, probe-only `host_key_probe`, and bounded SFTP
 list/stat/read/write/exclusive-create/remove/link-count operations with
 validated parameters. `server_exec` is the only command-text operation; it is
@@ -340,8 +340,20 @@ The desktop inventory request uses the same endpoint with no parameters:
 }
 ```
 
+The root filesystem query is also parameterless; callers cannot choose a path or
+provide a command:
+
+```json
+{
+  "target_id": "staging-web-01",
+  "operation": "disk_usage",
+  "parameters": {},
+  "timeout_seconds": 10
+}
+```
+
 Only the documented fields are accepted. `service_status` requires exactly one
-validated unit name; `connection_check` and `service_inventory` accept no
+validated unit name; `disk_usage`, `connection_check`, and `service_inventory` accept no
 parameters. `system_snapshot` accepts only a fresh 32-character lowercase
 hexadecimal nonce used to delimit its fixed collector results; `docker_ps`
 accepts only a boolean `all` filter. `docker_logs` validates its container

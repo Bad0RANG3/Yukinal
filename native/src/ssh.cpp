@@ -2202,6 +2202,16 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
   return run_ssh_command(target, "systemctl is-active -- " + service, timeout_seconds);
 }
 
+ExecResult disk_usage(const TargetConfig& target, int timeout_seconds) {
+  if (target.probe_only || timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The read-only disk usage parameters are invalid");
+    return result;
+  }
+  // Fixed root-filesystem query. It has no model-controlled command or path input.
+  return run_ssh_command(target, "df -Pk /", timeout_seconds);
+}
+
 ExecResult connection_check(const TargetConfig& target, int timeout_seconds) {
   ExecResult result;
   const auto started = Clock::now();
@@ -3562,6 +3572,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "service_status") {
     return service_status(target, request.service, request.timeout_seconds);
+  }
+  if (request.operation == "disk_usage") {
+    return disk_usage(target, request.timeout_seconds);
   }
   if (request.operation == "server_exec") {
     return server_exec_operation(target, request);

@@ -15,7 +15,7 @@ still in progress. Current components include:
 - a Python caller over local HTTP/JSON;
 - structured SSH operations: `connection_check`, `system_snapshot`, `docker_ps`,
   `docker_logs`, `docker_inspect`, `systemd_inspect`, `package_inspect`,
-  `service_status`, `service_inventory`, and the existing host-approved
+  `service_status`, fixed read-only `disk_usage`, `service_inventory`, and the existing host-approved
   `docker_restart`, `systemd_restart`, and `package_install` actions, plus
   bounded SFTP listing, metadata, read, write, exclusive backup creation, removal,
   guarded atomic replacement, and link-count probes for supported desktop identities,

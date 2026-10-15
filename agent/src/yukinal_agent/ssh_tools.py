@@ -114,6 +114,36 @@ def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None
         )
     )
 
+    async def disk_usage(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, object]:
+        target_id = context.context_target_id
+        if not isinstance(target_id, str):
+            raise ToolCallError("target_required", "A selected remote server is required")
+        result = await asyncio.to_thread(
+            client.disk_usage, target_id, arguments.get("timeout_seconds", 10)
+        )
+        if result.exit_code != 0:
+            raise ToolCallError("execution_failed", "could not read root filesystem usage")
+        parsed = _parse_disk_usage(result.stdout)
+        return {"target_id": target_id, **parsed, "duration_ms": result.duration_ms}
+
+    registry.register(
+        ToolSpec(
+            name="ssh.disk_usage",
+            description="Read total, used, and available capacity for the selected server's root filesystem.",
+            input_schema={
+                "type": "object",
+                "properties": {"timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "additionalProperties": False,
+            },
+            risk_level="read",
+            requires_approval=False,
+            handler=disk_usage,
+            target_id_argument=None,
+            target_required=True,
+            timeout_ms=35_000,
+        )
+    )
+
 
 def register_desktop_ssh_tools(
     registry: ToolRegistry, host: HostRpcClient, binary: Path
@@ -140,6 +170,16 @@ def register_desktop_ssh_tools(
                 "additionalProperties": False,
             },
             "service_status",
+        ),
+        (
+            "ssh.disk_usage",
+            "Read total, used, and available capacity for the selected server's root filesystem.",
+            {
+                "type": "object",
+                "properties": {"timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "additionalProperties": False,
+            },
+            "disk_usage",
         ),
         (
             "server.logs",
@@ -278,10 +318,14 @@ def register_desktop_ssh_tools(
         except asyncio.CancelledError:
             raise
         except Exception:
+            if tool_name == "ssh.disk_usage":
+                raise ToolCallError("ssh_target_unavailable", "could not resolve the selected target for C++ SSH") from None
             return await _execute_on_host(host, tool_name, arguments, context)
         try:
             process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
         except SshServiceProcessError:
+            if tool_name == "ssh.disk_usage":
+                raise ToolCallError("ssh_target_unsupported", "the selected target is not supported by the C++ SSH service") from None
             return await _execute_on_host(host, tool_name, arguments, context)
 
         try:
@@ -291,6 +335,8 @@ def register_desktop_ssh_tools(
             raise
         except SshServiceProcessError:
             await process.stop()
+            if tool_name == "ssh.disk_usage":
+                raise ToolCallError("ssh_service_unavailable", "the C++ SSH service could not be started") from None
             return await _execute_on_host(host, tool_name, arguments, context)
 
         try:
@@ -340,6 +386,14 @@ def register_desktop_ssh_tools(
                     arguments["service"],
                     arguments.get("timeout_seconds", 10),
                 )
+            elif operation == "disk_usage":
+                result = await asyncio.to_thread(
+                    client.disk_usage, target_id, arguments.get("timeout_seconds", 10)
+                )
+                if result.exit_code != 0:
+                    raise ToolCallError("execution_failed", "could not read root filesystem usage")
+                parsed = _parse_disk_usage(result.stdout)
+                return {"target_id": target_id, **parsed, "duration_ms": result.duration_ms}
             elif operation == "server_logs":
                 result = await asyncio.to_thread(
                     client.server_logs,
@@ -2076,6 +2130,37 @@ async def _desktop_filesystem_backup_cleanup(
         raise ToolCallError(error.code, str(error)) from None
     finally:
         await process.stop()
+
+
+def _parse_disk_usage(raw: str) -> dict[str, object]:
+    if not isinstance(raw, str) or len(raw) > 4096:
+        raise ToolCallError("invalid_response", "The C++ SSH service returned invalid disk usage data")
+    lines = [line.split() for line in raw.splitlines() if line.strip()]
+    if len(lines) != 2 or len(lines[0]) < 6 or len(lines[1]) < 6:
+        raise ToolCallError("invalid_response", "The C++ SSH service returned invalid disk usage data")
+    header, row = lines
+    if header[:5] != ["Filesystem", "1024-blocks", "Used", "Available", "Capacity"]:
+        raise ToolCallError("invalid_response", "The C++ SSH service returned invalid disk usage data")
+    if not row[4].endswith("%") or not row[5].startswith("/"):
+        raise ToolCallError("invalid_response", "The C++ SSH service returned invalid disk usage data")
+    try:
+        blocks, used, available = (int(value) for value in row[1:4])
+        percent = int(row[4][:-1])
+    except ValueError:
+        raise ToolCallError("invalid_response", "The C++ SSH service returned invalid disk usage data") from None
+    if (
+        any(value < 0 or value > 2**53 - 1 for value in (blocks, used, available))
+        or not 0 <= percent <= 100
+    ):
+        raise ToolCallError("invalid_response", "The C++ SSH service returned invalid disk usage data")
+    return {
+        "filesystem": row[0][:256],
+        "mount": " ".join(row[5:])[:512],
+        "total_bytes": blocks * 1024,
+        "used_bytes": used * 1024,
+        "available_bytes": available * 1024,
+        "usage_percent": percent,
+    }
 
 
 def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, object]:
