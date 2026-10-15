@@ -11,7 +11,11 @@ from typing import Any
 from yukinal_ssh import SshServiceClient, SshServiceError
 
 from .host_rpc import HostRpcClient
-from .host_tools import _execute_on_host
+from .host_tools import (
+    _FILESYSTEM_WRITE_INPUT_SCHEMA,
+    _execute_on_host,
+)
+from .filesystem_action_ledger import FilesystemActionLedger, FilesystemActionLedgerError
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .system_snapshot import normalize_system_snapshot
 from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
@@ -396,7 +400,177 @@ def register_desktop_ssh_tools(
         for name, description, schema, operation in tools
         if name not in existing_names
     ])
-    return frozenset(name for name, _, _, _ in tools if name != "ssh.service_status")
+
+    if "filesystem.write" not in existing_names:
+        registry.register(ToolSpec(
+            name="filesystem.write",
+            description=(
+                "Replace one complete remote text file after exact per-call approval. "
+                "The write is executed by the Python Agent through the C++ SFTP service."
+            ),
+            input_schema=_FILESYSTEM_WRITE_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_filesystem_write(
+                host, binary, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=20_000,
+            cancellable=True,
+        ))
+    return frozenset(
+        {name for name, _, _, _ in tools if name != "ssh.service_status"}
+        | {"filesystem.write"}
+    )
+
+
+async def _desktop_filesystem_write(
+    host: HostRpcClient,
+    binary: Path,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, object]:
+    """Run an approved, plan-checked file write through the C++ SFTP service."""
+    target_id = context.context_target_id
+    target = context.host_target
+    if (
+        not isinstance(target_id, str)
+        or not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or target.get("serverId") != target_id
+        or not context.run_id
+        or not context.trace_id
+        or not context.call_id
+        or not context.host_task_id
+        or not context.plan_id
+        or not context.plan_step_id
+    ):
+        raise ToolCallError(
+            "durable_plan_required", "filesystem.write requires a durable remote action plan"
+        )
+
+    plan_request = {
+        "taskId": context.host_task_id,
+        "toolName": "filesystem.write",
+        "input": arguments,
+        "target": dict(target),
+    }
+    try:
+        plan = await host.request(
+            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError("host_unavailable", "The desktop host could not validate the action plan") from None
+    if (
+        not isinstance(plan, dict)
+        or plan.get("status") != "allowed"
+        or plan.get("planId") != context.plan_id
+        or plan.get("stepId") != context.plan_step_id
+        or plan.get("stepKind") != "action"
+        or plan.get("evidenceIds") != list(context.evidence_ids)
+    ):
+        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this file write")
+
+    ledger = FilesystemActionLedger.from_environment()
+    if ledger is None:
+        return await _execute_on_host(host, "filesystem.write", arguments, context)
+    ledger_scope = {
+        "run_id": context.run_id,
+        "trace_id": context.trace_id,
+        "call_id": context.call_id,
+        "tool_name": "filesystem.write",
+        "target_id": target_id,
+        "arguments": arguments,
+        "plan_id": context.plan_id,
+        "plan_step_id": context.plan_step_id,
+        "evidence_ids": context.evidence_ids,
+    }
+    try:
+        cached = await ledger.claim(**ledger_scope)
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    if cached is not None:
+        return cached
+
+    async def run_host_compatibility_path() -> dict[str, object]:
+        output = await _execute_on_host(host, "filesystem.write", arguments, context)
+        if not isinstance(output, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid file write result")
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+
+    try:
+        payload = await host.request(
+            "host.ssh.filesystem_write_target",
+            {
+                "serverId": target_id,
+                "path": arguments["path"],
+                "content": arguments["content"],
+                "taskId": context.host_task_id,
+                "planId": context.plan_id,
+                "planStepId": context.plan_step_id,
+                "evidenceIds": list(context.evidence_ids),
+                "target": dict(target),
+            },
+            timeout_seconds=8.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # The target resolver rejects modes and routes that still need the Rust compatibility path.
+        return await run_host_compatibility_path()
+
+    expected_bytes = len(arguments["content"].encode("utf-8"))
+    binding = payload.get("filesystemWrite") if isinstance(payload, dict) else None
+    if (
+        not isinstance(binding, dict)
+        or binding != {"path": arguments["path"], "bytesWritten": expected_bytes}
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid write binding")
+    try:
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+    except SshServiceProcessError:
+        return await run_host_compatibility_path()
+    try:
+        await process.start()
+    except asyncio.CancelledError:
+        await process.stop()
+        raise
+    except SshServiceProcessError:
+        await process.stop()
+        return await run_host_compatibility_path()
+
+    try:
+        client = SshServiceClient(token, base_url=base_url)
+        await asyncio.to_thread(
+            client.sftp_write,
+            target_id,
+            arguments["path"],
+            arguments["content"].encode("utf-8"),
+        )
+        output: dict[str, object] = {
+            "path": arguments["path"],
+            "bytesWritten": expected_bytes,
+        }
+        await ledger.complete(**ledger_scope, output=output)
+        return output
+    except asyncio.CancelledError:
+        # The ledger intentionally remains `running`: SFTP may have committed before cancellation.
+        raise
+    except SshServiceError as error:
+        # A transport error can arrive after the server applied the write. Never retry it here.
+        raise ToolCallError(error.code, str(error)) from None
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    finally:
+        await process.stop()
 
 
 def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, object]:

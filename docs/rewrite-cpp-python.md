@@ -41,6 +41,14 @@
 > that allows them. These actions require exact per-call approval; Rust fingerprints
 > the exact host input and consumes a one-time ticket before dispatch. Raw approval
 > input is removed before persistence and UI emission.
+> Agent `filesystem.write` now runs as a Python desktop tool through the C++ SFTP
+> service when the target route supports it. The host checks the current plan and
+> exact path/content limits before returning a one-target credential context.
+> Python requires its exact per-call approval and records the call fingerprint in
+> a private SQLite action ledger before SFTP starts. A completed call returns its
+> cached result; an interrupted call stays outcome-unknown and is never replayed.
+> Unsupported routes use the Rust host executor. The remaining filesystem
+> mutations still use Rust orchestration.
 
 ## Repository baseline and migration boundary
 
@@ -80,13 +88,13 @@ consumes the exact approval ticket or reserves the bounded task command grant,
 then starts a one-shot C++ service config that enables `server.exec` for that
 target only. Persistent service target configs deny it by default. Targets that
 still require a Rust-only SSH route retain the existing Rust compatibility path.
-The Python sidecar exposes bounded `filesystem.read`, `filesystem.write`,
-revision-guarded `filesystem.edit`, and the host-owned backup/list/retention/
-restore/cleanup tools. File mutations require per-call approval and a durable
-remote plan binding; their requests and outputs are schema-checked in Python,
-then the desktop host rechecks the target, plan, file revision, backup ledger,
-and operation limits before dispatch. Supported targets use the existing C++
-SFTP transport; unsupported SSH routes remain on the compatibility path.
+The Python sidecar exposes bounded `filesystem.read`, and Agent `filesystem.write`
+uses Python approval, host plan/path checks, a durable exact-call ledger, and the
+C++ SFTP transport for supported routes. Unsupported routes use the existing
+Rust host executor. Revision-guarded `filesystem.edit` and host-owned
+backup/list/retention/restore/cleanup still use Rust orchestration; those tools
+remain plan-bound and approved. Moving those workflows is the next filesystem
+migration step.
 Task-scoped, body-free `investigation.evidence.search`/`compare` also run through
 the desktop host.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
@@ -104,8 +112,8 @@ in this environment because Cargo and rustc are unavailable.
 Python Agent Runtime
     ├── Tool Registry → schema → per-run tool/plan allowlist → audit
     ├── LangGraph bounded tool workflow
-    ├── host.* JSON-RPC bridge → Tauri/Rust host → existing SSH and MCP
-    └── yukinal_ssh caller (optional service-status tool)
+    ├── host.* JSON-RPC bridge → Tauri/Rust host → remaining host tools and MCP
+    └── yukinal_ssh caller → one-target C++ service (Agent SSH and file tools)
               │ HTTP/JSON + local bearer token
               ▼
         C++ SSH service (binds only 127.0.0.1)
@@ -120,9 +128,11 @@ C++ service executes migrated structured SSH and SFTP operations
 The bridge uses the existing sidecar request path: Python sends
 `host.tool.execute` (or `host.mcp.catalog`) over the child process pipe, and the
 desktop host replies over that same pipe. Python does not open SSH sessions or
-start MCP processes through this bridge. The host continues to resolve the
-server, enforce its current authorization and approval checks, and execute the
-operation. For investigation calls, Python carries the current durable plan,
+start MCP processes through this bridge. For `filesystem.write`, the host checks
+the current plan, validates the path and byte limit, and returns a one-target
+credential context; Python then starts the C++ service and sends the bounded SFTP
+write directly. Other host tools continue through the host executor. For
+investigation calls, Python carries the current durable plan,
 step, and evidence binding; high-risk host actions also carry the host-issued
 per-call approval ID. The approval event carries raw host input only
 across the local pipe; Rust fingerprints it and removes it before persistence or
@@ -456,6 +466,23 @@ targets. `git diff --check` passed. Rust formatting, clippy, Cargo check, and
 Rust-to-sidecar integration were skipped because Cargo is not installed on
 `PATH`, so the desktop host bridge and its updated tool-catalog assertion remain
 uncompiled in this environment.
+
+On 2026-10-15, `filesystem.write` moved to a Python desktop tool that validates
+the current host plan and path limits before sending the write through the
+one-target C++ SFTP service. The Python SQLite ledger caches completed writes
+and blocks retries after an unknown outcome; unsupported routes still use the
+Rust host executor. Full Python Agent discovery ran 96 tests: 92 passed and 4
+service integration cases were skipped because no C++ binary path was configured
+for that standalone run. The sidecar smoke, focused ledger/SSH routing tests
+(12), Python syntax compilation, documentation link check, and `git diff --check`
+passed. `pnpm check` passed its hygiene, secret, documentation, contract build,
+typecheck, and packaging stages, then stopped in the JavaScript unit tests:
+Node 26.5.1 failed in `os.userInfo()` with `uv_os_get_passwd returned ENOMEM`;
+the same error reproduces with `node -e`. No native CMake test build is
+configured in this workspace. The new Rust host resolver could not be compiled
+because Cargo is unavailable on `PATH`. The host-side independent plan recheck
+and its request-binding wiring were added after those Python checks, so those
+latest Rust/Python changes have not been recompiled or rerun through the suite.
 
 ## Deliberately deferred
 

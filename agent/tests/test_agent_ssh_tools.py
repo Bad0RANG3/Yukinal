@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from yukinal_agent import AgentWorkflow, ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
+from yukinal_agent.tools import approval_fingerprint
 from yukinal_agent.ssh_tools import (
     _parse_docker_inspect,
     _parse_docker_logs,
@@ -40,6 +41,15 @@ class FakeDesktopHost:
         self, method: str, params: dict[str, Any], *, timeout_seconds: float
     ) -> dict[str, Any]:
         self.calls.append((method, params))
+        if method == "host.investigation.plan.check":
+            return {
+                "status": "allowed",
+                "planId": "plan-1",
+                "stepId": "step-1",
+                "stepKind": "action",
+                "evidenceIds": ["evidence-1"],
+                "requiresApproval": True,
+            }
         if method == "host.tool.execute" and params.get("toolName") == "server.info":
             if params.get("target") != {
                 "host": "remote", "serverId": "srv_stage1", "environment": "staging"
@@ -64,6 +74,11 @@ class FakeDesktopHost:
             payload["filesystemRead"] = {
                 "path": params["path"],
                 "maxBytes": params.get("maxBytes") or 131072,
+            }
+        if method == "host.ssh.filesystem_write_target":
+            payload["filesystemWrite"] = {
+                "path": params["path"],
+                "bytesWritten": len(params["content"].encode("utf-8")),
             }
         return payload
 
@@ -194,6 +209,9 @@ class FakeDesktopSshClient:
         self.calls.append(("sftp_read", arguments))
         return b"hello\x00x"
 
+    def sftp_write(self, *arguments: Any) -> Any:
+        return self._result("sftp_write", *arguments)
+
 
 class FakeSshServiceClient:
     def __init__(self) -> None:
@@ -261,6 +279,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct_names, {
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
+            "filesystem.write",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -411,6 +430,78 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.calls, expected_host_calls)
         self.assertEqual(len(FakeDesktopSshProcess.instances), len(cases))
         self.assertTrue(all(process.started and process.stopped for process in FakeDesktopSshProcess.instances))
+
+    async def test_filesystem_write_uses_cpp_after_plan_check_and_replays_exact_success(self) -> None:
+        import os
+        import tempfile
+
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {"path": "/etc/app.conf", "content": "hello=world\n"}
+        fingerprint = approval_fingerprint(
+            "filesystem.write",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"filesystem.write"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-write"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-1",
+            trace_id="trace-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"YUKINAL_DATA_DIR": temporary}),
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            first = await registry.execute("filesystem.write", arguments, context, call_id="call-write-1")
+            second = await registry.execute("filesystem.write", arguments, context, call_id="call-write-1")
+
+        expected = {"path": "/etc/app.conf", "bytesWritten": len(arguments["content"].encode())}
+        self.assertEqual(first.value, expected)
+        self.assertEqual(second.value, expected)
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [("sftp_write", ("srv_stage1", "/etc/app.conf", b"hello=world\n"))],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            [
+                "host.investigation.plan.check",
+                "host.ssh.filesystem_write_target",
+                "host.investigation.plan.check",
+            ],
+        )
+        self.assertEqual(host.calls[1][1], {
+            "serverId": "srv_stage1",
+            "path": "/etc/app.conf",
+            "content": "hello=world\n",
+            "taskId": "task-durable-1",
+            "planId": "plan-1",
+            "planStepId": "step-1",
+            "evidenceIds": ["evidence-1"],
+            "target": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        })
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 
     async def test_service_inventory_parser_handles_docker_and_unavailable_sources(self) -> None:
         docker = _parse_service_inventory(

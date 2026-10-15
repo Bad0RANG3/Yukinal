@@ -7,7 +7,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use yukinal_credentials::{CredentialRef, CredentialStore};
-use yukinal_filesystem::{AgentReadRequest, DEFAULT_AGENT_READ_BYTES};
+use yukinal_filesystem::{AgentReadRequest, AgentWriteRequest, DEFAULT_AGENT_READ_BYTES};
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
 #[tauri::command]
@@ -372,6 +372,14 @@ struct SshServiceFilesystemReadTargetRequest {
     max_bytes: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshServiceFilesystemWriteTargetRequest {
+    server_id: String,
+    path: String,
+    content: String,
+}
+
 /// Resolve one selected desktop target for a short-lived C++ SSH service process.
 /// Secrets leave the OS credential store only for this local sidecar request and
 /// are returned separately from the non-secret target allowlist.
@@ -567,6 +575,25 @@ pub(super) fn resolve_ssh_service_filesystem_read_target(
     let mut payload =
         resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
     payload["filesystemRead"] = json!({ "path": path, "maxBytes": max_bytes });
+    Ok(payload)
+}
+
+/// Resolve a C++ target only after the host's existing Agent write policy accepts the exact input.
+pub(super) fn resolve_ssh_service_filesystem_write_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request: SshServiceFilesystemWriteTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH filesystem write target request is invalid".to_string())?;
+    let bytes_written = request.content.len();
+    AgentWriteRequest::check(&request.path, request.content)
+        .map_err(|error| error.to_string())?;
+    let mut payload =
+        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    payload["filesystemWrite"] = json!({
+        "path": request.path,
+        "bytesWritten": bytes_written,
+    });
     Ok(payload)
 }
 

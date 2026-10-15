@@ -1,8 +1,8 @@
 //! Host-side execution for bounded Agent tools (read-only plus permission-gated writes).
 //!
-//! The sidecar can describe and request a tool, but it cannot open SSH sessions or
-//! resolve credentials. This module is the narrow, deny-by-default bridge from the
-//! sidecar request to Rust-owned state.
+//! The sidecar can request a tool, but it cannot query the credential store or choose an
+//! unscoped SSH target. This module validates planned writes and resolves their one-target
+//! C++ execution context from Rust-owned state.
 //!
 //! The file tools (`filesystem.read` / `filesystem.write` / `filesystem.edit` /
 //! `filesystem.backup` / `filesystem.restore`) delegate to
@@ -10,7 +10,9 @@
 //! only maps the capability's typed failures onto the host protocol's failure codes
 //! (see [`filesystem_failure`]).
 //!
-//! `filesystem.write` overwrites, `filesystem.edit` is a guarded read-then-modify,
+//! Agent `filesystem.write` is approved by Python and gets a narrowly scoped C++ SFTP target
+//! only after this module revalidates its durable action plan. Other host file writes continue
+//! through the Rust executor. `filesystem.edit` is a guarded read-then-modify,
 //! `filesystem.backup` creates a host-owned sibling copy, and `filesystem.restore` publishes
 //! that copy only with a current revision guard; the capability's crate docs state what these
 //! guarantees do **not** cover (SFTP has no compare-and-swap, so checks and publication are
@@ -86,6 +88,7 @@ use tools::*;
 const HOST_TOOL_EXECUTE: &str = "host.tool.execute";
 const HOST_SSH_SERVICE_TARGET: &str = "host.ssh.service_target";
 const HOST_SSH_FILESYSTEM_READ_TARGET: &str = "host.ssh.filesystem_read_target";
+const HOST_SSH_FILESYSTEM_WRITE_TARGET: &str = "host.ssh.filesystem_write_target";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -149,6 +152,19 @@ struct HostToolExecuteRequest {
     plan_step_id: Option<String>,
     evidence_ids: Option<Vec<String>>,
     approval_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostSshFilesystemWriteTargetRequest {
+    server_id: String,
+    path: String,
+    content: String,
+    task_id: String,
+    plan_id: String,
+    plan_step_id: String,
+    evidence_ids: Vec<String>,
+    target: HostToolTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -1258,6 +1274,9 @@ async fn handle_sidecar_request_with_context(
             state, params,
         );
     }
+    if method == HOST_SSH_FILESYSTEM_WRITE_TARGET {
+        return resolve_ssh_filesystem_write_target(state, params);
+    }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
     }
@@ -1489,6 +1508,83 @@ fn record_failure(code: &str, message: impl Into<String>, retryable: bool) -> Va
         "recorded": false,
         "error": { "code": code, "message": message.into(), "retryable": retryable }
     })
+}
+
+/// Resolve one C++ credential context only for an exact, currently authorized planned file write.
+fn resolve_ssh_filesystem_write_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostSshFilesystemWriteTargetRequest>(params)
+        .map_err(|_| "the SSH filesystem write target request is invalid".to_string())?;
+    if request.target.host != "remote"
+        || request.target.server_id.as_deref() != Some(request.server_id.as_str())
+        || request.evidence_ids.len() > 128
+        || request.evidence_ids.iter().collect::<BTreeSet<_>>().len()
+            != request.evidence_ids.len()
+    {
+        return Err("the SSH filesystem write target binding is invalid".into());
+    }
+    let server = state
+        .database
+        .servers()
+        .get(&request.server_id)
+        .map_err(|_| "the selected SSH server is not available".to_string())?;
+    if server.metadata.environment != request.target.environment {
+        return Err("the SSH filesystem write target environment does not match the server".into());
+    }
+    if let Some(workspace_id) = request.target.workspace_id.as_deref() {
+        if !server
+            .metadata
+            .workspace_ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| id == workspace_id))
+        {
+            return Err("the SSH filesystem write target is not attached to that workspace".into());
+        }
+    }
+
+    let input = json!({
+        "path": request.path.clone(),
+        "content": request.content.clone(),
+    });
+    match check_plan_for_tool(
+        state,
+        &request.task_id,
+        FILESYSTEM_WRITE,
+        &request.target,
+        PlanCheckBinding {
+            input: &input,
+            plan_id: Some(&request.plan_id),
+            step_id: Some(&request.plan_step_id),
+            evidence_ids: Some(&request.evidence_ids),
+        },
+    )? {
+        Ok(()) => {}
+        Err(deviation) => return Err(deviation.message),
+    }
+    let plan = state
+        .database
+        .investigations()
+        .latest_plan(&request.task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the active file-write plan is unavailable".to_string())?;
+    if plan.current_step_id.as_deref() != Some(request.plan_step_id.as_str())
+        || !plan.steps.iter().any(|step| {
+            step.id == request.plan_step_id && step.kind == PlanStepKind::Action
+        })
+    {
+        return Err("filesystem.write is available only in the current action plan step".into());
+    }
+
+    crate::commands::sidecar::resolve_ssh_service_filesystem_write_target(
+        state,
+        json!({
+            "serverId": request.server_id,
+            "path": input["path"],
+            "content": input["content"],
+        }),
+    )
 }
 
 fn same_investigation_scope(task: &InvestigationTask, evidence: &Evidence) -> bool {
