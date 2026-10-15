@@ -374,6 +374,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   set(YUKINAL_DESKTOP_VERSION "${CMAKE_MATCH_1}")
 
   add_library(yukinal_desktop_host_core
+    desktop_host/src/credential_store.cpp
     desktop_host/src/database.cpp
     desktop_host/src/ipc_router.cpp
   )
@@ -387,10 +388,16 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   )
   if(WIN32)
     target_compile_definitions(yukinal_desktop_host_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(yukinal_desktop_host_core PRIVATE shell32)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 shell32)
     add_executable(yukinal-desktop-host WIN32 desktop_host/src/main.cpp)
     target_compile_definitions(yukinal-desktop-host PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  elseif(APPLE)
+    find_library(SECURITY_FRAMEWORK Security REQUIRED)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE ${SECURITY_FRAMEWORK})
   else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE PkgConfig::LIBSECRET)
     add_executable(yukinal-desktop-host desktop_host/src/main.cpp)
   endif()
   target_link_libraries(yukinal-desktop-host PRIVATE yukinal_desktop_host_core webview::core)
