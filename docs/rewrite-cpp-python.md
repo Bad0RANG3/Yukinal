@@ -32,7 +32,7 @@
 > structured SSH operations. Host-key probes use C++ on direct and supported
 > HTTP/HTTPS CONNECT and SOCKS5/SOCKS5H routes; the probe reports the certified public-key fingerprint without
 > treating it as trusted. Unsupported host-key modes retain the Rust compatibility
-> path.
+> path. The desktop file browser fails explicitly when its target is outside C++ SFTP support.
 > Manual transfers use bounded C++ SFTP streams on supported direct, HTTP/HTTPS CONNECT,
 > or SOCKS5/SOCKS5H routes with either a confirmed pin or supported host CA. The
 > Rust compatibility path
@@ -79,9 +79,9 @@
 > stability and single-link ownership, and C++ creates the copy exclusively.
 > The host then rechecks the plan and stores ownership metadata in its durable
 > SQLite ledger. If registration is uncertain, Python preserves the remote
-> copy and leaves the call outcome unknown. Unsupported routes use the Rust
-> host executor. `filesystem.restore` now also follows the Python/C++ path. The
-> host checks task ownership and backup status, Python verifies both the target
+> copy and leaves the call outcome unknown. File operations fail explicitly when
+> the target is outside C++ SFTP support. `filesystem.restore` now also follows
+> the Python/C++ path. The host checks task ownership and backup status, Python verifies both the target
 > revision and backup digest, and C++ publishes through guarded atomic SFTP;
 > the host consumes the backup ledger row only after the replace succeeds.
 > `filesystem.backup.cleanup` now follows Python/C++ for supported targets.
@@ -147,9 +147,9 @@ target revision and the backup's ledger digest before guarded replacement, then
 asks the host to consume the available ledger row. Cleanup verifies each exact
 backup and lets the host consume each row after C++ removal; cross-task deletion
 is accepted only for an exact item in an approved `backup_rotation` step.
-Unsupported routes use the existing Rust host executor. Backup listing queries
-remain task-scoped at the host database boundary, where Rust revalidates the
-durable task, target and plan binding and records the call identity. Python maps
+File operations fail explicitly when the target is outside C++ SFTP support.
+Backup listing queries remain task-scoped at the host database boundary, where
+Rust revalidates the durable task, target and plan binding and records the call identity. Python maps
 the bounded rows into Agent results and performs retention ordering, age and
 keep-count selection over a bounded host scan.
 Task-scoped, body-free `investigation.evidence.search`/`compare` also run through

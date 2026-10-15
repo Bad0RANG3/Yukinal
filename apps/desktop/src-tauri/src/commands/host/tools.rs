@@ -2,8 +2,8 @@
 //!
 //! 每个 `host.tool.execute` 里的工具名对应这里的一个执行器：`server.info`、
 //! `docker.*`、`systemd.*`、`package.*` 与 `filesystem.*`。遗留 SSH 命令仍通过
-//! `ensure_session_with_cancel` 建立 Rust 会话；文件工具按身份选择 C++ 或兼容传输，
-//! 并共享同一套失败映射（`transport_or_cancel` / `filesystem_failure` / `cancelled_failure`）。
+//! `ensure_session_with_cancel` is limited to legacy command operations; file tools use the
+//! one-target C++ SFTP service and share `filesystem_failure` / `cancelled_failure` mapping.
 //! `filesystem.backup.list` 与 `filesystem.backup.retention` 在 Python 中运行，不再由这个
 //! 模块格式化账本结果或计算保留候选。
 //!
@@ -1600,10 +1600,6 @@ async fn filesystem_backup_cleanup_batch(
     }
 
     let mut results = Vec::with_capacity(items.len());
-    let cpp_file_transport = app.is_some()
-        && crate::commands::files::cpp_ssh_file_operations_supported(state, server_id)
-            .unwrap_or(false);
-    let mut session_ready = false;
     for (index, item) in items.iter().enumerate() {
         if cancel.is_cancelled() {
             results.push(cleanup_item_not_removed(item, "skipped", "cancelled"));
@@ -1651,21 +1647,6 @@ async fn filesystem_backup_cleanup_batch(
                 "expectedRevision does not match the revision recorded for this backup",
             ));
             continue;
-        }
-        if !cpp_file_transport && !session_ready {
-            if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-                // One failed Rust connection is likely to affect the remaining items too.
-                results.push(cleanup_item_not_removed(item, "failed", error));
-                for remaining in items.iter().skip(index + 1) {
-                    results.push(cleanup_item_not_removed(
-                        remaining,
-                        "skipped",
-                        "transport failed for an earlier item",
-                    ));
-                }
-                break;
-            }
-            session_ready = true;
         }
         let service = remote_file_service(state, app);
         let cleanup = tokio::select! {

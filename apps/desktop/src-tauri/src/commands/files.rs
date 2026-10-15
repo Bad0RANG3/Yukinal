@@ -1,10 +1,9 @@
 //! UI's remote file browser: directory listing, one bounded read, and metadata.
 //!
-//! The rules and the limits live in `yukinal-filesystem`; this module only does two things:
-//! adapt `TerminalService` (SFTP) to the capability's transport trait, and map results onto the
-//! JSON shape these commands publish. The adapter lives here (rather than in a module of its own)
-//! because this file is the file capability's command surface, and the Agent's host tools reach
-//! the same adapter through [`remote_file_service`] — one transport implementation, two callers.
+//! The rules and limits live in `yukinal-filesystem`; this module adapts the C++ SFTP service to
+//! the capability transport trait and maps results onto the JSON shape these commands publish.
+//! The Agent's host tools reach the same adapter through [`remote_file_service`], so both callers
+//! share one transport implementation.
 
 pub mod drag_out;
 pub mod local_paths;
@@ -17,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{AppHandle, State};
 
-use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use yukinal_filesystem::{
     ListedEntry, RemoteEntryKind, RemoteFileService, RemoteFileTransport, RemoteStat, ReplaceError,
@@ -69,12 +67,10 @@ pub struct RemoteFileReadResponse {
     pub truncated: bool,
 }
 
-/// Desktop-side transport: C++ SFTP for supported file operations, with `TerminalService`
-/// retained for guarded replacement and the other auth modes.
+/// Desktop-side transport for bounded file operations through the C++ SFTP service.
 ///
-/// It lives on this side of the boundary because it needs `AppState` and credentials. Connection
-/// and credential resolution belong to the desktop layer, and the capability only sees
-/// [`RemoteFileTransport`]. The Rust compatibility path ensures its cached session before use.
+/// This adapter needs `AppState`, the local trust decision and credentials. The file capability
+/// sees only [`RemoteFileTransport`]; it cannot choose or widen the SSH target.
 pub(crate) struct TerminalFileTransport<'a> {
     state: &'a AppState,
     app: Option<AppHandle>,
@@ -91,40 +87,34 @@ pub(crate) fn remote_file_service<'a>(
     })
 }
 
-pub(crate) fn cpp_ssh_file_operations_supported(
+fn cpp_ssh_file_operations_supported(
     state: &AppState,
     server_id: &str,
 ) -> Result<bool, String> {
     crate::commands::ssh_service::supports_cpp_target(state, server_id)
 }
 
+impl TerminalFileTransport<'_> {
+    fn cpp_app(&self, server_id: &str) -> TransportResult<&AppHandle> {
+        if !cpp_ssh_file_operations_supported(self.state, server_id)
+            .map_err(TransportError::new)?
+        {
+            return Err(TransportError::new(
+                "the selected target is not supported by the C++ SSH service",
+            ));
+        }
+        self.app.as_ref().ok_or_else(|| {
+            TransportError::new("the C++ SSH service is unavailable in this host context")
+        })
+    }
+}
+
 impl RemoteFileTransport for TerminalFileTransport<'_> {
     async fn list(&self, server_id: &str, path: &str) -> TransportResult<Vec<ListedEntry>> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                let entries =
-                    crate::commands::ssh_service::sftp_list(app, self.state, server_id, path)
-                        .await
-                        .map_err(TransportError::new)?;
-                return Ok(entries
-                    .into_iter()
-                    .map(|(name, file_type, size)| ListedEntry {
-                        name,
-                        file_type,
-                        size,
-                    })
-                    .collect());
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        let entries = crate::commands::ssh_service::sftp_list(app, self.state, server_id, path)
             .await
             .map_err(TransportError::new)?;
-        let entries = self
-            .state
-            .terminals
-            .sftp_list(server_id, path)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))?;
         Ok(entries
             .into_iter()
             .map(|(name, file_type, size)| ListedEntry {
@@ -141,43 +131,17 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
         path: &str,
         max_bytes: usize,
     ) -> TransportResult<Vec<u8>> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_read_bounded(
-                    app, self.state, server_id, path, max_bytes,
-                )
-                .await
-                .map_err(TransportError::new);
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        crate::commands::ssh_service::sftp_read_bounded(app, self.state, server_id, path, max_bytes)
             .await
-            .map_err(TransportError::new)?;
-        self.state
-            .terminals
-            .sftp_read_bounded(server_id, path, max_bytes)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))
+            .map_err(TransportError::new)
     }
 
     async fn write(&self, server_id: &str, path: &str, data: &[u8]) -> TransportResult<()> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_write(
-                    app, self.state, server_id, path, data,
-                )
-                .await
-                .map_err(TransportError::new);
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        crate::commands::ssh_service::sftp_write(app, self.state, server_id, path, data)
             .await
-            .map_err(TransportError::new)?;
-        self.state
-            .terminals
-            .sftp_write(server_id, path, data)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))
+            .map_err(TransportError::new)
     }
 
     async fn create_exclusive(
@@ -186,92 +150,31 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
         path: &str,
         data: &[u8],
     ) -> TransportResult<()> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_create_exclusive(
-                    app, self.state, server_id, path, data,
-                )
-                .await
-                .map_err(TransportError::new);
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        crate::commands::ssh_service::sftp_create_exclusive(app, self.state, server_id, path, data)
             .await
-            .map_err(TransportError::new)?;
-        self.state
-            .terminals
-            .sftp_create_exclusive(server_id, path, data)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))
+            .map_err(TransportError::new)
     }
 
     async fn remove_file(&self, server_id: &str, path: &str) -> TransportResult<()> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_remove_file(
-                    app, self.state, server_id, path,
-                )
-                .await
-                .map_err(TransportError::new);
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        crate::commands::ssh_service::sftp_remove_file(app, self.state, server_id, path)
             .await
-            .map_err(TransportError::new)?;
-        self.state
-            .terminals
-            .sftp_remove_file(server_id, path)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))
+            .map_err(TransportError::new)
     }
 
     async fn stat(&self, server_id: &str, path: &str) -> TransportResult<RemoteStat> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_stat(app, self.state, server_id, path)
-                    .await
-                    .map_err(TransportError::new);
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        crate::commands::ssh_service::sftp_stat(app, self.state, server_id, path)
             .await
-            .map_err(TransportError::new)?;
-        let stat = self
-            .state
-            .terminals
-            .sftp_stat(server_id, path)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))?;
-        Ok(RemoteStat {
-            kind: match stat.kind {
-                yukinal_ssh::SftpEntryKind::File => RemoteEntryKind::File,
-                yukinal_ssh::SftpEntryKind::Directory => RemoteEntryKind::Directory,
-                yukinal_ssh::SftpEntryKind::Symlink => RemoteEntryKind::Symlink,
-                yukinal_ssh::SftpEntryKind::Other => RemoteEntryKind::Other,
-            },
-            size: stat.size,
-            modified: stat.modified,
-        })
+            .map_err(TransportError::new)
     }
 
     async fn link_count(&self, server_id: &str, path: &str) -> TransportResult<Option<u64>> {
-        if cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_link_count(
-                    app, self.state, server_id, path,
-                )
-                .await
-                .map_err(TransportError::new);
-            }
-        }
-        ensure_session(self.state, server_id)
+        let app = self.cpp_app(server_id)?;
+        crate::commands::ssh_service::sftp_link_count(app, self.state, server_id, path)
             .await
-            .map_err(TransportError::new)?;
-        self.state
-            .terminals
-            .sftp_link_count(server_id, path)
-            .await
-            .map_err(|error| TransportError::new(error.to_string()))
+            .map_err(TransportError::new)
     }
 
     async fn replace_guarded(
@@ -281,52 +184,11 @@ impl RemoteFileTransport for TerminalFileTransport<'_> {
         guard: &ReplaceGuard,
         data: &[u8],
     ) -> Result<ReplacedFile, ReplaceError> {
-        if cpp_ssh_file_operations_supported(self.state, server_id)
-            .map_err(|error| ReplaceError::Transport(TransportError::new(error)))?
-        {
-            if let Some(app) = self.app.as_ref() {
-                return crate::commands::ssh_service::sftp_replace_guarded(
-                    app, self.state, server_id, path, guard, data,
-                )
-                .await;
-            }
-        }
-        ensure_session(self.state, server_id)
-            .await
-            .map_err(|error| ReplaceError::Transport(TransportError::new(error)))?;
-        let outcome = self
-            .state
-            .terminals
-            .sftp_replace_guarded(
-                server_id,
-                path,
-                yukinal_ssh::SftpReplaceGuard {
-                    size: guard.size,
-                    modified: guard.modified,
-                    content_digest: guard.content_digest,
-                },
-                data,
-            )
-            .await;
-        match outcome {
-            Ok(replacement) => Ok(ReplacedFile {
-                size: replacement.size,
-                modified: replacement.modified,
-            }),
-            Err(yukinal_core::terminal::SftpReplaceFailure::ConcurrentChange(detail)) => {
-                Err(ReplaceError::ConcurrentChange(detail))
-            }
-            Err(yukinal_core::terminal::SftpReplaceFailure::Unsupported(detail)) => {
-                Err(ReplaceError::Unsupported(detail))
-            }
-            Err(yukinal_core::terminal::SftpReplaceFailure::MetadataNotPreserved {
-                message,
-                missing,
-            }) => Err(ReplaceError::MetadataNotPreserved { message, missing }),
-            Err(yukinal_core::terminal::SftpReplaceFailure::Failed(detail)) => {
-                Err(ReplaceError::Transport(TransportError::new(detail)))
-            }
-        }
+        let app = self.cpp_app(server_id).map_err(ReplaceError::Transport)?;
+        crate::commands::ssh_service::sftp_replace_guarded(
+            app, self.state, server_id, path, guard, data,
+        )
+        .await
     }
 }
 
