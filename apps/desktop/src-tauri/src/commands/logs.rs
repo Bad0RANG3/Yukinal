@@ -83,7 +83,7 @@ fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Error,
@@ -91,7 +91,7 @@ pub enum LogLevel {
     Info,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogSource {
     Journalctl,
@@ -100,15 +100,15 @@ pub enum LogSource {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServerLogLine {
     pub text: String,
     pub level: LogLevel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServerLogsResponse {
     pub source: LogSource,
     pub lines: Vec<ServerLogLine>,
@@ -126,7 +126,15 @@ pub async fn server_logs(
 ) -> Result<ServerLogsResponse, String> {
     if ssh_service::supports_cpp_target(&state, &server_id)? {
         let output = ssh_service::server_logs(&app, &state, &server_id, None, None).await?;
-        return parse_logs_output(&output)
+        let normalized = crate::commands::server::normalize_ssh_output_via_python(
+            &app,
+            &state,
+            "server.logs.normalize",
+            &output,
+            serde_json::json!({}),
+        )
+        .await?;
+        return deserialize_python_normalized_logs(normalized)
             .map_err(|error| format!("log discovery returned an invalid response: {error}"));
     }
     ensure_session(&state, &server_id).await?;
@@ -148,6 +156,24 @@ pub async fn server_logs(
 
     parse_logs_output(&output.stdout_lossy())
         .map_err(|error| format!("log discovery returned an invalid response: {error}"))
+}
+
+fn deserialize_python_normalized_logs(
+    response: serde_json::Value,
+) -> Result<ServerLogsResponse, String> {
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let message = response
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Python Agent rejected the log output");
+        return Err(message.to_string());
+    }
+    let output = response
+        .get("output")
+        .cloned()
+        .ok_or_else(|| "Python Agent returned no normalized logs".to_string())?;
+    serde_json::from_value(output)
+        .map_err(|_| "Python Agent returned invalid normalized logs".to_string())
 }
 
 pub(crate) fn parse_logs_output(raw: &str) -> Result<ServerLogsResponse, String> {

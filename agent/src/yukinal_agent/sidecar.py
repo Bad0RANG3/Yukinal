@@ -22,10 +22,15 @@ from .host_rpc import HostRpcClient
 from .host_tools import HOST_APPROVAL_TOOLS, register_host_tools, register_mcp_catalog
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
-from .ssh_tools import register_desktop_ssh_tools, register_ssh_tools
+from .ssh_tools import (
+    _parse_server_logs,
+    _parse_service_inventory,
+    register_desktop_ssh_tools,
+    register_ssh_tools,
+)
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .system_snapshot import SYSTEM_SNAPSHOT_COMMAND_IDS, normalize_system_snapshot
-from .tools import ToolRegistry
+from .tools import ToolCallError, ToolRegistry
 
 RPC_VERSION = "1.0"
 MAX_SIDECAR_FRAME_BYTES = 24 * 1024 * 1024
@@ -40,6 +45,8 @@ METHODS = {
     "initialize": True,
     "system.ping": True,
     "server.snapshot.normalize": True,
+    "server.logs.normalize": True,
+    "server.services.normalize": True,
     "tools.list": True,
     "system.describe": True,
     "agent.run.start": True,
@@ -143,6 +150,10 @@ class PythonSidecar:
                 result = self._ping(params)
             elif method == "server.snapshot.normalize":
                 result = self._normalize_snapshot(params)
+            elif method == "server.logs.normalize":
+                result = self._normalize_server_logs(params)
+            elif method == "server.services.normalize":
+                result = self._normalize_server_services(params)
             elif method == "tools.list":
                 _strict_object(params, set())
                 result = {"tools": [self._declaration(spec) for spec in self._registry.list()]}
@@ -650,6 +661,14 @@ class PythonSidecar:
         return {"snapshotData": snapshot_data}
 
     @staticmethod
+    def _normalize_server_logs(params: object) -> dict[str, Any]:
+        return _normalize_ssh_inventory(params, _parse_server_logs, {"sinceSeconds", "unit"}, "logs")
+
+    @staticmethod
+    def _normalize_server_services(params: object) -> dict[str, Any]:
+        return _normalize_ssh_inventory(params, _parse_service_inventory, {"name", "state"}, "services")
+
+    @staticmethod
     def _declaration(spec: Any) -> dict[str, Any]:
         return {
             "name": spec.name,
@@ -670,6 +689,48 @@ def _strict_object(value: object, allowed_keys: set[str]) -> dict[str, Any]:
     if set(value) - allowed_keys:
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     return value
+
+
+def _normalize_ssh_inventory(
+    params: object,
+    parser: Callable[[str, dict[str, Any]], dict[str, object]],
+    allowed_arguments: set[str],
+    kind: str,
+) -> dict[str, Any]:
+    parsed = _strict_object(params, {"stdout", "arguments"})
+    stdout = parsed.get("stdout")
+    arguments = _strict_object(parsed.get("arguments"), allowed_arguments)
+    if not isinstance(stdout, str) or len(stdout.encode("utf-8")) > 1024 * 1024:
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid SSH command output")
+
+    if kind == "logs":
+        since_seconds = arguments.get("sinceSeconds")
+        if since_seconds is not None and (
+            isinstance(since_seconds, bool)
+            or not isinstance(since_seconds, int)
+            or not 1 <= since_seconds <= 604_800
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid server.logs filters")
+        unit = arguments.get("unit")
+        if unit is not None and (
+            not isinstance(unit, str)
+            or len(unit) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*\.service", unit) is None
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid server.logs filters")
+    elif kind == "services":
+        state = arguments.get("state")
+        if state is not None and (
+            not isinstance(state, str)
+            or state not in {"running", "stopped", "failed", "unknown"}
+        ):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid server.services filters")
+
+    try:
+        output = parser(stdout, arguments)
+    except ToolCallError as error:
+        return {"ok": False, "code": error.code, "message": str(error)}
+    return {"ok": True, "output": output}
 
 
 def _parse_runtime_model_config(params: object) -> tuple[ModelConfig, str | None, int]:

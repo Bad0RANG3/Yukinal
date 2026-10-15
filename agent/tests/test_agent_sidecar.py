@@ -139,6 +139,52 @@ class PythonSidecarTests(unittest.TestCase):
         }))
         self.assertEqual(invalid["error"]["code"], RPC_INVALID_PARAMS)
 
+    def test_readonly_ssh_output_normalization_rpcs_preserve_ui_shapes_and_filters(self) -> None:
+        sidecar = PythonSidecar(_registry())
+        sidecar.handle(_request(1, "initialize", {
+            "protocolVersion": "1.0", "clientVersion": "desktop", "dataDir": "C:/data",
+        }))
+
+        logs = sidecar.handle(_request(2, "server.logs.normalize", {
+            "stdout": "panic: service failed\nwarning: retrying\n__YUKINAL_SOURCE__=journalctl\n",
+            "arguments": {"sinceSeconds": 60, "unit": "api.service"},
+        }))
+        self.assertEqual(logs["result"], {
+            "ok": True,
+            "output": {
+                "source": "journalctl",
+                "lines": [
+                    {"text": "panic: service failed", "level": "error"},
+                    {"text": "warning: retrying", "level": "warning"},
+                ],
+            },
+        })
+
+        services = sidecar.handle(_request(3, "server.services.normalize", {
+            "stdout": "api\trunning\tUp 3 days\tnginx:latest\n"
+            "old\texited\tExited (0) 1 day ago\talpine\n"
+            "__YUKINAL_SOURCE__=docker\n",
+            "arguments": {"state": "running"},
+        }))
+        self.assertEqual(services["result"]["output"], {
+            "source": "docker",
+            "services": [{
+                "name": "api", "state": "running", "status": "Up 3 days",
+                "description": "nginx:latest",
+            }],
+        })
+
+        unsupported = sidecar.handle(_request(4, "server.logs.normalize", {
+            "stdout": "line\n__YUKINAL_SOURCE__=syslog\n",
+            "arguments": {"unit": "api.service"},
+        }))
+        self.assertEqual(unsupported["result"]["code"], "unsupported")
+        malformed = sidecar.handle(_request(5, "server.services.normalize", {
+            "stdout": "__YUKINAL_SOURCE__=unavailable\n",
+            "arguments": {"state": []},
+        }))
+        self.assertEqual(malformed["error"]["code"], RPC_INVALID_PARAMS)
+
     def test_approval_rpc_resumes_the_matching_pending_call(self) -> None:
         async def run_approval() -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[Any, ...]], dict[str, Any]]:
             notifications: list[tuple[str, dict[str, Any]]] = []

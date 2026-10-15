@@ -35,7 +35,7 @@ pub enum ServiceState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceSource {
     Systemd,
@@ -43,8 +43,8 @@ pub enum ServiceSource {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServerService {
     pub name: String,
     pub state: ServiceState,
@@ -53,8 +53,8 @@ pub struct ServerService {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServerServicesResponse {
     pub source: ServiceSource,
     pub services: Vec<ServerService>,
@@ -105,8 +105,34 @@ pub async fn server_services(
         return legacy_service_inventory(&state, &server_id).await;
     }
     let output = ssh_service::service_inventory(&app, &state, &server_id).await?;
-    parse_services_output(&output)
+    let normalized = crate::commands::server::normalize_ssh_output_via_python(
+        &app,
+        &state,
+        "server.services.normalize",
+        &output,
+        serde_json::json!({}),
+    )
+    .await?;
+    deserialize_python_normalized_services(normalized)
         .map_err(|error| format!("service discovery returned an invalid response: {error}"))
+}
+
+fn deserialize_python_normalized_services(
+    response: serde_json::Value,
+) -> Result<ServerServicesResponse, String> {
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let message = response
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Python Agent rejected the service inventory");
+        return Err(message.to_string());
+    }
+    let output = response
+        .get("output")
+        .cloned()
+        .ok_or_else(|| "Python Agent returned no normalized services".to_string())?;
+    serde_json::from_value(output)
+        .map_err(|_| "Python Agent returned invalid normalized services".to_string())
 }
 
 /// Keep using the legacy transport for any endpoint or authentication mode the C++ service

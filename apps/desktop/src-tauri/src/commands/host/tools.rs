@@ -767,6 +767,53 @@ pub(super) async fn server_logs(
         };
         result.stdout_lossy()
     };
+    if cpp_supported {
+        let arguments = json!({
+            "sinceSeconds": input.since_seconds,
+            "unit": input.unit.as_deref(),
+        });
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "server.logs.normalize",
+                &output,
+                arguments,
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
+            let code = if code == "unsupported" { "unsupported" } else { "execution_failed" };
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("server.logs returned an invalid response");
+            return Ok(failed(code, message, false, None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized server.logs output".to_string()
+        })?;
+        let parsed = match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output)
+        {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized server.logs output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(
+            serde_json::to_value(parsed).map_err(|error| error.to_string())?,
+        ));
+    }
     let parsed = match parse_logs_output(&output) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -853,6 +900,55 @@ pub(super) async fn server_services(
         };
         (result.stdout_lossy(), result.exit_code)
     };
+    if cpp_supported {
+        let arguments = json!({
+            "name": input.name.as_deref(),
+            "state": input.state,
+        });
+        let normalized = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = crate::commands::server::normalize_ssh_output_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
+                "server.services.normalize",
+                &output,
+                arguments,
+            ) => match result {
+                Ok(response) => response,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        };
+        if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
+            let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
+            let code = if code == "invalid_arguments" { "invalid_input" } else { "execution_failed" };
+            let message = normalized
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("server.services returned an invalid response");
+            return Ok(failed(code, message, code == "invalid_input", None));
+        }
+        let output = normalized.get("output").cloned().ok_or_else(|| {
+            "Python Agent returned no normalized server.services output".to_string()
+        })?;
+        let parsed = match serde_json::from_value::<
+            crate::commands::services::ServerServicesResponse,
+        >(output)
+        {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized server.services output",
+                    false,
+                    None,
+                ));
+            }
+        };
+        return Ok(success(
+            serde_json::to_value(parsed).map_err(|error| error.to_string())?,
+        ));
+    }
     let mut parsed = match parse_services_output(&output) {
         Ok(parsed) => parsed,
         Err(error) => {
