@@ -20,6 +20,7 @@ from yukinal_agent.sidecar import (
     RPC_NOT_IMPLEMENTED,
     PythonSidecar,
     _allowed_tool_names,
+    _allowed_tools_for_run,
     _parse_run_request,
     _RpcFault,
     serve_stdio,
@@ -75,6 +76,42 @@ class PythonSidecarTests(unittest.TestCase):
         })
         self.assertEqual(_allowed_tool_names(registry, "plan"), {"ssh.service_status"})
         self.assertEqual(_allowed_tool_names(registry, "readonly"), {"ssh.service_status"})
+
+    def test_plan_bound_host_actions_are_hidden_without_a_durable_remote_plan(self) -> None:
+        registry = _registry()
+
+        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            return "ok"
+
+        registry.register(ToolSpec(
+            name="filesystem.edit",
+            description="Edit one guarded remote file after approval.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            risk_level="write",
+            requires_approval=True,
+            handler=handler,
+            target_id_argument=None,
+        ))
+        request = {
+            "taskId": "task-1",
+            "hostTarget": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        }
+        self.assertEqual(
+            _allowed_tools_for_run(registry, "goal", request),
+            {"ssh.service_status"},
+        )
+
+        request["planBinding"] = {
+            "planId": "plan-1", "planStepId": "step-1", "evidenceIds": [],
+        }
+        self.assertEqual(
+            _allowed_tools_for_run(registry, "goal", request),
+            {"ssh.service_status", "filesystem.edit"},
+        )
+        self.assertEqual(
+            _allowed_tools_for_run(registry, "readonly", request),
+            {"ssh.service_status"},
+        )
 
     def test_handshake_tool_catalog_and_capability_declaration(self) -> None:
         sidecar = PythonSidecar(_registry(), agent_version="0.3.0")

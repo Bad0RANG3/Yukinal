@@ -19,7 +19,12 @@ from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .host_rpc import HostRpcClient
-from .host_tools import HOST_APPROVAL_TOOLS, register_host_tools, register_mcp_catalog
+from .host_tools import (
+    HOST_APPROVAL_TOOLS,
+    PLAN_BOUND_HOST_ACTION_TOOLS,
+    register_host_tools,
+    register_mcp_catalog,
+)
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .ssh_tools import (
@@ -417,9 +422,7 @@ class PythonSidecar:
         try:
             target_id = request.get("targetId")
             mode = request.get("mode", "goal")
-            allowed_tools = set(_allowed_tool_names(self._registry, mode))
-            if not _host_action_has_plan_binding(request):
-                allowed_tools.difference_update(HOST_APPROVAL_TOOLS)
+            allowed_tools = set(_allowed_tools_for_run(self._registry, mode, request))
             result = await agent.run(
                 task_id=_safe_context_id("task", task_id or run_id),
                 tenant_id="local",
@@ -543,7 +546,7 @@ class PythonSidecar:
 
         fingerprint = approval.fingerprint
         plan_binding = request.get("planBinding")
-        if approval.tool_name in HOST_APPROVAL_TOOLS and not isinstance(plan_binding, dict):
+        if approval.tool_name in PLAN_BOUND_HOST_ACTION_TOOLS and not isinstance(plan_binding, dict):
             raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its durable plan binding")
         if approval.tool_name in HOST_APPROVAL_TOOLS and not isinstance(host_input, dict):
             raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its exact input")
@@ -579,7 +582,7 @@ class PythonSidecar:
                     "planId": plan_binding["planId"],
                     "planStepId": plan_binding["planStepId"],
                     "evidenceIds": list(plan_binding["evidenceIds"]),
-                } if approval.tool_name in HOST_APPROVAL_TOOLS and isinstance(plan_binding, dict) else {}),
+                } if approval.tool_name in PLAN_BOUND_HOST_ACTION_TOOLS and isinstance(plan_binding, dict) else {}),
             },
             "at": _timestamp(),
         })
@@ -1157,6 +1160,17 @@ def _allowed_tool_names(registry: ToolRegistry, mode: str) -> frozenset[str]:
             and spec.requires_approval
         )
     )
+
+
+def _allowed_tools_for_run(
+    registry: ToolRegistry,
+    mode: str,
+    request: dict[str, Any],
+) -> frozenset[str]:
+    allowed = set(_allowed_tool_names(registry, mode))
+    if not _host_action_has_plan_binding(request):
+        allowed.difference_update(PLAN_BOUND_HOST_ACTION_TOOLS)
+    return frozenset(allowed)
 
 
 def _prompt_text(prompt: str, parts: object) -> str:

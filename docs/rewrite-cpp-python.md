@@ -80,10 +80,15 @@ consumes the exact approval ticket or reserves the bounded task command grant,
 then starts a one-shot C++ service config that enables `server.exec` for that
 target only. Persistent service target configs deny it by default. Targets that
 still require a Rust-only SSH route retain the existing Rust compatibility path.
-The Python sidecar exposes bounded `filesystem.read` and task-scoped,
-body-free `investigation.evidence.search`/`compare` through the desktop host.
-`filesystem.write` and backup/restore/cleanup remain present in the desktop host
-and legacy TypeScript Agent reference, but have not been ported into Python.
+The Python sidecar exposes bounded `filesystem.read`, `filesystem.write`,
+revision-guarded `filesystem.edit`, and the host-owned backup/list/retention/
+restore/cleanup tools. File mutations require per-call approval and a durable
+remote plan binding; their requests and outputs are schema-checked in Python,
+then the desktop host rechecks the target, plan, file revision, backup ledger,
+and operation limits before dispatch. Supported targets use the existing C++
+SFTP transport; unsupported SSH routes remain on the compatibility path.
+Task-scoped, body-free `investigation.evidence.search`/`compare` also run through
+the desktop host.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
@@ -440,6 +445,17 @@ CTest targets passed. The SSH mock covers successful command output, combined
 stdout/stderr truncation, and the persistent-config default-deny behavior.
 Python syntax checks and `git diff --check` passed. The Rust host bridge changes
 could not be compiled here because Cargo and rustc are unavailable.
+
+On 2026-10-15, after registering the full filesystem tool set in Python,
+`pnpm check` passed, including all six CTest targets, workspace typechecks and
+tests, the desktop bundle, and the Python sidecar smoke. Standalone Python Agent
+discovery ran 92 tests: 88 passed and 4 service integration cases were skipped
+because that standalone invocation had no C++ binary path; the CTest run passed
+the configured Python Agent, C++ HTTP, SSH mock, and Agent-to-C++ integration
+targets. `git diff --check` passed. Rust formatting, clippy, Cargo check, and
+Rust-to-sidecar integration were skipped because Cargo is not installed on
+`PATH`, so the desktop host bridge and its updated tool-catalog assertion remain
+uncompiled in this environment.
 
 ## Deliberately deferred
 

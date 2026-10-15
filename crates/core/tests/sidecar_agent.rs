@@ -210,6 +210,17 @@ async fn handshakes_pings_and_reports_the_real_python_sidecar() {
         names.contains(&"filesystem.read"),
         "host-backed filesystem.read missing: {names:?}"
     );
+    for tool in [
+        "filesystem.write",
+        "filesystem.edit",
+        "filesystem.backup",
+        "filesystem.backup.list",
+        "filesystem.backup.retention",
+        "filesystem.backup.cleanup",
+        "filesystem.restore",
+    ] {
+        assert!(names.contains(&tool), "host-backed {tool} missing: {names:?}");
+    }
     assert!(
         names.contains(&"server.exec"),
         "approval-gated server.exec missing: {names:?}"

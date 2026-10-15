@@ -6,7 +6,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from yukinal_agent import ExecutionContext, MemoryAuditSink, ModelDrivenAgent, ToolCallError, ToolRegistry
-from yukinal_agent.host_tools import register_host_tools
+from yukinal_agent.host_tools import FILESYSTEM_ACTION_TOOLS, register_host_tools
 from yukinal_agent.tools import approval_fingerprint
 
 
@@ -238,6 +238,198 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "durable_plan_required")
         self.assertEqual(host.calls, [])
+
+
+class FakeFilesystemHost:
+    def __init__(self, outputs: dict[str, dict[str, Any]] | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, Any], float]] = []
+        self.outputs = outputs or {}
+
+    async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+        self.calls.append((method, params, timeout_seconds))
+        tool_name = params.get("toolName")
+        output = self.outputs.get(tool_name, {
+            "path": "/etc/app.conf",
+            "revision": "a" * 64,
+            "bytesBefore": 10,
+            "bytesAfter": 11,
+            "lineDelta": 0,
+        })
+        return {"status": "success", "output": output}
+
+
+class HostFilesystemToolTests(unittest.IsolatedAsyncioTestCase):
+    def make_context(
+        self,
+        *,
+        allowed_tools: frozenset[str] = FILESYSTEM_ACTION_TOOLS,
+        approved_actions: dict[str, str] | None = None,
+        with_plan: bool = True,
+    ) -> ExecutionContext:
+        return ExecutionContext(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            allowed_tools=allowed_tools,
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions=approved_actions or {},
+            context_target_id="srv_stage1",
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-current-1" if with_plan else None,
+            plan_step_id="step-file-action-1" if with_plan else None,
+            evidence_ids=("ev-1",) if with_plan else (),
+            run_id="run-1",
+            trace_id="trace-1",
+        )
+
+    async def test_filesystem_actions_require_exact_approval_and_forward_plan_binding(self) -> None:
+        host = FakeFilesystemHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        tools = {tool.name: tool for tool in registry.list()}
+        for name in FILESYSTEM_ACTION_TOOLS:
+            self.assertEqual(tools[name].risk_level, "write")
+            self.assertTrue(tools[name].requires_approval)
+        self.assertEqual(tools["filesystem.backup.list"].risk_level, "read")
+        self.assertFalse(tools["filesystem.backup.list"].requires_approval)
+        self.assertEqual(tools["filesystem.backup.retention"].risk_level, "read")
+        self.assertFalse(tools["filesystem.backup.retention"].requires_approval)
+
+        arguments = {
+            "path": "/etc/app.conf",
+            "expectedRevision": "b" * 64,
+            "oldString": "listen = 80",
+            "newString": "listen = 8080",
+        }
+        context = self.make_context()
+        with self.assertRaises(ToolCallError) as pending:
+            await registry.execute("filesystem.edit", arguments, context, call_id="edit-call-1")
+        self.assertEqual(pending.exception.code, "approval_required")
+        self.assertEqual(host.calls, [])
+
+        fingerprint = approval_fingerprint(
+            "filesystem.edit",
+            "srv_stage1",
+            arguments,
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+        )
+        approved = self.make_context(approved_actions={fingerprint: "approved-once"})
+        result = await registry.execute("filesystem.edit", arguments, approved, call_id="edit-call-1")
+
+        self.assertEqual(result.value["revision"], "a" * 64)
+        self.assertEqual(len(host.calls), 1)
+        method, request, _timeout = host.calls[0]
+        self.assertEqual(method, "host.tool.execute")
+        self.assertEqual(request["toolName"], "filesystem.edit")
+        self.assertEqual(request["input"], arguments)
+        self.assertEqual(request["taskId"], "task-durable-1")
+        self.assertEqual(request["planId"], "plan-current-1")
+        self.assertEqual(request["planStepId"], "step-file-action-1")
+        self.assertEqual(request["evidenceIds"], ["ev-1"])
+        self.assertNotIn("approvalId", request)
+
+    async def test_filesystem_action_fails_closed_without_plan_and_rejects_host_output_extras(self) -> None:
+        arguments = {
+            "path": "/etc/app.conf",
+            "expectedRevision": "b" * 64,
+            "oldString": "old",
+            "newString": "new",
+        }
+        fingerprint = approval_fingerprint(
+            "filesystem.edit",
+            "srv_stage1",
+            arguments,
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+        )
+        host = FakeFilesystemHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+
+        with self.assertRaises(ToolCallError) as no_plan:
+            await registry.execute(
+                "filesystem.edit",
+                arguments,
+                self.make_context(approved_actions={fingerprint: "approved-once"}, with_plan=False),
+                call_id="edit-no-plan",
+            )
+        self.assertEqual(no_plan.exception.code, "durable_plan_required")
+        self.assertEqual(host.calls, [])
+
+        extra_output_host = FakeFilesystemHost(outputs={"filesystem.edit": {
+            "path": "/etc/app.conf",
+            "revision": "a" * 64,
+            "bytesBefore": 3,
+            "bytesAfter": 3,
+            "lineDelta": 0,
+            "rawContent": "must not cross the Agent boundary",
+        }})
+        extra_output_registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(extra_output_registry, extra_output_host)  # type: ignore[arg-type]
+        with self.assertRaises(ToolCallError) as invalid_output:
+            await extra_output_registry.execute(
+                "filesystem.edit",
+                arguments,
+                self.make_context(approved_actions={fingerprint: "approved-once"}),
+                call_id="edit-invalid-output",
+            )
+        self.assertEqual(invalid_output.exception.code, "invalid_host_response")
+
+    async def test_backup_metadata_tools_validate_filters_and_return_bounded_rows(self) -> None:
+        row = {
+            "id": "backup_1",
+            "serverId": "srv_stage1",
+            "taskId": "task-durable-1",
+            "path": "/etc/app.conf",
+            "backupPath": "/etc/.app.conf.backup",
+            "revision": "c" * 64,
+            "bytesBackedUp": 128,
+            "status": "available",
+            "createdAt": "2026-10-15T00:00:00Z",
+            "updatedAt": "2026-10-15T00:00:00Z",
+            "restoredAt": None,
+            "deletedAt": None,
+        }
+        host = FakeFilesystemHost(outputs={
+            "filesystem.backup.list": {"backups": [row], "truncated": False},
+            "filesystem.backup.retention": {
+                "candidates": [{
+                    "path": row["path"],
+                    "backupPath": row["backupPath"],
+                    "revision": row["revision"],
+                    "taskId": row["taskId"],
+                    "createdAt": row["createdAt"],
+                    "bytesBackedUp": row["bytesBackedUp"],
+                }],
+                "truncated": False,
+                "keptCount": 2,
+                "scannedCount": 3,
+            },
+        })
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        context = self.make_context(allowed_tools=frozenset({
+            "filesystem.backup.list", "filesystem.backup.retention",
+        }))
+
+        listed = await registry.execute(
+            "filesystem.backup.list", {"limit": 8}, context, call_id="backup-list"
+        )
+        planned = await registry.execute(
+            "filesystem.backup.retention", {"keepLatest": 2}, context, call_id="backup-retention"
+        )
+        self.assertEqual(listed.value["backups"][0]["id"], "backup_1")
+        self.assertEqual(planned.value["candidates"][0]["backupPath"], row["backupPath"])
+        self.assertTrue(all(request["taskId"] == "task-durable-1" for _method, request, _timeout in host.calls))
+
+        with self.assertRaises(ToolCallError) as invalid_filter:
+            await registry.execute("filesystem.backup.retention", {}, context, call_id="bad-retention")
+        self.assertEqual(invalid_filter.exception.code, "invalid_arguments")
+        self.assertEqual(len(host.calls), 2)
 
 
 class FakeEvidenceHost:

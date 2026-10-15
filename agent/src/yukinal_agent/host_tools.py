@@ -12,6 +12,14 @@ from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec, appr
 _BASE_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {}}
 _MCP_INPUT_SCHEMA = {"type": "object", "additionalProperties": True}
 HOST_APPROVAL_TOOLS = frozenset({"server.exec", "docker.restart", "systemd.restart", "package.install"})
+FILESYSTEM_ACTION_TOOLS = frozenset({
+    "filesystem.write",
+    "filesystem.edit",
+    "filesystem.backup",
+    "filesystem.restore",
+    "filesystem.backup.cleanup",
+})
+PLAN_BOUND_HOST_ACTION_TOOLS = HOST_APPROVAL_TOOLS | FILESYSTEM_ACTION_TOOLS
 _SERVER_EXEC_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -149,6 +157,248 @@ _EVIDENCE_COMPARE_OUTPUT_VALIDATOR = Draft202012Validator({
     "required": ["comparison"],
     "additionalProperties": False,
 })
+_REMOTE_PATH_SCHEMA = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 4096,
+    "pattern": "^/[^\\u0000-\\u001f]*$",
+}
+_CONTENT_REVISION_SCHEMA = {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+_FILESYSTEM_WRITE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "content": {"type": "string", "maxLength": 524288},
+    },
+    "required": ["path", "content"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_EDIT_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "expectedRevision": _CONTENT_REVISION_SCHEMA,
+        "oldString": {"type": "string", "minLength": 1, "maxLength": 524288},
+        "newString": {"type": "string", "maxLength": 524288},
+    },
+    "required": ["path", "expectedRevision", "oldString", "newString"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"path": _REMOTE_PATH_SCHEMA},
+    "required": ["path"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_RESTORE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "backupPath": _REMOTE_PATH_SCHEMA,
+        "expectedRevision": _CONTENT_REVISION_SCHEMA,
+    },
+    "required": ["path", "backupPath", "expectedRevision"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_CLEANUP_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "backupPath": _REMOTE_PATH_SCHEMA,
+        "expectedRevision": _CONTENT_REVISION_SCHEMA,
+    },
+    "required": ["path", "backupPath", "expectedRevision"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_CLEANUP_INPUT_SCHEMA = {
+    "type": "object",
+    "oneOf": [
+        _FILESYSTEM_BACKUP_CLEANUP_ITEM_SCHEMA,
+        {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": _FILESYSTEM_BACKUP_CLEANUP_ITEM_SCHEMA,
+                    "minItems": 1,
+                    "maxItems": 32,
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+    ],
+}
+_FILESYSTEM_BACKUP_LIST_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["available", "restored", "deleted"]},
+        "path": _REMOTE_PATH_SCHEMA,
+        "limit": {"type": "integer", "minimum": 1, "maximum": 128},
+    },
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_RETENTION_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pathPrefix": _REMOTE_PATH_SCHEMA,
+        "keepLatest": {"type": "integer", "minimum": 1, "maximum": 64},
+        "olderThanDays": {"type": "integer", "minimum": 1, "maximum": 3650},
+    },
+    "anyOf": [{"required": ["keepLatest"]}, {"required": ["olderThanDays"]}],
+    "additionalProperties": False,
+}
+_FILESYSTEM_EDIT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "revision": _CONTENT_REVISION_SCHEMA,
+        "bytesBefore": {"type": "integer", "minimum": 0, "maximum": 524288},
+        "bytesAfter": {"type": "integer", "minimum": 0, "maximum": 524288},
+        "lineDelta": {"type": "integer", "minimum": -524288, "maximum": 524288},
+    },
+    "required": ["path", "revision", "bytesBefore", "bytesAfter", "lineDelta"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_WRITE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "bytesWritten": {"type": "integer", "minimum": 0, "maximum": 524288},
+    },
+    "required": ["path", "bytesWritten"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "backupPath": _REMOTE_PATH_SCHEMA,
+        "revision": _CONTENT_REVISION_SCHEMA,
+        "bytesBackedUp": {"type": "integer", "minimum": 0, "maximum": 1048576},
+    },
+    "required": ["path", "backupPath", "revision", "bytesBackedUp"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_RESTORE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": _REMOTE_PATH_SCHEMA,
+        "backupPath": _REMOTE_PATH_SCHEMA,
+        "revision": _CONTENT_REVISION_SCHEMA,
+        "bytesBefore": {"type": "integer", "minimum": 0, "maximum": 1048576},
+        "bytesAfter": {"type": "integer", "minimum": 0, "maximum": 1048576},
+    },
+    "required": ["path", "backupPath", "revision", "bytesBefore", "bytesAfter"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_CLEANUP_OUTPUT_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "path": _REMOTE_PATH_SCHEMA,
+                "backupPath": _REMOTE_PATH_SCHEMA,
+                "revision": _CONTENT_REVISION_SCHEMA,
+                "bytesDeleted": {"type": "integer", "minimum": 0, "maximum": 1048576},
+            },
+            "required": ["path", "backupPath", "revision", "bytesDeleted"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": _REMOTE_PATH_SCHEMA,
+                            "backupPath": _REMOTE_PATH_SCHEMA,
+                            "outcome": {"type": "string", "enum": ["removed", "skipped", "failed"]},
+                            "revision": _CONTENT_REVISION_SCHEMA,
+                            "bytesDeleted": {"type": "integer", "minimum": 0, "maximum": 1048576},
+                            "reason": {"type": "string", "minLength": 1, "maxLength": 1024},
+                        },
+                        "required": ["path", "backupPath", "outcome"],
+                        "additionalProperties": False,
+                    },
+                    "maxItems": 32,
+                },
+                "partial": {"type": "boolean"},
+            },
+            "required": ["items", "partial"],
+            "additionalProperties": False,
+        },
+    ],
+}
+_FILESYSTEM_BACKUP_LEDGER_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "serverId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "taskId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "path": _REMOTE_PATH_SCHEMA,
+        "backupPath": _REMOTE_PATH_SCHEMA,
+        "revision": _CONTENT_REVISION_SCHEMA,
+        "bytesBackedUp": {"type": "integer", "minimum": 0, "maximum": 1048576},
+        "status": {"type": "string", "enum": ["available", "restored", "deleted"]},
+        "createdAt": {"type": "string", "minLength": 1, "maxLength": 80},
+        "updatedAt": {"type": "string", "minLength": 1, "maxLength": 80},
+        "restoredAt": {"type": ["string", "null"], "minLength": 1, "maxLength": 80},
+        "deletedAt": {"type": ["string", "null"], "minLength": 1, "maxLength": 80},
+    },
+    "required": [
+        "id", "serverId", "taskId", "path", "backupPath", "revision", "bytesBackedUp",
+        "status", "createdAt", "updatedAt",
+    ],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_LIST_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "backups": {"type": "array", "items": _FILESYSTEM_BACKUP_LEDGER_ITEM_SCHEMA, "maxItems": 128},
+        "truncated": {"type": "boolean"},
+    },
+    "required": ["backups", "truncated"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_BACKUP_RETENTION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": _REMOTE_PATH_SCHEMA,
+                    "backupPath": _REMOTE_PATH_SCHEMA,
+                    "revision": _CONTENT_REVISION_SCHEMA,
+                    "taskId": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "createdAt": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "bytesBackedUp": {"type": "integer", "minimum": 0, "maximum": 1048576},
+                },
+                "required": ["path", "backupPath", "revision", "createdAt", "bytesBackedUp"],
+                "additionalProperties": False,
+            },
+            "maxItems": 32,
+        },
+        "truncated": {"type": "boolean"},
+        "keptCount": {"type": "integer", "minimum": 0},
+        "scannedCount": {"type": "integer", "minimum": 0},
+    },
+    "required": ["candidates", "truncated", "keptCount", "scannedCount"],
+    "additionalProperties": False,
+}
+_FILESYSTEM_OUTPUT_VALIDATORS = {
+    "filesystem.write": Draft202012Validator(_FILESYSTEM_WRITE_OUTPUT_SCHEMA),
+    "filesystem.edit": Draft202012Validator(_FILESYSTEM_EDIT_OUTPUT_SCHEMA),
+    "filesystem.backup": Draft202012Validator(_FILESYSTEM_BACKUP_OUTPUT_SCHEMA),
+    "filesystem.restore": Draft202012Validator(_FILESYSTEM_RESTORE_OUTPUT_SCHEMA),
+    "filesystem.backup.cleanup": Draft202012Validator(_FILESYSTEM_BACKUP_CLEANUP_OUTPUT_SCHEMA),
+    "filesystem.backup.list": Draft202012Validator(_FILESYSTEM_BACKUP_LIST_OUTPUT_SCHEMA),
+    "filesystem.backup.retention": Draft202012Validator(_FILESYSTEM_BACKUP_RETENTION_OUTPUT_SCHEMA),
+}
 _STRUCTURED_ACTIONS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     (
         "docker.restart",
@@ -286,10 +536,22 @@ def register_host_tools(
                 "additionalProperties": False,
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000-\\u001f]*$"},
+                    "path": _REMOTE_PATH_SCHEMA,
                     "maxBytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
                 },
             },
+        ),
+        (
+            "filesystem.backup.list",
+            "Read bounded metadata for host-owned backups belonging to the current investigation task. "
+            "An available ledger entry does not prove that the remote backup still exists.",
+            _FILESYSTEM_BACKUP_LIST_INPUT_SCHEMA,
+        ),
+        (
+            "filesystem.backup.retention",
+            "Preview bounded backup-retention candidates across tasks. This reads host ledger metadata and "
+            "never deletes or probes remote files.",
+            _FILESYSTEM_BACKUP_RETENTION_INPUT_SCHEMA,
         ),
     )
 
@@ -300,7 +562,7 @@ def register_host_tools(
             input_schema=schema,
             risk_level="read",
             requires_approval=False,
-            handler=_host_tool_handler(host, name),
+            handler=_host_tool_handler(host, name, _FILESYSTEM_OUTPUT_VALIDATORS.get(name)),
             target_id_argument=None,
             target_required=True,
             origin={"kind": "builtin"},
@@ -338,6 +600,66 @@ def register_host_tools(
             cancellable=True,
         )
         for name, description, schema in _STRUCTURED_ACTIONS
+    ])
+    filesystem_actions = (
+        (
+            "filesystem.write",
+            "Replace one complete remote text file after per-call approval. This overwrites the entire file; "
+            "use filesystem.edit for a revision-guarded exact replacement. Content is limited to 512 KiB.",
+            _FILESYSTEM_WRITE_INPUT_SCHEMA,
+            20_000,
+        ),
+        (
+            "filesystem.edit",
+            "Replace exactly one occurrence in a remote file after per-call approval. The file must still match "
+            "expectedRevision from a complete filesystem.read; the host rejects stale revisions, missing or "
+            "repeated oldString values, symlinks, and files outside the 512 KiB edit cap.",
+            _FILESYSTEM_EDIT_INPUT_SCHEMA,
+            30_000,
+        ),
+        (
+            "filesystem.backup",
+            "Create a complete bounded recovery copy of one remote file before a change. The host chooses a "
+            "unique sibling path and records it in the durable backup ledger.",
+            _FILESYSTEM_BACKUP_INPUT_SCHEMA,
+            30_000,
+        ),
+        (
+            "filesystem.restore",
+            "Restore a host-owned backup after per-call approval. The backup must belong to this server, task, "
+            "and path, and the target must still match expectedRevision.",
+            _FILESYSTEM_RESTORE_INPUT_SCHEMA,
+            30_000,
+        ),
+        (
+            "filesystem.backup.cleanup",
+            "Delete one exact host-owned backup or a bounded approved rotation batch. The host verifies its "
+            "ledger record and content revision before removing it.",
+            _FILESYSTEM_BACKUP_CLEANUP_INPUT_SCHEMA,
+            60_000,
+        ),
+    )
+    registry.register_many([
+        ToolSpec(
+            name=name,
+            description=description,
+            input_schema=schema,
+            risk_level="write",
+            requires_approval=True,
+            handler=_host_tool_handler(
+                host,
+                name,
+                _FILESYSTEM_OUTPUT_VALIDATORS[name],
+                timeout_seconds=55.0 if name == "filesystem.backup.cleanup" else 45.0,
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=timeout_ms,
+            cancellable=True,
+        )
+        for name, description, schema, timeout_ms in filesystem_actions
+        if name not in excluded_names
     ])
     evidence_tools = (
         (
@@ -433,9 +755,25 @@ def register_mcp_catalog(registry: ToolRegistry, host: HostRpcClient, catalog: o
     return registered
 
 
-def _host_tool_handler(host: HostRpcClient, tool_name: str):
+def _host_tool_handler(
+    host: HostRpcClient,
+    tool_name: str,
+    output_validator: Draft202012Validator | None = None,
+    *,
+    timeout_seconds: float = 45.0,
+):
     async def execute(arguments: dict[str, Any], context: ExecutionContext) -> Any:
-        return await _execute_on_host(host, tool_name, arguments, context)
+        output = await _execute_on_host(
+            host, tool_name, arguments, context, timeout_seconds=timeout_seconds
+        )
+        if output_validator is not None:
+            try:
+                output_validator.validate(output)
+            except ValidationError:
+                raise ToolCallError(
+                    "invalid_host_response", f"The desktop host returned an invalid {tool_name} response"
+                ) from None
+        return output
 
     return execute
 
@@ -493,6 +831,8 @@ async def _execute_on_host(
     tool_name: str,
     arguments: dict[str, Any],
     context: ExecutionContext,
+    *,
+    timeout_seconds: float = 45.0,
 ) -> Any:
     target = context.host_target
     if not isinstance(target, dict):
@@ -512,14 +852,16 @@ async def _execute_on_host(
         request["planId"] = context.plan_id
         request["planStepId"] = context.plan_step_id
         request["evidenceIds"] = list(context.evidence_ids)
-    if tool_name in HOST_APPROVAL_TOOLS:
+    if tool_name in PLAN_BOUND_HOST_ACTION_TOOLS:
         if (
-            context.host_target.get("host") != "remote"
+            not context.host_target
+            or context.host_target.get("host") != "remote"
             or not context.host_task_id
             or not context.plan_id
             or not context.plan_step_id
         ):
             raise ToolCallError("durable_plan_required", "host actions require a current durable remote action plan")
+    if tool_name in HOST_APPROVAL_TOOLS:
         fingerprint = approval_fingerprint(
             tool_name,
             context.context_target_id,
@@ -533,7 +875,7 @@ async def _execute_on_host(
             raise ToolCallError("approval_reference_missing", "The exact host action approval reference is unavailable")
         request["approvalId"] = approval_id
     try:
-        response = await host.request("host.tool.execute", request, timeout_seconds=45.0)
+        response = await host.request("host.tool.execute", request, timeout_seconds=timeout_seconds)
     except asyncio.CancelledError:
         raise
     except Exception:
