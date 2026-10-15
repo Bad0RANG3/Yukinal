@@ -90,6 +90,19 @@ def register_desktop_ssh_tools(
             "server_logs",
         ),
         (
+            "server.services",
+            "Discover bounded read-only systemd or Docker service status on the selected server.",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:/-]{0,127}$"},
+                    "state": {"type": "string", "enum": ["running", "stopped", "failed", "unknown"]},
+                },
+                "additionalProperties": False,
+            },
+            "service_inventory",
+        ),
+        (
             "docker.ps",
             "List Docker containers on the selected server without changing state.",
             {
@@ -202,6 +215,9 @@ def register_desktop_ssh_tools(
                     arguments.get("sinceSeconds"),
                     arguments.get("unit"),
                 )
+            elif operation == "service_inventory":
+                result = await asyncio.to_thread(client.service_inventory, target_id)
+                return _parse_service_inventory(result.stdout, arguments)
             elif operation == "docker_ps":
                 result = await asyncio.to_thread(
                     client.docker_ps, target_id, arguments.get("all", False)
@@ -268,3 +284,90 @@ def register_desktop_ssh_tools(
         if name not in existing_names
     ])
     return frozenset(name for name, _, _, _ in tools if name != "ssh.service_status")
+
+
+def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, object]:
+    source_marker = "__YUKINAL_SOURCE__="
+    source_value = next(
+        (line.strip()[len(source_marker):] for line in raw.splitlines() if line.strip().startswith(source_marker)),
+        None,
+    )
+    if source_value not in {"systemd", "docker", "unavailable"}:
+        raise ToolCallError("execution_failed", "The C++ SSH service returned an invalid service inventory")
+
+    services: list[dict[str, str]] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(source_marker):
+            continue
+        if source_value == "systemd":
+            fields = line.split()
+            offset = 1 if fields and fields[0] == "●" else 0
+            if len(fields) < offset + 4:
+                continue
+            name, active, sub = fields[offset], fields[offset + 2], fields[offset + 3]
+            description = " ".join(fields[offset + 4:])
+            state = _systemd_service_state(active, sub)
+            status = f"{active}/{sub}"
+        elif source_value == "docker":
+            fields = line.split("\t", 3)
+            if len(fields) < 3:
+                continue
+            name, raw_state, status = (field.strip() for field in fields[:3])
+            description = fields[3].strip() if len(fields) == 4 else ""
+            if not name or not raw_state or not status:
+                continue
+            state = _docker_service_state(raw_state)
+        else:
+            continue
+
+        service: dict[str, str] = {"name": name, "state": state, "status": status}
+        if description:
+            service["description"] = description
+        services.append(service)
+        if len(services) == 200:
+            break
+
+    name_filter = arguments.get("name")
+    if name_filter is not None and (
+        not isinstance(name_filter, str)
+        or not name_filter.strip()
+        or len(name_filter) > 128
+        or not name_filter[0].isascii()
+        or not name_filter[0].isalnum()
+        or not all(
+            character.isascii() and (character.isalnum() or character in "_.@:/-")
+            for character in name_filter
+        )
+    ):
+        raise ToolCallError("invalid_arguments", "server.services name must be a bounded service or container reference")
+    state_filter = arguments.get("state")
+    if name_filter is not None:
+        services = [service for service in services if service["name"] == name_filter]
+    if state_filter is not None:
+        services = [service for service in services if service["state"] == state_filter]
+
+    result: dict[str, object] = {"source": source_value, "services": services}
+    if source_value == "unavailable":
+        result["message"] = "未检测到可读取的 systemd 或 Docker 服务管理器"
+    return result
+
+
+def _systemd_service_state(active: str, sub: str) -> str:
+    if active == "failed" or sub == "failed":
+        return "failed"
+    if active == "active" and sub == "running":
+        return "running"
+    if active in {"inactive", "deactivating"} or sub in {"dead", "exited"}:
+        return "stopped"
+    return "unknown"
+
+
+def _docker_service_state(state: str) -> str:
+    if state in {"running", "restarting"}:
+        return "running"
+    if state == "dead":
+        return "failed"
+    if state in {"created", "exited", "paused", "removing"}:
+        return "stopped"
+    return "unknown"

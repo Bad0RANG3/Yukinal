@@ -55,7 +55,7 @@ The Python runtime speaks the desktop host's bidirectional JSON-RPC protocol for
 approval, target resolution, and remaining host operations; it also loads low-risk
 MCP tools from the host catalog and emits the tool-call/result events consumed by
 the existing transcript UI. With the packaged C++ service available, desktop
-`server.logs`, Docker read operations, `systemd.inspect`, `package.inspect`, and
+`server.logs`, `server.services`, Docker read operations, `systemd.inspect`, `package.inspect`, and
 `ssh.service_status` use a short-lived, one-target C++ process. Rust supplies the
 saved target, confirmed host-key pin, and credential material from the OS store;
 the Python process passes credentials only through the C++ child environment and
@@ -373,7 +373,7 @@ Verification on 2026-10-15 used Python 3.14.8 with LangGraph 1.2.15,
 MCP Python SDK 2.3.0 and jsonschema 4.26.0 in the ignored `agent/.venv`
 environment. The C++ build and all six CTest targets passed on the preceding
 verified revision. On the current Python tool-routing changes, full Agent-focused
-discovery ran 52 tests and all passed; the focused SSH tool/process run passed 10
+discovery ran 53 tests and all passed; the focused SSH tool/process run passed 11
 tests. An earlier full Python
 unittest discovery ran 45 tests: 42 passed and 3 service integration cases were
 skipped because the service binary path was not configured for that standalone

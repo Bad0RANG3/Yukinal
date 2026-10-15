@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from yukinal_agent import AgentWorkflow, ExecutionContext, MemoryAuditSink, ToolCallError, ToolRegistry
-from yukinal_agent.ssh_tools import register_desktop_ssh_tools, register_ssh_tools
+from yukinal_agent.ssh_tools import _parse_service_inventory, register_desktop_ssh_tools, register_ssh_tools
 
 
 class FakeDesktopHost:
@@ -75,6 +75,22 @@ class FakeDesktopSshClient:
 
     def server_logs(self, *arguments: Any) -> Any:
         return self._result("server_logs", *arguments)
+
+    def service_inventory(self, *arguments: Any) -> Any:
+        self.calls.append(("service_inventory", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0],
+            operation="service_inventory",
+            exit_code=0,
+            stdout=(
+                "api.service loaded active running API service\n"
+                "stopped.service loaded inactive dead Stopped service\n"
+                "__YUKINAL_SOURCE__=systemd\n"
+            ),
+            stderr="",
+            duration_ms=3,
+            output_truncated=False,
+        )
 
     def docker_ps(self, *arguments: Any) -> Any:
         return self._result("docker_ps", *arguments)
@@ -156,7 +172,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(MemoryAuditSink())
         direct_names = register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
         self.assertEqual(direct_names, {
-            "server.logs", "docker.ps", "docker.logs", "docker.inspect",
+            "server.logs", "server.services", "docker.ps", "docker.logs", "docker.inspect",
             "systemd.inspect", "package.inspect",
         })
         FakeDesktopSshProcess.instances.clear()
@@ -165,6 +181,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         cases = [
             ("ssh.service_status", {"service": "nginx.service"}, "service_status", ("srv_stage1", "nginx.service", 10)),
             ("server.logs", {"sinceSeconds": 60, "unit": "nginx.service"}, "server_logs", ("srv_stage1", 60, "nginx.service")),
+            ("server.services", {"name": "api.service", "state": "running"}, "service_inventory", ("srv_stage1",)),
             ("docker.ps", {"all": True}, "docker_ps", ("srv_stage1", True)),
             ("docker.logs", {"container": "api", "tail": 50}, "docker_logs", ("srv_stage1", "api", 50)),
             ("docker.inspect", {"container": "api"}, "docker_inspect", ("srv_stage1", "api")),
@@ -188,8 +205,19 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         ):
             for tool_name, arguments, operation, expected_arguments in cases:
                 result = await registry.execute(tool_name, arguments, context)
-                self.assertEqual(result.value["operation"], operation)
-                self.assertEqual(result.value["target_id"], "srv_stage1")
+                if tool_name == "server.services":
+                    self.assertEqual(result.value, {
+                        "source": "systemd",
+                        "services": [{
+                            "name": "api.service",
+                            "state": "running",
+                            "status": "active/running",
+                            "description": "API service",
+                        }],
+                    })
+                else:
+                    self.assertEqual(result.value["operation"], operation)
+                    self.assertEqual(result.value["target_id"], "srv_stage1")
 
         self.assertEqual(
             FakeDesktopSshClient.calls,
@@ -201,6 +229,25 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(FakeDesktopSshProcess.instances), len(cases))
         self.assertTrue(all(process.started and process.stopped for process in FakeDesktopSshProcess.instances))
+
+    async def test_service_inventory_parser_handles_docker_and_unavailable_sources(self) -> None:
+        docker = _parse_service_inventory(
+            "api\trunning\tUp 3 days\tnginx:latest\n"
+            "stopped\texited\tExited (0) 1 day ago\talpine\n"
+            "__YUKINAL_SOURCE__=docker\n",
+            {},
+        )
+        self.assertEqual(docker, {
+            "source": "docker",
+            "services": [
+                {"name": "api", "state": "running", "status": "Up 3 days", "description": "nginx:latest"},
+                {"name": "stopped", "state": "stopped", "status": "Exited (0) 1 day ago", "description": "alpine"},
+            ],
+        })
+        unavailable = _parse_service_inventory("__YUKINAL_SOURCE__=unavailable\n", {})
+        self.assertEqual(unavailable["source"], "unavailable")
+        self.assertEqual(unavailable["services"], [])
+        self.assertEqual(unavailable["message"], "未检测到可读取的 systemd 或 Docker 服务管理器")
 
     async def test_selected_server_is_bound_by_host_context(self) -> None:
         client = FakeSshServiceClient()
