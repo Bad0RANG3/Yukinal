@@ -126,12 +126,13 @@ terminal outcomes in the durable execution fence. Rust keeps the compatibility
 executor for routes it explicitly reports as unsupported.
 `server.exec` remains separately guarded and exposed only when the host supplies
 the current remote action-plan binding. On C++-supported targets, the host
-validates the plan, consumes the exact approval ticket, creates the Rust-built
-remote command wrapper, then starts a one-shot C++ service config that enables
-`server.exec` for that target only. Python sends the bounded structured request
-and returns its validated result to the host. Persistent service target configs
-deny it by default. The bounded task command-grant path remains in the Rust
-compatibility executor for targets that the C++ service reports as unsupported.
+validates the plan, consumes the exact approval ticket, then starts a one-shot
+C++ service config that enables `server.exec` for that target only. Python sends
+the raw command plus bounded workdir/environment parameters; the C++ policy
+validates those fields and its SSH service builds the quoted remote shell wrapper.
+Python returns the validated result to the host. Persistent service target
+configs deny it by default. Targets the C++ service reports as unsupported still
+use the Rust compatibility executor.
 The Python sidecar exposes bounded `filesystem.read`; Agent `filesystem.write`,
 revision-guarded `filesystem.edit`, `filesystem.backup`, `filesystem.restore`,
 and `filesystem.backup.cleanup`

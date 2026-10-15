@@ -193,6 +193,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string destination_path;
   std::string nonce;
   std::string command;
+  std::string workdir;
+  std::map<std::string, std::string> environment;
   std::string package_manager;
   std::string package;
   std::string package_version;
@@ -617,8 +619,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
       return false;
     }
   } else if (operation == "server_exec") {
-    if (!has_only_keys(*parameters_it, {"command", "max_output_bytes", "timeout_ms"})) {
-      set_error(error, 422, "invalid_parameters", "server_exec accepts only command, max_output_bytes, and timeout_ms");
+    if (!has_only_keys(*parameters_it, {"command", "max_output_bytes", "timeout_ms", "workdir", "env"})) {
+      set_error(error, 422, "invalid_parameters", "server_exec accepts only command, limits, workdir, and env");
       return false;
     }
     const auto command_it = parameters_it->find("command");
@@ -655,6 +657,57 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     }
     max_output_bytes = static_cast<std::uint32_t>(parsed_output);
     timeout_ms = static_cast<std::uint32_t>(parsed_timeout_ms);
+    const auto workdir_it = parameters_it->find("workdir");
+    if (workdir_it != parameters_it->end()) {
+      if (!workdir_it->is_string()) {
+        set_error(error, 422, "invalid_parameters", "server_exec workdir must be an absolute POSIX path");
+        return false;
+      }
+      workdir = workdir_it->get<std::string>();
+      const bool has_dot_segment = [&] {
+        std::size_t start = 0;
+        while (start <= workdir.size()) {
+          const auto end = workdir.find('/', start);
+          const auto segment = std::string_view(workdir).substr(
+              start, end == std::string::npos ? std::string::npos : end - start);
+          if (segment == "." || segment == "..") return true;
+          if (end == std::string::npos) break;
+          start = end + 1;
+        }
+        return false;
+      }();
+      if (workdir.empty() || workdir.size() > 4096 || workdir.front() != '/' ||
+          workdir.find('\0') != std::string::npos ||
+          std::any_of(workdir.begin(), workdir.end(), [](unsigned char ch) { return ch < 0x20 || ch == 0x7f; }) ||
+          has_dot_segment) {
+        set_error(error, 422, "invalid_parameters", "server_exec workdir must be a bounded absolute path without traversal or control characters");
+        return false;
+      }
+    }
+    const auto env_it = parameters_it->find("env");
+    if (env_it != parameters_it->end()) {
+      static const std::set<std::string> allowed_environment = {
+          "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_TIME", "LC_NUMERIC",
+          "LC_COLLATE", "TZ", "TERM"};
+      if (!env_it->is_object() || env_it->size() > 16) {
+        set_error(error, 422, "invalid_parameters", "server_exec env must contain at most 16 allowlisted variables");
+        return false;
+      }
+      for (auto it = env_it->begin(); it != env_it->end(); ++it) {
+        if (!allowed_environment.contains(it.key()) || !it.value().is_string()) {
+          set_error(error, 422, "invalid_parameters", "server_exec env contains a non-allowlisted variable or non-string value");
+          return false;
+        }
+        auto value = it.value().get<std::string>();
+        if (value.size() > 256 || std::any_of(value.begin(), value.end(), [](unsigned char ch) {
+              return ch < 0x20 || ch == 0x7f;
+            })) {
+          set_error(error, 422, "invalid_parameters", "server_exec env values must be bounded and contain no control characters");
+          return false;
+        }
+        environment.emplace(it.key(), std::move(value));
+      }
+    }
   } else if (operation == "sftp_remove_file" || operation == "sftp_link_count" ||
              operation == "sftp_create_dir") {
     if (!has_only_keys(*parameters_it, {"path"})) {
@@ -711,6 +764,8 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->destination_path = std::move(destination_path);
   request->nonce = std::move(nonce);
   request->command = std::move(command);
+  request->workdir = std::move(workdir);
+  request->environment = std::move(environment);
   request->package_manager = std::move(package_manager);
   request->package = std::move(package);
   request->package_version = std::move(package_version);

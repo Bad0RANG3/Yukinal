@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <array>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -24,6 +25,8 @@ struct ExecRequest {
   std::string source_path;
   std::string destination_path;
   std::string command;
+  std::string workdir;
+  std::map<std::string, std::string> environment;
   std::string nonce;
   std::string container;
   bool include_all_containers = false;

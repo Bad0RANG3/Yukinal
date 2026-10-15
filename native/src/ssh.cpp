@@ -2161,7 +2161,28 @@ static ExecResult server_exec_operation(const TargetConfig& target,
     fail(&result, "operation_not_allowed", "server.exec requires a one-shot host authorization");
     return result;
   }
-  return run_ssh_command_with_limits(target, request.command,
+  std::string command;
+  const auto quote = [](const std::string& value) {
+    std::string quoted = "'";
+    for (const char character : value) {
+      if (character == '\'') quoted += "'\\''";
+      else quoted += character;
+    }
+    quoted += '\'';
+    return quoted;
+  };
+  if (!request.workdir.empty()) command = "cd " + quote(request.workdir) + " && ";
+  if (!request.environment.empty()) {
+    command += "env";
+    for (const auto& [key, value] : request.environment) {
+      command += " " + key + "=" + quote(value);
+    }
+    command += " /bin/sh -c ";
+  } else {
+    command += "/bin/sh -c ";
+  }
+  command += quote(request.command);
+  return run_ssh_command_with_limits(target, command,
                                      std::chrono::milliseconds(request.timeout_ms),
                                      request.max_output_bytes, true);
 }

@@ -528,6 +528,8 @@ pub(crate) async fn execute_server_command(
     state: &AppState,
     server_id: &str,
     command: &str,
+    workdir: Option<&str>,
+    env: Option<&std::collections::BTreeMap<String, String>>,
     timeout_ms: u64,
     max_output_bytes: usize,
 ) -> Result<Value, (String, String)> {
@@ -542,15 +544,22 @@ pub(crate) async fn execute_server_command(
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))
             .map_err(|message| ("transport_error".into(), message))?;
+    let mut parameters = json!({
+        "command": command,
+        "timeout_ms": timeout_ms,
+        "max_output_bytes": max_output_bytes,
+    });
+    if let Some(workdir) = workdir {
+        parameters["workdir"] = json!(workdir);
+    }
+    if let Some(env) = env {
+        parameters["env"] = json!(env);
+    }
     run_operation_response_with_target(
         app,
         server_id,
         "server_exec",
-        json!({
-            "command": command,
-            "timeout_ms": timeout_ms,
-            "max_output_bytes": max_output_bytes,
-        }),
+        parameters,
         target_payload,
         true,
     )
