@@ -275,6 +275,9 @@ class FakeDesktopSshClient:
     def systemd_restart(self, *arguments: Any) -> Any:
         return self._result("systemd_restart", *arguments)
 
+    def package_install(self, *arguments: Any) -> Any:
+        return self._result("package_install", *arguments)
+
     def package_inspect(self, *arguments: Any) -> Any:
         self.calls.append(("package_inspect", arguments))
         return SimpleNamespace(
@@ -385,7 +388,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
-            "filesystem.backup.cleanup", "systemd.restart", "docker.restart",
+            "filesystem.backup.cleanup", "systemd.restart", "docker.restart", "package.install",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -646,6 +649,72 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(host.calls[0][1]["toolCall"]["toolName"], "docker.restart")
         self.assertEqual(host.calls[0][1]["toolCall"]["approvalId"], "apr-approved-docker")
+        self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_desktop_package_install_uses_approved_host_route_and_cpp_operation(self) -> None:
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {
+            "manager": "apt",
+            "package": "nginx",
+            "version": "1.27.0-1",
+            "timeoutSeconds": 10,
+        }
+        fingerprint = approval_fingerprint(
+            "package.install",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"package.install"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-package-install"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-package-install-1",
+            trace_id="trace-package-install-1",
+            call_id="call-package-install-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            result = await registry.execute(
+                "package.install", arguments, context, call_id=context.call_id
+            )
+
+        self.assertEqual(
+            result.value,
+            {"manager": "apt", "package": "nginx", "version": "1.27.0-1", "installed": True},
+        )
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [("package_install", ("srv_stage1", "apt", "nginx", "1.27.0-1", 10))],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            ["host.ssh.effectful_action_target", "host.ssh.effectful_action_finished"],
+        )
+        self.assertEqual(host.calls[0][1]["toolCall"]["toolName"], "package.install")
+        self.assertEqual(
+            host.calls[0][1]["toolCall"]["approvalId"], "apr-approved-package-install"
+        )
         self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)

@@ -304,6 +304,40 @@ class ClientTests(unittest.TestCase):
                 invoke()
         self.assertIsNone(self.server.last_request)
 
+    def test_package_install_uses_a_validated_structured_operation(self) -> None:
+        self.server.response_body["operation"] = "package_install"
+        result = self.client.package_install(
+            "staging-web-01", "apt", "nginx", "1.27.0-1", 180
+        )
+        self.assertEqual(result.operation, "package_install")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "package_install",
+                "parameters": {
+                    "manager": "apt",
+                    "package": "nginx",
+                    "version": "1.27.0-1",
+                    "timeout_seconds": 180,
+                },
+                "timeout_seconds": 180,
+            },
+        )
+
+    def test_package_install_rejects_invalid_manager_package_version_and_timeout(self) -> None:
+        invalid_calls = (
+            lambda: self.client.package_install("staging-web-01", "yum", "nginx"),
+            lambda: self.client.package_install("staging-web-01", "apt", "nginx;id"),
+            lambda: self.client.package_install("staging-web-01", "apt", "nginx", "1;id"),
+            lambda: self.client.package_install("staging-web-01", "apt", "nginx", timeout_seconds=True),
+            lambda: self.client.package_install("staging-web-01", "apt", "nginx", timeout_seconds=601),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke), self.assertRaises(ValueError):
+                invoke()
+        self.assertIsNone(self.server.last_request)
+
     def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
         self.server.response_body["operation"] = "sftp_write"
         self.server.response_body["stdout"] = '{"bytes_written":4}'

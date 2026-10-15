@@ -40,8 +40,9 @@
 > `package.install` actions only for a remote goal run with an active action step
 > that allows them. These actions require exact per-call approval; Rust fingerprints
 > the exact host input and consumes a one-time ticket before dispatch. On
-> C++-supported routes, `systemd.restart` and `docker.restart` now run from
-> Python through structured C++ SSH operations. The host checks the durable action plan before
+> C++-supported routes, `systemd.restart`, `docker.restart`, and
+> `package.install` now run from Python through structured C++ SSH operations.
+> The host checks the durable action plan before
 > claiming the call and consuming its ticket. A successful result is cached only
 > after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
 > and cannot be replayed. Rust retains the
@@ -577,6 +578,14 @@ host-tools module passed all 12 tests. `py_compile`, the documentation link
 checker (15 Markdown files, 48 links), and `git diff --check` passed. The Rust
 host bridge could not be formatted or compiled because Cargo, rustfmt, and rustc
 are not available on `PATH`.
+
+On 2026-10-15, `package.install` moved to the shared Python/C++ effectful-action
+route. Rust revalidates the durable plan, exact approval and package parameters,
+then records the terminal result in the host execution fence; unsupported SSH
+routes retain the existing Rust executor. Added Python coverage for structured
+request bounds and the approved desktop route. Full Python Agent discovery ran
+112 tests successfully with 4 service-path skips; CTest passed all six targets,
+including the C++ SSH mock and Agent-to-C++ integration.
 
 ## Deliberately deferred
 
