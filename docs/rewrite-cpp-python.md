@@ -418,7 +418,9 @@ configuration.
 The desktop passes the selected proxy URL and optional `no_proxy` string to the
 C++ service without parsing them in Rust. C++ validates HTTP and HTTPS proxy URLs,
 verifies HTTPS proxy certificates, evaluates exact-host, domain-suffix, IPv4
-prefix, IPv4/IPv6 CIDR, and `*` bypass patterns, and performs the CONNECT tunnel.
+prefix, IPv4/IPv6 CIDR, and `*` bypass patterns. Hostname and wildcard patterns
+can include an SSH-port constraint, such as `localhost:22` and `[::1]:2222`.
+C++ then performs the CONNECT tunnel.
 Proxy credentials are forwarded to the child environment separately from the
 target JSON. The C++ service bounds the CONNECT response and shares the SSH
 operation deadline.
@@ -739,3 +741,9 @@ Python Agent keep supported CA and proxy targets on its Python-to-C++ path inste
 of rejecting the payload and handing the operation back to the desktop host. The
 focused process suite passed all six tests, and the Agent SSH mock passed selected
 target status and snapshot operations through an authenticated SOCKS5H tunnel.
+
+On 2026-10-15, aligned C++ and Python validation for port-qualified `no_proxy`
+patterns. C++ now checks both the host pattern and SSH port before bypassing the
+proxy; the Python desktop caller accepts the same syntax, including bracketed
+IPv6 and all-host port rules. The native C++ suite, all six CTest targets, the
+focused Python process suite, and the Agent-to-C++ SSH mock passed.

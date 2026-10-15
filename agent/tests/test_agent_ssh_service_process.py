@@ -195,7 +195,16 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 "host": "proxy.example.test",
                 "port": 8080,
                 "auth_env": "YK_SSH_PROXY_CREDENTIAL",
-                "no_proxy": ["*.corp", "10.*", "localhost", "10.0.0.0/8"],
+                "no_proxy": [
+                    "*.corp",
+                    "10.*",
+                    "localhost",
+                    "10.0.0.0/8",
+                    "localhost:22",
+                    "*.corp:2200",
+                    "[::1]:2222",
+                    "*:2222",
+                ],
             },
         }
         credentials = {
@@ -245,7 +254,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             "proxy": {
                 "url": "socks5h://proxy.example.test:1080",
                 "auth_env": "YK_SSH_PROXY_CREDENTIAL",
-                "no_proxy": "*.corp,10.0.0.0/8,2001:db8::/32",
+                "no_proxy": "*.corp,10.0.0.0/8,2001:db8::/32,localhost:22,[::1]:2022,*:2222",
             },
         }
         credentials = {
@@ -277,6 +286,21 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 SshServiceProcess.for_desktop_target(
                     binary, {"target": invalid_target, "credentials": credentials}
                 )
+
+            for invalid_entry in (
+                "localhost:0",
+                "localhost:65536",
+                "localhost:abc",
+                "[::1]:22:23",
+            ):
+                invalid_target = {
+                    **target,
+                    "proxy": {**target["proxy"], "no_proxy": invalid_entry},
+                }
+                with self.assertRaises(SshServiceProcessError):
+                    SshServiceProcess.for_desktop_target(
+                        binary, {"target": invalid_target, "credentials": credentials}
+                    )
 
             invalid_target = {
                 **target,

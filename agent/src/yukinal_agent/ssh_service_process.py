@@ -544,7 +544,7 @@ def _valid_host_certificate_authority(value: object) -> bool:
 
 
 def _valid_cpp_no_proxy_entry(value: object) -> bool:
-    if not isinstance(value, str) or not value or len(value) > 253:
+    if not isinstance(value, str) or not value or len(value) > 260:
         return False
     if value == "*":
         return True
@@ -554,12 +554,36 @@ def _valid_cpp_no_proxy_entry(value: object) -> bool:
         except ValueError:
             return False
         return True
-    if value.startswith("*."):
-        host = value[2:]
-    elif value.startswith("."):
-        host = value[1:]
-    elif value.endswith(".*"):
-        prefix = value[:-2]
+    host_entry = value
+    port_text: str | None = None
+    if value.startswith("["):
+        close = value.find("]")
+        if close == -1:
+            return False
+        suffix = value[close + 1 :]
+        if suffix:
+            if not suffix.startswith(":"):
+                return False
+            host_entry = value[: close + 1]
+            port_text = suffix[1:]
+    elif ":" in value:
+        if value.count(":") != 1:
+            return False
+        host_entry, port_text = value.rsplit(":", 1)
+    if port_text is not None and (
+        not port_text.isascii()
+        or not port_text.isdigit()
+        or not 1 <= int(port_text) <= 65535
+    ):
+        return False
+    if host_entry == "*":
+        return True
+    if host_entry.startswith("*."):
+        host = host_entry[2:]
+    elif host_entry.startswith("."):
+        host = host_entry[1:]
+    elif host_entry.endswith(".*"):
+        prefix = host_entry[:-2]
         octets = prefix.split(".")
         return bool(prefix) and len(octets) <= 3 and all(
             octet
@@ -570,7 +594,7 @@ def _valid_cpp_no_proxy_entry(value: object) -> bool:
             for octet in octets
         )
     else:
-        host = value
+        host = host_entry
     bracketed_ipv6 = (
         len(host) >= 4
         and host.startswith("[")

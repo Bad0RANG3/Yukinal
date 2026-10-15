@@ -39,7 +39,8 @@ agent identities when the target uses a supported host-key trust mode and a
 supported direct, HTTP/HTTPS CONNECT, or SOCKS5/SOCKS5H route. SOCKS5 resolves
 target names locally; SOCKS5H delegates name resolution to the proxy. The desktop
 passes the configured proxy URL through as data; URL parsing, HTTPS certificate
-verification, bypass matching, and CONNECT/SOCKS5 negotiation run in C++. Supported interactive terminal
+verification, host and optional port-qualified bypass matching, and
+CONNECT/SOCKS5 negotiation run in C++. Supported interactive terminal
 sessions use the dedicated C++ PTY worker. The C++ terminal worker forwards
 keyboard-interactive challenges through the existing desktop prompt UI. Rust
 remains the compatibility path for other SSH configurations the C++ service

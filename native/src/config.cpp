@@ -223,19 +223,55 @@ bool ipv6_matches_cidr(std::string_view host, std::string_view cidr) {
   return true;
 }
 
+bool split_proxy_bypass_port(std::string_view entry, std::string_view* host, int* port) {
+  if (entry.empty() || !host || !port) return false;
+  *host = entry;
+  *port = 0;
+  std::string_view port_text;
+  if (entry.front() == '[') {
+    const auto close = entry.find(']');
+    if (close == std::string_view::npos) return false;
+    if (close + 1 == entry.size()) return true;
+    if (entry[close + 1] != ':') return false;
+    *host = entry.substr(0, close + 1);
+    port_text = entry.substr(close + 2);
+  } else {
+    const auto colon = entry.rfind(':');
+    if (colon == std::string_view::npos) return true;
+    if (entry.find(':') != colon) return true;
+    *host = entry.substr(0, colon);
+    port_text = entry.substr(colon + 1);
+  }
+  unsigned int parsed_port = 0;
+  if (port_text.empty()) return false;
+  const auto parsed = std::from_chars(port_text.data(), port_text.data() + port_text.size(), parsed_port);
+  if (parsed.ec != std::errc{} || parsed.ptr != port_text.data() + port_text.size() ||
+      parsed_port == 0 || parsed_port > 65535) {
+    return false;
+  }
+  *port = static_cast<int>(parsed_port);
+  return true;
+}
+
 bool valid_proxy_bypass_entry(const std::string& entry) {
-  if (entry.empty() || entry.size() > 253) return false;
-  if (entry == "*") return true;
-  if (entry.find('/') != std::string::npos) {
+  if (entry.empty() || entry.size() > 260) return false;
+  std::string_view host_entry;
+  int port = 0;
+  if (!split_proxy_bypass_port(entry, &host_entry, &port) || host_entry.empty() ||
+      host_entry.size() > 253 || (port != 0 && host_entry.find('/') != std::string_view::npos)) {
+    return false;
+  }
+  if (host_entry == "*") return true;
+  if (host_entry.find('/') != std::string_view::npos) {
     std::array<unsigned char, 4> network{};
     unsigned int prefix4 = 0;
-    if (parse_ipv4_cidr(entry, &network, &prefix4)) return true;
+    if (parse_ipv4_cidr(host_entry, &network, &prefix4)) return true;
     std::array<unsigned char, 16> network6{};
     unsigned int prefix6 = 0;
-    return parse_ipv6_cidr(entry, &network6, &prefix6);
+    return parse_ipv6_cidr(host_entry, &network6, &prefix6);
   }
 
-  std::string_view host = entry;
+  std::string_view host = host_entry;
   if (host.rfind("*.", 0) == 0) host.remove_prefix(2);
   else if (host.front() == '.') host.remove_prefix(1);
   else if (host.size() > 2 && host.substr(host.size() - 2) == ".*") {
@@ -697,7 +733,14 @@ bool proxy_bypasses_target(const TargetConfig& target) {
     host = host.substr(1, host.size() - 2);
   }
   for (const auto& raw_entry : target.proxy_no_proxy) {
-    const std::string entry = lowercase(raw_entry);
+    const std::string lowered = lowercase(raw_entry);
+    std::string_view host_entry;
+    int port = 0;
+    if (!split_proxy_bypass_port(lowered, &host_entry, &port) ||
+        (port != 0 && port != target.port)) {
+      continue;
+    }
+    const std::string entry(host_entry);
     if (entry == "*") return true;
     if (entry.find('/') != std::string::npos) {
       if (ipv4_matches_cidr(host, entry) || ipv6_matches_cidr(host, entry)) return true;

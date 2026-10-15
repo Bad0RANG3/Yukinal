@@ -312,6 +312,37 @@ YUKINAL_TEST(config_applies_supported_no_proxy_host_patterns) {
   YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
 }
 
+YUKINAL_TEST(config_applies_no_proxy_port_constraints) {
+  auto value = valid_config();
+  value["targets"][0]["proxy"] = {
+      {"type", "http_connect"}, {"host", "proxy.example.test"}, {"port", 8080},
+      {"no_proxy", json::array({"localhost:2200", "*.corp:22", "[::1]:2022", "*:2222"})}};
+  auto config = parse_config(value);
+  auto& target = config.targets.at("staging-web-01");
+
+  target.host = "localhost";
+  target.port = 22;
+  YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
+  target.port = 2200;
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+
+  target.host = "api.corp";
+  target.port = 22;
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+  target.port = 2200;
+  YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
+
+  target.host = "[::1]";
+  target.port = 2022;
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+
+  target.host = "other.example.test";
+  target.port = 2222;
+  YUKINAL_REQUIRE(yukinal::ssh_service::proxy_bypasses_target(target));
+  target.port = 22;
+  YUKINAL_REQUIRE(!yukinal::ssh_service::proxy_bypasses_target(target));
+}
+
 YUKINAL_TEST(config_rejects_invalid_no_proxy_patterns) {
   auto value = valid_config();
   value["targets"][0]["proxy"] = {
@@ -324,6 +355,17 @@ YUKINAL_TEST(config_rejects_invalid_no_proxy_patterns) {
     rejected = true;
   }
   YUKINAL_REQUIRE(rejected);
+
+  for (const auto& invalid_entry : {"localhost:0", "localhost:65536", "localhost:abc", "[::1]:22:23"}) {
+    value["targets"][0]["proxy"]["no_proxy"] = json::array({invalid_entry});
+    rejected = false;
+    try {
+      (void)parse_config(value);
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+    YUKINAL_REQUIRE(rejected);
+  }
 
   value["targets"][0]["proxy"]["no_proxy"] = json::array({"10.0.0.0/33"});
   rejected = false;

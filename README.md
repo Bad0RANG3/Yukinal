@@ -131,8 +131,11 @@ parses and validates the URL, verifies HTTPS proxy certificates, and establishes
 the CONNECT tunnel.
 Supported bypass patterns include exact hosts, domain suffixes (`.corp` or
 `*.corp`), IPv4 prefixes such as `10.*`, IPv4 CIDR ranges such as
-`10.0.0.0/8`, IPv6 CIDR ranges such as `2001:db8:abcd::/48`, and `*`. Proxy credentials belong in
-the environment variable, not in the JSON file. Unsupported proxy protocols use
+`10.0.0.0/8`, IPv6 CIDR ranges such as `2001:db8:abcd::/48`, and `*`. Hostname
+and wildcard patterns can be restricted to an SSH port, for example `localhost:22`,
+`*.corp:2200`, or `[::1]:2222`; `*:2222` bypasses the proxy for every host on
+that port. Proxy credentials belong in the environment variable, not in the JSON
+file. Unsupported proxy protocols use
 the compatibility route; invalid HTTP(S) proxy URLs or bypass patterns fail
 configuration validation in the C++ service.
 
