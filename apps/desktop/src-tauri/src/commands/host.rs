@@ -5,19 +5,19 @@
 //! C++ execution context from Rust-owned state.
 //!
 //! The file tools (`filesystem.read` / `filesystem.write` / `filesystem.edit` /
-//! `filesystem.backup` / `filesystem.restore`) delegate to
+//! `filesystem.backup` / `filesystem.restore` / `filesystem.backup.cleanup`) delegate to
 //! `yukinal-filesystem`: path policy, byte caps and bounded decoding live there, and this module
 //! only maps the capability's typed failures onto the host protocol's failure codes
 //! (see [`filesystem_failure`]).
 //!
-//! Agent `filesystem.write`, `filesystem.edit`, `filesystem.backup`, and `filesystem.restore` are
-//! approved by Python and get a narrowly scoped C++ SFTP target only after this module revalidates
-//! their durable action plan. Backup ownership and restore-consumption metadata remain in the host
-//! database. Other host file operations continue through the Rust executor. `filesystem.edit` is a
-//! guarded read-then-modify, `filesystem.backup` creates a host-owned sibling copy, and
-//! `filesystem.restore` publishes that copy only with a current revision guard; the capability's
-//! crate docs state what these guarantees do **not** cover (SFTP has no compare-and-swap, so checks
-//! and publication are multiple round trips apart).
+//! Agent filesystem mutations are approved by Python and get a narrowly scoped C++ SFTP target only
+//! after this module revalidates their durable action plan. Backup ownership and restore/cleanup
+//! consumption metadata remain in the host database. Other host file operations continue through
+//! the Rust executor. `filesystem.edit` is a guarded read-then-modify, `filesystem.backup` creates a
+//! host-owned sibling copy, `filesystem.restore` publishes it only with a current revision guard,
+//! and cleanup verifies exact backup metadata before consuming ownership. The capability's crate
+//! docs state what these guarantees do **not** cover (SFTP has no compare-and-swap, so checks and
+//! publication are multiple round trips apart).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -95,6 +95,8 @@ const HOST_SSH_FILESYSTEM_BACKUP_TARGET: &str = "host.ssh.filesystem_backup_targ
 const HOST_FILESYSTEM_BACKUP_REGISTER: &str = "host.investigation.filesystem_backup.register";
 const HOST_SSH_FILESYSTEM_RESTORE_TARGET: &str = "host.ssh.filesystem_restore_target";
 const HOST_FILESYSTEM_BACKUP_RESTORED: &str = "host.investigation.filesystem_backup.restored";
+const HOST_SSH_FILESYSTEM_CLEANUP_TARGET: &str = "host.ssh.filesystem_cleanup_target";
+const HOST_FILESYSTEM_BACKUP_DELETED: &str = "host.investigation.filesystem_backup.deleted";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -241,6 +243,38 @@ struct HostFilesystemBackupRestoredRequest {
     revision: String,
     bytes_before: usize,
     bytes_after: usize,
+    task_id: String,
+    plan_id: String,
+    plan_step_id: String,
+    trace_id: String,
+    call_id: String,
+    evidence_ids: Vec<String>,
+    target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostSshFilesystemCleanupTargetRequest {
+    server_id: String,
+    input: Value,
+    task_id: String,
+    plan_id: String,
+    plan_step_id: String,
+    run_id: String,
+    trace_id: String,
+    call_id: String,
+    evidence_ids: Vec<String>,
+    target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostFilesystemBackupDeletedRequest {
+    server_id: String,
+    input: Value,
+    item: FilesystemBackupCleanupItemInput,
+    revision: String,
+    bytes_deleted: usize,
     task_id: String,
     plan_id: String,
     plan_step_id: String,
@@ -1375,6 +1409,12 @@ async fn handle_sidecar_request_with_context(
     if method == HOST_FILESYSTEM_BACKUP_RESTORED {
         return mark_ssh_filesystem_backup_restored(state, params);
     }
+    if method == HOST_SSH_FILESYSTEM_CLEANUP_TARGET {
+        return resolve_ssh_filesystem_cleanup_target(state, params);
+    }
+    if method == HOST_FILESYSTEM_BACKUP_DELETED {
+        return mark_ssh_filesystem_backup_deleted(state, params);
+    }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
     }
@@ -1835,6 +1875,256 @@ fn resolve_ssh_filesystem_restore_target(
             "bytesBackedUp": bytes_backed_up,
         }),
     )
+}
+
+fn resolve_ssh_filesystem_cleanup_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostSshFilesystemCleanupTargetRequest>(params)
+        .map_err(|_| "the SSH filesystem cleanup target request is invalid".to_string())?;
+    if [
+        request.run_id.as_str(),
+        request.trace_id.as_str(),
+        request.call_id.as_str(),
+    ]
+    .iter()
+    .any(|value| {
+        value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+    }) {
+        return Err("filesystem cleanup durable call identity is invalid".into());
+    }
+    let cleanup_input = serde_json::from_value::<FilesystemBackupCleanupInput>(request.input.clone())
+        .map_err(|_| "filesystem.backup.cleanup input is invalid".to_string())?;
+    let (items, batch) = match cleanup_input.resolve()? {
+        BackupCleanupRequest::Single(item) => (vec![item], false),
+        BackupCleanupRequest::Batch(items) => (items, true),
+    };
+    let context = HostToolExecuteRequest {
+        call_id: request.call_id.clone(),
+        run_id: Some(request.run_id.clone()),
+        trace_id: request.trace_id.clone(),
+        tool_name: FILESYSTEM_BACKUP_CLEANUP.to_string(),
+        input: request.input.clone(),
+        target: request.target.clone(),
+        task_id: Some(request.task_id.clone()),
+        plan_id: Some(request.plan_id.clone()),
+        plan_step_id: Some(request.plan_step_id.clone()),
+        evidence_ids: Some(request.evidence_ids.clone()),
+        approval_id: None,
+    };
+    validate_ssh_filesystem_action_binding(
+        state,
+        &request.server_id,
+        &request.task_id,
+        FILESYSTEM_BACKUP_CLEANUP,
+        &request.input,
+        &request.target,
+        &request.plan_id,
+        &request.plan_step_id,
+        &request.evidence_ids,
+    )?;
+
+    // Reject malformed paths for the entire request before reporting any item as executable.
+    let checked = items
+        .iter()
+        .map(|item| {
+            AgentCleanupBackupRequest::check(
+                &item.path,
+                &item.backup_path,
+                &item.expected_revision,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut bindings = Vec::with_capacity(items.len());
+    let mut has_ready_item = false;
+    for (item, _checked_request) in items.iter().zip(checked) {
+        let mut binding = json!({
+            "path": item.path.clone(),
+            "backupPath": item.backup_path.clone(),
+            "expectedRevision": item.expected_revision.clone(),
+        });
+        let backup = match state.database.filesystem_backups().find_available(
+            &request.server_id,
+            &item.path,
+            &item.backup_path,
+        ) {
+            Ok(Some(record)) => record,
+            Ok(None) if batch => {
+                binding["status"] = json!("skipped");
+                binding["reason"] = json!("no available host ledger record for this server and backup path");
+                bindings.push(binding);
+                continue;
+            }
+            Ok(None) => {
+                return Err("filesystem.backup.cleanup requires an available host-owned backup for this server and target path".into());
+            }
+            Err(error) if batch => {
+                binding["status"] = json!("failed");
+                binding["reason"] = json!(truncate_text(
+                    &format!("could not read the filesystem backup ledger: {error}"),
+                    1_024,
+                ));
+                bindings.push(binding);
+                continue;
+            }
+            Err(error) => return Err(format!("could not read the filesystem backup ledger: {error}")),
+        };
+
+        let same_task = backup.task_id.as_deref() == Some(request.task_id.as_str());
+        let cross_task_allowed = batch
+            && !same_task
+            && tools::cross_task_cleanup_is_plan_bound(state, &context, item);
+        if !same_task && !cross_task_allowed {
+            if batch {
+                binding["status"] = json!("skipped");
+                binding["reason"] = json!("owned by another investigation task and not bound by the approved rotation step");
+                bindings.push(binding);
+                continue;
+            }
+            return Err("filesystem.backup.cleanup cannot use a backup owned by another investigation task".into());
+        }
+        if !backup.revision.eq_ignore_ascii_case(&item.expected_revision) {
+            if batch {
+                binding["status"] = json!("failed");
+                binding["reason"] = json!("expectedRevision does not match the revision recorded for this backup");
+                bindings.push(binding);
+                continue;
+            }
+            return Err("expectedRevision does not match the revision recorded for this backup; preserve it and re-read the ledger".into());
+        }
+        let bytes_backed_up = usize::try_from(backup.bytes_backed_up)
+            .ok()
+            .filter(|bytes| *bytes <= yukinal_filesystem::MAX_AGENT_BACKUP_BYTES);
+        let Some(bytes_backed_up) = bytes_backed_up else {
+            if batch {
+                binding["status"] = json!("failed");
+                binding["reason"] = json!("the host backup ledger has an invalid byte count");
+                bindings.push(binding);
+                continue;
+            }
+            return Err("the host backup ledger has an invalid byte count".into());
+        };
+        binding["status"] = json!("ready");
+        binding["revision"] = json!(backup.revision);
+        binding["bytesBackedUp"] = json!(bytes_backed_up);
+        binding["ownerTaskId"] = json!(backup.task_id);
+        has_ready_item = true;
+        bindings.push(binding);
+    }
+
+    let mut payload = if has_ready_item {
+        crate::commands::sidecar::resolve_ssh_service_target(
+            state,
+            json!({ "serverId": request.server_id }),
+        )?
+    } else {
+        json!({})
+    };
+    payload["filesystemCleanup"] = json!({ "items": bindings });
+    Ok(payload)
+}
+
+fn mark_ssh_filesystem_backup_deleted(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostFilesystemBackupDeletedRequest>(params)
+        .map_err(|_| "the filesystem cleanup registration request is invalid".to_string())?;
+    if request.bytes_deleted > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
+        || request.trace_id.trim().is_empty()
+        || request.call_id.trim().is_empty()
+        || request.trace_id.len() > 256
+        || request.call_id.len() > 256
+        || request.trace_id.chars().any(char::is_control)
+        || request.call_id.chars().any(char::is_control)
+    {
+        return Err("filesystem cleanup result or durable call identity is invalid".into());
+    }
+    let cleanup_input = serde_json::from_value::<FilesystemBackupCleanupInput>(request.input.clone())
+        .map_err(|_| "filesystem.backup.cleanup input is invalid".to_string())?;
+    let (items, batch) = match cleanup_input.resolve()? {
+        BackupCleanupRequest::Single(item) => (vec![item], false),
+        BackupCleanupRequest::Batch(items) => (items, true),
+    };
+    if !items.iter().any(|candidate| {
+        candidate.path == request.item.path
+            && candidate.backup_path == request.item.backup_path
+            && candidate.expected_revision.eq_ignore_ascii_case(&request.item.expected_revision)
+    }) {
+        return Err("the deleted backup is not part of the approved cleanup input".into());
+    }
+    AgentCleanupBackupRequest::check(
+        &request.item.path,
+        &request.item.backup_path,
+        &request.item.expected_revision,
+    )
+    .map_err(|error| error.to_string())?;
+    validate_ssh_filesystem_action_binding(
+        state,
+        &request.server_id,
+        &request.task_id,
+        FILESYSTEM_BACKUP_CLEANUP,
+        &request.input,
+        &request.target,
+        &request.plan_id,
+        &request.plan_step_id,
+        &request.evidence_ids,
+    )?;
+    let context = HostToolExecuteRequest {
+        call_id: request.call_id,
+        run_id: None,
+        trace_id: request.trace_id,
+        tool_name: FILESYSTEM_BACKUP_CLEANUP.to_string(),
+        input: request.input,
+        target: request.target,
+        task_id: Some(request.task_id.clone()),
+        plan_id: Some(request.plan_id.clone()),
+        plan_step_id: Some(request.plan_step_id.clone()),
+        evidence_ids: Some(request.evidence_ids),
+        approval_id: None,
+    };
+    let backup = state
+        .database
+        .filesystem_backups()
+        .find_available(
+            &request.server_id,
+            &request.item.path,
+            &request.item.backup_path,
+        )
+        .map_err(|_| "could not read the filesystem backup ledger".to_string())?
+        .ok_or_else(|| "filesystem backup is no longer available".to_string())?;
+    let same_task = backup.task_id.as_deref() == Some(request.task_id.as_str());
+    if !same_task
+        && (!batch || !tools::cross_task_cleanup_is_plan_bound(state, &context, &request.item))
+    {
+        return Err("filesystem.backup.cleanup cannot use a backup owned by another investigation task".into());
+    }
+    if !backup.revision.eq_ignore_ascii_case(&request.item.expected_revision)
+        || !backup.revision.eq_ignore_ascii_case(&request.revision)
+        || i64::try_from(request.bytes_deleted).ok() != Some(backup.bytes_backed_up)
+    {
+        return Err("filesystem cleanup result does not match the host backup ledger".into());
+    }
+    state
+        .database
+        .filesystem_backups()
+        .mark_deleted(
+            &request.server_id,
+            &request.item.path,
+            &request.item.backup_path,
+            &yukinal_core::sidecar::iso8601_now(),
+        )
+        .map_err(|_| "filesystem backup could not be consumed in the host ledger".to_string())?;
+    Ok(json!({
+        "deleted": true,
+        "path": request.item.path,
+        "backupPath": request.item.backup_path,
+        "revision": backup.revision,
+        "bytesDeleted": request.bytes_deleted,
+    }))
 }
 
 fn mark_ssh_filesystem_backup_restored(

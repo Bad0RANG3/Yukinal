@@ -100,6 +100,29 @@ class FakeDesktopHost:
                 "revision": hashlib.sha256(b"old config").hexdigest(),
                 "bytesBackedUp": len(b"old config"),
             }
+        if method == "host.ssh.filesystem_cleanup_target":
+            raw_input = params["input"]
+            items = raw_input.get("items") if isinstance(raw_input, dict) else None
+            if not isinstance(items, list):
+                items = [raw_input]
+            bindings = []
+            for item in items:
+                common = {
+                    "path": item["path"],
+                    "backupPath": item["backupPath"],
+                    "expectedRevision": item["expectedRevision"],
+                }
+                if item["path"] == "/opt/missing.conf":
+                    bindings.append({**common, "status": "skipped", "reason": "no available host ledger record"})
+                else:
+                    bindings.append({
+                        **common,
+                        "status": "ready",
+                        "revision": item["expectedRevision"],
+                        "bytesBackedUp": 7,
+                        "ownerTaskId": params["taskId"],
+                    })
+            payload["filesystemCleanup"] = {"items": bindings}
         if method == "host.investigation.filesystem_backup.register":
             return {"registered": True, "backupPath": params["backupPath"]}
         if method == "host.investigation.filesystem_backup.restored":
@@ -111,6 +134,13 @@ class FakeDesktopHost:
                 "bytesBefore": params["bytesBefore"],
                 "bytesAfter": params["bytesAfter"],
             }
+        if method == "host.investigation.filesystem_backup.deleted":
+            return {"deleted": True, **{
+                "path": params["path"],
+                "backupPath": params["backupPath"],
+                "revision": params["revision"],
+                "bytesDeleted": params["bytesDeleted"],
+            }}
         return payload
 
 
@@ -255,6 +285,9 @@ class FakeDesktopSshClient:
     def sftp_create_exclusive(self, *arguments: Any) -> Any:
         return self._result("sftp_create_exclusive", *arguments)
 
+    def sftp_remove_file(self, *arguments: Any, **kwargs: Any) -> Any:
+        return self._result("sftp_remove_file", *arguments, kwargs.get("timeout_seconds", 10))
+
     def sftp_replace_guarded(self, target_id: str, path: str, content: bytes, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("sftp_replace_guarded", (target_id, path, content, kwargs)))
         return {"size": len(content), "modified": 202}
@@ -335,6 +368,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
+            "filesystem.backup.cleanup",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -737,6 +771,178 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.calls[2][1]["revision"], restored_revision)
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_filesystem_backup_cleanup_verifies_cpp_bytes_and_consumes_host_ledger_once(self) -> None:
+        import os
+        import tempfile
+
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        backup_path = (
+            f"/etc/.yukinal-backup-{hashlib.sha256(b'/etc/app.conf').hexdigest()[:16]}-"
+            f"{'0' * 32}"
+        )
+        arguments = {
+            "path": "/etc/app.conf",
+            "backupPath": backup_path,
+            "expectedRevision": hashlib.sha256(b"hello\x00x").hexdigest(),
+        }
+        fingerprint = approval_fingerprint(
+            "filesystem.backup.cleanup",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"filesystem.backup.cleanup"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-cleanup"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-1",
+            trace_id="trace-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"YUKINAL_DATA_DIR": temporary}),
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            first = await registry.execute(
+                "filesystem.backup.cleanup", arguments, context, call_id="call-cleanup-1"
+            )
+            second = await registry.execute(
+                "filesystem.backup.cleanup", arguments, context, call_id="call-cleanup-1"
+            )
+
+        expected = {
+            "path": arguments["path"],
+            "backupPath": backup_path,
+            "revision": arguments["expectedRevision"],
+            "bytesDeleted": 7,
+        }
+        self.assertEqual(first.value, expected)
+        self.assertEqual(second.value, expected)
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [
+                ("sftp_stat", ("srv_stage1", backup_path)),
+                ("sftp_link_count", ("srv_stage1", backup_path)),
+                ("sftp_read", ("srv_stage1", backup_path, 1_048_576)),
+                ("sftp_stat", ("srv_stage1", backup_path)),
+                ("sftp_remove_file", ("srv_stage1", backup_path, 20)),
+            ],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            [
+                "host.investigation.plan.check",
+                "host.ssh.filesystem_cleanup_target",
+                "host.investigation.filesystem_backup.deleted",
+                "host.investigation.plan.check",
+            ],
+        )
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_filesystem_backup_cleanup_batch_keeps_partial_host_results(self) -> None:
+        import os
+        import tempfile
+
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        revision = hashlib.sha256(b"hello\x00x").hexdigest()
+        first_path = (
+            f"/etc/.yukinal-backup-{hashlib.sha256(b'/etc/app.conf').hexdigest()[:16]}-"
+            f"{'1' * 32}"
+        )
+        missing_path = (
+            f"/opt/.yukinal-backup-{hashlib.sha256(b'/opt/missing.conf').hexdigest()[:16]}-"
+            f"{'2' * 32}"
+        )
+        arguments = {"items": [
+            {"path": "/etc/app.conf", "backupPath": first_path, "expectedRevision": revision},
+            {"path": "/opt/missing.conf", "backupPath": missing_path, "expectedRevision": revision},
+        ]}
+        fingerprint = approval_fingerprint(
+            "filesystem.backup.cleanup",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"filesystem.backup.cleanup"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-cleanup-batch"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-1",
+            trace_id="trace-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"YUKINAL_DATA_DIR": temporary}),
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            result = await registry.execute(
+                "filesystem.backup.cleanup", arguments, context, call_id="call-cleanup-batch"
+            )
+
+        self.assertEqual(result.value, {
+            "items": [
+                {
+                    "path": "/etc/app.conf",
+                    "backupPath": first_path,
+                    "outcome": "removed",
+                    "revision": revision,
+                    "bytesDeleted": 7,
+                },
+                {
+                    "path": "/opt/missing.conf",
+                    "backupPath": missing_path,
+                    "outcome": "skipped",
+                    "reason": "no available host ledger record",
+                },
+            ],
+            "partial": True,
+        })
+        self.assertEqual(
+            [operation for operation, _arguments in FakeDesktopSshClient.calls].count("sftp_remove_file"),
+            1,
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls].count(
+                "host.investigation.filesystem_backup.deleted"
+            ),
+            1,
+        )
 
     async def test_service_inventory_parser_handles_docker_and_unavailable_sources(self) -> None:
         docker = _parse_service_inventory(

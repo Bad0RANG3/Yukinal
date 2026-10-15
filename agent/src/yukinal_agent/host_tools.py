@@ -633,8 +633,8 @@ def register_host_tools(
         ),
         (
             "filesystem.backup.cleanup",
-            "Delete one exact host-owned backup or a bounded approved rotation batch. The host verifies its "
-            "ledger record and content revision before removing it.",
+            "Delete one exact host-owned backup or a bounded approved rotation batch. Python checks the "
+            "backup bytes through C++ SFTP; the host rechecks ownership and consumes the matching ledger row.",
             _FILESYSTEM_BACKUP_CLEANUP_INPUT_SCHEMA,
             60_000,
         ),

@@ -13,6 +13,7 @@ from yukinal_ssh import SshServiceClient, SshServiceError
 from .host_rpc import HostRpcClient
 from .host_tools import (
     _FILESYSTEM_BACKUP_INPUT_SCHEMA,
+    _FILESYSTEM_BACKUP_CLEANUP_INPUT_SCHEMA,
     _FILESYSTEM_EDIT_INPUT_SCHEMA,
     _FILESYSTEM_RESTORE_INPUT_SCHEMA,
     _FILESYSTEM_WRITE_INPUT_SCHEMA,
@@ -483,9 +484,31 @@ def register_desktop_ssh_tools(
             timeout_ms=45_000,
             cancellable=True,
         ))
+    if "filesystem.backup.cleanup" not in existing_names:
+        registry.register(ToolSpec(
+            name="filesystem.backup.cleanup",
+            description=(
+                "Remove one exact host-owned recovery copy, or a bounded approved rotation batch. "
+                "Python verifies each backup digest through C++ SFTP; the host consumes its ownership ledger."
+            ),
+            input_schema=_FILESYSTEM_BACKUP_CLEANUP_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_filesystem_backup_cleanup(
+                host, binary, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=60_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
-        | {"filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore"}
+        | {
+            "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
+            "filesystem.backup.cleanup",
+        }
     )
 
 
@@ -1050,6 +1073,14 @@ def _validate_host_backup_path(path: str, backup_path: str) -> None:
         raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup path")
 
 
+def _bounded_cleanup_reason(value: str) -> str:
+    readable = "".join(
+        " " if ord(character) < 0x20 or ord(character) == 0x7F else character
+        for character in value
+    )
+    return readable.encode("utf-8")[:256].decode("utf-8", errors="ignore")
+
+
 async def _desktop_filesystem_restore(
     host: HostRpcClient,
     binary: Path,
@@ -1289,6 +1320,367 @@ async def _desktop_filesystem_restore(
     except SshServiceError as error:
         code = "unsafe_remote_write" if error.code == "replace_unsupported" else error.code
         raise ToolCallError(code, str(error)) from None
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    finally:
+        await process.stop()
+
+
+async def _desktop_filesystem_backup_cleanup(
+    host: HostRpcClient,
+    binary: Path,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, object]:
+    """Verify exact host-owned backup bytes and remove them through C++ SFTP."""
+    target_id = context.context_target_id
+    target = context.host_target
+    if (
+        not isinstance(target_id, str)
+        or not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or target.get("serverId") != target_id
+        or not context.run_id
+        or not context.trace_id
+        or not context.call_id
+        or not context.host_task_id
+        or not context.plan_id
+        or not context.plan_step_id
+    ):
+        raise ToolCallError(
+            "durable_plan_required", "filesystem.backup.cleanup requires a durable remote action plan"
+        )
+
+    batch = "items" in arguments
+    items = arguments["items"] if batch else [arguments]
+    if batch:
+        worst_case_output = {
+            "items": [
+                {
+                    "path": item["path"],
+                    "backupPath": item["backupPath"],
+                    "outcome": "failed",
+                    "reason": '"' * 256,
+                }
+                for item in items
+            ],
+            "partial": True,
+        }
+        if len(json.dumps(worst_case_output, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 16 * 1024:
+            raise ToolCallError(
+                "output_too_large", "The cleanup batch paths exceed the durable result size limit"
+            )
+    plan_request = {
+        "taskId": context.host_task_id,
+        "toolName": "filesystem.backup.cleanup",
+        "input": arguments,
+        "target": dict(target),
+    }
+    try:
+        plan = await host.request(
+            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError(
+            "host_unavailable", "The desktop host could not validate the cleanup plan"
+        ) from None
+    if (
+        not isinstance(plan, dict)
+        or plan.get("status") != "allowed"
+        or plan.get("planId") != context.plan_id
+        or plan.get("stepId") != context.plan_step_id
+        or plan.get("stepKind") != "action"
+        or plan.get("evidenceIds") != list(context.evidence_ids)
+    ):
+        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this cleanup")
+
+    ledger = FilesystemActionLedger.from_environment()
+    if ledger is None:
+        return await _execute_on_host(host, "filesystem.backup.cleanup", arguments, context)
+    ledger_scope = {
+        "run_id": context.run_id,
+        "trace_id": context.trace_id,
+        "call_id": context.call_id,
+        "tool_name": "filesystem.backup.cleanup",
+        "target_id": target_id,
+        "arguments": arguments,
+        "plan_id": context.plan_id,
+        "plan_step_id": context.plan_step_id,
+        "evidence_ids": context.evidence_ids,
+    }
+    try:
+        cached = await ledger.claim(**ledger_scope)
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    if cached is not None:
+        return cached
+
+    async def run_host_compatibility_path() -> dict[str, object]:
+        output = await _execute_on_host(host, "filesystem.backup.cleanup", arguments, context)
+        if not isinstance(output, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid cleanup result")
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+
+    try:
+        payload = await host.request(
+            "host.ssh.filesystem_cleanup_target",
+            {
+                "serverId": target_id,
+                "input": arguments,
+                "taskId": context.host_task_id,
+                "planId": context.plan_id,
+                "planStepId": context.plan_step_id,
+                "runId": context.run_id,
+                "traceId": context.trace_id,
+                "callId": context.call_id,
+                "evidenceIds": list(context.evidence_ids),
+                "target": dict(target),
+            },
+            timeout_seconds=8.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return await run_host_compatibility_path()
+
+    binding = payload.get("filesystemCleanup") if isinstance(payload, dict) else None
+    bound_items = binding.get("items") if isinstance(binding, dict) else None
+    if not isinstance(bound_items, list) or len(bound_items) != len(items):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid cleanup binding")
+    statuses: list[dict[str, Any]] = []
+    for requested, bound in zip(items, bound_items):
+        if (
+            not isinstance(bound, dict)
+            or bound.get("path") != requested.get("path")
+            or bound.get("backupPath") != requested.get("backupPath")
+            or bound.get("expectedRevision") != requested.get("expectedRevision")
+        ):
+            raise ToolCallError("invalid_host_response", "The desktop host returned a mismatched cleanup item")
+        status = bound.get("status")
+        if status == "ready":
+            revision = bound.get("revision")
+            byte_count = bound.get("bytesBackedUp")
+            owner_task_id = bound.get("ownerTaskId")
+            if (
+                not isinstance(revision, str)
+                or re.fullmatch(r"[a-fA-F0-9]{64}", revision) is None
+                or revision.lower() != requested["expectedRevision"].lower()
+                or isinstance(byte_count, bool)
+                or not isinstance(byte_count, int)
+                or not 0 <= byte_count <= _MAX_AGENT_BACKUP_BYTES
+                or (owner_task_id is not None and (not isinstance(owner_task_id, str) or not owner_task_id))
+                or (not batch and owner_task_id != context.host_task_id)
+            ):
+                raise ToolCallError("invalid_host_response", "The desktop host returned invalid cleanup metadata")
+            _validate_host_backup_path(requested["path"], requested["backupPath"])
+            statuses.append({
+                "path": requested["path"],
+                "backupPath": requested["backupPath"],
+                "expectedRevision": requested["expectedRevision"],
+                "status": "ready",
+                "revision": revision,
+                "bytesBackedUp": byte_count,
+            })
+        elif batch and status in {"skipped", "failed"}:
+            reason = bound.get("reason")
+            if not isinstance(reason, str) or not reason or len(reason) > 1024:
+                raise ToolCallError("invalid_host_response", "The desktop host returned an invalid cleanup reason")
+            statuses.append({
+                "path": requested["path"],
+                "backupPath": requested["backupPath"],
+                "expectedRevision": requested["expectedRevision"],
+                "status": status,
+                "reason": reason,
+            })
+        else:
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid cleanup status")
+
+    ready = [item for item in statuses if item["status"] == "ready"]
+    if not batch and not ready:
+        reason = statuses[0].get("reason", "The host backup is not available for cleanup")
+        raise ToolCallError("cleanup_denied", str(reason))
+    results: list[dict[str, object] | None] = [None] * len(items)
+    for index, status in enumerate(statuses):
+        if status["status"] != "ready":
+            results[index] = {
+                "path": status["path"],
+                "backupPath": status["backupPath"],
+                "outcome": status["status"],
+                "reason": _bounded_cleanup_reason(status["reason"]),
+            }
+
+    if not ready:
+        output = {
+            "items": [result for result in results if result is not None],
+            "partial": True,
+        }
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+
+    try:
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+    except SshServiceProcessError:
+        return await run_host_compatibility_path()
+    try:
+        await process.start()
+    except asyncio.CancelledError:
+        await process.stop()
+        raise
+    except SshServiceProcessError:
+        await process.stop()
+        return await run_host_compatibility_path()
+
+    client = SshServiceClient(token, base_url=base_url)
+
+    def remove_verified_backup(item: dict[str, Any], binding_item: dict[str, Any]) -> dict[str, object]:
+        backup_path = item["backupPath"]
+        before = client.sftp_stat(target_id, backup_path)
+        if before["kind"] != "file":
+            raise ToolCallError("unsafe_remote_write", "Only a regular host-owned backup can be cleaned up")
+        if before["size"] > _MAX_AGENT_BACKUP_BYTES:
+            raise ToolCallError("invalid_input", "The host-owned backup exceeds the 1 MiB cleanup limit")
+        if client.sftp_link_count(target_id, backup_path) != 1:
+            raise ToolCallError(
+                "unsafe_remote_write", "The server cannot prove the backup has exactly one name"
+            )
+        content = client.sftp_read(target_id, backup_path, _MAX_AGENT_BACKUP_BYTES)
+        if len(content) > _MAX_AGENT_BACKUP_BYTES:
+            raise ToolCallError("invalid_input", "The host-owned backup exceeds the 1 MiB cleanup limit")
+        revision = hashlib.sha256(content).hexdigest()
+        if revision != item["expectedRevision"].lower() or revision != binding_item["revision"].lower():
+            raise ToolCallError("invalid_input", "The host-owned backup no longer matches its recorded revision")
+        after = client.sftp_stat(target_id, backup_path)
+        if (
+            before["size"] != after["size"]
+            or before["modified"] != after["modified"]
+            or before["size"] != len(content)
+            or len(content) != binding_item["bytesBackedUp"]
+        ):
+            raise ToolCallError("concurrent_change", "The host-owned backup changed while it was checked")
+        try:
+            removed = client.sftp_remove_file(target_id, backup_path, timeout_seconds=20)
+        except SshServiceError as error:
+            # The remote unlink may have completed before the transport stopped responding.
+            raise ToolCallError(
+                "cleanup_outcome_unknown",
+                f"Cleanup of {backup_path} may have completed; reconcile before trying again",
+            ) from error
+        if removed.exit_code != 0:
+            raise ToolCallError(
+                "cleanup_failed",
+                removed.stderr[:1024] or "The SSH service could not remove the backup",
+            )
+        return {
+            "path": item["path"],
+            "backupPath": backup_path,
+            "revision": revision,
+            "bytesDeleted": len(content),
+        }
+
+    try:
+        for index, requested in enumerate(items):
+            binding_item = statuses[index]
+            if binding_item["status"] != "ready":
+                continue
+            try:
+                deleted = await asyncio.to_thread(remove_verified_backup, requested, binding_item)
+            except asyncio.CancelledError:
+                # An in-flight SFTP unlink can complete after cancellation; keep the exact call fenced.
+                raise
+            except ToolCallError as error:
+                if error.code == "cleanup_outcome_unknown":
+                    raise
+                if not batch:
+                    raise
+                results[index] = {
+                    "path": requested["path"],
+                    "backupPath": requested["backupPath"],
+                    "outcome": "failed",
+                    "reason": _bounded_cleanup_reason(str(error)),
+                }
+                continue
+            except SshServiceError as error:
+                if not batch:
+                    raise ToolCallError(error.code, str(error)) from None
+                results[index] = {
+                    "path": requested["path"],
+                    "backupPath": requested["backupPath"],
+                    "outcome": "failed",
+                    "reason": _bounded_cleanup_reason(str(error)),
+                }
+                continue
+
+            try:
+                confirmation = await host.request(
+                    "host.investigation.filesystem_backup.deleted",
+                    {
+                        "serverId": target_id,
+                        "input": arguments,
+                        "item": requested,
+                        **deleted,
+                        "taskId": context.host_task_id,
+                        "planId": context.plan_id,
+                        "planStepId": context.plan_step_id,
+                        "traceId": context.trace_id,
+                        "callId": context.call_id,
+                        "evidenceIds": list(context.evidence_ids),
+                        "target": dict(target),
+                    },
+                    timeout_seconds=8.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise ToolCallError(
+                    "cleanup_registration_unknown",
+                    f"The backup at {requested['backupPath']} was removed, but host ledger consumption could not be confirmed; reconcile before another cleanup",
+                ) from None
+            expected_confirmation = {"deleted": True, **deleted}
+            if confirmation != expected_confirmation:
+                raise ToolCallError(
+                    "cleanup_registration_unknown",
+                    f"The backup at {requested['backupPath']} was removed, but host ledger consumption could not be confirmed; reconcile before another cleanup",
+                )
+            if batch:
+                results[index] = {
+                    "path": requested["path"],
+                    "backupPath": requested["backupPath"],
+                    "outcome": "removed",
+                    "revision": deleted["revision"],
+                    "bytesDeleted": deleted["bytesDeleted"],
+                }
+            else:
+                output = deleted
+                try:
+                    await ledger.complete(**ledger_scope, output=output)
+                except FilesystemActionLedgerError as error:
+                    raise ToolCallError(error.code, str(error)) from None
+                return output
+
+        output = {
+            "items": [result for result in results if result is not None],
+            "partial": any(result is None or result.get("outcome") != "removed" for result in results),
+        }
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+    except asyncio.CancelledError:
+        raise
+    except ToolCallError:
+        raise
+    except SshServiceError as error:
+        raise ToolCallError(error.code, str(error)) from None
     except FilesystemActionLedgerError as error:
         raise ToolCallError(error.code, str(error)) from None
     finally:

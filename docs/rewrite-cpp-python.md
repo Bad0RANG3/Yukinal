@@ -59,7 +59,11 @@
 > host checks task ownership and backup status, Python verifies both the target
 > revision and backup digest, and C++ publishes through guarded atomic SFTP;
 > the host consumes the backup ledger row only after the replace succeeds.
-> Backup listing/retention and cleanup still use Rust orchestration.
+> `filesystem.backup.cleanup` now follows Python/C++ for supported targets.
+> Python verifies each backup's type, size, link count, stability and digest
+> before C++ removes it; the host rechecks ownership and consumes each ledger
+> row. Approved rotation batches retain per-item partial results. Listing and
+> retention remain host operations.
 
 ## Repository baseline and migration boundary
 
@@ -100,16 +104,18 @@ then starts a one-shot C++ service config that enables `server.exec` for that
 target only. Persistent service target configs deny it by default. Targets that
 still require a Rust-only SSH route retain the existing Rust compatibility path.
 The Python sidecar exposes bounded `filesystem.read`; Agent `filesystem.write`,
-revision-guarded `filesystem.edit`, `filesystem.backup`, and `filesystem.restore`
+revision-guarded `filesystem.edit`, `filesystem.backup`, `filesystem.restore`,
+and `filesystem.backup.cleanup`
 use Python approval, host plan/path checks, a durable exact-call ledger, and the
 C++ SFTP transport for supported routes. Backup ownership metadata stays in the
 host database; the host chooses its unguessable sibling name and confirms
 registration after the remote exclusive create. Restore verifies the current
 target revision and the backup's ledger digest before guarded replacement, then
-asks the host to consume the available ledger row. Unsupported routes use the
-existing Rust host executor. Backup listing/retention and cleanup remain
-plan-bound, approved Rust host operations and are the next filesystem migration
-work.
+asks the host to consume the available ledger row. Cleanup verifies each exact
+backup and lets the host consume each row after C++ removal; cross-task deletion
+is accepted only for an exact item in an approved `backup_rotation` step.
+Unsupported routes use the existing Rust host executor. Backup listing and
+retention remain host operations.
 Task-scoped, body-free `investigation.evidence.search`/`compare` also run through
 the desktop host.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
@@ -144,9 +150,10 @@ The bridge uses the existing sidecar request path: Python sends
 `host.tool.execute` (or `host.mcp.catalog`) over the child process pipe, and the
 desktop host replies over that same pipe. Python does not start MCP processes
 through this bridge. For `filesystem.write`, `filesystem.edit`,
-`filesystem.backup`, and `filesystem.restore`, the host checks the current plan, validates the path and
-request limits, and returns a one-target credential context; Python then starts
-the C++ service and performs bounded SFTP. Edit reads and checks the requested
+`filesystem.backup`, `filesystem.restore`, and `filesystem.backup.cleanup`, the
+host checks the current plan, validates the path and request limits, and returns
+a one-target credential context; Python then starts the C++ service and performs
+bounded SFTP. Edit reads and checks the requested
 revision in Python before asking C++ to publish with its size/mtime/content
 digest guard. Backup reads a stable regular file no larger than 1 MiB, requires
 exactly one hard link, and creates the host-derived sibling with exclusive SFTP
@@ -154,7 +161,11 @@ creation. A separate host RPC revalidates its action binding before adding the
 remote copy's metadata to the ownership ledger. Restore checks the exact available
 backup, owning task, current target revision, backup content digest, and both
 single-link counts before C++ publishes the backup with a guarded atomic replace.
-The host marks the backup as restored only after publication succeeds. Other host
+The host marks the backup as restored only after publication succeeds. Cleanup
+checks the ledger-owned revision and byte count, verifies the remote backup's
+regular-file type, single-link count, stable metadata and SHA-256 in Python, then
+removes it through C++; the host consumes the ledger row only after a confirmed
+remove. Other host
 tools continue through the host executor. For
 investigation calls, Python carries the current durable plan,
 step, and evidence binding; high-risk host actions also carry the host-issued
@@ -529,6 +540,18 @@ tests: 94 passed and 4 C++ service integration cases were skipped because no
 service binary path was configured. `py_compile`, the documentation link checker
 (15 Markdown files, 48 links), and `git diff --check` passed. Rust host bridge
 compilation could not run because Cargo and rustc are unavailable on `PATH`.
+
+On 2026-10-15, `filesystem.backup.cleanup` moved to Python/C++ for supported
+desktop SSH routes. The host validates exact plan bindings and ledger ownership,
+including approved cross-task rotation items. Python checks the backup digest,
+size, file type, stability and single-link count before deletion, then asks the
+host to consume the exact row. The batch path preserves ordered `removed`,
+`skipped`, and `failed` outcomes. Validation results are recorded after the
+implementation run: `py_compile`, the documentation link check, and
+`git diff --check` passed. The focused Python test module could not import
+because `jsonschema` is not installed in the active environment. The Rust host
+bridge could not be formatted or compiled because Cargo, rustfmt, and rustc are
+not available on `PATH`.
 
 ## Deliberately deferred
 
