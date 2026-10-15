@@ -5,8 +5,10 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import patch
 
 from yukinal_ssh import SshServiceClient, SshServiceError
+from yukinal_ssh.client import _SYSTEM_SNAPSHOT_COMMAND_IDS, _parse_system_snapshot_output
 
 TOKEN = "test-token-that-is-long-enough-for-local-service"
 
@@ -129,6 +131,66 @@ class ClientTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.client.server_logs("staging-web-01", since_seconds, unit)
         self.assertIsNone(self.server.last_request)
+
+    def test_system_snapshot_sends_nonce_and_splits_every_fixed_command(self) -> None:
+        nonce = "a" * 32
+        self.server.response_body["operation"] = "system_snapshot"
+        self.server.response_body["stdout"] = "".join(
+            f"__YK_SNAPSHOT_{nonce}_{command_id}_BEGIN__\n"
+            f"value-{command_id}\n\n"
+            f"__YK_SNAPSHOT_{nonce}_{command_id}_END_{index % 3}__\n"
+            for index, command_id in enumerate(_SYSTEM_SNAPSHOT_COMMAND_IDS)
+        )
+
+        with patch("yukinal_ssh.client.secrets.token_hex", return_value=nonce):
+            results = self.client.system_snapshot("staging-web-01", 9)
+
+        self.assertEqual(
+            results,
+            {
+                command_id: (index % 3, f"value-{command_id}\n")
+                for index, command_id in enumerate(_SYSTEM_SNAPSHOT_COMMAND_IDS)
+            },
+        )
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "system_snapshot",
+                "parameters": {"nonce": nonce},
+                "timeout_seconds": 9,
+            },
+        )
+
+    def test_system_snapshot_rejects_missing_duplicate_and_invalid_markers(self) -> None:
+        nonce = "b" * 32
+        valid = "".join(
+            f"__YK_SNAPSHOT_{nonce}_{command_id}_BEGIN__\n"
+            f"value\n\n__YK_SNAPSHOT_{nonce}_{command_id}_END_0__\n"
+            for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS
+        )
+        cases = (
+            (
+                valid.replace(
+                    f"__YK_SNAPSHOT_{nonce}_{_SYSTEM_SNAPSHOT_COMMAND_IDS[0]}_BEGIN__\n",
+                    "",
+                    1,
+                ),
+                "incomplete system snapshot",
+            ),
+            (
+                valid + f"__YK_SNAPSHOT_{nonce}_{_SYSTEM_SNAPSHOT_COMMAND_IDS[0]}_BEGIN__\n",
+                "incomplete system snapshot",
+            ),
+            (
+                valid.replace("_END_0__", "_END_256__", 1),
+                "invalid system snapshot status",
+            ),
+        )
+        for output, expected_message in cases:
+            with self.subTest(expected_message=expected_message), self.assertRaises(SshServiceError) as caught:
+                _parse_system_snapshot_output(output, nonce)
+            self.assertIn(expected_message, str(caught.exception))
 
     def test_read_only_operations_use_only_their_structured_parameters(self) -> None:
         calls = (

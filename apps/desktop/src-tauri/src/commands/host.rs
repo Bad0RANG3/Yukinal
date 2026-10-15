@@ -129,6 +129,31 @@ const MAX_EVIDENCE_CORRELATION_WINDOW_SECONDS: u64 = 3_600;
 const DEFAULT_RETENTION_DAYS: u64 = 30;
 const DEFAULT_RETENTION_LIMIT: usize = 64;
 const MAX_RETENTION_LIMIT: usize = 128;
+const MAX_SERVER_SNAPSHOT_OUTPUT_BYTES: usize = 64 * 1024;
+const SERVER_SNAPSHOT_COMMAND_IDS: &[&str] = &[
+    "os_detect",
+    "os_release",
+    "os_kernel",
+    "os_arch",
+    "os_hostname",
+    "cpu_detect",
+    "cpu_ticks_a",
+    "cpu_ticks_b",
+    "cpu_cores",
+    "cpu_model",
+    "cpu_load",
+    "memory_detect",
+    "memory_info",
+    "uptime_detect",
+    "uptime_info",
+    "disk_detect",
+    "disk_usage",
+    "network_detect",
+    "network_info",
+    "docker_detect",
+    "docker_info",
+    "docker_ps",
+];
 /// Evidence is a point-in-time observation. The host exposes this conservative,
 /// versioned policy as metadata; it does not silently delete or mutate old rows.
 const EVIDENCE_FRESHNESS_STALE_AFTER_SECONDS: u64 = 15 * 60;
@@ -149,6 +174,13 @@ struct HostToolExecuteRequest {
     plan_step_id: Option<String>,
     evidence_ids: Option<Vec<String>>,
     approval_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServerSnapshotCommandOutput {
+    exit_code: i32,
+    stdout: String,
 }
 
 #[derive(Debug, Clone)]

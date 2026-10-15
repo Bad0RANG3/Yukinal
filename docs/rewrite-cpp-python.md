@@ -333,6 +333,12 @@ remote errors are raised as `SshServiceError` with a stable `code` and
 `http_status`. Install Agent dependencies with `python -m pip install -e
 "agent[agent]"` to use LangGraph and MCP.
 
+The desktop Agent routes `server.info` command acquisition through the C++ SSH
+service using a fixed command set and nonce-delimited output. Python validates
+the markers and forwards bounded command results to the Rust host, which keeps
+the existing snapshot parser and database write path. The snapshot shape used
+by the UI and host context remains the same.
+
 ## Build and verification
 
 ```powershell
@@ -392,6 +398,14 @@ parameter-bound approvals, approval RPC resume/reject, audit redaction,
 tool/task/output limits, LangGraph execution, bidirectional host RPC framing,
 and redacted tool lifecycle events. The Paramiko SSH mock and
 Python-to-C++ HTTP tests also passed in CTest.
+
+On 2026-10-15, after routing `server.info` through the C++ snapshot batch, full
+Python unittest discovery ran 76 tests: 73 passed and 3 service integration
+cases were skipped because no service binary path was configured for that
+standalone run. The focused SSH client suite passed 18 tests and the desktop SSH
+routing suite passed 8 tests. CTest passed all six registered targets. A Rust
+host-tool test now covers snapshot parsing and persistence, but could not be run
+because Cargo and rustc are unavailable in this environment.
 
 ## Deliberately deferred
 

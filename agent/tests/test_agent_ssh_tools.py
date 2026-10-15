@@ -19,6 +19,16 @@ from yukinal_agent.ssh_tools import (
     register_desktop_ssh_tools,
     register_ssh_tools,
 )
+from yukinal_ssh.client import _SYSTEM_SNAPSHOT_COMMAND_IDS
+
+_SNAPSHOT_OUTPUTS = {
+    command_id: (0, f"{command_id}\n") for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS
+}
+_SNAPSHOT_VALUE = {
+    "id": "snapshot-1",
+    "serverId": "srv_stage1",
+    "os": {"hostname": "stage.example.test"},
+}
 
 
 class FakeDesktopHost:
@@ -29,6 +39,15 @@ class FakeDesktopHost:
         self, method: str, params: dict[str, Any], *, timeout_seconds: float
     ) -> dict[str, Any]:
         self.calls.append((method, params))
+        if method == "host.tool.execute" and params.get("toolName") == "server.info":
+            if params.get("target") != {
+                "host": "remote", "serverId": "srv_stage1", "environment": "staging"
+            }:
+                raise AssertionError(f"server.info host request lost the selected target: {params!r}")
+            tool_input = params.get("input")
+            if not isinstance(tool_input, dict) or set(tool_input) != {"snapshotOutputs"}:
+                raise AssertionError(f"server.info host input was invalid: {tool_input!r}")
+            return {"status": "success", "output": _SNAPSHOT_VALUE}
         payload = {
             "target": {
                 "target_id": params["serverId"],
@@ -89,6 +108,10 @@ class FakeDesktopSshClient:
 
     def service_status(self, *arguments: Any) -> Any:
         return self._result("service_status", *arguments)
+
+    def system_snapshot(self, *arguments: Any) -> dict[str, tuple[int, str]]:
+        self.calls.append(("system_snapshot", arguments))
+        return _SNAPSHOT_OUTPUTS
 
     def server_logs(self, *arguments: Any) -> Any:
         self.calls.append(("server_logs", arguments))
@@ -235,13 +258,14 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(MemoryAuditSink())
         direct_names = register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
         self.assertEqual(direct_names, {
-            "server.logs", "server.services", "docker.ps", "docker.logs", "docker.inspect",
-            "systemd.inspect", "package.inspect", "filesystem.read",
+            "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
+            "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
 
         cases = [
+            ("server.info", {}, "system_snapshot", ("srv_stage1",)),
             ("ssh.service_status", {"service": "nginx.service"}, "service_status", ("srv_stage1", "nginx.service", 10)),
             ("server.logs", {"sinceSeconds": 60, "unit": "nginx.service"}, "server_logs", ("srv_stage1", 60, "nginx.service")),
             ("server.services", {"name": "api.service", "state": "running"}, "service_inventory", ("srv_stage1",)),
@@ -261,6 +285,8 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             approved_actions={},
             host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
             context_target_id="srv_stage1",
+            call_id="call-desktop-ssh-test",
+            trace_id="trace-desktop-ssh-test",
         )
 
         with (
@@ -268,7 +294,12 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
         ):
             for tool_name, arguments, operation, expected_arguments in cases:
-                result = await registry.execute(tool_name, arguments, context)
+                result = await registry.execute(
+                    tool_name,
+                    arguments,
+                    context,
+                    call_id="call-server-info-test" if tool_name == "server.info" else None,
+                )
                 if tool_name == "server.services":
                     self.assertEqual(result.value, {
                         "source": "systemd",
@@ -337,6 +368,8 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                         "installed": True,
                         "version": "1.27.0-1",
                     })
+                elif tool_name == "server.info":
+                    self.assertEqual(result.value, _SNAPSHOT_VALUE)
                 else:
                     self.assertEqual(result.value["operation"], operation)
                     self.assertEqual(result.value["target_id"], "srv_stage1")
@@ -346,18 +379,38 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             [("sftp_read" if operation == "filesystem_read" else operation, expected_arguments)
              for _, _, operation, expected_arguments in cases],
         )
-        self.assertEqual(
-            host.calls,
-            [
-                (
+        expected_host_calls: list[tuple[str, dict[str, Any]]] = []
+        for tool_name, _, operation, _ in cases:
+            if operation == "filesystem_read":
+                expected_host_calls.append((
                     "host.ssh.filesystem_read_target",
                     {"serverId": "srv_stage1", "path": "/srv/app/data.bin", "maxBytes": 5},
-                )
-                if operation == "filesystem_read"
-                else ("host.ssh.service_target", {"serverId": "srv_stage1"})
-                for _, _, operation, _ in cases
-            ],
-        )
+                ))
+            else:
+                expected_host_calls.append((
+                    "host.ssh.service_target", {"serverId": "srv_stage1"}
+                ))
+                if tool_name == "server.info":
+                    expected_host_calls.append((
+                        "host.tool.execute",
+                        {
+                            "callId": "call-server-info-test",
+                            "traceId": "trace-desktop-ssh-test",
+                            "toolName": "server.info",
+                            "input": {
+                                "snapshotOutputs": {
+                                    command_id: {"exitCode": exit_code, "stdout": stdout}
+                                    for command_id, (exit_code, stdout) in _SNAPSHOT_OUTPUTS.items()
+                                },
+                            },
+                            "target": {
+                                "host": "remote",
+                                "serverId": "srv_stage1",
+                                "environment": "staging",
+                            },
+                        },
+                    ))
+        self.assertEqual(host.calls, expected_host_calls)
         self.assertEqual(len(FakeDesktopSshProcess.instances), len(cases))
         self.assertTrue(all(process.started and process.stopped for process in FakeDesktopSshProcess.instances))
 

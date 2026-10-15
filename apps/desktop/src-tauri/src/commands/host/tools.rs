@@ -586,24 +586,39 @@ pub(super) async fn server_info(
     input: &Value,
     cancel: &CancellationToken,
 ) -> Result<Value, String> {
-    if !is_empty_object(input) {
-        return Ok(failed(
-            "invalid_input",
-            "server.info accepts an empty object",
-            true,
-            None,
-        ));
-    }
-
-    let collected_at = yukinal_core::sidecar::iso8601_now();
-    let cpp_supported = match app {
-        Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
-            Ok(supported) => supported,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        },
-        None => false,
+    let provided_outputs = match server_snapshot_outputs_from_input(input) {
+        Ok(outputs) => outputs,
+        Err(message) => {
+            return Ok(failed("invalid_input", message, true, None));
+        }
     };
-    let (snapshot, _) = if cpp_supported {
+    let collected_at = yukinal_core::sidecar::iso8601_now();
+    let cpp_supported = if provided_outputs.is_some() {
+        false
+    } else {
+        match app {
+            Some(_) => match crate::commands::ssh_service::supports_cpp_target(state, server_id) {
+                Ok(supported) => supported,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+            None => false,
+        }
+    };
+    let (snapshot, _) = if let Some(outputs) = provided_outputs {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(cancelled_failure()),
+            result = yukinal_core::collector::collect_snapshot_with_command_results(
+                server_id,
+                &collected_at,
+                cancel,
+                outputs,
+            ) => match result {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Ok(transport_or_cancel(error, cancel)),
+            },
+        }
+    } else if cpp_supported {
         let outputs = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(cancelled_failure()),
@@ -658,6 +673,53 @@ pub(super) async fn server_info(
     }
     let output = serde_json::to_value(snapshot).map_err(|error| error.to_string())?;
     Ok(success(output))
+}
+
+fn server_snapshot_outputs_from_input(
+    input: &Value,
+) -> Result<Option<std::collections::HashMap<String, (i32, String)>>, String> {
+    if is_empty_object(input) {
+        return Ok(None);
+    }
+    let Some(object) = input.as_object() else {
+        return Err("server.info accepts an empty object".into());
+    };
+    if object.len() != 1 {
+        return Err("server.info accepts an empty object".into());
+    }
+    let Some(value) = object.get("snapshotOutputs") else {
+        return Err("server.info accepts an empty object".into());
+    };
+    let outputs = serde_json::from_value::<
+        std::collections::HashMap<String, super::ServerSnapshotCommandOutput>,
+    >(value.clone())
+    .map_err(|_| "server.info snapshot outputs are invalid".to_string())?;
+    if outputs.len() != super::SERVER_SNAPSHOT_COMMAND_IDS.len()
+        || super::SERVER_SNAPSHOT_COMMAND_IDS
+            .iter()
+            .any(|command_id| !outputs.contains_key(*command_id))
+    {
+        return Err("server.info snapshot command set is invalid".into());
+    }
+    let Some(total_output_bytes) = outputs
+        .values()
+        .try_fold(0usize, |total, output| total.checked_add(output.stdout.len()))
+    else {
+        return Err("server.info snapshot output exceeds its bounds".into());
+    };
+    if total_output_bytes > super::MAX_SERVER_SNAPSHOT_OUTPUT_BYTES
+        || outputs
+            .values()
+            .any(|output| !(0..=255).contains(&output.exit_code))
+    {
+        return Err("server.info snapshot output exceeds its bounds".into());
+    }
+    Ok(Some(
+        outputs
+            .into_iter()
+            .map(|(command_id, output)| (command_id, (output.exit_code, output.stdout)))
+            .collect(),
+    ))
 }
 
 pub(super) async fn server_logs(

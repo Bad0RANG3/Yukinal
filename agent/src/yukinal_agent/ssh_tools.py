@@ -72,6 +72,12 @@ def register_desktop_ssh_tools(
 
     tools: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         (
+            "server.info",
+            "Collect a fresh read-only health snapshot for the selected remote server.",
+            {"type": "object", "additionalProperties": False, "properties": {}},
+            "system_snapshot",
+        ),
+        (
             "ssh.service_status",
             "Read the active state of one allow-listed systemd service on the selected remote server.",
             {
@@ -264,6 +270,24 @@ def register_desktop_ssh_tools(
                     "truncated": len(raw) > max_bytes,
                     "revision": hashlib.sha256(kept).hexdigest(),
                 }
+            elif operation == "system_snapshot":
+                outputs = await asyncio.to_thread(client.system_snapshot, target_id)
+                snapshot = await _execute_on_host(
+                    host,
+                    tool_name,
+                    {
+                        "snapshotOutputs": {
+                            command_id: {"exitCode": exit_code, "stdout": stdout}
+                            for command_id, (exit_code, stdout) in outputs.items()
+                        },
+                    },
+                    context,
+                )
+                if not isinstance(snapshot, dict):
+                    raise ToolCallError(
+                        "invalid_response", "desktop host returned an invalid system snapshot"
+                    )
+                return snapshot
             elif operation == "service_status":
                 result = await asyncio.to_thread(
                     client.service_status,

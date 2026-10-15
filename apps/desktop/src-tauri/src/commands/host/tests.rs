@@ -34,7 +34,7 @@ use super::{
     FilesystemBackupCleanupItemInput, HostCancellationRegistry, HostToolCallDecision,
     HostToolExecuteRequest, HostToolTarget, DOCKER_LOGS, FILESYSTEM_BACKUP,
     FILESYSTEM_BACKUP_CLEANUP, FILESYSTEM_EDIT, FILESYSTEM_RESTORE, FILESYSTEM_WRITE,
-    HOST_TOOL_EXECUTE, SERVER_INFO,
+    HOST_TOOL_EXECUTE, SERVER_INFO, SERVER_SNAPSHOT_COMMAND_IDS,
 };
 use super::{cross_task_cleanup_is_plan_bound, filesystem_backup_retention, retention_candidates};
 use crate::state::AppState;
@@ -54,6 +54,91 @@ use yukinal_database::repositories::{
 
 const E2E_SSH_USER: &str = "yukinal-host-e2e";
 const E2E_SSH_PASSWORD: &str = "loopback-only";
+
+#[tokio::test]
+async fn sidecar_snapshot_results_use_host_collector_and_persist_snapshot() {
+    let directory = tempfile::tempdir().expect("isolated host data directory");
+    let state = AppState::bootstrap(directory.path()).expect("bootstrap host state");
+    let server_id = "srv_snapshot_rpc";
+    state
+        .database
+        .servers()
+        .insert(&Server {
+            id: server_id.into(),
+            name: "snapshot RPC fixture".into(),
+            connection: ServerConnection {
+                host: "snapshot.example.test".into(),
+                port: 22,
+                username: "ops".into(),
+                identity_id: None,
+                host_certificate_authority: None,
+            },
+            group_id: None,
+            capabilities: ServerCapabilities::default(),
+            status: ServerStatus::Disconnected,
+            metadata: ServerMetadata {
+                environment: Environment::Staging,
+                region: None,
+                hostname: None,
+                os: None,
+                tags: None,
+                workspace_ids: None,
+            },
+            created_at: "2026-10-15T00:00:00Z".into(),
+            updated_at: "2026-10-15T00:00:00Z".into(),
+        })
+        .expect("register snapshot fixture server");
+
+    let parsed_outputs = HashMap::from([
+        ("os_detect", (0, "Linux\n")),
+        ("os_release", (0, "NAME=\"Test Linux\"\nVERSION_ID=\"1\"\n")),
+        ("os_kernel", (0, "6.1.0\n")),
+        ("os_arch", (0, "x86_64\n")),
+        ("os_hostname", (0, "mock-host\n")),
+    ]);
+    let mut outputs = serde_json::Map::new();
+    for command_id in SERVER_SNAPSHOT_COMMAND_IDS {
+        let (exit_code, stdout) = parsed_outputs.get(command_id).copied().unwrap_or((1, ""));
+        outputs.insert(
+            (*command_id).into(),
+            json!({ "exitCode": exit_code, "stdout": stdout }),
+        );
+    }
+    let result = handle_sidecar_request_with_cancel(
+        &state,
+        HOST_TOOL_EXECUTE,
+        json!({
+            "callId": "call_snapshot_rpc",
+            "traceId": "trace_snapshot_rpc",
+            "toolName": SERVER_INFO,
+            "input": { "snapshotOutputs": outputs },
+            "target": {
+                "host": "remote",
+                "serverId": server_id,
+                "environment": "staging"
+            }
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("host should collect the fixed command set");
+
+    assert_eq!(result["status"], "success");
+    let snapshot = result
+        .get("output")
+        .expect("host tool should return the snapshot");
+    assert_eq!(snapshot["serverId"], server_id);
+    assert_eq!(snapshot["os"]["hostname"], "mock-host");
+    assert_eq!(
+        state
+            .database
+            .snapshots()
+            .list_recent(server_id, 10)
+            .expect("read persisted snapshot")
+            .len(),
+        1
+    );
+}
 
 #[derive(Clone, Default)]
 struct ExecServerObservations {

@@ -31,6 +31,7 @@ except ImportError as error:
     raise SystemExit("install the optional test dependency with: python -m pip install -e 'agent[test]'") from error
 
 from yukinal_ssh import SshServiceClient, SshServiceError
+from yukinal_ssh.client import _SYSTEM_SNAPSHOT_COMMAND_IDS
 
 
 TOKEN = "paramiko-live-ssh-test-token-long-enough-for-service"
@@ -809,13 +810,34 @@ def exercise_agent_runtime(
             raise AssertionError(f"Agent accepted a model-supplied target override: {forged!r}")
 
         class DesktopHost:
+            snapshot_outputs: dict[str, object] | None = None
+
             async def request(self, method: str, params: dict[str, object], *, timeout_seconds: float) -> object:
-                if method != "host.ssh.service_target" or params != {"serverId": "srv_stage1"}:
-                    raise AssertionError(f"unexpected desktop SSH target request: {method} {params!r}")
-                return desktop_target
+                if method == "host.ssh.service_target" and params == {"serverId": "srv_stage1"}:
+                    return desktop_target
+                if method == "host.tool.execute" and params.get("toolName") == "server.info":
+                    target = params.get("target")
+                    tool_input = params.get("input")
+                    if not isinstance(target, dict) or target.get("serverId") != "srv_stage1":
+                        raise AssertionError(f"snapshot used a different target: {params!r}")
+                    if not isinstance(tool_input, dict):
+                        raise AssertionError(f"snapshot host input was invalid: {tool_input!r}")
+                    outputs = tool_input.get("snapshotOutputs")
+                    if not isinstance(outputs, dict) or set(outputs) != set(_SYSTEM_SNAPSHOT_COMMAND_IDS):
+                        raise AssertionError(f"snapshot command set was invalid: {outputs!r}")
+                    self.snapshot_outputs = outputs
+                    cpu_model = outputs["cpu_model"]
+                    if not isinstance(cpu_model, dict) or "Mock CPU" not in str(cpu_model.get("stdout")):
+                        raise AssertionError(f"snapshot did not include the C++ SSH result: {cpu_model!r}")
+                    return {"status": "success", "output": {
+                        "serverId": "srv_stage1", "os": {"hostname": "mock-host"},
+                        "cpu": {"model": "Mock CPU"},
+                    }}
+                raise AssertionError(f"unexpected desktop SSH request: {method} {params!r}")
 
         desktop_registry = ToolRegistry(MemoryAuditSink())
-        register_desktop_ssh_tools(desktop_registry, DesktopHost(), service_binary)
+        desktop_host = DesktopHost()
+        register_desktop_ssh_tools(desktop_registry, desktop_host, service_binary)
         desktop_workflow = AgentWorkflow(desktop_registry)
         desktop_result = await desktop_workflow.run(
             task_id="desktop-managed-ssh-target",
@@ -834,6 +856,25 @@ def exercise_agent_runtime(
         desktop_output = desktop_result.results[0].get("result", {})
         if desktop_output.get("target_id") != "srv_stage1" or desktop_output.get("stdout") != "active\n":
             raise AssertionError(f"desktop-managed C++ SSH path used the wrong target: {desktop_output!r}")
+
+        snapshot_result = await desktop_workflow.run(
+            task_id="desktop-managed-server-snapshot",
+            tenant_id="integration-tenant",
+            user_id="integration-operator",
+            allowed_tools={"server.info"},
+            allowed_target_ids={"srv_stage1"},
+            tool_calls=[{"name": "server.info", "arguments": {}}],
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+        if snapshot_result.status != "succeeded" or not snapshot_result.results:
+            raise AssertionError(f"desktop-managed C++ snapshot route failed: {snapshot_result!r}")
+        snapshot_output = snapshot_result.results[0].get("result", {})
+        if (
+            snapshot_output.get("serverId") != "srv_stage1"
+            or snapshot_output.get("cpu", {}).get("model") != "Mock CPU"
+            or desktop_host.snapshot_outputs is None
+        ):
+            raise AssertionError(f"desktop-managed snapshot result was not preserved: {snapshot_output!r}")
 
     asyncio.run(run())
 
@@ -1058,13 +1099,8 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 exercise_agent_runtime(client, service_binary, desktop_target)
                 return
 
-            snapshot = client._execute_operation(
-                "srv_stage1",
-                "system_snapshot",
-                {"nonce": "0123456789abcdef0123456789abcdef"},
-                timeout_seconds=30,
-            )
-            if snapshot.exit_code != 0 or "Mock CPU" not in snapshot.stdout:
+            snapshot = client.system_snapshot("srv_stage1", timeout_seconds=30)
+            if snapshot["cpu_model"][0] != 0 or "Mock CPU" not in snapshot["cpu_model"][1]:
                 raise AssertionError(f"unexpected structured system snapshot: {snapshot!r}")
 
             docker = client._execute_operation(

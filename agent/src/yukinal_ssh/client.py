@@ -5,6 +5,7 @@ import binascii
 import http.client
 import json
 import re
+import secrets
 import socket
 import urllib.error
 import urllib.parse
@@ -23,6 +24,30 @@ _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 _MAX_SFTP_WRITE_BYTES = 512 * 1024
 _MAX_SFTP_EXCLUSIVE_BYTES = 1024 * 1024
 _MAX_SFTP_READ_BYTES = 1024 * 1024
+_SYSTEM_SNAPSHOT_COMMAND_IDS = (
+    "os_detect",
+    "os_release",
+    "os_kernel",
+    "os_arch",
+    "os_hostname",
+    "cpu_detect",
+    "cpu_ticks_a",
+    "cpu_ticks_b",
+    "cpu_cores",
+    "cpu_model",
+    "cpu_load",
+    "memory_detect",
+    "memory_info",
+    "uptime_detect",
+    "uptime_info",
+    "disk_detect",
+    "disk_usage",
+    "network_detect",
+    "network_info",
+    "docker_detect",
+    "docker_info",
+    "docker_ps",
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +68,41 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str,
                          headers: Any, newurl: str) -> None:
         return None
+
+
+def _parse_system_snapshot_output(output: str, nonce: str) -> dict[str, tuple[int, str]]:
+    if (
+        not isinstance(output, str)
+        or not isinstance(nonce, str)
+        or re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+    ):
+        raise SshServiceTransportError(
+            "invalid_response", "SSH service returned an invalid system snapshot"
+        )
+
+    results: dict[str, tuple[int, str]] = {}
+    for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS:
+        start_marker = f"__YK_SNAPSHOT_{nonce}_{command_id}_BEGIN__\n"
+        if output.count(start_marker) != 1:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned an incomplete system snapshot"
+            )
+        data_start = output.find(start_marker) + len(start_marker)
+        end_prefix = f"\n__YK_SNAPSHOT_{nonce}_{command_id}_END_"
+        end = output.find(end_prefix, data_start)
+        if end < 0 or output.find(end_prefix, end + len(end_prefix)) >= 0:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned an incomplete system snapshot"
+            )
+        status_start = end + len(end_prefix)
+        status_end = output.find("__\n", status_start)
+        status = output[status_start:status_end] if status_end >= 0 else ""
+        if re.fullmatch(r"[0-9]{1,3}", status) is None or int(status) > 255:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned an invalid system snapshot status"
+            )
+        results[command_id] = (int(status), output[data_start:end])
+    return results
 
 
 class SshServiceClient:
@@ -164,6 +224,20 @@ class SshServiceClient:
                 raise ValueError("unit must be a bounded .service reference")
             parameters["unit"] = unit
         return self._execute_operation(target_id, "server_logs", parameters, timeout_seconds)
+
+    def system_snapshot(
+        self, target_id: str, timeout_seconds: int = 10
+    ) -> dict[str, tuple[int, str]]:
+        """Collect fixed system snapshot commands and split their nonce markers."""
+        nonce = secrets.token_hex(16)
+        result = self._execute_operation(
+            target_id, "system_snapshot", {"nonce": nonce}, timeout_seconds
+        )
+        if result.exit_code != 0:
+            raise SshServiceError(
+                "execution_failed", "could not collect a system snapshot", http_status=502
+            )
+        return _parse_system_snapshot_output(result.stdout, nonce)
 
     def sftp_write(
         self, target_id: str, path: str, content: bytes, timeout_seconds: int = 10

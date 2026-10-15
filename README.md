@@ -39,13 +39,15 @@ The Python JSON-RPC layer handles initialization, health, tool catalogs,
 provider checks and model catalogs, text runs, cancellation, and a bidirectional
 JSON-RPC bridge to the desktop host. Python runs can execute the existing
 read-only server tools through the host and can use MCP tools the host marks
-low-risk. The three approved desktop actions above remain behind the existing
-host approval and one-time call checks; they are not exposed as Python Agent
-tools. The Python sidecar now round-trips approvals for tools that explicitly
-require them, including reject and expiry handling; the current desktop catalog
-still exposes read-only tools. Durable task state and broader tool coverage
-remain in progress. The existing React/Tauri UI remains intact while those
-paths are migrated.
+low-risk. On the desktop, `server.info` gathers its fixed SSH command batch
+through the C++ service and sends bounded results through the existing host
+collector and snapshot database path. The three approved desktop actions above
+remain behind the existing host approval and one-time call checks; they are not
+exposed as Python Agent tools. The Python sidecar now round-trips approvals for
+tools that explicitly require them, including reject and expiry handling; the
+current desktop catalog still exposes read-only tools. Durable task state and
+broader tool coverage remain in progress. The existing React/Tauri UI remains
+intact while those paths are migrated.
 
 The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service
