@@ -4,11 +4,12 @@
  * checked for cross-platform problems before the next stage starts).
  *
  * Order is deliberate:
- *   1. check repository hygiene, docs, and packaging contracts
- *   2. build the contract libs   (consumers import their dist/*.d.ts)
- *   3. typecheck and test JavaScript sources (including retained legacy Agent tests)
- *   4. smoke the Python Agent and configured C++/Python CTest targets
- *   5. rust fmt + clippy + check, when a Rust toolchain is installed
+ *   1. check repository hygiene and docs
+ *   2. run the configured C++ SSH and Python Agent tests before unrelated JS gates
+ *   3. build the contract libs (consumers import their dist/*.d.ts)
+ *   4. typecheck and test JavaScript sources (including retained legacy Agent tests)
+ *   5. smoke the Python Agent
+ *   6. rust fmt + clippy + check, when a Rust toolchain is installed
  *
  * Exits non-zero on the first failure.
  */
@@ -44,6 +45,14 @@ const steps = [
   // section that moves takes its anchors with it, and only the renderer notices.
   { name: "docs links", command: process.execPath, args: ["scripts/check-docs-links.mjs"], required: true },
   {
+    name: "C++ SSH service and Python Agent tests",
+    command: "ctest",
+    args: ["--test-dir", nativeBuildDirectory ?? "native/build", "-C", "Release", "--output-on-failure"],
+    required: true,
+    skip: !nativeBuildDirectory,
+    skipReason: "no configured CMake test build (see README.md)",
+  },
+  {
     name: "build contract libs",
     command: "pnpm",
     args: ["--filter", "@yukinal/shared", "--filter", "@yukinal/provider-sdk", "--filter", "@yukinal/agent-sdk", "build"],
@@ -54,14 +63,6 @@ const steps = [
   { name: "unit tests", command: "pnpm", args: ["-r", "--if-present", "test"], required: true },
   { name: "desktop bundle (vite build)", command: "pnpm", args: ["--filter", "@yukinal/desktop", "build"], required: true },
   { name: "Python Agent source sidecar smoke", command: process.execPath, args: ["scripts/smoke-python-dev-agent.mjs"], required: true },
-  {
-    name: "C++ SSH service and Python Agent tests",
-    command: "ctest",
-    args: ["--test-dir", nativeBuildDirectory ?? "native/build", "-C", "Release", "--output-on-failure"],
-    required: true,
-    skip: !nativeBuildDirectory,
-    skipReason: "no configured CMake test build (see README.md)",
-  },
   { name: "rustfmt check", command: "cargo", args: ["fmt", "--all", "--check"], required: false, skip: !hasCargo, skipReason: "no cargo on PATH" },
   {
     name: "clippy",

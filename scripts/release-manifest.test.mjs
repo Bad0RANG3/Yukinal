@@ -232,6 +232,7 @@ test("package build runs the generated NSIS policy check only on Windows", async
 test("the cross-platform check gate builds and tests the C++ service and Python Agent", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "check.yml"), "utf8");
+  const checkScript = await readFile(path.join(root, "scripts", "check.mjs"), "utf8");
 
   assert.match(workflow, /actions\/setup-python@[0-9a-f]{40}/);
   assert.match(workflow, /agent\[agent,models,test\]/);
@@ -242,6 +243,10 @@ test("the cross-platform check gate builds and tests the C++ service and Python 
   assert.match(workflow, /cmake --build native\/build-check/);
   assert.match(workflow, /YUKINAL_SSH_CMAKE_BUILD_DIR: native\/build-check/);
   assert.match(workflow, /pnpm check/);
+  const nativeTestsAt = checkScript.indexOf('name: "C++ SSH service and Python Agent tests"');
+  const contractBuildAt = checkScript.indexOf('name: "build contract libs"');
+  assert.ok(nativeTestsAt !== -1 && contractBuildAt !== -1 && nativeTestsAt < contractBuildAt,
+    "the SSH and Python integration tests must run before TypeScript gates can stop the check");
 });
 
 test("the local check gate smokes the Python Agent sidecar over stdio", async () => {
