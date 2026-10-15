@@ -252,6 +252,32 @@ class ClientTests(unittest.TestCase):
                 invoke()
         self.assertIsNone(self.server.last_request)
 
+    def test_systemd_restart_uses_a_structured_bounded_operation(self) -> None:
+        self.server.response_body["operation"] = "systemd_restart"
+        result = self.client.systemd_restart("staging-web-01", "nginx.service", 7)
+        self.assertEqual(result.operation, "systemd_restart")
+        self.assertEqual(
+            self.server.last_request["body"],
+            {
+                "target_id": "staging-web-01",
+                "operation": "systemd_restart",
+                "parameters": {"service": "nginx.service", "timeout_seconds": 7},
+                "timeout_seconds": 7,
+            },
+        )
+
+    def test_systemd_restart_rejects_invalid_units_and_timeouts_before_network_call(self) -> None:
+        invalid_calls = (
+            lambda: self.client.systemd_restart("staging-web-01", "nginx"),
+            lambda: self.client.systemd_restart("staging-web-01", "nginx.service;id"),
+            lambda: self.client.systemd_restart("staging-web-01", "nginx.service", True),
+            lambda: self.client.systemd_restart("staging-web-01", "nginx.service", 31),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke), self.assertRaises(ValueError):
+                invoke()
+        self.assertIsNone(self.server.last_request)
+
     def test_bounded_binary_sftp_writes_use_base64_and_structured_paths(self) -> None:
         self.server.response_body["operation"] = "sftp_write"
         self.server.response_body["stdout"] = '{"bytes_written":4}'

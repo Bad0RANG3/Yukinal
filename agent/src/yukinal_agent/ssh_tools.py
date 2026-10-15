@@ -22,7 +22,13 @@ from .host_tools import (
 from .filesystem_action_ledger import FilesystemActionLedger, FilesystemActionLedgerError
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .system_snapshot import normalize_system_snapshot
-from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
+from .tools import (
+    ExecutionContext,
+    ToolCallError,
+    ToolRegistry,
+    ToolSpec,
+    approval_fingerprint,
+)
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _MAX_SERVER_LOG_LINES = 500
@@ -30,6 +36,18 @@ _MAX_DOCKER_PS_CONTAINERS = 200
 _MAX_DOCKER_LOG_LINE_CHARS = 4_000
 _MAX_AGENT_EDIT_BYTES = 512 * 1024
 _MAX_AGENT_BACKUP_BYTES = 1024 * 1024
+_SYSTEMD_RESTART_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "service": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,119}\\.service$",
+        },
+        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 25},
+    },
+    "required": ["service", "timeoutSeconds"],
+    "additionalProperties": False,
+}
 
 
 def register_ssh_tools(registry: ToolRegistry, client: SshServiceClient) -> None:
@@ -503,13 +521,207 @@ def register_desktop_ssh_tools(
             timeout_ms=60_000,
             cancellable=True,
         ))
+    if "systemd.restart" not in existing_names:
+        registry.register(ToolSpec(
+            name="systemd.restart",
+            description=(
+                "Restart one systemd service after exact per-call approval and host plan checks. "
+                "Python runs the structured operation through the C++ SSH service."
+            ),
+            input_schema=_SYSTEMD_RESTART_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_systemd_restart(
+                host, binary, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=40_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
         | {
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
-            "filesystem.backup.cleanup",
+            "filesystem.backup.cleanup", "systemd.restart",
         }
     )
+
+
+def _systemd_restart_host_call(
+    arguments: dict[str, Any], context: ExecutionContext
+) -> dict[str, Any]:
+    target = context.host_target
+    target_id = context.context_target_id
+    if (
+        not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or not isinstance(target_id, str)
+        or target.get("serverId") != target_id
+        or not context.run_id
+        or not context.trace_id
+        or not context.call_id
+        or not context.host_task_id
+        or not context.plan_id
+        or not context.plan_step_id
+    ):
+        raise ToolCallError(
+            "durable_plan_required", "systemd.restart requires a durable remote action plan"
+        )
+    fingerprint = approval_fingerprint(
+        "systemd.restart",
+        target_id,
+        arguments,
+        task_id=context.task_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+    )
+    approval_id = context.approved_actions.get(fingerprint)
+    if not approval_id:
+        raise ToolCallError("approval_reference_missing", "the exact restart approval is unavailable")
+    return {
+        "callId": context.call_id,
+        "runId": context.run_id,
+        "traceId": context.trace_id,
+        "toolName": "systemd.restart",
+        "input": arguments,
+        "target": dict(target),
+        "taskId": context.host_task_id,
+        "planId": context.plan_id,
+        "planStepId": context.plan_step_id,
+        "evidenceIds": list(context.evidence_ids),
+        "approvalId": approval_id,
+    }
+
+
+async def _finish_desktop_systemd_restart(
+    host: HostRpcClient,
+    tool_call: dict[str, Any],
+    outcome: str,
+) -> None:
+    try:
+        response = await host.request(
+            "host.ssh.systemd_restart_finished",
+            {"toolCall": tool_call, "outcome": outcome},
+            timeout_seconds=8.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError(
+            "host_unavailable", "the desktop host could not record the restart outcome"
+        ) from None
+    if not isinstance(response, dict) or response.get("status") != "success":
+        error = response.get("error") if isinstance(response, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            code = "invalid_host_response"
+        raise ToolCallError(
+            code,
+            message if isinstance(message, str) else "the host rejected the restart completion record",
+        )
+
+
+async def _desktop_systemd_restart(
+    host: HostRpcClient,
+    binary: Path,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, Any]:
+    tool_call = _systemd_restart_host_call(arguments, context)
+    try:
+        response = await host.request(
+            "host.ssh.systemd_restart_target",
+            {"toolCall": tool_call},
+            timeout_seconds=15.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError(
+            "host_unavailable", "the desktop host could not authorize the restart target"
+        ) from None
+    if not isinstance(response, dict):
+        raise ToolCallError("invalid_host_response", "the desktop host returned an invalid restart target")
+    if response.get("status") == "already_completed":
+        return {"service": arguments["service"], "restarted": True}
+    if response.get("status") == "failed":
+        error = response.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        if code == "unsupported_route":
+            return await _execute_on_host(host, "systemd.restart", arguments, context)
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            code = "host_tool_failed"
+        raise ToolCallError(
+            code,
+            message if isinstance(message, str) else "the desktop host rejected the restart request",
+        )
+    payload = response.get("targetData")
+    if response.get("status") != "success" or not isinstance(payload, dict):
+        if response.get("status") == "success":
+            await _finish_desktop_systemd_restart(host, tool_call, "failed")
+        raise ToolCallError("invalid_host_response", "the desktop host returned an invalid restart target")
+
+    process = None
+    outcome = "failed"
+    operation_started = False
+    cancelled = False
+    try:
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        target = payload.get("target")
+        target_id = context.context_target_id
+        if not isinstance(target, dict) or target.get("target_id") != target_id:
+            raise SshServiceProcessError("the desktop host returned the wrong restart target")
+        await process.start()
+        operation_started = True
+        result = await asyncio.to_thread(
+            SshServiceClient(token, base_url=base_url).systemd_restart,
+            target_id,
+            arguments["service"],
+            arguments["timeoutSeconds"],
+        )
+        outcome = "succeeded" if result.exit_code == 0 else "failed"
+    except asyncio.CancelledError:
+        cancelled = True
+        if operation_started:
+            outcome = "unknown"
+        await asyncio.shield(_finish_desktop_systemd_restart(host, tool_call, outcome))
+        raise
+    except SshServiceError as error:
+        outcome = "unknown" if operation_started else "failed"
+        await _finish_desktop_systemd_restart(host, tool_call, outcome)
+        raise ToolCallError(error.code, str(error)) from None
+    except SshServiceProcessError:
+        await _finish_desktop_systemd_restart(host, tool_call, "failed")
+        raise ToolCallError(
+            "host_unavailable", "the C++ SSH service could not start for the approved restart"
+        ) from None
+    except Exception:
+        outcome = "unknown" if operation_started else "failed"
+        await _finish_desktop_systemd_restart(host, tool_call, outcome)
+        raise ToolCallError(
+            "transport", "the approved systemd restart did not return a usable result"
+        ) from None
+    else:
+        await _finish_desktop_systemd_restart(host, tool_call, outcome)
+        if result.exit_code != 0:
+            raise ToolCallError(
+                "execution_failed", f"could not restart systemd service `{arguments['service']}`"
+            )
+        return {"service": arguments["service"], "restarted": True}
+    finally:
+        if process is not None:
+            try:
+                await process.stop()
+            except asyncio.CancelledError:
+                if not cancelled:
+                    raise
+            except Exception:
+                if not cancelled:
+                    raise
 
 
 async def _desktop_filesystem_write(

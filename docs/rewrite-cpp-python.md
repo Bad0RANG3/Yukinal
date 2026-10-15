@@ -39,8 +39,14 @@
 > plan-bound `server.exec`, `docker.restart`, `systemd.restart`, and
 > `package.install` actions only for a remote goal run with an active action step
 > that allows them. These actions require exact per-call approval; Rust fingerprints
-> the exact host input and consumes a one-time ticket before dispatch. Raw approval
-> input is removed before persistence and UI emission.
+> the exact host input and consumes a one-time ticket before dispatch. On
+> C++-supported routes, `systemd.restart` now runs from Python through the
+> structured C++ SSH operation. The host checks the durable action plan before
+> claiming the call and consuming its ticket. A successful result is cached only
+> after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
+> and cannot be replayed. Rust retains the
+> compatibility executor only for routes it explicitly reports as unsupported.
+> Raw approval input is removed before persistence and UI emission.
 > Agent `filesystem.write` and `filesystem.edit` now run as Python desktop tools
 > through the C++ SFTP service when the target route supports it. The host checks
 > the current plan and exact path/content limits before returning a one-target
@@ -97,7 +103,10 @@ host-key errors do not trigger a fallback.
 The Python Agent catalog exposes `docker.restart`, `systemd.restart`, and
 `package.install` as structured actions with exact per-call approval. The host
 recomputes a fingerprint from the exact raw input, consumes the corresponding
-one-time ticket, and dispatches through its existing structured C++ SSH routing.
+one-time ticket. `systemd.restart` is routed through the Python caller to the
+structured C++ SSH operation on supported targets; the host records its terminal
+outcome in the durable execution fence. Docker restart and package installation
+continue through the host executor.
 `server.exec` remains separately guarded and exposed only when the host supplies
 the current remote action-plan binding. On C++-supported targets, the host first
 consumes the exact approval ticket or reserves the bounded task command grant,

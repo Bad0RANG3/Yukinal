@@ -191,6 +191,29 @@ class SshServiceClient:
             target_id, "systemd_inspect", {"service": service}, timeout_seconds
         )
 
+    def systemd_restart(
+        self, target_id: str, service: str, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        """Restart one validated systemd unit through the structured operation."""
+        if (
+            not isinstance(service, str)
+            or not _SERVICE_NAME.fullmatch(service)
+            or not service.endswith(".service")
+        ):
+            raise ValueError("service must be a valid .service unit name")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int)
+            or not 1 <= timeout_seconds <= 30
+        ):
+            raise ValueError("timeout_seconds must be an integer from 1 to 30")
+        return self._execute_operation(
+            target_id,
+            "systemd_restart",
+            {"service": service, "timeout_seconds": timeout_seconds},
+            timeout_seconds,
+        )
+
     def package_inspect(
         self, target_id: str, manager: str, package: str, timeout_seconds: int = 10
     ) -> SshOperationResult:

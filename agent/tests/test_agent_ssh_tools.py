@@ -41,6 +41,8 @@ class FakeDesktopHost:
         self, method: str, params: dict[str, Any], *, timeout_seconds: float
     ) -> dict[str, Any]:
         self.calls.append((method, params))
+        if method == "host.ssh.systemd_restart_finished":
+            return {"status": "success", "finished": True}
         if method == "host.investigation.plan.check":
             return {
                 "status": "allowed",
@@ -59,9 +61,16 @@ class FakeDesktopHost:
             if not isinstance(tool_input, dict) or set(tool_input) != {"snapshotData"}:
                 raise AssertionError(f"server.info host input was invalid: {tool_input!r}")
             return {"status": "success", "output": _SNAPSHOT_VALUE}
+        tool_call = params.get("toolCall")
+        nested_target = tool_call.get("target") if isinstance(tool_call, dict) else None
+        server_id = params.get("serverId")
+        if not isinstance(server_id, str) and isinstance(nested_target, dict):
+            server_id = nested_target.get("serverId")
+        if not isinstance(server_id, str):
+            raise AssertionError(f"SSH target request omitted its server id: {params!r}")
         payload = {
             "target": {
-                "target_id": params["serverId"],
+                "target_id": server_id,
                 "host": "stage.example.test",
                 "port": 22,
                 "username": "ops",
@@ -70,6 +79,8 @@ class FakeDesktopHost:
             },
             "credentials": {"SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"},
         }
+        if method == "host.ssh.systemd_restart_target":
+            return {"status": "success", "targetData": payload}
         if method == "host.ssh.filesystem_read_target":
             payload["filesystemRead"] = {
                 "path": params["path"],
@@ -258,6 +269,9 @@ class FakeDesktopSshClient:
             stderr="", duration_ms=3, output_truncated=False,
         )
 
+    def systemd_restart(self, *arguments: Any) -> Any:
+        return self._result("systemd_restart", *arguments)
+
     def package_inspect(self, *arguments: Any) -> Any:
         self.calls.append(("package_inspect", arguments))
         return SimpleNamespace(
@@ -368,7 +382,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
-            "filesystem.backup.cleanup",
+            "filesystem.backup.cleanup", "systemd.restart",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -519,6 +533,145 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.calls, expected_host_calls)
         self.assertEqual(len(FakeDesktopSshProcess.instances), len(cases))
         self.assertTrue(all(process.started and process.stopped for process in FakeDesktopSshProcess.instances))
+
+    async def test_desktop_systemd_restart_uses_approved_host_route_and_cpp_operation(self) -> None:
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {"service": "nginx.service", "timeoutSeconds": 10}
+        fingerprint = approval_fingerprint(
+            "systemd.restart",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"systemd.restart"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-systemd"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-systemd-1",
+            trace_id="trace-systemd-1",
+            call_id="call-systemd-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            result = await registry.execute("systemd.restart", arguments, context)
+
+        self.assertEqual(result.value, {"service": "nginx.service", "restarted": True})
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [("systemd_restart", ("srv_stage1", "nginx.service", 10))],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            ["host.ssh.systemd_restart_target", "host.ssh.systemd_restart_finished"],
+        )
+        tool_call = host.calls[0][1]["toolCall"]
+        self.assertEqual(tool_call["approvalId"], "apr-approved-systemd")
+        self.assertEqual(tool_call["planId"], "plan-1")
+        self.assertEqual(tool_call["planStepId"], "step-1")
+        self.assertEqual(host.calls[1][1]["outcome"], "succeeded")
+        self.assertEqual(len(FakeDesktopSshProcess.instances), 1)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_desktop_systemd_restart_does_not_fallback_after_target_rpc_failure(self) -> None:
+        host = FakeDesktopHost()
+        host.request = AsyncMock(side_effect=RuntimeError("host timeout"))  # type: ignore[method-assign]
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {"service": "nginx.service", "timeoutSeconds": 10}
+        fingerprint = approval_fingerprint(
+            "systemd.restart",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"systemd.restart"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-systemd"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            run_id="run-systemd-1",
+            trace_id="trace-systemd-1",
+            call_id="call-systemd-1",
+            context_target_id="srv_stage1",
+        )
+        fallback = AsyncMock(return_value={"service": "nginx.service", "restarted": True})
+
+        with patch("yukinal_agent.ssh_tools._execute_on_host", fallback):
+            with self.assertRaises(ToolCallError) as caught:
+                await registry.execute("systemd.restart", arguments, context)
+
+        self.assertEqual(caught.exception.code, "host_unavailable")
+        fallback.assert_not_awaited()
+
+    async def test_desktop_systemd_restart_falls_back_only_when_host_rejects_cpp_route(self) -> None:
+        host = FakeDesktopHost()
+        host.request = AsyncMock(return_value={
+            "status": "failed",
+            "error": {"code": "unsupported_route", "message": "legacy SSH mode"},
+        })  # type: ignore[method-assign]
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        arguments = {"service": "nginx.service", "timeoutSeconds": 10}
+        fingerprint = approval_fingerprint(
+            "systemd.restart",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"systemd.restart"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-systemd"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            run_id="run-systemd-1",
+            trace_id="trace-systemd-1",
+            call_id="call-systemd-1",
+            context_target_id="srv_stage1",
+        )
+        fallback = AsyncMock(return_value={"service": "nginx.service", "restarted": True})
+
+        with patch("yukinal_agent.ssh_tools._execute_on_host", fallback):
+            result = await registry.execute(
+                "systemd.restart", arguments, context, call_id=context.call_id
+            )
+
+        self.assertEqual(result.value, {"service": "nginx.service", "restarted": True})
+        fallback.assert_awaited_once_with(host, "systemd.restart", arguments, context)
 
     async def test_filesystem_write_uses_cpp_after_plan_check_and_replays_exact_success(self) -> None:
         import os
