@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 import uuid
 from pathlib import Path
 
@@ -17,6 +18,45 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "agent" / "src"))
 
 from yukinal_ssh import SshServiceClient
+
+
+_DISK_USAGE_HEADER = [
+    "Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"
+]
+
+
+def is_root_disk_usage_output(output: str) -> bool:
+    lines = output.splitlines()
+    if len(lines) != 2 or lines[0].split() != _DISK_USAGE_HEADER:
+        return False
+    fields = lines[1].split()
+    return (
+        len(fields) == 6
+        and bool(fields[0])
+        and all(re.fullmatch(r"[0-9]+", value) for value in fields[1:4])
+        and re.fullmatch(r"[0-9]{1,3}%", fields[4]) is not None
+        and fields[5] == "/"
+    )
+
+
+class OpenSshContainerHarnessTests(unittest.TestCase):
+    def test_root_disk_usage_accepts_overlay_mounts(self) -> None:
+        output = (
+            "Filesystem     1024-blocks     Used Available Capacity Mounted on\n"
+            "overlay          151263856 63287860  87959612      42% /\n"
+        )
+        self.assertTrue(is_root_disk_usage_output(output))
+
+    def test_root_disk_usage_rejects_bad_columns_and_non_root_mounts(self) -> None:
+        header = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+        for output in (
+            header + "/dev/root x 250 750 25% /\n",
+            header + "/dev/root 1000 250 750 25% /home\n",
+            header + "/dev/root 1000 250 750 25%\n",
+            "Filesystem Size Used Available Use% Mounted on\n/dev/root 1G 250M 750M 25% /\n",
+        ):
+            with self.subTest(output=output):
+                self.assertFalse(is_root_disk_usage_output(output))
 
 
 def run(command: list[str], *, capture: bool = False) -> str:
@@ -137,19 +177,7 @@ def main() -> int:
                 raise RuntimeError(f"unexpected service status result: exit={result.exit_code}, stdout={result.stdout!r}")
 
             disk_usage = client.disk_usage("test-openssh", timeout_seconds=10)
-            if (
-                disk_usage.exit_code != 0
-                or not disk_usage.stdout.startswith("Filesystem 1024-blocks Used Available Capacity Mounted on\n")
-                or not disk_usage.stdout.rstrip().endswith(" /")
-            ):
-                raise RuntimeError(f"unexpected root disk usage result: {disk_usage.stdout!r}")
-
-            disk_usage = client.disk_usage("test-openssh", timeout_seconds=10)
-            if (
-                disk_usage.exit_code != 0
-                or not disk_usage.stdout.startswith("Filesystem 1024-blocks Used Available Capacity Mounted on\n")
-                or not disk_usage.stdout.rstrip().endswith(" /")
-            ):
+            if disk_usage.exit_code != 0 or not is_root_disk_usage_output(disk_usage.stdout):
                 raise RuntimeError(f"unexpected root disk usage result: {disk_usage.stdout!r}")
 
             transfer_id = uuid.uuid4().hex

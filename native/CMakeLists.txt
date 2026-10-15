@@ -215,6 +215,11 @@ if(YUKINAL_BUILD_TESTS)
     TIMEOUT 30
   )
 
+  add_test(
+    NAME ssh_container_harness_tests
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../scripts -p test_ssh_container.py -v
+  )
+
   if(YUKINAL_ENABLE_AGENT_TESTS)
     execute_process(
       COMMAND ${Python3_EXECUTABLE} -c "import jsonschema, langgraph, mcp; import langgraph.checkpoint.sqlite.aio"
