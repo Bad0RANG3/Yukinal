@@ -709,3 +709,8 @@ URLs before applying the loopback-only HTTP rule. Loopback IPv4 and IPv6
 classification no longer depends on platform socket conversion APIs. The C++
 test executable passed all 54 tests, and all six CTest targets passed, including
 the SSH mock and Agent-to-C++ integration.
+
+Also on 2026-10-15, added direct C++ coverage for KRL HTTP loopback address
+classification, including IPv4 `127/8`, IPv6 `::1`, malformed addresses, and
+non-loopback addresses. The rebuilt C++ test executable passed all 55 tests, and
+all six CTest targets passed.

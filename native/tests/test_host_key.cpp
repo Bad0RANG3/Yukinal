@@ -466,6 +466,18 @@ YUKINAL_TEST(host_krl_loader_bounds_local_files_and_restricts_http_urls) {
   YUKINAL_REQUIRE(error.find("malformed") != std::string::npos);
 }
 
+YUKINAL_TEST(host_krl_http_loopback_host_detection_accepts_only_loopback_addresses) {
+  using yukinal::ssh_service::detail::is_loopback_host;
+  for (const auto host : {"localhost", "proxy.localhost", "127.0.0.1", "127.255.255.255",
+                          "::1", "0:0:0:0:0:0:0:1"}) {
+    YUKINAL_REQUIRE(is_loopback_host(host));
+  }
+  for (const auto host : {"localhost.example", "128.0.0.1", "127.0.0", "127.0.0.1.example",
+                          "::2", "0:0:0:0:0:0:0:0", "127..0.1", "::1%eth0"}) {
+    YUKINAL_REQUIRE(!is_loopback_host(host));
+  }
+}
+
 YUKINAL_TEST(host_krl_loader_fetches_loopback_http_responses) {
   const auto expected = make_unsigned_krl({});
   httplib::Server server;

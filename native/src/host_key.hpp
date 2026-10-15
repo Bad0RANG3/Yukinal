@@ -32,6 +32,7 @@ struct HostKeyMaterial {
 std::optional<HostKeyMaterial> normalize_host_key_blob(std::string_view blob);
 bool valid_host_ca_public_key(std::string_view ca_public_key);
 std::optional<std::string> host_ca_public_key_blob(std::string_view ca_public_key);
+bool is_loopback_host(std::string_view host);
 
 // Validates an OpenSSH host certificate against an authorized_keys-style CA
 // public key line and the configured host principal patterns.

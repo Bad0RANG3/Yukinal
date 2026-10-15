@@ -671,7 +671,7 @@ std::optional<KrlUrl> parse_krl_url(std::string_view value, std::string* error) 
   return result;
 }
 
-bool is_loopback_host(std::string_view host) {
+bool is_loopback_host_impl(std::string_view host) {
   std::string lowered(host);
   std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
     return static_cast<char>(ascii_lower(ch));
@@ -866,6 +866,10 @@ const char* revoked_reason(const KrlData& krl, std::string_view subject_key,
 }
 
 }  // namespace
+
+bool is_loopback_host(std::string_view host) {
+  return is_loopback_host_impl(host);
+}
 
 bool valid_host_ca_public_key(std::string_view ca_public_key) {
   return host_ca_public_key_blob(ca_public_key).has_value();
