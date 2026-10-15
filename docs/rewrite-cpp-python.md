@@ -614,9 +614,10 @@ request for the same one-shot target is rejected with `operation_not_allowed`,
 including when the first SSH attempt fails. The SSH mock now uses separate
 one-shot targets for the successful and output-cap cases and verifies replay
 rejection. Python syntax parsing and `git diff --check` passed. This revision
-could not be rebuilt here: `build-nmake` has no `nmake` executable and
-`build-vs` contains no generated Visual Studio project, so its C++ integration
-test was not run; results from the preceding revision do not verify this change.
+was rebuilt with the installed Visual Studio Build Tools environment, and all
+six CTest targets passed, including the SSH mock replay check and Agent-to-C++
+integration. The initial build failure was only caused by the shell not loading
+the MSVC environment; no project or build configuration change was needed.
 
 ## Deliberately deferred
 
