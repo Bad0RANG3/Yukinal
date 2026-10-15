@@ -1,10 +1,9 @@
 //! Terminal IPC commands: the UI only sees `terminal_session_id`s.
 //!
-//! Wire: resolve server and identity → read credentials at use time → C++ PTY child
-//! for supported connections, with Rust retained only for SSH configurations the
-//! C++ service cannot represent yet. Keyboard-interactive prompts travel through the
-//! existing UI challenge broker while the C++ worker owns the SSH connection. React only sees
-//! `terminal_session_id`s and the existing terminal events.
+//! Wire: resolve server and identity → read credentials at use time → C++ PTY child.
+//! Keyboard-interactive prompts travel through the existing UI challenge broker while
+//! the C++ worker owns the SSH connection. React keeps the same `terminal_session_id`
+//! contract and terminal events.
 //!
 //! This is intentionally a manual UI path, not an Agent tool. It has no task/plan ticket and
 //! must not be called as an autonomous write primitive; the durable-plan gate lives in
@@ -106,7 +105,7 @@ fn resolve_capabilities(
                 revocation_list_signers: authority.revocation_list_signers.clone(),
             },
         ),
-        // 终端/文件/SFTP/服务器探测共用这一条（`ensure_session`）：未知主机必须在
+        // Rust compatibility sessions use `ensure_session`; unknown hosts must still be
         // **认证之前**停下，由用户走 `server_host_key_probe` → `server_host_key_trust`
         // 显式核验指纹。首连自动信任（TOFU）会把一次中间人劫持固化成「可信」，而项目
         // 其余 SSH 入口本来就已经是显式确认。
@@ -211,33 +210,35 @@ pub async fn terminal_open(
     rows: u16,
 ) -> Result<TerminalOpenResponse, String> {
     validate_terminal_dimensions(cols, rows)?;
-    let terminal_session_id = if ssh_service::supports_cpp_target(&state, &server_id)? {
-        match ssh_service::open_terminal(&app, &state, &server_id, cols, rows).await {
-            Ok(pty) => {
-                let session_id = state
-                    .cpp_terminals
-                    .open(&server_id, cols, rows, pty)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let _ = state.database.servers().set_status(
-                    &server_id,
-                    yukinal_database::models::ServerStatus::Connected,
-                    &yukinal_core::sidecar::iso8601_now(),
-                );
-                session_id
-            }
-            Err(ssh_service::TerminalOpenFailure::Failed(error)) => {
-                let _ = state.database.servers().set_status(
-                    &server_id,
-                    yukinal_database::models::ServerStatus::Error,
-                    &yukinal_core::sidecar::iso8601_now(),
-                );
-                return Err(error);
-            }
+    if !ssh_service::supports_cpp_target(&state, &server_id)? {
+        let _ = state.database.servers().set_status(
+            &server_id,
+            yukinal_database::models::ServerStatus::Error,
+            &yukinal_core::sidecar::iso8601_now(),
+        );
+        return Err("the selected target is not supported by the C++ SSH service".into());
+    }
+    let pty = match ssh_service::open_terminal(&app, &state, &server_id, cols, rows).await {
+        Ok(pty) => pty,
+        Err(ssh_service::TerminalOpenFailure::Failed(error)) => {
+            let _ = state.database.servers().set_status(
+                &server_id,
+                yukinal_database::models::ServerStatus::Error,
+                &yukinal_core::sidecar::iso8601_now(),
+            );
+            return Err(error);
         }
-    } else {
-        open_rust_terminal(&state, &server_id, cols, rows).await?
     };
+    let terminal_session_id = state
+        .cpp_terminals
+        .open(&server_id, cols, rows, pty)
+        .await
+        .map_err(|error| error.to_string())?;
+    let _ = state.database.servers().set_status(
+        &server_id,
+        yukinal_database::models::ServerStatus::Connected,
+        &yukinal_core::sidecar::iso8601_now(),
+    );
     Ok(TerminalOpenResponse {
         terminal_session_id,
     })
@@ -250,39 +251,17 @@ fn validate_terminal_dimensions(cols: u16, rows: u16) -> Result<(), String> {
     Ok(())
 }
 
-async fn open_rust_terminal(
-    state: &AppState,
-    server_id: &str,
-    cols: u16,
-    rows: u16,
-) -> Result<String, String> {
-    ensure_session(state, server_id).await?;
-    state
-        .terminals
-        .open(server_id, cols, rows)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command]
 pub async fn terminal_write(
     state: State<'_, AppState>,
     terminal_session_id: String,
     data: String,
 ) -> Result<EmptyResponse, String> {
-    if terminal_session_id.starts_with("tc_") {
-        state
-            .cpp_terminals
-            .write(&terminal_session_id, data.as_bytes())
-            .await
-            .map_err(|error| error.to_string())?;
-    } else {
-        state
-            .terminals
-            .write(&terminal_session_id, data.as_bytes())
-            .await
-            .map_err(|error| error.to_string())?;
-    }
+    state
+        .cpp_terminals
+        .write(&terminal_session_id, data.as_bytes())
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(EmptyResponse {})
 }
 
@@ -294,19 +273,11 @@ pub async fn terminal_resize(
     rows: u16,
 ) -> Result<EmptyResponse, String> {
     validate_terminal_dimensions(cols, rows)?;
-    if terminal_session_id.starts_with("tc_") {
-        state
-            .cpp_terminals
-            .resize(&terminal_session_id, cols, rows)
-            .await
-            .map_err(|error| error.to_string())?;
-    } else {
-        state
-            .terminals
-            .resize(&terminal_session_id, cols, rows)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
+    state
+        .cpp_terminals
+        .resize(&terminal_session_id, cols, rows)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(EmptyResponse {})
 }
 
@@ -315,19 +286,11 @@ pub async fn terminal_close(
     state: State<'_, AppState>,
     terminal_session_id: String,
 ) -> Result<EmptyResponse, String> {
-    if terminal_session_id.starts_with("tc_") {
-        state
-            .cpp_terminals
-            .close(&terminal_session_id)
-            .await
-            .map_err(|error| error.to_string())?;
-    } else {
-        state
-            .terminals
-            .close(&terminal_session_id)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
+    state
+        .cpp_terminals
+        .close(&terminal_session_id)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(EmptyResponse {})
 }
 
@@ -600,7 +563,7 @@ mod tests {
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 2222);
         assert_eq!(config.username, "deploy");
-        // 审计第一阶段 3.1：终端（以及复用 `ensure_session` 的文件/SFTP/服务/日志路径）
+        // 审计第一阶段 3.1：复用 `ensure_session` 的文件/SFTP/服务/日志路径
         // 不再首连自动信任。未知主机在 TCP/认证之前就被拒绝，指纹只能由用户显式确认。
         assert_eq!(
             config.known_hosts_policy,

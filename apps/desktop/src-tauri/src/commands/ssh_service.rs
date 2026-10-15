@@ -670,7 +670,7 @@ pub(crate) async fn open_terminal(
 ) -> Result<SshTerminalPty, TerminalOpenFailure> {
     if !supports_cpp_target(state, server_id)? {
         return Err(TerminalOpenFailure::Failed(
-            "the selected SSH target requires the Rust compatibility path".into(),
+            "the selected target is not supported by the C++ SSH service".into(),
         ));
     }
     let target_payload =

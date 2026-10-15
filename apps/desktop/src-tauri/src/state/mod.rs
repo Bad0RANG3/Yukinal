@@ -57,9 +57,9 @@ pub struct AppState {
     /// OS Keychain / Credential Manager / Secret Service。
     pub credentials: Arc<OsCredentialStore>,
     pub ssh: Arc<RusshBackend>,
-    /// Rust PTY Manager for legacy configurations that still need its transport.
+    /// Legacy Rust SSH session and SFTP manager. UI terminals now use `cpp_terminals`.
     pub terminals: TerminalService,
-    /// C++-owned interactive SSH PTYs; `tc_` session IDs route to this manager.
+    /// C++-owned interactive SSH PTYs; all UI terminal session IDs route here.
     pub cpp_terminals: TerminalManager<crate::commands::ssh_service::SshTerminalPty>,
     /// One-shot SSH keyboard-interactive challenges and responses.
     pub auth: AuthChallengeBroker,

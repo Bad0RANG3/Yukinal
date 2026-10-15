@@ -20,8 +20,9 @@
 > SSH modes remain
 > on the compatibility path.
 > Keyboard-interactive terminal prompts are forwarded by the C++ PTY worker to
-> the existing desktop prompt UI. Supported desktop
-> terminals use a dedicated C++ PTY child process. The Python sidecar can call the C++
+> the existing desktop prompt UI. Desktop terminals use a dedicated C++ PTY
+> child process; configurations outside C++ support fail closed instead of
+> opening a Rust SSH terminal. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop Agent routes server
 > logs, Docker inspection, systemd inspection, and package inspection through a
 > short-lived C++ process using the saved desktop target and identity. The desktop file browser and
