@@ -13,7 +13,8 @@ allowlist selects agent authentication.
 
 The HTTP service deliberately has no raw-command endpoint. Its separate `--terminal`
 worker mode is used only by the manually opened desktop terminal; it is not an
-Agent operation and accepts no HTTP requests.
+Agent operation and accepts no HTTP requests. Supported desktop terminal
+sessions and manual SFTP transfers also use C++ workers.
 The `host_key_probe` operation is restricted to targets configured with
 `probe_only: true` and `auth: {"type":"probe"}`; those targets cannot perform
 any authenticated operation and do not configure a trust source. The desktop
@@ -26,11 +27,14 @@ OpenSSH POSIX atomic rename extension. It fails closed when that extension is no
 available. The desktop
 calls the one-path remove operation only after it checks backup ownership and
 revision. The link-count operation runs a fixed, quoted `stat` probe. The
-desktop routes supported Agent file reads/writes and backup/cleanup operations
-through C++ for password, private-key, and agent identities without a host CA.
-Guarded edit/restore now uses the same C++ service for those identities.
-Transfers, PTY sessions, and certificate/Host CA trust modes still use Rust
-while their C++ equivalents are migrated.
+desktop routes supported Agent file operations, file browsing, and manual
+transfers through C++ for password, private-key, OpenSSH user-certificate, and
+agent identities when the target has a confirmed host-key pin and uses a
+supported direct or HTTP CONNECT route. Supported interactive terminal sessions
+use the dedicated C++ PTY worker. Rust remains the compatibility path for Host
+CA trust, HTTPS proxies, unsupported proxy bypass patterns,
+keyboard-interactive authentication, and other SSH configurations the C++
+service cannot yet represent.
 
 ## Build
 
@@ -64,10 +68,10 @@ service exit if its parent dies without a graceful shutdown.
 The Python Agent and desktop service panel create a short-lived one-target
 allowlist from the selected desktop server record and OS keychain identity. The
 desktop file browser routes listing, metadata, and bounded reads through the
-C++ service for supported password, private-key, and agent identities. Agent
-file reads, writes, backup creation, cleanup, guarded edits, and restores use
-the same service. Transfers and interactive PTY sessions remain on the Rust
-transport during migration.
+C++ service for supported identities. Agent file reads, writes, backup
+creation, cleanup, guarded edits, and restores use the same service. Manual
+transfers use bounded C++ SFTP streams, and interactive PTY sessions use the
+dedicated C++ worker when the selected SSH configuration is supported.
 
 ## Run
 

@@ -44,13 +44,12 @@ through the C++ service, normalizes its snapshot in Python, and sends the
 validated result through the existing guarded host tool and snapshot database
 path. The Overview's direct snapshot refresh uses the same Python normalizer for
 C++ targets; legacy SSH-only configurations retain a Rust collector fallback
-during migration. The three approved desktop actions above
-remain behind the existing host approval and one-time call checks; they are not
-exposed as Python Agent tools. The Python sidecar now round-trips approvals for
-tools that explicitly require them, including reject and expiry handling; the
-current desktop catalog still exposes read-only tools. Durable task state and
-broader tool coverage remain in progress. The existing React/Tauri UI remains
-intact while those paths are migrated.
+during migration. The approved desktop actions remain behind host-side plan
+checks and one-time call grants. Python exposes approval-required host tools
+only while a durable remote-goal action step authorizes them; approval requests,
+rejection, expiry, and accepted calls round-trip through the desktop host.
+Durable task recovery and broader tool coverage remain in progress. The
+existing React/Tauri UI remains intact while those paths are migrated.
 
 The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service

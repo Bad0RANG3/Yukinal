@@ -6,10 +6,11 @@
 > desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; the old Node resources remain as a transition fallback. Rust still
-> hosts native UI IPC, local trust-store updates, final approvals, and PTY/SFTP
-> compatibility paths for Host CA, HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
-> known-hosts-only trust, and other unsupported SSH modes. Supported desktop terminals use a dedicated C++
-> PTY child process. The Python sidecar can call the C++
+> hosts native UI IPC, local trust-store updates, final approvals, and SSH
+> compatibility paths for configurations outside current C++ coverage: Host CA,
+> HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
+> known-hosts-only trust, and other unsupported SSH modes. Supported desktop
+> terminals use a dedicated C++ PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop Agent routes server
 > logs, Docker inspection, systemd inspection, and package inspection through a
 > short-lived C++ process using the saved desktop target and identity. The desktop file browser and
@@ -440,7 +441,8 @@ could not be compiled here because Cargo and rustc are unavailable.
   C++ service configuration;
 - moving Rust-only Host CA, HTTPS proxy, unsupported proxy bypass, keyboard-interactive,
   and other compatibility SSH routes into the C++ service;
-- SFTP transfer, PTY, persistence, and a Qt desktop shell;
+- full durable task/plan recovery beyond the pending-approval reattach path;
+- full C++ SFTP and PTY coverage for compatibility-only SSH configurations;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
 The next milestones are installed-app parity checks, removing the Node fallback,
