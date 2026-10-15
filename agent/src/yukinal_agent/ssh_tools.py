@@ -14,6 +14,7 @@ from .host_rpc import HostRpcClient
 from .host_tools import (
     _FILESYSTEM_BACKUP_INPUT_SCHEMA,
     _FILESYSTEM_EDIT_INPUT_SCHEMA,
+    _FILESYSTEM_RESTORE_INPUT_SCHEMA,
     _FILESYSTEM_WRITE_INPUT_SCHEMA,
     _execute_on_host,
 )
@@ -463,9 +464,28 @@ def register_desktop_ssh_tools(
             timeout_ms=45_000,
             cancellable=True,
         ))
+    if "filesystem.restore" not in existing_names:
+        registry.register(ToolSpec(
+            name="filesystem.restore",
+            description=(
+                "Restore a host-owned remote backup after exact per-call approval. Python verifies "
+                "the current revision and backup digest; C++ publishes it with guarded atomic SFTP."
+            ),
+            input_schema=_FILESYSTEM_RESTORE_INPUT_SCHEMA,
+            risk_level="write",
+            requires_approval=True,
+            handler=lambda arguments, context: _desktop_filesystem_restore(
+                host, binary, arguments, context
+            ),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=45_000,
+            cancellable=True,
+        ))
     return frozenset(
         {name for name, _, _, _ in tools if name != "ssh.service_status"}
-        | {"filesystem.write", "filesystem.edit", "filesystem.backup"}
+        | {"filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore"}
     )
 
 
@@ -928,19 +948,7 @@ async def _desktop_filesystem_backup(
     ):
         raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup binding")
     backup_path = binding["backupPath"]
-    parent = arguments["path"].rsplit("/", 1)[0] or "/"
-    source_fingerprint = hashlib.sha256(arguments["path"].encode("utf-8")).hexdigest()[:16]
-    backup_name_prefix = f".yukinal-backup-{source_fingerprint}-"
-    backup_prefix = (
-        f"/{backup_name_prefix}"
-        if parent == "/"
-        else f"{parent}/{backup_name_prefix}"
-    )
-    if (
-        len(backup_path.encode("utf-8")) > 4096
-        or re.fullmatch(re.escape(backup_prefix) + r"[a-f0-9]{32}", backup_path) is None
-    ):
-        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup path")
+    _validate_host_backup_path(arguments["path"], backup_path)
     try:
         process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
     except SshServiceProcessError:
@@ -1024,6 +1032,263 @@ async def _desktop_filesystem_backup(
         raise
     except SshServiceError as error:
         raise ToolCallError(error.code, str(error)) from None
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    finally:
+        await process.stop()
+
+
+def _validate_host_backup_path(path: str, backup_path: str) -> None:
+    parent = path.rsplit("/", 1)[0] or "/"
+    source_fingerprint = hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+    backup_name_prefix = f".yukinal-backup-{source_fingerprint}-"
+    backup_prefix = f"/{backup_name_prefix}" if parent == "/" else f"{parent}/{backup_name_prefix}"
+    if (
+        len(backup_path.encode("utf-8")) > 4096
+        or re.fullmatch(re.escape(backup_prefix) + r"[a-f0-9]{32}", backup_path) is None
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid backup path")
+
+
+async def _desktop_filesystem_restore(
+    host: HostRpcClient,
+    binary: Path,
+    arguments: dict[str, Any],
+    context: ExecutionContext,
+) -> dict[str, object]:
+    """Verify a host-owned backup and restore it with a guarded C++ SFTP replace."""
+    target_id = context.context_target_id
+    target = context.host_target
+    if (
+        not isinstance(target_id, str)
+        or not isinstance(target, dict)
+        or target.get("host") != "remote"
+        or target.get("serverId") != target_id
+        or not context.run_id
+        or not context.trace_id
+        or not context.call_id
+        or not context.host_task_id
+        or not context.plan_id
+        or not context.plan_step_id
+    ):
+        raise ToolCallError(
+            "durable_plan_required", "filesystem.restore requires a durable remote action plan"
+        )
+
+    plan_request = {
+        "taskId": context.host_task_id,
+        "toolName": "filesystem.restore",
+        "input": arguments,
+        "target": dict(target),
+    }
+    try:
+        plan = await host.request(
+            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ToolCallError("host_unavailable", "The desktop host could not validate the restore plan") from None
+    if (
+        not isinstance(plan, dict)
+        or plan.get("status") != "allowed"
+        or plan.get("planId") != context.plan_id
+        or plan.get("stepId") != context.plan_step_id
+        or plan.get("stepKind") != "action"
+        or plan.get("evidenceIds") != list(context.evidence_ids)
+    ):
+        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this restore")
+
+    ledger = FilesystemActionLedger.from_environment()
+    if ledger is None:
+        return await _execute_on_host(host, "filesystem.restore", arguments, context)
+    ledger_scope = {
+        "run_id": context.run_id,
+        "trace_id": context.trace_id,
+        "call_id": context.call_id,
+        "tool_name": "filesystem.restore",
+        "target_id": target_id,
+        "arguments": arguments,
+        "plan_id": context.plan_id,
+        "plan_step_id": context.plan_step_id,
+        "evidence_ids": context.evidence_ids,
+    }
+    try:
+        cached = await ledger.claim(**ledger_scope)
+    except FilesystemActionLedgerError as error:
+        raise ToolCallError(error.code, str(error)) from None
+    if cached is not None:
+        return cached
+
+    async def run_host_compatibility_path() -> dict[str, object]:
+        output = await _execute_on_host(host, "filesystem.restore", arguments, context)
+        if not isinstance(output, dict):
+            raise ToolCallError("invalid_host_response", "The desktop host returned an invalid restore result")
+        try:
+            await ledger.complete(**ledger_scope, output=output)
+        except FilesystemActionLedgerError as error:
+            raise ToolCallError(error.code, str(error)) from None
+        return output
+
+    try:
+        payload = await host.request(
+            "host.ssh.filesystem_restore_target",
+            {
+                "serverId": target_id,
+                **arguments,
+                "taskId": context.host_task_id,
+                "planId": context.plan_id,
+                "planStepId": context.plan_step_id,
+                "evidenceIds": list(context.evidence_ids),
+                "target": dict(target),
+            },
+            timeout_seconds=8.0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return await run_host_compatibility_path()
+
+    binding = payload.get("filesystemRestore") if isinstance(payload, dict) else None
+    if (
+        not isinstance(binding, dict)
+        or binding.get("path") != arguments["path"]
+        or binding.get("backupPath") != arguments["backupPath"]
+        or binding.get("expectedRevision") != arguments["expectedRevision"]
+        or not isinstance(binding.get("revision"), str)
+        or re.fullmatch(r"[a-fA-F0-9]{64}", binding["revision"]) is None
+        or isinstance(binding.get("bytesBackedUp"), bool)
+        or not isinstance(binding.get("bytesBackedUp"), int)
+        or not 0 <= binding["bytesBackedUp"] <= _MAX_AGENT_BACKUP_BYTES
+    ):
+        raise ToolCallError("invalid_host_response", "The desktop host returned an invalid restore binding")
+    backup_path = binding["backupPath"]
+    _validate_host_backup_path(arguments["path"], backup_path)
+    try:
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+    except SshServiceProcessError:
+        return await run_host_compatibility_path()
+    try:
+        await process.start()
+    except asyncio.CancelledError:
+        await process.stop()
+        raise
+    except SshServiceProcessError:
+        await process.stop()
+        return await run_host_compatibility_path()
+
+    def restore_remote_file() -> dict[str, object]:
+        client = SshServiceClient(token, base_url=base_url)
+        target_path = arguments["path"]
+        target_before = client.sftp_stat(target_id, target_path)
+        if target_before["kind"] != "file":
+            raise ToolCallError("unsafe_remote_write", "Only a regular remote target can be restored")
+        if client.sftp_link_count(target_id, target_path) != 1:
+            raise ToolCallError(
+                "unsafe_remote_write", "The server cannot prove the target has exactly one name"
+            )
+        target_bytes = client.sftp_read(target_id, target_path, _MAX_AGENT_BACKUP_BYTES)
+        if len(target_bytes) > _MAX_AGENT_BACKUP_BYTES:
+            raise ToolCallError("invalid_input", "The current target exceeds the 1 MiB restore limit")
+        target_revision = hashlib.sha256(target_bytes).hexdigest()
+        if target_revision != arguments["expectedRevision"]:
+            raise ToolCallError(
+                "invalid_input", "The target changed after it was read; inspect it again before restoring"
+            )
+        target_after = client.sftp_stat(target_id, target_path)
+        if (
+            target_before["size"] != target_after["size"]
+            or target_before["modified"] != target_after["modified"]
+            or target_before["size"] != len(target_bytes)
+        ):
+            raise ToolCallError("concurrent_change", "The target changed while its revision was checked")
+
+        backup_before = client.sftp_stat(target_id, backup_path)
+        if backup_before["kind"] != "file":
+            raise ToolCallError("unsafe_remote_write", "The host-owned backup is not a regular file")
+        if client.sftp_link_count(target_id, backup_path) != 1:
+            raise ToolCallError(
+                "unsafe_remote_write", "The server cannot prove the backup has exactly one name"
+            )
+        backup_bytes = client.sftp_read(target_id, backup_path, _MAX_AGENT_BACKUP_BYTES)
+        if len(backup_bytes) > _MAX_AGENT_BACKUP_BYTES:
+            raise ToolCallError("invalid_input", "The host-owned backup exceeds the 1 MiB restore limit")
+        backup_after = client.sftp_stat(target_id, backup_path)
+        if (
+            backup_before["size"] != backup_after["size"]
+            or backup_before["modified"] != backup_after["modified"]
+            or backup_before["size"] != len(backup_bytes)
+            or len(backup_bytes) != binding["bytesBackedUp"]
+        ):
+            raise ToolCallError("concurrent_change", "The host-owned backup changed while it was read")
+        revision = hashlib.sha256(backup_bytes).hexdigest()
+        if revision != binding["revision"].lower():
+            raise ToolCallError("invalid_input", "The host-owned backup no longer matches its ledger revision")
+
+        replaced = client.sftp_replace_guarded(
+            target_id,
+            target_path,
+            backup_bytes,
+            expected_size=len(target_bytes),
+            expected_modified=target_before["modified"],
+            expected_digest=target_revision,
+            timeout_seconds=25,
+        )
+        if replaced["size"] != len(backup_bytes):
+            raise ToolCallError("concurrent_change", "The restored target has an unexpected size")
+        return {
+            "path": target_path,
+            "backupPath": backup_path,
+            "revision": revision,
+            "bytesBefore": len(target_bytes),
+            "bytesAfter": len(backup_bytes),
+        }
+
+    try:
+        output = await asyncio.to_thread(restore_remote_file)
+        try:
+            confirmation = await host.request(
+                "host.investigation.filesystem_backup.restored",
+                {
+                    "serverId": target_id,
+                    **output,
+                    "expectedRevision": arguments["expectedRevision"],
+                    "taskId": context.host_task_id,
+                    "planId": context.plan_id,
+                    "planStepId": context.plan_step_id,
+                    "traceId": context.trace_id,
+                    "callId": context.call_id,
+                    "evidenceIds": list(context.evidence_ids),
+                    "target": dict(target),
+                },
+                timeout_seconds=8.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ToolCallError(
+                "restore_registration_unknown",
+                f"The target was restored from {backup_path}, but host ledger consumption could not be confirmed; reconcile before restoring again",
+            ) from None
+        expected_confirmation = {
+            "restored": True,
+            **output,
+        }
+        if confirmation != expected_confirmation:
+            raise ToolCallError(
+                "restore_registration_unknown",
+                f"The target was restored from {backup_path}, but host ledger consumption could not be confirmed; reconcile before restoring again",
+            )
+        await ledger.complete(**ledger_scope, output=output)
+        return output
+    except asyncio.CancelledError:
+        # A guarded atomic replace may have committed before cancellation; never replay this call.
+        raise
+    except ToolCallError:
+        raise
+    except SshServiceError as error:
+        code = "unsafe_remote_write" if error.code == "replace_unsupported" else error.code
+        raise ToolCallError(code, str(error)) from None
     except FilesystemActionLedgerError as error:
         raise ToolCallError(error.code, str(error)) from None
     finally:

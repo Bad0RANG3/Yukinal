@@ -88,8 +88,29 @@ class FakeDesktopHost:
                     f"{'0' * 32}"
                 ),
             }
+        if method == "host.ssh.filesystem_restore_target":
+            backup_path = (
+                f"/var/.yukinal-backup-{hashlib.sha256(params['path'].encode()).hexdigest()[:16]}-"
+                f"{'0' * 32}"
+            )
+            payload["filesystemRestore"] = {
+                "path": params["path"],
+                "backupPath": backup_path,
+                "expectedRevision": params["expectedRevision"],
+                "revision": hashlib.sha256(b"old config").hexdigest(),
+                "bytesBackedUp": len(b"old config"),
+            }
         if method == "host.investigation.filesystem_backup.register":
             return {"registered": True, "backupPath": params["backupPath"]}
+        if method == "host.investigation.filesystem_backup.restored":
+            return {
+                "restored": True,
+                "path": params["path"],
+                "backupPath": params["backupPath"],
+                "revision": params["revision"],
+                "bytesBefore": params["bytesBefore"],
+                "bytesAfter": params["bytesAfter"],
+            }
         return payload
 
 
@@ -215,15 +236,16 @@ class FakeDesktopSshClient:
             output_truncated=False,
         )
 
-    def sftp_read(self, *arguments: Any) -> bytes:
-        self.calls.append(("sftp_read", arguments))
-        return b"hello\x00x"
-
     def sftp_write(self, *arguments: Any) -> Any:
         return self._result("sftp_write", *arguments)
 
     def sftp_stat(self, *arguments: Any) -> dict[str, Any]:
         self.calls.append(("sftp_stat", arguments))
+        path = arguments[1]
+        if path == "/var/app.conf":
+            return {"kind": "file", "size": len(b"new config"), "modified": 200}
+        if ".yukinal-backup-" in path and path.startswith("/var/"):
+            return {"kind": "file", "size": len(b"old config"), "modified": 201}
         return {"kind": "file", "size": 7, "modified": 123}
 
     def sftp_link_count(self, *arguments: Any) -> int:
@@ -232,6 +254,18 @@ class FakeDesktopSshClient:
 
     def sftp_create_exclusive(self, *arguments: Any) -> Any:
         return self._result("sftp_create_exclusive", *arguments)
+
+    def sftp_replace_guarded(self, target_id: str, path: str, content: bytes, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("sftp_replace_guarded", (target_id, path, content, kwargs)))
+        return {"size": len(content), "modified": 202}
+
+    def sftp_read(self, target_id: str, path: str, max_bytes: int, *arguments: Any) -> bytes:
+        self.calls.append(("sftp_read", (target_id, path, max_bytes, *arguments)))
+        if path == "/var/app.conf":
+            return b"new config"
+        if ".yukinal-backup-" in path and path.startswith("/var/"):
+            return b"old config"
+        return b"hello\x00x"
 
 
 class FakeSshServiceClient:
@@ -300,7 +334,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct_names, {
             "server.info", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
-            "filesystem.write", "filesystem.edit", "filesystem.backup",
+            "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -601,6 +635,106 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(host.calls[2][1]["revision"], expected["revision"])
         self.assertEqual(host.calls[2][1]["bytesBackedUp"], 7)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].started)
+        self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
+
+    async def test_filesystem_restore_checks_both_revisions_and_consumes_host_ledger_once(self) -> None:
+        import os
+        import tempfile
+
+        host = FakeDesktopHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
+        backup_path = (
+            f"/var/.yukinal-backup-{hashlib.sha256(b'/var/app.conf').hexdigest()[:16]}-"
+            f"{'0' * 32}"
+        )
+        arguments = {
+            "path": "/var/app.conf",
+            "backupPath": backup_path,
+            "expectedRevision": hashlib.sha256(b"new config").hexdigest(),
+        }
+        fingerprint = approval_fingerprint(
+            "filesystem.restore",
+            "srv_stage1",
+            arguments,
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+        )
+        context = ExecutionContext(
+            task_id="task-ssh-1",
+            tenant_id="tenant-1",
+            user_id="operator-1",
+            allowed_tools=frozenset({"filesystem.restore"}),
+            allowed_target_ids=frozenset({"srv_stage1"}),
+            approved_actions={fingerprint: "apr-approved-restore"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            plan_id="plan-1",
+            plan_step_id="step-1",
+            evidence_ids=("evidence-1",),
+            run_id="run-1",
+            trace_id="trace-1",
+            context_target_id="srv_stage1",
+        )
+        FakeDesktopSshClient.calls.clear()
+        FakeDesktopSshProcess.instances.clear()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"YUKINAL_DATA_DIR": temporary}),
+            patch("yukinal_agent.ssh_tools.SshServiceProcess", FakeDesktopSshProcess),
+            patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
+        ):
+            first = await registry.execute("filesystem.restore", arguments, context, call_id="call-restore-1")
+            second = await registry.execute("filesystem.restore", arguments, context, call_id="call-restore-1")
+
+        restored_revision = hashlib.sha256(b"old config").hexdigest()
+        expected = {
+            "path": arguments["path"],
+            "backupPath": backup_path,
+            "revision": restored_revision,
+            "bytesBefore": len(b"new config"),
+            "bytesAfter": len(b"old config"),
+        }
+        self.assertEqual(first.value, expected)
+        self.assertEqual(second.value, expected)
+        self.assertEqual(
+            FakeDesktopSshClient.calls,
+            [
+                ("sftp_stat", ("srv_stage1", arguments["path"])),
+                ("sftp_link_count", ("srv_stage1", arguments["path"])),
+                ("sftp_read", ("srv_stage1", arguments["path"], 1_048_576)),
+                ("sftp_stat", ("srv_stage1", arguments["path"])),
+                ("sftp_stat", ("srv_stage1", backup_path)),
+                ("sftp_link_count", ("srv_stage1", backup_path)),
+                ("sftp_read", ("srv_stage1", backup_path, 1_048_576)),
+                ("sftp_stat", ("srv_stage1", backup_path)),
+                (
+                    "sftp_replace_guarded",
+                    (
+                        "srv_stage1", arguments["path"], b"old config",
+                        {
+                            "expected_size": len(b"new config"),
+                            "expected_modified": 200,
+                            "expected_digest": arguments["expectedRevision"],
+                            "timeout_seconds": 25,
+                        },
+                    ),
+                ),
+            ],
+        )
+        self.assertEqual(
+            [method for method, _params in host.calls],
+            [
+                "host.investigation.plan.check",
+                "host.ssh.filesystem_restore_target",
+                "host.investigation.filesystem_backup.restored",
+                "host.investigation.plan.check",
+            ],
+        )
+        self.assertEqual(host.calls[2][1]["revision"], restored_revision)
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 

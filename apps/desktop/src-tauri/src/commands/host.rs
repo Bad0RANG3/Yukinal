@@ -10,14 +10,14 @@
 //! only maps the capability's typed failures onto the host protocol's failure codes
 //! (see [`filesystem_failure`]).
 //!
-//! Agent `filesystem.write`, `filesystem.edit`, and `filesystem.backup` are approved by Python and
-//! get a narrowly scoped C++ SFTP target only after this module revalidates their durable action
-//! plan. Backup ownership metadata remains in the host database. Other host file operations
-//! continue through the Rust executor. `filesystem.edit` is a guarded read-then-modify,
-//! `filesystem.backup` creates a host-owned sibling copy, and `filesystem.restore` publishes that
-//! copy only with a current revision guard; the capability's crate docs state what these guarantees
-//! do **not** cover (SFTP has no compare-and-swap, so checks and publication are multiple round
-//! trips apart).
+//! Agent `filesystem.write`, `filesystem.edit`, `filesystem.backup`, and `filesystem.restore` are
+//! approved by Python and get a narrowly scoped C++ SFTP target only after this module revalidates
+//! their durable action plan. Backup ownership and restore-consumption metadata remain in the host
+//! database. Other host file operations continue through the Rust executor. `filesystem.edit` is a
+//! guarded read-then-modify, `filesystem.backup` creates a host-owned sibling copy, and
+//! `filesystem.restore` publishes that copy only with a current revision guard; the capability's
+//! crate docs state what these guarantees do **not** cover (SFTP has no compare-and-swap, so checks
+//! and publication are multiple round trips apart).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -93,6 +93,8 @@ const HOST_SSH_FILESYSTEM_WRITE_TARGET: &str = "host.ssh.filesystem_write_target
 const HOST_SSH_FILESYSTEM_EDIT_TARGET: &str = "host.ssh.filesystem_edit_target";
 const HOST_SSH_FILESYSTEM_BACKUP_TARGET: &str = "host.ssh.filesystem_backup_target";
 const HOST_FILESYSTEM_BACKUP_REGISTER: &str = "host.investigation.filesystem_backup.register";
+const HOST_SSH_FILESYSTEM_RESTORE_TARGET: &str = "host.ssh.filesystem_restore_target";
+const HOST_FILESYSTEM_BACKUP_RESTORED: &str = "host.investigation.filesystem_backup.restored";
 const HOST_CONTEXT_FETCH: &str = "host.context.fetch";
 const HOST_EVIDENCE_RECORD: &str = "host.investigation.evidence.record";
 const HOST_EVIDENCE_FETCH: &str = "host.investigation.evidence.fetch";
@@ -206,6 +208,39 @@ struct HostFilesystemBackupRegisterRequest {
     backup_path: String,
     revision: String,
     bytes_backed_up: usize,
+    task_id: String,
+    plan_id: String,
+    plan_step_id: String,
+    trace_id: String,
+    call_id: String,
+    evidence_ids: Vec<String>,
+    target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostSshFilesystemRestoreTargetRequest {
+    server_id: String,
+    path: String,
+    backup_path: String,
+    expected_revision: String,
+    task_id: String,
+    plan_id: String,
+    plan_step_id: String,
+    evidence_ids: Vec<String>,
+    target: HostToolTarget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostFilesystemBackupRestoredRequest {
+    server_id: String,
+    path: String,
+    backup_path: String,
+    expected_revision: String,
+    revision: String,
+    bytes_before: usize,
+    bytes_after: usize,
     task_id: String,
     plan_id: String,
     plan_step_id: String,
@@ -1334,6 +1369,12 @@ async fn handle_sidecar_request_with_context(
     if method == HOST_FILESYSTEM_BACKUP_REGISTER {
         return register_ssh_filesystem_backup(state, params);
     }
+    if method == HOST_SSH_FILESYSTEM_RESTORE_TARGET {
+        return resolve_ssh_filesystem_restore_target(state, params);
+    }
+    if method == HOST_FILESYSTEM_BACKUP_RESTORED {
+        return mark_ssh_filesystem_backup_restored(state, params);
+    }
     if method == HOST_CONTEXT_FETCH {
         return handle_context_request(state, params);
     }
@@ -1739,6 +1780,134 @@ fn register_ssh_filesystem_backup(
             "backup exists remotely but could not be registered in the host ledger; preserve it and reconcile before restoring".to_string()
         })?;
     Ok(json!({ "registered": true, "backupPath": record.backup_path }))
+}
+
+fn resolve_ssh_filesystem_restore_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostSshFilesystemRestoreTargetRequest>(params)
+        .map_err(|_| "the SSH filesystem restore target request is invalid".to_string())?;
+    yukinal_filesystem::AgentRestoreRequest::check(
+        &request.path,
+        &request.backup_path,
+        &request.expected_revision,
+    )
+    .map_err(|error| error.to_string())?;
+    let input = json!({
+        "path": request.path.clone(),
+        "backupPath": request.backup_path.clone(),
+        "expectedRevision": request.expected_revision.clone(),
+    });
+    validate_ssh_filesystem_action_binding(
+        state,
+        &request.server_id,
+        &request.task_id,
+        FILESYSTEM_RESTORE,
+        &input,
+        &request.target,
+        &request.plan_id,
+        &request.plan_step_id,
+        &request.evidence_ids,
+    )?;
+    let backup = state
+        .database
+        .filesystem_backups()
+        .find_available(&request.server_id, &request.path, &request.backup_path)
+        .map_err(|_| "could not read the filesystem backup ledger".to_string())?
+        .ok_or_else(|| "filesystem.restore requires an available host-owned backup".to_string())?;
+    if backup.task_id.as_deref() != Some(request.task_id.as_str()) {
+        return Err("filesystem.restore cannot use a backup owned by another investigation task".into());
+    }
+    if backup.bytes_backed_up > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES as i64 {
+        return Err("filesystem backup exceeds the host restore limit".into());
+    }
+    let bytes_backed_up = usize::try_from(backup.bytes_backed_up)
+        .map_err(|_| "filesystem backup byte count is invalid".to_string())?;
+    crate::commands::sidecar::resolve_ssh_service_filesystem_restore_target(
+        state,
+        json!({
+            "serverId": request.server_id,
+            "path": request.path,
+            "backupPath": request.backup_path,
+            "expectedRevision": request.expected_revision,
+            "revision": backup.revision,
+            "bytesBackedUp": bytes_backed_up,
+        }),
+    )
+}
+
+fn mark_ssh_filesystem_backup_restored(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request = serde_json::from_value::<HostFilesystemBackupRestoredRequest>(params)
+        .map_err(|_| "the filesystem restore registration request is invalid".to_string())?;
+    if request.bytes_before > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
+        || request.bytes_after > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
+        || request.trace_id.trim().is_empty()
+        || request.call_id.trim().is_empty()
+        || request.trace_id.len() > 256
+        || request.call_id.len() > 256
+        || request.trace_id.chars().any(char::is_control)
+        || request.call_id.chars().any(char::is_control)
+    {
+        return Err("filesystem restore result or durable call identity is invalid".into());
+    }
+    yukinal_filesystem::AgentRestoreRequest::check(
+        &request.path,
+        &request.backup_path,
+        &request.expected_revision,
+    )
+    .map_err(|error| error.to_string())?;
+    let input = json!({
+        "path": request.path.clone(),
+        "backupPath": request.backup_path.clone(),
+        "expectedRevision": request.expected_revision.clone(),
+    });
+    validate_ssh_filesystem_action_binding(
+        state,
+        &request.server_id,
+        &request.task_id,
+        FILESYSTEM_RESTORE,
+        &input,
+        &request.target,
+        &request.plan_id,
+        &request.plan_step_id,
+        &request.evidence_ids,
+    )?;
+    let backup = state
+        .database
+        .filesystem_backups()
+        .find_available(&request.server_id, &request.path, &request.backup_path)
+        .map_err(|_| "could not read the filesystem backup ledger".to_string())?
+        .ok_or_else(|| "filesystem backup is no longer available".to_string())?;
+    if backup.task_id.as_deref() != Some(request.task_id.as_str()) {
+        return Err("filesystem.restore cannot use a backup owned by another investigation task".into());
+    }
+    if !backup.revision.eq_ignore_ascii_case(&request.revision)
+        || i64::try_from(request.bytes_after).ok() != Some(backup.bytes_backed_up)
+    {
+        return Err("filesystem restore result does not match the host backup ledger".into());
+    }
+    state
+        .database
+        .filesystem_backups()
+        .mark_restored(
+            &request.server_id,
+            &request.path,
+            &request.backup_path,
+            &yukinal_core::sidecar::iso8601_now(),
+        )
+        .map_err(|_| "the remote file was restored but its host backup ledger could not be consumed; reconcile before another restore".to_string())?;
+    Ok(json!({
+        "restored": true,
+        "path": request.path,
+        "backupPath": request.backup_path,
+        "revision": request.revision,
+        "bytesBefore": request.bytes_before,
+        "bytesAfter": request.bytes_after,
+    }))
 }
 
 fn validate_ssh_filesystem_action_binding(

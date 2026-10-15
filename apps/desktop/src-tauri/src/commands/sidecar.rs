@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use yukinal_credentials::{CredentialRef, CredentialStore};
 use yukinal_filesystem::{
-    AgentEditRequest, AgentReadRequest, AgentWriteRequest, DEFAULT_AGENT_READ_BYTES,
+    AgentEditRequest, AgentReadRequest, AgentRestoreRequest, AgentWriteRequest,
+    DEFAULT_AGENT_READ_BYTES,
 };
 
 /// Smoke test: proves the IPC round trip without pretending to do real work.
@@ -400,6 +401,17 @@ struct SshServiceFilesystemBackupTargetRequest {
     backup_path: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SshServiceFilesystemRestoreTargetRequest {
+    server_id: String,
+    path: String,
+    backup_path: String,
+    expected_revision: String,
+    revision: String,
+    bytes_backed_up: usize,
+}
+
 /// Resolve one selected desktop target for a short-lived C++ SSH service process.
 /// Secrets leave the OS credential store only for this local sidecar request and
 /// are returned separately from the non-secret target allowlist.
@@ -651,6 +663,37 @@ pub(super) fn resolve_ssh_service_filesystem_backup_target(
     payload["filesystemBackup"] = json!({
         "path": request.path,
         "backupPath": request.backup_path,
+    });
+    Ok(payload)
+}
+
+/// Resolve a C++ target with the host-owned restore binding and backup metadata.
+pub(super) fn resolve_ssh_service_filesystem_restore_target(
+    state: &AppState,
+    params: Value,
+) -> Result<Value, String> {
+    let request: SshServiceFilesystemRestoreTargetRequest = serde_json::from_value(params)
+        .map_err(|_| "the SSH filesystem restore target request is invalid".to_string())?;
+    AgentRestoreRequest::check(
+        &request.path,
+        &request.backup_path,
+        &request.expected_revision,
+    )
+    .map_err(|error| error.to_string())?;
+    if request.revision.len() != 64
+        || !request.revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || request.bytes_backed_up > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
+    {
+        return Err("the SSH filesystem restore backup metadata is invalid".into());
+    }
+    let mut payload =
+        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    payload["filesystemRestore"] = json!({
+        "path": request.path,
+        "backupPath": request.backup_path,
+        "expectedRevision": request.expected_revision,
+        "revision": request.revision,
+        "bytesBackedUp": request.bytes_backed_up,
     });
     Ok(payload)
 }
