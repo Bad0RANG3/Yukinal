@@ -700,4 +700,6 @@ Also on 2026-10-15, HTTP/HTTPS proxy URL validation, HTTPS certificate
 verification, bypass matching, and CONNECT transport moved into C++. The desktop
 passes the selected proxy configuration through the Tauri bridge; other proxy
 protocols remain on the compatibility path. The C++ service and Tauri library
-compiled after this change; the test suites were not run in this round.
+compiled after this change. The SSH mock integration passed with a locally trusted
+CA, a complete HTTPS CONNECT SSH operation, and rejection of a proxy certificate
+whose SAN did not match the configured proxy host.

@@ -78,6 +78,8 @@ CTest targets with the Agent and optional Paramiko test dependencies installed:
 the C++ config/policy/network tests, Python client tests, service HTTP
 integration, Python Agent tests, SSH mock integration, and Agent-to-SSH
 integration. The real OpenSSH container test is separate and requires Docker.
+The SSH mock also exercises HTTPS CONNECT through a locally trusted CA and
+confirms that a certificate with a mismatched proxy hostname is rejected.
 
 `pnpm build:ssh-service` builds only the C++ executable and stages it under
 `apps/desktop/src-tauri/resources/ssh-service/`; `pnpm package` and the direct

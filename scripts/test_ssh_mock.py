@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import datetime
 import hashlib
+import ipaddress
 import io
 import json
 import logging
@@ -12,6 +14,7 @@ import queue
 import re
 import select
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -22,7 +25,10 @@ import time
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
+from cryptography.hazmat.primitives import hashes
+from cryptography import x509
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "agent" / "src"))
@@ -44,6 +50,7 @@ EXEC_COMMANDS: list[bytes] = []
 AUTH_EVENTS: list[str] = []
 TERMINAL_DIMENSIONS: list[tuple[int, int]] = []
 PROXY_CONNECT_TARGETS: list[str] = []
+HTTPS_PROXY_CONNECT_TARGETS: list[str] = []
 
 
 def unused_port() -> int:
@@ -482,8 +489,86 @@ def start_ssh_mock(
     return listener, stopping
 
 
+def write_https_proxy_certificates(root: Path) -> tuple[Path, Path, Path, Path, Path]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Yukinal HTTPS proxy test CA")])
+    ca_certificate = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_path = root / "https-proxy-test-ca.pem"
+    ca_path.write_bytes(ca_certificate.public_bytes(serialization.Encoding.PEM))
+
+    def write_leaf(name: str, *, wrong_host: bool) -> tuple[Path, Path]:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        san = (
+            x509.DNSName("proxy-mismatch.invalid")
+            if wrong_host
+            else x509.IPAddress(ipaddress.ip_address("127.0.0.1"))
+        )
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=1))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+        cert_path = root / f"{name}.pem"
+        key_path = root / f"{name}-key.pem"
+        cert_path.write_bytes(
+            certificate.public_bytes(serialization.Encoding.PEM)
+            + ca_certificate.public_bytes(serialization.Encoding.PEM)
+        )
+        key_path.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        return cert_path, key_path
+
+    good_certificate, good_key = write_leaf("https-proxy-good", wrong_host=False)
+    bad_certificate, bad_key = write_leaf("https-proxy-bad", wrong_host=True)
+    return ca_path, good_certificate, good_key, bad_certificate, bad_key
+
+
 def start_http_connect_proxy(
     expected_credential: str,
+    *,
+    tls_context: ssl.SSLContext | None = None,
+    target_log: list[str] = PROXY_CONNECT_TARGETS,
 ) -> tuple[socket.socket, threading.Event]:
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -498,6 +583,8 @@ def start_http_connect_proxy(
     def handle_connection(connection: socket.socket) -> None:
         upstream: socket.socket | None = None
         try:
+            if tls_context is not None:
+                connection = tls_context.wrap_socket(connection, server_side=True)
             request = bytearray()
             while b"\r\n\r\n" not in request and len(request) < 8192:
                 chunk = connection.recv(1)
@@ -529,7 +616,7 @@ def start_http_connect_proxy(
                 host = host[1:-1]
             upstream = socket.create_connection((host, int(port_text)), timeout=3)
             upstream.settimeout(None)
-            PROXY_CONNECT_TARGETS.append(authority)
+            target_log.append(authority)
             connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             while not stopping.is_set():
                 readable, _, _ = select.select([connection, upstream], [], [], 1)
@@ -934,7 +1021,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
     def ed25519_key() -> tuple[paramiko.Ed25519Key, str]:
-        private_key = Ed25519PrivateKey.generate().private_bytes(
+        private_key = ed25519.Ed25519PrivateKey.generate().private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.OpenSSH,
             serialization.NoEncryption(),
@@ -965,9 +1052,32 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     proxy_listener, proxy_stopping = start_http_connect_proxy("proxy-user:proxy-password")
     proxy_port = proxy_listener.getsockname()[1]
     PROXY_CONNECT_TARGETS.clear()
+    HTTPS_PROXY_CONNECT_TARGETS.clear()
 
     with tempfile.TemporaryDirectory(prefix="yukinal-paramiko-ssh-") as temp:
         root = Path(temp)
+        ca_bundle, good_certificate, good_key, bad_certificate, bad_key = (
+            write_https_proxy_certificates(root)
+        )
+
+        def tls_server_context(certificate: Path, key: Path) -> ssl.SSLContext:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certificate, key)
+            return context
+
+        https_proxy_listener, https_proxy_stopping = start_http_connect_proxy(
+            "proxy-user:proxy-password",
+            tls_context=tls_server_context(good_certificate, good_key),
+            target_log=HTTPS_PROXY_CONNECT_TARGETS,
+        )
+        https_proxy_port = https_proxy_listener.getsockname()[1]
+        bad_tls_proxy_listener, bad_tls_proxy_stopping = start_http_connect_proxy(
+            "proxy-user:proxy-password",
+            tls_context=tls_server_context(bad_certificate, bad_key),
+            target_log=HTTPS_PROXY_CONNECT_TARGETS,
+        )
+        bad_tls_proxy_port = bad_tls_proxy_listener.getsockname()[1]
         known_hosts = root / "known_hosts"
 
         def write_known_host(key: paramiko.PKey) -> None:
@@ -1105,6 +1215,42 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     },
                     "auth": {"type": "probe"},
                 },
+                {
+                    "target_id": "srv_https_proxy",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "url": f"https://127.0.0.1:{https_proxy_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_https_proxy_probe_only",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "ssh_probe",
+                    "probe_only": True,
+                    "proxy": {
+                        "url": f"https://127.0.0.1:{https_proxy_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "probe"},
+                },
+                {
+                    "target_id": "srv_https_proxy_bad_host",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "known_hosts_file": str(known_hosts),
+                    "proxy": {
+                        "url": f"https://127.0.0.1:{bad_tls_proxy_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
             ],
         }
         config_path = root / "service.json"
@@ -1116,6 +1262,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
         environment["YK_SSH_TEST_PRIVATE_KEY"] = private_key_pem
         environment["YK_SSH_TEST_PROXY_CREDENTIAL"] = "proxy-user:proxy-password"
         environment["YK_SSH_TEST_PROXY_BAD_CREDENTIAL"] = "proxy-user:bad-proxy-password"
+        environment["SSL_CERT_FILE"] = str(ca_bundle)
         process = subprocess.Popen(
             [str(service_binary), "--config", str(config_path)],
             stdin=subprocess.DEVNULL,
@@ -1173,6 +1320,39 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     raise AssertionError("proxy error response exposed the credential") from error
             else:
                 raise AssertionError("C++ SSH accepted a rejected HTTP proxy credential")
+
+            https_probe = client._execute_operation(
+                "srv_https_proxy_probe_only", "host_key_probe", {}, timeout_seconds=8
+            )
+            if https_probe.stdout != pinned_fingerprint or https_probe.exit_code != 0:
+                raise AssertionError(
+                    f"verified HTTPS CONNECT host-key probe returned an unexpected result: {https_probe!r}"
+                )
+            https_result = client.service_status(
+                "srv_https_proxy", "nginx.service", timeout_seconds=8
+            )
+            if https_result.exit_code != 0 or https_result.stdout != "active\n":
+                raise AssertionError(
+                    f"verified HTTPS CONNECT proxy did not carry SSH: {https_result!r}"
+                )
+            expected_authority = f"127.0.0.1:{ssh_port}"
+            if HTTPS_PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
+                raise AssertionError(
+                    f"HTTPS CONNECT used an unexpected target: {HTTPS_PROXY_CONNECT_TARGETS!r}"
+                )
+            try:
+                client.service_status(
+                    "srv_https_proxy_bad_host", "nginx.service", timeout_seconds=5
+                )
+            except SshServiceError as error:
+                if error.code != "proxy_tls_failed":
+                    raise AssertionError(
+                        f"unmatched HTTPS proxy certificate returned the wrong error: {error.code}"
+                    ) from error
+                if "proxy-password" in str(error):
+                    raise AssertionError("HTTPS proxy error response exposed its credential") from error
+            else:
+                raise AssertionError("C++ SSH accepted an HTTPS proxy certificate for another host")
 
             desktop_target = {
                 "target": {
@@ -1527,6 +1707,10 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             keyboard_listener.close()
             proxy_stopping.set()
             proxy_listener.close()
+            https_proxy_stopping.set()
+            https_proxy_listener.close()
+            bad_tls_proxy_stopping.set()
+            bad_tls_proxy_listener.close()
 
 
 def main() -> int:
@@ -1544,7 +1728,7 @@ def main() -> int:
     if args.agent_runtime_only:
         print("PASS Agent SSH tool selected-target binding, task target allowlist, and model target override rejection")
     else:
-        print("PASS SSH exec, HTTP CONNECT proxy, SFTP listing/stat/read/write/exclusive-create/remove/link-count, auth rejection, timeout, output cap, and host-key rejection")
+        print("PASS SSH exec, HTTP/HTTPS CONNECT with certificate verification, SFTP listing/stat/read/write/exclusive-create/remove/link-count, auth rejection, timeout, output cap, and host-key rejection")
     return 0
 
 
