@@ -538,7 +538,7 @@ pub(crate) async fn execute_server_command(
     {
         return Err((
             "unsupported_target".into(),
-            "the selected SSH target requires the Rust compatibility path".into(),
+            "the selected target is not supported by the C++ SSH service".into(),
         ));
     }
     let target_payload =

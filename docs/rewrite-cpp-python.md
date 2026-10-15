@@ -55,13 +55,15 @@
 > C++-supported routes, `systemd.restart`, `docker.restart`, `package.install`,
 > and approved `server.exec` now run from Python through structured C++ SSH
 > operations. The `server.exec` one-shot target is enabled only after Rust
-> validates the plan and consumes the exact approval; the bounded command-grant
-> path remains only in the Rust compatibility executor for unsupported targets.
+> validates the plan and consumes the exact approval; `server.exec` now requires
+> a C++-supported target in production and fails explicitly when the target is
+> unsupported. Its former Rust route is retained only in unit-test builds while
+> the host integration is migrated.
 > The host checks the durable action plan before
 > claiming the call and consuming its ticket. A successful result is cached only
 > after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
-> and cannot be replayed. Rust retains the
-> compatibility executor only for routes it explicitly reports as unsupported.
+> and cannot be replayed. Other SSH operations still retain compatibility paths
+> for routes that C++ explicitly reports as unsupported.
 > Raw approval input is removed before persistence and UI emission.
 > Agent `filesystem.write` and `filesystem.edit` now run as Python desktop tools
 > through the C++ SFTP service when the target route supports it. The host checks
@@ -125,14 +127,14 @@ structured C++ SSH operations on supported targets; the host records their
 terminal outcomes in the durable execution fence. Rust keeps the compatibility
 executor for routes it explicitly reports as unsupported.
 `server.exec` remains separately guarded and exposed only when the host supplies
-the current remote action-plan binding. On C++-supported targets, the host
-validates the plan, consumes the exact approval ticket, then starts a one-shot
-C++ service config that enables `server.exec` for that target only. Python sends
-the raw command plus bounded workdir/environment parameters; the C++ policy
-validates those fields and its SSH service builds the quoted remote shell wrapper.
-Python returns the validated result to the host. Persistent service target
-configs deny it by default. Targets the C++ service reports as unsupported still
-use the Rust compatibility executor.
+the current remote action-plan binding. The host validates the plan, consumes
+the exact approval ticket, then starts a one-shot C++ service config that enables
+`server.exec` for that target only. Python sends the raw command plus bounded
+workdir/environment parameters; the C++ policy validates those fields and its
+SSH service builds the quoted remote shell wrapper. Python returns the validated
+result to the host. Persistent service target configs deny it by default. A
+target the C++ service reports as unsupported fails explicitly; production
+never falls back to Rust SSH execution.
 The Python sidecar exposes bounded `filesystem.read`; Agent `filesystem.write`,
 revision-guarded `filesystem.edit`, `filesystem.backup`, `filesystem.restore`,
 and `filesystem.backup.cleanup`
@@ -284,13 +286,12 @@ or `dnf`, a safe package name, an optional validated version, and
 `timeout_seconds` from 1 to 600. For the latter two operations, the nested
 timeout must equal the request's top-level timeout. The Python Agent runs
 approved restart, package-install, and `server.exec` operations through the C++
-SSH service. For `server.exec`, Rust still validates the durable plan and exact
-approval, builds the remote shell wrapper, and grants the one-shot C++ target
-capability; Python transports that command and returns bounded output for
-host-side validation and idempotent replay. The Rust compatibility executor is
-used only when the C++ target route is unsupported. The desktop host continues
-to enforce approval, parameter binding, and one-time call handling before
-dispatching these actions.
+SSH service. For `server.exec`, Rust validates the durable plan and exact
+approval and grants the one-shot C++ target capability; Python transports raw
+bounded parameters, and C++ validates them and builds the remote shell wrapper.
+Production reports unsupported targets without invoking the Rust SSH backend.
+The desktop host continues to enforce approval, parameter binding, and one-time
+call handling before dispatching these actions.
 Every authenticated operation runs only after the target host key matches the
 configured OpenSSH `known_hosts` file or exact desktop pin. Unknown and changed
 keys fail closed. The separate `probe_only` operation intentionally does not
@@ -646,6 +647,14 @@ VS 2022 environment was loaded. `cargo check --manifest-path
 apps/desktop/src-tauri/Cargo.toml --lib --locked` passed. The desktop unit-test
 binary linked, but stalled before listing or running tests, including with
 `--list`; the focused CA-route test is not counted as passed.
+
+On 2026-10-15, production `server.exec` stopped falling back to the Rust SSH
+executor. A target the C++ service cannot represent now fails before consuming
+the task command budget; the former path remains compiled only for Rust unit
+tests. The supported route sends raw command/workdir/environment parameters to
+C++, where policy validation and shell quoting run. The C++ service builds;
+Rust formatting and compilation could not be checked because Cargo and rustfmt
+are absent from `PATH` and the usual per-user Cargo bin directory is absent.
 
 ## Deliberately deferred
 
