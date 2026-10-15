@@ -129,7 +129,7 @@ impl AuthChallengeBroker {
         cancelled
     }
 
-    async fn request(
+    pub(crate) async fn request(
         &self,
         server_id: &str,
         username: &str,

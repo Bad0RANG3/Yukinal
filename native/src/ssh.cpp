@@ -11,6 +11,7 @@
 #include <climits>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <iostream>
@@ -569,6 +570,26 @@ void wipe(std::string* value) {
   value->clear();
 }
 
+struct StringWiper {
+  std::string* value;
+  ~StringWiper() { wipe(value); }
+};
+
+void wipe_json_strings(nlohmann::json* value) {
+  if (value->is_string()) {
+    wipe(&value->get_ref<std::string&>());
+  } else if (value->is_array()) {
+    for (auto& item : *value) wipe_json_strings(&item);
+  } else if (value->is_object()) {
+    for (auto& item : *value) wipe_json_strings(&item);
+  }
+}
+
+struct JsonStringWiper {
+  nlohmann::json* value;
+  ~JsonStringWiper() { wipe_json_strings(value); }
+};
+
 struct DurationTracker {
   ExecResult& result;
   Clock::time_point started;
@@ -616,8 +637,21 @@ int initialize_libssh2() {
   return result;
 }
 
+struct TerminalInputQueue;
+
+struct TerminalAuthContext {
+  std::shared_ptr<TerminalInputQueue> input;
+  bool failed = false;
+};
+
+void terminal_keyboard_interactive_callback(
+    const char* name, int name_length, const char* instruction, int instruction_length,
+    int prompt_count, const LIBSSH2_USERAUTH_KBDINT_PROMPT* prompts,
+    LIBSSH2_USERAUTH_KBDINT_RESPONSE* responses, void** abstract);
+
 bool connect_authenticated(const TargetConfig& target, Clock::time_point deadline,
-                           SshResources* resources, ExecResult* result) {
+                           SshResources* resources, ExecResult* result,
+                           TerminalAuthContext* terminal_auth = nullptr) {
   if (initialize_libssh2() != 0) {
     fail(result, "ssh_unavailable", "SSH library initialization failed");
     return false;
@@ -746,12 +780,14 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
       }
     }
     if (!authenticated) {
-      fail(result, "authentication_failed", "None of the configured SSH agent identities was accepted");
-      return false;
+      if (!terminal_auth) {
+        fail(result, "authentication_failed", "None of the configured SSH agent identities was accepted");
+        return false;
+      }
     }
-    return true;
+    if (authenticated) return true;
   }
-  if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
+  else if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
     std::string passphrase = read_environment(target.passphrase_env);
     if (!target.private_key_env.empty()) {
       std::string private_key = read_environment(target.private_key_env);
@@ -792,7 +828,28 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     wipe(&password);
   }
   if (auth_result != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0 || libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
+    bool timed_out = remaining_ms(deadline) == 0 ||
+        libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
+    if (!timed_out && terminal_auth) {
+      const auto interactive_deadline = Clock::now() + std::chrono::seconds(125);
+      if (set_session_timeout(resources->session_, interactive_deadline)) {
+        void** abstract = libssh2_session_abstract(resources->session_);
+        if (abstract) *abstract = terminal_auth;
+        auth_result = libssh2_userauth_keyboard_interactive_ex(
+            resources->session_, target.username.c_str(),
+            static_cast<unsigned int>(target.username.size()),
+            terminal_keyboard_interactive_callback);
+        if (abstract) *abstract = nullptr;
+        timed_out = remaining_ms(interactive_deadline) == 0 ||
+            libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
+      }
+    }
+    if (auth_result == 0) return true;
+    if (terminal_auth && terminal_auth->failed && !timed_out) {
+      fail(result, "authentication_failed",
+           "SSH keyboard-interactive authentication was cancelled or invalid");
+      return false;
+    }
     fail(result, timed_out ? "timeout" : "authentication_failed",
          timed_out ? "SSH authentication timed out" : "SSH authentication failed");
     return false;
@@ -840,8 +897,9 @@ std::string base64_encode(const std::vector<unsigned char>& bytes) {
 namespace {
 
 struct TerminalInputCommand {
-  enum class Kind { write, resize, close } kind = Kind::close;
+  enum class Kind { write, resize, close, auth_response } kind = Kind::close;
   std::string data;
+  std::vector<std::string> responses;
   std::uint16_t columns = 0;
   std::uint16_t rows = 0;
 };
@@ -851,6 +909,8 @@ struct TerminalInputQueue {
   std::condition_variable changed;
   std::deque<TerminalInputCommand> commands;
   std::size_t queued_data_bytes = 0;
+  std::size_t expected_auth_responses = 0;
+  bool auth_prompt_active = false;
   bool eof = false;
   bool invalid = false;
 };
@@ -863,13 +923,16 @@ constexpr std::size_t kMaxQueuedTerminalCommands = 256;
 void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
   std::string line;
   while (std::getline(std::cin, line)) {
+    StringWiper line_wiper{&line};
     if (line.size() > kMaxTerminalInputJsonBytes) {
       std::lock_guard lock(input->mutex);
       input->invalid = true;
       break;
     }
     try {
-      const auto message = nlohmann::json::parse(line);
+      auto message = nlohmann::json::parse(line);
+      wipe(&line);
+      JsonStringWiper message_wiper{&message};
       if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
         std::lock_guard lock(input->mutex);
         input->invalid = true;
@@ -899,6 +962,36 @@ void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
         command.kind = TerminalInputCommand::Kind::resize;
         command.columns = static_cast<std::uint16_t>(columns);
         command.rows = static_cast<std::uint16_t>(rows);
+      } else if (type == "auth_response" && message.size() == 2 &&
+                 message.contains("responses") && message["responses"].is_array() &&
+                 message["responses"].size() <= 16) {
+        command.kind = TerminalInputCommand::Kind::auth_response;
+        bool valid_responses = true;
+        for (auto& response : message["responses"]) {
+          if (!response.is_string()) {
+            valid_responses = false;
+            break;
+          }
+          auto& secret = response.get_ref<std::string&>();
+          if (secret.size() > 4096) {
+            valid_responses = false;
+            break;
+          }
+          command.responses.push_back(std::move(secret));
+        }
+        std::lock_guard lock(input->mutex);
+        if (!valid_responses || !input->auth_prompt_active ||
+            command.responses.size() != input->expected_auth_responses) {
+          for (auto& response : command.responses) wipe(&response);
+          input->invalid = true;
+          input->changed.notify_all();
+          break;
+        }
+        input->auth_prompt_active = false;
+        input->expected_auth_responses = 0;
+        input->commands.push_back(std::move(command));
+        input->changed.notify_all();
+        continue;
       } else if (type == "close" && message.size() == 1) {
         command.kind = TerminalInputCommand::Kind::close;
         std::lock_guard lock(input->mutex);
@@ -913,15 +1006,20 @@ void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
 
       std::unique_lock lock(input->mutex);
       input->changed.wait(lock, [&] {
-        return input->eof ||
+        return input->eof || input->auth_prompt_active ||
                (input->commands.size() < kMaxQueuedTerminalCommands &&
                 input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
       });
-      if (input->eof) break;
+      if (input->eof || input->auth_prompt_active) {
+        input->invalid = true;
+        input->changed.notify_all();
+        break;
+      }
       input->queued_data_bytes += command.data.size();
       input->commands.push_back(std::move(command));
       input->changed.notify_all();
     } catch (const nlohmann::json::exception&) {
+      wipe(&line);
       std::lock_guard lock(input->mutex);
       input->invalid = true;
       break;
@@ -938,6 +1036,98 @@ bool emit_terminal_message(const nlohmann::json& message) {
   std::cout << message.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace)
             << '\n' << std::flush;
   return std::cout.good();
+}
+
+void terminal_keyboard_interactive_callback(
+    const char* name, int name_length, const char* instruction, int instruction_length,
+    int prompt_count, const LIBSSH2_USERAUTH_KBDINT_PROMPT* prompts,
+    LIBSSH2_USERAUTH_KBDINT_RESPONSE* responses, void** abstract) {
+  auto* context = abstract ? static_cast<TerminalAuthContext*>(*abstract) : nullptr;
+  if (!context || !context->input || prompt_count < 0 || prompt_count > 16 ||
+      (prompt_count > 0 && (!prompts || !responses)) || name_length < 0 ||
+      instruction_length < 0 || name_length > 4096 || instruction_length > 4096 ||
+      (name_length > 0 && !name) || (instruction_length > 0 && !instruction)) {
+    if (context) context->failed = true;
+    return;
+  }
+
+  nlohmann::json prompt_values = nlohmann::json::array();
+  for (int index = 0; index < prompt_count; ++index) {
+    if (prompts[index].length > 4096 || (prompts[index].length > 0 && !prompts[index].text)) {
+      context->failed = true;
+      return;
+    }
+    const std::string prompt = prompts[index].length == 0
+        ? std::string{}
+        : std::string(reinterpret_cast<const char*>(prompts[index].text), prompts[index].length);
+    prompt_values.push_back({{"prompt", prompt}, {"echo", prompts[index].echo != 0}});
+  }
+
+  auto input = context->input;
+  {
+    std::lock_guard lock(input->mutex);
+    if (input->eof || input->invalid || input->auth_prompt_active) {
+      context->failed = true;
+      return;
+    }
+    input->auth_prompt_active = true;
+    input->expected_auth_responses = static_cast<std::size_t>(prompt_count);
+  }
+  input->changed.notify_all();
+  if (!emit_terminal_message({
+          {"type", "auth_prompt"},
+          {"name", name_length == 0 ? std::string{} : std::string(name, static_cast<std::size_t>(name_length))},
+          {"instructions", instruction_length == 0 ? std::string{} : std::string(instruction, static_cast<std::size_t>(instruction_length))},
+          {"prompts", std::move(prompt_values)},
+      })) {
+    std::lock_guard lock(input->mutex);
+    input->auth_prompt_active = false;
+    input->expected_auth_responses = 0;
+    context->failed = true;
+    input->changed.notify_all();
+    return;
+  }
+
+  TerminalInputCommand command;
+  bool received_response = false;
+  {
+    std::unique_lock lock(input->mutex);
+    const bool ready = input->changed.wait_for(lock, std::chrono::seconds(125), [&] {
+      return input->invalid || input->eof || !input->commands.empty();
+    });
+    if (ready && !input->commands.empty() &&
+        input->commands.front().kind == TerminalInputCommand::Kind::auth_response) {
+      command = std::move(input->commands.front());
+      input->commands.pop_front();
+      received_response = command.responses.size() == static_cast<std::size_t>(prompt_count);
+    }
+    input->auth_prompt_active = false;
+    input->expected_auth_responses = 0;
+    if (!received_response) context->failed = true;
+  }
+  input->changed.notify_all();
+  if (!received_response) return;
+
+  std::vector<char*> allocated;
+  allocated.reserve(command.responses.size());
+  for (const auto& response : command.responses) {
+    auto* value = static_cast<char*>(std::malloc(response.size() + 1));
+    if (!value) {
+      for (char* item : allocated) std::free(item);
+      context->failed = true;
+      for (auto& secret : command.responses) wipe(&secret);
+      return;
+    }
+    std::memcpy(value, response.data(), response.size());
+    value[response.size()] = '\0';
+    allocated.push_back(value);
+  }
+  for (int index = 0; index < prompt_count; ++index) {
+    const auto response_index = static_cast<std::size_t>(index);
+    responses[index].text = allocated[response_index];
+    responses[index].length = static_cast<unsigned int>(command.responses[response_index].size());
+  }
+  for (auto& secret : command.responses) wipe(&secret);
 }
 
 bool write_terminal_channel(SshResources* resources, const std::string& data) {
@@ -968,10 +1158,13 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     emit_terminal_message({{"type", "error"}, {"message", "The terminal dimensions or SSH target are invalid"}});
     return 2;
   }
+  const auto input = std::make_shared<TerminalInputQueue>();
+  std::thread(read_terminal_input, input).detach();
+  TerminalAuthContext terminal_auth{input};
   ExecResult connection_result;
   SshResources resources;
   const auto deadline = Clock::now() + std::chrono::seconds(30);
-  if (!connect_authenticated(target, deadline, &resources, &connection_result)) {
+  if (!connect_authenticated(target, deadline, &resources, &connection_result, &terminal_auth)) {
     emit_terminal_message({{"type", "error"},
                            {"code", connection_result.error_code},
                            {"message", connection_result.error_message.empty()
@@ -1006,8 +1199,6 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
   libssh2_session_set_blocking(resources.session_, 0);
   libssh2_channel_set_blocking(resources.channel_, 0);
 
-  const auto input = std::make_shared<TerminalInputQueue>();
-  std::thread(read_terminal_input, input).detach();
   if (!emit_terminal_message({{"type", "ready"}})) return 0;
 
   bool running = true;

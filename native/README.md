@@ -31,10 +31,11 @@ desktop routes supported Agent file operations, file browsing, and manual
 transfers through C++ for password, private-key, OpenSSH user-certificate, and
 agent identities when the target has a confirmed host-key pin and uses a
 supported direct or HTTP CONNECT route. Supported interactive terminal sessions
-use the dedicated C++ PTY worker. Rust remains the compatibility path for Host
-CA trust, HTTPS proxies, unsupported proxy bypass patterns,
-keyboard-interactive authentication, and other SSH configurations the C++
-service cannot yet represent.
+use the dedicated C++ PTY worker. The C++ terminal worker forwards
+keyboard-interactive challenges through the existing desktop prompt UI. Rust
+remains the compatibility path for Host CA trust, HTTPS proxies, unsupported
+proxy bypass patterns, and other SSH configurations the C++ service cannot yet
+represent.
 
 ## Build
 

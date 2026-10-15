@@ -28,6 +28,8 @@ use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
 };
 use yukinal_terminal::{TerminalPty, TerminalPtyEvent};
+use yukinal_ssh::{KeyboardInteractiveChallenge, KeyboardInteractivePrompt};
+use zeroize::Zeroize;
 
 use crate::state::AppState;
 
@@ -340,8 +342,56 @@ pub(crate) struct SshTerminalPty {
 
 #[derive(Debug)]
 pub(crate) enum TerminalOpenFailure {
-    AuthenticationFailed,
     Failed(String),
+}
+
+fn decode_terminal_auth_challenge(message: &Value) -> Result<KeyboardInteractiveChallenge, String> {
+    let object = message
+        .as_object()
+        .filter(|object| object.len() == 4)
+        .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication challenge".to_string())?;
+    if object.get("type").and_then(Value::as_str) != Some("auth_prompt") {
+        return Err("the C++ SSH terminal returned an invalid authentication challenge".into());
+    }
+    let bounded_text = |key: &str| -> Result<String, String> {
+        let value = object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| value.len() <= 4096)
+            .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication challenge".to_string())?;
+        Ok(value.to_string())
+    };
+    let prompts = object
+        .get("prompts")
+        .and_then(Value::as_array)
+        .filter(|prompts| prompts.len() <= 16)
+        .ok_or_else(|| "the C++ SSH terminal returned invalid authentication prompts".to_string())?
+        .iter()
+        .map(|prompt| {
+            let prompt = prompt
+                .as_object()
+                .filter(|prompt| prompt.len() == 2)
+                .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication prompt".to_string())?;
+            let text = prompt
+                .get("prompt")
+                .and_then(Value::as_str)
+                .filter(|text| text.len() <= 4096)
+                .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication prompt".to_string())?;
+            let echo = prompt
+                .get("echo")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "the C++ SSH terminal returned an invalid authentication prompt".to_string())?;
+            Ok(KeyboardInteractivePrompt {
+                prompt: text.to_string(),
+                echo,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(KeyboardInteractiveChallenge {
+        name: bounded_text("name")?,
+        instructions: bounded_text("instructions")?,
+        prompts,
+    })
 }
 
 pub(crate) enum CppProxyRoute {
@@ -742,7 +792,7 @@ pub(crate) async fn open_terminal(
         .map_err(|_| "could not start the packaged C++ SSH terminal process".to_string())?;
     drop(command);
     drop(target_payload);
-    let input = child
+    let mut input = child
         .stdin
         .take()
         .ok_or_else(|| "the C++ SSH terminal process has no input pipe".to_string())?;
@@ -751,49 +801,117 @@ pub(crate) async fn open_terminal(
         .take()
         .ok_or_else(|| "the C++ SSH terminal process has no output pipe".to_string())?;
     let mut output = BufReader::new(output);
-    let mut first_line = String::new();
-    let startup =
-        tokio::time::timeout(Duration::from_secs(35), output.read_line(&mut first_line)).await;
-    match startup {
-        Ok(Ok(count)) if count > 0 && first_line.len() <= 32 * 1024 => {}
-        Ok(Ok(_)) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err("the C++ SSH terminal process exited during startup".into());
+    loop {
+        let mut first_line = String::new();
+        let startup = tokio::time::timeout(
+            Duration::from_secs(125),
+            output.read_line(&mut first_line),
+        )
+        .await;
+        match startup {
+            Ok(Ok(count)) if count > 0 && first_line.len() <= 512 * 1024 => {}
+            Ok(Ok(_)) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err("the C++ SSH terminal process exited during startup".into());
+            }
+            Ok(Err(_)) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err("could not read the C++ SSH terminal startup response".into());
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err("the C++ SSH terminal did not connect or finish authentication in time".into());
+            }
         }
-        Ok(Err(_)) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err("could not read the C++ SSH terminal startup response".into());
+        let startup: Value = match serde_json::from_str(first_line.trim_end()) {
+            Ok(startup) => startup,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err("the C++ SSH terminal returned an invalid startup response".into());
+            }
+        };
+        match startup.get("type").and_then(Value::as_str) {
+            Some("ready") => break,
+            Some("auth_prompt") => {
+                let challenge = match decode_terminal_auth_challenge(&startup) {
+                    Ok(challenge) => challenge,
+                    Err(error) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        return Err(TerminalOpenFailure::Failed(error));
+                    }
+                };
+                let username = target
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "the desktop returned an invalid SSH terminal username".to_string())?;
+                let host = target
+                    .get("host")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "the desktop returned an invalid SSH terminal host".to_string())?;
+                let responses = match state
+                    .auth
+                    .request(server_id, username, host, &challenge)
+                    .await
+                {
+                    Ok(responses) => responses,
+                    Err(error) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        return Err(TerminalOpenFailure::Failed(error.to_string()));
+                    }
+                };
+                let mut response_message = json!({
+                    "type": "auth_response",
+                    "responses": responses,
+                });
+                let encoded = serde_json::to_vec(&response_message);
+                if let Some(responses) = response_message
+                    .get_mut("responses")
+                    .and_then(Value::as_array_mut)
+                {
+                    for response in responses {
+                        if let Value::String(secret) = response {
+                            secret.zeroize();
+                        }
+                    }
+                }
+                let mut frame = match encoded {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        return Err("could not encode the SSH authentication response".into());
+                    }
+                };
+                frame.push(b'\n');
+                let write_result = input.write_all(&frame).await;
+                frame.zeroize();
+                if write_result.is_err() || input.flush().await.is_err() {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(TerminalOpenFailure::Failed(
+                        "could not send the SSH authentication response to C++".into(),
+                    ));
+                }
+            }
+            Some("error") => {
+                let message = startup
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the C++ SSH terminal could not start");
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(TerminalOpenFailure::Failed(message.to_string()));
+            }
+            _ => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err("the C++ SSH terminal returned an invalid startup response".into());
+            }
         }
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err("the C++ SSH terminal did not connect within 35 seconds".into());
-        }
-    }
-    let startup: Value = match serde_json::from_str(first_line.trim_end()) {
-        Ok(startup) => startup,
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err("the C++ SSH terminal returned an invalid startup response".into());
-        }
-    };
-    if startup.get("type").and_then(Value::as_str) != Some("ready") {
-        let message = startup
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("the C++ SSH terminal could not start");
-        let authentication_failed =
-            startup.get("code").and_then(Value::as_str) == Some("authentication_failed");
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(if authentication_failed {
-            TerminalOpenFailure::AuthenticationFailed
-        } else {
-            TerminalOpenFailure::Failed(message.to_string())
-        });
     }
 
     let (sender, receiver) = mpsc::channel(256);

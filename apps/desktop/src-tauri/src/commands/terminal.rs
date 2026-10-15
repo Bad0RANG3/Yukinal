@@ -1,8 +1,9 @@
 //! Terminal IPC commands: the UI only sees `terminal_session_id`s.
 //!
 //! Wire: resolve server and identity → read credentials at use time → C++ PTY child
-//! for supported direct connections, with the Rust backend retained for host CA,
-//! certificate-identity, proxy, and known-hosts-only configurations. React only sees
+//! for supported connections, with Rust retained only for SSH configurations the
+//! C++ service cannot represent yet. Keyboard-interactive prompts travel through the
+//! existing UI challenge broker while the C++ worker owns the SSH connection. React only sees
 //! `terminal_session_id`s and the existing terminal events.
 //!
 //! This is intentionally a manual UI path, not an Agent tool. It has no task/plan ticket and
@@ -224,12 +225,6 @@ pub async fn terminal_open(
                     &yukinal_core::sidecar::iso8601_now(),
                 );
                 session_id
-            }
-            Err(ssh_service::TerminalOpenFailure::AuthenticationFailed) => {
-                // libssh2's password method does not cover every server's
-                // keyboard-interactive challenge flow; preserve the existing
-                // user-mediated Rust path for that authentication case.
-                open_rust_terminal(&state, &server_id, cols, rows).await?
             }
             Err(ssh_service::TerminalOpenFailure::Failed(error)) => {
                 let _ = state.database.servers().set_status(

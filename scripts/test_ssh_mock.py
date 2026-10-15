@@ -50,19 +50,41 @@ def unused_port() -> int:
 
 
 class ExecServer(paramiko.ServerInterface):
-    def __init__(self, public_key: paramiko.PKey) -> None:
+    def __init__(self, public_key: paramiko.PKey, keyboard_interactive_only: bool = False) -> None:
         self.command: bytes | None = None
         self.command_ready = threading.Event()
         self.terminal_ready = threading.Event()
         self.subsystem_ready = threading.Event()
         self.public_key = public_key
+        self.keyboard_interactive_only = keyboard_interactive_only
 
     def get_allowed_auths(self, username: str) -> str:
+        if self.keyboard_interactive_only:
+            return "keyboard-interactive"
         return "password,publickey"
 
     def check_auth_password(self, username: str, password: str) -> int:
         AUTH_EVENTS.append("password")
+        if self.keyboard_interactive_only:
+            return paramiko.AUTH_FAILED
         if username == "test-user" and password == PASSWORD:
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
+    def check_auth_interactive(self, username: str, submethods: str) -> paramiko.InteractiveQuery:
+        AUTH_EVENTS.append("keyboard-interactive-request")
+        if username != "test-user" or not self.keyboard_interactive_only:
+            return paramiko.AUTH_FAILED
+        return paramiko.InteractiveQuery(
+            "Second factor",
+            "Enter the one-time code",
+            ("One-time code: ", False),
+        )
+
+    def check_auth_interactive_response(self, responses: list[str]) -> int:
+        AUTH_EVENTS.append("keyboard-interactive-response")
+        if self.keyboard_interactive_only and responses == ["654321"]:
+            AUTH_EVENTS.append("keyboard-interactive-success")
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
@@ -267,7 +289,10 @@ class FsyncSftpServer(paramiko.SFTPServer):
 
 
 def start_ssh_mock(
-    host_key: paramiko.RSAKey, user_key: paramiko.PKey
+    host_key: paramiko.RSAKey,
+    user_key: paramiko.PKey,
+    *,
+    keyboard_interactive_only: bool = False,
 ) -> tuple[socket.socket, threading.Event]:
     StaticSftpInterface._files = {
         "/settings.toml": StaticSftpInterface.CONTENTS,
@@ -290,7 +315,7 @@ def start_ssh_mock(
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
             transport.set_subsystem_handler("sftp", FsyncSftpServer, StaticSftpInterface)
-            server = ExecServer(user_key)
+            server = ExecServer(user_key, keyboard_interactive_only)
             transport.start_server(server=server)
             channel = transport.accept(10)
             if channel is None:
@@ -556,6 +581,8 @@ def exercise_cpp_terminal(
     root: Path,
     target: dict[str, object],
     environment: dict[str, str],
+    *,
+    keyboard_interactive: bool = False,
 ) -> None:
     terminal_config = root / "terminal-service.json"
     terminal_config.write_text(
@@ -594,6 +621,18 @@ def exercise_cpp_terminal(
 
     try:
         ready = next_event()
+        if keyboard_interactive:
+            if ready.get("type") != "auth_prompt":
+                raise AssertionError(f"C++ terminal did not surface the SSH challenge: {ready!r}")
+            if (
+                ready.get("name") != "Second factor"
+                or ready.get("instructions") != "Enter the one-time code"
+                or ready.get("prompts") != [{"prompt": "One-time code: ", "echo": False}]
+            ):
+                raise AssertionError(f"C++ terminal changed the SSH challenge details: {ready!r}")
+            process.stdin.write(json.dumps({"type": "auth_response", "responses": ["654321"]}) + "\n")
+            process.stdin.flush()
+            ready = next_event()
         if ready.get("type") != "ready":
             raise AssertionError(f"C++ terminal failed to start: {ready!r}")
         output = next_event()
@@ -621,6 +660,8 @@ def exercise_cpp_terminal(
             raise AssertionError(f"C++ terminal did not report a clean close: {closed!r}")
         if process.wait(timeout=5) != 0:
             raise AssertionError(f"C++ terminal worker exited with {process.returncode}")
+        if keyboard_interactive and "keyboard-interactive-success" not in AUTH_EVENTS:
+            raise AssertionError(f"SSH mock did not accept the keyboard-interactive response: {AUTH_EVENTS!r}")
     finally:
         if process.poll() is None:
             process.kill()
@@ -893,6 +934,10 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     user_key = paramiko.RSAKey.generate(2048)
     listener, stopping = start_ssh_mock(host_key, user_key)
     ssh_port = listener.getsockname()[1]
+    keyboard_listener, keyboard_stopping = start_ssh_mock(
+        host_key, user_key, keyboard_interactive_only=True
+    )
+    keyboard_ssh_port = keyboard_listener.getsockname()[1]
     proxy_listener, proxy_stopping = start_http_connect_proxy("proxy-user:proxy-password")
     proxy_port = proxy_listener.getsockname()[1]
     PROXY_CONNECT_TARGETS.clear()
@@ -1431,6 +1476,21 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
             }
             exercise_cpp_terminal(service_binary, root, terminal_target, environment)
+            keyboard_terminal_target = {
+                "target_id": "srv_keyboard_interactive",
+                "host": "127.0.0.1",
+                "port": keyboard_ssh_port,
+                "username": "test-user",
+                "host_key_fingerprint": pinned_fingerprint,
+                "auth": {"type": "password", "password_env": "YUKINAL_TEST_BAD_PASSWORD"},
+            }
+            exercise_cpp_terminal(
+                service_binary,
+                root,
+                keyboard_terminal_target,
+                environment,
+                keyboard_interactive=True,
+            )
             exercise_cpp_sftp_streams(service_binary, root, terminal_target, environment)
         finally:
             if process.poll() is None:
@@ -1442,6 +1502,8 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     process.wait(timeout=5)
             stopping.set()
             listener.close()
+            keyboard_stopping.set()
+            keyboard_listener.close()
             proxy_stopping.set()
             proxy_listener.close()
 

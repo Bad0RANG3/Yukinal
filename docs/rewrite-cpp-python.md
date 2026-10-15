@@ -10,8 +10,9 @@
 > Rust still
 > hosts native UI IPC, local trust-store updates, final approvals, and SSH
 > compatibility paths for configurations outside current C++ coverage: Host CA,
-> HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
-> known-hosts-only trust, and other unsupported SSH modes. Supported desktop
+> HTTPS proxies, unsupported proxy bypass rules, and other unsupported SSH modes.
+> Keyboard-interactive terminal prompts are forwarded by the C++ PTY worker to
+> the existing desktop prompt UI. Supported desktop
 > terminals use a dedicated C++ PTY child process. The Python sidecar can call the C++
 > `service_status` operation when configured; the desktop Agent routes server
 > logs, Docker inspection, systemd inspection, and package inspection through a
