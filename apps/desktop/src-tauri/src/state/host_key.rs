@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::Rng as _;
-use yukinal_ssh::known_hosts::{
-    Check, ForgetOutcome, KnownHostsError, KnownHostsStore, TrustDecision,
-};
+use yukinal_host_trust::{Check, ForgetOutcome, KnownHostsError, KnownHostsStore, TrustDecision};
 
 const PROBE_TTL: Duration = Duration::from_secs(120);
 

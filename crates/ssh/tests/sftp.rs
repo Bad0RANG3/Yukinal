@@ -284,7 +284,7 @@ impl RemoteFileTransport for SftpFileTransport<'_> {
             .await
         {
             Ok(result) => Ok(parse_link_count(&result.stdout, result.exit_code)),
-            // Match TerminalService: a failed probe means "unknown", so the file service refuses.
+            // Match the desktop C++ SSH path: a failed probe means "unknown", so the file service refuses.
             Err(_) => Ok(None),
         }
     }

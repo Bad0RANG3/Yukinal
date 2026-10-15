@@ -110,10 +110,8 @@ fn resolve_capabilities(
                 revocation_list_signers: authority.revocation_list_signers.clone(),
             },
         ),
-        // Rust compatibility sessions use `ensure_session`; unknown hosts must still be
-        // **认证之前**停下，由用户走 `server_host_key_probe` → `server_host_key_trust`
-        // 显式核验指纹。首连自动信任（TOFU）会把一次中间人劫持固化成「可信」，而项目
-        // 其余 SSH 入口本来就已经是显式确认。
+        // 仅旧 Rust 测试夹具使用这条路径。生产终端由 C++ service 执行，并要求
+        // `server_host_key_probe` → `server_host_key_trust` 显式确认指纹。
         outbound_proxy: proxy,
         known_hosts_policy: KnownHostsPolicy::RequireMatch,
         keepalive_interval_secs: 30,

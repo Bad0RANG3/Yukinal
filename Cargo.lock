@@ -6716,20 +6716,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "yukinal-collector"
-version = "1.0.0"
-dependencies = [
- "futures",
- "nix",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "yukinal-ssh",
-]
-
-[[package]]
 name = "yukinal-core"
 version = "1.0.0"
 dependencies = [
@@ -6743,7 +6729,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "yukinal-collector",
  "yukinal-database",
  "yukinal-net",
  "yukinal-ssh",
@@ -6789,6 +6774,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "ssh-key",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -6801,6 +6787,7 @@ dependencies = [
  "yukinal-credentials",
  "yukinal-database",
  "yukinal-filesystem",
+ "yukinal-host-trust",
  "yukinal-net",
  "yukinal-ssh",
  "yukinal-terminal",
@@ -6820,6 +6807,14 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "yukinal-host-trust"
+version = "1.0.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6851,6 +6846,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "yukinal-filesystem",
+ "yukinal-host-trust",
  "yukinal-net",
 ]
 

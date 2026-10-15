@@ -1,8 +1,7 @@
 //! yukinal-core — Rust 侧的编排层与本地系统能力。
 //!
 //! 职责：
-//! - 聚合 `yukinal-ssh` / `yukinal-terminal` / `yukinal-collector` / `yukinal-database`，
-//!   向 Tauri Command 暴露稳定入口。
+//! - 提供桌面宿主使用的本地服务、策略与数据装配能力。
 //! - 本地系统操作（本机 process / filesystem / OS info）。
 //! - 命令风险静态规则只是 *信号生产者*，不是决策者（ADR 0005）。
 //!
@@ -19,7 +18,6 @@
 //! （这段说明曾经写着「filesystem 目前仍是契约占位、尚无实现」——那句话在 `filesystem`
 //! crate 落地之后就错了，而错的是**文档**而不是依赖清单：依赖清单本来就对。）
 
-pub mod collector;
 pub mod docker;
 pub mod health;
 pub mod identity;
@@ -44,4 +42,5 @@ mod redact;
 pub mod sidecar;
 
 pub mod supervisor;
+#[cfg(feature = "legacy-rust-ssh-tests")]
 pub mod terminal;

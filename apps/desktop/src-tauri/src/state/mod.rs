@@ -32,7 +32,7 @@ pub(crate) use approval::{
     is_host_approval_tool_name, HostActionExecutionBinding, HostActionTicketError,
     HostApprovalLedger,
 };
-pub use auth::AuthChallengeBroker;
+pub use auth::{AuthChallengeBroker, KeyboardInteractiveChallenge, KeyboardInteractivePrompt};
 pub use host_key::{HostKeyProbeBroker, HostTrustStore};
 pub use oauth::OAuthFlowBroker;
 

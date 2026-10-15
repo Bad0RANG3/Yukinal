@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+legacy-rust-ssh-tests = ["dep:yukinal-ssh", "dep:yukinal-terminal"]
+
 [dependencies]
 serde = { workspace = true }
 rusqlite = { workspace = true }
@@ -13,11 +16,10 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-yukinal-collector = { workspace = true }
 yukinal-database = { workspace = true }
 yukinal-net = { workspace = true }
-yukinal-ssh = { workspace = true }
-yukinal-terminal = { workspace = true }
+yukinal-ssh = { workspace = true, optional = true }
+yukinal-terminal = { workspace = true, optional = true }
 yukinal-time = { workspace = true }
 
 tracing = { workspace = true }

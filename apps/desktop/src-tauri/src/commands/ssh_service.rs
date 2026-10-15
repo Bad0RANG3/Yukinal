@@ -27,11 +27,10 @@ use yukinal_filesystem::transfer::{TransferError, TransferReader, TransferWriter
 use yukinal_filesystem::{
     RemoteEntryKind, RemoteStat, ReplaceError, ReplaceGuard, ReplacedFile, TransportError,
 };
-use yukinal_ssh::{KeyboardInteractiveChallenge, KeyboardInteractivePrompt};
 use yukinal_terminal::{TerminalPty, TerminalPtyEvent};
 use zeroize::Zeroize;
 
-use crate::state::AppState;
+use crate::state::{AppState, KeyboardInteractiveChallenge, KeyboardInteractivePrompt};
 
 pub(crate) async fn service_inventory(
     app: &AppHandle,

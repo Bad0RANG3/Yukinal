@@ -39,7 +39,7 @@ pub(crate) async fn establish(
     let pinned = known_hosts
         .lock()
         .map_err(|_| Error::Transport("known_hosts lock poisoned".into()))?
-        .pinned(&config.host, config.port);
+        .pinned_fingerprint(&config.host, config.port);
     let (expected, accept_unknown) = match pinned {
         Some(pinned_fp) => (Some(pinned_fp), false),
         None if trusted_host_ca.is_some() => (None, false),
@@ -590,19 +590,6 @@ impl client::Handler for ProbeHandler {
     }
 }
 
-impl KnownHostsStore {
-    /// 只看是否已钉过、钉子是什么（不比较 presented）。
-    ///
-    /// 这里直接查表，不再借道 `check(host, port, "")` —— 那是以「和空串比较」的形式
-    /// 表达一次查找，读起来像在做校验，实际只是取值。真正的比对在
-    /// `ConnHandler::check_server_key`（指纹只在该回调里才存在）；`check` 在生产路径上
-    /// 的另一个使用者是探针（`RusshBackend::host_key_check`），它比的是**真的**出示过的
-    /// 指纹，不是空串。
-    fn pinned(&self, host: &str, port: u16) -> Option<String> {
-        self.pinned_fingerprint(host, port)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use russh::client::Handler as _;
@@ -615,7 +602,7 @@ mod tests {
     #[test]
     fn pinned_reports_unknown_for_new_hosts() {
         let store = KnownHostsStore::in_memory();
-        assert_eq!(store.pinned("example.com", 22), None);
+        assert_eq!(store.pinned_fingerprint("example.com", 22), None);
     }
 
     #[tokio::test]

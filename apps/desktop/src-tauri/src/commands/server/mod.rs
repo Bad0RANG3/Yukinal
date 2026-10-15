@@ -17,7 +17,13 @@ use yukinal_database::models::{
 };
 use yukinal_database::UpdateServerInput;
 use yukinal_database::{AddServerInput, AuthenticationInput};
-use yukinal_ssh::{validate_host_ca_public_key, MAX_KRL_SIGNERS};
+const MAX_KRL_SIGNERS: usize = 16;
+
+fn validate_host_ca_public_key(value: &str) -> Result<(), String> {
+    ssh_key::PublicKey::from_openssh(value.trim())
+        .map(|_| ())
+        .map_err(|error| format!("invalid host CA public key: {error}"))
+}
 
 /// 身份写入与回收的 keychain 侧（需要 `CredentialStore` 句柄，所以住不进 `crates/core`）。
 mod identity;

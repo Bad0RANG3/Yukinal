@@ -22,6 +22,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tempfile = { workspace = true }
 yukinal-net = { workspace = true }
+yukinal-host-trust = { workspace = true }
 
 # New deps rationale (repo rule): russh/russh-sftp — MIT, maintained, pure Rust,
 # cross-platform, replaces hand-rolled SSH. tokio-util — MIT, part of the tokio

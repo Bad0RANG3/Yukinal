@@ -2,7 +2,7 @@
  * Runtime gate for collector output (see `types/collector.ts`).
  *
  * `ServerSnapshot` is the shape Rust returns from `server_snapshot`, so this schema
- * must stay assignable to that type AND to what `crates/collector` will emit. It is
+ * must stay assignable to that type AND to what the Python snapshot normalizer emits. It is
  * strict on purpose: `snapshots` rows are cross-boundary data, and a silent strip of
  * unknown keys would hide a contract drift instead of failing the parse.
  */

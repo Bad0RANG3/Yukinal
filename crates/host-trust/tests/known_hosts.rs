@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use yukinal_ssh::known_hosts::{
+use yukinal_host_trust::{
     decide_trust, Check, Comparison, ForgetOutcome, KnownHostsStore, TrustDecision,
 };
 

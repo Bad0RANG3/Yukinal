@@ -20,7 +20,7 @@ use tauri::{AppHandle, State};
 
 use crate::commands::ssh_service;
 use crate::state::AppState;
-use yukinal_ssh::known_hosts::{Check, ForgetOutcome, TrustDecision};
+use yukinal_host_trust::{Check, ForgetOutcome, TrustDecision};
 
 /// `server_host_key_status`：这台服务器对应的 `host:port` 现在钉的是什么。
 ///

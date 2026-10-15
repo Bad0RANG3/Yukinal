@@ -42,9 +42,9 @@ passes the configured proxy URL through as data; URL parsing, HTTPS certificate
 verification, host and optional port-qualified bypass matching, and
 CONNECT/SOCKS5 negotiation run in C++. Supported interactive terminal
 sessions use the dedicated C++ PTY worker. The C++ terminal worker forwards
-keyboard-interactive challenges through the existing desktop prompt UI. Rust
-remains the compatibility path for other SSH configurations the C++ service
-cannot yet represent. When pin or `known_hosts` trust is used with a host
+keyboard-interactive challenges through the existing desktop prompt UI. SSH
+configurations the C++ service cannot represent are rejected by the desktop;
+they do not fall back to a Rust SSH connection. When pin or `known_hosts` trust is used with a host
 certificate, C++ fingerprints the certified public key, matching the desktop
 trust store.
 

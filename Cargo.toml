@@ -2,11 +2,11 @@
 resolver = "2"
 members = [
   "apps/desktop/src-tauri",
-  "crates/collector",
   "crates/core",
   "crates/credentials",
   "crates/database",
   "crates/filesystem",
+  "crates/host-trust",
   "crates/net",
   "crates/ssh",
   "crates/terminal",
@@ -37,10 +37,9 @@ tempfile = "3.23"
 drag = "2.1.1"
 zeroize = "1.8"
 
-# SSH backend. ADR 0002: russh (pure Rust, tokio-native, PTY + SFTP).
-# Crypto backend: `ring` instead of the default aws-lc-rs — aws-lc-sys needs a C
-# toolchain/cmake everywhere, ring ships prebuilt asm for the platforms we target.
-# (audited per the ADR's crypto note; revisit if a server needs aws-lc-only ciphers)
+# Retired Rust SSH stack, kept only for legacy regression fixtures while their
+# coverage is replaced by C++ SSH service tests. The desktop runtime has no russh
+# dependency; production SSH lives under `native/`.
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.0"
 # Direct access to the same ssh-key version russh uses, for certificate/key encoding
@@ -89,10 +88,10 @@ tauri-plugin-dialog = "2.8"
 
 # Internal crates are referenced through the workspace so paths exist in one place.
 yukinal-core = { path = "crates/core" }
-yukinal-collector = { path = "crates/collector" }
 yukinal-credentials = { path = "crates/credentials" }
 yukinal-database = { path = "crates/database" }
 yukinal-filesystem = { path = "crates/filesystem" }
+yukinal-host-trust = { path = "crates/host-trust" }
 yukinal-net = { path = "crates/net" }
 yukinal-ssh = { path = "crates/ssh" }
 yukinal-terminal = { path = "crates/terminal" }

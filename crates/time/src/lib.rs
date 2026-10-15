@@ -1,26 +1,7 @@
-//! yukinal-time — 时间戳的**唯一**实现。
-//!
-//! 这个 crate 存在的理由很具体：同一套「取当前秒数 → 转 ISO-8601 UTC」的逻辑
-//! 曾在四个地方各写了一遍 ——
-//!
-//! - `crates/core/src/sidecar.rs`：`iso8601_now` + `now_epoch_seconds` +
-//!   `iso8601_utc` + `civil_from_days`
-//! - `crates/core/src/collector.rs`：`now_epoch_seconds`
-//! - `crates/terminal/src/lib.rs`：`iso8601_now` + `iso8601_utc` + `civil_from_days`
-//! - `crates/collector/tests/live.rs`：内联的 `now_epoch_seconds`
-//!
-//! 其中 `crates/terminal/src/lib.rs` 那份旁边还留着一句注释：「与 core 侧同一套
-//! 日历算法（civil_from_days），保持所有时间戳格式一致」—— 作者知道自己在抄，
-//! 并把「保持一致」寄托在纪律上。这类纪律的失效方式是静默的：改了一处、忘了另一处，
-//! 于是同一份审计记录里出现两种时间格式。
-//!
-//! 为什么必须是独立 crate 而不是复用某个现有的：`crates/terminal` 依赖面刻意极窄
-//! （只有 `yukinal-ssh`），而 `crates/core` 在最上层。任何一方都不可能依赖另一方，
-//! 所以共享实现只能放在两者共同的**下层**。仓库里 `crates/filesystem` 只有一个文件，
-//! 说明为一件小事开一个 crate 是既有风格。
-//!
-//! 不引入 `chrono` / `time`：这里只需要一个显示用的字符串，为它拉进一个日期库
-//! 不值得（这也是原本 core 侧那句注释的意思）。
+//! Shared UTC timestamp parsing and formatting for the desktop host, database,
+//! and terminal event layer. Keeping this in one small crate prevents timestamps
+//! from drifting across those boundaries. The supported formats need no date-time
+//! framework dependency.
 
 #![forbid(unsafe_code)]
 
