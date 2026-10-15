@@ -10,3 +10,6 @@ allowBuilds:
 # Vite 8 currently resolves this exact @types/node release through its optional peer.
 minimumReleaseAgeExclude:
   - '@types/node@26.4.1'
+
+overrides:
+  source-map-js: 1.2.2

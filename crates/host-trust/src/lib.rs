@@ -347,9 +347,9 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
         // The rename already committed. Reporting this as a failed save would make the
         // caller roll its in-memory pin back while the file contains the new value.
-        tracing::warn!(
-            path = %parent.display(),
-            "known_hosts was replaced, but syncing its directory failed: {error}"
+        eprintln!(
+            "known_hosts was replaced, but syncing directory {} failed: {error}",
+            parent.display()
         );
     }
 

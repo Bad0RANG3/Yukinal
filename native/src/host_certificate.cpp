@@ -920,7 +920,11 @@ class SocksKrlHttpsClient final : public httplib::ClientImpl {
     if (context_) {
       SSL_CTX_set_min_proto_version(context_.get(), TLS1_2_VERSION);
       SSL_CTX_set_verify(context_.get(), SSL_VERIFY_PEER, nullptr);
-      if (SSL_CTX_set_default_verify_paths(context_.get()) != 1) context_.reset();
+      const char* ca_file = std::getenv("SSL_CERT_FILE");
+      const int loaded = ca_file && *ca_file
+          ? SSL_CTX_load_verify_locations(context_.get(), ca_file, nullptr)
+          : SSL_CTX_set_default_verify_paths(context_.get());
+      if (loaded != 1) context_.reset();
     }
   }
 
@@ -1252,6 +1256,9 @@ std::optional<std::string> load_host_revocation_list(
     if (!client.is_valid()) {
       if (error) *error = "could not create an HTTPS client for the host certificate KRL";
       return std::nullopt;
+    }
+    if (const char* ca_file = std::getenv("SSL_CERT_FILE"); ca_file && *ca_file) {
+      client.set_ca_cert_path(ca_file);
     }
     return perform_krl_http_request(client, *url, target, error);
   }
