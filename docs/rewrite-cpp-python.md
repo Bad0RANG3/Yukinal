@@ -7,10 +7,12 @@
 > existing UI. Tauri development and new package builds now select the Python
 > sidecar; installer resources contain Python Agent and C++ SSH assets only.
 > The desktop resolver has no legacy Node resource or runtime fallback; old Node paths below refer only to historical migration evidence.
-> Rust still
-> hosts native UI IPC, local trust-store updates, final approvals, and SSH
-> compatibility paths for configurations outside current C++ coverage: Host CA,
-> HTTPS proxies, unsupported proxy bypass rules, and other unsupported SSH modes.
+> Rust still hosts native UI IPC, local trust-store updates, final approvals, and
+> compatibility paths for configurations outside current C++ coverage. C++ verifies
+> configured OpenSSH host CAs and optional KRLs for supported CA algorithms; a CA is
+> itself a valid trust source and does not also require a leaf host-key pin. HTTPS
+> proxies, unsupported proxy bypass rules, unsupported CA algorithms, and other
+> unsupported SSH modes remain on the compatibility path.
 > Keyboard-interactive terminal prompts are forwarded by the C++ PTY worker to
 > the existing desktop prompt UI. Supported desktop
 > terminals use a dedicated C++ PTY child process. The Python sidecar can call the C++
@@ -18,13 +20,14 @@
 > logs, Docker inspection, systemd inspection, and package inspection through a
 > short-lived C++ process using the saved desktop target and identity. The desktop file browser and
 > manual transfers use C++ SFTP operations for password, private-key, OpenSSH user-certificate, and
-> SSH-agent identities on direct or supported HTTP CONNECT routes with a confirmed host-key pin and
-> without Host CA. The same identities use C++ for
+> SSH-agent identities on direct or supported HTTP CONNECT routes with either a
+> confirmed host-key pin or a supported host CA. The same identities use C++ for
 > structured SSH operations. Host-key probes use C++ on direct and supported HTTP
-> CONNECT routes; Host CA, unsupported proxy routes, or unsupported host-key formats use Rust. Manual transfers use
-> bounded C++ SFTP streams for supported direct or HTTP CONNECT targets with a confirmed host-key
-> pin and retain the Rust compatibility path for unsupported targets. PTY and
-> Host CA trust still use Rust where unsupported.
+> CONNECT routes when the selected trust mode is supported; CA-specific fingerprint
+> displays and unsupported proxy or host-key modes retain the Rust compatibility path.
+> Manual transfers use bounded C++ SFTP streams on supported direct or HTTP CONNECT
+> routes with either a confirmed pin or supported host CA. The Rust compatibility path
+> remains for unsupported targets.
 > Every C++ operation resolves its `target_id` through the service
 > allowlist. The C++ executable is included in desktop resources; when an
 > operator supplies `YUKINAL_SSH_SERVICE_CONFIG`, Python starts it, checks its
@@ -99,7 +102,8 @@ the desktop returns a target to Python, Rust checks the requested path and byte
 limit with the existing `AgentReadRequest` policy. Python parses `server.logs`,
 Docker list/log/inspect, `systemd.inspect`, and `package.inspect` output into the
 existing structured result shapes. Rust supplies the
-saved target, confirmed host-key pin, and credential material from the OS store;
+saved target, selected trust source (confirmed host-key pin or configured host CA),
+and credential material from the OS store;
 the Python process passes credentials only through the C++ child environment and
 cleans up its temporary configuration when the call ends. If Rust reports that
 the target route is unsupported or the local C++ process cannot start, the same
@@ -679,3 +683,8 @@ and confirmed key pins can now use the C++ path for certificate-backed hosts.
 This does not validate a host CA signature; that policy and KRL handling remain
 on the Rust compatibility route. C++ build and all six CTest targets passed,
 including the new host-key parser coverage.
+
+Later on 2026-10-15, C++ host CA signature and KRL verification moved into the
+service. Desktop routing now accepts a supported configured CA as the target's
+trust source without requiring a redundant leaf-key pin. Unsupported CA
+algorithms and proxy routes still use the compatibility path.

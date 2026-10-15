@@ -529,22 +529,20 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
         .servers()
         .get(server_id)
         .map_err(|error| error.to_string())?;
-    if let Some(authority) = server.connection.host_certificate_authority.as_ref() {
-        let algorithm = authority
-            .ca_public_key
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or_default();
-        if !matches!(
-            algorithm,
-            "ssh-ed25519"
-                | "ssh-rsa"
-                | "ecdsa-sha2-nistp256"
-                | "ecdsa-sha2-nistp384"
-                | "ecdsa-sha2-nistp521"
-        ) {
-            return Ok(false);
-        }
+    let host_ca_algorithm =
+        server
+            .connection
+            .host_certificate_authority
+            .as_ref()
+            .map(|authority| {
+                authority
+                    .ca_public_key
+                    .split_ascii_whitespace()
+                    .next()
+                    .unwrap_or_default()
+            });
+    if host_ca_algorithm.is_some_and(|algorithm| !cpp_supports_host_ca_algorithm(algorithm)) {
+        return Ok(false);
     }
     let Some(identity_id) = server.connection.identity_id.as_deref() else {
         return Ok(false);
@@ -572,11 +570,35 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
     if matches!(resolve_cpp_proxy_route(state)?, CppProxyRoute::Unsupported) {
         return Ok(false);
     }
+    if host_ca_algorithm.is_some() {
+        return Ok(cpp_has_supported_trust_source(host_ca_algorithm, false));
+    }
     let pin = state
         .ssh
         .host_key_pin(&server.connection.host, server.connection.port)
         .map_err(|error| error.to_string())?;
-    Ok(pin.is_some())
+    Ok(cpp_has_supported_trust_source(None, pin.is_some()))
+}
+
+fn cpp_supports_host_ca_algorithm(algorithm: &str) -> bool {
+    matches!(
+        algorithm,
+        "ssh-ed25519"
+            | "ssh-rsa"
+            | "ecdsa-sha2-nistp256"
+            | "ecdsa-sha2-nistp384"
+            | "ecdsa-sha2-nistp521"
+    )
+}
+
+fn cpp_has_supported_trust_source(
+    host_ca_algorithm: Option<&str>,
+    has_pinned_host_key: bool,
+) -> bool {
+    match host_ca_algorithm {
+        Some(algorithm) => cpp_supports_host_ca_algorithm(algorithm),
+        None => has_pinned_host_key,
+    }
 }
 
 /// Execute a host-authorized server.exec call with a one-shot C++ target config.
@@ -2316,7 +2338,8 @@ fn api_token() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cpp_proxy_route, decode_sftp_read_output, valid_host_key_fingerprint, CppProxyRoute,
+        CppProxyRoute, cpp_has_supported_trust_source, cpp_proxy_route, decode_sftp_read_output,
+        valid_host_key_fingerprint,
     };
     use yukinal_net::{NetworkProxy, OutboundProxy, ProxyCredential, ProxySource};
 
@@ -2401,5 +2424,18 @@ mod tests {
         assert!(!valid_host_key_fingerprint(
             "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         ));
+    }
+
+    #[test]
+    fn cpp_route_accepts_supported_ca_without_a_leaf_pin() {
+        assert!(cpp_has_supported_trust_source(Some("ssh-ed25519"), false));
+        assert!(cpp_has_supported_trust_source(Some("ssh-rsa"), false));
+        assert!(cpp_has_supported_trust_source(
+            Some("ecdsa-sha2-nistp256"),
+            false
+        ));
+        assert!(cpp_has_supported_trust_source(None, true));
+        assert!(!cpp_has_supported_trust_source(None, false));
+        assert!(!cpp_has_supported_trust_source(Some("ssh-dss"), true));
     }
 }
