@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "yukinal/policy.hpp"
+#include "host_key.hpp"
 
 namespace yukinal::ssh_service {
 namespace {
@@ -337,7 +338,7 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     require_object(entry, label);
     require_only_keys(entry,
                       {"target_id", "host", "port", "username", "known_hosts_file",
-                       "host_key_fingerprint", "auth", "probe_only", "proxy",
+                       "host_key_fingerprint", "host_certificate_authority", "auth", "probe_only", "proxy",
                        "allow_server_exec"},
                       label);
 
@@ -363,18 +364,43 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     }
     const bool has_known_hosts_file = entry.contains("known_hosts_file");
     const bool has_host_key_fingerprint = entry.contains("host_key_fingerprint");
+    const bool has_host_ca = entry.contains("host_certificate_authority");
     if (target.probe_only) {
-      if (has_known_hosts_file || has_host_key_fingerprint) {
+      if (has_known_hosts_file || has_host_key_fingerprint || has_host_ca) {
         throw std::runtime_error(label + " probe-only targets cannot configure host-key trust");
       }
-    } else if (has_known_hosts_file == has_host_key_fingerprint) {
+    } else if (static_cast<int>(has_known_hosts_file) + static_cast<int>(has_host_key_fingerprint) +
+                   static_cast<int>(has_host_ca) != 1) {
       throw std::runtime_error(label + " must contain exactly one host-key trust source");
     } else if (has_known_hosts_file) {
       target.known_hosts_file = resolve_path(required_string(entry, "known_hosts_file", label), base_directory);
-    } else if (!target.probe_only) {
+    } else if (has_host_key_fingerprint) {
       target.host_key_fingerprint = required_string(entry, "host_key_fingerprint", label);
       if (!valid_host_key_fingerprint(target.host_key_fingerprint)) {
         throw std::runtime_error(label + ".host_key_fingerprint must be a SHA256 host-key fingerprint");
+      }
+    } else if (has_host_ca) {
+      const Json& authority = entry["host_certificate_authority"];
+      require_object(authority, label + ".host_certificate_authority");
+      require_only_keys(authority, {"ca_public_key", "principals"}, label + ".host_certificate_authority");
+      target.host_ca_public_key = required_string(authority, "ca_public_key", label + ".host_certificate_authority");
+      if (!detail::valid_host_ca_public_key(target.host_ca_public_key)) {
+        throw std::runtime_error(label + ".host_certificate_authority.ca_public_key is not a supported OpenSSH public key");
+      }
+      const auto principals = authority.find("principals");
+      if (principals == authority.end() || !principals->is_array() || principals->empty() || principals->size() > 256) {
+        throw std::runtime_error(label + ".host_certificate_authority.principals must contain 1 to 256 patterns");
+      }
+      std::set<std::string> unique_principals;
+      for (const Json& principal : *principals) {
+        if (!principal.is_string()) {
+          throw std::runtime_error(label + ".host_certificate_authority.principals must contain strings");
+        }
+        const auto value = principal.get<std::string>();
+        if (value.empty() || value.size() > 253 || !unique_principals.insert(value).second) {
+          throw std::runtime_error(label + ".host_certificate_authority.principals contains an invalid pattern");
+        }
+        target.host_principals.push_back(value);
       }
     }
     if (!valid_target_id(target.target_id)) throw std::runtime_error(label + ".target_id is invalid");

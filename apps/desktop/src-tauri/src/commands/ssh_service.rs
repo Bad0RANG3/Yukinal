@@ -529,8 +529,28 @@ pub(crate) fn supports_cpp_target(state: &AppState, server_id: &str) -> Result<b
         .servers()
         .get(server_id)
         .map_err(|error| error.to_string())?;
-    if server.connection.host_certificate_authority.is_some() {
-        return Ok(false);
+    if let Some(authority) = server.connection.host_certificate_authority.as_ref() {
+        if authority.revocation_list_path.is_some()
+            || authority.revocation_list_url.is_some()
+            || !authority.revocation_list_signers.is_empty()
+        {
+            return Ok(false);
+        }
+        let algorithm = authority
+            .ca_public_key
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        if !matches!(
+            algorithm,
+            "ssh-ed25519"
+                | "ssh-rsa"
+                | "ecdsa-sha2-nistp256"
+                | "ecdsa-sha2-nistp384"
+                | "ecdsa-sha2-nistp521"
+        ) {
+            return Ok(false);
+        }
     }
     let Some(identity_id) = server.connection.identity_id.as_deref() else {
         return Ok(false);

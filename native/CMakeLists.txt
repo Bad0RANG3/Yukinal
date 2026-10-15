@@ -143,9 +143,11 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_library(yukinal_ssh_core
   src/config.cpp
+  src/host_certificate.cpp
   src/host_key.cpp
   src/policy.cpp
   src/ssh.cpp
@@ -159,14 +161,11 @@ else()
 endif()
 target_link_libraries(yukinal_ssh_core
   PUBLIC nlohmann_json::nlohmann_json
-  PRIVATE libssh2::libssh2 Threads::Threads
+  PRIVATE libssh2::libssh2 Threads::Threads OpenSSL::Crypto
 )
 if(WIN32)
   target_compile_definitions(yukinal_ssh_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(yukinal_ssh_core PRIVATE ws2_32 bcrypt)
-else()
-  find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-  target_link_libraries(yukinal_ssh_core PRIVATE OpenSSL::Crypto)
 endif()
 
 add_executable(yukinal-ssh-service src/main.cpp)
@@ -182,7 +181,7 @@ if(YUKINAL_BUILD_TESTS)
     tests/test_network.cpp
   )
   target_include_directories(yukinal_ssh_tests PRIVATE tests src)
-  target_link_libraries(yukinal_ssh_tests PRIVATE yukinal_ssh_core)
+  target_link_libraries(yukinal_ssh_tests PRIVATE yukinal_ssh_core OpenSSL::Crypto)
   add_test(NAME yukinal_ssh_tests COMMAND yukinal_ssh_tests)
 
   find_package(Python3 3.11 COMPONENTS Interpreter REQUIRED)

@@ -15,6 +15,8 @@ struct TargetConfig {
   std::string username;
   std::string known_hosts_file;
   std::string host_key_fingerprint;
+  std::string host_ca_public_key;
+  std::vector<std::string> host_principals;
   std::string private_key_file;
   std::string public_key_file;
   std::string private_key_env;

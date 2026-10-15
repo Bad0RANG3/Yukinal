@@ -684,7 +684,8 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
       ? detail::normalize_host_key_blob(std::string_view(host_key, host_key_length))
       : std::nullopt;
   const int known_key_type = material ? known_host_key_type(material->algorithm) : 0;
-  if (!material || (target.host_key_fingerprint.empty() && known_key_type == 0)) {
+  if (!material || (target.host_ca_public_key.empty() &&
+                    target.host_key_fingerprint.empty() && known_key_type == 0)) {
     fail(result, "host_key_unverified", "The SSH server presented an unsupported host key");
     return false;
   }
@@ -694,7 +695,20 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     fail(result, "host_key_unverified", "Could not fingerprint the SSH host key");
     return false;
   }
-  if (!target.host_key_fingerprint.empty()) {
+  if (!target.host_ca_public_key.empty()) {
+    if (!material->certificate) {
+      fail(result, "host_key_unverified",
+           "A host CA is configured, but the server presented a plain host key");
+      return false;
+    }
+    std::string certificate_error;
+    if (!detail::verify_host_certificate(std::string_view(host_key, host_key_length),
+            target.host_ca_public_key, target.host_principals, &certificate_error)) {
+      const std::string message = "The SSH host certificate could not be verified: " + certificate_error;
+      fail(result, "host_key_unverified", message.c_str());
+      return false;
+    }
+  } else if (!target.host_key_fingerprint.empty()) {
     if (fingerprint != target.host_key_fingerprint) {
       fail(result, "host_key_unverified", "The SSH host key differs from the configured fingerprint");
       return false;

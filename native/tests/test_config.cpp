@@ -103,6 +103,43 @@ YUKINAL_TEST(config_accepts_desktop_host_key_pin_and_memory_private_key) {
   YUKINAL_REQUIRE(parsed.private_key_env == "YK_SSH_KEY_0");
 }
 
+YUKINAL_TEST(config_accepts_host_certificate_authority_trust) {
+  auto value = valid_config();
+  auto& target = value["targets"][0];
+  target.erase("known_hosts_file");
+  target["host_certificate_authority"] = {
+      {"ca_public_key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test-ca"},
+      {"principals", json::array({"*.example.test", "api.internal"})}};
+  const auto config = parse_config(value);
+  const auto& parsed = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(parsed.host_ca_public_key.find("ssh-ed25519 ") == 0);
+  YUKINAL_REQUIRE(parsed.host_principals.size() == 2);
+  YUKINAL_REQUIRE(parsed.host_principals[0] == "*.example.test");
+}
+
+YUKINAL_TEST(config_rejects_ambiguous_or_invalid_host_certificate_authority_trust) {
+  auto value = valid_config();
+  value["targets"][0]["host_certificate_authority"] = {
+      {"ca_public_key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+      {"principals", json::array({"*.example.test"})}};
+  bool rejected = false;
+  try { (void)parse_config(value); } catch (const std::runtime_error&) { rejected = true; }
+  YUKINAL_REQUIRE(rejected);
+
+  value["targets"][0].erase("known_hosts_file");
+  value["targets"][0]["host_certificate_authority"]["ca_public_key"] = "not-an-openssh-key";
+  rejected = false;
+  try { (void)parse_config(value); } catch (const std::runtime_error&) { rejected = true; }
+  YUKINAL_REQUIRE(rejected);
+
+  value["targets"][0]["host_certificate_authority"]["ca_public_key"] =
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  value["targets"][0]["host_certificate_authority"]["principals"] = json::array({""});
+  rejected = false;
+  try { (void)parse_config(value); } catch (const std::runtime_error&) { rejected = true; }
+  YUKINAL_REQUIRE(rejected);
+}
+
 YUKINAL_TEST(config_accepts_public_certificate_with_memory_private_key) {
   auto value = valid_config();
   value["targets"][0]["auth"] = {

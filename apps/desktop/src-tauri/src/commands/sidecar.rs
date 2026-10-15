@@ -433,14 +433,28 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         .servers()
         .get(&request.server_id)
         .map_err(|_| "the selected SSH server is not available".to_string())?;
-    if server.connection.host_certificate_authority.is_some() {
-        return Err("C++ SSH service does not yet support host certificate authorities".into());
+    let authority = server.connection.host_certificate_authority.as_ref();
+    if authority.is_some_and(|authority| {
+        authority.revocation_list_path.is_some()
+            || authority.revocation_list_url.is_some()
+            || !authority.revocation_list_signers.is_empty()
+    }) {
+        return Err(
+            "the C++ SSH service does not yet support host certificate revocation settings"
+                .into(),
+        );
     }
-    let fingerprint = state
-        .ssh
-        .host_key_pin(&server.connection.host, server.connection.port)
-        .map_err(|_| "the selected server host-key pin could not be read".to_string())?
-        .ok_or_else(|| "the selected server has no confirmed host-key pin".to_string())?;
+    let fingerprint = if authority.is_none() {
+        Some(
+            state
+                .ssh
+                .host_key_pin(&server.connection.host, server.connection.port)
+                .map_err(|_| "the selected server host-key pin could not be read".to_string())?
+                .ok_or_else(|| "the selected server has no confirmed host-key pin".to_string())?,
+        )
+    } else {
+        None
+    };
     let proxy_route = super::ssh_service::resolve_cpp_proxy_route(state)?;
     if matches!(&proxy_route, super::ssh_service::CppProxyRoute::Unsupported) {
         return Err("the configured proxy route is not supported by the C++ SSH service".into());
@@ -561,9 +575,17 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
         "host": server.connection.host,
         "port": server.connection.port,
         "username": server.connection.username,
-        "host_key_fingerprint": fingerprint,
         "auth": auth,
     });
+    if let Some(fingerprint) = fingerprint {
+        target["host_key_fingerprint"] = json!(fingerprint);
+    }
+    if let Some(authority) = authority {
+        target["host_certificate_authority"] = json!({
+            "ca_public_key": authority.ca_public_key,
+            "principals": authority.principals,
+        });
+    }
     match proxy_route {
         super::ssh_service::CppProxyRoute::Direct => {}
         super::ssh_service::CppProxyRoute::HttpConnect {
