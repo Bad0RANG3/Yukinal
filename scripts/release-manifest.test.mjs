@@ -241,6 +241,17 @@ test("the cross-platform check gate builds and tests the C++ service and Python 
   assert.match(workflow, /pnpm check/);
 });
 
+test("the local check gate smokes the Python Agent sidecar over stdio", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const checkScript = await readFile(path.join(root, "scripts", "check.mjs"), "utf8");
+  const smokeScript = await readFile(path.join(root, "scripts", "smoke-python-dev-agent.mjs"), "utf8");
+
+  assert.match(checkScript, /Python Agent source sidecar smoke/);
+  assert.match(checkScript, /scripts\/smoke-python-dev-agent\.mjs/);
+  assert.match(smokeScript, /-m", "yukinal_agent\.sidecar/);
+  assert.match(smokeScript, /runSidecarSmoke\(python/);
+});
+
 test("installer-sensitive pull requests run the Windows lifecycle gate without packaging macOS or Linux", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");

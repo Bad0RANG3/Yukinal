@@ -7,7 +7,7 @@
  *   1. check repository hygiene, docs, and packaging contracts
  *   2. build the contract libs   (consumers import their dist/*.d.ts)
  *   3. typecheck and test every JavaScript workspace
- *   4. smoke the legacy Node protocol fixture and run configured C++/Python CTest targets
+ *   4. smoke the legacy Node fixture, Python Agent, and configured C++/Python CTest targets
  *   5. rust fmt + clippy + check, when a Rust toolchain is installed
  *
  * Exits non-zero on the first failure.
@@ -49,6 +49,7 @@ const steps = [
   { name: "unit tests", command: "pnpm", args: ["-r", "--if-present", "test"], required: true },
   { name: "desktop bundle (vite build)", command: "pnpm", args: ["--filter", "@yukinal/desktop", "build"], required: true },
   { name: "sidecar stdio smoke", command: process.execPath, args: ["scripts/smoke-sidecar.mjs"], required: true },
+  { name: "Python Agent source sidecar smoke", command: process.execPath, args: ["scripts/smoke-python-dev-agent.mjs"], required: true },
   {
     name: "C++ SSH service and Python Agent tests",
     command: "ctest",

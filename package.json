@@ -15,6 +15,7 @@
     "build:python-agent": "node scripts/build-python-agent.mjs",
     "build:ssh-service": "node scripts/build-ssh-service.mjs",
     "smoke:python-agent": "node scripts/smoke-python-agent.mjs",
+    "smoke:python-dev-agent": "node scripts/smoke-python-dev-agent.mjs",
     "test": "pnpm -r --if-present test && node --test scripts/lib/tauri-agent-command.test.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
     "package": "node scripts/package.mjs",
