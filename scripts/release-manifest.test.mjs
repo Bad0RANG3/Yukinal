@@ -214,7 +214,7 @@ test("Rust sidecar resolution uses the Python Agent without a Node fallback", as
   assert.doesNotMatch(source, /YUKINAL_NODE|YUKINAL_AGENT_ENTRY|packaged_entry|packaged_runtime|requires_node/);
   assert.ok(source.includes("is_python_agent: true"));
   assert.ok(source.includes("if self.is_python_agent"));
-  assert.ok(source.includes('resources.join("python-agent")'));
+  assert.ok(source.replace(/\s+/g, "").includes('resources.join("python-agent")'));
 });
 
 test("package build runs the generated NSIS policy check only on Windows", async () => {

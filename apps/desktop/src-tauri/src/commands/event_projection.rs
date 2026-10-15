@@ -76,10 +76,7 @@ pub(crate) fn forward_agent_frame(app: &AppHandle, frame: &Value) {
 
 fn without_host_input(params: &Value) -> Value {
     let mut projected = params.clone();
-    if let Some(approval) = projected
-        .get_mut("approval")
-        .and_then(Value::as_object_mut)
-    {
+    if let Some(approval) = projected.get_mut("approval").and_then(Value::as_object_mut) {
         approval.remove("hostInput");
     }
     projected

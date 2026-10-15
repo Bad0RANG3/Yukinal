@@ -522,7 +522,9 @@ fn server_exec_interruption(state: &'static str, duration_ms: u64) -> ServerExec
     }
 }
 
-pub(super) fn validate_server_exec_input(input: &ServerExecInput) -> std::result::Result<(), String> {
+pub(super) fn validate_server_exec_input(
+    input: &ServerExecInput,
+) -> std::result::Result<(), String> {
     if input.command.trim().is_empty()
         || input.command.chars().count() > SERVER_EXEC_MAX_COMMAND_CHARS
         || input.command.contains('\0')
@@ -786,7 +788,7 @@ pub(super) async fn server_info(
         },
         None => false,
     };
-    let (snapshot, _) = if cpp_supported {
+    let snapshot = if cpp_supported {
         let outputs = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(cancelled_failure()),
@@ -837,7 +839,7 @@ pub(super) async fn server_info(
                 &collected_at,
                 cancel,
             ) => match result {
-                Ok(snapshot) => snapshot,
+                Ok((snapshot, _samples)) => snapshot,
                 Err(error) => return Ok(transport_or_cancel(error, cancel)),
             },
         }
@@ -955,28 +957,33 @@ pub(super) async fn server_logs(
         };
         if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
             let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
-            let code = if code == "unsupported" { "unsupported" } else { "execution_failed" };
+            let code = if code == "unsupported" {
+                "unsupported"
+            } else {
+                "execution_failed"
+            };
             let message = normalized
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("server.logs returned an invalid response");
             return Ok(failed(code, message, false, None));
         }
-        let output = normalized.get("output").cloned().ok_or_else(|| {
-            "Python Agent returned no normalized server.logs output".to_string()
-        })?;
-        let parsed = match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output)
-        {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized server.logs output",
-                    false,
-                    None,
-                ));
-            }
-        };
+        let output = normalized
+            .get("output")
+            .cloned()
+            .ok_or_else(|| "Python Agent returned no normalized server.logs output".to_string())?;
+        let parsed =
+            match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    return Ok(failed(
+                        "execution_failed",
+                        "Python Agent returned invalid normalized server.logs output",
+                        false,
+                        None,
+                    ));
+                }
+            };
         return Ok(success(
             serde_json::to_value(parsed).map_err(|error| error.to_string())?,
         ));
@@ -1088,7 +1095,11 @@ pub(super) async fn server_services(
         };
         if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
             let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
-            let code = if code == "invalid_arguments" { "invalid_input" } else { "execution_failed" };
+            let code = if code == "invalid_arguments" {
+                "invalid_input"
+            } else {
+                "execution_failed"
+            };
             let message = normalized
                 .get("message")
                 .and_then(Value::as_str)
@@ -1098,10 +1109,9 @@ pub(super) async fn server_services(
         let output = normalized.get("output").cloned().ok_or_else(|| {
             "Python Agent returned no normalized server.services output".to_string()
         })?;
-        let parsed = match serde_json::from_value::<
-            crate::commands::services::ServerServicesResponse,
-        >(output)
-        {
+        let parsed = match serde_json::from_value::<crate::commands::services::ServerServicesResponse>(
+            output,
+        ) {
             Ok(parsed) => parsed,
             Err(_) => {
                 return Ok(failed(
@@ -1924,23 +1934,25 @@ pub(super) async fn docker_ps(
                 .unwrap_or("docker.ps returned an invalid response");
             return Ok(failed("execution_failed", message, false, None));
         }
-        let output = normalized.get("output").cloned().ok_or_else(|| {
-            "Python Agent returned no normalized docker.ps output".to_string()
-        })?;
-        let containers = match serde_json::from_value::<Vec<yukinal_database::models::ContainerInfo>>(
-            output,
-        ) {
-            Ok(containers) => containers,
-            Err(_) => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized docker.ps output",
-                    false,
-                    None,
-                ));
-            }
-        };
-        return Ok(success(json!({ "available": true, "containers": containers })));
+        let output = normalized
+            .get("output")
+            .cloned()
+            .ok_or_else(|| "Python Agent returned no normalized docker.ps output".to_string())?;
+        let containers =
+            match serde_json::from_value::<Vec<yukinal_database::models::ContainerInfo>>(output) {
+                Ok(containers) => containers,
+                Err(_) => {
+                    return Ok(failed(
+                        "execution_failed",
+                        "Python Agent returned invalid normalized docker.ps output",
+                        false,
+                        None,
+                    ));
+                }
+            };
+        return Ok(success(
+            json!({ "available": true, "containers": containers }),
+        ));
     }
     Ok(success(json!({
         "available": true,
@@ -2070,9 +2082,10 @@ pub(super) async fn docker_logs(
                 .unwrap_or("docker.logs returned an invalid response");
             return Ok(failed("execution_failed", message, false, None));
         }
-        let output = normalized.get("output").cloned().ok_or_else(|| {
-            "Python Agent returned no normalized docker.logs output".to_string()
-        })?;
+        let output = normalized
+            .get("output")
+            .cloned()
+            .ok_or_else(|| "Python Agent returned no normalized docker.logs output".to_string())?;
         let parsed = match serde_json::from_value::<DockerLogsResult>(output) {
             Ok(parsed) if parsed.container == input.container => parsed,
             _ => {
@@ -2214,19 +2227,18 @@ pub(super) async fn docker_inspect(
         let output = normalized.get("output").cloned().ok_or_else(|| {
             "Python Agent returned no normalized docker.inspect output".to_string()
         })?;
-        let inspected = match serde_json::from_value::<yukinal_core::docker::DockerInspectResult>(
-            output,
-        ) {
-            Ok(inspected) => inspected,
-            Err(_) => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized docker.inspect output",
-                    false,
-                    None,
-                ));
-            }
-        };
+        let inspected =
+            match serde_json::from_value::<yukinal_core::docker::DockerInspectResult>(output) {
+                Ok(inspected) => inspected,
+                Err(_) => {
+                    return Ok(failed(
+                        "execution_failed",
+                        "Python Agent returned invalid normalized docker.inspect output",
+                        false,
+                        None,
+                    ));
+                }
+            };
         return Ok(success(
             serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         ));
@@ -2455,20 +2467,18 @@ pub(super) async fn systemd_inspect(
         let output = normalized.get("output").cloned().ok_or_else(|| {
             "Python Agent returned no normalized systemd.inspect output".to_string()
         })?;
-        let inspected = match serde_json::from_value::<
-            yukinal_core::service::SystemdInspectResult,
-        >(output)
-        {
-            Ok(inspected) if inspected.service == input.service => inspected,
-            _ => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized systemd.inspect output",
-                    false,
-                    None,
-                ));
-            }
-        };
+        let inspected =
+            match serde_json::from_value::<yukinal_core::service::SystemdInspectResult>(output) {
+                Ok(inspected) if inspected.service == input.service => inspected,
+                _ => {
+                    return Ok(failed(
+                        "execution_failed",
+                        "Python Agent returned invalid normalized systemd.inspect output",
+                        false,
+                        None,
+                    ));
+                }
+            };
         return Ok(success(
             serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         ));
@@ -2704,7 +2714,11 @@ pub(super) async fn package_inspect(
         };
         if normalized.get("ok").and_then(Value::as_bool) != Some(true) {
             let code = normalized.get("code").and_then(Value::as_str).unwrap_or("");
-            let mapped_code = if code == "unsupported" { "unsupported" } else { "execution_failed" };
+            let mapped_code = if code == "unsupported" {
+                "unsupported"
+            } else {
+                "execution_failed"
+            };
             let message = normalized
                 .get("message")
                 .and_then(Value::as_str)
@@ -2714,24 +2728,22 @@ pub(super) async fn package_inspect(
         let output = normalized.get("output").cloned().ok_or_else(|| {
             "Python Agent returned no normalized package.inspect output".to_string()
         })?;
-        let inspected = match serde_json::from_value::<
-            yukinal_core::package::PackageInspectResult,
-        >(output)
-        {
-            Ok(inspected)
-                if inspected.manager == input.manager && inspected.package == input.package =>
-            {
-                inspected
-            }
-            _ => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized package.inspect output",
-                    false,
-                    None,
-                ));
-            }
-        };
+        let inspected =
+            match serde_json::from_value::<yukinal_core::package::PackageInspectResult>(output) {
+                Ok(inspected)
+                    if inspected.manager == input.manager && inspected.package == input.package =>
+                {
+                    inspected
+                }
+                _ => {
+                    return Ok(failed(
+                        "execution_failed",
+                        "Python Agent returned invalid normalized package.inspect output",
+                        false,
+                        None,
+                    ));
+                }
+            };
         return Ok(success(
             serde_json::to_value(inspected).map_err(|error| error.to_string())?,
         ));

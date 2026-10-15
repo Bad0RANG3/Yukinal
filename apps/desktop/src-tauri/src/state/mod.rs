@@ -27,8 +27,8 @@ pub(crate) mod host_key;
 mod oauth;
 
 pub(crate) use approval::{
-    is_host_approval_tool_name, HostApprovalLedger, HostActionExecutionBinding,
-    HostActionTicketError,
+    is_host_approval_tool_name, HostActionExecutionBinding, HostActionTicketError,
+    HostApprovalLedger,
 };
 pub use auth::AuthChallengeBroker;
 pub use host_key::HostKeyProbeBroker;

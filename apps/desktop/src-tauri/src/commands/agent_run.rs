@@ -759,10 +759,12 @@ pub(crate) async fn start_agent_run(
                 .database
                 .investigations()
                 .latest_plan(task_id)
-                .map_err(|error| format!("failed to read the current investigation plan: {error}"))?;
-            if let Some(plan) = plan.filter(|plan| {
-                plan.status == yukinal_database::models::PlanStatus::Active
-            }) {
+                .map_err(|error| {
+                    format!("failed to read the current investigation plan: {error}")
+                })?;
+            if let Some(plan) =
+                plan.filter(|plan| plan.status == yukinal_database::models::PlanStatus::Active)
+            {
                 if let Some(step) = plan
                     .current_step_id
                     .as_deref()

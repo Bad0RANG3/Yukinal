@@ -619,12 +619,12 @@ six CTest targets passed, including the SSH mock replay check and Agent-to-C++
 integration. The initial build failure was only caused by the shell not loading
 the MSVC environment; no project or build configuration change was needed. A
 repo-wide `pnpm check` passed publication/secret checks, Node command and
-packaging tests, documentation links, contract builds, typechecks, and the
-packaging contract, then stopped before JavaScript tests because Node 26.5.1
-threw `uv_os_get_passwd returned ENOMEM` from `os.userInfo()` inside `tsx`.
-The independent CTest run above passed; the full gate's later Python sidecar
-smoke was not reached. Cargo is not on `PATH`, so Rust formatting, lint, and
-workspace checks remain unavailable in this environment.
+packaging tests, documentation links, contract builds, typechecks, 278 Agent
+tests, the desktop production bundle, Python sidecar smoke, and all six CTest
+targets. In the restricted shell Node 26.5.1 throws
+`uv_os_get_passwd returned ENOMEM` from `os.userInfo()` inside `tsx`; rerunning
+the gate under the normal user context passed. Rust formatting, lint, Cargo
+check, and Rust-to-sidecar tests were skipped because Cargo is not on `PATH`.
 
 ## Deliberately deferred
 
@@ -649,3 +649,16 @@ integration remain unverified because Cargo and rustc are unavailable in this
 environment.
 Do not mark later product requirements as delivered by the scaffold or
 documentation.
+
+On 2026-10-15, the Rust toolchain and MSVC environment were loaded explicitly.
+`cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, and
+`cargo clippy --workspace --all-targets -- -D warnings` passed. The focused
+sidecar PID handshake test passed. The durable Rust-to-Python Agent integration
+test was then run with its required environment and exposed a later-stage gap:
+the Python runtime does not register `investigation.plan`, so a durable run
+fails before reaching its read-only host tool. Its loopback model fixture now
+uses the non-streaming OpenAI-compatible JSON response expected by the Python
+`ainvoke` path. This Agent workflow gap is outside the brief's first SSH
+foundation stage and remains explicitly unverified; it is not counted as a
+passing integration test. The C++ build and all six CTest targets passed after
+loading the installed Visual Studio environment.

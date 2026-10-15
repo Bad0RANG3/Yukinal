@@ -557,13 +557,13 @@ pub(super) fn resolve_ssh_service_target(state: &AppState, params: Value) -> Res
     };
 
     let mut target = json!({
-            "target_id": server.id,
-            "host": server.connection.host,
-            "port": server.connection.port,
-            "username": server.connection.username,
-            "host_key_fingerprint": fingerprint,
-            "auth": auth,
-        });
+        "target_id": server.id,
+        "host": server.connection.host,
+        "port": server.connection.port,
+        "username": server.connection.username,
+        "host_key_fingerprint": fingerprint,
+        "auth": auth,
+    });
     match proxy_route {
         super::ssh_service::CppProxyRoute::Direct => {}
         super::ssh_service::CppProxyRoute::HttpConnect {
@@ -604,8 +604,7 @@ pub(super) fn resolve_ssh_service_filesystem_read_target(
     let request: SshServiceFilesystemReadTargetRequest = serde_json::from_value(params)
         .map_err(|_| "the SSH filesystem read target request is invalid".to_string())?;
     let (path, max_bytes) = checked_agent_filesystem_read(&request.path, request.max_bytes)?;
-    let mut payload =
-        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    let mut payload = resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
     payload["filesystemRead"] = json!({ "path": path, "maxBytes": max_bytes });
     Ok(payload)
 }
@@ -618,10 +617,8 @@ pub(super) fn resolve_ssh_service_filesystem_write_target(
     let request: SshServiceFilesystemWriteTargetRequest = serde_json::from_value(params)
         .map_err(|_| "the SSH filesystem write target request is invalid".to_string())?;
     let bytes_written = request.content.len();
-    AgentWriteRequest::check(&request.path, request.content)
-        .map_err(|error| error.to_string())?;
-    let mut payload =
-        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    AgentWriteRequest::check(&request.path, request.content).map_err(|error| error.to_string())?;
+    let mut payload = resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
     payload["filesystemWrite"] = json!({
         "path": request.path,
         "bytesWritten": bytes_written,
@@ -643,8 +640,7 @@ pub(super) fn resolve_ssh_service_filesystem_edit_target(
         request.new_string.clone(),
     )
     .map_err(|error| error.to_string())?;
-    let mut payload =
-        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    let mut payload = resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
     payload["filesystemEdit"] = json!({
         "path": request.path,
         "expectedRevision": request.expected_revision,
@@ -681,13 +677,15 @@ pub(super) fn resolve_ssh_service_filesystem_restore_target(
     )
     .map_err(|error| error.to_string())?;
     if request.revision.len() != 64
-        || !request.revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !request
+            .revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
         || request.bytes_backed_up > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
     {
         return Err("the SSH filesystem restore backup metadata is invalid".into());
     }
-    let mut payload =
-        resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
+    let mut payload = resolve_ssh_service_target(state, json!({ "serverId": request.server_id }))?;
     payload["filesystemRestore"] = json!({
         "path": request.path,
         "backupPath": request.backup_path,
@@ -703,7 +701,10 @@ fn checked_agent_filesystem_read(
     max_bytes: Option<usize>,
 ) -> Result<(String, usize), String> {
     AgentReadRequest::check(path, max_bytes).map_err(|error| error.to_string())?;
-    Ok((path.to_string(), max_bytes.unwrap_or(DEFAULT_AGENT_READ_BYTES)))
+    Ok((
+        path.to_string(),
+        max_bytes.unwrap_or(DEFAULT_AGENT_READ_BYTES),
+    ))
 }
 
 /// Resolve a single endpoint into a target that can perform only a host-key handshake.
@@ -735,13 +736,13 @@ pub(super) fn resolve_ssh_service_probe_target(
     }
 
     let mut target = json!({
-            "target_id": server.id,
-            "host": server.connection.host,
-            "port": server.connection.port,
-            "username": "ssh_probe",
-            "probe_only": true,
-            "auth": { "type": "probe" },
-        });
+        "target_id": server.id,
+        "host": server.connection.host,
+        "port": server.connection.port,
+        "username": "ssh_probe",
+        "probe_only": true,
+        "auth": { "type": "probe" },
+    });
     let mut credentials = serde_json::Map::new();
     match proxy_route {
         super::ssh_service::CppProxyRoute::Direct => {}
@@ -792,31 +793,6 @@ fn read_ssh_secret(
         ));
     }
     Ok(value)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::checked_agent_filesystem_read;
-    use yukinal_filesystem::DEFAULT_AGENT_READ_BYTES;
-
-    #[test]
-    fn cpp_file_read_binding_uses_the_validated_default_and_limit() {
-        assert_eq!(
-            checked_agent_filesystem_read("/etc/hosts", None).expect("default read is valid"),
-            ("/etc/hosts".to_string(), DEFAULT_AGENT_READ_BYTES)
-        );
-        assert_eq!(
-            checked_agent_filesystem_read("/etc/hosts", Some(64)).expect("bounded read is valid"),
-            ("/etc/hosts".to_string(), 64)
-        );
-    }
-
-    #[test]
-    fn cpp_file_read_binding_rejects_blocked_paths_and_oversized_limits() {
-        assert!(checked_agent_filesystem_read("/home/deploy/.ssh/id_rsa", None).is_err());
-        assert!(checked_agent_filesystem_read("relative/path", None).is_err());
-        assert!(checked_agent_filesystem_read("/etc/hosts", Some(1_048_577)).is_err());
-    }
 }
 
 /// One task per launched sidecar: keeps stderr visible and maps sidecar notifications
@@ -935,4 +911,29 @@ pub(crate) fn forward_sidecar_events(app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_agent_filesystem_read;
+    use yukinal_filesystem::DEFAULT_AGENT_READ_BYTES;
+
+    #[test]
+    fn cpp_file_read_binding_uses_the_validated_default_and_limit() {
+        assert_eq!(
+            checked_agent_filesystem_read("/etc/hosts", None).expect("default read is valid"),
+            ("/etc/hosts".to_string(), DEFAULT_AGENT_READ_BYTES)
+        );
+        assert_eq!(
+            checked_agent_filesystem_read("/etc/hosts", Some(64)).expect("bounded read is valid"),
+            ("/etc/hosts".to_string(), 64)
+        );
+    }
+
+    #[test]
+    fn cpp_file_read_binding_rejects_blocked_paths_and_oversized_limits() {
+        assert!(checked_agent_filesystem_read("/home/deploy/.ssh/id_rsa", None).is_err());
+        assert!(checked_agent_filesystem_read("relative/path", None).is_err());
+        assert!(checked_agent_filesystem_read("/etc/hosts", Some(1_048_577)).is_err());
+    }
 }

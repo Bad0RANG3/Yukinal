@@ -1407,9 +1407,7 @@ async fn handle_sidecar_request_with_context(
         return crate::commands::sidecar::resolve_ssh_service_target(state, params);
     }
     if method == HOST_SSH_FILESYSTEM_READ_TARGET {
-        return crate::commands::sidecar::resolve_ssh_service_filesystem_read_target(
-            state, params,
-        );
+        return crate::commands::sidecar::resolve_ssh_service_filesystem_read_target(state, params);
     }
     if method == HOST_SSH_FILESYSTEM_WRITE_TARGET {
         return resolve_ssh_filesystem_write_target(state, params);
@@ -1633,18 +1631,34 @@ async fn handle_sidecar_request_with_context(
             SERVER_INFO => server_info(app, state, server_id, &request.input, &cancel).await,
             SERVER_EXEC => server_exec(app, state, server_id, &request, &cancel).await,
             SERVER_LOGS => server_logs(app, state, server_id, &request.input, &cancel).await,
-            SERVER_SERVICES => server_services(app, state, server_id, &request.input, &cancel).await,
+            SERVER_SERVICES => {
+                server_services(app, state, server_id, &request.input, &cancel).await
+            }
             DOCKER_PS => docker_ps(app, state, server_id, &request.input, &cancel).await,
             DOCKER_LOGS => docker_logs(app, state, server_id, &request.input, &cancel).await,
             DOCKER_INSPECT => docker_inspect(app, state, server_id, &request.input, &cancel).await,
             DOCKER_RESTART => docker_restart(app, state, server_id, &request.input, &cancel).await,
-            SYSTEMD_INSPECT => systemd_inspect(app, state, server_id, &request.input, &cancel).await,
-            SYSTEMD_RESTART => systemd_restart(app, state, server_id, &request.input, &cancel).await,
-            PACKAGE_INSPECT => package_inspect(app, state, server_id, &request.input, &cancel).await,
-            PACKAGE_INSTALL => package_install(app, state, server_id, &request.input, &cancel).await,
-            FILESYSTEM_READ => filesystem_read(app, state, server_id, &request.input, &cancel).await,
-            FILESYSTEM_WRITE => filesystem_write(app, state, server_id, &request.input, &cancel).await,
-            FILESYSTEM_EDIT => filesystem_edit(app, state, server_id, &request.input, &cancel).await,
+            SYSTEMD_INSPECT => {
+                systemd_inspect(app, state, server_id, &request.input, &cancel).await
+            }
+            SYSTEMD_RESTART => {
+                systemd_restart(app, state, server_id, &request.input, &cancel).await
+            }
+            PACKAGE_INSPECT => {
+                package_inspect(app, state, server_id, &request.input, &cancel).await
+            }
+            PACKAGE_INSTALL => {
+                package_install(app, state, server_id, &request.input, &cancel).await
+            }
+            FILESYSTEM_READ => {
+                filesystem_read(app, state, server_id, &request.input, &cancel).await
+            }
+            FILESYSTEM_WRITE => {
+                filesystem_write(app, state, server_id, &request.input, &cancel).await
+            }
+            FILESYSTEM_EDIT => {
+                filesystem_edit(app, state, server_id, &request.input, &cancel).await
+            }
             FILESYSTEM_BACKUP => {
                 filesystem_backup(app, state, server_id, &request.input, &cancel, &request).await
             }
@@ -1675,10 +1689,7 @@ fn record_failure(code: &str, message: impl Into<String>, retryable: bool) -> Va
 }
 
 /// Resolve one C++ credential context only for an exact, currently authorized planned file write.
-fn resolve_ssh_filesystem_write_target(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn resolve_ssh_filesystem_write_target(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostSshFilesystemWriteTargetRequest>(params)
         .map_err(|_| "the SSH filesystem write target request is invalid".to_string())?;
     let input = json!({
@@ -1687,14 +1698,16 @@ fn resolve_ssh_filesystem_write_target(
     });
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_WRITE,
-        &input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_WRITE,
+            input: &input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     crate::commands::sidecar::resolve_ssh_service_filesystem_write_target(
         state,
@@ -1706,10 +1719,7 @@ fn resolve_ssh_filesystem_write_target(
     )
 }
 
-fn resolve_ssh_filesystem_edit_target(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn resolve_ssh_filesystem_edit_target(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostSshFilesystemEditTargetRequest>(params)
         .map_err(|_| "the SSH filesystem edit target request is invalid".to_string())?;
     AgentEditRequest::check(
@@ -1727,14 +1737,16 @@ fn resolve_ssh_filesystem_edit_target(
     });
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_EDIT,
-        &input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_EDIT,
+            input: &input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     crate::commands::sidecar::resolve_ssh_service_filesystem_edit_target(
         state,
@@ -1748,30 +1760,29 @@ fn resolve_ssh_filesystem_edit_target(
     )
 }
 
-fn resolve_ssh_filesystem_backup_target(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn resolve_ssh_filesystem_backup_target(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostSshFilesystemBackupTargetRequest>(params)
         .map_err(|_| "the SSH filesystem backup target request is invalid".to_string())?;
     let path = request.path;
     let input = json!({ "path": path.clone() });
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_BACKUP,
-        &input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_BACKUP,
+            input: &input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     let token = tools::backup_token();
     yukinal_filesystem::AgentBackupRequest::check(&path, &token)
         .map_err(|error| error.to_string())?;
-    let backup_path = yukinal_filesystem::backup_path_for(&path, &token)
-        .map_err(|error| error.to_string())?;
+    let backup_path =
+        yukinal_filesystem::backup_path_for(&path, &token).map_err(|error| error.to_string())?;
     crate::commands::sidecar::resolve_ssh_service_filesystem_backup_target(
         state,
         json!({
@@ -1782,10 +1793,7 @@ fn resolve_ssh_filesystem_backup_target(
     )
 }
 
-fn register_ssh_filesystem_backup(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn register_ssh_filesystem_backup(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostFilesystemBackupRegisterRequest>(params)
         .map_err(|_| "the filesystem backup registration request is invalid".to_string())?;
     if request.bytes_backed_up > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES {
@@ -1809,14 +1817,16 @@ fn register_ssh_filesystem_backup(
     let input = json!({ "path": request.path.clone() });
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_BACKUP,
-        &input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_BACKUP,
+            input: &input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     let now = yukinal_core::sidecar::iso8601_now();
     let record = FilesystemBackupRecord {
@@ -1830,8 +1840,9 @@ fn register_ssh_filesystem_backup(
         path: request.path,
         backup_path: request.backup_path.clone(),
         revision: request.revision,
-        bytes_backed_up: i64::try_from(request.bytes_backed_up)
-            .map_err(|_| "filesystem backup byte count exceeds the host ledger range".to_string())?,
+        bytes_backed_up: i64::try_from(request.bytes_backed_up).map_err(|_| {
+            "filesystem backup byte count exceeds the host ledger range".to_string()
+        })?,
         status: FilesystemBackupStatus::Available,
         created_at: now.clone(),
         updated_at: now,
@@ -1848,10 +1859,7 @@ fn register_ssh_filesystem_backup(
     Ok(json!({ "registered": true, "backupPath": record.backup_path }))
 }
 
-fn resolve_ssh_filesystem_restore_target(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn resolve_ssh_filesystem_restore_target(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostSshFilesystemRestoreTargetRequest>(params)
         .map_err(|_| "the SSH filesystem restore target request is invalid".to_string())?;
     yukinal_filesystem::AgentRestoreRequest::check(
@@ -1867,14 +1875,16 @@ fn resolve_ssh_filesystem_restore_target(
     });
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_RESTORE,
-        &input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_RESTORE,
+            input: &input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     let backup = state
         .database
@@ -1883,7 +1893,9 @@ fn resolve_ssh_filesystem_restore_target(
         .map_err(|_| "could not read the filesystem backup ledger".to_string())?
         .ok_or_else(|| "filesystem.restore requires an available host-owned backup".to_string())?;
     if backup.task_id.as_deref() != Some(request.task_id.as_str()) {
-        return Err("filesystem.restore cannot use a backup owned by another investigation task".into());
+        return Err(
+            "filesystem.restore cannot use a backup owned by another investigation task".into(),
+        );
     }
     if backup.bytes_backed_up > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES as i64 {
         return Err("filesystem backup exceeds the host restore limit".into());
@@ -1948,14 +1960,18 @@ fn validate_filesystem_backup_query_scope(
             ));
         }
     }
-    let task = state.database.investigations().get_task(task_id).map_err(|_| {
-        failed(
-            "not_found",
-            "the durable investigation task was not found",
-            false,
-            None,
-        )
-    })?;
+    let task = state
+        .database
+        .investigations()
+        .get_task(task_id)
+        .map_err(|_| {
+            failed(
+                "not_found",
+                "the durable investigation task was not found",
+                false,
+                None,
+            )
+        })?;
     if task.server_id.as_deref() != Some(server_id) {
         return Err(failed(
             "denied_by_policy",
@@ -2124,17 +2140,18 @@ async fn query_ssh_filesystem_backup_list(
             None,
         ));
     }
-    let token = match prepare_filesystem_backup_query_call(
-        state,
-        &tool_call,
-        FILESYSTEM_BACKUP_LIST,
-    )
-    .await?
-    {
-        HostToolCallDecision::Respond(response) => return Ok(response),
-        HostToolCallDecision::Execute(token) => token,
-    };
-    let server_id = tool_call.target.server_id.as_deref().expect("validated server id");
+    let token =
+        match prepare_filesystem_backup_query_call(state, &tool_call, FILESYSTEM_BACKUP_LIST)
+            .await?
+        {
+            HostToolCallDecision::Respond(response) => return Ok(response),
+            HostToolCallDecision::Execute(token) => token,
+        };
+    let server_id = tool_call
+        .target
+        .server_id
+        .as_deref()
+        .expect("validated server id");
     let task_id = tool_call.task_id.as_deref().expect("validated task id");
     let response = match state.database.filesystem_backups().list_for_task(
         server_id,
@@ -2172,19 +2189,18 @@ async fn scan_ssh_filesystem_backups_for_retention(
             None,
         ));
     }
-    let input = match serde_json::from_value::<FilesystemBackupRetentionInput>(
-        tool_call.input.clone(),
-    ) {
-        Ok(input) => input,
-        Err(_) => {
-            return Ok(failed(
-                "invalid_input",
-                "filesystem.backup.retention input is invalid",
-                false,
-                None,
-            ));
-        }
-    };
+    let input =
+        match serde_json::from_value::<FilesystemBackupRetentionInput>(tool_call.input.clone()) {
+            Ok(input) => input,
+            Err(_) => {
+                return Ok(failed(
+                    "invalid_input",
+                    "filesystem.backup.retention input is invalid",
+                    false,
+                    None,
+                ));
+            }
+        };
     if input.keep_latest.is_none() && input.older_than_days.is_none() {
         return Ok(failed(
             "invalid_input",
@@ -2193,7 +2209,10 @@ async fn scan_ssh_filesystem_backups_for_retention(
             None,
         ));
     }
-    if input.keep_latest.is_some_and(|keep| !(1..=64).contains(&keep)) {
+    if input
+        .keep_latest
+        .is_some_and(|keep| !(1..=64).contains(&keep))
+    {
         return Ok(failed(
             "invalid_input",
             "filesystem.backup.retention keepLatest must be between 1 and 64",
@@ -2217,25 +2236,22 @@ async fn scan_ssh_filesystem_backups_for_retention(
             return Ok(failed("invalid_input", error, false, None));
         }
     }
-    let token = match prepare_filesystem_backup_query_call(
-        state,
-        &tool_call,
-        FILESYSTEM_BACKUP_RETENTION,
-    )
-    .await?
-    {
-        HostToolCallDecision::Respond(response) => return Ok(response),
-        HostToolCallDecision::Execute(token) => token,
-    };
-    let server_id = tool_call.target.server_id.as_deref().expect("validated server id");
+    let token =
+        match prepare_filesystem_backup_query_call(state, &tool_call, FILESYSTEM_BACKUP_RETENTION)
+            .await?
+        {
+            HostToolCallDecision::Respond(response) => return Ok(response),
+            HostToolCallDecision::Execute(token) => token,
+        };
+    let server_id = tool_call
+        .target
+        .server_id
+        .as_deref()
+        .expect("validated server id");
     let response = match state
         .database
         .filesystem_backups()
-        .list_available_for_server_with_path_prefix(
-            server_id,
-            input.path_prefix.as_deref(),
-            512,
-        )
+        .list_available_for_server_with_path_prefix(server_id, input.path_prefix.as_deref(), 512)
     {
         Ok((records, scan_truncated)) => {
             let records = records
@@ -2277,7 +2293,12 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
         SYSTEMD_RESTART => {
             let input = serde_json::from_value::<SystemdRestartInput>(tool_call.input.clone())
                 .map_err(|_| {
-                    failed("invalid_input", "systemd.restart input is invalid", false, None)
+                    failed(
+                        "invalid_input",
+                        "systemd.restart input is invalid",
+                        false,
+                        None,
+                    )
                 })?;
             if !is_safe_systemd_service_ref(&input.service) {
                 return Err(failed(
@@ -2303,7 +2324,12 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
         DOCKER_RESTART => {
             let input = serde_json::from_value::<DockerRestartInput>(tool_call.input.clone())
                 .map_err(|_| {
-                    failed("invalid_input", "docker.restart input is invalid", false, None)
+                    failed(
+                        "invalid_input",
+                        "docker.restart input is invalid",
+                        false,
+                        None,
+                    )
                 })?;
             if !is_safe_container_ref(&input.container) {
                 return Err(failed(
@@ -2327,13 +2353,16 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
         PACKAGE_INSTALL => {
             let input = serde_json::from_value::<PackageInstallInput>(tool_call.input.clone())
                 .map_err(|_| {
-                    failed("invalid_input", "package.install input is invalid", false, None)
+                    failed(
+                        "invalid_input",
+                        "package.install input is invalid",
+                        false,
+                        None,
+                    )
                 })?;
-            if let Err(message) = package_install_command(
-                &input.manager,
-                &input.package,
-                input.version.as_deref(),
-            ) {
+            if let Err(message) =
+                package_install_command(&input.manager, &input.package, input.version.as_deref())
+            {
                 return Err(failed("invalid_input", message, false, None));
             }
             let timeout = input
@@ -2351,7 +2380,9 @@ fn validate_ssh_effectful_action_input(tool_call: &HostToolExecuteRequest) -> Re
         }
         SERVER_EXEC => {
             let input = serde_json::from_value::<ServerExecInput>(tool_call.input.clone())
-                .map_err(|_| failed("invalid_input", "server.exec input is invalid", false, None))?;
+                .map_err(|_| {
+                    failed("invalid_input", "server.exec input is invalid", false, None)
+                })?;
             if let Err(message) = validate_server_exec_input(&input) {
                 return Err(failed("invalid_input", message, false, None));
             }
@@ -2414,9 +2445,7 @@ async fn resolve_ssh_effectful_action_target(
         ));
     }
     if !tool_call.run_id.as_deref().is_some_and(|run_id| {
-        !run_id.trim().is_empty()
-            && run_id.len() <= 256
-            && !run_id.chars().any(char::is_control)
+        !run_id.trim().is_empty() && run_id.len() <= 256 && !run_id.chars().any(char::is_control)
     }) {
         return Ok(failed(
             "invalid_input",
@@ -2435,7 +2464,14 @@ async fn resolve_ssh_effectful_action_target(
     }
     let server = match state.database.servers().get(server_id) {
         Ok(server) => server,
-        Err(_) => return Ok(failed("not_found", "the selected server was not found", false, None)),
+        Err(_) => {
+            return Ok(failed(
+                "not_found",
+                "the selected server was not found",
+                false,
+                None,
+            ))
+        }
     };
     if server.metadata.environment != tool_call.target.environment {
         return Ok(failed(
@@ -2547,7 +2583,9 @@ async fn resolve_ssh_effectful_action_target(
             if response.get("status").and_then(Value::as_str) == Some("success") {
                 if tool_name == SERVER_EXEC {
                     let input = serde_json::from_value::<ServerExecInput>(tool_call.input.clone())
-                        .map_err(|_| "server.exec input became invalid during replay".to_string())?;
+                        .map_err(|_| {
+                            "server.exec input became invalid during replay".to_string()
+                        })?;
                     let Some(output) = response.get("output") else {
                         return Ok(failed(
                             "invalid_response",
@@ -2654,32 +2692,37 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
     }
     let (output, server_exec_exit_code) = match request.tool_call.tool_name.as_str() {
         SYSTEMD_RESTART => {
-            let input = serde_json::from_value::<SystemdRestartInput>(
-                request.tool_call.input.clone(),
+            let input =
+                serde_json::from_value::<SystemdRestartInput>(request.tool_call.input.clone())
+                    .map_err(|_| "systemd.restart completion input is invalid".to_string())?;
+            (
+                Some(json!({ "service": input.service, "restarted": true })),
+                None,
             )
-                .map_err(|_| "systemd.restart completion input is invalid".to_string())?;
-            (Some(json!({ "service": input.service, "restarted": true })), None)
         }
         DOCKER_RESTART => {
-            let input = serde_json::from_value::<DockerRestartInput>(
-                request.tool_call.input.clone(),
+            let input =
+                serde_json::from_value::<DockerRestartInput>(request.tool_call.input.clone())
+                    .map_err(|_| "docker.restart completion input is invalid".to_string())?;
+            (
+                Some(json!({ "container": input.container, "restarted": true })),
+                None,
             )
-                .map_err(|_| "docker.restart completion input is invalid".to_string())?;
-            (Some(json!({ "container": input.container, "restarted": true })), None)
         }
         PACKAGE_INSTALL => {
-            let input = serde_json::from_value::<PackageInstallInput>(
-                request.tool_call.input.clone(),
-            )
-            .map_err(|_| "package.install completion input is invalid".to_string())?;
+            let input =
+                serde_json::from_value::<PackageInstallInput>(request.tool_call.input.clone())
+                    .map_err(|_| "package.install completion input is invalid".to_string())?;
             (
-                Some(serde_json::to_value(PackageInstallResult {
-                    manager: input.manager,
-                    package: input.package,
-                    version: input.version,
-                    installed: true,
-                })
-                .map_err(|error| error.to_string())?),
+                Some(
+                    serde_json::to_value(PackageInstallResult {
+                        manager: input.manager,
+                        package: input.package,
+                        version: input.version,
+                        installed: true,
+                    })
+                    .map_err(|error| error.to_string())?,
+                ),
                 None,
             )
         }
@@ -2713,7 +2756,14 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
                 parsed.map(|result| result.exit_code),
             )
         }
-        _ => return Ok(failed("denied_by_policy", "unsupported SSH action", false, None)),
+        _ => {
+            return Ok(failed(
+                "denied_by_policy",
+                "unsupported SSH action",
+                false,
+                None,
+            ))
+        }
     };
     let response = match request.outcome.as_str() {
         "succeeded" => {
@@ -2726,7 +2776,12 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
                 ));
             }
             let Some(output) = output else {
-                return Ok(failed("invalid_input", "SSH action result is missing", false, None));
+                return Ok(failed(
+                    "invalid_input",
+                    "SSH action result is missing",
+                    false,
+                    None,
+                ));
             };
             success(output)
         }
@@ -2741,7 +2796,10 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
             }
             failed(
                 "execution_failed",
-                format!("{} did not complete successfully", request.tool_call.tool_name),
+                format!(
+                    "{} did not complete successfully",
+                    request.tool_call.tool_name
+                ),
                 false,
                 if request.tool_call.tool_name == SERVER_EXEC {
                     output
@@ -2756,7 +2814,14 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
             true,
             None,
         ),
-        _ => return Ok(failed("invalid_input", "SSH action outcome is invalid", false, None)),
+        _ => {
+            return Ok(failed(
+                "invalid_input",
+                "SSH action outcome is invalid",
+                false,
+                None,
+            ))
+        }
     };
     let token = HostToolCallToken {
         key: (
@@ -2768,10 +2833,7 @@ fn finish_ssh_effectful_action(state: &AppState, params: Value) -> Result<Value,
     Ok(json!({ "status": "success", "finished": true }))
 }
 
-fn resolve_ssh_filesystem_cleanup_target(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn resolve_ssh_filesystem_cleanup_target(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostSshFilesystemCleanupTargetRequest>(params)
         .map_err(|_| "the SSH filesystem cleanup target request is invalid".to_string())?;
     if [
@@ -2785,8 +2847,9 @@ fn resolve_ssh_filesystem_cleanup_target(
     }) {
         return Err("filesystem cleanup durable call identity is invalid".into());
     }
-    let cleanup_input = serde_json::from_value::<FilesystemBackupCleanupInput>(request.input.clone())
-        .map_err(|_| "filesystem.backup.cleanup input is invalid".to_string())?;
+    let cleanup_input =
+        serde_json::from_value::<FilesystemBackupCleanupInput>(request.input.clone())
+            .map_err(|_| "filesystem.backup.cleanup input is invalid".to_string())?;
     let (items, batch) = match cleanup_input.resolve()? {
         BackupCleanupRequest::Single(item) => (vec![item], false),
         BackupCleanupRequest::Batch(items) => (items, true),
@@ -2806,26 +2869,24 @@ fn resolve_ssh_filesystem_cleanup_target(
     };
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_BACKUP_CLEANUP,
-        &request.input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_BACKUP_CLEANUP,
+            input: &request.input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
 
     // Reject malformed paths for the entire request before reporting any item as executable.
     let checked = items
         .iter()
         .map(|item| {
-            AgentCleanupBackupRequest::check(
-                &item.path,
-                &item.backup_path,
-                &item.expected_revision,
-            )
-            .map_err(|error| error.to_string())
+            AgentCleanupBackupRequest::check(&item.path, &item.backup_path, &item.expected_revision)
+                .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -2845,7 +2906,8 @@ fn resolve_ssh_filesystem_cleanup_target(
             Ok(Some(record)) => record,
             Ok(None) if batch => {
                 binding["status"] = json!("skipped");
-                binding["reason"] = json!("no available host ledger record for this server and backup path");
+                binding["reason"] =
+                    json!("no available host ledger record for this server and backup path");
                 bindings.push(binding);
                 continue;
             }
@@ -2861,13 +2923,16 @@ fn resolve_ssh_filesystem_cleanup_target(
                 bindings.push(binding);
                 continue;
             }
-            Err(error) => return Err(format!("could not read the filesystem backup ledger: {error}")),
+            Err(error) => {
+                return Err(format!(
+                    "could not read the filesystem backup ledger: {error}"
+                ))
+            }
         };
 
         let same_task = backup.task_id.as_deref() == Some(request.task_id.as_str());
-        let cross_task_allowed = batch
-            && !same_task
-            && tools::cross_task_cleanup_is_plan_bound(state, &context, item);
+        let cross_task_allowed =
+            batch && !same_task && tools::cross_task_cleanup_is_plan_bound(state, &context, item);
         if !same_task && !cross_task_allowed {
             if batch {
                 binding["status"] = json!("skipped");
@@ -2875,12 +2940,19 @@ fn resolve_ssh_filesystem_cleanup_target(
                 bindings.push(binding);
                 continue;
             }
-            return Err("filesystem.backup.cleanup cannot use a backup owned by another investigation task".into());
+            return Err(
+                "filesystem.backup.cleanup cannot use a backup owned by another investigation task"
+                    .into(),
+            );
         }
-        if !backup.revision.eq_ignore_ascii_case(&item.expected_revision) {
+        if !backup
+            .revision
+            .eq_ignore_ascii_case(&item.expected_revision)
+        {
             if batch {
                 binding["status"] = json!("failed");
-                binding["reason"] = json!("expectedRevision does not match the revision recorded for this backup");
+                binding["reason"] =
+                    json!("expectedRevision does not match the revision recorded for this backup");
                 bindings.push(binding);
                 continue;
             }
@@ -2918,10 +2990,7 @@ fn resolve_ssh_filesystem_cleanup_target(
     Ok(payload)
 }
 
-fn mark_ssh_filesystem_backup_deleted(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn mark_ssh_filesystem_backup_deleted(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostFilesystemBackupDeletedRequest>(params)
         .map_err(|_| "the filesystem cleanup registration request is invalid".to_string())?;
     if request.bytes_deleted > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
@@ -2934,8 +3003,9 @@ fn mark_ssh_filesystem_backup_deleted(
     {
         return Err("filesystem cleanup result or durable call identity is invalid".into());
     }
-    let cleanup_input = serde_json::from_value::<FilesystemBackupCleanupInput>(request.input.clone())
-        .map_err(|_| "filesystem.backup.cleanup input is invalid".to_string())?;
+    let cleanup_input =
+        serde_json::from_value::<FilesystemBackupCleanupInput>(request.input.clone())
+            .map_err(|_| "filesystem.backup.cleanup input is invalid".to_string())?;
     let (items, batch) = match cleanup_input.resolve()? {
         BackupCleanupRequest::Single(item) => (vec![item], false),
         BackupCleanupRequest::Batch(items) => (items, true),
@@ -2943,7 +3013,9 @@ fn mark_ssh_filesystem_backup_deleted(
     if !items.iter().any(|candidate| {
         candidate.path == request.item.path
             && candidate.backup_path == request.item.backup_path
-            && candidate.expected_revision.eq_ignore_ascii_case(&request.item.expected_revision)
+            && candidate
+                .expected_revision
+                .eq_ignore_ascii_case(&request.item.expected_revision)
     }) {
         return Err("the deleted backup is not part of the approved cleanup input".into());
     }
@@ -2955,14 +3027,16 @@ fn mark_ssh_filesystem_backup_deleted(
     .map_err(|error| error.to_string())?;
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_BACKUP_CLEANUP,
-        &request.input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_BACKUP_CLEANUP,
+            input: &request.input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     let context = HostToolExecuteRequest {
         call_id: request.call_id,
@@ -2991,9 +3065,14 @@ fn mark_ssh_filesystem_backup_deleted(
     if !same_task
         && (!batch || !tools::cross_task_cleanup_is_plan_bound(state, &context, &request.item))
     {
-        return Err("filesystem.backup.cleanup cannot use a backup owned by another investigation task".into());
+        return Err(
+            "filesystem.backup.cleanup cannot use a backup owned by another investigation task"
+                .into(),
+        );
     }
-    if !backup.revision.eq_ignore_ascii_case(&request.item.expected_revision)
+    if !backup
+        .revision
+        .eq_ignore_ascii_case(&request.item.expected_revision)
         || !backup.revision.eq_ignore_ascii_case(&request.revision)
         || i64::try_from(request.bytes_deleted).ok() != Some(backup.bytes_backed_up)
     {
@@ -3018,10 +3097,7 @@ fn mark_ssh_filesystem_backup_deleted(
     }))
 }
 
-fn mark_ssh_filesystem_backup_restored(
-    state: &AppState,
-    params: Value,
-) -> Result<Value, String> {
+fn mark_ssh_filesystem_backup_restored(state: &AppState, params: Value) -> Result<Value, String> {
     let request = serde_json::from_value::<HostFilesystemBackupRestoredRequest>(params)
         .map_err(|_| "the filesystem restore registration request is invalid".to_string())?;
     if request.bytes_before > yukinal_filesystem::MAX_AGENT_BACKUP_BYTES
@@ -3048,14 +3124,16 @@ fn mark_ssh_filesystem_backup_restored(
     });
     validate_ssh_filesystem_action_binding(
         state,
-        &request.server_id,
-        &request.task_id,
-        FILESYSTEM_RESTORE,
-        &input,
-        &request.target,
-        &request.plan_id,
-        &request.plan_step_id,
-        &request.evidence_ids,
+        SshFilesystemActionBinding {
+            server_id: &request.server_id,
+            task_id: &request.task_id,
+            tool_name: FILESYSTEM_RESTORE,
+            input: &input,
+            target: &request.target,
+            plan_id: &request.plan_id,
+            plan_step_id: &request.plan_step_id,
+            evidence_ids: &request.evidence_ids,
+        },
     )?;
     let backup = state
         .database
@@ -3064,7 +3142,9 @@ fn mark_ssh_filesystem_backup_restored(
         .map_err(|_| "could not read the filesystem backup ledger".to_string())?
         .ok_or_else(|| "filesystem backup is no longer available".to_string())?;
     if backup.task_id.as_deref() != Some(request.task_id.as_str()) {
-        return Err("filesystem.restore cannot use a backup owned by another investigation task".into());
+        return Err(
+            "filesystem.restore cannot use a backup owned by another investigation task".into(),
+        );
     }
     if !backup.revision.eq_ignore_ascii_case(&request.revision)
         || i64::try_from(request.bytes_after).ok() != Some(backup.bytes_backed_up)
@@ -3091,17 +3171,31 @@ fn mark_ssh_filesystem_backup_restored(
     }))
 }
 
+struct SshFilesystemActionBinding<'a> {
+    server_id: &'a str,
+    task_id: &'a str,
+    tool_name: &'a str,
+    input: &'a Value,
+    target: &'a HostToolTarget,
+    plan_id: &'a str,
+    plan_step_id: &'a str,
+    evidence_ids: &'a [String],
+}
+
 fn validate_ssh_filesystem_action_binding(
     state: &AppState,
-    server_id: &str,
-    task_id: &str,
-    tool_name: &str,
-    input: &Value,
-    target: &HostToolTarget,
-    plan_id: &str,
-    plan_step_id: &str,
-    evidence_ids: &[String],
+    binding: SshFilesystemActionBinding<'_>,
 ) -> Result<(), String> {
+    let SshFilesystemActionBinding {
+        server_id,
+        task_id,
+        tool_name,
+        input,
+        target,
+        plan_id,
+        plan_step_id,
+        evidence_ids,
+    } = binding;
     if target.host != "remote"
         || target.server_id.as_deref() != Some(server_id)
         || evidence_ids.len() > 128
@@ -3124,7 +3218,9 @@ fn validate_ssh_filesystem_action_binding(
             .as_ref()
             .is_some_and(|ids| ids.iter().any(|id| id == workspace_id))
         {
-            return Err("the SSH filesystem action target is not attached to that workspace".into());
+            return Err(
+                "the SSH filesystem action target is not attached to that workspace".into(),
+            );
         }
     }
     match check_plan_for_tool(
@@ -3149,9 +3245,10 @@ fn validate_ssh_filesystem_action_binding(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "the active filesystem action plan is unavailable".to_string())?;
     if plan.current_step_id.as_deref() != Some(plan_step_id)
-        || !plan.steps.iter().any(|step| {
-            step.id == plan_step_id && step.kind == PlanStepKind::Action
-        })
+        || !plan
+            .steps
+            .iter()
+            .any(|step| step.id == plan_step_id && step.kind == PlanStepKind::Action)
     {
         return Err("filesystem mutation is available only in the current action plan step".into());
     }

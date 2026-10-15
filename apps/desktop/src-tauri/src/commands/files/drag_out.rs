@@ -20,8 +20,8 @@ use yukinal_filesystem::transfer::{ConflictPolicy, TransferStatus};
 use yukinal_filesystem::RemoteEntryKind;
 use yukinal_ssh::{SftpEntryKind, SshBackend};
 
-use crate::commands::ssh_service;
 use crate::commands::files::transfer::FileTransferState;
+use crate::commands::ssh_service;
 use crate::commands::terminal::ensure_session;
 use crate::commands::EmptyResponse;
 use crate::state::AppState;

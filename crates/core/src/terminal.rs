@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use yukinal_ssh::{
-    ConnectionSecrets, PtyEvent, RusshBackend, Session, SftpFileStat, SftpReplaceError,
-    SftpReplaceGuard, SftpReplacement, SshBackend, SshConfig, link_count_probe_command,
-    parse_link_count,
+    link_count_probe_command, parse_link_count, ConnectionSecrets, PtyEvent, RusshBackend, Session,
+    SftpFileStat, SftpReplaceError, SftpReplaceGuard, SftpReplacement, SshBackend, SshConfig,
 };
 use yukinal_terminal::{TerminalAppEvent, TerminalManager, TerminalPty, TerminalPtyEvent};
 

@@ -82,7 +82,10 @@ impl SidecarConfig {
             let executable = for_command_line(path);
             return Ok(Self {
                 program: executable.clone(),
-                args: vec![OsString::from("-m"), OsString::from("yukinal_agent.sidecar")],
+                args: vec![
+                    OsString::from("-m"),
+                    OsString::from("yukinal_agent.sidecar"),
+                ],
                 env: Vec::new(),
                 request_timeout,
                 entry_label: executable.display().to_string(),
@@ -240,11 +243,14 @@ fn plain_windows_path(path: &Path) -> Option<PathBuf> {
 /// Frozen Python Agent path inside Tauri's resource directory.
 #[must_use]
 pub fn packaged_python_entry(resources: &Path) -> PathBuf {
-    resources.join("python-agent").join("yukinal-agent").join(if cfg!(windows) {
-        "yukinal-agent.exe"
-    } else {
-        "yukinal-agent"
-    })
+    resources
+        .join("python-agent")
+        .join("yukinal-agent")
+        .join(if cfg!(windows) {
+            "yukinal-agent.exe"
+        } else {
+            "yukinal-agent"
+        })
 }
 
 /// Standalone C++ SSH service executable inside Tauri's resource directory.
@@ -294,10 +300,8 @@ mod tests {
     }
 
     fn temp_tagged_dir(tag: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "yukinal-sidecar-test-{tag}-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("yukinal-sidecar-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create temp dir");
         path
@@ -337,7 +341,13 @@ mod tests {
 
         let config = SidecarConfig::from_env_with_cwd(&nested).expect("dev Python Agent resolves");
         assert_eq!(config.program, python);
-        assert_eq!(config.args, [OsString::from("-m"), OsString::from("yukinal_agent.sidecar")]);
+        assert_eq!(
+            config.args,
+            [
+                OsString::from("-m"),
+                OsString::from("yukinal_agent.sidecar")
+            ]
+        );
         assert!(config.is_python_agent);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -347,10 +357,13 @@ mod tests {
         let _guard = env_guard();
         clear_launch_env();
         std::env::set_var("YUKINAL_AGENT_COMMAND", "python-test");
-        std::env::set_var("YUKINAL_AGENT_ARGS", "-m;yukinal_agent.sidecar;two with space");
+        std::env::set_var(
+            "YUKINAL_AGENT_ARGS",
+            "-m;yukinal_agent.sidecar;two with space",
+        );
         std::env::set_var("YUKINAL_DATA_DIR", "agent-data");
-        let config = SidecarConfig::from_env_with_cwd(Path::new("."))
-            .expect("explicit command resolves");
+        let config =
+            SidecarConfig::from_env_with_cwd(Path::new(".")).expect("explicit command resolves");
         assert_eq!(config.program, PathBuf::from("python-test"));
         assert_eq!(config.args.len(), 3);
         assert_eq!(config.args[2], OsString::from("two with space"));

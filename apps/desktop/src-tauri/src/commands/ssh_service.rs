@@ -314,7 +314,7 @@ pub(crate) async fn probe_host_key(
         .get("stdout")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "the C++ SSH service returned an invalid host-key probe result")?;
+        .ok_or("the C++ SSH service returned an invalid host-key probe result")?;
     if !valid_host_key_fingerprint(&fingerprint) {
         return Err("the C++ SSH service returned an invalid host-key fingerprint".into());
     }
@@ -421,10 +421,8 @@ fn parse_cpp_no_proxy(value: &str) -> Option<Vec<String>> {
         return None;
     }
     let valid_host = |host: &str| {
-        let bracketed_ipv6 = host.len() >= 4
-            && host.starts_with('[')
-            && host.ends_with(']')
-            && host.contains(':');
+        let bracketed_ipv6 =
+            host.len() >= 4 && host.starts_with('[') && host.ends_with(']') && host.contains(':');
         !host.is_empty()
             && host.len() <= 253
             && !host.starts_with('.')
@@ -527,17 +525,17 @@ pub(crate) async fn execute_server_command(
     timeout_ms: u64,
     max_output_bytes: usize,
 ) -> Result<Value, (String, String)> {
-    if !supports_cpp_target(state, server_id).map_err(|message| ("transport_error".into(), message))? {
+    if !supports_cpp_target(state, server_id)
+        .map_err(|message| ("transport_error".into(), message))?
+    {
         return Err((
             "unsupported_target".into(),
             "the selected SSH target requires the Rust compatibility path".into(),
         ));
     }
-    let target_payload = super::sidecar::resolve_ssh_service_target(
-        state,
-        json!({ "serverId": server_id }),
-    )
-    .map_err(|message| ("transport_error".into(), message))?;
+    let target_payload =
+        super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))
+            .map_err(|message| ("transport_error".into(), message))?;
     run_operation_response_with_target(
         app,
         server_id,
@@ -1288,31 +1286,22 @@ pub(crate) async fn sftp_create_exclusive_stream(
             }
 
             let mut line = String::new();
-            loop {
-                line.clear();
-                match tokio::time::timeout(Duration::from_secs(90), output.read_line(&mut line))
-                    .await
-                {
-                    Ok(Ok(count)) if count > 0 && line.len() <= 48 * 1024 => {}
-                    _ => return Err("the C++ SFTP upload did not finish within 90 seconds".into()),
+            match tokio::time::timeout(Duration::from_secs(90), output.read_line(&mut line)).await {
+                Ok(Ok(count)) if count > 0 && line.len() <= 48 * 1024 => {}
+                _ => return Err("the C++ SFTP upload did not finish within 90 seconds".into()),
+            }
+            let message: Value = serde_json::from_str(line.trim_end())
+                .map_err(|_| "the C++ SFTP upload returned invalid framing".to_string())?;
+            match message.get("type").and_then(Value::as_str) {
+                Some("closed") if message.get("exit_code").and_then(Value::as_i64) == Some(0) => {}
+                Some("error") => {
+                    return Err(message
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the C++ SFTP upload failed")
+                        .to_string());
                 }
-                let message: Value = serde_json::from_str(line.trim_end())
-                    .map_err(|_| "the C++ SFTP upload returned invalid framing".to_string())?;
-                match message.get("type").and_then(Value::as_str) {
-                    Some("closed")
-                        if message.get("exit_code").and_then(Value::as_i64) == Some(0) =>
-                    {
-                        break
-                    }
-                    Some("error") => {
-                        return Err(message
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("the C++ SFTP upload failed")
-                            .to_string());
-                    }
-                    _ => return Err("the C++ SFTP upload returned an unexpected event".into()),
-                }
+                _ => return Err("the C++ SFTP upload returned an unexpected event".into()),
             }
             let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
                 .await
@@ -1826,12 +1815,12 @@ async fn run_operation_with_status(
         .get("exit_code")
         .and_then(Value::as_i64)
         .and_then(|code| i32::try_from(code).ok())
-        .ok_or_else(|| "the C++ SSH service returned an invalid operation exit code")?;
+        .ok_or("the C++ SSH service returned an invalid operation exit code")?;
     let stdout = response
         .get("stdout")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "the C++ SSH service returned an invalid operation result")?;
+        .ok_or("the C++ SSH service returned an invalid operation result")?;
     Ok((exit_code, stdout))
 }
 
@@ -1881,7 +1870,8 @@ async fn run_operation_response(
     }
     let target_payload =
         super::sidecar::resolve_ssh_service_target(state, json!({ "serverId": server_id }))?;
-    run_operation_response_with_target(app, server_id, operation, parameters, target_payload, false).await
+    run_operation_response_with_target(app, server_id, operation, parameters, target_payload, false)
+        .await
 }
 
 async fn run_operation_response_with_target(
@@ -2132,18 +2122,18 @@ async fn request_operation(
             "the C++ SSH service response exceeded the size limit",
         ));
     }
-    let response_body = response
-        .bytes()
-        .await
-        .map_err(|_| operation_response_failure(operation, "the C++ SSH service returned invalid JSON"))?;
+    let response_body = response.bytes().await.map_err(|_| {
+        operation_response_failure(operation, "the C++ SSH service returned invalid JSON")
+    })?;
     if response_body.len() > MAX_RESPONSE_BYTES {
         return Err(operation_response_failure(
             operation,
             "the C++ SSH service response exceeded the size limit",
         ));
     }
-    let body: Value = serde_json::from_slice(&response_body)
-        .map_err(|_| operation_response_failure(operation, "the C++ SSH service returned invalid JSON"))?;
+    let body: Value = serde_json::from_slice(&response_body).map_err(|_| {
+        operation_response_failure(operation, "the C++ SSH service returned invalid JSON")
+    })?;
     if !status.is_success() {
         let error = body.get("error");
         let message = error

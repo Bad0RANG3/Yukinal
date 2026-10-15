@@ -24,13 +24,17 @@ use yukinal_core::sidecar::{self, SidecarConfig, SidecarEvent, PROTOCOL_VERSION}
 use yukinal_core::supervisor::{RestartPolicy, Supervisor};
 
 fn env_file(key: &str) -> Option<PathBuf> {
-    std::env::var(key).ok().map(PathBuf::from).filter(|path| {
-        path.is_file()
-    })
+    std::env::var(key)
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
 }
 
 fn env_directory(key: &str) -> Option<PathBuf> {
-    std::env::var(key).ok().map(PathBuf::from).filter(|path| path.is_dir())
+    std::env::var(key)
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
 }
 
 /// True when the runner declares that these tests must actually execute.
@@ -96,18 +100,12 @@ fn config() -> Option<SidecarConfig> {
         program: python,
         args: vec!["-m".into(), "yukinal_agent.sidecar".into()],
         env: vec![
-            (
-                "PYTHONPATH".into(),
-                source.display().to_string(),
-            ),
+            ("PYTHONPATH".into(), source.display().to_string()),
             (
                 "YUKINAL_SSH_API_TOKEN".into(),
                 "integration-smoke-token-0123456789abcdef".into(),
             ),
-            (
-                "YUKINAL_SSH_API_URL".into(),
-                "http://127.0.0.1:9".into(),
-            ),
+            ("YUKINAL_SSH_API_URL".into(), "http://127.0.0.1:9".into()),
         ],
         request_timeout: Duration::from_secs(10),
         entry_label: String::from("-m yukinal_agent.sidecar"),
@@ -125,7 +123,10 @@ async fn handshakes_pings_and_reports_the_real_python_sidecar() {
         .await
         .expect("launch + initialize + describe must succeed");
     assert_eq!(launched.protocol_version, PROTOCOL_VERSION);
-    assert!(launched.tool_count >= 1, "Python Agent tools must be registered");
+    assert!(
+        launched.tool_count >= 1,
+        "Python Agent tools must be registered"
+    );
     assert_ne!(launched.agent_version, "unknown");
 
     let pid = launched.handle.info().pid;
@@ -141,10 +142,15 @@ async fn handshakes_pings_and_reports_the_real_python_sidecar() {
         .await
         .expect("ping must answer");
     assert_eq!(pong.get("pong").and_then(Value::as_str), Some("from-rust"));
-    assert_eq!(
-        pong.get("agentPid").and_then(Value::as_u64),
-        Some(u64::from(pid)),
-        "the pid Rust holds must be the pid that answered"
+    let agent_pid = pong
+        .get("agentPid")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .expect("the Agent reports its process id");
+    let agent_parent_pid = pong.get("agentParentPid").and_then(Value::as_u64);
+    assert!(
+        agent_pid == pid || agent_parent_pid == Some(u64::from(pid)),
+        "the Agent process must be the process Rust launched or its direct child: rust={pid}, agent={agent_pid}, parent={agent_parent_pid:?}"
     );
 
     // tools.list must expose the Python server tool and its JSON Schema.
@@ -219,7 +225,10 @@ async fn handshakes_pings_and_reports_the_real_python_sidecar() {
         "filesystem.backup.cleanup",
         "filesystem.restore",
     ] {
-        assert!(names.contains(&tool), "host-backed {tool} missing: {names:?}");
+        assert!(
+            names.contains(&tool),
+            "host-backed {tool} missing: {names:?}"
+        );
     }
     assert!(
         names.contains(&"server.exec"),
@@ -254,6 +263,10 @@ async fn handshakes_pings_and_reports_the_real_python_sidecar() {
     );
 
     launched.handle.shutdown().await;
+    wait_until_pid_is_gone(pid, Duration::from_secs(5)).await;
+    if agent_pid != pid {
+        wait_until_pid_is_gone(agent_pid, Duration::from_secs(5)).await;
+    }
     assert!(
         !launched.handle.is_running(),
         "sidecar must be gone after shutdown"
@@ -626,28 +639,39 @@ async fn read_http_request(stream: &mut TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
-fn provider_sse_body(request_index: usize) -> String {
-    if request_index == 0 {
-        return concat!(
-            "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_plan\",\"type\":\"function\",\"function\":{\"name\":\"investigation__plan\",\"arguments\":\"{\\\"steps\\\":[{\\\"kind\\\":\\\"evidence\\\",\\\"title\\\":\\\"Collect server health\\\",\\\"purpose\\\":\\\"Read one fresh server health snapshot\\\",\\\"allowedTools\\\":[\\\"server.info\\\"],\\\"riskLevel\\\":\\\"read\\\",\\\"successCriteria\\\":[\\\"A fresh server snapshot is persisted\\\"],\\\"requiresApproval\\\":false,\\\"maxAttempts\\\":1}]}\"}}]},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
-            "data: [DONE]\n\n",
-        )
-        .to_string();
-    }
-    if request_index == 1 {
-        return concat!(
-            "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_server_info\",\"type\":\"function\",\"function\":{\"name\":\"server__info\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
-            "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
-            "data: [DONE]\n\n",
-        )
-        .to_string();
-    }
-    concat!(
-        "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"cross-layer fixture completed\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: [DONE]\n\n",
-    )
+fn provider_response_body(request_index: usize) -> String {
+    let message = match request_index {
+        0 => json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_plan",
+                "type": "function",
+                "function": {
+                    "name": "investigation__plan",
+                    "arguments": "{\"steps\":[{\"kind\":\"evidence\",\"title\":\"Collect server health\",\"purpose\":\"Read one fresh server health snapshot\",\"allowedTools\":[\"server.info\"],\"riskLevel\":\"read\",\"successCriteria\":[\"A fresh server snapshot is persisted\"],\"requiresApproval\":false,\"maxAttempts\":1}]}"
+                }
+            }]
+        }),
+        1 => json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_server_info",
+                "type": "function",
+                "function": { "name": "server__info", "arguments": "{}" }
+            }]
+        }),
+        _ => json!({ "role": "assistant", "content": "cross-layer fixture completed" }),
+    };
+    json!({
+        "id": "chatcmpl-fixture",
+        "object": "chat.completion",
+        "created": 1_790_000_000_u64,
+        "model": "fixture-model",
+        "choices": [{ "index": 0, "message": message, "finish_reason": if request_index < 2 { "tool_calls" } else { "stop" } }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+    })
     .to_string()
 }
 
@@ -657,16 +681,16 @@ async fn serve_provider_fixture(
 ) -> Result<(), String> {
     // The real AgentLoop asks the Provider once for the plan, once for the host-backed tool,
     // and once for the final response. Closing each connection makes the fixture independent of
-    // HTTP keep-alive details while still exercising the actual fetch + SSE parser.
+    // HTTP keep-alive details while exercising the actual OpenAI-compatible response parser.
     for _ in 0..3 {
         let (mut stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
         read_http_request(&mut stream)
             .await
             .map_err(|error| error.to_string())?;
         let index = request_count.fetch_add(1, Ordering::SeqCst);
-        let body = provider_sse_body(index);
+        let body = provider_response_body(index);
         let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             body.len(),
             body,
         );
@@ -680,7 +704,7 @@ async fn serve_provider_fixture(
 }
 
 /// This is the cross-language task proof that the smoke test intentionally does not attempt:
-/// a real bundled sidecar receives a real Provider SSE stream, calls a host-backed tool, asks
+/// a real bundled sidecar receives a real OpenAI-compatible response, calls a host-backed tool, asks
 /// the Rust side to persist the resulting evidence, and returns a terminal completion event.
 /// The Provider is a loopback fixture, so the test never creates a shared or bridged network.
 #[tokio::test]
@@ -705,9 +729,11 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
     let handle = launched.handle.clone();
     let responder_handle = handle.clone();
     let mut events = handle.subscribe();
+    let provider_requests_for_events = Arc::clone(&provider_requests);
     let event_task = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut frames = Vec::new();
+        let mut logs = Vec::new();
         let mut host_methods = Vec::new();
         let mut tool_requests = 0_usize;
         let mut evidence_records = 0_usize;
@@ -715,7 +741,12 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
         loop {
             let event = tokio::time::timeout_at(deadline, events.recv())
                 .await
-                .map_err(|_| "timed out waiting for the durable sidecar event".to_string())?
+                .map_err(|_| {
+                    format!(
+                        "timed out waiting for the durable sidecar event; provider requests={}, logs={logs:?}",
+                        provider_requests_for_events.load(Ordering::SeqCst)
+                    )
+                })?
                 .map_err(|error| format!("sidecar event stream failed: {error}"))?;
             match event {
                 SidecarEvent::Request { id, method, params } => {
@@ -855,8 +886,9 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
                         continue;
                     }
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
-                    let completed =
-                        params.get("type").and_then(Value::as_str) == Some("agent.completed");
+                    let event_type = params.get("type").and_then(Value::as_str);
+                    let completed = event_type == Some("agent.completed");
+                    let failed = event_type == Some("agent.failed");
                     frames.push(params);
                     if completed {
                         return Ok((
@@ -867,8 +899,26 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
                             active_plan,
                         ));
                     }
+                    if failed {
+                        let trace = frames
+                            .iter()
+                            .map(|frame| {
+                                json!({
+                                    "type": frame.get("type").and_then(Value::as_str),
+                                    "toolName": frame.get("toolName").and_then(Value::as_str),
+                                    "status": frame.get("status").and_then(Value::as_str),
+                                    "errorCode": frame.get("errorCode").and_then(Value::as_str),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        return Err(format!(
+                            "Agent run failed before completion: {}; provider requests={}, logs={logs:?}, trace={trace:?}",
+                            frames.last().unwrap_or(&Value::Null),
+                            provider_requests_for_events.load(Ordering::SeqCst)
+                        ));
+                    }
                 }
-                SidecarEvent::Log(_) => {}
+                SidecarEvent::Log(line) => logs.push(line),
                 SidecarEvent::Exited { code, signal } => {
                     return Err(format!(
                         "sidecar exited before completion: code={code:?} signal={signal:?}"
@@ -971,7 +1021,7 @@ async fn real_sidecar_runs_a_durable_read_through_provider_and_host() {
 
     let provider_result = tokio::time::timeout(Duration::from_secs(5), provider_task)
         .await
-        .expect("provider fixture must finish after two calls")
+        .expect("provider fixture must finish after three calls")
         .expect("provider fixture task must not panic");
     provider_result.expect("provider fixture must serve both SSE responses");
     handle.shutdown().await;

@@ -20,15 +20,16 @@ use yukinal_ssh::{
     Authentication, ConnectionSecrets, KnownHostsPolicy, OutboundProxy, SshBackend, SshConfig,
 };
 
+use super::cross_task_cleanup_is_plan_bound;
 use super::{
     backup_owner_matches_request, backup_record_id, baseline_artifact_matches_plan,
     cancel_sidecar_request, collect_json_diff, compare_text_content,
     effectful_tool_requires_durable_plan, evidence_freshness_at, filesystem_failure,
     finish_host_tool_call, handle_evidence_correlation, handle_sidecar_request_with_cancel,
-    host_tool_call_status, input_bindings_match, is_effectful_host_tool, merge_plan_runtime,
-    normalize_new_plan_runtime, observation_configuration_matches,
-    plan_allows_repeated_observation, plan_binding_matches, plan_definition,
-    prepare_host_tool_call, reset_observation_window, host_tool_input_fingerprint, success,
+    host_tool_call_status, host_tool_input_fingerprint, input_bindings_match,
+    is_effectful_host_tool, merge_plan_runtime, normalize_new_plan_runtime,
+    observation_configuration_matches, plan_allows_repeated_observation, plan_binding_matches,
+    plan_definition, prepare_host_tool_call, reset_observation_window, success,
     task_allows_auto_medium_action, task_guardrail_violation, validate_observation_window,
     validate_playbook_step, BackupCleanupRequest, FilesystemBackupCleanupInput,
     FilesystemBackupCleanupItemInput, HostCancellationRegistry, HostToolCallDecision,
@@ -36,7 +37,6 @@ use super::{
     FILESYSTEM_BACKUP_CLEANUP, FILESYSTEM_EDIT, FILESYSTEM_RESTORE, FILESYSTEM_WRITE,
     HOST_TOOL_EXECUTE, SERVER_INFO,
 };
-use super::{cross_task_cleanup_is_plan_bound, filesystem_backup_retention, retention_candidates};
 use crate::state::AppState;
 use yukinal_database::models::{
     Environment, Evidence, EvidenceContentType, EvidenceKind, EvidenceRedactionStatus,

@@ -652,7 +652,7 @@ class PythonSidecar:
         echo = parsed.get("echo", "pong")
         if not isinstance(echo, str) or len(echo) > 1000:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
-        return {"pong": echo, "agentPid": os.getpid()}
+        return {"pong": echo, "agentPid": os.getpid(), "agentParentPid": os.getppid()}
 
     @staticmethod
     def _normalize_snapshot(params: object) -> dict[str, Any]:

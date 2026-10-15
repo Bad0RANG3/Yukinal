@@ -196,7 +196,7 @@ impl HostApprovalLedger {
         };
         let Some(host_input) = event.approval.host_input.filter(Value::is_object) else {
             return Err("host action approval is missing its exact host input".into());
-        }
+        };
         // The sidecar fingerprint includes Python authorization context. Tickets
         // instead bind to the exact host-tool input, using the same canonical JSON
         // fingerprint that the Rust host recomputes before dispatch.
@@ -415,10 +415,10 @@ fn is_sha256_hex(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostApprovalLedger, HostActionExecutionBinding, HostActionTicketError};
+    use super::{HostActionExecutionBinding, HostActionTicketError, HostApprovalLedger};
+    use crate::commands::host::host_tool_input_fingerprint;
     use serde_json::json;
     use std::time::Duration;
-    use crate::commands::host::host_tool_input_fingerprint;
 
     const NOW: u64 = 1_800_000_000;
     const EXPIRY: &str = "2027-01-15T08:02:00Z";
@@ -560,7 +560,10 @@ mod tests {
         ledger
             .finish_response(token, true, NOW + 150)
             .expect("finish accepted response");
-        assert_eq!(ledger.consume(execution_binding(), || NOW + 150).await, Ok(()));
+        assert_eq!(
+            ledger.consume(execution_binding(), || NOW + 150).await,
+            Ok(())
+        );
     }
 
     #[tokio::test]
