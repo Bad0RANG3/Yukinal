@@ -427,10 +427,10 @@ def start_ssh_mock(
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
-            elif command == b"printf server-exec-ok":
+            elif command == b"/bin/sh -c 'printf server-exec-ok'":
                 channel.sendall(b"authorized-output\n")
                 channel.send_exit_status(0)
-            elif command == b"server-exec-large-output":
+            elif command == b"/bin/sh -c 'server-exec-large-output'":
                 channel.sendall(b"A" * 5000)
                 channel.send_stderr(b"B" * 5000)
                 channel.send_exit_status(0)
