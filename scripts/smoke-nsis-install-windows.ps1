@@ -60,8 +60,6 @@ $localDataCanary = Join-Path $localDataRoot "nsis-uninstall-preserves-$runId.mar
 $productRegistryPath = 'HKCU:\Software\Yukinal contributors\Yukinal'
 $uninstallRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Yukinal'
 $runningYukinal = @(Get-CimInstance Win32_Process -Filter "Name = 'yukinal-desktop.exe'")
-$nodeOnHost = [bool](Get-Command node.exe -ErrorAction SilentlyContinue)
-
 $blockers = [System.Collections.Generic.List[string]]::new()
 if (Test-Path -LiteralPath $appDataRoot) { $blockers.Add("Roaming Yukinal data already exists: $appDataRoot") }
 if (Test-Path -LiteralPath $localDataRoot) { $blockers.Add("Local Yukinal data already exists: $localDataRoot") }
@@ -82,7 +80,6 @@ $plan = [pscustomobject]@{
   DefaultInstallDirectory = $defaultInstallDir
   RoamingDataRoot = $appDataRoot
   LocalDataRoot = $localDataRoot
-  NodeFoundOnHost = $nodeOnHost
   PlanOnly = [bool]$PlanOnly
   Blockers = @($blockers)
 }
@@ -132,8 +129,6 @@ try {
   foreach ($required in @(
     (Join-Path $installDir 'yukinal-desktop.exe'),
     (Join-Path $installDir 'python-agent/yukinal-agent/yukinal-agent.exe'),
-    (Join-Path $installDir 'runtime/node.exe'),
-    (Join-Path $installDir 'agent/index.js'),
     (Join-Path $installDir 'NOTICE')
   )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
@@ -299,7 +294,6 @@ try {
 [pscustomobject]@{
   Installer = $InstallerPath
   InstallDirectory = $installDir
-  NodeFoundOnHost = $nodeOnHost
   InstalledAppSmokeExitCode = $smokeExitCode
   UpdateModeReinstallExitCode = $updateExitCode
   UserDataPreservedAcrossUpdate = $updateCanariesPreserved

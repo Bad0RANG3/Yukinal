@@ -1,24 +1,5 @@
 #!/usr/bin/env node
-/**
- * Packaging contract: the places that must agree about *what an installed app
- * launches*, checked in one place.
- *
- * An installer that ships the wrong file is not caught by any unit test -- it is caught by
- * the user. Three of these facts are only true at once or not at all:
- *
- *   1. `apps/desktop/src-tauri/tauri.conf.json` stages the agent as `agent/index.js`
- *      and the pinned Node runtime as `runtime/node[.exe]` inside the resource directory.
- *   2. `crates/core/src/sidecar/config.rs` resolves the staged agent and its adjacent
- *      runtime; a rename on one side alone is invisible until an installed user starts it.
- *   3. `apps/agent`'s build emits exactly one file, `dist/index.js`, with no bare or
- *      relative imports left for `node_modules` to satisfy -- the packaged app has none.
- *   4. The bundled Node archive version, architecture list and SHA-256 pins are explicit.
- *   5. The bundler's icons and targets are configured, because `bundle.active: true`
- *      without them fails the build rather than producing an installer.
- *   6. The esbuild target, bundled runtime major and development `engines.node` agree.
- *
- * Run after `pnpm --filter @yukinal/agent build`; `pnpm check` orders it that way.
- */
+/** Check that the Tauri bundle, Python sidecar resolver, and build hook agree. */
 
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
@@ -27,13 +8,10 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const tauriDir = join(root, "apps", "desktop", "src-tauri");
 const confPath = join(tauriDir, "tauri.conf.json");
-const agentBundle = join(root, "apps", "agent", "dist", "index.js");
-
 const problems = [];
 const fail = (message) => problems.push(message);
 const read = (path) => readFileSync(path, "utf8");
 
-// ─────────────────────────────────────────────────────────── 1. tauri.conf.json
 let conf;
 try {
   conf = JSON.parse(read(confPath));
@@ -43,178 +21,62 @@ try {
 }
 
 const bundle = conf.bundle ?? {};
-if (bundle.active !== true) {
-  fail("bundle.active is not true — the build produces an app that was never packaged");
-}
+if (bundle.active !== true) fail("bundle.active is not true");
 
-// The resource map (not the list form): the destination has to be explicit, because the
-// runtime path is a contract with the Rust resolver, not a copy of the source layout.
-//
-// Two entries live under `agent/`, and exactly two: the bundle itself, and a one-line
-// `package.json` declaring `"type": "module"`.
-//
-// The second one is not decoration. In the installed layout the bundle has no
-// neighbouring `package.json`, so Node decides the module system by **syntax
-// detection** (`--experimental-detect-module`, on by default since Node 22.7). That
-// works, but it is a default we do not control: a user with
-// `NODE_OPTIONS=--no-experimental-detect-module` in their environment would make the
-// sidecar fail to parse, and a future Node could change the default. Staging the
-// declaration next to the file makes the module system explicit at the location where
-// it is actually loaded.
 const resources = bundle.resources;
+const expectedDestinations = ["NOTICE", "python-agent", "ssh-service"];
 if (resources === null || typeof resources !== "object" || Array.isArray(resources)) {
-  fail('bundle.resources must be a map ({"<source>": "<destination>"}), not a list or null');
+  fail('bundle.resources must be a map ({"<source>": "<destination>"})');
 } else {
   const entries = Object.entries(resources);
-  const agentEntries = entries.filter(([, destination]) => String(destination).replace(/\\/g, "/").startsWith("agent/"));
-  const destinations = agentEntries.map(([, destination]) => String(destination).replace(/\\/g, "/")).sort();
-  const expected = ["agent/index.js", "agent/package.json"];
-  if (destinations.join(",") !== expected.join(",")) {
-    fail(
-      `bundle.resources must stage exactly ${expected.join(" and ")} under agent/, found ${
-        destinations.length > 0 ? destinations.join(" and ") : "nothing"
-      }`,
-    );
+  const normalized = entries.map(([, destination]) => String(destination).replace(/\\/g, "/").replace(/\/+$/, ""));
+  const actual = [...normalized].sort();
+  if (actual.join(",") !== expectedDestinations.join(",")) {
+    fail(`bundle.resources must contain only ${expectedDestinations.join(", ")}; found ${actual.join(", ")}`);
   }
 
-  const bundleEntry = agentEntries.find(([, d]) => String(d).replace(/\\/g, "/") === "agent/index.js");
-  if (bundleEntry) {
-    const [source] = bundleEntry;
-    // Sources are relative to src-tauri, which is where the bundler runs.
-    const resolved = resolve(tauriDir, source);
-    if (resolved !== agentBundle) {
-      fail(`bundle.resources source "${source}" resolves to ${resolved}, expected ${agentBundle}`);
+  const expectedSources = new Map([
+    ["python-agent", join(root, "agent", "runtime")],
+    ["ssh-service", join(tauriDir, "resources", "ssh-service")],
+    ["NOTICE", join(root, "NOTICE")],
+  ]);
+  for (const [source, destination] of entries) {
+    const normalizedDestination = String(destination).replace(/\\/g, "/").replace(/\/+$/, "");
+    const resolvedSource = resolve(tauriDir, source);
+    const expectedSource = expectedSources.get(normalizedDestination);
+    if (!expectedSource) continue;
+    if (resolvedSource !== expectedSource) {
+      fail(`bundle.resources source for ${normalizedDestination} resolves to ${resolvedSource}, expected ${expectedSource}`);
     }
-    if (/[*?]/.test(source)) {
-      fail(`bundle.resources source "${source}" is a glob — the agent bundle must be one named file`);
+    if (!existsSync(resolvedSource)) {
+      fail(`bundle.resources source for ${normalizedDestination} does not exist: ${resolvedSource}`);
+    } else if (normalizedDestination !== "NOTICE" && !statSync(resolvedSource).isDirectory()) {
+      fail(`bundle.resources source for ${normalizedDestination} must be a directory`);
     }
   }
 
-  const moduleEntry = agentEntries.find(([, d]) => String(d).replace(/\\/g, "/") === "agent/package.json");
-  if (moduleEntry) {
-    const [source] = moduleEntry;
-    const resolved = resolve(tauriDir, source);
-    if (!existsSync(resolved)) {
-      fail(`bundle.resources source "${source}" does not exist — the staged declaration must be a real file`);
+  for (const directory of [join(root, "agent", "runtime"), join(tauriDir, "resources", "ssh-service")]) {
+    if (!existsSync(join(directory, ".gitkeep"))) {
+      fail(`${directory} must remain present in a fresh checkout`);
     }
-    let declared;
-    try {
-      declared = JSON.parse(read(resolved));
-    } catch (error) {
-      fail(`the staged agent package.json is not valid JSON: ${error.message}`);
-    }
-    if (declared?.type !== "module") {
-      fail(`the staged agent package.json must declare {"type": "module"}, found ${JSON.stringify(declared)}`);
-    }
-    if (Object.keys(declared).length !== 1) {
-      fail(
-        "the staged agent package.json must contain only `type` — anything else (a `name`, an `exports` map) would make Node treat the bundle directory as a package and change resolution",
-      );
-    }
+  }
+  if (entries.some(([, destination]) => /^(?:agent\/|runtime\/?$)/.test(String(destination).replace(/\\/g, "/")))) {
+    fail("the installer must not ship the legacy Node Agent or Node runtime");
   }
 }
 
-const runtimeEntries =
-  resources !== null && typeof resources === "object" && !Array.isArray(resources)
-    ? Object.entries(resources).filter(([, destination]) =>
-        String(destination).replace(/\\/g, "/").replace(/\/+$/, "") === "runtime",
-      )
-    : [];
-if (runtimeEntries.length !== 1) {
-  fail(`bundle.resources must map one runtime directory to runtime/, found ${runtimeEntries.length}`);
-} else {
-  const [source] = runtimeEntries[0];
-  const resolved = resolve(tauriDir, source);
-  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
-    fail(`bundled runtime source "${source}" must be an existing directory`);
-  }
-  if (!existsSync(join(resolved, ".gitkeep"))) {
-    fail(`bundled runtime source "${source}" must remain present in a fresh checkout`);
-  }
+if (!existsSync(join(root, "scripts", "build-python-agent.mjs"))) {
+  fail("scripts/build-python-agent.mjs is missing");
 }
-
-const pythonRuntimeEntries =
-  resources !== null && typeof resources === "object" && !Array.isArray(resources)
-    ? Object.entries(resources).filter(([, destination]) =>
-        String(destination).replace(/\\/g, "/").replace(/\/+$/, "") === "python-agent",
-      )
-    : [];
-if (pythonRuntimeEntries.length !== 1) {
-  fail(`bundle.resources must map one frozen Python Agent directory to python-agent/, found ${pythonRuntimeEntries.length}`);
-} else {
-  const [source] = pythonRuntimeEntries[0];
-  const resolved = resolve(tauriDir, source);
-  const expected = join(root, "agent", "runtime");
-  if (resolved !== expected) {
-    fail(`bundle.resources Python Agent source "${source}" resolves to ${resolved}, expected ${expected}`);
-  }
-  if (!existsSync(resolved) || !statSync(resolved).isDirectory() || !existsSync(join(resolved, ".gitkeep"))) {
-    fail(`frozen Python Agent source "${source}" must be a tracked directory that exists in a fresh checkout`);
-  }
-}
-
-const sshServiceEntries =
-  resources !== null && typeof resources === "object" && !Array.isArray(resources)
-    ? Object.entries(resources).filter(([, destination]) =>
-        String(destination).replace(/\\/g, "/").replace(/\/+$/, "") === "ssh-service",
-      )
-    : [];
 if (!existsSync(join(root, "scripts", "build-ssh-service.mjs"))) {
-  fail("scripts/build-ssh-service.mjs is missing — the C++ resource must be built before Tauri packaging");
-}
-if (sshServiceEntries.length !== 1) {
-  fail(`bundle.resources must map one C++ SSH service directory to ssh-service/, found ${sshServiceEntries.length}`);
-} else {
-  const [source] = sshServiceEntries[0];
-  const resolved = resolve(tauriDir, source);
-  const expected = join(tauriDir, "resources", "ssh-service");
-  if (resolved !== expected) {
-    fail(`bundle.resources SSH service source resolves to ${resolved}, expected ${expected}`);
-  }
-  if (!existsSync(join(resolved, ".gitkeep"))) {
-    fail(`SSH service resource directory ${source} must exist in a fresh checkout`);
-  }
+  fail("scripts/build-ssh-service.mjs is missing");
 }
 
-const runtimeManifestPath = join(root, "scripts", "node-runtime.json");
-let runtimeManifest;
-try {
-  runtimeManifest = JSON.parse(read(runtimeManifestPath));
-} catch (error) {
-  fail(`Node runtime manifest is not valid JSON: ${error.message}`);
-}
-const requiredRuntimePlatforms = [
-  "win32-x64",
-  "win32-arm64",
-  "darwin-x64",
-  "darwin-arm64",
-  "linux-x64",
-  "linux-arm64",
-];
-if (runtimeManifest) {
-  if (!/^24\.\d+\.\d+$/.test(runtimeManifest.version ?? "")) {
-    fail(`bundled Node runtime version must be a pinned Node 24 patch release, got ${runtimeManifest.version}`);
-  }
-  for (const platform of requiredRuntimePlatforms) {
-    const build = runtimeManifest.platforms?.[platform];
-    if (!build) {
-      fail(`Node runtime manifest is missing ${platform}`);
-      continue;
-    }
-    if (!/^[a-f0-9]{64}$/.test(build.sha256 ?? "")) {
-      fail(`Node runtime checksum for ${platform} must be a SHA-256 hex digest`);
-    }
-    if (!String(build.archive).includes(runtimeManifest.version)) {
-      fail(`Node runtime archive for ${platform} does not match pinned version ${runtimeManifest.version}`);
-    }
-  }
-}
-
-// Icons: the bundler refuses to run without them, and each platform needs its own format.
+// The bundle must carry platform-specific icons and explicit package targets.
 const REQUIRED_ICONS = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns", "icon.ico"];
 const icons = bundle.icon;
 if (!Array.isArray(icons) || icons.length === 0) {
-  fail("bundle.icon is missing — the bundler refuses to run without an icon set");
+  fail("bundle.icon is missing");
 } else {
   for (const icon of icons) {
     if (!existsSync(resolve(tauriDir, icon))) fail(`bundle.icon lists ${icon}, which does not exist`);
@@ -226,9 +88,6 @@ if (!Array.isArray(icons) || icons.length === 0) {
   }
 }
 
-// Targets: listed per platform on purpose. tauri-bundler filters this list down to the
-// current host's package types (Settings::package_types), so the same config is correct
-// on all three -- and an omission here would silently produce no artifact on that OS.
 const PLATFORM_TARGETS = {
   windows: ["nsis", "msi"],
   macOS: ["app", "dmg"],
@@ -236,7 +95,7 @@ const PLATFORM_TARGETS = {
 };
 const targets = bundle.targets;
 if (targets === "all") {
-  fail('bundle.targets is "all" — list the targets so an unsupported one is a review decision, not a surprise');
+  fail('bundle.targets is "all"');
 } else if (!Array.isArray(targets) || targets.length === 0) {
   fail("bundle.targets must be a non-empty list");
 } else {
@@ -247,10 +106,9 @@ if (targets === "all") {
   }
 }
 
-// A release build that ships a stale agent is a silent breakage, so the ordering of the
-// hook is part of the contract: contract libs -> agent bundle -> frontend bundle.
+// Tauri direct builds and package.mjs must stage current sidecars before the UI build.
 const beforeBuild = conf.build?.beforeBuildCommand ?? "";
-const order = ["prepare-node-runtime.mjs", "build:libs", "@yukinal/agent", "build-python-agent.mjs", "build-ssh-service.mjs", "@yukinal/desktop"];
+const order = ["build:libs", "build-python-agent.mjs", "build-ssh-service.mjs", "@yukinal/desktop"];
 let cursor = -1;
 for (const token of order) {
   const index = beforeBuild.indexOf(token);
@@ -265,135 +123,41 @@ for (const token of order) {
   cursor = index;
 }
 
-// Linux packages must declare their runtime libraries. Tauri's schema permits an
-// empty/missing `depends` list, but that produces an installable package that cannot
-// start on a clean machine.
+// Linux installs must declare the system libraries required by the WebView.
 const debDepends = bundle.linux?.deb?.depends;
-if (!Array.isArray(debDepends) || debDepends.length === 0) {
-  fail("bundle.linux.deb.depends is empty — .deb installs must pull webkit and GTK");
-}
+if (!Array.isArray(debDepends) || debDepends.length === 0) fail("bundle.linux.deb.depends is empty");
 for (const required of ["libwebkit2gtk", "libgtk-3"]) {
-  if (!debDepends.some((dependency) => String(dependency).includes(required))) {
+  if (!debDepends?.some((dependency) => String(dependency).includes(required))) {
     fail(`bundle.linux.deb.depends does not include ${required}`);
   }
 }
-
 const rpmDepends = bundle.linux?.rpm?.depends;
-if (!Array.isArray(rpmDepends) || rpmDepends.length === 0) {
-  fail("bundle.linux.rpm.depends is empty — .rpm installs must pull webkit and GTK");
-}
+if (!Array.isArray(rpmDepends) || rpmDepends.length === 0) fail("bundle.linux.rpm.depends is empty");
 for (const required of ["webkit2gtk", "gtk3"]) {
-  if (!rpmDepends.some((dependency) => String(dependency).includes(required))) {
+  if (!rpmDepends?.some((dependency) => String(dependency).includes(required))) {
     fail(`bundle.linux.rpm.depends does not include ${required}`);
   }
 }
 
-// ─────────────────────────────────────────── 2. the Rust side of the same contract
+// Rust and Tauri must resolve the same frozen Python Agent in packaged builds.
 const configRs = join(root, "crates", "core", "src", "sidecar", "config.rs");
 const configSource = read(configRs);
-// Test the index, not the slice: `slice(-1)` on a miss returns the file's last
-// character, which is truthy, so `if (!packagedEntry)` could never fire and the
-// diagnostic below was unreachable. The rename case then surfaced through the
-// body check further down, with a message about the resource directory -- true
-// but not the reason.
-const packagedEntryAt = configSource.indexOf("pub fn packaged_entry");
-if (packagedEntryAt === -1) {
-  fail(
-    `${configRs}: packaged_entry() not found — it is the other half of the resource path ` +
-      "(if it was renamed, update this check and tauri.conf.json together)",
-  );
-} else {
-  const packagedEntry = configSource.slice(packagedEntryAt);
-  // Accept any spelling of the same subpath -- separate "agent"/"index.js" literals, one
-  // "agent/index.js" literal, or a constant elsewhere in the file. What must not change is
-  // the subpath itself: a rename on one side alone is invisible until an installed user
-  // starts the app.
-  const compact = configSource.replace(/\s+/g, "");
-  const joinsAgentAndIndex = compact.includes('"agent"') && compact.includes('"index.js"');
-  if (!compact.includes('"agent/index.js"') && !joinsAgentAndIndex) {
-    fail(`${configRs}: no "agent/index.js" (or "agent" + "index.js") literal — update tauri.conf.json to match`);
-  } else {
-    const body = packagedEntry.slice(0, packagedEntry.indexOf("\n}"));
-    if (!/resources|resource_dir|join/.test(body)) {
-      fail(`${configRs}: packaged_entry() no longer derives from the resource directory: ${body.trim()}`);
-    }
-  }
-}
-if (!configSource.includes("pub fn packaged_runtime") || !configSource.includes('"runtime"')) {
-  fail(`${configRs}: bundled runtime path must be resolved from <resources>/runtime`);
+const resolverStart = configSource.indexOf("pub fn from_env_with_resources");
+const pythonSelection = configSource.indexOf("map(packaged_python_entry)", resolverStart);
+const legacyNodeSelection = configSource.indexOf("map(packaged_entry)", resolverStart);
+if (resolverStart === -1 || pythonSelection === -1) {
+  fail(`${configRs}: packaged resource resolution must select packaged_python_entry()`);
+} else if (legacyNodeSelection !== -1 && pythonSelection > legacyNodeSelection) {
+  fail(`${configRs}: the Python Agent must be selected before the legacy Node fallback`);
 }
 const pythonEntryAt = configSource.indexOf("pub fn packaged_python_entry");
 if (pythonEntryAt === -1) {
-  fail(`${configRs}: packaged_python_entry() not found — it must match the Tauri resource destination`);
+  fail(`${configRs}: packaged_python_entry() is missing`);
 } else {
-  const pythonEntry = configSource.slice(pythonEntryAt);
-  const body = pythonEntry.slice(0, pythonEntry.indexOf("\n}"));
+  const body = configSource.slice(pythonEntryAt, configSource.indexOf("\n}", pythonEntryAt));
   if (!body.includes('"python-agent"') || !body.includes('"yukinal-agent"')) {
-    fail(`${configRs}: packaged_python_entry() must resolve the frozen binary inside python-agent/yukinal-agent`);
+    fail(`${configRs}: packaged_python_entry() must resolve python-agent/yukinal-agent`);
   }
-}
-
-// ───────────────────────────────────────── 3. the bundle is one self-contained file
-const agentManifest = JSON.parse(read(join(root, "apps", "agent", "package.json")));
-const buildScript = agentManifest.scripts?.build ?? "";
-if (!buildScript.includes("--outfile=dist/index.js")) {
-  fail(`apps/agent build script does not emit dist/index.js: ${buildScript}`);
-}
-if (!buildScript.includes("--bundle")) {
-  fail(`apps/agent build script does not bundle: ${buildScript}`);
-}
-if (!buildScript.includes("--platform=node")) {
-  fail(`apps/agent build script does not set --platform=node: ${buildScript}`);
-}
-// ESM output is what the source is (`"type": "module"`), and it is what Node loads in the
-// installed layout: there is no package.json next to `<resources>/agent/index.js`, so Node
-// falls back to syntax detection, which is a documented default only from Node 22.7 onward
-// -- the same floor `engines.node` states below.
-if (!buildScript.includes("--format=esm")) {
-  fail(`apps/agent build script does not emit ESM: ${buildScript}`);
-}
-if (agentManifest.type !== "module") {
-  fail('apps/agent/package.json is not "type": "module" — dist/index.js would be read as CommonJS');
-}
-
-// The compile target, development floor and bundled runtime major must agree.
-const enginesNode = JSON.parse(read(join(root, "package.json"))).engines?.node ?? "";
-const targetMajor = /--target=node(\d+)/.exec(buildScript)?.[1];
-const floorMajor = /(\d+)/.exec(enginesNode)?.[1];
-if (!targetMajor) {
-  fail(`apps/agent build script has no --target=node<major>: ${buildScript}`);
-} else if (!floorMajor) {
-  fail(`root package.json engines.node ("${enginesNode}") does not state a floor to compare with`);
-} else if (targetMajor !== floorMajor) {
-  fail(
-    `esbuild --target=node${targetMajor} contradicts engines.node "${enginesNode}" — ` +
-      "the development Node floor and the bundled runtime must match the compile target",
-  );
-}
-
-const runtimeMajor = /^(\d+)\./.exec(runtimeManifest?.version ?? "")?.[1];
-if (targetMajor && runtimeMajor && targetMajor !== runtimeMajor) {
-  fail(`esbuild target node${targetMajor} does not match bundled runtime ${runtimeManifest.version}`);
-}
-
-if (!existsSync(agentBundle)) {
-  fail(`${agentBundle} does not exist — run: pnpm --filter @yukinal/agent build`);
-} else {
-  const source = read(agentBundle);
-  // `node:` builtins are the only legal external in a `--platform=node` bundle; anything
-  // else is a specifier the installed app is expected to resolve without node_modules.
-  const externals = [...source.matchAll(/^\s*import\s+(?:[^"']*?\sfrom\s+)?["']([^"']+)["']/gm)]
-    .map((match) => match[1])
-    .filter((specifier) => !specifier.startsWith("node:"));
-  if (externals.length > 0) {
-    fail(`${agentBundle} still imports ${[...new Set(externals)].join(", ")} — a packaged app has no node_modules`);
-  }
-  const size = statSync(agentBundle).size;
-  // State both numbers rather than claiming they match: this line is also printed when the
-  // target/floor comparison above has just failed.
-  console.log(
-    `  staged agent: ${size} bytes, one file, no non-builtin imports (target node${targetMajor}, engines.node "${enginesNode}")`,
-  );
 }
 
 if (problems.length > 0) {
@@ -402,4 +166,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log("packaging contract: green");
+console.log("packaging contract: green (Python Agent and C++ SSH service only)");

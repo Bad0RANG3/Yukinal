@@ -5,7 +5,9 @@
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
 > desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
 > existing UI. Tauri development and new package builds now select the Python
-> sidecar; the old Node resources remain as a transition fallback. Rust still
+> sidecar; installer resources contain Python Agent and C++ SSH assets only.
+> The resolver retains a legacy Node compatibility branch for older layouts.
+> Rust still
 > hosts native UI IPC, local trust-store updates, final approvals, and SSH
 > compatibility paths for configurations outside current C++ coverage: Host CA,
 > HTTPS proxies, unsupported proxy bypass rules, keyboard-interactive auth,
@@ -82,10 +84,11 @@ still require a Rust-only SSH route retain the existing Rust compatibility path.
 `pnpm --filter @yukinal/desktop tauri dev` selects this runtime for Tauri
 development; `pnpm desktop:dev:python` is an equivalent shortcut and
 `pnpm desktop:dev` remains the browser-only UI preview. `pnpm package` freezes
-the Python runtime with PyInstaller, stages it under `python-agent/`, and the
-Rust resolver prefers it over the retained Node fallback. Installed app and
-cross-platform artifact acceptance are still required before removing that
-fallback.
+the Python runtime with PyInstaller, stages it under `python-agent/`, and
+validates the Python/C++ resource layout before Tauri builds. Node is no longer
+downloaded or staged in new installers. The Rust resolver retains a compatibility
+branch for older packaged layouts, but the new Tauri installer has not been built
+in this environment because Cargo and rustc are unavailable.
 
 ## Processes and trust boundaries
 
@@ -436,7 +439,7 @@ could not be compiled here because Cargo and rustc are unavailable.
 
 ## Deliberately deferred
 
-- removing the Node bundle and runtime transition fallback after installed-app parity;
+- removing the legacy Node resource-resolution branch after old packaged layouts no longer need compatibility;
 - keeping a persistent C++ SSH service alive across desktop requests;
 - automatically synchronizing selected desktop targets and credentials to the
   C++ service configuration;
@@ -446,8 +449,8 @@ could not be compiled here because Cargo and rustc are unavailable.
 - full C++ SFTP and PTY coverage for compatibility-only SSH configurations;
 - control plane, PostgreSQL, and multi-tenant deployment.
 
-The next milestones are installed-app parity checks, removing the Node fallback,
-durable task/plan state, and automatic selected-target synchronization to the C++
+The next milestones are new-layout Tauri installer parity checks, durable
+task/plan state, and automatic selected-target synchronization to the C++
 service configuration, while keeping
 host authorization as the final gate. A real SSH success against an OpenSSH
 server remains unverified because Docker is unavailable. The frozen Python
@@ -455,6 +458,6 @@ Agent build and installed-resource layout smoke passed on Windows 11 / Python
 3.14.8 with a restricted `PATH`, including provider/MCP imports and the JSON-RPC
 stdio lifecycle. The full Tauri installer smoke and Rust-to-Python host
 integration remain unverified because Cargo and rustc are unavailable in this
-environment. Keep the Node fallback until that full installer path is verified.
+environment.
 Do not mark later product requirements as delivered by the scaffold or
 documentation.

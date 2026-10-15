@@ -1,33 +1,23 @@
 #!/usr/bin/env node
 /**
- * Smoke the agent the way an *installed* app launches it.
+ * Smoke the Python Agent the way an *installed* app launches it.
  *
- * `smoke-sidecar.mjs` proves the bundle speaks the protocol while it still sits in the
- * repository, where `apps/agent/node_modules` and the workspace checkout are one `..`
- * away. That is not what the user gets: the installer ships a small `<resource_dir>/agent/`
- * directory, staged by `bundle.resources` in
- * `apps/desktop/src-tauri/tauri.conf.json`, with no `node_modules` anywhere above it.
+ * `smoke-sidecar.mjs` covers the legacy Node development route. This script stages the
+ * Tauri resource map and runs the frozen Python Agent from that isolated installed shape.
  *
- * So this stages **exactly what that map says** into a throwaway directory, then runs the
- * same assertions against the staged entry. A leftover bare specifier (`import "zod"`), a
- * relative import that esbuild left unresolved, or a path resolved against the source tree
- * fails here and nowhere else.
+ * The Python executable must start without Python on PATH, load its provider/MCP imports,
+ * and complete the sidecar protocol smoke from the staged resource directory.
  *
- * Reading the map instead of hardcoding one file is not tidiness: this script previously
- * copied `index.js` alone with a comment saying "not even a package.json", and when the
- * map gained a second entry (`agent/package.json`, which declares the staged bundle's
- * module system) the smoke kept testing a layout the installer no longer produces. The
- * map is the single source of truth for the installed shape; deriving the staging from it
- * means the two cannot disagree again.
+ * The map is the single source of truth for the installed shape; deriving the staging from
+ * it means the smoke and installer cannot silently disagree.
  */
 
 import { copyFile, cp, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { runSidecarSmoke } from "./lib/sidecar-smoke.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const tauriDir = join(repo, "apps", "desktop", "src-tauri");
@@ -38,16 +28,13 @@ try {
   resources = JSON.parse(readFileSync(confPath, "utf8"))?.bundle?.resources;
 } catch (error) {
   console.error(`✗ cannot read bundle.resources from ${confPath}: ${error.message}`);
-  process.exit(2);
+  throw error;
 }
 if (resources === null || typeof resources !== "object" || Array.isArray(resources)) {
-  console.error(`✗ ${confPath} has no bundle.resources map to stage`);
-  process.exit(2);
+  throw new Error(`${confPath} has no bundle.resources map to stage`);
 }
 
 const staged = await mkdtemp(join(tmpdir(), "yukinal-packaged-"));
-const entry = join(staged, "agent", "index.js");
-const bundledNode = join(staged, "runtime", process.platform === "win32" ? "node.exe" : "node");
 
 try {
   for (const [source, destination] of Object.entries(resources)) {
@@ -55,24 +42,20 @@ try {
     const from = resolve(tauriDir, source);
     const to = join(staged, String(destination).replace(/\\/g, "/"));
     if (!existsSync(from)) {
-      console.error(`✗ bundle.resources maps "${source}", which does not exist (${from})`);
-      console.error("  build it first: pnpm --filter @yukinal/agent build");
-      process.exit(2);
+      throw new Error(`bundle.resources maps "${source}", which does not exist (${from}); build the Python Agent and C++ SSH service first`);
     }
     await mkdir(dirname(to), { recursive: true });
     if ((await stat(from)).isDirectory()) await cp(from, to, { recursive: true });
     else await copyFile(from, to);
   }
 
-  if (process.env.YUKINAL_REQUIRE_PACKAGED_NODE === "1" && !existsSync(bundledNode)) {
-    console.error(`✗ bundled Node.js is required for this smoke but was not staged (${bundledNode})`);
-    process.exit(2);
-  }
-  const program = existsSync(bundledNode) ? bundledNode : process.execPath;
-  await runSidecarSmoke(entry, {
-    program,
-    label: `${entry} (resource layout, no node_modules)`,
+  const smoke = spawnSync(process.execPath, [join(repo, "scripts", "smoke-installed-agent.mjs"), staged], {
+    cwd: repo,
+    stdio: "inherit",
+    windowsHide: true,
   });
+  if (smoke.error) throw smoke.error;
+  if (smoke.status !== 0) throw new Error(`installed Python Agent smoke failed (exit ${smoke.status ?? 1})`);
 } finally {
   await rm(staged, { recursive: true, force: true });
 }

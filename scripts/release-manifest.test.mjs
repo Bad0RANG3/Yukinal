@@ -25,7 +25,7 @@ test("release manifest records package hashes and ignores non-artifact files", a
     const manifest = await writeReleaseManifest({
       bundleDir,
       appVersion: "1.2.3",
-      runtimeVersion: "24.21.0",
+      agentVersion: "0.1.0",
       generatedAt: "2026-09-29T00:00:00.000Z",
       platform: "win32",
       architecture: "x64",
@@ -35,18 +35,18 @@ test("release manifest records package hashes and ignores non-artifact files", a
 
     assert.deepEqual(manifest.artifacts.map(({ path: artifactPath }) => artifactPath), ["nsis/Yukinal-setup.exe"]);
     assert.equal(manifest.artifacts[0].bytes, Buffer.byteLength("installer bytes"));
-    assert.equal(manifest.application.bundledNodeRuntime, "24.21.0");
+    assert.equal(manifest.application.bundledPythonAgent, "0.1.0");
     assert.equal(manifest.build.source.dirty, true);
     assert.match(await readFile(path.join(bundleDir, "SHA256SUMS.txt"), "utf8"), /^[a-f0-9]{64}  nsis\/Yukinal-setup\.exe\n$/);
     assert.equal((await verifyReleaseManifest(bundleDir)).artifacts.length, 1);
-    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", runtimeVersion: "24.21.0" });
+    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", agentVersion: "0.1.0" });
     assert.equal((await verifyReleaseManifest(bundleDir)).artifacts.length, 1);
   });
 });
 
 test("release manifest verification detects changed payload bytes", async () => {
   await withBundle(async (bundleDir) => {
-    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", runtimeVersion: "24.21.0" });
+    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", agentVersion: "0.1.0" });
     await writeFile(path.join(bundleDir, "nsis", "Yukinal-setup.exe"), "changed bytes");
     await assert.rejects(verifyReleaseManifest(bundleDir), /size changed|checksum mismatch/);
   });
@@ -54,7 +54,7 @@ test("release manifest verification detects changed payload bytes", async () => 
 
 test("release manifest verification refuses an artifact added after generation", async () => {
   await withBundle(async (bundleDir) => {
-    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", runtimeVersion: "24.21.0" });
+    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", agentVersion: "0.1.0" });
     await writeFile(path.join(bundleDir, "Yukinal.msi"), "another installer");
     await assert.rejects(verifyReleaseManifest(bundleDir), /not covered by the release manifest/);
   });
@@ -62,7 +62,7 @@ test("release manifest verification refuses an artifact added after generation",
 
 test("release manifest verification rejects a path escaping the bundle", async () => {
   await withBundle(async (bundleDir) => {
-    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", runtimeVersion: "24.21.0" });
+    await writeReleaseManifest({ bundleDir, appVersion: "1.2.3", agentVersion: "0.1.0" });
     const manifestPath = path.join(bundleDir, "release-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     manifest.artifacts[0].path = "../outside.exe";
@@ -191,6 +191,17 @@ test("installed package Agent smoke checks the frozen Python runtime and require
   assert.ok(smoke.includes("env: { PATH: restrictedPath }"), "installed smoke must prove the frozen runtime starts without Python on PATH");
   assert.ok(smoke.includes("dataDir"), "installed smoke must isolate Agent data in a temporary directory");
   assert.ok(protocolSmoke.includes("options.dataDir"), "shared sidecar smoke must pass its isolated data directory to the Agent");
+});
+
+test("the installer resource map ships Python and C++ resources without the legacy Node runtime", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const config = JSON.parse(await readFile(path.join(root, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"));
+  const destinations = Object.values(config.bundle.resources).map((destination) => destination.replace(/\\/g, "/").replace(/\/+$/, "")).sort();
+  const packageScript = await readFile(path.join(root, "scripts", "package.mjs"), "utf8");
+
+  assert.deepEqual(destinations, ["NOTICE", "python-agent", "ssh-service"]);
+  assert.doesNotMatch(packageScript, /prepare-node-runtime|check-node-runtime-pins|YUKINAL_REQUIRE_PACKAGED_NODE/);
+  assert.match(packageScript, /smoke-packaged-agent\.mjs/);
 });
 
 test("Rust sidecar resolution prefers the packaged Python Agent and marks it for SSH service credentials", async () => {

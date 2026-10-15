@@ -103,7 +103,7 @@ async function atomicWrite(filePath, contents) {
 export async function writeReleaseManifest({
   bundleDir,
   appVersion,
-  runtimeVersion,
+  agentVersion,
   generatedAt = new Date().toISOString(),
   platform = process.platform,
   architecture = process.arch,
@@ -115,7 +115,7 @@ export async function writeReleaseManifest({
   const manifest = {
     schemaVersion: 1,
     generatedAt,
-    application: { name: "Yukinal", version: appVersion, bundledNodeRuntime: runtimeVersion },
+    application: { name: "Yukinal", version: appVersion, bundledPythonAgent: agentVersion },
     build: { platform, architecture, nodeVersion, source },
     artifacts,
   };

@@ -6,6 +6,8 @@
 
 ## 当前状态
 
+2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
+
 仓库版本为 `1.0.0`，用于标记当前跨层接口基线。三平台安装包已在 CI runner 完成限定范围的安装/复制冒烟；这不代表用户干净环境、完整桌面 GUI 或真实 Provider、MCP 和远端维护场景都已验收。版本号以 `packages/shared/src/version.ts` 为源，并由测试检查各清单与 IPC fixture。
 
 | 项目 | 已有证据 | 发布前仍需完成 |
@@ -16,7 +18,7 @@
 | Rust 依赖审计 | 2026-09-30 本机以 `cargo-audit 0.22.2` 扫描 628 项依赖，未发现已知漏洞；仍有 2 条允许提示：[`glib 0.18.5` 的 `VariantStrIter` unsound 告警](https://rustsec.org/advisories/RUSTSEC-2024-0429)及 [`proc-macro-error 1.0.4`](https://rustsec.org/advisories/RUSTSEC-2024-0370) 未维护。升级前曾有 7 条提示；已把 yanked 的 `wnaf 0.14.0` 更新至 `0.14.1`，Tauri 升到 `2.12.0` 后移除了 `urlpattern` 带来的 5 条 `unic-*` 告警，并获得上游 ACL 跨来源权限修复，代价是 Rust MSRV 提高到 1.90。Yukinal 源码没有直接引用 `glib::VariantStrIter` 或 `proc-macro-error`；`glib` 和 `proc-macro-error` 都来自 Linux Tauri/GTK3 图形依赖树，后者仅经 `glib-macros 0.18.5` 与 `gtk3-macros 0.18.2` 引入，`--target x86_64-pc-windows-msvc` 下无该依赖输出。为避开旧 RustSec Action 的 Node 20 运行时并收紧权限，advisory job 现固定安装 `cargo-audit 0.22.2` 后直接执行 `cargo audit`，仅保留 `contents: read`；主分支、PR 和 `v*` tag 都运行审计，tag 上跳过重复的三平台 `pnpm check`（由发布包工作流执行） | GitHub 下一次 main/PR/tag 运行确认新 CLI 和 tag 触发配置。Linux GTK 链中的两条提示仍无法在当前 Tauri 2.x 依赖边界内安全升级；GTK4/WebKitGTK 6 迁移仍是[未合并的 Tauri 3.0 变更](https://github.com/tauri-apps/tauri/pull/14684)，届时重新评估，不静默屏蔽告警 |
 | Windows 包 | 本轮 `pnpm package` 从 dirty 工作树重新生成 unsigned MSI（47,427,584 bytes，SHA-256 `90ed4998ed364421107eeee0a5cad66663992d4815d9211fbe64cbb9ea062c69`）和 NSIS（33,268,000 bytes，SHA-256 `29a5d6ccc054a1c91c9b17f18bb3665edf510302f7e3be25e30348487ddc9386`），release manifest 与生成的 NSIS 卸载策略检查通过；本轮未在系统中安装这两个新产物。本机此前已完成 NSIS 隔离安装/卸载及数据保留验收；另完成 NSIS checkbox、MSI 管理员映像载荷及原生窗口 smoke。PR #2 提交 `a3dbb71` 的 GitHub package run [36667041840](https://github.com/Bad0RANG3/Yukinal/actions/runs/36667041840) 与三平台/依赖门禁 [36667041930](https://github.com/Bad0RANG3/Yukinal/actions/runs/36667041930) 全部通过；PR #3 的手动三平台发布包 run [36674149301](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301) 也通过 NSIS 安装/更新/启动/卸载与数据保留、MSI 安装/启动/关闭/卸载及 manifest 校验 | 完全没有 Node.js 的干净 Windows 系统复验；新工作树产物的安装后 GUI/A/O/F 操作验收、代码签名、公证及跨版本回滚策略 |
 | macOS / Linux 包 | PR #3 手动三平台发布包 run [36674149301](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301) 成功：Ubuntu 22.04 对 `.deb` 实际安装、检查 dpkg 安装状态、验证包内资源并用 bundled Node 完成 Agent 握手，随后 purge；macOS runner 对 DMG 实际挂载、将 `Yukinal.app` 复制到临时 Applications、检查资源并完成 bundled Agent 握手。两平台 release manifest 校验通过，安装包及 manifest 均上传为 [Linux artifact](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11080610014) 和 [macOS artifact](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11079725899) | 这些是隔离的 CI runner 安装/复制 smoke，不覆盖完整桌面 GUI 实际操作、签名/公证、升级/重启或干净用户主机复验 |
-| Node.js 运行时 | 固定版本的官方运行时按 SHA-256 校验；2026-09-30 本机 `node scripts/check-node-runtime-pins.mjs` 将六个平台的 24.21.0 归档 pin 全部与官方 SHASUMS 清单核对一致；打包时会重复该校验。针对上述 MSI SHA-256 对应的管理员映像，2026-09-30 两次 `smoke-installed-windows.ps1` 均确认受限 PATH 找不到 Node、实际 sidecar 使用与载荷一致的 bundled `node.exe`、Agent 握手成功；正常关窗和强制终止父进程后 sidecar 均退出。当前 NSIS SHA-256 也通过同一进程级检查：受限 PATH 找不到 Node、sidecar 哈希与随包 runtime 一致、Agent 握手成功并在应用正常退出后停止。PR #3 的 Linux `.deb` 和 macOS DMG 安装后 smoke 也由包内 Node 启动 Agent 并完成协议握手 | Windows 系统未安装 Node 的干净机复验仍缺；Linux/macOS runner 预装 Node，冒烟 harness 也由 runner Node 启动，因此这些结果只证明应用选用包内 runtime，不证明系统完全没有 Node 时可用 |
+| 旧版 Node.js 随包运行时（历史记录） | 2026-09-30 的 MSI、NSIS、Linux `.deb` 和 macOS DMG 验收使用固定版 Node 24.21.0，记录见下方远端 CI 快照与旧产物记录。当前源码配置已不再把该 runtime 或旧 Node Agent 放进安装包 | 新 Python-only 资源映射尚待 Tauri 安装包构建、实际安装和三平台验收；旧版验收不覆盖新布局 |
 | 真实环境与协议回归 | 本机 acceptance fixture 通过真实 AgentLoop 与 Host RPC client 覆盖只读诊断、审批变更、验证失败，以及文件恢复被拒绝或批准后的 revision/原内容核验；新增 native Host RPC + 真实临时 SQLite 测试，记录 evidence 后关闭并重建 `AppState`，再经 fetch RPC 读回内容与宿主绑定的 run ID；自动回归还覆盖 Agent 停止/运行时限、工具超时、Host RPC 断连时拒绝所有挂起请求并取消在途工具、持续巡检任务重启恢复及数据库迁移失败恢复。2026-09-30 的 `desktop_host_rpc_executes_server_command_once_and_persists_unknown_outcome` 通过桌面 Host RPC 分发和真实 `AppState` SSH 客户端连到临时 russh SSH 服务，验证未授权不发命令、获授权执行并记预算、重复请求不二次执行、丢失退出状态后标记未知且阻止逻辑重放。`crates/ssh/tests/sftp.rs` 新增服务层上传用例：`TransferManager` 经测试适配器调用生产 `RusshBackend` 的流式 SFTP/硬链接发布，核验发布字节、目标竞争不覆盖及 staging 清理。既有 SSH/SFTP 回环还覆盖固定主机密钥认证、exec stdout/stderr/非零退出码/输出上限/超时/取消、目录列表、限长与完整读取、独占写入/备份/删除，以及 `RemoteFileService` 的 revision 守卫与故障注入。SFTP 不提供 CAS，最后一次内容复核后仍有竞争窗口。可分别运行 `cargo test -p yukinal-ssh --test command` 和 `cargo test -p yukinal-ssh --test sftp`。2026-09-30 本机前置条件只读核验：当前进程未配置 live-test opt-in、OpenAI key/base/model、Anthropic/Gemini key；Windows OpenSSH client 存在，但未找到 sshd.exe 或 sshd 服务；本轮未发起任何外部 Provider/SSH 调用 | 用可重置服务器、真实 Provider 和 MCP 端点跑新目标 A/O/F 路径及错误矩阵；回环测试走真实 SSH/SFTP wire protocol，但不证明 OpenSSH/其他真实服务器兼容性、真实 Provider/AgentLoop/sidecar stdio 往返、真实目标机行为、Tauri transfer adapter、完整 UI 工作流或实际目标机故障恢复 |
 | 发布可信度 | 产物当前未签名 | 确定证书、渠道、升级与回退方案后再公开分发 |
 
@@ -32,7 +34,7 @@ Rust 依赖边界复核（2026-09-30）：`cargo tree -i glib@0.18.5 --target x8
 
 此前 5 条 `unic-*` 未维护告警均来自 `urlpattern 0.3.0 -> tauri-utils 2.9.3`；现已锁定 Tauri `2.12.0` / `tauri-utils 2.10.0`，该版本改用 `urlpattern 0.6`，2026-09-29 与 2026-09-30 两次本机 `cargo audit` 均确认这些告警已消失（[Tauri 发行记录](https://github.com/tauri-apps/tauri/releases/tag/tauri-v2.12.0)）。因此项目 MSRV 已提高至 Rust 1.90；本轮以精确的 `1.90.0` 工具链通过 `fmt`、`check`、Clippy 和 workspace 全量测试，默认工具链下 `pnpm check` 也全绿；GitHub 的 Linux 全门禁现固定使用 Rust 1.90.0，其他平台继续测试 stable。这不影响终端用户安装包无需 Node.js 的承诺，也不会消除 Linux GTK 链中的 `glib` / `proc-macro-error` 两条告警。
 
-固定运行时为 Node.js 24.21.0；截至 2026-09-29，Node.js 官方将 24.x 列为 LTS，支持计划延续至 2028 年 4 月底。六个平台归档 hash 以[官方 24.21.0 SHASUMS](https://nodejs.org/dist/v24.21.0/SHASUMS256.txt) 为准；每次 `pnpm package` 会执行 `node scripts/check-node-runtime-pins.mjs` 核对整组 pin，而不只核对当前构建平台。[官方归档页](https://nodejs.org/en/download/archive/v24.21.0)列出各平台二进制和签名校验清单。
+历史 Node 随包方案使用固定 Node.js 24.21.0；截至 2026-09-29，官方将 24.x 列为 LTS，支持计划延续至 2028 年 4 月底。该版六个平台归档 hash 曾与[官方 SHASUMS](https://nodejs.org/dist/v24.21.0/SHASUMS256.txt) 核对；2026-10-15 停止在安装包中携带 Node runtime 后，相关下载和 pin 校验脚本已移除。[官方归档页](https://nodejs.org/en/download/archive/v24.21.0)仍可查阅当时的二进制和签名校验清单。
 
 ### 本机 Windows 构建记录
 
@@ -40,7 +42,7 @@ Rust 依赖边界复核（2026-09-30）：`cargo tree -i glib@0.18.5 --target x8
 
 本节按时间保留验收证据；安装包哈希、ProductCode 和 `-PlanOnly` 输出都只对应其标注的快照。阅读当前结论时，以日期最新的工作树复核为准；历史安装器通过记录只适用于对应的旧哈希。
 
-以下是本轮脏工作区生成的本地验收产物，不是签名版或可公开发布的 release。构建操作系统为 Windows x64；打包脚本先通过严格模式的 sidecar 冒烟，再由 Tauri 生成两个安装器。使用 7-Zip 检查 NSIS 内容，并读取 MSI 的 `File` 表，确认都带有 `runtime/node.exe`（93,580,104 字节）、`runtime/LICENSE`（160,555 字节）及 Agent bundle。
+以下是 2026-09-30 上一轮脏工作区生成的本地验收产物，不是签名版或可公开发布的 release。构建操作系统为 Windows x64；当时的打包脚本先通过严格模式的 sidecar 冒烟，再由 Tauri 生成两个安装器。使用 7-Zip 检查 NSIS 内容，并读取 MSI 的 `File` 表，确认都带有 `runtime/node.exe`（93,580,104 字节）、`runtime/LICENSE`（160,555 字节）及 Agent bundle。该记录不描述 2026-10-15 起的新 Python-only 资源映射。
 
 此前版本的 NSIS 曾以 per-user 模式在本机真实安装，按测试专用 `YUKINAL_DATA_DIR`、不含 Node 的子进程 `PATH`，通过 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 验证 sidecar 的实际运行文件与安装内容哈希相同、Agent 握手成功、正常关窗后应用及 sidecar 退出；该循环重复 7 次，7 次均通过。在当时重建的 NSIS 隔离目录 `target/release/nsis-post-wnaf-20260929/` 完成静默 per-user 安装和启动/关闭冒烟，再运行该目录自己的 `uninstall.exe /S`；确认 PATH 隔离有效、随包运行时哈希一致、Agent 握手成功、应用与 sidecar 正常退出、安装目录和卸载注册消失，卸载前已存在的 `%LOCALAPPDATA%\dev.yukinal.workspace` 用户数据目录仍在。第一次未收紧握手条件的手工尝试曾有一次 20 秒关闭等待超时；按就绪信号运行后没有复现，故记为一次未复现异常，不据此改代码。以上 NSIS 安装生命周期记录针对 Tauri 2.12 重建前的包，不冒充当前安装包的验收。当前机器装有 Node.js；这里只能证明应用子进程 PATH 不提供 Node 时会选用随包运行时，尚不等于完全未安装 Node 的干净系统验收。
 
@@ -48,7 +50,7 @@ Rust 依赖边界复核（2026-09-30）：`cargo tree -i glib@0.18.5 --target x8
 
 为真实 MSI 生命周期新增了 `scripts/smoke-msi-install-windows.ps1`。它会从 MSI 读取 ProductCode、版本和安装路径；非管理员、检测到 Node.js、已有 Yukinal 安装、数据目录已存在或安装目录占用时会在改动系统前拒绝运行。仅在一次性 Windows x64 管理员测试机（无 Node.js、无现存 Yukinal、干净用户配置文件）运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`；脚本安装这一个 MSI、调用上面的进程级启动/关闭冒烟、检查卸载前创建的数据保护标记仍保留，再只卸载本次 MSI ProductCode 并清理该标记，日志留在 `target/release/msi-install-smoke/`。`-PlanOnly` 只读解析包并报告主机阻碍。Windows 打包 workflow 现也会在 GitHub 一次性管理员 runner 上运行同一生命周期脚本；GitHub 将标准 `windows-latest` 描述为每个 job 新建的 Windows VM，并以管理员权限运行（[runner 文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)），当前 Windows 2025 镜像也预装 Node.js（[镜像软件清单](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md)）。CI 因此明确使用 `-AllowInstalledNodeForPathIsolationSmoke`，而应用启动冒烟仍把 PATH 限制为 Windows 系统目录，所以可验收真实 MSI 安装/卸载和“应用进程 PATH 无 Node”行为，但不能冒充“系统未安装 Node”的验收，且首次远端通过记录尚未取得。2026-09-30 对最终 MSI `F57F401147D1FD2D8AB6917D2C0BB0235A8CB2D72309D2EFEFCC0F99839C1E03`（ProductCode `{3BA5349F-35D5-43CF-A008-9A70F6015E2F}`）执行 `-PlanOnly`；它是 per-machine（`ALLUSERS=1`），预检因当前 PowerShell 非管理员、主机存在 Node.js、Yukinal 用户数据根目录已存在而安全拒绝。预检未发现已有 MSI 安装，`C:\Program Files\Yukinal` 不存在；未进行安装或修改系统。当前工作机没有 WSL 发行版、Windows Sandbox 可执行文件或 Docker/Podman；虽有 Hyper-V PowerShell 模块，但当前账户无权运行 `Get-VM`/`Get-VMHost`，因此无法确认或使用可回滚的 Windows 虚拟机，也没有尝试实际 MSI 安装。
 
-NSIS 当前构建的真实生命周期脚本为 `scripts/smoke-nsis-install-windows.ps1`。它只在两个 Yukinal 数据目录、产品/卸载注册、测试安装目录和默认 `%LOCALAPPDATA%\Yukinal` 安装目录均未占用时运行；静默安装到 `target/release/nsis-install-smoke/<run-id>/`，核对产品注册指向该临时目录，调用 `scripts/smoke-installed-windows.ps1` 验证 bundled Node、Agent 握手和关闭，再创建两处 canary 并静默卸载，断言数据未被删除或改写。执行 `-PlanOnly` 只报告环境阻碍。卸载后若仅剩当前 smoke 的 `uninstall.exe`，脚本会在确认进程已退出后精确清理该文件和空测试目录。图形确认页由隔离 fixture 操作真实 checkbox 和 Tauri 生成的回调，验证默认不勾选时保留、勾选时展示说明并保留、更新模式仍保留；该 fixture 不安装产品、不写注册表，也不触碰默认用户数据路径。打包 workflow 在安装器相关路径发生 PR 改动时运行 Windows 生命周期验收；release tag 或手动触发仍构建全平台安装包。
+2026-09-30 NSIS 构建的真实生命周期脚本为 `scripts/smoke-nsis-install-windows.ps1`。它只在两个 Yukinal 数据目录、产品/卸载注册、测试安装目录和默认 `%LOCALAPPDATA%\Yukinal` 安装目录均未占用时运行；静默安装到 `target/release/nsis-install-smoke/<run-id>/`，核对产品注册指向该临时目录，调用 `scripts/smoke-installed-windows.ps1` 验证当时的 bundled Node、Agent 握手和关闭，再创建两处 canary 并静默卸载，断言数据未被删除或改写。执行 `-PlanOnly` 只报告环境阻碍。卸载后若仅剩当前 smoke 的 `uninstall.exe`，脚本会在确认进程已退出后精确清理该文件和空测试目录。图形确认页由隔离 fixture 操作真实 checkbox 和 Tauri 生成的回调，验证默认不勾选时保留、勾选时展示说明并保留、更新模式仍保留；该 fixture 不安装产品、不写注册表，也不触碰默认用户数据路径。打包 workflow 在安装器相关路径发生 PR 改动时运行 Windows 生命周期验收；release tag 或手动触发仍构建全平台安装包。
 
 卸载生成脚本回归补强：构建后检查验证确认页回调在卸载区段之前捕获复选框状态、preservation hook 位于两条且仅两条应用数据递归删除语句之前、两条语句都位于 Tauri 同意与非更新 guard 内；同时检查 hook 会清零状态、只显示说明而不含递归删除，并拒绝缺失状态捕获和额外无条件数据删除。Windows UI smoke 从当前生成脚本提取 `un.ConfirmShow` / `un.ConfirmLeave` 和实际标签，通过 native control 实测默认未选中时保留、勾选后提示并保留，以及 `/UPDATE` 模式仍保留；静默 `/S` 模式通过测试专用 `/TESTCHECKED` 预置已勾选状态，验证正常退出和 canary 原值保留；canary 全部位于临时 fixture。生成器检查、原生图形卸载和实际 `/UPDATE` 文件恢复均已由 Windows package run `36667041840` 通过。
 
@@ -72,7 +74,7 @@ NSIS 当前构建的真实生命周期脚本为 `scripts/smoke-nsis-install-wind
 
 ## 开发和本地验证
 
-开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。新构建的应用默认使用 Python Agent，Node 资源暂留作迁移回退。仓库根目录执行：
+开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。Node.js 仅用于构建工具、前端及旧版本地兼容 sidecar；当前安装包由冻结 Python Agent 提供运行时。仓库根目录执行：
 
 ```bash
 pnpm install --frozen-lockfile
@@ -87,7 +89,7 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。构建当前平台安装包使用 `pnpm package`；它会先对六种受支持平台逐一核对 Node.js 官方 SHASUMS pin，再下载并校验迁移期回退归档，构建并 smoke 检查冻结 Python Agent，产物位于 `target/release/bundle/`。本地构建成功只证明该平台产物生成，不代替安装后的验收。
 
-成功运行 `pnpm package` 会在 `target/release/bundle/` 同步生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发安装文件的 SHA-256、字节数、应用/随包 Node.js 迁移回退版本、构建平台、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的可用第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建/替换产物后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm release:manifest -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。`--no-bundle` 编译检查不刷新旧安装包的清单。CI 的平台安装包作业会复核这两份文件再与安装包一起上传；测试也会检查 CI 上传规则覆盖清单支持的全部安装包后缀。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名。
+成功运行 `pnpm package` 会在 `target/release/bundle/` 同步生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发安装文件的 SHA-256、字节数、应用版本和随包 Python Agent 版本、构建平台、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的可用第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建/替换产物后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm release:manifest -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。`--no-bundle` 编译检查不刷新旧安装包的清单。CI 的平台安装包作业会复核这两份文件再与安装包一起上传；测试也会检查 CI 上传规则覆盖清单支持的全部安装包后缀。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名。
 
 ## 发布验收
 
@@ -99,7 +101,7 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 ### 安装包与现有自动回归
 
-每个平台至少保留一条从干净安装环境执行的记录，包含提交、版本、操作系统、产物名称与 SHA-256、安装方式、随包 Python Agent 和 Node 回退版本、启动/退出/重开/卸载结果和脱敏失败日志位置。确认主机未安装 Node.js 或 Python 时 sidecar 仍能启动，并检查应用退出后 sidecar、MCP 子进程和 PTY 是否正确收尾。读取安装器清单或本地构建成功不算完成安装验收。Windows 可用 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 对 NSIS 安装版做进程级复验，也可用 `-InstallDir <目录>` 检查 MSI 提取载荷；真实 MSI 生命周期应在一次性管理员测试机运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`。这些脚本仍需配合干净系统、重启/升级及手动 GUI 验收。
+每个平台至少保留一条从干净安装环境执行的记录，包含提交、版本、操作系统、产物名称与 SHA-256、安装方式、随包 Python Agent 版本、启动/退出/重开/卸载结果和脱敏失败日志位置。确认主机未安装 Python 时 sidecar 仍能启动，并检查应用退出后 sidecar、MCP 子进程和 PTY 是否正确收尾。读取安装器清单或本地构建成功不算完成安装验收。Windows 可用 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 对 NSIS 安装版做进程级复验，也可用 `-InstallDir <目录>` 检查 MSI 提取载荷；真实 MSI 生命周期应在一次性管理员测试机运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`。这些脚本仍需配合干净系统、重启/升级及手动 GUI 验收。
 
 已有 Agent fixture `pnpm --filter @yukinal/agent exec tsx --test src/runtime/investigation-acceptance.test.ts` 使用真实 AgentLoop、权限审批和 Host RPC client，但服务端和远端文件是状态化内存 fixture。native Host RPC + SQLite 测试 `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib evidence_record_host_rpc_survives_host_restart_and_remains_fetchable` 覆盖 evidence 跨 `AppState` 重启。回环 SSH/SFTP 测试验证协议操作；这些都不证明真实 Provider、OpenSSH、安装版 UI 或大文件传输。新接口需分别补契约、宿主、sidecar、真实远端及 GUI 层的可观察验收。
 

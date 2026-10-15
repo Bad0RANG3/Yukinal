@@ -4,6 +4,8 @@ Yukinal is a desktop operations workspace for inspecting and managing SSH
 servers. The React interface remains the product UI; the 2.0 rewrite moves SSH
 operations toward a C++ service and Python Agent.
 
+The current app/package interface version is `1.0.0`; the rewrite is still in progress.
+
 ## Rewrite status
 
 The brief's first SSH foundation stage is complete; the broader migration is
@@ -54,10 +56,10 @@ existing React/Tauri UI remains intact while those paths are migrated.
 The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service
 panel uses the same short-lived service process for read-only service inventory.
-Tauri development and new
-desktop builds now select the frozen Python Agent. The Node runtime and bundle
-remain staged as a temporary fallback while the remaining desktop migration is
-validated.
+Tauri development and new desktop builds select the frozen Python Agent. The
+Node runtime and bundle are no longer included in installer resources. The
+legacy Node sidecar remains available only as a local development and
+compatibility route.
 
 To run the existing desktop UI with the Python Agent sidecar, create
 `agent/.venv` and install `agent[agent,models]`. Then run
@@ -194,9 +196,8 @@ pnpm --filter @yukinal/desktop tauri dev
 ```
 
 The package build creates a frozen Python Agent with PyInstaller and includes
-available third-party license texts. The old Node runtime remains in the
-installer as a transition fallback; removing it follows installed-app parity
-and lifecycle acceptance.
+available third-party license texts. Installer resources contain the Python
+Agent, C++ SSH service, and NOTICE; the legacy Node runtime is not packaged.
 
 The browser preview is available with `pnpm desktop:dev`; it does not connect to
 the new SSH service.

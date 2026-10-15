@@ -4,9 +4,9 @@
  *
  * What it adds over calling the bundler by hand: it fails *before* the expensive part.
  * `tauri build` compiles the whole Rust workspace in release mode before the bundler looks
- * at a single resource, so a config that stages nothing, or an agent bundle that still
- * imports `zod` from `node_modules`, would surface ten minutes in -- or, worse, only for
- * the user who installs the result. Steps 1-3 cost a few seconds and close that gap.
+ * at a single resource, so a missing frozen Agent or SSH service would surface ten minutes
+ * in -- or, worse, only for the user who installs the result. Preflight builds and smokes
+ * the Python resource layout before starting Tauri's release build.
  *
  * The installer itself is unsigned: there is no certificate in this repository, and
  * `bundle.signingIdentity` is deliberately not configured (see `docs/release.md`).
@@ -30,12 +30,9 @@ if (!existsSync(join(root, "pnpm-workspace.yaml"))) {
 }
 
 const steps = [
-  { name: "verify Node.js runtime checksum pins", command: process.execPath, args: ["scripts/check-node-runtime-pins.mjs"] },
-  { name: "prepare bundled Node.js runtime", command: process.execPath, args: ["scripts/prepare-node-runtime.mjs"] },
   { name: "contract libs", command: "pnpm", args: ["build:libs"] },
-  // Both runtimes are built here for preflight smoke; the Tauri hook builds them too so a
-  // direct `tauri build` also stages a current Agent.
-  { name: "agent bundle (esbuild)", command: "pnpm", args: ["--filter", "@yukinal/agent", "build"] },
+  // Build the exact runtimes shipped in the app. Tauri repeats these steps in its
+  // beforeBuildCommand so direct `tauri build` calls produce the same resource layout.
   {
     name: "frozen Python Agent build and smoke",
     command: process.execPath,
@@ -47,10 +44,9 @@ const steps = [
     args: ["scripts/build-ssh-service.mjs"],
   },
   {
-    name: "installed-layout smoke with bundled Node.js fallback",
+    name: "installed-layout Python Agent smoke",
     command: process.execPath,
     args: ["scripts/smoke-packaged-agent.mjs"],
-    env: { YUKINAL_REQUIRE_PACKAGED_NODE: "1" },
   },
   { name: "packaging contract", command: process.execPath, args: ["scripts/check-packaging.mjs"] },
   {
@@ -124,5 +120,5 @@ if (!bundleDir) {
 }
 
 console.log("\nThese installers are UNSIGNED: no certificate or signing identity is configured.");
-console.log("The packaged app starts the frozen Python Agent and includes the C++ SSH service; Node.js remains a transition fallback.");
+console.log("The packaged app includes the frozen Python Agent and C++ SSH service; Node.js is used only by build and validation scripts.");
 console.log("See the repository docs/release.md, 「交付与发布」.");

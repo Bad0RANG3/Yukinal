@@ -39,11 +39,17 @@ on:
       - scripts/check-desktop-window.ps1
       - scripts/nsis-uninstall-policy.test.mjs
       - scripts/lib/sidecar-smoke.mjs
+      - scripts/check-packaging.mjs
+      - scripts/check.mjs
       - scripts/package.mjs
+      - scripts/smoke-packaged-agent.mjs
       - scripts/build-python-agent.mjs
       - scripts/collect-python-licenses.py
       - scripts/smoke-python-agent.mjs
       - scripts/smoke-installed-agent.mjs
+      - scripts/lib/release-manifest.mjs
+      - scripts/write-release-manifest.mjs
+      - scripts/release-manifest.test.mjs
       - crates/core/src/sidecar/config.rs
       - NOTICE
       - scripts/smoke-deb-install-linux.sh
@@ -117,14 +123,13 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: pnpm audit
 
-      # The gate, unchanged: contract libs -> typecheck -> agent bundle -> packaging
-      # contract -> tests -> vite build -> both sidecar smokes -> cargo.
+      # Shared compiler gate: contract libs -> typecheck -> compatibility sidecar ->
+      # packaging contract -> tests -> vite build -> Rust checks.
       - run: pnpm check
 
-      # Verify runtime pins, prepare the Node transition fallback, contract libs,
-      # Node fallback bundle, frozen Python Agent, installed-layout smokes,
-      # packaging contract, then `tauri build`. The runtime and agent are prepared again by
-      # `beforeBuildCommand`, so the staged resource layout matches a direct Tauri build too.
+      # Build and smoke the frozen Python Agent and C++ SSH service, validate the
+      # installed resource layout, then package. Tauri repeats the resource builds so
+      # direct `tauri build` calls use the same layout.
       - run: pnpm run package
 
       # Install the actual Debian artifact on the disposable hosted runner, verify the

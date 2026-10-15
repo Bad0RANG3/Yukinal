@@ -30,10 +30,12 @@ async function main() {
     return;
   }
 
-  const [tauriConfig, runtimePins] = await Promise.all([
+  const [tauriConfig, pythonProject] = await Promise.all([
     readFile(path.join(root, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8").then(JSON.parse),
-    readFile(path.join(root, "scripts", "node-runtime.json"), "utf8").then(JSON.parse),
+    readFile(path.join(root, "agent", "pyproject.toml"), "utf8"),
   ]);
+  const agentVersion = /^\[project\]\s*[\s\S]*?^version\s*=\s*"([^"]+)"/m.exec(pythonProject)?.[1];
+  if (!agentVersion) throw new Error("could not read the Python Agent version from agent/pyproject.toml");
   const revision = gitValue(["rev-parse", "--verify", "HEAD"]);
   const status = gitValue(["status", "--porcelain"]);
   const source = {
@@ -43,7 +45,7 @@ async function main() {
   const manifest = await writeReleaseManifest({
     bundleDir,
     appVersion: tauriConfig.version,
-    runtimeVersion: runtimePins.version,
+    agentVersion,
     source,
   });
   console.log(`wrote release manifest for ${manifest.artifacts.length} artifact(s) to ${bundleDir}`);

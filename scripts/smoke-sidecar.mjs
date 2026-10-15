@@ -2,9 +2,8 @@
 /**
  * End-to-end smoke test of the sidecar over its real transport (ADR 0001 / ADR 0006).
  *
- * It runs the **built bundle** -- `apps/agent/dist/index.js`, the exact file the installer
- * ships as `<resource_dir>/agent/index.js` -- the way Rust launches it (`node <entry>`,
- * nothing else on the command line). Running the `tsx src/index.ts` dev path here would
+ * It runs the legacy Node development sidecar bundle (`apps/agent/dist/index.js`) the way
+ * Rust's Node compatibility route launches it (`node <entry>`). Running the `tsx src/index.ts` dev path here would
  * test a process the user never gets: a multi-file `tsc` build resolves `zod`,
  * `@yukinal/shared` and `@yukinal/provider-sdk` through `node_modules`, which a packaged
  * app does not have. If the bundle regresses, this step has to be the one that goes red.

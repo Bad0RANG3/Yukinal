@@ -5,12 +5,8 @@
  * on stdin/stdout, and asserts the protocol behaves as contracted, including the real
  * agent admission path and survival of a malformed frame.
  *
- * It lives here, not in a single `smoke-*.mjs`, because two different questions need the
- * same assertions: "does the built bundle speak the protocol?" (`smoke-sidecar.mjs` on
- * `apps/agent/dist/index.js`) and "does that same file still work when it is the only file
- * around, i.e. as `<resource_dir>/agent/index.js` in an installed app?"
- * (`smoke-packaged-agent.mjs`). Two copies of these assertions would drift, and the copy
- * that drifts is the one nobody runs.
+ * It is shared by the Node development smoke and the frozen Python installed-layout smoke,
+ * keeping the host/sidecar protocol assertions consistent across both launch routes.
  */
 
 import { spawn } from "node:child_process";

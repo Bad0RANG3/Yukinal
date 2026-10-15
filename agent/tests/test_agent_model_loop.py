@@ -177,10 +177,11 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_lifecycle_events_share_call_identity_and_redact_secrets(self) -> None:
         events: list[dict[str, Any]] = []
         handler_call_ids: list[str] = []
+        fake_api_key = "sk-" + "proj-1234567890abcdef"
 
         async def handler(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, str]:
             handler_call_ids.append(context.call_id)
-            return {"api_key": "sk-proj-1234567890abcdef"}
+            return {"api_key": fake_api_key}
 
         registry = ToolRegistry(MemoryAuditSink())
         registry.register(ToolSpec(
@@ -222,7 +223,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result_event["callId"], call_event["callId"])
         self.assertEqual(handler_call_ids, [call_event["callId"]])
         self.assertEqual(result_event["status"], "success")
-        self.assertNotIn("sk-proj-1234567890abcdef", result_event["outputSummary"])
+        self.assertNotIn(fake_api_key, result_event["outputSummary"])
         self.assertNotIn("secret-input", str(call_event["input"]))
 
     async def test_write_action_waits_for_exact_approval_and_redacts_secret(self) -> None:
