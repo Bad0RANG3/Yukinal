@@ -8,7 +8,7 @@
 
 C++ 桌面宿主核心、Windows 可执行文件及桌面宿主测试（IPC router、数据库迁移、self-check）已在本机构建并通过。数据库测试已改为用真实的前 8 段迁移构造 v8 库，再验证迁移到 36 与旧数据可读；上一检查点遗留的“迁移后仍为 v8”断言已失效并被替换。
 
-Rust/Tauri 桌面仍在仓库中，旧 UI 路径和 Python Agent 的桌面接入还使用它。C++ 窗口目前是并行宿主；完成所有 UI 命令、数据边界、授权流程和安装版验收前，不要移除 Tauri 或 Rust 代码。新功能实现应落在 C++ 桌面宿主或 Python Agent 中，跨层命令和数据形状以 `packages/shared` 为准。
+Rust/Tauri 宿主与 legacy Node agent 已按 `rust-removal-plan.md` 从仓库删除；C++ WebView 宿主是唯一桌面宿主，`pnpm check` 不再依赖 cargo。因此 C++ 宿主目前是**唯一载体**：尚未迁移的命令返回 `NOT_IMPLEMENTED`，前端也不再回退 Tauri。新功能实现应落在 C++ 桌面宿主或 Python Agent 中，跨层命令和数据形状以 `packages/shared` 为准。命令级缺口、依赖顺序和实现指导见 `docs/rust-removal-plan.md`。
 
 ## 架构与代码位置
 
@@ -30,9 +30,10 @@ Python Agent ── LangGraph / models / tools / MCP
 | `native/desktop_host/src/database.cpp` | SQLite 打开、迁移、服务器与其他本地记录操作 |
 | `native/desktop_host/src/schema_migrations.hpp` | 按顺序执行的 36 个 SQLite 迁移 SQL；版本只能追加 |
 | `native/desktop_host/src/credential_store.cpp` | Windows Credential Manager、macOS Keychain、Linux Secret Service 与 keyutils |
+| `native/desktop_host/src/host_trust.cpp` | 本机 `known_hosts` v1 存储（host-key status/forget） |
 | `native/src/` | 独立 C++ SSH 服务、传输和策略 |
 | `agent/src/yukinal_agent/` | Python Agent Runtime、工具注册、LangGraph 和 MCP |
-| `apps/desktop/src-tauri/` | 暂存中的 Rust/Tauri 旧宿主；仅作迁移对照，不承接新桌面功能 |
+| `apps/desktop/src-tauri/` | **已删除**（Rust/Tauri 旧宿主） |
 
 ## C++ 宿主已有命令
 

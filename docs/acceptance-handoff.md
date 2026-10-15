@@ -2,6 +2,8 @@
 
 本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区的 `ssh_agent_development_brief.md`（**不要提交它**，它是任务输入，不是仓库文件）。
 
+> **变更提示（Rust/Tauri 已删除）**：`crates/`、`apps/desktop/src-tauri/`、`Cargo.*`、`rust-toolchain.toml`、`.cargo/` 和 legacy Node agent（`apps/agent/`）已从仓库移除；`pnpm check` 不再跑 cargo，桌面宿主只有 C++。本文中失效的命令（`cargo test`/`pnpm --filter @yukinal/agent test:live`/`yukinal-desktop --lib`）已在下文标注；后续实现指导见 [`rust-removal-plan.md`](./rust-removal-plan.md)。
+
 本文只写可复核的事实：命令、预期结果、真实结果，以及还没闭环的部分。不要因为本文说“通过”就跳过重新运行。
 
 ---
@@ -29,7 +31,7 @@
 | `cargo clippy --workspace --all-targets -- -D warnings` | passed |
 | 真实 OpenSSH 容器验收 | **未跑**（本机无 Docker） |
 | 真实云 Provider live | **未跑**（本机无 API key；Python 侧也没有 live harness） |
-| `yukinal-desktop --lib` 单元测试 | **无法启动**（`STATUS_ENTRYPOINT_NOT_FOUND`，环境问题，见 §7） |
+| `yukinal-desktop --lib` 单元测试 | **无法启动**（`STATUS_ENTRYPOINT_NOT_FOUND`，环境问题，见 第 7 节） |
 
 ---
 
@@ -136,7 +138,7 @@ cargo test --workspace -- --test-threads=1
 ```
 
 - `YUKINAL_TEST_REQUIRED=1` 很关键：没有它，缺少 Python/Node 的测试会静默 skip，绿色不代表真跑过。
-- 唯一预期失败是 `yukinal-desktop --lib` 的**启动**失败（不是断言失败），见 §7。
+- 唯一预期失败是 `yukinal-desktop --lib` 的**启动**失败（不是断言失败），见 第 7 节。
 - 任务书最关键的端到端测试是：
   `crates/core/tests/sidecar_agent.rs::real_sidecar_runs_a_durable_read_through_provider_and_host`
   —— 真 Python sidecar + 回环 OpenAI 兼容 Provider + 真 host RPC + LangGraph 持久计划 + host-backed 只读工具。可单独跑：
@@ -160,17 +162,17 @@ cargo test -p yukinal-core --test sidecar_agent -- --test-threads=1
 | LangGraph 工作流、步数/时限/预算、Checkpointer 恢复 | `agent/src/yukinal_agent/model_agent.py`、`checkpoints.py` | `test_agent_workflow`、`test_agent_model_loop` | 通过 |
 | ModelFactory 多 provider 配置切换 | `agent/src/yukinal_agent/models.py`、`provider_store.py` | `test_agent_models_policy`、`test_provider_store` | 通过 |
 | provider 鉴权失败/超时/限流分类 | `model_agent.py::_model_error_code` | `test_agent_model_loop` | 通过 |
-| Provider 端到端 | Python Agent + 回环 OpenAI 兼容 | `sidecar_agent::real_sidecar_runs_a_durable_read_through_provider_and_host` | 通过（回环；真实云见 §6.2） |
+| Provider 端到端 | Python Agent + 回环 OpenAI 兼容 | `sidecar_agent::real_sidecar_runs_a_durable_read_through_provider_and_host` | 通过（回环；真实云见 第 6.2 节） |
 | 策略引擎、高风险拦截、审批参数变化重审 | `agent/src/yukinal_agent/policy.py`、host 审批 | `test_agent_models_policy`、`test_agent_sidecar`、`test_agent_model_loop` | 通过 |
 | 工具名全局唯一/冲突检测 | `tools.py` + provider 边界映射（`model_agent.py`） | `test_agent_tools`、`test_agent_model_loop` | 通过 |
 | 任务取消、重复请求、进程重启 | `sidecar.py`、`supervisor` | `test_agent_sidecar`、Rust `supervisor` 测试 | 通过 |
-| 完整调查任务/计划恢复（证据/产物持久化） | — | — | **未实现**（属产品 A/O/F/R 线，不在任务书内；见 §6.3） |
+| 完整调查任务/计划恢复（证据/产物持久化） | — | — | **未实现**（属产品 A/O/F/R 线，不在任务书内；见 第 6.3 节） |
 
 ---
 
 ## 6. 本机无法完成、需要接手者执行的验收
 
-### 6.1 真实 OpenSSH 容器（任务书 §11/§12 要求）
+### 6.1 真实 OpenSSH 容器（任务书 第 11 节/第 12 节 要求）
 
 前置：Docker Desktop 正在运行，`ssh-keygen`、`ssh-keyscan` 可用。
 
@@ -197,7 +199,7 @@ ctest --test-dir native/build-check -C Release -R openssh_container_integration 
 ### 6.2 真实云 Provider
 
 现状：
-- Python Agent 的 provider 路径已在**回环** OpenAI 兼容服务上端到端验证（§4.3）。这验证了 wire、工具调用、LangGraph、持久计划，但不证明某家真实云厂商。
+- Python Agent 的 provider 路径已在**回环** OpenAI 兼容服务上端到端验证（第 4.3 节）。这验证了 wire、工具调用、LangGraph、持久计划，但不证明某家真实云厂商。
 - 仓库里现成的 live 门禁是**旧 Node provider SDK** 的：
   `apps/agent/live/provider-live.test.ts`。它测的不是 Python LangChain 路径。
 
@@ -287,7 +289,7 @@ cargo test --workspace -- --test-threads=1
 # 5. 真实 OpenSSH（需 Docker）
 python scripts/test_ssh_container.py --service-binary native/build-nmake/yukinal-ssh-service.exe
 
-# 6. 真实 Provider（旧 Node 门禁；Python 路径见 §6.2）
+# 6. 真实 Provider（旧 Node 门禁；Python 路径见 第 6.2 节）
 $env:YUKINAL_LIVE_PROVIDER_TESTS = "1"
 $env:YUKINAL_LIVE_PROVIDERS = "openai-chat"
 $env:YUKINAL_OPENAI_MODEL = "<model>"
@@ -309,9 +311,9 @@ pnpm --filter @yukinal/agent test:live
 
 ## 11. 接手后的建议顺序
 
-1. 按 §9 复现本机结果，确认 CTest=10/10、Python=132、Rust 除已知 launch 问题外全绿。
-2. 跑 §6.1 真实 OpenSSH，补齐真实协议兼容性证据。
-3. 跑 §6.2 真实 Provider（明确区分 Node SDK 与 Python LangChain 两条路径）。
+1. 按 第 9 节 复现本机结果，确认 CTest=10/10、Python=132、Rust 除已知 launch 问题外全绿。
+2. 跑 第 6.1 节 真实 OpenSSH，补齐真实协议兼容性证据。
+3. 跑 第 6.2 节 真实 Provider（明确区分 Node SDK 与 Python LangChain 两条路径）。
 4. 把结果写回 `docs/rewrite-cpp-python.md`（带日期、版本、通过/失败组合），再更新 `docs/changelog.md`。
-5. 决定是否处理 §7.1 的 Tauri 测试 manifest 问题（修好后本机 `pnpm check` 才能整条绿）。
+5. 决定是否处理 第 7.1 节 的 Tauri 测试 manifest 问题（修好后本机 `pnpm check` 才能整条绿）。
 6. 若要推送：确认只提交已完成且可复核的文件，Git 身份用 `Bad0RANG3 <badorangeovo@Outlook.com>`，且**不要**提交 `ssh_agent_development_brief.md`。

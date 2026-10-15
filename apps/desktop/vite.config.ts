@@ -1,7 +1,8 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// Tauri expects a fixed dev port and no interactive output rewriting.
+// The native C++ desktop host expects a fixed dev port and no interactive output
+// rewriting.
 //
 // 这里曾经还挂着一个 `tailwindcss()` 插件。它是纯粹的负担：
 // src/styles.css 里没有 `@import "tailwindcss"`、也没有 `@tailwind` 指令，
@@ -15,13 +16,12 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
-    // `**/src-tauri/**` is Rust source, not frontend.
     // The `.tmpdir` pattern covers editors that save atomically (write a temp
     // file, then rename). Vite tries to watch that temp file while it is still
     // locked and dies with EBUSY on Windows, taking the dev server down.
-    watch: { ignored: ["**/src-tauri/**", "**/*.tmpdir/**"] },
+    watch: { ignored: ["**/*.tmpdir/**"] },
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  envPrefix: ["VITE_"],
   build: {
     target: "es2022",
     outDir: "dist",

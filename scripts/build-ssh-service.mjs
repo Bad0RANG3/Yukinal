@@ -10,7 +10,7 @@ const buildDirectory = resolve(
   root,
   process.env.YUKINAL_SSH_CMAKE_BUILD_DIR || join("native", "build-desktop"),
 );
-const resourceDirectory = join(root, "apps", "desktop", "src-tauri", "resources", "ssh-service");
+const resourceDirectory = join(root, "apps", "desktop", "resources", "ssh-service");
 const executableName = `yukinal-ssh-service${process.platform === "win32" ? ".exe" : ""}`;
 const opensslLicense = join(root, "native", "licenses", "OPENSSL-LICENSE.txt");
 const cmakeExecutable = process.env.CMAKE_EXECUTABLE || "cmake";

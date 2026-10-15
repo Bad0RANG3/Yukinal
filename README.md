@@ -52,8 +52,9 @@ rejection, expiry, and accepted calls round-trip through the desktop host.
 On C++-supported targets, `systemd.restart` and `docker.restart` now run as
 structured operations through the Python caller; the host checks the durable
 plan and consumes the exact one-time approval before returning target credentials.
-Durable task recovery and broader tool coverage remain in progress. The
-existing React/Tauri UI remains intact while those paths are migrated.
+Durable task recovery and broader tool coverage remain in progress. The React UI
+is served by the C++ WebView host; the retired Rust/Tauri host and the legacy Node
+agent have been removed from the repository.
 
 Desktop `filesystem.write`, `filesystem.edit`, `filesystem.backup`,
 `filesystem.restore`, and `filesystem.backup.cleanup` now use Python approval and
@@ -68,21 +69,15 @@ ledger queries.
 The Python Agent resolves the selected desktop server from SQLite and the OS
 credential store before starting a one-target C++ service. The desktop service
 panel uses the same short-lived service process for read-only service inventory.
-Tauri development and new desktop builds select the frozen Python Agent. The
-Node runtime and bundle are no longer included in installer resources, and the
-desktop launcher has no Node fallback. Legacy Node source remains in the
-repository for protocol and migration checks only.
+The Rust/Tauri host and the legacy Node agent are gone: the C++ WebView host is
+the only desktop host, and the Python Agent is the only agent runtime. Installing
+the desktop (installers, bundlers, NSIS/MSI/DMG/deb packaging) is **not
+implemented yet**; see [the Rust removal and C++ takeover plan](./docs/rust-removal-plan.md).
 
-To run the existing desktop UI with the Python Agent sidecar, create
-`agent/.venv` and install `agent[agent,models]`. Then run
-`pnpm --filter @yukinal/desktop tauri dev`. The `pnpm desktop:dev:python` command
-is an equivalent shortcut. `pnpm agent:dev` starts the same source Python Agent,
-and `pnpm smoke:sidecar` exercises its stdio protocol. The Tauri host continues
-to own the process and execute host-mediated tools.
-
-To create an installer, install `agent[agent,models,package]` into that virtual
-environment and run `pnpm package`. The build creates a frozen Python Agent and
-the packaged desktop selects it by default.
+To run the source Python Agent and its stdio sidecar protocol, create
+`agent/.venv` and install `agent[agent,models]`. `pnpm smoke:sidecar` exercises
+its stdio protocol. The C++ desktop host launches the Agent once its RPC bridge
+is implemented.
 
 For the C++ and Python service test suite, install `agent[agent,models,test]`,
 configure and build the native service, then run `pnpm check`; the check gate
@@ -161,11 +156,11 @@ In the second PowerShell session:
 ```powershell
 $env:YUKINAL_SSH_API_TOKEN = "<same token>"
 $env:YUKINAL_SSH_API_URL = "http://127.0.0.1:8765"
-pnpm desktop:dev:python
+pnpm desktop:dev:cpp
 ```
 
-The Tauri host forwards the SSH token only to the Python Agent sidecar when the
-service is configured. The C++ SSH service still needs to be started separately.
+The C++ desktop host forwards the SSH token only to the Python Agent sidecar when
+the service is configured. The C++ SSH service still needs to be started separately.
 
 To include the Paramiko SSH mock in CTest, install the optional test extra
 before configuring CMake:
@@ -219,41 +214,27 @@ limits, and unknown/changed host keys. It requires Docker, `ssh-keygen`, and
 `ssh-keyscan`; it generates temporary keys and removes its test container and
 image afterward.
 
-## Existing desktop UI
+## Desktop UI
 
-The React UI is shared by the existing Tauri shell and the new C++ WebView host.
-The C++ host currently provides the window, IPC bridge, and read-only server and
-workspace listings from the existing SQLite database. Writes and operational
-commands are still migrating, so the packaged default remains Tauri until parity
-is verified. See [the C++ desktop host migration plan](./docs/native-desktop-host.md).
+The React UI runs inside the C++ WebView host. The C++ host owns the window, the
+IPC bridge, SQLite/credential access, and the migrated commands; commands it has
+not taken over yet return `NOT_IMPLEMENTED` and never fall back to a removed host.
 
-The current Tauri app can still be launched from the repository root with:
-
-```powershell
-pnpm install --frozen-lockfile
-python -m venv agent/.venv
-agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
-pnpm check
-pnpm --filter @yukinal/desktop tauri dev
-```
-
-To run the React UI in the C++ desktop host, use `pnpm desktop:dev:cpp`. The
-command builds the shared contracts and C++ host, then starts Vite and the native
-window. It accepts `YUKINAL_DESKTOP_HOST_BUILD_DIR` and `YUKINAL_DATA_DIR` for
-local build and data-directory overrides.
-
-The package build creates a frozen Python Agent with PyInstaller and includes
-available third-party license texts. Installer resources contain the Python
-Agent, C++ SSH service, and NOTICE; the legacy Node runtime is not packaged.
+Run the UI in the C++ desktop host with `pnpm desktop:dev:cpp`. The command builds
+the shared contracts and C++ host, then starts Vite and the native window. It
+accepts `YUKINAL_DESKTOP_HOST_BUILD_DIR` and `YUKINAL_DATA_DIR` for local build and
+data-directory overrides.
 
 The browser preview is available with `pnpm desktop:dev`; it does not connect to
-the new SSH service.
+the SSH service. Packaging/installers are not implemented yet; see
+[the Rust removal and C++ takeover plan](./docs/rust-removal-plan.md).
 
 ## Project docs
 
 - [Product definition](./docs/product.md)
 - [Security and data boundaries](./docs/security.md)
 - [Rewrite plan and current status](./docs/rewrite-cpp-python.md)
+- [C++ takeover and Rust removal plan](./docs/rust-removal-plan.md)
 - [SSH + Agent acceptance handoff](./docs/acceptance-handoff.md)
 - [C++ desktop host migration](./docs/native-desktop-host.md)
 - [Architecture and acceptance criteria](./docs/architecture-and-build-plan.md)

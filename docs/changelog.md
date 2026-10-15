@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **删除整个 Rust/Tauri 桌面宿主（按用户要求）**：移除 `crates/`、`apps/desktop/src-tauri/`、`Cargo.toml`/`Cargo.lock`/`rust-toolchain.toml`/`.cargo/`，以及已退休的 legacy Node agent（`apps/agent/`）和只能由它运行的 smoke。React UI 现在只通过 `window.__YUKINAL_HOST__` 与 C++ 宿主通信，不再回退 Tauri；`pnpm check` 移除所有 cargo 步骤并全绿，`pnpm package`（tauri build）与安装器脚本一并移除。C++ 宿主尚未实现的命令继续返回 `NOT_IMPLEMENTED`；重写指导见 `docs/rust-removal-plan.md`。
+
 - C++ 桌面宿主接管本机 host-key 信任的只读与遗忘路径：`server_host_key_status`/`server_host_key_forget` 读写与连接路径同一个 `known_hosts` v1 文件，指纹变化报 `mismatch` 而不静默覆盖，遗忘未钉住的主机不伪报删除；探针与确认仍待迁移。桌面宿主测试覆盖 pin/status/forget 回环。
 
 - Python Agent 按 ADR 0004 实现模型边界的工具名映射：内部点分名（`server.info`）对模型暴露为双下划线名（`server__info`），模型返回的调用名在查注册表前映射回内部名，并拒绝提供者名冲突；此前的点分名会被 OpenAI 兼容端点拒绝。跨语言 sidecar 集成测试改为在真实 `yukinal.db` 提供者存储中注册回环 Provider，并断言持久的只读路径；调查证据/产物持久化仍未在 Python 运行时实现，该测试不再把它计为通过。

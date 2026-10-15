@@ -845,3 +845,15 @@ host reports `forgotten: false` instead of claiming a removal. Probe and trust
 C++ build and all ten CTest targets passed, including the new pin/status/forget
 round trip in `desktop_host_database_tests`. The command-level C++/Rust parity and
 deletion plan is tracked in `docs/rust-removal-plan.md`.
+
+On 2026-10-15, the Rust/Tauri desktop host was removed at the user's explicit
+request, before parity was reached. `crates/`, `apps/desktop/src-tauri/`,
+`Cargo.toml`/`Cargo.lock`/`rust-toolchain.toml`/`.cargo/`, the retired legacy Node
+agent (`apps/agent/`) and its smoke were deleted; the React UI talks only to the
+C++ host through `window.__YUKINAL_HOST__`, with no Tauri fallback. `pnpm check`
+drops cargo and packaging steps and passes end to end (CTest 10/10, shared 125,
+desktop 251, sidecar smoke). Commands the C++ host has not implemented keep
+returning `NOT_IMPLEMENTED`; packaging/installers are not implemented. From here
+the work is implementation against the shared contract, guided by
+`docs/rust-removal-plan.md`; the pinned reference implementations remain in git
+history.

@@ -216,11 +216,11 @@ test("the terminal loss notice is gated as a count, not as opaque text", () => {
   assert.equal(schema.safeParse({ missedEvents: 1, extra: true }).success, false);
 });
 
-test("the terminal gate matches the exact shape the Rust forwarder emits", () => {
-  // `forward_terminal_events` in apps/desktop/src-tauri/src/lib.rs hand-builds
-  // exactly these two field sets. If that serialisation gains or renames a field,
-  // this test is what makes it a visible failure instead of a dead terminal:
-  // a strict gate that no longer matches would silently drop every chunk.
+test("the terminal gate matches the exact shape the C++ host emits", () => {
+  // The C++ host builds exactly these two field sets when it forwards terminal
+  // output. If that serialisation gains or renames a field, this test is what makes
+  // it a visible failure instead of a dead terminal: a strict gate that no longer
+  // matches would silently drop every chunk.
   const data = EVENT_SCHEMAS["terminal.data"];
   assert.deepEqual(Object.keys(data.shape).sort(), ["data", "terminalSessionId"]);
 

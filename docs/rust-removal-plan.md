@@ -1,25 +1,27 @@
 # C++ 接管与 Rust 移除计划
 
-这份文档把“什么时候可以删掉 Rust/Tauri”从原则变成可勾选的清单。删除动作本身只有一行，但它的前置条件很多；本文给出命令级盘点、依赖顺序和删除时的清理清单。
+这份文档把 C++ 接管拆成可勾选的清单，并记录删除 Rust/Tauri 时的清理范围。
 
-**硬门槛：在本文“完成标准”逐条勾上之前，不要删除任何 Rust/Tauri 代码。** 这也是 `docs/cpp-desktop-handoff.md` 的既定规则。
+> **状态：Rust/Tauri 已删除。** `crates/`、`apps/desktop/src-tauri/`、`Cargo.toml`/`Cargo.lock`/`rust-toolchain.toml`/`.cargo/`，以及已退休的 legacy Node agent（`apps/agent/`）都已从仓库移除；`pnpm check` 已不再依赖 cargo，前端不再回退 Tauri。**本文件现在是“从零实现 C++ 宿主能力”的指导，而不是“何时删除”的门槛。** 删除时向 C++ 手工追回的参考实现在 `docs/rewrite-cpp-python.md` 和 git 历史里。
+
+## 0. 已删除的内容（本文件原本的前置条件）
+
+- 桌面 UI 原有 **81 个 Tauri 命令**（`crates/core` + `apps/desktop/src-tauri`），其中 C++ 宿主**已实现约 20 个**，其余仍返回 `NOT_IMPLEMENTED`。
+- `pnpm package` 曾走 `tauri build`；现在 **打包/安装器尚未实现**。
+- `pnpm check` 曾跑 `cargo fmt/clippy/check/test`；现在已移除。
+- 原本由 Rust 承载的共享能力（36 段 SQLite 迁移权威副本、OS 凭据边界、出站代理、host-trust、MCP、Python Agent sidecar 启动与监管）需要按下面顺序在 C++/Python 中重新提供。
+- Python Agent 到 C++ 宿主 RPC 的桥接仍未接入。
 
 ---
 
-## 1. 为什么现在不能删
+## 1. 迁移前的盘点（保留作参考）
 
-- 桌面 UI 有 **81 个 Tauri 命令**（`apps/desktop/src-tauri/src/**`，`#[tauri::command]`）。
-- C++ 桌面宿主**已实现约 18 个**；其余返回 `NOT_IMPLEMENTED`，并且**不回退 Tauri**。
-- `pnpm package` 走的是 `tauri build`（Rust 宿主）——安装包的实际宿主是 Rust。
-- `pnpm check` 跑 `cargo fmt/clippy/check/test`。
 - Rust 还承载 C++ 尚未接管的共享能力：36 段 SQLite 迁移的权威副本、OS 凭据边界、出站代理、host-trust、MCP、以及对 Python Agent sidecar 的**启动与监管**。
 - Python Agent 到 C++ 宿主 RPC 的完整桥接仍未接入。
 
-直接删除的后果：桌面应用不可用、`pnpm check`/`pnpm package` 失败、迁移与凭据的权威实现消失。
-
 ---
 
-## 2. C++ 宿主已实现（18）
+## 2. C++ 宿主已实现（20）
 
 `native/desktop_host/src/ipc_router.cpp`
 
@@ -56,7 +58,7 @@
 - `server_snapshot`、`server_services`、`server_logs` 的归一化部分
 - `investigation_*`（15）中的持久化/恢复部分
 
-要把这些迁进 C++ 宿主，**必须先有 C++ ↔ Python sidecar 桥**（见 §4）。
+要把这些迁进 C++ 宿主，**必须先有 C++ ↔ Python sidecar 桥**（见 第 4 节）。
 
 ### D. 进程监管与 MCP
 
@@ -80,13 +82,13 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 
 ## 5. 建议施工顺序
 
-1. **纯本机数据组（§3A）**：host-trust 移植 + transfer 查询 + 本机路径。
-2. **C++ ↔ Python 桥（§4）**：先通 `initialize` + `provider_*`，再 `host.credentials.*`、`host.mcp.catalog`、`host.tool.execute`。
-3. **Provider / Agent / Investigation 转发（§3C）**：把 Rust 的转发命令改由 C++ 宿主转发。
-4. **MCP 生命周期与 OAuth（§3D）** + `agent_*` 监管。
-5. **SSH/SFTP/PTY 组（§3B）**：连接、host key、终端、文件、传输、审批。
+1. **纯本机数据组（第 3 节A）**：host-trust 移植 + transfer 查询 + 本机路径。
+2. **C++ ↔ Python 桥（第 4 节）**：先通 `initialize` + `provider_*`，再 `host.credentials.*`、`host.mcp.catalog`、`host.tool.execute`。
+3. **Provider / Agent / Investigation 转发（第 3 节C）**：把 Rust 的转发命令改由 C++ 宿主转发。
+4. **MCP 生命周期与 OAuth（第 3 节D）** + `agent_*` 监管。
+5. **SSH/SFTP/PTY 组（第 3 节B）**：连接、host key、终端、文件、传输、审批。
 6. **三平台构建与安装验收**：Windows/macOS/Linux 桌面构建、升级、用户数据保留、真实 UI 冒烟。
-7. **删除 Rust/Tauri**（见 §7），并同步清理门禁/打包/CI/文档。
+7. **删除 Rust/Tauri**（见 第 7 节），并同步清理门禁/打包/CI/文档。
 
 每一轮只纳入已完成且可复核的文件，更新文档，构建受影响的 C++ 目标并跑测试。
 
@@ -131,4 +133,4 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
 - [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。
 - [ ] Windows/macOS/Linux 安装、升级、用户数据保留、真实 UI 冒烟通过。
-- [ ] 删除清单（§7）全部执行并复验。
+- [ ] 删除清单（第 7 节）全部执行并复验。

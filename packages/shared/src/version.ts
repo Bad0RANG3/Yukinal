@@ -8,9 +8,9 @@
  * it is a literal here.
  *
  * "Every manifest agrees with this constant" is not a convention, it is a gate:
- * `version.test.ts` reads the seven `package.json` manifests, `Cargo.toml`'s
- * `[workspace.package]` and the version-carrying contract fixtures, and fails when any of
- * them disagrees. Bumping a release means editing this file and the manifests that gate
- * names; it does not know about any prose, so a release note has to be updated by hand.
+ * `version.test.ts` reads the JavaScript manifests and the version-carrying contract
+ * fixtures, and fails when any of them disagrees. Bumping a release means editing this
+ * file and the manifests that gate names; it does not know about any prose, so a release
+ * note has to be updated by hand.
  */
 export const APP_VERSION = "1.0.0";

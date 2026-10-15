@@ -1,5 +1,3 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
-
 import { isNativeDesktopShell } from "./ipc.js";
 
 /** URLs the Markdown renderer may hand to the operating system. */
@@ -15,14 +13,14 @@ export function isExternalOpenUrl(url: string): boolean {
 /**
  * Open a link outside the WebView.
  *
- * The Tauri capability admits the same three schemes. In browser preview we use a
+ * The native host admits the same three schemes. In browser preview we use a
  * `noopener` tab instead, so preview cannot navigate the application window away.
  */
 export async function openExternalUrl(url: string): Promise<void> {
   if (!isExternalOpenUrl(url)) throw new Error("Only http(s) and mailto links can be opened");
   if (isNativeDesktopShell()) {
-    if (window.__YUKINAL_HOST__) await window.__YUKINAL_HOST__.openUrl(url);
-    else await openUrl(url);
+    if (!window.__YUKINAL_HOST__) throw new Error("The desktop host has no external-link capability");
+    await window.__YUKINAL_HOST__.openUrl(url);
     return;
   }
   const opened = window.open(url, "_blank", "noopener,noreferrer");

@@ -1,7 +1,7 @@
 name: check
 
 # One job per OS that runs the local gate (`pnpm check`), including the configured
-# CTest suite for the C++ SSH service and Python Agent before the Rust host checks.
+# CTest suite for the C++ SSH service and Python Agent.
 
 on:
   push:
@@ -11,23 +11,19 @@ on:
 
 jobs:
   gate:
-    name: pnpm check (${{ matrix.os }} / Rust ${{ matrix.rust }})
-    # Release package.yml runs this full matrix for tags; keep the tag-triggered
-    # check workflow focused on dependency advisory audits.
+    name: pnpm check (${{ matrix.os }})
+    # Release packaging is not implemented yet; keep the tag-triggered check workflow
+    # focused on the dependency advisory audit.
     if: github.event_name != 'push' || github.ref_type != 'tag'
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Keep the full Linux/GTK dependency graph honest at the declared MSRV.
           - os: ubuntu-latest
-            rust: 1.90.0
             openssh_container_test: ON
           - os: windows-latest
-            rust: stable
             openssh_container_test: OFF
           - os: macos-latest
-            rust: stable
             openssh_container_test: OFF
     runs-on: ${{ matrix.os }}
     env:
@@ -50,18 +46,11 @@ jobs:
           cache: pip
           cache-dependency-path: agent/pyproject.toml
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # pinned action
-        with:
-          toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
-
-      - name: Install Linux system deps (Tauri / webkit2gtk)
+      - name: Install Linux system deps (WebKitGTK for the C++ desktop host)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev
-
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev build-essential curl wget file libssl-dev
 
       - name: Install Python Agent and SSH test dependencies
         run: python -m pip install -e "agent[agent,models,test]"
@@ -81,14 +70,14 @@ jobs:
           if (-not $nmake) { throw 'NMake was not found in the selected Visual Studio installation.' }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path -Parent $nmake)
 
-      - name: Configure C++ SSH service and tests
+      - name: Configure C++ SSH service, desktop host, and tests
         run: cmake -S native -B native/build-check -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }}
 
-      - name: Build C++ SSH service and tests
+      - name: Build C++ targets
         if: matrix.os != 'windows-latest'
         run: cmake --build native/build-check --config Release --parallel
 
-      - name: Build C++ SSH service and tests (Windows)
+      - name: Build C++ targets (Windows)
         if: matrix.os == 'windows-latest'
         shell: cmd
         run: |
@@ -96,7 +85,7 @@ jobs:
           call "%VSINSTALLDIR%\VC\Auxiliary\Build\vcvars64.bat"
           cmake --build native/build-check --config Release
 
-      # check.mjs runs CTest against this build, then runs the desktop/Rust gates.
+      # check.mjs runs CTest against this build, then the JavaScript/contract gates.
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
 
@@ -122,9 +111,3 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Audit JavaScript dependencies
         run: pnpm audit
-
-      - name: Install pinned cargo-audit CLI
-        run: cargo install cargo-audit --locked --version 0.22.2
-
-      - name: Audit Rust dependencies
-        run: cargo audit

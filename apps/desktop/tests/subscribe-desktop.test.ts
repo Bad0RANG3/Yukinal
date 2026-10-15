@@ -2,37 +2,24 @@
  * `subscribeDesktop`: the leak that the unlisten race causes, pinned.
  *
  * `listenDesktop` resolves the unlisten function through a promise, but every caller
- * unsubscribes synchronously. Get that wrong and the Tauri-side listener outlives the
+ * unsubscribes synchronously. Get that wrong and the native listener outlives the
  * component that asked for it, still firing into a dead handler — visible only under
  * fast navigation, which is why the idiom was written out by hand four times with
  * three slightly different shapes.
  *
- * These tests drive the real `plugin:event|listen` / `plugin:event|unlisten` IPC
- * calls through `mockIPC`, so they exercise the actual `@tauri-apps/api/event` code
- * path rather than a stub of it.
+ * These tests drive the real `window.__YUKINAL_HOST__.listen` path, not a stub of it.
  */
 
 import assert from "node:assert/strict";
-import { webcrypto } from "node:crypto";
 import { afterEach, test } from "node:test";
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { tauriEventName } from "@yukinal/shared";
 
 import { subscribeDesktop } from "../src/lib/ipc.js";
+import { installHost, removeHost } from "./host-mock.js";
 
-/**
- * Tauri's `listen` goes through `transformCallback`, which mints a callback id with
- * `window.crypto.getRandomValues`. There is no DOM here, so the fake window has to
- * carry a real WebCrypto — a stub returning zeros would collide callback ids and
- * make these tests pass for the wrong reason.
- */
-Object.defineProperty(globalThis, "window", {
-  value: { __TAURI_INTERNALS__: {}, crypto: webcrypto },
-  configurable: true,
-});
+Object.defineProperty(globalThis, "window", { value: {}, configurable: true });
 
 afterEach(() => {
-  clearMocks();
+  removeHost();
 });
 
 /** Records every listen/unlisten round trip and lets a test control their ordering. */
@@ -43,17 +30,14 @@ function recordingBridge() {
   const gate = new Promise<void>((resolve) => { releaseListen = resolve; });
   let holdListens = false;
 
-  mockIPC((command, args) => {
-    if (command === "plugin:event|listen") {
-      listens.push(String((args as { event: string }).event));
-      if (holdListens) return gate.then(() => 1);
-      return 1;
-    }
-    if (command === "plugin:event|unlisten") {
-      unlistens.push(String((args as { event: string }).event));
-      return undefined;
-    }
-    return undefined;
+  installHost({
+    listen: async (event) => {
+      listens.push(event);
+      if (holdListens) await gate;
+      return () => {
+        unlistens.push(event);
+      };
+    },
   });
 
   return {
@@ -71,15 +55,10 @@ test("subscribing registers the channel and unsubscribing releases it", async ()
   const bridge = recordingBridge();
   const { stop } = subscribeDesktop("activity.created", () => {});
   await settle();
-  assert.deepEqual(bridge.listens, [tauriEventName("activity.created")], "the channel was never registered");
-  // 事件名在 IPC 线上用的是冒号形式（`activity.created` → `activity:created`），
-  // 由 shared 的 `tauriEventName` 唯一决定。断一次真正的线上名字，免得上面那句
-  // 断言两边都用同一个函数而永远成立。
-  assert.equal(bridge.listens[0], "activity:created");
-
+  assert.deepEqual(bridge.listens, ["activity.created"], "the channel was never registered");
   stop();
   await settle();
-  assert.deepEqual(bridge.unlistens, ["activity:created"], "unsubscribe did not reach Tauri");
+  assert.deepEqual(bridge.unlistens, ["activity.created"], "unsubscribe did not reach the host");
 });
 
 test("unsubscribing before the listen resolves still releases the channel", async () => {
@@ -96,10 +75,10 @@ test("unsubscribing before the listen resolves still releases the channel", asyn
 
   bridge.release();
   await settle();
-  assert.deepEqual(bridge.listens, ["terminal:data"]);
+  assert.deepEqual(bridge.listens, ["terminal.data"]);
   assert.deepEqual(
     bridge.unlistens,
-    ["terminal:data"],
+    ["terminal.data"],
     "the late subscription was not unsubscribed: this is the listener leak",
   );
 });
@@ -113,7 +92,7 @@ test("unsubscribing twice is harmless", async () => {
   stop();
   stop();
   await settle();
-  assert.deepEqual(bridge.listens, ["activity:created"], "a second teardown re-listened");
+  assert.deepEqual(bridge.listens, ["activity.created"], "a second teardown re-listened");
   assert.equal(bridge.unlistens.length, 2, "the second teardown is a no-op, not a crash");
 });
 

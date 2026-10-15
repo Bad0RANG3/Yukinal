@@ -161,19 +161,23 @@ export async function runSidecarSmoke(entry, options = {}) {
     assert(frame.error?.code === -32602, `run.start should be INVALID_PARAMS for an incomplete request: ${JSON.stringify(frame)}`),
   );
 
+  // The smoke host seeds the migrated provider table and a loopback provider, so a full
+  // run.start is accepted and dispatched. The run itself fails later against the
+  // unreachable endpoint and travels on the event stream; here we pin only the
+  // request dispatch and the echoed run id.
   await ask(
     {
       jsonrpc: "2.0",
-      id: 6,
+      id: 7,
       method: "agent.run.start",
       params: {
         runId: "smoke_run",
         sessionId: "ses",
         prompt: "hi",
-        providerConfig: { kind: "openai-compatible", baseUrl: "http://127.0.0.1:1", model: "m" },
+        providerId: "smoke-provider",
+        model: "m",
       },
     },
-    // 真实 run（无可达端点）会在后台失败并走事件；这里只断言分发不炸 + 返回 runId。
     (frame) => {
       assert(!frame.error, `run.start should not error: ${JSON.stringify(frame)}`);
       assert(frame.result?.runId === "smoke_run", `run.start should echo runId: ${JSON.stringify(frame)}`);
@@ -182,7 +186,7 @@ export async function runSidecarSmoke(entry, options = {}) {
 
   // A malformed frame must be dropped, not fatal.
   send("{ this is not json\n");
-  await ask({ jsonrpc: "2.0", id: 7, method: "system.ping", params: {} }, (frame) =>
+  await ask({ jsonrpc: "2.0", id: 8, method: "system.ping", params: {} }, (frame) =>
     assert(frame.result?.pong === "pong", `stream must survive a malformed frame: ${JSON.stringify(frame)}`),
   );
 

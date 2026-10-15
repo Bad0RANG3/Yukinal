@@ -171,9 +171,8 @@ button:disabled {
   align-items: center;
 }
 
-/* 左上角这枚标记就是任务栏里那枚应用图标本身：src/assets/brand-mark.png 取自
-   src-tauri/icons/128x128.png（由 scripts/generate-app-icon.ps1 生成、`pnpm --filter
-   @yukinal/desktop icon` 铺开的那套图标里的 128px 一档），所以换了图标就跟着换。
+/* 左上角这枚标记就是任务栏里那枚应用图标本身：src/assets/brand-mark.png 取自应用图标
+   的 128px 一档，所以换了图标就跟着换。
    图标自带一圈透明留白和 #09090b 的深色底板，底色因此直接取底板同色：留白落在同色底上，
    rail 里只剩环与节点，不用再画内描边。容器只负责摆位与悬浮反馈，原来那套字形、字重
    样式随 "Y" 一起删掉了。

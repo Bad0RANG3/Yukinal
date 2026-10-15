@@ -26,7 +26,7 @@ const RULES = [
 ];
 
 const BINARY_EXTENSION = /\.(?:png|ico|icns|woff2?|ttf|otf|jpg|jpeg|pdf|zip|gz|7z)$/i;
-const SKIPPED_FILES = new Set(["Cargo.lock", "pnpm-lock.yaml"]);
+const SKIPPED_FILES = new Set(["pnpm-lock.yaml"]);
 
 const tracked = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
   encoding: "utf8",

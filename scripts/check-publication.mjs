@@ -35,7 +35,7 @@ const RULES = [
   { pattern: /\bOrbit\b/, label: "曾用名", why: "已废弃，只在私有计划里保留" },
 ];
 
-const SKIP_FILES = new Set(["scripts/check-publication.mjs", "Cargo.lock", "pnpm-lock.yaml"]);
+const SKIP_FILES = new Set(["scripts/check-publication.mjs", "pnpm-lock.yaml"]);
 const SKIP_EXT = /\.(png|ico|icns|woff2?|ttf|otf|jpg|jpeg)$/;
 
 const tracked = spawnSync("git", ["ls-files", "-z"], { encoding: "utf8" }).stdout.split("\0").filter(Boolean);

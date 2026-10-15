@@ -13,9 +13,7 @@
 
 import {
   EVENT_SCHEMAS,
-  IPC_COMMANDS,
   IPC_SCHEMAS,
-  tauriEventName,
   type IpcCommandMap,
   type IpcCommandName,
 } from "@yukinal/shared";
@@ -38,11 +36,9 @@ declare global {
   }
 }
 
-/** True only when a native Yukinal desktop host is present. */
+/** True only when the native C++ Yukinal desktop host is present. */
 export function isNativeDesktopShell(): boolean {
-  return typeof window !== "undefined" && (
-    window.__YUKINAL_HOST__ !== undefined || "__TAURI_INTERNALS__" in window
-  );
+  return typeof window !== "undefined" && window.__YUKINAL_HOST__ !== undefined;
 }
 
 /**
@@ -79,21 +75,11 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
 ): Promise<T> {
   if (!isDesktopShell()) throw new IpcUnavailableError(command);
   const validatedParams = IPC_SCHEMAS[command].params.parse(params);
-  // The legacy desktop adapter accepts one structured `input`; the C++ host follows
-  // the shared flat contract. Keep this temporary compatibility detail at the edge.
-  const legacyArgs = command === IPC_COMMANDS.serverAdd || command === IPC_COMMANDS.serverUpdate
-    ? { input: validatedParams }
-    : { ...(validatedParams as Record<string, unknown>) };
   const nativeArgs = { ...(validatedParams as Record<string, unknown>) };
   try {
     if (isPreviewFixture()) return parse(previewResponse(command, validatedParams));
-    let raw: unknown;
-    if (window.__YUKINAL_HOST__) {
-      raw = await window.__YUKINAL_HOST__.invoke(command, nativeArgs);
-    } else {
-      const { invoke } = await import("@tauri-apps/api/core");
-      raw = await invoke<unknown>(command, legacyArgs);
-    }
+    if (!window.__YUKINAL_HOST__) throw new IpcUnavailableError(command);
+    const raw = await window.__YUKINAL_HOST__.invoke(command, nativeArgs);
     return parse(raw);
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error));
@@ -152,8 +138,7 @@ export async function listenDesktop<E extends DesktopEventName>(
     handler(parsed.data as DesktopEventPayload<E>);
   };
   if (window.__YUKINAL_HOST__) return window.__YUKINAL_HOST__.listen(name, deliver);
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<unknown>(tauriEventName(name), (event) => deliver(event.payload));
+  return () => {};
 }
 
 const reportedDroppedEvents = new Set<string>();

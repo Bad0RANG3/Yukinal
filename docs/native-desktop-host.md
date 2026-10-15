@@ -17,10 +17,11 @@ C++ desktop host ── SQLite / OS credential store / file and URL dialogs
   └── Python Agent sidecar (newline-delimited JSON-RPC)
 ```
 
-The current Rust desktop host remains available as a temporary fallback while each
-capability is migrated and checked. It is not a target dependency and receives no
-new product features. Remove it only after the C++ host covers the UI contract and
-the installer, persistence, credential, and recovery acceptance checks.
+The Rust/Tauri desktop host and the legacy Node agent have been removed. The C++
+host is the only desktop host; capabilities that have not moved yet return a stable
+error instead of falling back to a host that no longer exists. Packaging/installers
+are not implemented yet; the command-level gap list and implementation order are in
+[the C++ takeover and Rust removal plan](./rust-removal-plan.md).
 
 ## Native WebView and IPC
 
@@ -61,8 +62,8 @@ C++; the React UI keeps using the shared IPC contract.
    workflows.
 5. Port task history, schedules, recovery, audit and remaining UI commands. Validate
    each command and event against the shared contracts and existing desktop tests.
-6. Build and smoke-test Windows, macOS, and Linux installers. Remove Tauri/Rust and
-   the retired TypeScript Agent runtime after parity is demonstrated.
+6. Build and smoke-test Windows, macOS, and Linux installers (not implemented yet;
+   see [the Rust removal plan](./rust-removal-plan.md)).
 
 ## Native-host storage and server CRUD
 

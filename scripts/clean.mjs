@@ -3,7 +3,7 @@
 import { glob } from "node:fs/promises";
 import { rm } from "node:fs/promises";
 
-const targets = ["packages/*/dist", "apps/*/dist", "apps/*/src-tauri/target", "target"];
+const targets = ["packages/*/dist", "apps/*/dist"];
 
 for (const pattern of targets) {
   for await (const target of glob(pattern)) {

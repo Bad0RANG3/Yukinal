@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import { runSidecarSmoke } from "./lib/sidecar-smoke.mjs";
@@ -65,6 +66,38 @@ if (imports.error || imports.status !== 0) {
 }
 
 const dataDir = await mkdtemp(join(tmpdir(), "yukinal-python-agent-smoke-"));
+// The desktop host migrates `yukinal.db` before the sidecar starts. Reproduce the one
+// table the protocol smoke exercises so run.start resolves a loopback provider.
+const seed = new DatabaseSync(join(dataDir, "yukinal.db"));
+seed.exec(`
+  CREATE TABLE provider_configs (
+    id TEXT PRIMARY KEY,
+    family TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    base_url TEXT,
+    model TEXT,
+    api_key_credential_ref TEXT,
+    credential_ref TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    custom_headers TEXT,
+    max_input_tokens INTEGER,
+    settings TEXT,
+    wire_api TEXT NOT NULL DEFAULT 'chat',
+    api_version TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO provider_configs (
+    id, family, kind, label, base_url, model, api_key_credential_ref, credential_ref,
+    enabled, custom_headers, max_input_tokens, settings, wire_api, api_version, created_at, updated_at
+  ) VALUES (
+    'smoke-provider', 'ai', 'openai-compatible', 'smoke', 'http://127.0.0.1:1', 'm',
+    NULL, NULL, 1, NULL, NULL, NULL, 'chat', NULL,
+    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+  );
+`);
+seed.close();
 try {
   await runSidecarSmoke(python, {
     agentKind: "python",
@@ -75,5 +108,15 @@ try {
     dataDir,
   });
 } finally {
-  await rm(dataDir, { recursive: true, force: true });
+  // Windows can keep the checkpoint SQLite file locked for a moment after the
+  // child exits, so removal is retried instead of failing the smoke on cleanup.
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (error?.code !== "EBUSY" && error?.code !== "EPERM") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 }

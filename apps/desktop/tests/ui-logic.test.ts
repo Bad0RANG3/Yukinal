@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, IPC_COMMANDS, isReadOnlyRunMode } from "@yukinal/shared";
 import { callDesktop } from "../src/lib/ipc.js";
+import { installHost, removeHost } from "./host-mock.js";
 import { useWorkspaceStore } from "../src/stores/workspace-store.js";
 import { buildServerInput, type ServerFormValues } from "../src/features/servers/server-form.js";
 import { RunLifecycle } from "../src/features/agent/run-lifecycle.js";
@@ -34,7 +34,7 @@ import {
 
 Object.defineProperty(globalThis, "window", { value: {}, configurable: true });
 afterEach(() => {
-  clearMocks();
+  removeHost();
   useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true);
 });
 
@@ -59,7 +59,7 @@ test("opening the task workspace from a selected server keeps that server availa
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
 });
 
-test("server form commands match the Rust input argument; other commands stay flat", async () => {
+test("every desktop command sends the shared flat contract to the host", async () => {
   const calls: unknown[] = [];
   const server = {
     id: "srv_test",
@@ -71,11 +71,13 @@ test("server form commands match the Rust input argument; other commands stay fl
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
   };
-  mockIPC((command, args) => {
-    calls.push({ command, args });
-    if (command === "server_add" || command === "server_update") return { server };
-    if (command === "server_connect") return { status: "connected" };
-    return {};
+  installHost({
+    invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "server_add" || command === "server_update") return { server };
+      if (command === "server_connect") return { status: "connected" };
+      return {};
+    },
   });
   const input = {
     name: "Test", host: "example.test", port: 22, username: "deploy",
@@ -86,14 +88,14 @@ test("server form commands match the Rust input argument; other commands stay fl
   await callDesktop(IPC_COMMANDS.serverUpdate, { ...input, serverId: "srv_test" });
   await callDesktop(IPC_COMMANDS.serverConnect, { serverId: "srv_test" });
   assert.deepEqual(calls, [
-    { command: "server_add", args: { input } },
-    { command: "server_update", args: { input: { ...input, serverId: "srv_test" } } },
+    { command: "server_add", args: input },
+    { command: "server_update", args: { ...input, serverId: "srv_test" } },
     { command: "server_connect", args: { serverId: "srv_test" } },
   ]);
 });
 
 test("native string errors become visible Error messages", async () => {
-  mockIPC(() => Promise.reject("SSH authentication failed"));
+  installHost({ invoke: () => Promise.reject("SSH authentication failed") });
   await assert.rejects(callDesktop(IPC_COMMANDS.serverConnect, { serverId: "srv_test" }), {
     name: "Error", message: "SSH authentication failed",
   });
