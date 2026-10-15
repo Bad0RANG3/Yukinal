@@ -40,8 +40,11 @@
 > `package.install` actions only for a remote goal run with an active action step
 > that allows them. These actions require exact per-call approval; Rust fingerprints
 > the exact host input and consumes a one-time ticket before dispatch. On
-> C++-supported routes, `systemd.restart`, `docker.restart`, and
-> `package.install` now run from Python through structured C++ SSH operations.
+> C++-supported routes, `systemd.restart`, `docker.restart`, `package.install`,
+> and approved `server.exec` now run from Python through structured C++ SSH
+> operations. The `server.exec` one-shot target is enabled only after Rust
+> validates the plan and consumes the exact approval; the bounded command-grant
+> path remains only in the Rust compatibility executor for unsupported targets.
 > The host checks the durable action plan before
 > claiming the call and consuming its ticket. A successful result is cached only
 > after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
@@ -109,11 +112,13 @@ structured C++ SSH operations on supported targets; the host records their
 terminal outcomes in the durable execution fence. Rust keeps the compatibility
 executor for routes it explicitly reports as unsupported.
 `server.exec` remains separately guarded and exposed only when the host supplies
-the current remote action-plan binding. On C++-supported targets, the host first
-consumes the exact approval ticket or reserves the bounded task command grant,
-then starts a one-shot C++ service config that enables `server.exec` for that
-target only. Persistent service target configs deny it by default. Targets that
-still require a Rust-only SSH route retain the existing Rust compatibility path.
+the current remote action-plan binding. On C++-supported targets, the host
+validates the plan, consumes the exact approval ticket, creates the Rust-built
+remote command wrapper, then starts a one-shot C++ service config that enables
+`server.exec` for that target only. Python sends the bounded structured request
+and returns its validated result to the host. Persistent service target configs
+deny it by default. The bounded task command-grant path remains in the Rust
+compatibility executor for targets that the C++ service reports as unsupported.
 The Python sidecar exposes bounded `filesystem.read`; Agent `filesystem.write`,
 revision-guarded `filesystem.edit`, `filesystem.backup`, `filesystem.restore`,
 and `filesystem.backup.cleanup`
@@ -591,6 +596,17 @@ routes retain the existing Rust executor. Added Python coverage for structured
 request bounds and the approved desktop route. Full Python Agent discovery ran
 112 tests successfully with 4 service-path skips; CTest passed all six targets,
 including the C++ SSH mock and Agent-to-C++ integration.
+
+On 2026-10-15, approved `server.exec` moved to the same Python/C++ action route.
+Rust still validates the exact plan and approval, builds the remote command
+wrapper, and grants the one-shot target capability; Python calls the bounded C++
+operation and returns its validated output for the host execution fence. The
+Rust task command-grant executor remains only as the compatibility path for
+unsupported C++ targets. The Python client, Agent route, target capability, and
+SSH mock now cover this path. Python Agent discovery ran 116 tests with 4
+service-path skips, and CTest passed all six targets. Rust formatting and
+compilation remain unverified because Cargo, rustfmt, and rustc are unavailable
+on this machine.
 
 ## Deliberately deferred
 
