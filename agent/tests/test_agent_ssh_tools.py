@@ -20,6 +20,7 @@ from yukinal_agent.ssh_tools import (
     register_ssh_tools,
 )
 from yukinal_ssh.client import _SYSTEM_SNAPSHOT_COMMAND_IDS
+from yukinal_agent.system_snapshot import normalize_system_snapshot
 
 _SNAPSHOT_OUTPUTS = {
     command_id: (0, f"{command_id}\n") for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS
@@ -45,7 +46,7 @@ class FakeDesktopHost:
             }:
                 raise AssertionError(f"server.info host request lost the selected target: {params!r}")
             tool_input = params.get("input")
-            if not isinstance(tool_input, dict) or set(tool_input) != {"snapshotOutputs"}:
+            if not isinstance(tool_input, dict) or set(tool_input) != {"snapshotData"}:
                 raise AssertionError(f"server.info host input was invalid: {tool_input!r}")
             return {"status": "success", "output": _SNAPSHOT_VALUE}
         payload = {
@@ -398,10 +399,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                             "traceId": "trace-desktop-ssh-test",
                             "toolName": "server.info",
                             "input": {
-                                "snapshotOutputs": {
-                                    command_id: {"exitCode": exit_code, "stdout": stdout}
-                                    for command_id, (exit_code, stdout) in _SNAPSHOT_OUTPUTS.items()
-                                },
+                                "snapshotData": normalize_system_snapshot(_SNAPSHOT_OUTPUTS),
                             },
                             "target": {
                                 "host": "remote",

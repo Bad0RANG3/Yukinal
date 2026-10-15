@@ -13,6 +13,7 @@ from yukinal_ssh import SshServiceClient, SshServiceError
 from .host_rpc import HostRpcClient
 from .host_tools import _execute_on_host
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
+from .system_snapshot import normalize_system_snapshot
 from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
@@ -275,12 +276,7 @@ def register_desktop_ssh_tools(
                 snapshot = await _execute_on_host(
                     host,
                     tool_name,
-                    {
-                        "snapshotOutputs": {
-                            command_id: {"exitCode": exit_code, "stdout": stdout}
-                            for command_id, (exit_code, stdout) in outputs.items()
-                        },
-                    },
+                    {"snapshotData": normalize_system_snapshot(outputs)},
                     context,
                 )
                 if not isinstance(snapshot, dict):

@@ -335,9 +335,12 @@ remote errors are raised as `SshServiceError` with a stable `code` and
 
 The desktop Agent routes `server.info` command acquisition through the C++ SSH
 service using a fixed command set and nonce-delimited output. Python validates
-the markers and forwards bounded command results to the Rust host, which keeps
-the existing snapshot parser and database write path. The snapshot shape used
-by the UI and host context remains the same.
+the markers, parses the seven snapshot sections, computes health and collector
+results, and sends normalized data through the existing guarded
+`host.tool.execute` route. The host validates the typed snapshot shape, adds its
+own target identity and collection timestamp, and persists the existing UI
+contract to SQLite. Direct UI snapshot requests and legacy SSH configurations
+still use the Rust collector path while those call sites are migrated.
 
 ## Build and verification
 

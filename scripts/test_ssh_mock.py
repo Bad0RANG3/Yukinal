@@ -810,7 +810,7 @@ def exercise_agent_runtime(
             raise AssertionError(f"Agent accepted a model-supplied target override: {forged!r}")
 
         class DesktopHost:
-            snapshot_outputs: dict[str, object] | None = None
+            snapshot_data: dict[str, object] | None = None
 
             async def request(self, method: str, params: dict[str, object], *, timeout_seconds: float) -> object:
                 if method == "host.ssh.service_target" and params == {"serverId": "srv_stage1"}:
@@ -822,13 +822,13 @@ def exercise_agent_runtime(
                         raise AssertionError(f"snapshot used a different target: {params!r}")
                     if not isinstance(tool_input, dict):
                         raise AssertionError(f"snapshot host input was invalid: {tool_input!r}")
-                    outputs = tool_input.get("snapshotOutputs")
-                    if not isinstance(outputs, dict) or set(outputs) != set(_SYSTEM_SNAPSHOT_COMMAND_IDS):
-                        raise AssertionError(f"snapshot command set was invalid: {outputs!r}")
-                    self.snapshot_outputs = outputs
-                    cpu_model = outputs["cpu_model"]
-                    if not isinstance(cpu_model, dict) or "Mock CPU" not in str(cpu_model.get("stdout")):
-                        raise AssertionError(f"snapshot did not include the C++ SSH result: {cpu_model!r}")
+                    data = tool_input.get("snapshotData")
+                    if not isinstance(data, dict) or "cpu" not in data:
+                        raise AssertionError(f"normalized snapshot data was invalid: {data!r}")
+                    self.snapshot_data = data
+                    cpu = data["cpu"]
+                    if not isinstance(cpu, dict) or cpu.get("model") != "Mock CPU":
+                        raise AssertionError(f"snapshot did not include the C++ SSH result: {cpu!r}")
                     return {"status": "success", "output": {
                         "serverId": "srv_stage1", "os": {"hostname": "mock-host"},
                         "cpu": {"model": "Mock CPU"},
@@ -872,7 +872,7 @@ def exercise_agent_runtime(
         if (
             snapshot_output.get("serverId") != "srv_stage1"
             or snapshot_output.get("cpu", {}).get("model") != "Mock CPU"
-            or desktop_host.snapshot_outputs is None
+            or desktop_host.snapshot_data is None
         ):
             raise AssertionError(f"desktop-managed snapshot result was not preserved: {snapshot_output!r}")
 
