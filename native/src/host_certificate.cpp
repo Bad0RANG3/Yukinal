@@ -18,6 +18,18 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#endif
+
 #include <httplib.h>
 
 #include <openssl/bn.h>
@@ -25,6 +37,9 @@
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
+#include <openssl/x509v3.h>
+
+#include "ssh_network.hpp"
 
 namespace yukinal::ssh_service::detail {
 namespace {
@@ -749,26 +764,250 @@ void wipe_secret(std::string* value) {
   value->clear();
 }
 
+bool write_socket_bytes(socket_t socket, std::string_view bytes) {
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const int chunk = static_cast<int>(std::min<std::size_t>(
+        bytes.size() - offset, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+#ifdef MSG_NOSIGNAL
+    constexpr int send_flags = MSG_NOSIGNAL;
+#else
+    constexpr int send_flags = 0;
+#endif
+    const int written = ::send(socket, bytes.data() + offset, chunk, send_flags);
+    if (written <= 0) return false;
+    offset += static_cast<std::size_t>(written);
+  }
+  return true;
+}
+
+bool read_socket_bytes(socket_t socket, char* bytes, std::size_t length) {
+  std::size_t offset = 0;
+  while (offset < length) {
+    const int chunk = static_cast<int>(std::min<std::size_t>(
+        length - offset, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    const int received = ::recv(socket, bytes + offset, chunk, 0);
+    if (received <= 0) return false;
+    offset += static_cast<std::size_t>(received);
+  }
+  return true;
+}
+
+bool append_socks5_krl_destination(const KrlUrl& url,
+                                   yukinal::ssh_service::ProxyProtocol proxy_protocol,
+                                   std::string* request) {
+  if (!request) return false;
+  std::array<unsigned char, 16> address{};
+  if (inet_pton(AF_INET, url.host.c_str(), address.data()) == 1) {
+    request->push_back('\x01');
+    request->append(reinterpret_cast<const char*>(address.data()), 4);
+  } else if (inet_pton(AF_INET6, url.host.c_str(), address.data()) == 1) {
+    request->push_back('\x04');
+    request->append(reinterpret_cast<const char*>(address.data()), 16);
+  } else if (proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_remote_dns) {
+    if (url.host.empty() || url.host.size() > 255 || url.host.find(':') != std::string::npos) {
+      return false;
+    }
+    request->push_back('\x03');
+    request->push_back(static_cast<char>(url.host.size()));
+    request->append(url.host);
+  } else {
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* raw_addresses = nullptr;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto resolution = yukinal::ssh_service::detail::resolve_address_list(
+        url.host, std::to_string(url.port), hints, deadline, &raw_addresses);
+    std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(raw_addresses, freeaddrinfo);
+    if (resolution != yukinal::ssh_service::detail::AddressResolution::resolved || !addresses) {
+      return false;
+    }
+    const addrinfo* selected = addresses.get();
+    while (selected && selected->ai_family != AF_INET && selected->ai_family != AF_INET6) {
+      selected = selected->ai_next;
+    }
+    if (!selected) return false;
+    if (selected->ai_family == AF_INET) {
+      const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(selected->ai_addr);
+      request->push_back('\x01');
+      request->append(reinterpret_cast<const char*>(&ipv4->sin_addr), sizeof(ipv4->sin_addr));
+    } else {
+      const auto* ipv6 = reinterpret_cast<const sockaddr_in6*>(selected->ai_addr);
+      request->push_back('\x04');
+      request->append(reinterpret_cast<const char*>(&ipv6->sin6_addr), sizeof(ipv6->sin6_addr));
+    }
+  }
+  request->push_back(static_cast<char>((url.port >> 8) & 0xff));
+  request->push_back(static_cast<char>(url.port & 0xff));
+  return true;
+}
+
+bool establish_krl_socks5_tunnel(socket_t socket, const KrlUrl& url,
+                                 const yukinal::ssh_service::TargetConfig& target) {
+  const bool auth_required = !target.proxy_auth_env.empty();
+  const std::string greeting = auth_required ? std::string("\x05\x01\x02", 3)
+                                             : std::string("\x05\x01\x00", 3);
+  if (!write_socket_bytes(socket, greeting)) return false;
+  std::array<unsigned char, 2> method_response{};
+  if (!read_socket_bytes(socket, reinterpret_cast<char*>(method_response.data()), method_response.size()) ||
+      method_response[0] != 5 || method_response[1] == 0xff) {
+    return false;
+  }
+  if (auth_required) {
+    if (method_response[1] != 2) return false;
+    const char* configured = std::getenv(target.proxy_auth_env.c_str());
+    std::string credential = configured ? configured : "";
+    const auto separator = credential.find(':');
+    if (credential.empty() || credential.size() > 1024 || separator == std::string::npos ||
+        separator == 0 || separator + 1 >= credential.size() || separator > 255 ||
+        credential.size() - separator - 1 > 255) {
+      wipe_secret(&credential);
+      return false;
+    }
+    std::string auth;
+    auth.reserve(3 + credential.size());
+    auth.push_back('\x01');
+    auth.push_back(static_cast<char>(separator));
+    auth.append(credential, 0, separator);
+    auth.push_back(static_cast<char>(credential.size() - separator - 1));
+    auth.append(credential, separator + 1, std::string::npos);
+    wipe_secret(&credential);
+    const bool sent = write_socket_bytes(socket, auth);
+    wipe_secret(&auth);
+    if (!sent) return false;
+    std::array<unsigned char, 2> auth_response{};
+    if (!read_socket_bytes(socket, reinterpret_cast<char*>(auth_response.data()), auth_response.size()) ||
+        auth_response[0] != 1 || auth_response[1] != 0) {
+      return false;
+    }
+  } else if (method_response[1] != 0) {
+    return false;
+  }
+
+  std::string request("\x05\x01\x00", 3);
+  if (!append_socks5_krl_destination(url, target.proxy_protocol, &request) ||
+      !write_socket_bytes(socket, request)) {
+    return false;
+  }
+  std::array<unsigned char, 4> response{};
+  if (!read_socket_bytes(socket, reinterpret_cast<char*>(response.data()), response.size()) ||
+      response[0] != 5 || response[1] != 0 || response[2] != 0) {
+    return false;
+  }
+  std::size_t address_size = 0;
+  if (response[3] == 1) address_size = 4;
+  else if (response[3] == 4) address_size = 16;
+  else if (response[3] == 3) {
+    unsigned char length = 0;
+    if (!read_socket_bytes(socket, reinterpret_cast<char*>(&length), 1)) return false;
+    address_size = length;
+  } else {
+    return false;
+  }
+  std::array<char, 257> bound_address{};
+  return address_size <= 255 &&
+      read_socket_bytes(socket, bound_address.data(), address_size + 2);
+}
+
+class SocksKrlHttpsClient final : public httplib::ClientImpl {
+ public:
+  SocksKrlHttpsClient(const KrlUrl& url,
+                      const yukinal::ssh_service::TargetConfig& target)
+      : httplib::ClientImpl(url.host, url.port), url_(url), target_(target),
+        context_(SSL_CTX_new(TLS_client_method()), SSL_CTX_free) {
+    set_keep_alive(false);
+    if (context_) {
+      SSL_CTX_set_min_proto_version(context_.get(), TLS1_2_VERSION);
+      SSL_CTX_set_verify(context_.get(), SSL_VERIFY_PEER, nullptr);
+      if (SSL_CTX_set_default_verify_paths(context_.get()) != 1) context_.reset();
+    }
+  }
+
+  bool is_valid() const override { return context_ != nullptr; }
+
+ protected:
+  bool create_and_connect_socket(Socket& socket, httplib::Error& error) override {
+    socket.sock = httplib::detail::create_client_socket(
+        target_.proxy_host, "", target_.proxy_port, address_family_, tcp_nodelay_,
+        ipv6_v6only_, socket_options_, connection_timeout_sec_, connection_timeout_usec_,
+        read_timeout_sec_, read_timeout_usec_, write_timeout_sec_, write_timeout_usec_,
+        interface_, error);
+    if (socket.sock == INVALID_SOCKET) return false;
+    if (!establish_krl_socks5_tunnel(socket.sock, url_, target_)) {
+      error = httplib::Error::Connection;
+      httplib::detail::close_socket(socket.sock);
+      socket.sock = INVALID_SOCKET;
+      return false;
+    }
+    return true;
+  }
+
+  bool process_socket(const Socket& socket,
+                      std::function<bool(httplib::Stream&)> callback) override {
+    std::unique_ptr<SSL, decltype(&SSL_free)> ssl(SSL_new(context_.get()), SSL_free);
+    if (!ssl || SSL_set_fd(ssl.get(), static_cast<int>(socket.sock)) != 1) return false;
+    X509_VERIFY_PARAM* verify = SSL_get0_param(ssl.get());
+    std::array<unsigned char, 16> address{};
+    const bool is_ip = inet_pton(AF_INET, url_.host.c_str(), address.data()) == 1 ||
+        inet_pton(AF_INET6, url_.host.c_str(), address.data()) == 1;
+    if (is_ip) {
+      if (X509_VERIFY_PARAM_set1_ip_asc(verify, url_.host.c_str()) != 1) return false;
+    } else {
+      if (SSL_set_tlsext_host_name(ssl.get(), url_.host.c_str()) != 1 ||
+          X509_VERIFY_PARAM_set1_host(verify, url_.host.c_str(), 0) != 1) {
+        return false;
+      }
+    }
+    if (SSL_connect(ssl.get()) != 1 || SSL_get_verify_result(ssl.get()) != X509_V_OK) return false;
+    return httplib::detail::process_client_socket_ssl(
+        ssl.get(), socket.sock, read_timeout_sec_, read_timeout_usec_,
+        write_timeout_sec_, write_timeout_usec_, std::move(callback));
+  }
+
+ private:
+  KrlUrl url_;
+  yukinal::ssh_service::TargetConfig target_;
+  std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> context_;
+};
+
+bool krl_uses_proxy(const yukinal::ssh_service::TargetConfig& target,
+                    const KrlUrl& url) {
+  if (target.proxy_host.empty()) return false;
+  yukinal::ssh_service::TargetConfig proxy_target = target;
+  proxy_target.host = url.host;
+  proxy_target.port = url.port;
+  return !yukinal::ssh_service::proxy_bypasses_target(proxy_target);
+}
+
+bool krl_uses_socks_proxy(const yukinal::ssh_service::TargetConfig& target,
+                          const KrlUrl& url) {
+  return krl_uses_proxy(target, url) &&
+      (target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_local_dns ||
+       target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_remote_dns);
+}
+
 template <typename Client>
 std::optional<std::string> perform_krl_http_request(Client& client, const KrlUrl& url,
-    const yukinal::ssh_service::TargetConfig& target, std::string* error) {
+    const yukinal::ssh_service::TargetConfig& target, std::string* error,
+    bool socks_proxy_tunnel = false) {
   client.set_connection_timeout(std::chrono::seconds(10));
   client.set_read_timeout(std::chrono::seconds(15));
   client.set_write_timeout(std::chrono::seconds(15));
   client.set_follow_location(false);
-  yukinal::ssh_service::TargetConfig proxy_target = target;
-  proxy_target.host = url.host;
-  const bool use_proxy = !target.proxy_host.empty() &&
-      !yukinal::ssh_service::proxy_bypasses_target(proxy_target);
-  if (use_proxy &&
-      (target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_local_dns ||
-       target.proxy_protocol == yukinal::ssh_service::ProxyProtocol::socks5_remote_dns)) {
-    if (error) *error = "SOCKS proxy routes are not supported for host certificate KRL downloads";
+  const bool use_proxy = krl_uses_proxy(target, url);
+  const bool socks_proxy = krl_uses_socks_proxy(target, url);
+  if (socks_proxy && !url.https) {
+    if (error) *error = "HTTP KRL downloads must bypass the SOCKS proxy and use loopback directly";
+    return std::nullopt;
+  }
+  if (socks_proxy != socks_proxy_tunnel) {
+    if (error) *error = "the host certificate KRL proxy route could not be established";
     return std::nullopt;
   }
   std::string credential;
   bool proxy_auth_configured = false;
-  if (use_proxy) {
+  if (use_proxy && !socks_proxy_tunnel) {
     client.set_proxy(target.proxy_host, target.proxy_port);
     if (!target.proxy_auth_env.empty()) {
       const char* value = std::getenv(target.proxy_auth_env.c_str());
@@ -1001,6 +1240,14 @@ std::optional<std::string> load_host_revocation_list(
     return std::nullopt;
   }
   if (url->https) {
+    if (krl_uses_socks_proxy(target, *url)) {
+      SocksKrlHttpsClient client(*url, target);
+      if (!client.is_valid()) {
+        if (error) *error = "could not create a verified HTTPS client for the host certificate KRL";
+        return std::nullopt;
+      }
+      return perform_krl_http_request(client, *url, target, error, true);
+    }
     httplib::SSLClient client(url->host, url->port);
     if (!client.is_valid()) {
       if (error) *error = "could not create an HTTPS client for the host certificate KRL";

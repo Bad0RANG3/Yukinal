@@ -10,8 +10,9 @@
 > Rust still hosts native UI IPC, local trust-store updates, final approvals, and
 > compatibility paths for configurations outside current C++ coverage. C++ verifies
 > configured OpenSSH host CAs and optional KRLs for supported CA algorithms; remote
-> KRL download through SOCKS is not implemented yet and fails closed. A CA is
-> itself a valid trust source and does not also require a leaf host-key pin. The
+> HTTPS KRL downloads use the configured SOCKS5/SOCKS5H tunnel and verify the KRL
+> server certificate; loopback-only HTTP KRL downloads must bypass the proxy.
+> A CA is itself a valid trust source and does not also require a leaf host-key pin. The
 > desktop passes proxy configuration as data; C++ parses HTTP/HTTPS and SOCKS5/SOCKS5H
 > proxy URLs, verifies HTTPS proxy certificates, applies bypass rules, and establishes
 > CONNECT or SOCKS5 tunnels. SOCKS5 resolves target names locally; SOCKS5H delegates
@@ -741,6 +742,14 @@ Python Agent keep supported CA and proxy targets on its Python-to-C++ path inste
 of rejecting the payload and handing the operation back to the desktop host. The
 focused process suite passed all six tests, and the Agent SSH mock passed selected
 target status and snapshot operations through an authenticated SOCKS5H tunnel.
+
+On 2026-10-15, moved HTTPS Host CA KRL retrieval through authenticated SOCKS5
+and SOCKS5H routes into the C++ service. The KRL HTTPS certificate and hostname
+are verified before the bounded response is parsed. Port-qualified `NO_PROXY`
+rules are evaluated against the KRL URL's host and port, so a KRL-specific
+bypass does not accidentally use the SSH destination port. The SSH mock verifies
+SOCKS5 local DNS, SOCKS5H remote DNS, URL-port bypass, and rejection of a KRL
+server certificate with the wrong hostname; all six CTest targets passed.
 
 On 2026-10-15, aligned C++ and Python validation for port-qualified `no_proxy`
 patterns. C++ now checks both the host pattern and SSH port before bypassing the

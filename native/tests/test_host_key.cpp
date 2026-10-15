@@ -492,6 +492,9 @@ YUKINAL_TEST(host_krl_loader_fetches_loopback_http_responses) {
 
   yukinal::ssh_service::TargetConfig target;
   target.host_ca_revocation_list_url = "http://127.0.0.1:" + std::to_string(port) + "/revoked.krl";
+  target.proxy_host = "192.0.2.1";
+  target.proxy_port = 1;
+  target.proxy_no_proxy = {"127.0.0.1:" + std::to_string(port)};
   std::string error;
   const auto downloaded = yukinal::ssh_service::detail::load_host_revocation_list(target, &error);
   server.stop();

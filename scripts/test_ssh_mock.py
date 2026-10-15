@@ -5,6 +5,7 @@ import asyncio
 import base64
 import datetime
 import hashlib
+import http.server
 import ipaddress
 import io
 import json
@@ -525,10 +526,13 @@ def write_https_proxy_certificates(root: Path) -> tuple[Path, Path, Path, Path, 
     def write_leaf(name: str, *, wrong_host: bool) -> tuple[Path, Path]:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
-        san = (
-            x509.DNSName("proxy-mismatch.invalid")
+        sans = (
+            [x509.DNSName("proxy-mismatch.invalid")]
             if wrong_host
-            else x509.IPAddress(ipaddress.ip_address("127.0.0.1"))
+            else [
+                x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                x509.DNSName("localhost"),
+            ]
         )
         certificate = (
             x509.CertificateBuilder()
@@ -538,7 +542,7 @@ def write_https_proxy_certificates(root: Path) -> tuple[Path, Path, Path, Path, 
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(minutes=1))
             .not_valid_after(now + datetime.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(sans), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
@@ -563,6 +567,43 @@ def write_https_proxy_certificates(root: Path) -> tuple[Path, Path, Path, Path, 
     good_certificate, good_key = write_leaf("https-proxy-good", wrong_host=False)
     bad_certificate, bad_key = write_leaf("https-proxy-bad", wrong_host=True)
     return ca_path, good_certificate, good_key, bad_certificate, bad_key
+
+
+def start_https_krl_server(
+    certificate: Path, private_key: Path
+) -> tuple[http.server.ThreadingHTTPServer, threading.Thread, int]:
+    def ssh_string(value: bytes) -> bytes:
+        return struct.pack(">I", len(value)) + value
+
+    krl = (
+        b"SSHKRL\n\x00"
+        + struct.pack(">IQQQ", 1, 1, 0, 0)
+        + ssh_string(b"")
+        + ssh_string(b"SOCKS KRL integration fixture")
+    )
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != "/revoked.krl":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(krl)))
+            self.end_headers()
+            self.wfile.write(krl)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certificate, private_key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, int(server.server_address[1])
 
 
 def start_http_connect_proxy(
@@ -1183,6 +1224,12 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             target_log=HTTPS_PROXY_CONNECT_TARGETS,
         )
         bad_tls_proxy_port = bad_tls_proxy_listener.getsockname()[1]
+        krl_https_server, krl_https_thread, krl_https_port = start_https_krl_server(
+            good_certificate, good_key
+        )
+        bad_krl_https_server, bad_krl_https_thread, bad_krl_https_port = start_https_krl_server(
+            bad_certificate, bad_key
+        )
         known_hosts = root / "known_hosts"
 
         def write_known_host(key: paramiko.PKey) -> None:
@@ -1200,6 +1247,9 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
         wrong_fingerprint = "SHA256:" + base64.b64encode(
             hashlib.sha256(wrong_host_key.asbytes()).digest()
         ).decode("ascii").rstrip("=")
+        host_ca_public_key = (
+            f"{host_key.get_name()} {base64.b64encode(host_key.asbytes()).decode('ascii')} test-krl-ca"
+        )
         service_port = unused_port()
         while service_port == ssh_port:
             service_port = unused_port()
@@ -1358,6 +1408,71 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
                 },
                 {
+                    "target_id": "srv_krl_socks5h",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_certificate_authority": {
+                        "ca_public_key": host_ca_public_key,
+                        "principals": ["127.0.0.1"],
+                        "revocation_list_url": f"https://localhost:{krl_https_port}/revoked.krl",
+                    },
+                    "proxy": {
+                        "url": f"socks5h://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_krl_socks5h_bypass_port",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_certificate_authority": {
+                        "ca_public_key": host_ca_public_key,
+                        "principals": ["127.0.0.1"],
+                        "revocation_list_url": f"https://127.0.0.1:{krl_https_port}/revoked.krl",
+                    },
+                    "proxy": {
+                        "url": f"socks5h://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                        "no_proxy": f"127.0.0.1:{krl_https_port}",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_krl_socks5_local_dns",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_certificate_authority": {
+                        "ca_public_key": host_ca_public_key,
+                        "principals": ["127.0.0.1"],
+                        "revocation_list_url": f"https://localhost:{krl_https_port}/revoked.krl",
+                    },
+                    "proxy": {
+                        "url": f"socks5://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
+                    "target_id": "srv_krl_socks5h_bad_certificate",
+                    "host": "127.0.0.1",
+                    "port": ssh_port,
+                    "username": "test-user",
+                    "host_certificate_authority": {
+                        "ca_public_key": host_ca_public_key,
+                        "principals": ["127.0.0.1"],
+                        "revocation_list_url": f"https://127.0.0.1:{bad_krl_https_port}/revoked.krl",
+                    },
+                    "proxy": {
+                        "url": f"socks5h://127.0.0.1:{socks_port}",
+                        "auth_env": "YK_SSH_TEST_PROXY_CREDENTIAL",
+                    },
+                    "auth": {"type": "password", "password_env": "YUKINAL_TEST_SSH_PASSWORD"},
+                },
+                {
                     "target_id": "srv_https_proxy",
                     "host": "127.0.0.1",
                     "port": ssh_port,
@@ -1493,6 +1608,50 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     raise AssertionError("SOCKS proxy error response exposed the credential") from error
             else:
                 raise AssertionError("C++ SSH accepted a rejected SOCKS proxy credential")
+
+            for target_id in (
+                "srv_krl_socks5h",
+                "srv_krl_socks5h_bypass_port",
+                "srv_krl_socks5_local_dns",
+            ):
+                try:
+                    client.service_status(target_id, "nginx.service", timeout_seconds=8)
+                except SshServiceError as error:
+                    if error.code != "host_key_unverified" or "plain host key" not in str(error):
+                        raise AssertionError(
+                            f"{target_id} did not finish KRL verification before rejecting the mock host key: {error}"
+                        ) from error
+                else:
+                    raise AssertionError(f"{target_id} accepted a plain key under Host CA trust")
+            krl_socks_targets = [
+                item for item in SOCKS5_CONNECT_TARGETS if item[1] == krl_https_port
+            ]
+            if (
+                len(krl_socks_targets) != 2
+                or ("localhost", krl_https_port, 3) not in krl_socks_targets
+                or not any(
+                    target[1] == krl_https_port and target[2] in {1, 4}
+                    for target in krl_socks_targets
+                )
+            ):
+                raise AssertionError(
+                    f"KRL HTTPS did not use SOCKS exactly once; port-qualified NO_PROXY should bypass it: {krl_socks_targets!r}"
+                )
+            try:
+                client.service_status(
+                    "srv_krl_socks5h_bad_certificate", "nginx.service", timeout_seconds=8
+                )
+            except SshServiceError as error:
+                if (
+                    error.code != "host_key_unverified"
+                    or "Could not load the host certificate revocation list" not in str(error)
+                    or "plain host key" in str(error)
+                ):
+                    raise AssertionError(
+                        f"KRL retrieval did not reject a mismatched HTTPS certificate first: {error}"
+                    ) from error
+            else:
+                raise AssertionError("C++ SSH accepted an HTTPS KRL server with a mismatched certificate")
 
             https_probe = client._execute_operation(
                 "srv_https_proxy_probe_only", "host_key_probe", {}, timeout_seconds=8
@@ -1904,6 +2063,12 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             https_proxy_listener.close()
             bad_tls_proxy_stopping.set()
             bad_tls_proxy_listener.close()
+            krl_https_server.shutdown()
+            krl_https_server.server_close()
+            krl_https_thread.join(timeout=5)
+            bad_krl_https_server.shutdown()
+            bad_krl_https_server.server_close()
+            bad_krl_https_thread.join(timeout=5)
 
 
 def main() -> int:
