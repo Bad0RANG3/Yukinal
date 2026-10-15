@@ -632,18 +632,25 @@ pub(super) async fn server_info(
                 Err(error) => return Ok(transport_or_cancel(error, cancel)),
             },
         };
-        tokio::select! {
+        let data = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(cancelled_failure()),
-            result = yukinal_core::collector::collect_snapshot_with_command_results(
-                server_id,
-                &collected_at,
-                cancel,
+            result = crate::commands::server::normalize_snapshot_outputs_via_python(
+                app.expect("C++ SSH support requires an app handle"),
+                state,
                 outputs,
             ) => match result {
-                Ok(snapshot) => snapshot,
+                Ok(data) => data,
                 Err(error) => return Ok(transport_or_cancel(error, cancel)),
             },
+        };
+        match crate::commands::server::server_snapshot_from_normalized_data(
+            server_id,
+            &collected_at,
+            &data,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Ok(failed("invalid_response", error, true, None)),
         }
     } else {
         if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {

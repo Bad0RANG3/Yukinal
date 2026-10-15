@@ -1,7 +1,7 @@
 //! Server commands: list/add（持久化到 SQLite，凭据进 OS keychain）与 overview 的
 //! 实时快照（真实采集，不做假数据）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -26,6 +26,38 @@ mod snapshot;
 
 use identity::{reclaim_identity, store_identity};
 pub(crate) use snapshot::server_snapshot_from_normalized_data;
+
+pub(crate) async fn normalize_snapshot_outputs_via_python(
+    app: &AppHandle,
+    state: &AppState,
+    outputs: HashMap<String, (i32, String)>,
+) -> Result<serde_json::Value, String> {
+    if !state.supervisor.status().await.running {
+        crate::commands::start_sidecar(app).await?;
+    }
+    let outputs = outputs
+        .into_iter()
+        .map(|(command_id, (exit_code, stdout))| {
+            (
+                command_id,
+                serde_json::json!({ "exitCode": exit_code, "stdout": stdout }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let response = state
+        .supervisor
+        .request(
+            "server.snapshot.normalize",
+            serde_json::json!({ "outputs": outputs }),
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    response
+        .get("snapshotData")
+        .cloned()
+        .ok_or_else(|| "Python Agent returned invalid snapshot data".to_string())
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,32 +108,9 @@ pub async fn server_snapshot(
     let cancel = tokio_util::sync::CancellationToken::new();
     let (snapshot, _samples) = if ssh_service::supports_cpp_target(&state, &server_id)? {
         let outputs = ssh_service::system_snapshot(&app, &state, &server_id).await?;
-        if !state.supervisor.status().await.running {
-            crate::commands::start_sidecar(&app).await?;
-        }
-        let outputs = outputs
-            .into_iter()
-            .map(|(command_id, (exit_code, stdout))| {
-                (
-                    command_id,
-                    serde_json::json!({ "exitCode": exit_code, "stdout": stdout }),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>();
-        let response = state
-            .supervisor
-            .request(
-                "server.snapshot.normalize",
-                serde_json::json!({ "outputs": outputs }),
-                std::time::Duration::from_secs(15),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let data = response
-            .get("snapshotData")
-            .ok_or_else(|| "Python Agent returned invalid snapshot data".to_string())?;
+        let data = normalize_snapshot_outputs_via_python(&app, &state, outputs).await?;
         (
-            server_snapshot_from_normalized_data(&server_id, &collected_at, data)?,
+            server_snapshot_from_normalized_data(&server_id, &collected_at, &data)?,
             Vec::new(),
         )
     } else {
