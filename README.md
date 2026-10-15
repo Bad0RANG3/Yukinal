@@ -71,6 +71,18 @@ To create an installer, install `agent[agent,models,package]` into that virtual
 environment and run `pnpm package`. The build creates a frozen Python Agent and
 the packaged desktop selects it by default.
 
+For the C++ and Python service test suite, install `agent[agent,models,test]`,
+configure and build the native service, then run `pnpm check`; the check gate
+detects the configured CMake build and runs its CTest suite. For example:
+
+```powershell
+python -m pip install -e "agent[agent,models,test]"
+cmake -S native -B native/build-check -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON
+cmake --build native/build-check --config Release --parallel
+$env:YUKINAL_SSH_CMAKE_BUILD_DIR = "native/build-check"
+pnpm check
+```
+
 The new milestone boundary, API contract, build instructions, and remaining
 work are documented in [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md).
 

@@ -229,6 +229,18 @@ test("package build runs the generated NSIS policy check only on Windows", async
   assert.ok(packageScript.slice(guardAt, manifestAt).includes('"scripts/check-nsis-uninstall.mjs"'));
 });
 
+test("the cross-platform check gate builds and tests the C++ service and Python Agent", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const workflow = await readFile(path.join(root, ".github", "workflows", "check.yml"), "utf8");
+
+  assert.match(workflow, /actions\/setup-python@[0-9a-f]{40}/);
+  assert.match(workflow, /agent\[agent,models,test\]/);
+  assert.match(workflow, /cmake -S native -B native\/build-check[\s\S]*-DYUKINAL_BUILD_TESTS=ON/);
+  assert.match(workflow, /cmake --build native\/build-check/);
+  assert.match(workflow, /YUKINAL_SSH_CMAKE_BUILD_DIR: native\/build-check/);
+  assert.match(workflow, /pnpm check/);
+});
+
 test("installer-sensitive pull requests run the Windows lifecycle gate without packaging macOS or Linux", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const workflow = await readFile(path.join(root, ".github", "workflows", "package.yml"), "utf8");

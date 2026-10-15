@@ -4,22 +4,27 @@
  * checked for cross-platform problems before the next stage starts).
  *
  * Order is deliberate:
- *   1. build the contract libs   (consumers import their dist/*.d.ts)
- *   2. typecheck every workspace
- *   3. bundle the legacy Node development sidecar and check the Tauri Python package contract
- *   4. run every workspace's unit tests
- *   5. smoke the legacy Node development sidecar; package.mjs separately builds and smokes the frozen Python install layout
- *   6. rust fmt + clippy + check, when a Rust toolchain is installed
+ *   1. check repository hygiene, docs, and packaging contracts
+ *   2. build the contract libs   (consumers import their dist/*.d.ts)
+ *   3. typecheck and test every JavaScript workspace
+ *   4. smoke the legacy Node protocol fixture and run configured C++/Python CTest targets
+ *   5. rust fmt + clippy + check, when a Rust toolchain is installed
  *
  * Exits non-zero on the first failure.
  */
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { spawnCommandSync } from "./lib/commands.mjs";
 import { fileURLToPath } from "node:url";
 
 const hasCargo = spawnSync("cargo", ["--version"], { stdio: "ignore" }).status === 0;
+const nativeBuildCandidates = process.env.YUKINAL_SSH_CMAKE_BUILD_DIR
+  ? [resolve(process.env.YUKINAL_SSH_CMAKE_BUILD_DIR)]
+  : ["native/build-check", "native/build-desktop", "native/build", "native/build-vs", "native/build-nmake"];
+const nativeBuildDirectory = nativeBuildCandidates.find((directory) =>
+  existsSync(join(directory, "CTestTestfile.cmake")));
 
 const steps = [
   { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
@@ -44,21 +49,31 @@ const steps = [
   { name: "unit tests", command: "pnpm", args: ["-r", "--if-present", "test"], required: true },
   { name: "desktop bundle (vite build)", command: "pnpm", args: ["--filter", "@yukinal/desktop", "build"], required: true },
   { name: "sidecar stdio smoke", command: process.execPath, args: ["scripts/smoke-sidecar.mjs"], required: true },
-  { name: "rustfmt check", command: "cargo", args: ["fmt", "--all", "--check"], required: false, skip: !hasCargo },
+  {
+    name: "C++ SSH service and Python Agent tests",
+    command: "ctest",
+    args: ["--test-dir", nativeBuildDirectory ?? "native/build", "-C", "Release", "--output-on-failure"],
+    required: true,
+    skip: !nativeBuildDirectory,
+    skipReason: "no configured CMake test build (see README.md)",
+  },
+  { name: "rustfmt check", command: "cargo", args: ["fmt", "--all", "--check"], required: false, skip: !hasCargo, skipReason: "no cargo on PATH" },
   {
     name: "clippy",
     command: "cargo",
     args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
     required: false,
     skip: !hasCargo,
+    skipReason: "no cargo on PATH",
   },
-  { name: "cargo check", command: "cargo", args: ["check", "--workspace", "--all-targets"], required: false, skip: !hasCargo },
+  { name: "cargo check", command: "cargo", args: ["check", "--workspace", "--all-targets"], required: false, skip: !hasCargo, skipReason: "no cargo on PATH" },
   {
     name: "rust -> sidecar integration",
     command: "cargo",
     args: ["test", "--workspace", "--", "--test-threads=1"],
     required: false,
     skip: !hasCargo,
+    skipReason: "no cargo on PATH",
     // Opt the cross-language test in: the real supervisor launches the real bundle.
     env: {
       YUKINAL_TEST_NODE: process.execPath,
@@ -77,7 +92,7 @@ if (!existsSync("pnpm-workspace.yaml")) {
 let failures = 0;
 for (const step of steps) {
   if (step.skip) {
-    console.log(`\n── ${step.name}: skipped (no cargo on PATH)`);
+    console.log(`\n── ${step.name}: skipped (${step.skipReason ?? "prerequisite unavailable"})`);
     continue;
   }
   console.log(`\n── ${step.name}`);
