@@ -10,8 +10,6 @@ use tauri::{AppHandle, State};
 
 use crate::commands::activity::record_user_activity;
 use crate::state::AppState;
-use yukinal_core::provider::{primary_provider_id, sanitize_custom_headers};
-use yukinal_credentials::{CredentialRef, CredentialStore};
 use yukinal_database::models::{
     ActivityOutcome, ActivityType, AiProviderConfig, ProviderModelOption,
 };
@@ -219,61 +217,6 @@ pub async fn provider_activate(
         ActivityOutcome::Success,
     )?;
     Ok(ProviderActivateResponse { provider })
-}
-
-/// Agent runs currently receive a resolved key only at the Python runtime boundary.
-/// Keychain access stays in the native host and is never written into SQLite or logs.
-pub(crate) fn resolve_api_key(
-    state: &AppState,
-    provider: &AiProviderConfig,
-) -> Result<Option<String>, String> {
-    let Some(reference) = provider.api_key_credential_ref.as_deref() else {
-        return Ok(None);
-    };
-    let reference = CredentialRef::parse(reference).map_err(|error| error.to_string())?;
-    let secret = state
-        .credentials
-        .get(&reference)
-        .map_err(|error| error.to_string())?;
-    secret
-        .as_utf8()
-        .map(|value| Some(value.into_owned()))
-        .map_err(|error| error.to_string())
-}
-
-/// Retained for Agent run and scheduler startup until provider selection moves fully into Python.
-pub(crate) fn normalize_active_provider(state: &AppState) -> Result<(), String> {
-    let providers = state
-        .database
-        .providers()
-        .list_ai()
-        .map_err(|error| error.to_string())?;
-    let primary_id =
-        primary_provider_id(&providers, |provider| provider_is_usable(state, provider));
-
-    for mut provider in providers {
-        let should_enable = primary_id.as_deref() == Some(provider.id.as_str());
-        let sanitized_headers = sanitize_custom_headers(provider.custom_headers.as_ref());
-        if provider.enabled != should_enable || provider.custom_headers != sanitized_headers {
-            provider.enabled = should_enable;
-            provider.custom_headers = sanitized_headers;
-            provider.updated_at = yukinal_core::sidecar::iso8601_now();
-            state
-                .database
-                .providers()
-                .upsert_ai(&provider)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn provider_is_usable(state: &AppState, provider: &AiProviderConfig) -> bool {
-    yukinal_core::provider::provider_is_usable(provider, |reference| {
-        let reference = CredentialRef::parse(reference).ok()?;
-        let secret = state.credentials.get(&reference).ok()?;
-        secret.as_utf8().ok().map(std::borrow::Cow::into_owned)
-    })
 }
 
 #[cfg(test)]

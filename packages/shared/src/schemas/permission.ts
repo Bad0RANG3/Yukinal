@@ -27,7 +27,7 @@ import {
 } from "./provider.js";
 
 /**
- * Per-run provider material (mirrors `RuntimeProviderConfig`).
+ * Runtime provider configuration (internal to the Python Agent).
  *
  * 「哪些 kind 能带 `wireApi`」这条规则与保存路径共用同一份实现，而不是各自再写一遍：
  * 这是同一件事实（`wireApi` 只属于 openai-compatible），分成两份就会分叉。
@@ -397,7 +397,8 @@ export const AgentRunRequestSchema = z
     permissionMode: AgentPermissionModeSchema.optional(),
     /** Omitted -> `goal`, the unconstrained mode. */
     mode: AgentRunModeSchema.optional(),
-    providerConfig: RuntimeProviderConfigSchema.optional(),
+    providerId: z.string().trim().min(1).max(256).optional(),
+    model: z.string().trim().min(1).max(256).optional(),
   })
   .superRefine((request, context) => {
     if (!agentPromptCarriesContent(request)) {

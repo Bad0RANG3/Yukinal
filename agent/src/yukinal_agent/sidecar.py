@@ -503,6 +503,36 @@ class PythonSidecar:
         api_key = await self._provider_key(provider)
         return await self._test_provider(self._provider_runtime_config(provider, api_key))
 
+    async def _run_provider_model(
+        self, provider_id: object, selected_model: object
+    ) -> tuple[Any, int]:
+        listed = await self._provider_list({})
+        providers = listed["providers"]
+        if provider_id is None:
+            provider = next((item for item in providers if item.get("enabled") is True), None)
+        else:
+            provider = next(
+                (
+                    item for item in providers
+                    if item.get("id") == provider_id and item.get("enabled") is True
+                ),
+                None,
+            )
+        if provider is None:
+            raise _RpcFault(
+                RPC_INVALID_PARAMS,
+                "No enabled AI provider is available; configure one in Settings > Provider",
+            )
+        model_name = selected_model.strip() if isinstance(selected_model, str) else ""
+        if not model_name:
+            model_name = provider["model"]
+        if len(model_name) > 256 or "\r" in model_name or "\n" in model_name:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid model selection")
+        api_key = await self._provider_key(provider)
+        config = self._provider_runtime_config(provider, api_key, 120_000)
+        config["model"] = model_name
+        return self._create_runtime_model(config)
+
     async def _reclaim_provider_credential(self, reference: str) -> bool:
         if self._host_rpc is None:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Provider credential service is unavailable")
@@ -565,7 +595,9 @@ class PythonSidecar:
                 raise _RpcFault(RPC_INVALID_PARAMS, "runId was already used with different content")
             return {"runId": run_id, "started": False, "duplicate": True}
 
-        model, _timeout_ms = self._create_runtime_model(request.get("providerConfig"))
+        model, _timeout_ms = await self._run_provider_model(
+            request.get("providerId"), request.get("model")
+        )
         try:
             agent = ModelDrivenAgent(
                 self._registry,
@@ -1279,7 +1311,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     fields = {
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
-        "providerConfig", "requireCheckpoint", "planBinding",
+        "providerId", "model", "requireCheckpoint", "planBinding",
     }
     parsed = _strict_object(value, fields)
     run_id = parsed.get("runId")
@@ -1295,6 +1327,16 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         item = parsed.get(field)
         if field in parsed and (not isinstance(item, str) or not item.strip() or len(item) > 256):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    provider_id = parsed.get("providerId")
+    if provider_id is not None and (
+        not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 256
+    ):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    model = parsed.get("model")
+    if model is not None and (
+        not isinstance(model, str) or len(model) > 256 or "\r" in model or "\n" in model
+    ):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if parsed.get("delivery", "async") not in ("async", "sync"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if not isinstance(parsed.get("resume", True), bool):
@@ -1393,6 +1435,8 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "sessionId": session_id.strip(),
         "delivery": parsed.get("delivery", "async"),
         "resume": parsed.get("resume", True),
+        "providerId": provider_id.strip() if isinstance(provider_id, str) else None,
+        "model": model.strip() if isinstance(model, str) else None,
         "requireCheckpoint": parsed.get("requireCheckpoint", False),
         "promptText": prompt_text,
         "targetId": target_id,

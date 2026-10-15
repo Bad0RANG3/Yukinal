@@ -11,9 +11,8 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::{agent_run, investigation, provider, tauri_event_name};
+use crate::commands::{agent_run, investigation, tauri_event_name};
 use crate::state::AppState;
-use yukinal_core::provider::runtime_provider_config;
 use yukinal_database::models::{
     InvestigationRun, InvestigationRunMode, InvestigationRunStatus, InvestigationSchedule,
     InvestigationScheduleRun, InvestigationScheduleRunStatus, InvestigationScheduleStatus,
@@ -186,15 +185,6 @@ async fn launch_claimed_run_inner(
     // host-owned and deterministic; the sidecar receives only the effective cap.
     let budget = effective_schedule_budget(&task.budget, &schedule.budget);
 
-    provider::normalize_active_provider(&state)?;
-    let provider_config_row = agent_run::resolve_provider(&state, None)?;
-    let api_key = provider::resolve_api_key(&state, &provider_config_row)?;
-    let provider_config = runtime_provider_config(
-        &provider_config_row,
-        &provider_config_row.model,
-        api_key,
-        120_000,
-    );
     let attempt = state
         .database
         .investigations()
@@ -264,7 +254,6 @@ async fn launch_claimed_run_inner(
         },
         "permissionMode": task.permission_mode.as_str(),
         "mode": "readonly",
-        "providerConfig": provider_config,
         "target": serde_json::to_value(&task.scope).map_err(|error| error.to_string())?,
     });
     if let Some(server_id) = task.server_id.as_deref() {

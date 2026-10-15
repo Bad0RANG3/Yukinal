@@ -5,7 +5,6 @@
  */
 
 import type { AGENT_RUN_STATES, TOOL_RESULT_STATUSES } from "./enums.js";
-import type { RuntimeProviderConfig } from "./provider.js";
 import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolError, ToolOrigin, ToolTarget } from "./tool.js";
 import type { TaskBudget } from "./investigation.js";
@@ -268,8 +267,10 @@ export interface AgentRunRequest {
    * engine; `goal` leaves the run unconstrained. Omitted -> `goal`.
    */
   mode?: AgentRunMode;
-  /** Durable sidecar needs a per-run provider: Rust resolves and injects this. */
-  providerConfig?: RuntimeProviderConfig;
+  /** Optional saved provider selection; the Python Agent resolves its credentials at use time. */
+  providerId?: string;
+  /** Optional model override for the selected saved provider. */
+  model?: string;
 }
 
 /** `agent.run.stop` params: stop decouples from the run only by its id. */

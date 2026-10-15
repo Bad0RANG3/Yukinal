@@ -1,9 +1,5 @@
-//! Agent run commands: the UI sends a prompt; Rust resolves the provider +
-//! credential (SQLite row + OS keychain), forwards `agent.run.start` to the
-//! sidecar, and streams every observable step back as Tauri events.
-//!
-//! The sidecar never sees a key until this call: material rides only on the
-//! transient JSON-RPC params (ADR 0001/0006; resolve secrets at the point of use).
+//! Agent run commands forward the UI request and stream Agent events back as Tauri events.
+//! Provider lookup, model selection, credentials, and LangChain execution live in Python.
 
 use std::time::Duration;
 
@@ -11,12 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, State};
 
-use crate::commands::provider::resolve_api_key;
 use crate::state::AppState;
-use yukinal_core::provider::runtime_provider_config;
 use yukinal_database::models::{
-    AiProviderConfig, InvestigationFailure, InvestigationRun, InvestigationRunStatus,
-    InvestigationTargetHost, TaskFailureCode, TaskPhase, TaskStatus,
+    InvestigationFailure, InvestigationRun, InvestigationRunStatus, InvestigationTargetHost,
+    TaskFailureCode, TaskPhase, TaskStatus,
 };
 use yukinal_database::repositories::TaskProgressUpdate;
 
@@ -377,29 +371,6 @@ fn task_server_matches(
     }
 }
 
-/// 第一个启用的 AI provider；没有就明确报错（UI 引导去配置，不做假 provider）。
-pub(crate) fn resolve_provider(
-    state: &AppState,
-    provider_id: Option<&str>,
-) -> Result<AiProviderConfig, String> {
-    let providers = state
-        .database
-        .providers()
-        .list_ai()
-        .map_err(|error| error.to_string())?;
-    providers
-        .into_iter()
-        .find(|provider| {
-            provider_id
-                .map(|id| provider.id == id)
-                .unwrap_or(provider.enabled)
-                && provider.enabled
-        })
-        .ok_or_else(|| {
-            "没有启用的 AI provider：请先到「设置 ▸ Provider」配置（baseUrl/model/API key）".into()
-        })
-}
-
 fn interrupt_stale_investigation_run(
     state: &AppState,
     task_id: &str,
@@ -564,15 +535,6 @@ pub(crate) async fn start_agent_run(
 ) -> Result<RunStartResponse, String> {
     let mut focus_server_id = focus_server_id;
     let mut workspace_id = workspace_id;
-    // Repair legacy databases before resolving the provider. The UI normally does
-    // this through provider_list, but run.start must remain safe when invoked
-    // directly or while the startup query is still refreshing.
-    crate::commands::provider::normalize_active_provider(state)?;
-    let provider = resolve_provider(state, provider_id.as_deref())?;
-    let api_key = resolve_api_key(state, &provider)?;
-    let selected_model = model
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| provider.model.clone());
     if prompt.chars().count() > MAX_PROMPT_TEXT_CHARS {
         return Err(format!(
             "prompt must be at most {MAX_PROMPT_TEXT_CHARS} characters"
@@ -602,8 +564,6 @@ pub(crate) async fn start_agent_run(
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to encode prompt parts: {error}"))?;
-    let provider_config = runtime_provider_config(&provider, &selected_model, api_key, 120_000);
-
     let task = task_id
         .as_deref()
         .map(|id| {
@@ -740,7 +700,8 @@ pub(crate) async fn start_agent_run(
         "parts": parts_json,
         "delivery": delivery.unwrap_or_else(|| "async".into()),
         "resume": resume.unwrap_or(true),
-        "providerConfig": provider_config,
+        "providerId": provider_id,
+        "model": model,
     });
     if let Some(task_id) = task_id.as_deref() {
         params["taskId"] = json!(task_id);
