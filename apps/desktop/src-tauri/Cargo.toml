@@ -43,6 +43,3 @@ yukinal-terminal = { workspace = true }
 yukinal-time = { workspace = true }
 
 [dev-dependencies]
-russh = { workspace = true }
-yukinal-core = { workspace = true, features = ["legacy-rust-ssh-tests"] }
-yukinal-ssh = { workspace = true }

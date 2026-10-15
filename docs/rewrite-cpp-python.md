@@ -57,8 +57,8 @@
 > and approved `server.exec` now run from Python through structured C++ SSH
 > operations. The `server.exec` one-shot target is enabled only after Rust
 > validates the plan and consumes the exact approval; `server.exec` now requires
-> a C++-supported target in production and fails explicitly when the target is
-> unsupported. Its former Rust route is retained only in unit-test builds.
+> a C++-supported target and fails explicitly when the target is unsupported.
+> The former Rust route was later removed entirely.
 > The host checks the durable action plan before
 > claiming the call and consuming its ticket. A successful result is cached only
 > after C++ reports exit code zero; nonzero and transport outcomes stay uncertain
@@ -673,11 +673,11 @@ compiled here because Cargo and rustc are unavailable on `PATH`.
 
 On 2026-10-15, desktop `server.connect`, snapshot, logs, services, host-key
 probes, and Agent Docker/systemd/package operations were made C++-only. Rust
-command construction and output parsing for those SSH paths were removed; the
-old Rust session connector is compiled only for tests. Unsupported C++ target
-configurations now fail explicitly. Rust host-key pin reads/writes remain local
-trust-store operations. Compilation could not be checked because Cargo and
-rustc are unavailable on `PATH`.
+command construction and output parsing for those SSH paths were removed; at
+that checkpoint the old Rust session connector remained test-only. The later
+same-day cleanup below removed it. Unsupported C++ target configurations fail
+explicitly. Rust host-key pin reads/writes remain local trust-store operations.
+Compilation was unavailable at this checkpoint.
 
 ## Deliberately deferred
 
@@ -790,3 +790,11 @@ patterns. C++ now checks both the host pattern and SSH port before bypassing the
 proxy; the Python desktop caller accepts the same syntax, including bracketed
 IPv6 and all-host port rules. The native C++ suite, all six CTest targets, the
 focused Python process suite, and the Agent-to-C++ SSH mock passed.
+
+On 2026-10-15, removed the retired Rust SSH crate and every test-only Rust SSH
+transport path from the desktop host. `server.exec` tests no longer exercise a
+second backend; unsupported routes fail closed in test and production builds.
+The Tauri host remains responsible for UI IPC, local credentials, approvals,
+and persistence, while SSH transport and SFTP operations use C++ and Agent
+normalization stays in Python. Rust formatting, desktop test compilation, the
+core and host-trust suites, and all six CTest targets passed after the removal.

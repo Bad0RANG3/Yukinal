@@ -42,5 +42,3 @@ mod redact;
 pub mod sidecar;
 
 pub mod supervisor;
-#[cfg(feature = "legacy-rust-ssh-tests")]
-pub mod terminal;

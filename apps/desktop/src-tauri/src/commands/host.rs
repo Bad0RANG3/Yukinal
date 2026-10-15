@@ -27,8 +27,6 @@ use crate::commands::files::remote_file_service;
 use crate::commands::logs::ServerLogsInput;
 use crate::commands::mcp;
 use crate::commands::services::ServerServicesInput;
-#[cfg(test)]
-use crate::commands::terminal::ensure_session;
 use crate::state::AppState;
 use crate::state::{HostActionExecutionBinding, HostActionTicketError};
 use rand::Rng as _;
@@ -37,8 +35,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
-#[cfg(test)]
-use yukinal_core::docker::shell_quote;
 use yukinal_core::docker::{
     is_safe_container_ref, truncate_text, DockerLogsResult, DockerRestartResult, DEFAULT_LOG_TAIL,
     DEFAULT_RESTART_TIMEOUT, MAX_LOG_TAIL, MAX_RESTART_TIMEOUT,

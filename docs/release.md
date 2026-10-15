@@ -2,7 +2,9 @@
 
 本页的表格和“远端 CI 快照”记录已经取得的实现与安装包证据；后续 Windows 构建记录按日期保存旧产物与环境证据。新的产品目标与尚需完成的业务验收以[目标架构与施工交接](./architecture-and-build-plan.md)为准。历史段落中“待首次远端验收”或旧“三条路径”描述的是当时状态，不能作为新目标已完成的证明。
 
-当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的五个目标全部通过，包含 Python caller、C++ HTTP 服务集成和 Paramiko SSH mock 协议集成。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。这些状态不影响下面列出的 1.0 交付历史，也不能作为 2.0 发布证据。
+当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的六个目标全部通过，包含 Python caller、C++ HTTP 服务集成、Paramiko SSH mock 以及 Agent 到 C++ SSH 的集成。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。这些状态不影响下面列出的 1.0 交付历史，也不能作为 2.0 发布证据。
+
+2026-10-15 源码迁移移除了旧 Rust SSH crate、桌面测试专用 Rust SSH 连接器以及 Rust `server.exec` 测试回退。下方旧交付记录中的 `yukinal-ssh` 测试命令仅作历史证据，不再适用于当前源码；现在通过 CTest 验证 C++ SSH 与 Python caller。
 
 ## 当前状态
 

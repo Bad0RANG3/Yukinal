@@ -45,9 +45,8 @@ low-risk. On the desktop, `server.info` gathers its fixed SSH command batch
 through the C++ service, normalizes its snapshot in Python, and sends the
 validated result through the existing guarded host tool and snapshot database
 path. The Overview's direct snapshot refresh uses the same Python normalizer for
-C++ targets; legacy SSH-only configurations retain a Rust collector fallback
-during migration. The approved desktop actions remain behind host-side plan
-checks and one-time call grants. Python exposes approval-required host tools
+C++ targets; unsupported configurations fail explicitly. The approved desktop
+actions remain behind host-side plan checks and one-time call grants. Python exposes approval-required host tools
 only while a durable remote-goal action step authorizes them; approval requests,
 rejection, expiry, and accepted calls round-trip through the desktop host.
 On C++-supported targets, `systemd.restart` and `docker.restart` now run as

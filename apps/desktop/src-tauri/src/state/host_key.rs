@@ -24,11 +24,6 @@ impl HostTrustStore {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn shared_store(&self) -> Arc<Mutex<KnownHostsStore>> {
-        Arc::clone(&self.store)
-    }
-
     pub fn host_key_pin(&self, host: &str, port: u16) -> Result<Option<String>, KnownHostsError> {
         Ok(self.lock()?.pinned_fingerprint(host, port))
     }

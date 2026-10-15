@@ -1,8 +1,8 @@
 //! 出站 HTTP 的代理：读哪些系统设置、怎么接到 HTTP 客户端上。设计取舍见 ADR 0022。
 //!
 //! 这个 crate 刻意保持小而独立（只依赖 `serde` 与 `reqwest`）：它同时被 `yukinal-core`
-//! （MCP 的 Streamable HTTP）、`yukinal-ssh`（远端 KRL 下载）与桌面宿主（OAuth）使用，
-//! 而 core 依赖 ssh —— 代理这件事不能塞进两者中的任何一个。
+//! （MCP 的 Streamable HTTP）与桌面宿主（OAuth）使用。桌面 SSH 也读取相同的
+//! 应用级代理设置，并把解析后的配置传给独立 C++ 服务。
 //!
 //! 两条不变的性质：
 //!

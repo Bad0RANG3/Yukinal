@@ -92,9 +92,7 @@ fn deserialize_python_normalized_services(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ServerService, ServerServicesResponse, ServiceSource, ServiceState,
-    };
+    use super::{ServerService, ServerServicesResponse, ServiceSource, ServiceState};
 
     const FIXTURE: &str =
         include_str!("../../../../../packages/shared/fixtures/ipc/server_services.json");

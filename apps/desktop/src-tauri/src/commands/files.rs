@@ -87,18 +87,13 @@ pub(crate) fn remote_file_service<'a>(
     })
 }
 
-fn cpp_ssh_file_operations_supported(
-    state: &AppState,
-    server_id: &str,
-) -> Result<bool, String> {
+fn cpp_ssh_file_operations_supported(state: &AppState, server_id: &str) -> Result<bool, String> {
     crate::commands::ssh_service::supports_cpp_target(state, server_id)
 }
 
 impl TerminalFileTransport<'_> {
     fn cpp_app(&self, server_id: &str) -> TransportResult<&AppHandle> {
-        if !cpp_ssh_file_operations_supported(self.state, server_id)
-            .map_err(TransportError::new)?
-        {
+        if !cpp_ssh_file_operations_supported(self.state, server_id).map_err(TransportError::new)? {
             return Err(TransportError::new(
                 "the selected target is not supported by the C++ SSH service",
             ));

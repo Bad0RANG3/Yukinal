@@ -72,7 +72,7 @@ impl StagedSecrets {
 /// 身份编排需要的两个句柄：SQLite + keychain。
 ///
 /// 收成这个结构体而不是直接吃 `State<AppState>`，是为了**可测**：`AppState` 绑着
-/// Tauri runtime、`RusshBackend` 与真实的 `OsCredentialStore`，单元测试里造不出来。
+/// Tauri runtime 与真实的 `OsCredentialStore`，单元测试里造不出来。
 /// 这里只要求两个句柄，于是「带口令的身份写两条条目、回收时删两条」这条路径可以用
 /// `MemoryCredentialStore` + 临时库真实驱动，而不是靠读代码相信它。
 #[derive(Clone, Copy)]

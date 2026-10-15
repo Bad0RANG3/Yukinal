@@ -2,7 +2,7 @@
 //!
 //! 每个 `host.tool.execute` 里的工具名对应这里的一个执行器：`server.info`、
 //! `docker.*`、`systemd.*`、`package.*` 与 `filesystem.*`。生产 SSH 操作全部经过
-//! one-target C++ SSH/SFTP service；旧 `server.exec` 传输路径只在单元测试构建中保留。
+//! one-target C++ SSH/SFTP service；不支持的目标会直接失败，不会回退到 Rust SSH。
 //! 文件工具共享 `filesystem_failure` / `cancelled_failure` 错误映射。
 //! `filesystem.backup.list` 与 `filesystem.backup.retention` 在 Python 中运行，不再由这个
 //! 模块格式化账本结果或计算保留候选。
@@ -70,21 +70,6 @@ struct ServerExecInterruption {
     stdout_truncated: bool,
     stderr_truncated: bool,
     duration_ms: u64,
-}
-
-#[cfg(test)]
-async fn ensure_session_with_cancel(
-    state: &AppState,
-    server_id: &str,
-    cancel: &CancellationToken,
-) -> Result<(), String> {
-    if cancel.is_cancelled() {
-        return Err("host operation cancelled".to_string());
-    }
-    tokio::select! {
-        result = ensure_session(state, server_id) => result,
-        _ = cancel.cancelled() => Err("host operation cancelled".to_string()),
-    }
 }
 
 fn transport_or_cancel(error: impl std::fmt::Display, cancel: &CancellationToken) -> Value {
@@ -287,7 +272,6 @@ pub(super) async fn server_exec(
         },
         None => false,
     };
-    #[cfg(not(test))]
     if !cpp_supported {
         return Ok(failed(
             "unsupported_target",
@@ -320,8 +304,6 @@ pub(super) async fn server_exec(
         }
     }
 
-    #[cfg(test)]
-    let remote_command = server_exec_command(&input);
     let started = std::time::Instant::now();
     if cpp_supported {
         let response = tokio::select! {
@@ -466,96 +448,6 @@ pub(super) async fn server_exec(
         return Ok(success(output_value));
     }
 
-    #[cfg(test)]
-    {
-        if let Err(error) = ensure_session_with_cancel(state, server_id, cancel).await {
-            return Ok(transport_or_cancel(error, cancel));
-        }
-        let session = match state.terminals.cached_session(server_id) {
-            Ok(session) => session,
-            Err(error) => return Ok(transport_or_cancel(error, cancel)),
-        };
-        let result = state
-            .ssh
-            .execute_bounded_once(
-                &session,
-                &remote_command,
-                Some(std::time::Duration::from_millis(input.timeout_ms)),
-                input.max_output_bytes,
-                cancel,
-            )
-            .await;
-        let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let result = match result {
-            Ok(result) if result.exit_code >= 0 => result,
-            Ok(result) => {
-                let output = ServerExecInterruption {
-                    state: "result_unknown",
-                    exit_code: None,
-                    stdout: result.stdout_lossy(),
-                    stderr: result.stderr_lossy(),
-                    stdout_truncated: result.stdout_truncated,
-                    stderr_truncated: result.stderr_truncated,
-                    duration_ms,
-                };
-                return Ok(failed(
-                    "execution_failed",
-                    "remote command returned without an exit status; its effect is unknown",
-                    false,
-                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
-                ));
-            }
-            Err(yukinal_ssh::Error::Timeout) => {
-                let output = server_exec_interruption("timed_out", duration_ms);
-                return Ok(failed(
-                    "timeout",
-                    "remote command exceeded its host-enforced timeout; its effect may have occurred",
-                    false,
-                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
-                ));
-            }
-            Err(yukinal_ssh::Error::Cancelled) if cancel.is_cancelled() => {
-                let output = server_exec_interruption("cancelled", duration_ms);
-                return Ok(failed(
-                    "cancelled",
-                    "remote command was cancelled; its effect may have occurred",
-                    false,
-                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
-                ));
-            }
-            Err(error) => {
-                let output = server_exec_interruption("result_unknown", duration_ms);
-                return Ok(failed(
-                    "transport",
-                    format!("SSH command result is unavailable: {error}; its effect may have occurred"),
-                    false,
-                    Some(serde_json::to_value(output).map_err(|error| error.to_string())?),
-                ));
-            }
-        };
-
-        let output = ServerExecResult {
-            state: "completed",
-            exit_code: result.exit_code,
-            stdout: result.stdout_lossy(),
-            stderr: result.stderr_lossy(),
-            stdout_truncated: result.stdout_truncated,
-            stderr_truncated: result.stderr_truncated,
-            duration_ms,
-        };
-        let output_value = serde_json::to_value(output).map_err(|error| error.to_string())?;
-        if result.exit_code != 0 {
-            return Ok(failed(
-                "execution_failed",
-                format!("remote command exited with status {}", result.exit_code),
-                false,
-                Some(output_value),
-            ));
-        }
-        Ok(success(output_value))
-    }
-
-    #[cfg(not(test))]
     Ok(failed(
         "unsupported_target",
         "the selected target is not supported by the C++ SSH service",
@@ -643,33 +535,6 @@ pub(super) fn validate_server_exec_input(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(super) fn server_exec_command(input: &ServerExecInput) -> String {
-    let mut command = String::new();
-    if let Some(workdir) = input.workdir.as_deref() {
-        command.push_str("cd ");
-        command.push_str(&shell_quote(workdir));
-        command.push_str(" && ");
-    }
-    if let Some(env) = input.env.as_ref().filter(|env| !env.is_empty()) {
-        command.push_str("env");
-        for (key, value) in env {
-            command.push(' ');
-            command.push_str(key);
-            command.push('=');
-            command.push_str(&shell_quote(value));
-        }
-        command.push_str(" /bin/sh -c ");
-    } else {
-        command.push_str("/bin/sh -c ");
-    }
-    // SSH exec carries a shell command string. Quoting this inner shell invocation only
-    // preserves boundaries for workdir/env wrappers; it does not make arbitrary remote
-    // shell text safe or equivalent to an argv vector.
-    command.push_str(&shell_quote(&input.command));
-    command
 }
 
 fn is_critical_server_command(command: &str) -> bool {
@@ -997,18 +862,17 @@ pub(super) async fn server_logs(
         .get("output")
         .cloned()
         .ok_or_else(|| "Python Agent returned no normalized server.logs output".to_string())?;
-    let parsed =
-        match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output) {
-            Ok(parsed) => parsed,
-            Err(_) => {
-                return Ok(failed(
-                    "execution_failed",
-                    "Python Agent returned invalid normalized server.logs output",
-                    false,
-                    None,
-                ));
-            }
-        };
+    let parsed = match serde_json::from_value::<crate::commands::logs::ServerLogsResponse>(output) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            return Ok(failed(
+                "execution_failed",
+                "Python Agent returned invalid normalized server.logs output",
+                false,
+                None,
+            ));
+        }
+    };
     Ok(success(
         serde_json::to_value(parsed).map_err(|error| error.to_string())?,
     ))
@@ -1097,20 +961,18 @@ pub(super) async fn server_services(
         .get("output")
         .cloned()
         .ok_or_else(|| "Python Agent returned no normalized server.services output".to_string())?;
-    let parsed = match serde_json::from_value::<
-        crate::commands::services::ServerServicesResponse,
-    >(output)
-    {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            return Ok(failed(
-                "execution_failed",
-                "Python Agent returned invalid normalized server.services output",
-                false,
-                None,
-            ));
-        }
-    };
+    let parsed =
+        match serde_json::from_value::<crate::commands::services::ServerServicesResponse>(output) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(failed(
+                    "execution_failed",
+                    "Python Agent returned invalid normalized server.services output",
+                    false,
+                    None,
+                ));
+            }
+        };
     Ok(success(
         serde_json::to_value(parsed).map_err(|error| error.to_string())?,
     ))
@@ -2507,10 +2369,7 @@ fn is_empty_object(value: &Value) -> bool {
 
 #[cfg(test)]
 mod server_exec_tests {
-    use super::{
-        is_critical_server_command, server_exec_command, validate_server_exec_input,
-        ServerExecInput,
-    };
+    use super::{is_critical_server_command, validate_server_exec_input, ServerExecInput};
     use std::collections::BTreeMap;
 
     fn valid_input() -> ServerExecInput {
@@ -2540,21 +2399,6 @@ mod server_exec_tests {
         let mut input = valid_input();
         input.max_output_bytes = super::SERVER_EXEC_MAX_OUTPUT_BYTES + 1;
         assert!(validate_server_exec_input(&input).is_err());
-    }
-
-    #[test]
-    fn host_wrapper_quotes_optional_directory_and_environment_values() {
-        let mut input = valid_input();
-        input.workdir = Some("/srv/app with 'quote'".into());
-        input.env = Some(BTreeMap::from([("LANG".into(), "C 'UTF-8'".into())]));
-        let command = server_exec_command(&input);
-        assert!(command.starts_with("cd "));
-        assert!(command.contains(" && env LANG="));
-        assert!(
-            command.contains("'\\''"),
-            "single quotes must be escaped by the host wrapper"
-        );
-        assert!(command.ends_with("hello'"));
     }
 
     #[test]

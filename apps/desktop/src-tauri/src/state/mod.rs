@@ -14,12 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use yukinal_core::mcp::McpSupervisor;
 use yukinal_core::supervisor::Supervisor;
-#[cfg(test)]
-use yukinal_core::terminal::TerminalService;
 use yukinal_credentials::os::OsCredentialStore;
 use yukinal_database::Database;
-#[cfg(test)]
-use yukinal_ssh::RusshBackend;
 use yukinal_terminal::TerminalManager;
 
 mod approval;
@@ -60,12 +56,6 @@ pub struct AppState {
     pub credentials: Arc<OsCredentialStore>,
     /// Local confirmed host-key pins; this store has no SSH connection capability.
     pub host_trust: HostTrustStore,
-    /// Retained only for legacy unit fixtures; production SSH runs in C++.
-    #[cfg(test)]
-    pub ssh: Arc<RusshBackend>,
-    /// Test-only Rust SSH session manager used to cover removed compatibility paths.
-    #[cfg(test)]
-    pub terminals: TerminalService,
     /// C++-owned interactive SSH PTYs; all UI terminal session IDs route here.
     pub cpp_terminals: TerminalManager<crate::commands::ssh_service::SshTerminalPty>,
     /// One-shot SSH keyboard-interactive challenges and responses.
@@ -86,10 +76,6 @@ impl AppState {
         let database =
             Database::open(data_dir.join("yukinal.db")).map_err(|error| error.to_string())?;
         let host_trust = HostTrustStore::load(data_dir).map_err(|error| error.to_string())?;
-        #[cfg(test)]
-        let ssh = Arc::new(RusshBackend::new(host_trust.shared_store()));
-        #[cfg(test)]
-        let terminals = TerminalService::new(Arc::clone(&ssh));
         let cpp_terminals = TerminalManager::with_id_prefix("tc");
         let credentials = Arc::new(OsCredentialStore);
         for failure in credential_cleanup::reconcile(&database, credentials.as_ref()) {
@@ -103,10 +89,6 @@ impl AppState {
             host_action_approvals: HostApprovalLedger::default(),
             credentials,
             host_trust,
-            #[cfg(test)]
-            ssh,
-            #[cfg(test)]
-            terminals,
             cpp_terminals,
             auth: AuthChallengeBroker::new(),
             host_keys: HostKeyProbeBroker::new(),

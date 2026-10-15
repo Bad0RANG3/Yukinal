@@ -96,7 +96,7 @@ pub use oauth::{
     McpOAuthTokenSource,
 };
 pub use supervisor::McpSupervisor;
-// 出站代理解析在 `yukinal-net`（`yukinal-ssh` 与桌面宿主用的是同一个值），这里转发一次，
+// 出站代理解析在 `yukinal-net`（桌面宿主使用同一个值），这里转发一次，
 // 让依赖 core 的地方不必再多认一个 crate。
 pub use transport::McpServerHandle;
 pub use wire::{McpInitialize, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};

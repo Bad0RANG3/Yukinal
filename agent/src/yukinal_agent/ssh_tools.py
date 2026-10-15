@@ -1000,7 +1000,8 @@ async def _desktop_filesystem_write(
     except asyncio.CancelledError:
         raise
     except Exception:
-        # The target resolver rejects modes and routes that still need the Rust compatibility path.
+        # The target resolver rejects routes the C++ service cannot represent; the host path
+        # below is still backed by the same C++ SSH/SFTP bridge.
         return await run_host_compatibility_path()
 
     expected_bytes = len(arguments["content"].encode("utf-8"))

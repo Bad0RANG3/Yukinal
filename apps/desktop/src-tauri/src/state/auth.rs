@@ -5,21 +5,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(test)]
-use std::future::Future;
-#[cfg(test)]
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, Mutex};
-#[cfg(test)]
-use yukinal_ssh::{
-    Error as LegacySshError, KeyboardInteractiveChallenge as LegacyChallenge,
-    KeyboardInteractiveHandler, KeyboardInteractivePrompt as LegacyPrompt,
-};
 
 const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(120);
 const EVENT_CAPACITY: usize = 32;
@@ -103,21 +94,6 @@ impl AuthChallengeBroker {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AuthChallengeEvent> {
         self.events.subscribe()
-    }
-
-    #[cfg(test)]
-    pub fn handler(
-        &self,
-        server_id: String,
-        username: String,
-        host: String,
-    ) -> Arc<dyn KeyboardInteractiveHandler> {
-        Arc::new(LegacyKeyboardInteractiveHandler {
-            broker: self.clone(),
-            server_id,
-            username,
-            host,
-        })
     }
 
     pub async fn respond(&self, auth_id: &str, responses: Vec<String>) -> bool {
@@ -224,46 +200,6 @@ impl AuthChallengeBroker {
                 ))
             }
         }
-    }
-}
-
-#[cfg(test)]
-struct LegacyKeyboardInteractiveHandler {
-    broker: AuthChallengeBroker,
-    server_id: String,
-    username: String,
-    host: String,
-}
-
-#[cfg(test)]
-impl KeyboardInteractiveHandler for LegacyKeyboardInteractiveHandler {
-    fn respond<'a>(
-        &'a self,
-        challenge: &'a LegacyChallenge,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, LegacySshError>> + Send + 'a>> {
-        Box::pin(async move {
-            let challenge = KeyboardInteractiveChallenge {
-                name: challenge.name.clone(),
-                instructions: challenge.instructions.clone(),
-                prompts: challenge
-                    .prompts
-                    .iter()
-                    .map(|prompt: &LegacyPrompt| KeyboardInteractivePrompt {
-                        prompt: prompt.prompt.clone(),
-                        echo: prompt.echo,
-                    })
-                    .collect(),
-            };
-            self.broker
-                .request(&self.server_id, &self.username, &self.host, &challenge)
-                .await
-                .map_err(|error| match error {
-                    AuthChallengeError::Cancelled => LegacySshError::Cancelled,
-                    AuthChallengeError::Authentication(message) => {
-                        LegacySshError::Authentication(message)
-                    }
-                })
-        })
     }
 }
 

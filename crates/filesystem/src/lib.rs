@@ -46,8 +46,8 @@
 //!   所以本 crate 的本地实现不会有任何可达的调用方 —— 它只会变成一条没人测、也没人用的
 //!   绕过路径。真要为本地文件开口子，前提是先有一套属于本机的策略（这里的黑名单讲的是
 //!   远端服务器上的凭据），那是一次独立的设计，不是顺手补一个 backend 就能算数的。
-//! - **不管连接与凭据。** 连接（SQLite 取 server → keychain 取 secret → russh 握手 → 缓存）
-//!   属于桌面层的 `ensure_session`，本 crate 只看得见 [`RemoteFileTransport`]。这也正是
+//! - **不管连接与凭据。** 连接（SQLite 取 server → keychain 取 secret → C++ SSH 握手）
+//!   属于桌面层的 SSH service bridge，本 crate 只看得见 [`RemoteFileTransport`]。这也正是
 //!   它能在内存假传输上把策略与上限测完的原因。
 //! - **不产失败码。** `invalid_input` / `denied_by_policy` / `transport` 是 sidecar 的 host
 //!   协议词汇，映射留在命令层；本 crate 只给出类型与文案（文案是对外契约，所以和规则放在
