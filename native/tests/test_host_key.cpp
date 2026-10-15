@@ -484,6 +484,7 @@ YUKINAL_TEST(host_krl_loader_fetches_loopback_http_responses) {
   const auto downloaded = yukinal::ssh_service::detail::load_host_revocation_list(target, &error);
   server.stop();
   listener.join();
+  if (!downloaded) throw std::runtime_error("loopback KRL HTTP download failed: " + error);
   YUKINAL_REQUIRE(downloaded.has_value());
   YUKINAL_REQUIRE(*downloaded == expected);
 }

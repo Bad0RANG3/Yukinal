@@ -26,16 +26,6 @@
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
-#endif
-
 namespace yukinal::ssh_service::detail {
 namespace {
 
@@ -623,21 +613,23 @@ std::optional<KrlUrl> parse_krl_url(std::string_view value, std::string* error) 
     return reject("host certificate KRL URL is malformed");
   }
   KrlUrl result;
-  std::string_view rest;
-  std::string scheme(value.substr(0, std::min<std::size_t>(value.size(), 8)));
+  const auto scheme_end = value.find("://");
+  if (scheme_end == std::string_view::npos) {
+    return reject("host certificate KRL URL scheme is invalid");
+  }
+  std::string scheme(value.substr(0, scheme_end));
   std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char ch) {
     return static_cast<char>(ascii_lower(ch));
   });
-  if (scheme == "https://") {
+  if (scheme == "https") {
     result.https = true;
     result.port = 443;
-    rest = value.substr(8);
-  } else if (scheme == "http://") {
+  } else if (scheme == "http") {
     result.port = 80;
-    rest = value.substr(7);
   } else {
     return reject("host certificate KRL URL must use HTTPS; HTTP is allowed only on loopback");
   }
+  const std::string_view rest = value.substr(scheme_end + 3);
   const auto path_start = rest.find('/');
   const auto authority = rest.substr(0, path_start);
   result.path = path_start == std::string_view::npos ? "/" : std::string(rest.substr(path_start));
@@ -685,14 +677,70 @@ bool is_loopback_host(std::string_view host) {
     return static_cast<char>(ascii_lower(ch));
   });
   if (lowered == "localhost" || lowered.ends_with(".localhost")) return true;
-  in_addr ipv4{};
-  if (inet_pton(AF_INET, lowered.c_str(), &ipv4) == 1) {
-    const auto* bytes = reinterpret_cast<const unsigned char*>(&ipv4);
-    return bytes[0] == 127;
+
+  std::array<unsigned int, 4> ipv4{};
+  std::size_t start = 0;
+  bool valid_ipv4 = true;
+  for (std::size_t index = 0; index < ipv4.size(); ++index) {
+    const auto end = lowered.find('.', start);
+    if ((index + 1 < ipv4.size()) != (end != std::string::npos)) {
+      valid_ipv4 = false;
+      break;
+    }
+    const std::string_view octet(lowered.data() + start,
+        (end == std::string::npos ? lowered.size() : end) - start);
+    if (octet.empty() || octet.size() > 3) {
+      valid_ipv4 = false;
+      break;
+    }
+    const auto parsed = std::from_chars(octet.data(), octet.data() + octet.size(), ipv4[index]);
+    if (parsed.ec != std::errc{} || parsed.ptr != octet.data() + octet.size() || ipv4[index] > 255) {
+      valid_ipv4 = false;
+      break;
+    }
+    start = end == std::string::npos ? lowered.size() : end + 1;
   }
-  in6_addr ipv6{};
-  if (inet_pton(AF_INET6, lowered.c_str(), &ipv6) == 1) return IN6_IS_ADDR_LOOPBACK(&ipv6) != 0;
-  return false;
+  if (valid_ipv4 && start == lowered.size()) return ipv4[0] == 127;
+
+  if (lowered.empty() || lowered.find('%') != std::string::npos) return false;
+  const auto compression = lowered.find("::");
+  if (compression != std::string::npos && lowered.find("::", compression + 2) != std::string::npos) {
+    return false;
+  }
+  const auto parse_side = [](std::string_view side, std::vector<std::uint16_t>* groups) {
+    if (!groups) return false;
+    if (side.empty()) return true;
+    std::size_t offset = 0;
+    while (offset <= side.size()) {
+      const auto end = side.find(':', offset);
+      const std::string_view token = side.substr(
+          offset, end == std::string_view::npos ? side.size() - offset : end - offset);
+      if (token.empty() || token.size() > 4) return false;
+      unsigned int value = 0;
+      const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, 16);
+      if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() || value > 0xffff) {
+        return false;
+      }
+      groups->push_back(static_cast<std::uint16_t>(value));
+      if (end == std::string_view::npos) break;
+      offset = end + 1;
+    }
+    return true;
+  };
+  std::vector<std::uint16_t> left;
+  std::vector<std::uint16_t> right;
+  if (compression == std::string::npos) {
+    if (!parse_side(lowered, &left) || left.size() != 8) return false;
+  } else if (!parse_side(std::string_view(lowered).substr(0, compression), &left) ||
+             !parse_side(std::string_view(lowered).substr(compression + 2), &right) ||
+             left.size() + right.size() >= 8) {
+    return false;
+  }
+  std::array<std::uint16_t, 8> groups{};
+  std::copy(left.begin(), left.end(), groups.begin());
+  std::copy(right.begin(), right.end(), groups.end() - static_cast<std::ptrdiff_t>(right.size()));
+  return std::all_of(groups.begin(), groups.end() - 1,
+                     [](std::uint16_t group) { return group == 0; }) && groups.back() == 1;
 }
 
 void wipe_secret(std::string* value) {

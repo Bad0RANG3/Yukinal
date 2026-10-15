@@ -703,3 +703,9 @@ protocols remain on the compatibility path. The C++ service and Tauri library
 compiled after this change. The SSH mock integration passed with a locally trusted
 CA, a complete HTTPS CONNECT SSH operation, and rejection of a proxy certificate
 whose SAN did not match the configured proxy host.
+
+On 2026-10-15, fixed C++ KRL URL parsing that incorrectly rejected loopback HTTP
+URLs before applying the loopback-only HTTP rule. Loopback IPv4 and IPv6
+classification no longer depends on platform socket conversion APIs. The C++
+test executable passed all 54 tests, and all six CTest targets passed, including
+the SSH mock and Agent-to-C++ integration.
