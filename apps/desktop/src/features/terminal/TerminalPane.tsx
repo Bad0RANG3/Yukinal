@@ -252,7 +252,7 @@ export function TerminalPane({ active }: { active: boolean }) {
   return (
     <section className="terminal-page">
       <div className="terminal-toolbar">
-        <div className="section-heading-inline"><Icon name="terminal" size="md" /><div><p className="eyebrow">SSH</p><h2>终端</h2></div></div>
+        <div className="section-heading-inline"><Icon name="terminal" size="md" /><span>SSH</span></div>
         <span className="terminal-toolbar-note">{TERMINAL_FONT_LABEL[preferences.terminalFont]} · {preferences.terminalFontSize}px</span>
       </div>
       {ioError !== null && (

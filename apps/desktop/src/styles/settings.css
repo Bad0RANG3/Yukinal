@@ -1,0 +1,59 @@
+/* Settings are flat form sections. Other pages and the first-use guide retain
+   their own surfaces; this is the single layout entry point for Settings. */
+.settings-organized { gap: var(--space-content); }
+.settings-organized > [hidden] { display: none; }
+.settings-section-tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+.settings-section-tabs > button { position: relative; flex: 1 0 auto; min-width: 0; min-height: 36px; padding: 8px 4px; border: 0; border-radius: 0; background: transparent; color: var(--faint); font: inherit; font-size: var(--text-label); white-space: nowrap; cursor: pointer; }
+.settings-section-tabs > button:hover { color: var(--text); }
+.settings-section-tabs > button[aria-selected="true"] { color: var(--text); }
+.settings-section-tabs > button[aria-selected="true"]::after { position: absolute; inset: auto 4px -1px; height: 2px; background: currentColor; content: ""; }
+.settings-section-description { margin: 0 0 var(--space-group); color: var(--muted); font-size: var(--text-label); line-height: 1.65; }
+.settings-organized .settings-stack { gap: var(--space-group); }
+.settings-organized .settings-card { min-width: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; transform: none; transition: none; animation: none; }
+.settings-organized .settings-stack > .settings-card + .settings-card { padding-top: var(--space-group); border-top: 1px solid var(--line); }
+.settings-organized .settings-card-header { align-items: baseline; flex-wrap: wrap; gap: 8px 12px; margin-bottom: var(--space-card); }
+.settings-organized .settings-card-header > svg { display: none; }
+.settings-organized .settings-card-header :is(h2, h3) { margin: 0; font-size: var(--text-small); font-weight: 600; }
+.settings-organized .settings-card-header-actions { flex-wrap: wrap; }
+.settings-organized .settings-form-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-card); }
+.settings-organized .settings-form-grid .field-label { margin: 0 0 6px; font-size: var(--text-label); }
+.settings-organized .settings-form-fields > .settings-form-grid { margin-top: 12px; }
+.settings-organized .settings-check-grid { grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 12px; }
+.settings-organized .settings-check-row { align-items: center; margin-top: 12px; padding: 8px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--muted); font-size: var(--text-label); transform: none; }
+.settings-organized .settings-check-grid .settings-check-row { margin: 0; }
+.settings-organized .settings-check-row strong { font-size: inherit; font-weight: 400; }
+.settings-organized .settings-check-row input { margin: 0; accent-color: var(--accent); }
+.settings-organized :is(.settings-actions, .settings-card-actions) { margin-top: var(--space-card); }
+.settings-organized .settings-facts { grid-template-columns: minmax(0, 1fr); gap: 0; border: 0; background: transparent; }
+.settings-organized .settings-fact { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: baseline; gap: 8px 12px; padding: 12px 0; border-top: 1px solid var(--line); background: transparent; }
+.settings-organized .settings-fact dt { margin: 0; letter-spacing: 0; text-transform: none; }
+.settings-organized .settings-fact dd { font-size: var(--text-label); }
+.settings-organized .settings-fact-wide { grid-template-columns: minmax(0, 1fr); }
+.settings-organized .settings-status { max-width: 100%; }
+.settings-organized .provider-list { gap: var(--space-group); margin: 0; padding: 0; list-style: none; }
+.settings-organized .provider-row { padding: 0 0 var(--space-card); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; transform: none; }
+.settings-organized :is(.provider-copy, .provider-row-actions) { min-width: 0; flex-basis: 100%; }
+.settings-organized .provider-row-actions { gap: 8px; }
+.settings-organized .provider-meta { margin-bottom: 0; white-space: normal; overflow-wrap: anywhere; }
+.settings-organized .form-fieldset { padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+.settings-organized :is(.settings-notice, .settings-error-row, .provider-picker-confirm) { padding: 8px 0 8px 12px; border: 0; border-left: 2px solid currentColor; border-radius: 0; background: transparent; }
+.settings-organized .settings-error-row { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+.settings-organized .settings-error-row > span { min-width: 0; flex: 1 1 160px; overflow-wrap: anywhere; }
+.settings-organized .settings-error-row > button { flex-shrink: 0; white-space: nowrap; }
+.settings-organized .settings-preferences-reset { padding-top: var(--space-card); border-top: 1px solid var(--line); }
+.settings-organized .settings-preferences-reset .text-button { color: var(--muted); font-size: var(--text-label); }
+.settings-organized .settings-preferences .settings-form-grid { gap: 12px; }
+.settings-organized .settings-preferences .settings-field { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: 8px; }
+.settings-organized .settings-preferences .settings-field .field-label { margin: 0; }
+.settings-organized .settings-preferences .form-input { min-width: 0; margin: 0; }
+.settings-organized .settings-preferences > .settings-card + .settings-card { padding-top: var(--space-card); }
+.settings-organized .agent-log-viewer { border-radius: 0; box-shadow: none; }
+.settings-advanced { margin-top: var(--space-content); border-top: 1px solid var(--line); }
+.settings-advanced > summary { padding: 12px 0; color: var(--muted); font-size: var(--text-label); cursor: pointer; }
+.settings-advanced > .settings-form-grid { margin: 4px 0 var(--space-card); }
+
+@container reference (min-width: 600px) {
+  .settings-organized .settings-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 24px; }
+  .settings-organized .settings-check-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .settings-organized .settings-preferences .settings-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -1,11 +1,11 @@
 /**
- * 面板头部：标题、当前运行状态、以及「对话记录 / 收起」两个入口。
+ * 面板头部：当前运行状态、以及「对话记录 / 收起」两个入口。
  *
  * 状态文案的唯一职责是回答「Agent 现在在干什么」，因此它把运行态
  * 放在存活态之上：运行中显示正在进行的步骤，空闲时才回落到就绪与否。
  */
 
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import type { AgentTokenUsage } from "@yukinal/shared";
 
@@ -24,6 +24,9 @@ export function AgentHeader({
   onToggleHistory,
   onToggle,
   closeButtonRef,
+  workspace = false,
+  workspaceControls,
+  context,
 }: {
   running: boolean;
   runState: string | null;
@@ -37,15 +40,15 @@ export function AgentHeader({
   onToggleHistory: () => void;
   onToggle: () => void;
   closeButtonRef: RefObject<HTMLButtonElement | null>;
+  workspace?: boolean;
+  workspaceControls?: ReactNode;
+  context?: ReactNode;
 }) {
   const label = runStateLabel(runState);
 
   return (
     <header className="agent-header">
-      <div className="agent-title">
-        <span className="agent-orb"><Icon name="agent" size="md" /></span>
-        <div><p className="eyebrow">自动化工作区</p><h2>Agent</h2></div>
-      </div>
+      {context}
       <div className="agent-header-actions">
         {tokenUsage ? (
           <span
@@ -74,18 +77,19 @@ export function AgentHeader({
         >
           <Icon name="logs" size="md" />
         </button>
-        <button
+        {workspaceControls}
+        {!workspace ? <button
           ref={closeButtonRef}
           type="button"
           className="icon-button agent-toggle"
-          aria-label="收起 Agent 面板"
-          title="收起 Agent 面板"
+          aria-label="收起对话"
+          title="收起对话"
           aria-controls="agent-panel"
           aria-expanded={agentOpen}
           onClick={onToggle}
         >
           <Icon name="chevronRight" size="md" />
-        </button>
+        </button> : null}
       </div>
     </header>
   );

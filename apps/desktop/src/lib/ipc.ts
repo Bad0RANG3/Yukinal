@@ -15,11 +15,9 @@ import {
   EVENT_SCHEMAS,
   IPC_SCHEMAS,
   WindowShellContextSchema,
-  WindowShellSidebarSchema,
-  WindowShellActionSchema,
-  type WindowShellSidebar,
-  type WindowShellAction,
+  WindowShellSurfaceSchema,
   type WindowShellContext,
+  type WindowShellSurface,
   type IpcCommandMap,
   type IpcCommandName,
 } from "@yukinal/shared";
@@ -32,9 +30,9 @@ type UnlistenFn = () => void;
 
 type NativeDesktopHost = {
   windowShell?: {
+    titlebarOverlay?: boolean;
     updateContext: (context: WindowShellContext) => Promise<void>;
-    updateSidebar?: (sidebar: WindowShellSidebar) => Promise<void>;
-    onAction?: (handler: (action: unknown) => void) => UnlistenFn;
+    updateSurface?: (surface: WindowShellSurface) => Promise<void>;
   };
   invoke: (command: string, params: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, handler: (payload: unknown) => void) => Promise<UnlistenFn>;
@@ -54,28 +52,20 @@ export function isNativeDesktopShell(): boolean {
 
 /** A narrow native-shell presentation channel, separate from business tools. */
 export async function updateNativeWindowContext(context: WindowShellContext): Promise<void> {
-  if (!isNativeDesktopShell()) return;
   const shell = window.__YUKINAL_HOST__?.windowShell;
   if (shell) await shell.updateContext(WindowShellContextSchema.parse(context));
 }
 
-/** Capability detection keeps older hosts and browser previews on the React sidebar. */
-export function hasNativeWindowSidebar(): boolean {
-  return isNativeDesktopShell() && typeof window.__YUKINAL_HOST__?.windowShell?.updateSidebar === "function"
-    && typeof window.__YUKINAL_HOST__?.windowShell?.onAction === "function";
+export function supportsNativeCaptionSurface(): boolean {
+  return typeof window.__YUKINAL_HOST__?.windowShell?.updateSurface === "function";
 }
 
-export async function updateNativeWindowSidebar(sidebar: WindowShellSidebar): Promise<void> {
-  if (!hasNativeWindowSidebar()) return;
-  await window.__YUKINAL_HOST__!.windowShell!.updateSidebar!(WindowShellSidebarSchema.parse(sidebar));
+export function supportsNativeTitlebarControls(): boolean {
+  return window.__YUKINAL_HOST__?.windowShell?.titlebarOverlay === true;
 }
 
-export function onNativeWindowAction(handler: (action: WindowShellAction) => void): UnlistenFn {
-  if (!hasNativeWindowSidebar()) return () => {};
-  return window.__YUKINAL_HOST__!.windowShell!.onAction!((raw) => {
-    const parsed = WindowShellActionSchema.safeParse(raw);
-    if (parsed.success) handler(parsed.data);
-  });
+export async function updateNativeCaptionSurface(surface: WindowShellSurface): Promise<void> {
+  await window.__YUKINAL_HOST__?.windowShell?.updateSurface?.(WindowShellSurfaceSchema.parse(surface));
 }
 
 /**
@@ -164,7 +154,7 @@ export async function listenDesktop<E extends DesktopEventName>(
   // Browser preview cannot install native event listeners. Returning a no-op
   // subscription keeps components that always mount a listener (such as the
   // SSH authentication modal) from producing an unhandled browser rejection.
-  if (!isNativeDesktopShell()) return () => {};
+  if (isPreviewFixture() || !isNativeDesktopShell()) return () => {};
   const schema = EVENT_SCHEMAS[name];
   const deliver = (payload: unknown) => {
     const parsed = schema.safeParse(payload);

@@ -1,3 +1,6 @@
+@import "./styles/design-tokens.css";
+@import "./styles/materials.css";
+@import "./styles/typography.css";
 @import "./styles/app-shell.css";
 @import "./styles/ui-foundation.css";
 @import "./styles/providers.css";
@@ -7,3 +10,6 @@
 @import "./styles/agent-history.css";
 @import "./styles/files.css";
 @import "./styles/window-frame.css";
+@import "./styles/ai-workspace.css";
+@import "./styles/reference-pages.css";
+@import "./styles/settings.css";

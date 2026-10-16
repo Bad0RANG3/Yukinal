@@ -71,7 +71,7 @@ export const APPROVAL_OPTIONS: Readonly<Record<AgentPermissionMode, ApprovalOpti
   },
   auto: {
     value: "auto",
-    label: "帮我批准",
+    label: "自动批准",
     summary: "仅在开发/预发布目标上自动放行普通写入；高危操作仍会问你。",
   },
 };

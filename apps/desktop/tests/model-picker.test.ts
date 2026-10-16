@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { shortModelLabel } from "../src/features/agent/ModelPicker.js";
+import { resolveAgentModels } from "../src/features/agent/useAgentModels.js";
+import type { AiProviderConfig } from "@yukinal/shared";
 
 /**
  * 关闭态的模型名是底栏最容易被挤坏的一格：它必须在短名里把
@@ -26,4 +28,31 @@ test("shortModelLabel takes the segment after the last slash", () => {
 test("shortModelLabel falls back to the original when stripping yields nothing", () => {
   assert.equal(shortModelLabel(""), "");
   assert.equal(shortModelLabel("vendor/"), "vendor/");
+});
+
+test("model resolution keeps enabled provider order, catalog labels and legacy fallback", () => {
+  const provider = (id: string, enabled: boolean, models?: AiProviderConfig["models"]): AiProviderConfig => ({
+    id, enabled, models, kind: "openai-compatible", label: id, model: "legacy:model",
+    baseUrl: "http://localhost/v1", createdAt: "", updatedAt: "",
+  });
+  const disabled = provider("disabled", false);
+  const legacy = provider("legacy", true, []);
+  const catalog = provider("catalog", true, [
+    { id: "model:one", label: "Friendly name", supportsStreaming: true, supportsToolCalling: true },
+    { id: "model:two", label: "", supportsStreaming: true, supportsToolCalling: false },
+  ]);
+  const providers = [disabled, legacy, catalog];
+  const result = resolveAgentModels(providers, "catalog", "model:one");
+  assert.equal(result.fallback, legacy);
+  assert.equal(result.selectedProvider, catalog);
+  assert.equal(result.selectedModelLabel, "catalog · Friendly name");
+  assert.deepEqual(result.modelChoices.map(({ key, label }) => [key, label]), [
+    ["legacy:legacy:model", "legacy:model"], ["catalog:model:one", "Friendly name"], ["catalog:model:two", "model:two"],
+  ]);
+  for (const id of [null, "deleted", "disabled"]) {
+    const missing = resolveAgentModels(providers, id, "legacy:model");
+    assert.equal(missing.selectedProvider, undefined);
+    assert.equal(missing.selectedModelLabel, null);
+  }
+  assert.deepEqual(resolveAgentModels([], null, null).modelChoices, []);
 });

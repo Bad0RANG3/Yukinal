@@ -11,6 +11,7 @@ import { ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
 import { useServers } from "../../lib/servers.js";
 import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
+import { PageToolbar } from "../../components/PageToolbar.js";
 
 export function ProjectsPane() {
   const shell = isDesktopShell();
@@ -26,10 +27,10 @@ export function ProjectsPane() {
   // 与侧栏共用同一份服务器缓存（同一个 key、同一套新鲜度），不再是本地副本。
   const servers = useServers({ enabled: shell });
 
-  if (!shell) return <PreviewEmpty icon="projects" body="本地 workspace 数据只在 Tauri 桌面壳中可用，预览不会伪造项目内容。" />;
+  if (!shell) return <PreviewEmpty icon="projects" body="桌面功能不可用" />;
 
   if (workspaces.isLoading) {
-    return <LoadingPanel title="正在读取项目" hint="从本地 workspace 数据加载" />;
+    return <LoadingPanel title="正在读取项目" />;
   }
 
   if (workspaces.isError || !workspaces.data) {
@@ -48,19 +49,14 @@ export function ProjectsPane() {
 
   return (
     <div className="projects-page">
-      <section className="projects-page-header">
-        <div>
-          <p className="eyebrow">工作区集合</p>
-          <h2>项目</h2>
-          <p>按项目查看关联的服务器和代码仓库，目标环境始终明确可见。</p>
-        </div>
+      <PageToolbar actions={
         <button type="button" className="button-secondary" onClick={() => void workspaces.refetch()} disabled={workspaces.isFetching} title="刷新项目" aria-label="刷新项目">
           <Icon name="refresh" size="sm" /> {workspaces.isFetching ? "读取中" : "刷新"}
         </button>
-      </section>
+      }><span>{rows.length} 个项目</span></PageToolbar>
 
       {rows.length === 0 ? (
-        <EmptyPanel extraClass="project-empty" icon="projects" title="暂无项目" body="本地数据库还没有 workspace 记录。服务器视图仍可独立使用。" />
+        <EmptyPanel extraClass="project-empty" icon="projects" title="暂无项目" />
       ) : (
         <ul className="project-grid" aria-label="项目列表">
           {rows.map((workspace) => <ProjectCard key={workspace.id} workspace={workspace} serverNames={serverNames} />)}
@@ -75,8 +71,7 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
     <li className="project-card">
       <div className="project-card-header">
         <div>
-          <p className="eyebrow">项目工作区</p>
-          <h3>{workspace.name}</h3>
+          <h2>{workspace.name}</h2>
         </div>
         <span className={`project-environment project-environment-${workspace.defaultEnvironment}`}>
           {ENVIRONMENT_LABEL_SHORT[workspace.defaultEnvironment]}
@@ -85,7 +80,7 @@ function ProjectCard({ workspace, serverNames }: { workspace: Workspace; serverN
       <div className="project-card-meta">
         <span>{workspace.serverIds.length} 台服务器</span>
         <span>{workspace.repositories.length} 个仓库</span>
-        <span>{workspace.providerIds.length} 个 Provider</span>
+        <span>{workspace.providerIds.length} 个连接</span>
       </div>
       <div className="project-card-section">
         <span className="project-card-label">服务器</span>

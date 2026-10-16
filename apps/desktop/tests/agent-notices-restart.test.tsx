@@ -7,7 +7,7 @@
  * - 自动恢复的**预算用完了**：这时才需要用户动手，而最要紧的一句话是「不会再有下一次」；
  * - 一切正常：什么都不说。
  *
- * 把它们写成断言，同时把措辞冻结下来 —— 「已自动重启」与「已退出，可以重新启动」是两种
+ * 把它们写成断言，同时把措辞冻结下来 —— 「服务已重启」与「已退出，可以重新启动」是两种
  * 不同的处境（一个不用做任何事，一个必须按按钮），混成一句话会让用户在两者之间猜。
  */
 
@@ -47,9 +47,9 @@ test("a crash that recovered says so without blocking anything", () => {
   );
   // 进程在跑、provider 就绪 —— 用户不需要做任何事，所以没有按钮。
   assert.ok(!markup.includes("<button"), markup);
-  assert.ok(markup.includes("已自动重启"), markup);
-  assert.ok(markup.includes("第 2/5 次"), markup);
-  assert.ok(markup.includes("上一次运行已中断"), markup);
+  assert.ok(markup.includes("服务已重启"), markup);
+  assert.ok(markup.includes("2/5"), markup);
+  assert.ok(markup.includes("上次运行已中断"), markup);
 });
 
 test("an exhausted budget asks the user to act and says there is no next attempt", () => {
@@ -62,19 +62,19 @@ test("an exhausted budget asks the user to act and says there is no next attempt
       spawning={false}
     />,
   );
-  assert.ok(markup.includes("不会再次自动尝试"), markup);
+  assert.ok(markup.includes("自动恢复已停止"), markup);
   assert.ok(markup.includes("5/5"), markup);
   // 这一状态下必须给出按钮：不会再有自动尝试了。
   assert.ok(markup.includes("重新启动"), markup);
   // 而「可以重新启动」那句是**没有**恢复记录时的说法，两者不能同时出现。
-  assert.ok(!markup.includes("Agent 已退出，可以重新启动。"), markup);
+  assert.ok(!markup.includes("运行服务已退出"), markup);
 });
 
-test("a crashed agent without a restart keeps the original wording", () => {
+test("a crashed agent without a restart offers a restart action", () => {
   const markup = renderToStaticMarkup(
     <AgentNotices {...base} agentRunning={false} agentExited />,
   );
-  assert.ok(markup.includes("Agent 已退出，可以重新启动。"), markup);
+  assert.ok(markup.includes("运行服务已退出"), markup);
   assert.ok(markup.includes("启动 / 重试"), markup);
   assert.ok(!markup.includes("自动"), markup);
 });

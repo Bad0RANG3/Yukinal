@@ -10,7 +10,6 @@ import type { RefObject, ReactNode, UIEvent } from "react";
 
 import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
-import { Icon } from "../../components/Icon.js";
 import { AgentEntryView } from "./AgentEntryView.js";
 import type { Entry } from "./transcript.js";
 
@@ -46,9 +45,9 @@ export function AgentFeed({
     <div ref={feedRef} className="agent-feed" onScroll={onScroll}>
       {entries.length === 0 ? (
         <div className="agent-empty">
-          <span className="agent-empty-mark"><Icon name="sparkle" size="xl" /></span>
-          <strong>随心输入</strong>
-          <p>描述你想完成的事情，Agent 会在当前上下文里协助你。</p>
+          <div className="agent-empty-copy">
+            <strong>新任务</strong>
+          </div>
         </div>
       ) : (
         entries.map((entry, index) => (

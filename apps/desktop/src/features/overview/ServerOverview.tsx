@@ -316,13 +316,6 @@ function OverviewContent({
               {HEALTH_LABEL[health]}
             </span>
           </div>
-          {/* 这里原来是一个 <h2>{server.name}</h2>。名字在紧邻上方的
-              .workspace-header 里已经是这一页的 <h1>，再标一次 h2 会让读屏用户
-              连着听到两遍同一个名字、而且是两个不同层级（「Production API，
-              一级标题」「Production API，二级标题」）。视觉上这个大字要保留，
-              所以改成普通元素 + 同样的排版，不再参与标题层级 —— 页面的标题由
-              h1 独占，下面的小节这才好落在 h2 上。 */}
-          <p className="overview-title">{server.name}</p>
           <p className="overview-subtitle">
             {os ? os.distribution + " " + os.version : "操作系统未知"} · {server.connection.username}@{server.connection.host}
           </p>
@@ -373,7 +366,7 @@ function OverviewContent({
       </section>
 
       <nav className="overview-shortcuts" aria-label="服务器运维入口">
-        <button type="button" className="button-primary" onClick={() => setPrimary("tasks")} aria-label={`让 AI 在 ${server.name} 上完成目标`}><Icon name="agent" size="sm" />让 AI 处理目标</button>
+        <button type="button" className="button-primary" onClick={() => setPrimary("tasks")} aria-label={`在 ${server.name} 上创建任务`}><Icon name="agent" size="sm" />创建任务</button>
         <button type="button" className="button-secondary" onClick={() => setServerPage("services")}><Icon name="services" size="sm" />查看服务</button>
         <button type="button" className="button-secondary" onClick={() => setServerPage("logs")}><Icon name="logs" size="sm" />查看日志</button>
         <button type="button" className="button-secondary" onClick={() => setServerPage("files")}><Icon name="file" size="sm" />浏览文件</button>
@@ -389,7 +382,7 @@ function OverviewContent({
 
       <section className="section-block">
         <div className="section-heading">
-          <div><p className="eyebrow">资源概况</p><h2>系统健康</h2></div>
+          <div><h2>系统健康</h2></div>
           <span className="section-note">{connected ? "每 15 秒自动采集" : "连接后恢复自动采集"}</span>
         </div>
         <div className="metric-grid">
@@ -402,13 +395,13 @@ function OverviewContent({
       {health !== "healthy" ? (
         <section className={`attention-panel attention-${health}`}>
           <span className="attention-icon"><Icon name="warning" size="md" /></span>
-          <div><strong>{health === "critical" ? "需要立即关注" : "有资源接近阈值"}</strong><p>CPU、内存或磁盘至少一项已达到 {health === "critical" ? "严重" : "警告"} 阈值。可以让 Agent 进一步检查原因。</p></div>
+          <div><strong>{health === "critical" ? "需要立即关注" : "有资源接近阈值"}</strong><p>CPU、内存或磁盘至少一项已达到 {health === "critical" ? "严重" : "警告"} 阈值。</p></div>
         </section>
       ) : null}
 
       <section className="split-sections">
         <div className="section-block section-block-flex">
-          <div className="section-heading"><div><p className="eyebrow">容器运行时</p><h2>Docker</h2></div><span className="section-note">{docker?.available ? `${docker.containers.length} 个容器` : "不可用"}</span></div>
+          <div className="section-heading"><div><h2>Docker</h2></div><span className="section-note">{docker?.available ? `${docker.containers.length} 个容器` : "不可用"}</span></div>
           {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有运行中的容器。</p> : (
             <ul className="container-list">
               {docker.containers.slice(0, 8).map((container, index) => (
@@ -446,12 +439,12 @@ function RecentServerActivity({ serverId }: { serverId: string }) {
   return (
     <div className="section-block section-block-flex">
       <div className="section-heading">
-        <div><p className="eyebrow">审计流</p><h2>最近动态</h2></div>
+        <div><h2>最近动态</h2></div>
         <button type="button" className="button-secondary" onClick={() => setServerPage("activity")}>全部活动</button>
       </div>
       {activities.isLoading ? <p className="muted-copy" role="status">正在读取服务器动态…</p> : null}
       {activities.isError ? <p className="error-copy" role="alert">无法读取服务器动态：{errorMessage(activities.error)}</p> : null}
-      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="activity-empty"><Icon name="activity" size="lg" /><p>暂无动态；连接、配置和 Agent 操作会记录在这里。</p></div> : null}
+      {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="activity-empty"><Icon name="activity" size="lg" /><p>暂无动态</p></div> : null}
       {rows.length ? <ul className="overview-activity-list">{rows.map((activity) => (
         <li key={activity.id}>
           <strong>{activity.title}</strong>
@@ -474,12 +467,7 @@ function RecentServerActivity({ serverId }: { serverId: string }) {
 function WelcomePanel() {
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   return <div className="welcome-page">
-    <div className="welcome-copy"><span className="welcome-kicker"><span className="health-dot health-dot-healthy" />远程工作，从这里开始</span><h2>连接环境。<br /><span>专注正在做的事。</span></h2><p>服务器、终端与 Agent，<br />在一个安静、有序的工作区里协作。</p></div>
-    <div className="welcome-steps">
-      <div><span className="welcome-step-number">01</span><Icon name="connect" size="lg" /><strong>连接服务器</strong><p>在桌面应用中添加 SSH 连接。</p></div>
-      <div><span className="welcome-step-number">02</span><Icon name="activity" size="lg" /><strong>了解运行状态</strong><p>集中查看资源、日志和服务。</p></div>
-      <div><span className="welcome-step-number">03</span><Icon name="agent" size="lg" /><strong>让 Agent 协助</strong><p>带着明确的目标，开始排查。</p></div>
-    </div>
-    <div className="welcome-footer"><span><Icon name="servers" size="md" />当前为界面预览，连接功能需在桌面应用中使用。</span><button type="button" className="button-secondary" onClick={() => setPrimary("settings")}>调整工作区 <Icon name="chevronRight" size="sm" /></button></div>
+    <div className="welcome-copy"><h2>暂无服务器</h2></div>
+    <div className="welcome-footer"><button type="button" className="button-secondary" onClick={() => setPrimary("settings")}>设置 <Icon name="chevronRight" size="sm" /></button></div>
   </div>;
 }

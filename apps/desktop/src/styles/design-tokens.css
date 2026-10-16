@@ -1,0 +1,30 @@
+/* Shared visual vocabulary. CSS controls and the measured native AI caption
+   consume these values; the outer window and system buttons belong to DWM. */
+:root {
+  --radius-detail: 2px;
+  --radius-badge: 4px;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-panel: 16px;
+  --radius-pill: 999px;
+  --radius-circle: 50%;
+  --control-radius: var(--radius-control);
+  --card-radius: var(--radius-card);
+  --ai-frame-radius: var(--radius-panel);
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-terminal: "JetBrains Mono NL", "JetBrains Mono", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --opacity-disabled: .5;
+  --scrollbar-size: 10px;
+}
+
+.app-shell {
+  --space-group: 24px;
+  --space-content: 20px;
+  --space-card: 16px;
+  --space-row: 12px;
+  --height-control: 32px;
+  --height-row: 56px;
+}

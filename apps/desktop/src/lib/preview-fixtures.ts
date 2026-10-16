@@ -1,17 +1,17 @@
 /**
- * Local, deterministic data for the browser-only visual audit.
+ * Isolated in-memory data for desktop and browser visual evaluation.
  *
  * It is reachable only from Vite development with `?fixture=1`.  Responses
  * still traverse the regular Zod IPC schema, but no credentials, sockets, SSH
- * operations, or Tauri commands are involved.
+ * operations, or native business commands are involved. Reloading resets it.
  */
 
-import { IPC_COMMANDS, type IpcCommandName } from "@yukinal/shared";
+import { IPC_COMMANDS, type IpcCommandName, type Server } from "@yukinal/shared";
 
-const AT = "2026-09-21T08:00:00.000Z";
+const AT = new Date().toISOString();
 const FINGERPRINT = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
 
-const SERVERS = [
+const SERVERS: Server[] = [
   {
     id: "srv_previewapi",
     name: "Production API",
@@ -49,6 +49,26 @@ const SERVERS = [
     capabilities: { linux: true, systemd: true, redis: true },
     status: "error",
     metadata: { environment: "unknown", region: "Frankfurt", tags: ["needs-attention"] },
+    createdAt: AT,
+    updatedAt: AT,
+  },
+  {
+    id: "srv_previewedge",
+    name: "边缘代理 · 东京",
+    connection: { host: "edge-tokyo-01.example.net", port: 22, username: "ops" },
+    capabilities: { linux: true, nginx: true, systemd: true },
+    status: "connecting",
+    metadata: { environment: "production", region: "Tokyo", tags: ["edge"] },
+    createdAt: AT,
+    updatedAt: AT,
+  },
+  {
+    id: "srv_previewinference",
+    name: "本地模型推理节点",
+    connection: { host: "inference.local.example.net", port: 2202, username: "developer" },
+    capabilities: { linux: true, docker: true, redis: true },
+    status: "connected",
+    metadata: { environment: "local", region: "Local", tags: ["gpu", "inference"] },
     createdAt: AT,
     updatedAt: AT,
   },
@@ -161,24 +181,28 @@ function paramString(params: unknown, name: string, fallback: string): string {
 
 function serverFor(params: unknown) {
   const serverId = paramString(params, "serverId", SERVERS[0]?.id ?? "");
-  return SERVERS.find((server) => server.id === serverId) ?? SERVERS[0];
+  const server = SERVERS.find((candidate) => candidate.id === serverId);
+  if (!server) throw new Error("找不到这台模拟服务器，请刷新模拟数据。");
+  return server;
 }
 
 function snapshot(params: unknown): unknown {
   const server = serverFor(params);
+  const collectedAt = new Date().toISOString();
   const warning = server?.id === "srv_previewdb";
+  const inference = server.id === "srv_previewinference";
   return {
     snapshot: {
-      id: "snap_preview",
+      id: `snap_${server.id}`,
       serverId: server?.id,
-      collectedAt: AT,
+      collectedAt,
       health: warning ? "warning" : "healthy",
       os: { distribution: "Ubuntu", version: "24.04", hostname: server?.connection.host, kernel: "6.8.0", arch: "x86_64" },
-      cpu: { model: "Intel(R) Xeon(R) Platinum", cores: 8, usagePercent: warning ? 67.4 : 23.5, loadAverage: [1.2, 0.9, 0.7] },
-      memory: { totalBytes: 17179869184, usedBytes: warning ? 14087492730 : 6012954214, availableBytes: warning ? 3092371454 : 11166914970, usagePercent: warning ? 82 : 35 },
+      cpu: { model: "Intel(R) Xeon(R) Platinum", cores: 8, usagePercent: warning ? 67.4 : inference ? 48.2 : 23.5, loadAverage: [1.2, 0.9, 0.7] },
+      memory: { totalBytes: 17179869184, usedBytes: warning ? 14087492730 : inference ? 11338713661 : 6012954214, availableBytes: warning ? 3092371454 : inference ? 5841155523 : 11166914970, usagePercent: warning ? 82 : inference ? 66 : 35 },
       disks: [
         { device: "/dev/sda1", mountPoint: "/", totalBytes: 107374182400, usedBytes: 42949672960, usagePercent: 40 },
-        ...(warning ? [{ device: "/dev/sdb1", mountPoint: "/var/lib/postgresql", totalBytes: 214748364800, usedBytes: 182536110080, usagePercent: 85 }] : []),
+        ...(warning ? [{ device: "/dev/sdb1", mountPoint: "/var/lib/postgresql", totalBytes: 214748364800, usedBytes: 197568495616, usagePercent: 92 }] : []),
       ],
       uptimeSeconds: 172800,
       network: [{ name: "eth0", rxBytes: 1099511627776, txBytes: 2199023255552 }],
@@ -193,7 +217,7 @@ function snapshot(params: unknown): unknown {
         ],
       },
       capabilities: server?.capabilities,
-      collectors: [{ collectorId: "collector.cpu", collectedAt: AT, ok: true }],
+      collectors: ["os", "cpu", "memory", "disk", "uptime", "network", "docker"].map((id) => ({ collectorId: `collector.${id}`, collectedAt, ok: true })),
     },
   };
 }
@@ -221,6 +245,17 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
       return { version: "1.0.0-preview", os: "browser-fixture" };
     case IPC_COMMANDS.serverList:
       return { servers: SERVERS };
+    case IPC_COMMANDS.serverConnect:
+      serverFor(params).status = "connected";
+      return { status: "connected" };
+    case IPC_COMMANDS.serverDisconnect:
+      serverFor(params).status = "disconnected";
+      return {};
+    case IPC_COMMANDS.serverDelete: {
+      const server = serverFor(params);
+      SERVERS.splice(SERVERS.indexOf(server), 1);
+      return { deleted: true };
+    }
     case IPC_COMMANDS.workspaceList:
       return {
         workspaces: [
@@ -345,6 +380,6 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
     case IPC_COMMANDS.serverHostKeyStatus:
       return hostKey(params);
     default:
-      return {};
+      throw new Error("模拟数据模式仅供界面评估，此操作不会执行。退出模拟后可使用真实功能。");
   }
 }

@@ -1,0 +1,60 @@
+/* Default graphite skin. Component styles only consume this semantic palette.
+   Keep the fused native/React surfaces neutral: native chrome is not filtered. */
+:root {
+  --bg: #1d1d1d;
+  --panel: var(--bg);
+  --panel-soft: #212121;
+  --panel-raised: #2b2b2b;
+  --surface-1: #1e1e1e;
+  --surface-2: #252525;
+  --surface-3: #2c2c2c;
+  --surface-4: #363636;
+  --line: var(--edge-normal);
+  --line-strong: var(--edge-emphasis);
+  --text: #f0f0f0;
+  --muted: #bdbdbd;
+  --faint: #a2a2a2;
+  --accent: #e0e0e0;
+  --accent-strong: #a7a7a7;
+  --on-accent: #171717;
+  --warning: #d6d6d6;
+  --danger: #e3e3e3;
+  --success: #bdbdbd;
+  --info: #b0b0b0;
+  --ok-line: #515151;
+  --ok-surface: #212121;
+  --warn-line: #565656;
+  --warn-surface: #1c1c1c;
+  --danger-line: #454545;
+  --danger-surface: #181818;
+  --info-line: #5e5e5e;
+  --info-surface: #252525;
+  --focus-line: #717171;
+  --focus-halo: #c7c7c71a;
+  --composer-bg: transparent;
+  --composer-surface: #282828;
+  --composer-line: var(--edge-emphasis);
+  --composer-accent: var(--accent);
+  --composer-accent-hover: var(--text);
+  --workspace-content-surface: #282828;
+  --workspace-raised-surface: var(--panel-raised);
+  --workspace-raised-shadow: var(--shadow-card);
+
+  --material-highlight-rgb: 255 255 255;
+  --material-shadow-rgb: 0 0 0;
+  --edge-subtle: rgb(var(--material-highlight-rgb) / 3%);
+  --edge-normal: rgb(var(--material-highlight-rgb) / 6%);
+  --edge-emphasis: rgb(var(--material-highlight-rgb) / 16%);
+  --material-rest: rgb(var(--material-highlight-rgb) / 2%);
+  --material-hover: rgb(var(--material-highlight-rgb) / 4%);
+  --material-active: rgb(var(--material-highlight-rgb) / 6%);
+  --material-inset: rgb(var(--material-shadow-rgb) / 8%);
+  --material-scrim: rgb(var(--material-shadow-rgb) / 50%);
+  --material-sheen: linear-gradient(rgb(var(--material-highlight-rgb) / 1%), rgb(var(--material-shadow-rgb) / 2%));
+  --shadow-frame: 0 1px 2px rgb(var(--material-shadow-rgb) / 8%), 0 3px 10px rgb(var(--material-shadow-rgb) / 7%);
+  --shadow-card: inset 0 1px 0 var(--edge-subtle), 0 4px 12px rgb(var(--material-shadow-rgb) / 9%);
+  --shadow-inset: inset 0 1px 3px rgb(var(--material-shadow-rgb) / 8%);
+  --shadow-floating: 0 12px 32px rgb(var(--material-shadow-rgb) / 25%);
+  --shadow-focus: 0 0 0 3px var(--focus-halo);
+  --shadow-status: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
+}

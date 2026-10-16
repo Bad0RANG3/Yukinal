@@ -2,10 +2,6 @@
 #include <httplib.h>
 #include <webview/webview.h>
 
-#ifdef _WIN32
-#include "yukinal/desktop_host/windows_window_frame.hpp"
-#endif
-
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -23,6 +19,9 @@
 
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#ifdef _WIN32
+#include "yukinal/desktop_host/windows_window_frame.hpp"
+#endif
 
 namespace {
 
@@ -166,7 +165,6 @@ std::optional<std::string> resolve_ui_url(const Options& options, UiServer& ui_s
   return ui_server.url();
 }
 
-
 void rpc_handler(const char* id, const char* request, void* context_pointer) {
   auto& context = *static_cast<BridgeContext*>(context_pointer);
   nlohmann::json reply;
@@ -183,9 +181,9 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
 #ifdef _WIN32
         const auto result = method == "__shell.update_context"
             ? yukinal::desktop_host::update_shell_context(context.view, arguments[1])
-            : method == "__shell.update_sidebar"
-                ? yukinal::desktop_host::update_shell_sidebar(context.view, arguments[1])
-                : context.router.invoke(method, std::move(arguments[1]));
+            : method == "__shell.update_surface"
+            ? yukinal::desktop_host::update_caption_surface(context.view, arguments[1])
+            : context.router.invoke(method, std::move(arguments[1]));
 #else
         const auto result = context.router.invoke(method, std::move(arguments[1]));
 #endif
@@ -282,7 +280,11 @@ int run(const std::vector<std::string>& arguments) {
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
 #ifdef _WIN32
-    const bool native_frame = yukinal::desktop_host::install_fused_frame(context.view);
+    const bool titlebar_overlay = yukinal::desktop_host::install_fused_frame(context.view);
+    const std::string shell_bridge = std::string("window.__YUKINAL_HOST__.windowShell={titlebarOverlay:") +
+        (titlebar_overlay ? "true" : "false") + ",updateContext:(context)=>"
+        "window.__YUKINAL_HOST__.invoke('__shell.update_context',context).then(()=>undefined),"
+        "updateSurface:(surface)=>window.__YUKINAL_HOST__.invoke('__shell.update_surface',surface).then(()=>undefined)};";
 #endif
     if (webview_set_title(context.view, "Yukinal") != WEBVIEW_ERROR_OK ||
 #ifdef _WIN32
@@ -293,16 +295,7 @@ int run(const std::vector<std::string>& arguments) {
             WEBVIEW_ERROR_OK ||
         webview_init(context.view, kHostBridge) != WEBVIEW_ERROR_OK ||
 #ifdef _WIN32
-        webview_init(context.view,
-            native_frame ? R"JS((() => {
-              const listeners = new Set();
-              window.__YUKINAL_HOST__.windowShell = {
-                updateContext: (context) => window.__YUKINAL_HOST__.invoke('__shell.update_context', context).then(() => undefined),
-                updateSidebar: (sidebar) => window.__YUKINAL_HOST__.invoke('__shell.update_sidebar', sidebar).then(() => undefined),
-                onAction: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
-                dispatchAction: (action) => { for (const handler of listeners) handler(action); },
-              };
-            })();)JS" : "") != WEBVIEW_ERROR_OK ||
+        webview_init(context.view, shell_bridge.c_str()) != WEBVIEW_ERROR_OK ||
 #endif
         webview_navigate(context.view, url->c_str()) != WEBVIEW_ERROR_OK) {
 #ifdef _WIN32

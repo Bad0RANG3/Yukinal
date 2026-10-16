@@ -1,0 +1,23 @@
+/* A shared desktop type scale. The saved UI size remains the user's body size. */
+:root, .app-shell {
+  --text-caption: max(11px, calc(var(--ui-font-size, 14px) - 3px));
+  --text-label: max(12px, calc(var(--ui-font-size, 14px) - 2px));
+  --text-small: max(12px, calc(var(--ui-font-size, 14px) - 1px));
+  --text-body: var(--ui-font-size, 14px);
+  --text-subheading: calc(var(--ui-font-size, 14px) + 2px);
+  --text-heading: calc(var(--ui-font-size, 14px) + 4px);
+  --text-title: calc(var(--ui-font-size, 14px) + 10px);
+}
+
+.app-shell {
+  line-height: 1.5;
+}
+
+.app-shell :is(button, input, select, textarea) { font-family: var(--font-ui); }
+.app-shell :is(h1, h2, h3, h4, strong, b) { font-weight: 600; }
+.app-shell :is(.settings-card, .section-block, .project-card) { padding: var(--space-card); }
+.app-shell :is(.settings-field, .settings-fact, .form-field) { line-height: 1.5; }
+.app-shell :is(.settings-field, .field-label, .form-label, .button-primary, .button-secondary) { font-size: var(--text-small); }
+.app-shell :is(.form-input, .form-select) { min-height: var(--height-control); font-size: var(--text-small); }
+.app-shell :is(.button-primary, .button-secondary) { min-height: var(--height-control); }
+.app-shell :is(code, pre, .log-row code, .file-preview-content) { font-family: var(--font-terminal); }

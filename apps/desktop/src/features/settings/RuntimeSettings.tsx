@@ -7,7 +7,6 @@ import { McpSettings } from "./McpSettings.js";
 import { NetworkSettings } from "./NetworkSettings.js";
 import { NEW_PROVIDER_VALUE, ProviderPicker } from "./ProviderPicker.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
-import { TERMINAL_FONT_LABEL, TERMINAL_FONT_ORDER } from "../../lib/labels.js";
 import {
   PROVIDERS_QUERY_KEY,
   PROVIDER_KIND_DEFAULT_BASE_URL,
@@ -15,7 +14,6 @@ import {
   PROVIDER_KIND_ORDER,
   providerDeleteNotice,
   providerHeadersText,
-  providerKindBaseUrlHint,
   providerKindUsesApiVersion,
   providerKindUsesWireApi,
   parseProviderHeaders,
@@ -24,57 +22,67 @@ import {
 } from "../../lib/providers.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
 import { usePresence } from "../../hooks/usePresence.js";
-import {
-  usePreferencesStore,
-  type TerminalFont,
-  type TerminalFontSize,
-  type TerminalLineHeight,
-  type UiDensity,
-  type UiFontSize,
-} from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { PreferenceSettings } from "./PreferenceSettings.js";
+
+const SETTINGS_SECTIONS = [
+  { id: "general", label: "偏好", description: "终端和任务批准偏好，修改后自动保存到本机。" },
+  { id: "models", label: "模型", description: "管理模型连接。切换查看不会更换当前使用的连接。" },
+  { id: "tools", label: "工具", description: "管理 MCP 连接与工具授权。保存配置不会自动启动。" },
+  { id: "network", label: "网络", description: "管理出站连接方式，保存后下次连接生效。" },
+  { id: "runtime", label: "诊断", description: "查看运行服务的状态、版本和日志，排查连接与执行问题。" },
+] as const;
 
 export function RuntimeSettings() {
+  const [section, setSection] = useState<(typeof SETTINGS_SECTIONS)[number]["id"]>("general");
+  const id = useId();
+  return <section className="settings-page settings-organized">
+    <div className="settings-section-tabs" role="tablist" aria-label="设置分区">
+      {SETTINGS_SECTIONS.map((item, index) => <button type="button" role="tab" key={item.id}
+        id={`${id}-tab-${item.id}`} aria-controls={`${id}-panel-${item.id}`}
+        aria-selected={section === item.id} tabIndex={section === item.id ? 0 : -1}
+        onClick={() => setSection(item.id)} onKeyDown={(event) => {
+          const next = event.key === "ArrowRight" ? (index + 1) % SETTINGS_SECTIONS.length
+            : event.key === "ArrowLeft" ? (index + SETTINGS_SECTIONS.length - 1) % SETTINGS_SECTIONS.length
+            : event.key === "Home" ? 0 : event.key === "End" ? SETTINGS_SECTIONS.length - 1 : null;
+          const target = next === null ? null : SETTINGS_SECTIONS[next];
+          if (target) { event.preventDefault(); setSection(target.id); document.getElementById(`${id}-tab-${target.id}`)?.focus(); }
+        }}>{item.label}</button>)}
+    </div>
+    {SETTINGS_SECTIONS.map((item) => <div key={item.id} id={`${id}-panel-${item.id}`}
+      role="tabpanel" aria-labelledby={`${id}-tab-${item.id}`} hidden={section !== item.id} tabIndex={0}>
+      <p className="settings-section-description">{item.description}</p>
+      {item.id === "general" ? <PreferenceSettings /> : item.id === "models" ? <ProviderSettings />
+        : item.id === "tools" ? <McpSettings /> : item.id === "network" ? <NetworkSettings /> : <RuntimeStatus />}
+    </div>)}
+  </section>;
+}
+
+function RuntimeStatus() {
   const [showLogs, setShowLogs] = useState(false);
   const core = useCorePing();
   const status = useAgentStatus();
   const logs = useAgentLogs(showLogs);
   const shell = isDesktopShell();
-
   return (
-    <section className="settings-page">
-      <div className="settings-page-heading">
-        <p className="eyebrow">系统设置</p>
-        <h2>运行时与 AI</h2>
-        <p>管理本地 Runtime、Provider 和 Yukinal 的外观与交互。</p>
-      </div>
-
-      {!shell ? (
-        <div className="settings-notice" role="status">
-          <Icon name="warning" size="md" />
-          <span>浏览器预览：原生 Runtime 调用不可用，请启动 Tauri 桌面壳以连接 Agent。</span>
-        </div>
-      ) : null}
-
-      <section className="settings-card">
+    <section className="settings-card">
         <div className="settings-card-header">
           <div>
-            <p className="eyebrow">Runtime</p>
-            <h2>运行时状态</h2>
+            <h2>运行服务</h2>
           </div>
           <span className={`settings-status ${status.data?.running ? "settings-status-ready" : ""}`}>
-            {!shell ? "预览模式" : status.isError ? "状态读取失败" : status.isLoading ? "查询中…" : status.data?.running ? "Agent 运行中" : "Agent 未启动"}
+            {!shell ? "预览模式" : status.isError ? "状态读取失败" : status.isLoading ? "查询中…" : status.data?.running ? "运行中" : "未启动"}
           </span>
         </div>
         <dl className="settings-facts">
-          <Row label="Core" value={core.data ? `${core.data.version} (${core.data.os})` : unknown(shell)} />
-          <Row label="Agent" value={status.data ? (status.data.running ? "运行中" : "已停止") : unknown(shell)} />
-          <Row label="Agent PID" value={text(status.data?.pid, shell)} />
-          <Row label="Protocol" value={text(status.data?.protocolVersion, shell)} />
-          <Row label="Agent version" value={text(status.data?.agentVersion, shell)} />
-          <Row label="Tools" value={text(status.data?.toolCount, shell)} />
-          <Row label="Sidecar entry" value={text(status.data?.entry, shell)} wide />
-          <Row label="Last exit" value={status.data?.lastExit ? `${status.data.lastExit.code ?? status.data.lastExit.signal ?? "未知"} @ ${status.data.lastExit.at}` : "无"} wide />
+          <Row label="核心版本" value={core.data ? `${core.data.version} (${core.data.os})` : unknown(shell)} />
+          <Row label="运行服务" value={status.data ? (status.data.running ? "运行中" : "已停止") : unknown(shell)} />
+          <Row label="进程" value={text(status.data?.pid, shell)} />
+          <Row label="协议" value={text(status.data?.protocolVersion, shell)} />
+          <Row label="服务版本" value={text(status.data?.agentVersion, shell)} />
+          <Row label="工具" value={text(status.data?.toolCount, shell)} />
+          <Row label="服务入口" value={text(status.data?.entry, shell)} wide />
+          <Row label="上次退出" value={status.data?.lastExit ? `${status.data.lastExit.code ?? status.data.lastExit.signal ?? "未知"} @ ${status.data.lastExit.at}` : "无"} wide />
           {/*
             自动恢复是一句事实，不能只靠一闪而过的通知：崩溃时用户可能正在别的页面，
             回到设置里必须能查到「它自己起来过几次、还是已经放弃了」。
@@ -94,28 +102,17 @@ export function RuntimeSettings() {
         <div className="settings-card-actions">
           <button type="button" className="button-secondary" disabled={!shell} aria-expanded={showLogs} aria-controls="runtime-logs" onClick={() => setShowLogs((current) => !current)}>
             <Icon name={showLogs ? "chevronUp" : "logs"} size="sm" />
-            {showLogs ? "隐藏 Agent 日志" : "查看 Agent 日志"}
+            {showLogs ? "隐藏日志" : "查看日志"}
           </button>
         </div>
         {status.isError || core.isError ? <div className="settings-error-row" role="alert"><span>{status.error?.message ?? core.error?.message}</span><button type="button" className="text-button" onClick={() => { void core.refetch(); void status.refetch(); }}>重试</button></div> : null}
         <RuntimeLogs open={showLogs} logs={logs} />
       </section>
-
-      <AppearanceSettings />
-      <NetworkSettings />
-      <ProviderSettings />
-      {/*
-        MCP 放在 Provider 之后：它和 Provider 一样是「把外部能力接进来」，但方向相反 ——
-        Provider 决定模型从哪来，MCP 决定模型能碰哪些第三方进程。两者的风险等级差得很远，
-        所以它是独立一张卡，不是 Provider 卡里的一节。
-      */}
-      <McpSettings />
-    </section>
   );
 }
 
 /**
- * 「查看 Agent 日志」展开的那块输出。
+ * 「查看日志」展开的那块输出。
  *
  * 从 RuntimeSettings 里拆出来有两个理由：一是它有三种互斥的形态（加载中 /
  * 读取失败 / 有内容），挤在一行里既读不了也改不动；二是它需要一段收起动画，
@@ -139,79 +136,6 @@ function RuntimeLogs({ open, logs }: { open: boolean; logs: ReturnType<typeof us
     <pre id="runtime-logs" className={`agent-log-viewer${closing}`} onAnimationEnd={presence.onAnimationEnd}>
       {logs.data?.lines.length ? logs.data.lines.join("\n") : "（暂无捕获输出）"}
     </pre>
-  );
-}
-
-function AppearanceSettings() {
-  const preferences = usePreferencesStore();
-  const setPreferences = preferences.setPreferences;
-
-  return (
-    <section className="settings-card">
-      <div className="settings-card-header">
-        <div>
-          <p className="eyebrow">偏好</p>
-          <h2>外观与交互</h2>
-          <p>修改会立即应用，并保存在当前设备的本地存储中。</p>
-        </div>
-        <Icon name="settings" size="lg" />
-      </div>
-      <div className="settings-form-grid">
-        <Field label="UI 字号">
-          <select className="form-input" value={preferences.uiFontSize} onChange={(event) => setPreferences({ uiFontSize: Number(event.target.value) as UiFontSize })}>
-            <option value={12}>小 · 12px</option>
-            <option value={13}>标准 · 13px</option>
-            <option value={14}>大 · 14px</option>
-          </select>
-        </Field>
-        <Field label="内容密度">
-          <select className="form-input" value={preferences.density} onChange={(event) => setPreferences({ density: event.target.value as UiDensity })}>
-            <option value="compact">紧凑</option>
-            <option value="comfortable">舒适</option>
-          </select>
-        </Field>
-        <Field label="终端字体">
-          <select className="form-input" value={preferences.terminalFont} onChange={(event) => setPreferences({ terminalFont: event.target.value as TerminalFont })}>
-            {TERMINAL_FONT_ORDER.map((font) => <option key={font} value={font}>{TERMINAL_FONT_LABEL[font]}</option>)}
-          </select>
-        </Field>
-        <Field label="终端字号">
-          <select className="form-input" value={preferences.terminalFontSize} onChange={(event) => setPreferences({ terminalFontSize: Number(event.target.value) as TerminalFontSize })}>
-            {[12, 13, 14, 15, 16].map((size) => <option key={size} value={size}>{size}px</option>)}
-          </select>
-        </Field>
-        <Field label="终端行高">
-          <select className="form-input" value={preferences.terminalLineHeight} onChange={(event) => setPreferences({ terminalLineHeight: Number(event.target.value) as TerminalLineHeight })}>
-            <option value={1.2}>紧凑 · 1.2</option>
-            <option value={1.35}>标准 · 1.35</option>
-            <option value={1.5}>宽松 · 1.5</option>
-          </select>
-        </Field>
-        <Field label="Agent 权限">
-          <select className="form-input" value={preferences.agentPermissionMode} onChange={(event) => setPreferences({ agentPermissionMode: event.target.value as "ask" | "auto" })}>
-            <option value="ask">操作前询问（推荐）</option>
-            <option value="auto">委托 Agent 自动批准 开发与预发布写入</option>
-          </select>
-        </Field>
-      </div>
-      <div className="settings-check-grid">
-        <label className="settings-check-row">
-          <input type="checkbox" checked={preferences.terminalCursorBlink} onChange={(event) => setPreferences({ terminalCursorBlink: event.target.checked })} />
-          <span><strong>光标闪烁</strong><small>终端光标使用闪烁提示</small></span>
-        </label>
-        <label className="settings-check-row">
-          <input type="checkbox" checked={preferences.reduceMotion} onChange={(event) => setPreferences({ reduceMotion: event.target.checked })} />
-          <span><strong>减少动效</strong><small>降低过渡和状态动画</small></span>
-        </label>
-      </div>
-      <p className="form-hint">自动批准只适用于开发或预发布目标上的普通写入。本机、未知、生产、高危和 critical 操作仍需逐项确认；策略禁止的操作始终拒绝，允许的自动执行会以“Agent 自主批准”写入审计。</p>
-      <div className="settings-actions">
-        <button type="button" className="button-secondary" onClick={preferences.resetPreferences}>
-          <Icon name="refresh" size="sm" />恢复默认设置
-        </button>
-        <span className="settings-storage-note">仅保存界面偏好，不保存 API Key 或密码</span>
-      </div>
-    </section>
   );
 }
 
@@ -275,10 +199,10 @@ function ProviderSettings() {
     <div className="settings-stack">
       <section className="settings-card">
         <div className="settings-card-header">
-          <div><p className="eyebrow">AI</p><h2>Provider</h2><p>新建 Agent 运行会使用当前启用的 Provider。</p></div>
-          <div className="settings-card-header-actions"><span className="settings-count">{providers.data?.length ?? 0} 个已配置</span><button type="button" disabled={busy} onClick={() => setEditorProviderId(null)} className="button-secondary button-small">添加 Provider</button></div>
+          <div><h2>模型连接</h2></div>
+          <div className="settings-card-header-actions">{providers.data ? <span className="settings-count">{providers.data.length} 个已配置</span> : null}<button type="button" disabled={busy || providers.isLoading || providers.isError} title={providers.isError ? "读取连接失败，请重试后添加" : undefined} onClick={() => setEditorProviderId(null)} className="button-secondary button-small">添加连接</button></div>
         </div>
-        {providers.isLoading ? <p className="muted-copy" role="status">正在加载 Provider…</p> : providers.isError ? <p className="form-error" role="alert">{providers.error.message}</p> : providers.data?.length ? (
+        {providers.isLoading ? <p className="muted-copy" role="status">正在加载连接…</p> : providers.isError ? null : providers.data?.length ? (
           <ProviderPicker
             providers={providers.data}
             viewingId={viewingProviderId}
@@ -302,7 +226,7 @@ function ProviderSettings() {
               if (target && !remove.isPending) remove.mutate(target);
             }}
           />
-        ) : <p className="muted-copy">{shell ? "还没有配置 Provider。" : "在桌面应用中配置 AI Provider。"}</p>}
+        ) : <p className="muted-copy">{shell ? "暂无模型连接" : "桌面功能不可用"}</p>}
         {providers.isError ? <div className="settings-error-row" role="alert"><span>{providers.error.message}</span><button type="button" className="text-button" onClick={() => void providers.refetch()}>重试</button></div> : null}
         {activate.isError ? <div className="settings-error-row" role="alert"><span>启用失败：{activate.error.message}</span>{activate.variables ? <button type="button" className="text-button" onClick={() => activate.mutate(activate.variables!)}>重试</button> : null}</div> : null}
         {remove.isError ? <div className="settings-error-row" role="alert"><span>删除失败：{remove.error.message}</span>{remove.variables ? <button type="button" className="text-button" onClick={() => remove.mutate(remove.variables!)}>重试</button> : null}</div> : null}
@@ -354,8 +278,8 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
     mutationKey: ["provider-write"],
     mutationFn: () => {
       const nextProviderId = providerId.trim();
-      if (!provider && !nextProviderId) throw new Error("请填写 Provider ID。");
-      if (!provider && existingProviderIds.has(nextProviderId)) throw new Error("Provider ID 已存在，请换一个唯一 ID。");
+      if (!provider && !nextProviderId) throw new Error("请填写 连接 ID。");
+      if (!provider && existingProviderIds.has(nextProviderId)) throw new Error("连接 ID 已存在，请换一个唯一 ID。");
       // 校验交给共享的那条规则，而不是在这里再手写一遍。
       //
       // 原来这里是 `new URL(baseUrl.trim())` 加一句协议判断，有两个洞：
@@ -390,33 +314,30 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
   });
   return (
     <section className="settings-card">
-      <div className="settings-card-header"><div><p className="eyebrow">自定义 Provider</p><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>先选协议，再填唯一 ID、名称、Base URL、API Key 和模型。API Key 仅保存在系统密钥链。</p></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
+      <div className="settings-card-header"><div><h2>{provider ? "编辑连接" : "添加连接"}</h2></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
       <form onSubmit={(event) => { event.preventDefault(); if (shell && !busy) save.mutate(); }} onChange={() => { setSaved(false); save.reset(); }}>
         <fieldset className="settings-form-fields" disabled={busy}>
           <div className="settings-form-grid settings-form-grid-provider">
-            <Field label="Provider ID" className="field-wide"><input className="form-input" value={providerId} onChange={(event) => setProviderId(event.target.value.toLowerCase())} placeholder="myprovider" required={!provider} disabled={Boolean(provider)} spellCheck={false} pattern="[a-z0-9][a-z0-9-_]*" title="只能使用小写字母、数字、连字符和下划线，且首字符不能是符号" /></Field>
-            <Field label="名称" className="field-wide"><input className="form-input" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="My AI Provider" required /></Field>
-            {/*
-              协议是这张表单的第一个决定：它决定谁翻译请求，也决定后面哪些字段有意义。
-              没有它，同一个 base URL 用 chat completions 还是 Messages API 去调是说不清的。
-            */}
+            <Field label="名称" className="field-wide"><input className="form-input" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="连接名称" required /></Field>
+            {!provider ? <Field label="连接 ID" className="field-wide"><input className="form-input" value={providerId} onChange={(event) => setProviderId(event.target.value.toLowerCase())} placeholder="myprovider" required spellCheck={false} pattern="[a-z0-9][a-z0-9-_]*" title="只能使用小写字母、数字、连字符和下划线，且首字符不能是符号" /></Field> : null}
             <Field label="协议" className="field-wide"><select className="form-input" value={kind} onChange={(event) => changeKind(event.target.value as AiProviderKind)}>{PROVIDER_KIND_ORDER.map((option) => <option key={option} value={option}>{PROVIDER_KIND_LABEL[option]}</option>)}</select></Field>
             <Field label="Base URL" className="field-wide"><input type="url" className="form-input" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={PROVIDER_KIND_DEFAULT_BASE_URL[kind] ?? "https://api.example.com/v1"} required spellCheck={false} /></Field>
-            <Field label="Model"><input className="form-input" list={modelsId} value={model} onChange={(event) => setModel(event.target.value)} placeholder="选择或输入模型 ID" required spellCheck={false} /><datalist id={modelsId}>{models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</datalist></Field>
-            {/*
-              `wireApi` 只在 openai-compatible 里选方言，所以另外两种 kind **根本不渲染**这一格：
-              显示一个没有作用的控件比不显示更糟（它会让人以为这可以配）。
-            */}
-            {providerKindUsesWireApi(kind) ? <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
-            {providerKindUsesApiVersion(kind) ? <Field label="Anthropic Version"><input className="form-input" value={apiVersion} onChange={(event) => setApiVersion(event.target.value)} placeholder="2023-06-01（留空使用适配器默认值）" spellCheck={false} /></Field> : null}
-            <Field label="自定义请求头" className="field-wide"><textarea className="form-input" rows={3} value={customHeadersText} onChange={(event) => setCustomHeadersText(event.target.value)} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
             <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
+            <Field label="模型"><input className="form-input" list={modelsId} value={model} onChange={(event) => setModel(event.target.value)} placeholder="选择或输入模型 ID" required spellCheck={false} /><datalist id={modelsId}>{models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</datalist></Field>
           </div>
+          <details className="settings-advanced">
+            <summary>高级连接选项</summary>
+            <div className="settings-form-grid settings-form-grid-provider">
+              {provider ? <Field label="连接 ID" className="field-wide"><input className="form-input" value={providerId} readOnly spellCheck={false} /></Field> : null}
+              {providerKindUsesWireApi(kind) ? <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
+              {providerKindUsesApiVersion(kind) ? <Field label="Anthropic Version"><input className="form-input" value={apiVersion} onChange={(event) => setApiVersion(event.target.value)} placeholder="2023-06-01（留空使用适配器默认值）" spellCheck={false} /></Field> : null}
+              <Field label="自定义请求头" className="field-wide"><textarea className="form-input" rows={3} value={customHeadersText} onChange={(event) => setCustomHeadersText(event.target.value)} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
+            </div>
+          </details>
         </fieldset>
-        <p className="form-hint">{providerKindBaseUrlHint(kind)}</p>
         {catalog.isError ? <p className="form-hint form-hint-warning">实时模型列表暂不可用，可手动输入模型 ID。</p> : null}
         {save.isError ? <div className="settings-error-row" role="alert"><span>{save.error.message}</span><button type="button" className="text-button" onClick={() => save.mutate()}>重试</button></div> : null}
-        {saved ? <p className="form-success" role="status">Provider 配置已保存。</p> : null}
+        {saved ? <p className="form-success" role="status">已保存</p> : null}
         <div className="settings-actions">
           <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size="sm" />{save.isPending ? "保存中…" : provider ? "保存并启用" : "添加并启用"}</button>
           {provider ? <button type="button" disabled={!shell || busy || catalog.isFetching} onClick={() => void catalog.refetch()} className="button-secondary">{catalog.isFetching ? "检查中…" : "刷新模型"}</button> : null}

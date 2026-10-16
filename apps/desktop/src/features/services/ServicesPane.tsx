@@ -11,6 +11,7 @@ import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
+import { PageToolbar } from "../../components/PageToolbar.js";
 
 const STATE_LABEL: Record<ServiceState, string> = {
   running: "运行中",
@@ -41,14 +42,14 @@ export function ServicesPane() {
     },
   });
 
-  if (!shell) return <PreviewEmpty icon="services" body="原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端服务数据。" />;
+  if (!shell) return <PreviewEmpty icon="services" body="桌面功能不可用" />;
 
   if (!selectedServerId) {
-    return <EmptyPanel icon="services" title="选择一台服务器" body="从左侧列表选择目标环境，查看远端服务状态。" />;
+    return <EmptyPanel icon="services" title="选择一台服务器" />;
   }
 
   if (servicesQuery.isLoading) {
-    return <LoadingPanel title="正在读取服务状态" hint="SSH · systemd / Docker · 预计几秒完成" />;
+    return <LoadingPanel title="正在读取服务状态" />;
   }
 
   if (servicesQuery.isError || !servicesQuery.data) {
@@ -68,21 +69,14 @@ export function ServicesPane() {
 
   return (
     <div className="services-page">
-      <section className="services-page-header">
-        <div>
-          <p className="eyebrow">远程服务</p>
-          <h2>服务</h2>
-          <p>从目标服务器实时读取，不在本地猜测运行状态。</p>
-        </div>
+      <PageToolbar actions={
         <button type="button" className="button-secondary" onClick={() => void servicesQuery.refetch()} disabled={servicesQuery.isFetching} title="刷新服务" aria-label="刷新服务">
           <Icon name="refresh" size="sm" /> {servicesQuery.isFetching ? "读取中" : "刷新"}
         </button>
-      </section>
-
-      <div className="service-summary">
+      }>
         <span className={`service-source service-source-${response.source}`}>{SOURCE_LABEL[response.source]}</span>
         <span>{response.services.length} 项 · {running} 项运行中{failed ? ` · ${failed} 项失败` : ""}</span>
-      </div>
+      </PageToolbar>
 
       {response.message ? <div className="service-notice">{response.message}</div> : null}
 

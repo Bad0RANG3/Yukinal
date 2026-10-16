@@ -144,7 +144,7 @@ export function AgentComposer({
   const [highlight, setHighlight] = useState(0);
   /** Escape 之后本次触发词不再弹窗，直到内容变化。 */
   const [dismissed, setDismissed] = useState(false);
-  /** 「+」展开的设置面板：运行模式与批准方式都在这里。 */
+  /** 运行设置：运行模式与批准方式都在这里。 */
   const [menuOpen, setMenuOpen] = useState(false);
   const imageAttachments = attachments.filter(
     (attachment): attachment is AgentImagePromptPart => attachment.type === "image",
@@ -162,6 +162,8 @@ export function AgentComposer({
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
   const hasContent = Boolean(prompt.trim() || attachments.length);
+  // Preparing a local draft does not require a connected model or runtime.
+  const canEdit = !running && !commandContext.archived;
 
   /**
    * 输入框随内容长高，封顶由 CSS 的 max-height 决定。
@@ -283,7 +285,7 @@ export function AgentComposer({
   };
 
   const submit = (): void => {
-    if (!hasContent) return;
+    if (!hasContent || !canEdit) return;
     setTrigger(null);
     setDismissed(false);
     setAttachmentError(null);
@@ -291,7 +293,7 @@ export function AgentComposer({
   };
 
   const addFiles = async (files: readonly File[]): Promise<void> => {
-    if (!canSend || running || files.length === 0) return;
+    if (!canEdit || files.length === 0) return;
     let next: AgentPromptPart[] = [...attachments];
     let error: string | null = null;
     for (const file of files) {
@@ -379,12 +381,12 @@ export function AgentComposer({
       <div
         className={`agent-composer-shell${draggingAttachment ? " is-dragging-attachment" : ""}`}
         onDragEnter={(event) => {
-          if (running || !canSend) return;
+          if (!canEdit) return;
           event.preventDefault();
           setDraggingAttachment(true);
         }}
         onDragOver={(event) => {
-          if (running || !canSend) return;
+          if (!canEdit) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }}
@@ -494,9 +496,9 @@ export function AgentComposer({
         <textarea
           ref={inputRef}
           rows={1}
-          aria-label="Agent 输入"
+          aria-label="消息输入"
           value={prompt}
-          disabled={!canSend || running}
+          disabled={!canEdit}
           onChange={(event) => {
             const value = event.target.value;
             onPromptChange(value);
@@ -587,7 +589,6 @@ export function AgentComposer({
           >
             <section className="agent-settings-group">
               <p className="agent-settings-title">运行模式</p>
-              <p className="agent-settings-note">决定这次运行能做什么。只读类模式由权限引擎强制，模型无法绕过。</p>
               <ul className="agent-settings-options">
                 {RUN_MODE_ORDER.map((key) => {
                   const spec = RUN_MODE_SPECS[key];
@@ -606,7 +607,6 @@ export function AgentComposer({
                         {spec.label}
                         {spec.readOnly ? <span className="agent-settings-badge">不改动</span> : null}
                       </span>
-                      <span className="agent-settings-option-note">{spec.summary}</span>
                     </button>
                   </li>
                   );
@@ -616,7 +616,6 @@ export function AgentComposer({
 
             <section className="agent-settings-group">
               <p className="agent-settings-title">批准方式</p>
-              <p className="agent-settings-note">决定允许的操作由谁点头。与运行模式互不冲突。</p>
               <ul className="agent-settings-options">
                 {APPROVAL_ORDER.map((key) => {
                   const option = APPROVAL_OPTIONS[key];
@@ -630,7 +629,6 @@ export function AgentComposer({
                       onClick={() => onPermissionModeChange(option.value)}
                     >
                       <span className="agent-settings-option-label">{option.label}</span>
-                      <span className="agent-settings-option-note">{option.summary}</span>
                     </button>
                   </li>
                   );
@@ -640,12 +638,11 @@ export function AgentComposer({
 
             <section className="agent-settings-group">
               <p className="agent-settings-title">投递方式</p>
-              <p className="agent-settings-note">流式投递立即返回；等待完成会保留同一事件流，并等终态结果返回。</p>
               <ul className="agent-settings-options">
                 {([
-                  ["async", "流式投递", "发送后立即返回，回答继续通过事件流到达。"],
-                  ["sync", "等待完成", "发送调用等到运行结束后再返回，期间仍会显示流式事件。"],
-                ] as const).map(([value, label, note]) => (
+                  ["async", "流式投递"],
+                  ["sync", "等待完成"],
+                ] as const).map(([value, label]) => (
                   <li key={value}>
                     <button
                       type="button"
@@ -655,7 +652,6 @@ export function AgentComposer({
                       onClick={() => onDeliveryChange(value)}
                     >
                       <span className="agent-settings-option-label">{label}</span>
-                      <span className="agent-settings-option-note">{note}</span>
                     </button>
                   </li>
                 ))}
@@ -664,11 +660,6 @@ export function AgentComposer({
 
             <section className="agent-settings-group">
               <p className="agent-settings-title">目标策略</p>
-              {/* 这两句是这一组存在的理由，不能省：选定的策略**取代**按环境自动的那套，
-                  即使用户选的和目标环境对不上；而高危操作换不来自动批准。 */}
-              <p className="agent-settings-note">
-                决定这次运行按哪套策略判定。选定的策略会取代「按环境自动」，即使目标环境与它不一致；而 high / critical 操作无论选哪套都必须由你批准。
-              </p>
               {policyWarning ? <p className="agent-settings-warning" role="status">{policyWarning}</p> : null}
               <ul className="agent-settings-options">
                 {RUN_POLICY_ORDER.map((key) => {
@@ -685,7 +676,6 @@ export function AgentComposer({
                       onClick={() => onRunPolicyChange(spec.value)}
                     >
                       <span className="agent-settings-option-label">{spec.label}</span>
-                      <span className="agent-settings-option-note">{spec.summary}</span>
                     </button>
                   </li>
                   );
@@ -697,9 +687,7 @@ export function AgentComposer({
 
         <div className="agent-composer-toolbar">
           <div className="agent-composer-toolbar-left">
-            {/* 最左侧的「+」展开设置：运行模式（做到什么程度）、批准方式（谁
-                点头）与目标策略（按哪套策略判定）。只读模式下「+」保持可点 ——
-                用户必须能改主意。 */}
+            {/* 运行设置独立于附件入口，只读模式下也能调整下一次运行。 */}
             <button
               type="button"
               ref={settingsTriggerRef}
@@ -713,10 +701,7 @@ export function AgentComposer({
                 setTrigger(null);
               }}
             >
-              {/* A plus rotated 45° is the close glyph, so the control animates
-                  between the two states instead of swapping one drawing for
-                  another. Keep rendering `plus`: the rotation is the state. */}
-              <Icon name="plus" size="lg" />
+              <Icon name="settings" size="md" />
             </button>
             <button
               type="button"
@@ -727,10 +712,10 @@ export function AgentComposer({
                   ? `每条消息最多 ${AGENT_PROMPT_LIMITS.maxImages} 张图片`
                   : "添加图片"
               }
-              disabled={!canSend || running || imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages}
+              disabled={!canEdit || imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages}
               onClick={() => fileInputRef.current?.click()}
             >
-              <Icon name="image" size="lg" />
+              <Icon name="image" size="md" />
             </button>
             <button
               type="button"
@@ -743,31 +728,14 @@ export function AgentComposer({
                   : "添加文本文件或 PDF"
               }
               disabled={
-                !canSend ||
-                running ||
+                !canEdit ||
                 (fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
                   documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments)
               }
               onClick={() => otherFileInputRef.current?.click()}
             >
-              <Icon name="file" size="lg" />
+              <Icon name="file" size="md" />
             </button>
-            {/* 当前状态的常驻摘要：不展开菜单也能看出这次运行会怎样。 */}
-            <span className={`agent-mode-summary ${modeSpec.readOnly ? "is-readonly" : ""}`}>
-              {modeSpec.label}
-            </span>
-            <span className="agent-approval-summary" title={approvalSpec.summary}>
-              {approvalSpec.label}
-            </span>
-            <span
-              className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`}
-              title={policyWarning ?? policySpec.summary}
-            >
-              {policyWarning ? <Icon name="warning" size="sm" /> : null}
-              {policySpec.label}
-            </span>
-          </div>
-          <div className="agent-composer-toolbar-right">
             {models.length ? (
               <ModelPicker
                 choices={models}
@@ -777,6 +745,8 @@ export function AgentComposer({
                 disabled={running}
               />
             ) : <span className="agent-model-empty">未配置模型</span>}
+          </div>
+          <div className="agent-composer-toolbar-right">
             {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
                 点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。
                 语音若要做，应作为真实能力连同它的权限与降级路径一起加回来。 */}
@@ -793,7 +763,7 @@ export function AgentComposer({
                 onClick={submit}
                 onAnimationEnd={sendPresence.onAnimationEnd}
               >
-                发送
+                <Icon name="arrowUp" size="md" />
               </button>
             ) : null}
           </div>
@@ -811,8 +781,8 @@ export function AgentComposer({
             <button
               type="button"
               className="agent-stop-button"
-              aria-label="停止 Agent"
-              title={stopping ? "停止中" : "停止 Agent"}
+              aria-label="停止运行"
+              title={stopping ? "停止中" : "停止运行"}
               disabled={!canStop}
               onClick={onStop}
             >
@@ -821,6 +791,22 @@ export function AgentComposer({
             </button>
           </div>
         ) : null}
+      </div>
+      {/* 权限与策略始终可见，独立换行，不被模型名称或发送按钮挤掉。 */}
+      <div className="agent-composer-policy" aria-label="本次运行方式">
+        <span className={`agent-mode-summary ${modeSpec.readOnly ? "is-readonly" : ""}`}>
+          {modeSpec.label}
+        </span>
+        <span className="agent-approval-summary" title={approvalSpec.summary}>
+          {approvalSpec.label}
+        </span>
+        <span
+          className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`}
+          title={policyWarning ?? policySpec.summary}
+        >
+          {policyWarning ? <Icon name="warning" size="sm" /> : null}
+          {policySpec.label}
+        </span>
       </div>
     </footer>
   );

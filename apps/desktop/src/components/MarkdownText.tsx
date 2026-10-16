@@ -18,7 +18,7 @@
  * 错误、路径还是标识符，与原来一样由 token 规则决定。
  */
 
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 
 import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
@@ -26,7 +26,7 @@ import { KeywordText } from "./KeywordText.js";
 
 const HEADING_TAG = { 1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6" } as const;
 
-export function MarkdownText({ text, className }: { text: string; className?: string }) {
+export const MarkdownText = memo(function MarkdownText({ text, className }: { text: string; className?: string }) {
   const blocks = parseMarkdown(text);
   return (
     <div className={className}>
@@ -35,7 +35,7 @@ export function MarkdownText({ text, className }: { text: string; className?: st
       ))}
     </div>
   );
-}
+});
 
 function BlockView({ block }: { block: Block }) {
   switch (block.kind) {

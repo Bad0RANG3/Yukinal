@@ -72,23 +72,17 @@ export function appendEntries(current: Entry[], additions: Entry[]): Entry[] {
  * 流式文本按 run 累积。事件乱序也没关系：同一 run 的增量永远追加到
  * 末尾那条 assistant 行上，而不是新起一行。
  */
-export function appendReasoningDelta(current: Entry[], delta: string): Entry[] {
+function appendTextDelta(current: Entry[], kind: "reasoning" | "assistant", delta: string): Entry[] {
   if (delta.length === 0) return current;
   const last = current.at(-1);
-  if (last?.kind === "reasoning") {
-    return appendEntries(current.slice(0, -1), [{ kind: "reasoning", text: last.text + delta }]);
-  }
-  return appendEntries(current, [{ kind: "reasoning", text: delta }]);
+  if (last?.kind !== kind) return appendEntries(current, [{ kind, text: delta }]);
+  const next = current.slice(-MAX_TRANSCRIPT_ENTRIES);
+  next[next.length - 1] = { kind, text: last.text + delta };
+  return next;
 }
 
-export function appendAssistantDelta(current: Entry[], delta: string): Entry[] {
-  if (delta.length === 0) return current;
-  const last = current.at(-1);
-  if (last?.kind === "assistant") {
-    return appendEntries(current.slice(0, -1), [{ kind: "assistant", text: last.text + delta }]);
-  }
-  return appendEntries(current, [{ kind: "assistant", text: delta }]);
-}
+export const appendReasoningDelta = (current: Entry[], delta: string): Entry[] => appendTextDelta(current, "reasoning", delta);
+export const appendAssistantDelta = (current: Entry[], delta: string): Entry[] => appendTextDelta(current, "assistant", delta);
 
 /**
  * Reconcile the streamed prefix with the terminal snapshot.
@@ -163,13 +157,13 @@ export function sessionTitleFromPrompt(prompt: string): string {
 }
 
 export function lastUserPrompt(entries: Entry[]): string | undefined {
-  return [...entries].reverse().find((entry): entry is Extract<Entry, { kind: "user" }> => entry.kind === "user")?.text;
+  return lastUserEntry(entries)?.text;
 }
 
 export function lastUserEntry(
   entries: Entry[],
 ): Extract<Entry, { kind: "user" }> | undefined {
-  return [...entries].reverse().find(
+  return entries.findLast(
     (entry): entry is Extract<Entry, { kind: "user" }> => entry.kind === "user",
   );
 }

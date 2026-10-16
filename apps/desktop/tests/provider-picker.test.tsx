@@ -189,8 +189,8 @@ test("the enabled provider is the one marked, and only it", () => {
   const activate = buttons(html).find((button) => button.text === "设为当前");
   assert.ok(activate, "查看未启用的 Provider 时要能把它设为当前");
   assert.equal(activate.disabled, false);
-  assert.match(activate.title, /其余 Provider 会被停用/);
-  assert.match(html, /未启用：配置保留/);
+  assert.match(activate.title, /其余连接停用/);
+  assert.match(html, /未启用/);
 });
 
 test("the already-current provider has no second action to press", () => {
@@ -198,7 +198,7 @@ test("the already-current provider has no second action to press", () => {
   const current = buttons(html).find((button) => button.text === "当前使用中");
   assert.ok(current, "当前那个要显示成状态，而不是一个点了没反应的按钮");
   assert.equal(current.disabled, true);
-  assert.match(html, /新建 Agent 运行会使用它/);
+  assert.match(html, /已启用/);
 });
 
 test("the new-provider sentinel shows the empty form's consequence, not a provider's", () => {
@@ -206,7 +206,7 @@ test("the new-provider sentinel shows the empty form's consequence, not a provid
 
   assert.match(html, /<option[^>]*value="" selected/);
   assert.equal(buttons(html).length, 0, "新建时没有「设为当前」可点");
-  assert.match(html, /保存后会启用它，其余 Provider 自动停用/);
+  assert.match(html, /保存并启用/);
 });
 
 test("a busy write disables the control instead of letting two writes race", () => {

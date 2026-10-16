@@ -16,7 +16,7 @@
 
 .agent-history-toggle.is-active {
   border-color: var(--focus-line);
-  background: #15332f;
+  background: var(--ok-surface);
   color: var(--accent);
 }
 
@@ -40,14 +40,14 @@
 .agent-history-heading h3 {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: var(--text-subheading);
 }
 
 /* 「共 12 段 · 已载入 50」这类计数：等宽数字，免得数字变化时整行宽度跳动。 */
 .agent-history-summary {
   margin: 3px 0 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
 }
 
@@ -60,7 +60,7 @@
 .agent-history-new {
   min-height: 28px;
   padding: 5px 8px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-search {
@@ -69,8 +69,8 @@
   align-items: center;
   gap: 7px;
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: #0a0f13;
+  border-radius: var(--radius-control);
+  background: var(--material-inset);
   color: var(--faint);
   padding: 0 9px;
 }
@@ -85,7 +85,7 @@
 
 .agent-history-search:focus-within {
   border-color: var(--focus-line);
-  box-shadow: 0 0 0 3px var(--focus-halo);
+  box-shadow: var(--shadow-focus);
 }
 
 .agent-history-search input {
@@ -95,7 +95,7 @@
   outline: 0;
   background: transparent;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-search input::placeholder {
@@ -130,7 +130,7 @@
   align-items: center;
   gap: 2px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--surface-2);
   padding: 2px;
 }
@@ -143,11 +143,11 @@
   gap: 5px;
   /* 边框一直占位、只在选中时换颜色：否则文字会在切换的瞬间左右跳一下。 */
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--faint);
   padding: 4px 6px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-tabs button:hover {
@@ -163,7 +163,7 @@
 /* 计数回答的是「有多少」，不是「我在哪」，所以它比标签暗一档。 */
 .agent-history-tab-count {
   color: inherit;
-  font-size: 9px;
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
   opacity: 0.6;
 }
@@ -210,7 +210,7 @@
   background: var(--surface-1);
   color: var(--muted);
   padding: 1px 3px 5px;
-  font-size: 10px;
+  font-size: var(--text-caption);
   font-weight: 600;
   letter-spacing: 0.04em;
 }
@@ -226,7 +226,7 @@
   min-width: 0;
   flex-direction: column;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   background: var(--surface-2);
   transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease;
 }
@@ -239,7 +239,7 @@
    面板很窄，一行行看过去时「哪一段是打开的」要能一眼扫到。 */
 .agent-history-row.is-active {
   border-color: var(--focus-line);
-  background: #12221f;
+  background: var(--ok-surface);
 }
 
 .agent-history-row.is-active::before {
@@ -249,7 +249,7 @@
   bottom: 8px;
   left: -1px;
   width: 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-detail);
   background: var(--focus-line);
 }
 
@@ -265,7 +265,7 @@
   flex-direction: column;
   gap: 5px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: inherit;
   padding: 9px 10px 8px;
@@ -284,7 +284,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -294,7 +294,7 @@
 .agent-history-row-top time {
   flex: 0 0 auto;
   color: var(--faint);
-  font-size: 9px;
+  font-size: var(--text-caption);
   white-space: nowrap;
   transition: opacity var(--motion-fast) ease;
 }
@@ -316,7 +316,7 @@
   display: -webkit-box;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -328,7 +328,7 @@
   align-items: center;
   gap: 6px;
   color: var(--faint);
-  font-size: 9px;
+  font-size: var(--text-caption);
 }
 
 /* 目标是服务器**名字**，不是 srv_ 开头的 id：列表要回答「这是冲着哪台机器去的」。 */
@@ -336,7 +336,7 @@
   max-width: 132px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   padding: 1px 6px;
   text-overflow: ellipsis;
@@ -345,15 +345,15 @@
 
 .agent-history-badge {
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   padding: 1px 6px;
 }
 
 /* 搜索命中：只染底色，不动字形 —— 一段标题里的命中不该改变它的粗细与行高。 */
 .agent-history-match {
-  border-radius: 2px;
-  background: #2c3f3a;
+  border-radius: var(--radius-detail);
+  background: var(--ok-surface);
   color: inherit;
   padding: 0 1px;
 }
@@ -367,7 +367,7 @@
   align-items: center;
   gap: 2px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--surface-3);
   padding: 1px;
   opacity: 0;
@@ -393,7 +393,7 @@
 
 .agent-history-rename-input {
   min-height: 30px;
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-rename-actions,
@@ -407,7 +407,7 @@
 .agent-history-rename-actions .text-button,
 .agent-history-confirm-actions .text-button {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-rename-actions .text-button:hover:not(:disabled),
@@ -419,7 +419,7 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--danger-surface);
   padding: 9px 10px;
 }
@@ -427,7 +427,7 @@
 .agent-history-confirm p {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -439,7 +439,7 @@
 
 .agent-history-confirm-delete:hover:not(:disabled) {
   border-color: var(--danger-line);
-  background: #2f1a1e;
+  background: var(--danger-surface);
 }
 
 /* 还有更多记录时刻意画成虚线：它是一条「继续往下」的边界，不是一个普通按钮。 */
@@ -449,11 +449,11 @@
   justify-content: center;
   gap: 6px;
   border: 1px dashed var(--line-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   padding: 8px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-more:hover:not(:disabled) {
@@ -483,8 +483,8 @@
 }
 
 .agent-history-delete:hover:not(:disabled) {
-  border-color: #704044;
-  background: #291a1d;
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
   color: var(--danger);
 }
 
@@ -506,24 +506,24 @@
 
 .agent-history-empty strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--text-label);
 }
 
 .agent-history-empty p {
   max-width: 230px;
   margin: 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
 }
 
 .agent-history-error {
-  border: 1px solid #704044;
-  border-radius: 7px;
-  background: #291a1d;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-control);
+  background: var(--danger-surface);
   color: var(--danger);
   padding: 8px 9px;
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }

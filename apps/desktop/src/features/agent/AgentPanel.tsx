@@ -21,7 +21,7 @@ import type {
   Environment,
   RestartRecord,
 } from "@yukinal/shared";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { isDesktopShell } from "../../lib/ipc.js";
@@ -35,6 +35,7 @@ import { AgentFeed } from "./AgentFeed.js";
 import { AgentHeader } from "./AgentHeader.js";
 import { AgentHistoryPane } from "./AgentHistoryPane.js";
 import { AgentNotices } from "./AgentNotices.js";
+import { AgentStarters } from "./AgentStarters.js";
 import {
   commandHelpText,
   resolveMentionedServer,
@@ -63,12 +64,19 @@ function restartId(restart: RestartRecord | undefined): string | null {
   return restart ? `${restart.attempt}:${restart.at}` : null;
 }
 
-export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => void; onCloseEnd?: () => void }) {
-  const agentStatus = useAgentStatus();
+export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, onAttentionRequested }: {
+  onCloseStart?: () => void;
+  onCloseEnd?: () => void;
+  workspace?: boolean;
+  workspaceControls?: ReactNode;
+  onAttentionRequested?: () => void;
+}) {
+  const agentStatus = useAgentStatus({ poll: true });
   const spawnAgent = useSpawnAgent();
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectedTaskId = useWorkspaceStore((state) => state.selectedTaskId);
-  const agentOpen = useWorkspaceStore((state) => state.agentOpen);
+  const requestedOpen = useWorkspaceStore((state) => state.agentOpen);
+  const agentOpen = workspace || requestedOpen;
   const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
   const toggleAgent = useWorkspaceStore((state) => state.toggleAgent);
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
@@ -78,7 +86,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const setPreferences = usePreferencesStore((state) => state.setPreferences);
 
   const shell = isDesktopShell();
-  const agentRunning = agentStatus.data?.running === true;
+  const preview = isPreviewFixture();
+  const agentRunning = !preview && agentStatus.data?.running === true;
   const servers = useServers();
   const focusServer = servers.data?.find((server) => server.id === selectedServerId);
 
@@ -86,12 +95,12 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const sessions = useChatSessions();
   // 「收到审批时把面板带到前景」是导航决策，所以由面板注入，而不是让运行模块去读 store。
   const run = useAgentRun({
-    sidecarRunning: agentStatus.data?.running,
+    sidecarRunning: agentRunning,
     // 崩溃与自动重启之间的间隔可能短于一次轮询，所以「进程死过」这件事要由重启记录
     // 提供，而不能只靠 `running === false`。
     sidecarRestart: restartId(agentStatus.data?.restart),
     onAssistantMessage: (text) => void sessions.recordAssistantMessage(text),
-    onApprovalRequested: () => setAgentOpen(true),
+    onApprovalRequested: () => { setAgentOpen(true); onAttentionRequested?.(); },
   });
 
   // 草稿和「正在跑」放在 workspace store 里，是因为首次使用引导要先替用户填好
@@ -108,7 +117,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
   const [runContext, setRunContext] = useState<string | null>(null);
   // 预览页应当一打开就展示已注入的虚构对话，方便视觉检查与 README 截图；
   // 正式桌面壳仍保持默认收起，避免遮住工作区。
-  const [historyOpen, setHistoryOpen] = useState(() => isPreviewFixture());
+  const [historyOpen, setHistoryOpen] = useState(() => !workspace && isPreviewFixture());
   /** 记录视图关闭时把焦点还给它 —— 见 AgentHistoryPane 的卸载 effect。 */
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   /**
@@ -127,9 +136,13 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
     togglePanel: toggleAgent,
     onCloseStart,
     onCloseEnd,
+    persistent: workspace,
   });
 
   const canSend = shell && agentRunning && run.listening && models.providerReady && !sessions.archived;
+  const starterBlockedReason = sessions.archived ? "恢复当前对话后，可以继续准备任务。"
+    : run.running ? "当前任务完成后，可以选择新的起点。"
+    : prompt.trim() || attachments.length ? "先完成当前草稿，再选择新的起点。" : null;
 
   const commandContext: CommandContext = { running: run.running, archived: sessions.archived, desktop: shell };
 
@@ -258,6 +271,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
       id="agent-panel"
       ref={panel.panelRef}
       className={`agent-panel ${panel.panelClass}`}
+      aria-label="对话"
       aria-hidden={!agentOpen}
       onAnimationEnd={panel.onAnimationEnd}
     >
@@ -273,6 +287,14 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
         onToggleHistory={() => setHistoryOpen((current) => !current)}
         onToggle={panel.toggle}
         closeButtonRef={panel.closeButtonRef}
+        workspace={workspace}
+        workspaceControls={workspaceControls}
+        context={<div className="agent-context">
+          <Icon name="servers" size="sm" />
+          <span title={(run.running ? runContext : focusServer?.name) ?? "全局工作区"}>
+            {(run.running ? runContext : focusServer?.name) ?? "全局工作区"}
+          </span>
+        </div>}
       />
 
       {historyOpen ? (
@@ -289,71 +311,77 @@ export function AgentPanel({ onCloseStart, onCloseEnd }: { onCloseStart?: () => 
         />
       ) : (
         <>
-          <div className="agent-context">
-            <Icon name="servers" size="sm" />
-            <span title={runContext ?? focusServer?.name ?? "全局工作区"}>
-              {run.running ? runContext : focusServer?.name ?? "全局工作区"}
-            </span>
-            <small>{run.running ? "本次运行目标" : "当前上下文"}</small>
-          </div>
           {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
 
-          <AgentFeed
-            entries={run.entries}
-            running={run.running}
-            runState={run.runState}
-            lastUserEntry={lastUserEntry(run.entries)}
-            canSend={canSend}
-            onRetry={(entry) => void send(entry.text, entry.attachments ?? [], false)}
-            onApproval={run.respondApproval}
-            pendingApprovalIds={run.pendingApprovalIds}
-            approvalStatuses={run.approvalStatuses}
-            feedRef={follow.feedRef}
-            onScroll={follow.onScroll}
-          >
-            <AgentNotices
-              shell={shell}
-              agentRunning={agentRunning}
-              providerReady={models.providerReady}
-              agentExited={Boolean(agentStatus.data?.lastExit)}
-              restart={agentStatus.data?.restart}
-              statusUnreadable={agentStatus.isError}
-              spawning={spawnAgent.isPending}
-              spawnError={spawnAgent.error?.message}
-              onSpawn={() => spawnAgent.mutate()}
-              onOpenSettings={() => setPrimary("settings")}
+          <div className={`agent-conversation ${run.entries.length === 0 ? "is-empty" : "has-messages"}`}>
+            <AgentFeed
+              entries={run.entries}
+              running={run.running}
+              runState={run.runState}
+              lastUserEntry={lastUserEntry(run.entries)}
+              canSend={canSend}
+              onRetry={(entry) => void send(entry.text, entry.attachments ?? [], false)}
+              onApproval={run.respondApproval}
+              pendingApprovalIds={run.pendingApprovalIds}
+              approvalStatuses={run.approvalStatuses}
+              feedRef={follow.feedRef}
+              onScroll={follow.onScroll}
             />
-          </AgentFeed>
 
-          {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
+            <div className="agent-input-region">
+              <div className="agent-input-notices">
+                {preview ? <p className="agent-notice" role="status">模拟预览 · 可输入草稿，暂不发送请求。</p> : <AgentNotices
+                  shell={shell}
+                  agentRunning={agentRunning}
+                  providerReady={models.providerReady}
+                  agentExited={Boolean(agentStatus.data?.lastExit)}
+                  restart={agentStatus.data?.restart}
+                  statusUnreadable={agentStatus.isError}
+                  spawning={spawnAgent.isPending}
+                  spawnError={spawnAgent.error?.message}
+                  onSpawn={() => spawnAgent.mutate()}
+                  onOpenSettings={() => setPrimary("settings")}
+                />}
+                {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
+              </div>
 
-          <AgentComposer
-            prompt={prompt}
-            onPromptChange={setPrompt}
-            attachments={attachments}
-            onAttachmentsChange={setAttachments}
-            onSubmit={handleSubmit}
-            onStop={() => void run.stop()}
-            running={run.running}
-            stopping={run.stopping}
-            canSend={canSend}
-            canStop={Boolean(run.runId) && !run.stopping}
-            permissionMode={permissionMode}
-            onPermissionModeChange={(mode) => setPreferences({ agentPermissionMode: mode })}
-            runMode={runMode}
-            onRunModeChange={(mode) => setPreferences({ agentRunMode: mode })}
-            delivery={delivery}
-            onDeliveryChange={(value) => setPreferences({ agentDelivery: value })}
-            runPolicy={runPolicy}
-            onRunPolicyChange={setRunPolicy}
-            targetEnvironment={targetEnvironment}
-            models={models.modelChoices}
-            selectedModelKey={models.selectedModelKey}
-            selectedModelLabel={models.selectedModelLabel}
-            onSelectModel={models.selectModelKey}
-            mentions={mentionCandidates}
-            commandContext={commandContext}
-          />
+              <AgentComposer
+                prompt={prompt}
+                onPromptChange={setPrompt}
+                attachments={attachments}
+                onAttachmentsChange={setAttachments}
+                onSubmit={handleSubmit}
+                onStop={() => void run.stop()}
+                running={run.running}
+                stopping={run.stopping}
+                canSend={canSend}
+                canStop={Boolean(run.runId) && !run.stopping}
+                permissionMode={permissionMode}
+                onPermissionModeChange={(mode) => setPreferences({ agentPermissionMode: mode })}
+                runMode={runMode}
+                onRunModeChange={(mode) => setPreferences({ agentRunMode: mode })}
+                delivery={delivery}
+                onDeliveryChange={(value) => setPreferences({ agentDelivery: value })}
+                runPolicy={runPolicy}
+                onRunPolicyChange={setRunPolicy}
+                targetEnvironment={targetEnvironment}
+                models={models.modelChoices}
+                selectedModelKey={models.selectedModelKey}
+                selectedModelLabel={models.selectedModelLabel}
+                onSelectModel={models.selectModelKey}
+                mentions={mentionCandidates}
+                commandContext={commandContext}
+              />
+              {workspace && run.entries.length === 0 ? <AgentStarters
+                blockedReason={starterBlockedReason}
+                onPick={(text) => {
+                  if (sessions.archived || run.running || prompt.trim() || attachments.length) return;
+                  setPrompt(text);
+                  requestAnimationFrame(() => panel.panelRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
+                }}
+              /> : null}
+            </div>
+          </div>
         </>
       )}
     </aside>

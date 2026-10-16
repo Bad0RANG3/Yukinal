@@ -16,6 +16,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
 } from "@yukinal/shared";
+import { memo } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
@@ -24,7 +25,7 @@ import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../.
 import { imageAttachmentUrl } from "./image-attachments.js";
 import { targetLabel, type Entry } from "./transcript.js";
 
-export function AgentEntryView({
+export const AgentEntryView = memo(function AgentEntryView({
   entry,
   onApproval,
   approvalBusy,
@@ -109,7 +110,7 @@ export function AgentEntryView({
     case "assistant":
       return (
         <div className={`agent-entry agent-entry-assistant${streaming ? " agent-entry-streaming" : ""}`}>
-          <span className="entry-label">Agent</span>
+          <span className="entry-label">回复</span>
           <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" />
         </div>
       );
@@ -165,7 +166,7 @@ export function AgentEntryView({
         </div>
       );
   }
-}
+});
 
 /**
  * 一次工具调用 —— 调用与结果合成一张卡片。

@@ -315,10 +315,10 @@ test("the declared font families exist as real faces in the stylesheet", () => {
 });
 
 test("the terminal stack matches the --font-terminal token", () => {
-  // `styles/app-shell.css` already carries this exact stack as `--font-terminal`, which is what
+  // The shared design tokens carry this stack as `--font-terminal`, which is what
   // the xterm container inherits before the JS option overwrites it. Two copies of the
   // same list drift; this pins them together.
-  const css = readFileSync(new URL("../src/styles/app-shell.css", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/styles/design-tokens.css", import.meta.url), "utf8");
   const token = /--font-terminal:\s*([^;]+);/.exec(css);
   assert.ok(token, "--font-terminal is not defined");
   const tokenValue = token[1];

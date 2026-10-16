@@ -1,18 +1,18 @@
 /**
  * Main navigation skeleton:
  *
- *   Servers | Projects | Activity | Settings      <- primary nav
+ *   Servers | Tasks | Activity | Settings         <- primary nav
  *   Overview | Terminal | Files | Logs | Services  <- server-scoped pages
- *   Agent (always visible right)
+ *   AI workspace (persistent center) | Dashboard / selected server (right)
  *
- * Overview is the default page, not the terminal (Principle 1).
+ * The fleet dashboard is the default reference view; a selected server opens its overview.
  */
 
 import { create } from "zustand";
 
 import type { AgentPromptPart } from "@yukinal/shared";
 
-export const PRIMARY_NAV = ["servers", "projects", "tasks", "activity", "settings"] as const;
+export const PRIMARY_NAV = ["servers", "tasks", "activity", "settings"] as const;
 export type PrimaryNav = (typeof PRIMARY_NAV)[number];
 
 export const SERVER_PAGES = ["overview", "terminal", "files", "logs", "services", "activity"] as const;
@@ -21,11 +21,12 @@ export type ServerPage = (typeof SERVER_PAGES)[number];
 export interface WorkspaceState {
   primary: PrimaryNav;
   serverPage: ServerPage;
+  serverDetailOpen: boolean;
   selectedServerId: string | null;
   selectedProviderId: string | null;
   selectedModel: string | null;
   selectedTaskId: string | null;
-  /** Right panel is session-scoped and opens automatically for approvals. */
+  /** Kept for run/approval integration; the central AI workspace stays visible. */
   agentOpen: boolean;
   agentDraft: string;
   agentAttachments: AgentPromptPart[];
@@ -47,6 +48,7 @@ export interface WorkspaceState {
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   primary: "servers",
   serverPage: "overview",
+  serverDetailOpen: false,
   selectedServerId: null,
   selectedProviderId: null,
   selectedModel: null,
@@ -58,11 +60,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setAgentDraft: (agentDraft) => set({ agentDraft }),
   setAgentAttachments: (agentAttachments) => set({ agentAttachments }),
   setAgentBusy: (agentBusy) => set({ agentBusy }),
-  setPrimary: (primary) => set({ primary }),
-  setServerPage: (serverPage) => set({ serverPage, primary: "servers" }),
+  setPrimary: (primary) => set(primary === "servers" ? { primary, serverDetailOpen: false } : { primary }),
+  setServerPage: (serverPage) => set({ serverPage, primary: "servers", serverDetailOpen: true }),
   selectServer: (selectedServerId) => set((state) => ({
     selectedServerId,
     primary: selectedServerId ? "servers" : state.primary,
+    serverDetailOpen: Boolean(selectedServerId),
     serverPage: selectedServerId === state.selectedServerId ? state.serverPage : "overview",
   })),
   // Background refreshes can reconcile a deleted selection without taking the

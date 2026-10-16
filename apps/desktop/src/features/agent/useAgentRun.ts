@@ -20,6 +20,7 @@ import {
   type AgentTokenUsage,
   type ApprovalDecision,
   type ApprovalRequest,
+  type IpcCommandMap,
 } from "@yukinal/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -347,18 +348,14 @@ export function useAgentRun(options: {
     setTokenUsage(null);
     approvalLocks.current.clear();
 
+    const attachments = parts.filter((part) => part.type === "image" || part.type === "file" || part.type === "document");
+    const userEntry: Entry = {
+      kind: "user",
+      text: prompt,
+      ...(attachments.length ? { attachments } : {}),
+    };
     try {
-      const attachments = parts.filter(
-        (part): part is Extract<AgentPromptPart, { type: "image" | "file" | "document" }> =>
-          part.type === "image" || part.type === "file" || part.type === "document",
-      );
-      setEntries([
-        {
-          kind: "user",
-          text: prompt,
-          ...(attachments.length ? { attachments } : {}),
-        },
-      ]);
+      setEntries([userEntry]);
       // The first call records the message without executing it. The second call is
       // the resume; keeping these separate is what makes retrying the second call
       // idempotent rather than producing a second user message or run.
@@ -369,42 +366,29 @@ export function useAgentRun(options: {
       }
       const admitted = pendingAdmission.current;
       if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
-      const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
+      const request: IpcCommandMap[typeof IPC_COMMANDS.agentRunStart]["params"] = {
         runId: admitted.runId,
         sessionId: admitted.sessionId,
         taskId: input.taskId ?? undefined,
         prompt,
         messageId: admitted.messageId,
         parts,
-        delivery: "async",
-        resume: false,
         providerId: input.providerId ?? undefined,
         model: input.model ?? undefined,
         focusServerId: input.focusServerId ?? undefined,
         permissionMode: input.permissionMode,
         mode: input.mode,
+        // Omitted policy means the sidecar derives it from the target environment.
         policyId: input.policyId ?? undefined,
+      };
+      const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
+        ...request, delivery: "async", resume: false,
       });
       if (admissionResponse.runId !== admitted.runId) {
         throw new Error("sidecar 为已受理消息返回了不同的 runId。");
       }
       const response = await callDesktop(IPC_COMMANDS.agentRunStart, {
-        runId: admitted.runId,
-        sessionId: admitted.sessionId,
-        taskId: input.taskId ?? undefined,
-        prompt,
-        messageId: admitted.messageId,
-        parts,
-        delivery: input.delivery ?? "async",
-        resume: true,
-        providerId: input.providerId ?? undefined,
-        model: input.model ?? undefined,
-        focusServerId: input.focusServerId ?? undefined,
-        permissionMode: input.permissionMode,
-        mode: input.mode,
-        // 不传 = 由 sidecar 按目标环境推导策略。这里不做任何「默认策略」的猜测：
-        // 猜错就是让这次运行受另一套策略约束，而界面显示的却是「按环境自动」。
-        policyId: input.policyId ?? undefined,
+        ...request, delivery: input.delivery ?? "async", resume: true,
       });
       if (response.duplicate || !response.started || !response.resumed) {
         throw new Error("这条消息已经由另一个调用启动，当前界面不能重复接管它。");
@@ -420,18 +404,7 @@ export function useAgentRun(options: {
       lifecycle.current.fail();
       setRunning(false);
       setRunState("failed");
-      const attachments = parts.filter(
-        (part): part is Extract<AgentPromptPart, { type: "image" | "file" | "document" }> =>
-          part.type === "image" || part.type === "file" || part.type === "document",
-      );
-      setEntries([
-        {
-          kind: "user",
-          text: prompt,
-          ...(attachments.length ? { attachments } : {}),
-        },
-        { kind: "error", text: String(error) },
-      ]);
+      setEntries([userEntry, { kind: "error", text: String(error) }]);
       return "failed";
     }
   }, []);

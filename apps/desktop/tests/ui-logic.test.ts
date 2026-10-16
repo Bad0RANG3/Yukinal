@@ -268,6 +268,19 @@ test("streaming deltas accumulate into the trailing assistant line", () => {
   assert.equal(appendAssistantDelta(second, ""), second);
 });
 
+test("streaming keeps settled rows immutable and enforces the history limit", () => {
+  for (const [kind, append] of [["assistant", appendAssistantDelta], ["reasoning", appendReasoningDelta]] as const) {
+    const full: Entry[] = Array.from({ length: MAX_TRANSCRIPT_ENTRIES + 2 }, () => ({ kind: "user", text: "history" }));
+    full.push({ kind, text: "first" });
+    const next = append(full, " second");
+    assert.equal(next.length, MAX_TRANSCRIPT_ENTRIES);
+    assert.equal(next[0], full[full.length - MAX_TRANSCRIPT_ENTRIES]);
+    assert.equal(full.length, MAX_TRANSCRIPT_ENTRIES + 3);
+    assert.deepEqual(next.at(-1), { kind, text: "first second" });
+    assert.deepEqual(full.at(-1), { kind, text: "first" });
+  }
+});
+
 test("a delta arriving after a tool card opens a fresh assistant line", () => {
   const entries: Entry[] = [
     { kind: "assistant", text: "先看一下" },

@@ -225,6 +225,13 @@ the shared contracts and C++ host, then starts Vite and the native window. It
 accepts `YUKINAL_DESKTOP_HOST_BUILD_DIR` and `YUKINAL_DATA_DIR` for local build and
 data-directory overrides.
 
+The native development window stays connected to Vite: saving React or CSS files
+updates the open window automatically. Its AI header shows a development-only
+live-preview indicator and a manual refresh button. Manual refresh is disabled
+while an AI run or unsent input is present. Native C++ changes require rebuilding
+and reopening the host. Set `YUKINAL_DESKTOP_DEV_PORT` to choose another local port
+when the default port is occupied.
+
 The browser preview is available with `pnpm desktop:dev`; it does not connect to
 the SSH service. Packaging/installers are not implemented yet; see
 [the Rust removal and C++ takeover plan](./docs/rust-removal-plan.md).

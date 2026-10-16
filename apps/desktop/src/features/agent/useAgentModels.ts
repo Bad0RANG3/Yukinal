@@ -6,7 +6,7 @@
  */
 
 import type { AiProviderConfig } from "@yukinal/shared";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 
 import { useProviders } from "../../lib/providers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
@@ -24,6 +24,25 @@ export function modelChoiceKey(providerId: string, model: string): string {
   return `${providerId}:${model}`;
 }
 
+export function resolveAgentModels(providers: readonly AiProviderConfig[], providerId: string | null, modelId: string | null) {
+  const modelChoices: ModelChoice[] = [];
+  let selectedProvider: AiProviderConfig | undefined;
+  let fallback: AiProviderConfig | undefined;
+  let selectedModelLabel: string | null = null;
+  for (const provider of providers) {
+    if (!provider.enabled) continue;
+    fallback ??= provider;
+    if (provider.id === providerId) selectedProvider ??= provider;
+    const models = provider.models?.length ? provider.models : [{ id: provider.model, label: provider.model }];
+    for (const model of models) {
+      const label = model.label || model.id;
+      modelChoices.push({ key: modelChoiceKey(provider.id, model.id), providerId: provider.id, providerLabel: provider.label, model: model.id, label });
+      if (provider.id === providerId && model.id === modelId) selectedModelLabel ??= `${provider.label} · ${label}`;
+    }
+  }
+  return { modelChoices, selectedProvider, fallback, selectedModelLabel };
+}
+
 export function useAgentModels() {
   // 复用 `lib/providers.ts` 的规范查询，而不是在这里重写一遍 key 与 queryFn。
   // 两处写同一个 key 时，缓存是共享的，但 queryFn 是各写各的 —— 一旦 provider
@@ -33,32 +52,17 @@ export function useAgentModels() {
   const selectedModel = useWorkspaceStore((state) => state.selectedModel);
   const selectProvider = useWorkspaceStore((state) => state.selectProvider);
 
-  const modelChoices: ModelChoice[] = (providers.data ?? [])
-    .filter((provider) => provider.enabled)
-    .flatMap((provider) => {
-      const models = provider.models?.length ? provider.models : [{ id: provider.model, label: provider.model }];
-      return models.map((model) => ({
-        key: modelChoiceKey(provider.id, model.id),
-        providerId: provider.id,
-        providerLabel: provider.label,
-        model: model.id,
-        label: model.label || model.id,
-      }));
-    });
+  const { modelChoices, selectedProvider, fallback, selectedModelLabel } = useMemo(
+    () => resolveAgentModels(providers.data ?? [], selectedProviderId, selectedModel),
+    [providers.data, selectedProviderId, selectedModel],
+  );
 
   // 选中的 provider 可能被删除或被停用；落到第一个可用项，避免输入框假死。
   useEffect(() => {
-    if (!providers.data?.length) return;
-    const current = providers.data.find((provider: AiProviderConfig) => provider.id === selectedProviderId && provider.enabled);
-    const fallback = providers.data.find((provider: AiProviderConfig) => provider.enabled);
-    if (!current && fallback) selectProvider(fallback.id, fallback.model);
-  }, [providers.data, selectedProviderId, selectProvider]);
+    if (!selectedProvider && fallback) selectProvider(fallback.id, fallback.model);
+  }, [selectedProvider, fallback, selectProvider]);
 
-  const selectedProvider = providers.data?.find(
-    (provider: AiProviderConfig) => provider.id === selectedProviderId && provider.enabled,
-  );
   const selectedModelKey = selectedProviderId && selectedModel ? modelChoiceKey(selectedProviderId, selectedModel) : null;
-  const selectedChoice = modelChoices.find((choice) => choice.key === selectedModelKey);
 
   return {
     providers,
@@ -69,7 +73,7 @@ export function useAgentModels() {
     selectedModel,
     selectedModelKey,
     /** 「provider · model」，用于让用户一眼看到这次运行会用哪个模型。 */
-    selectedModelLabel: selectedChoice ? `${selectedChoice.providerLabel} · ${selectedChoice.label}` : null,
+    selectedModelLabel,
     /** 把渲染用的复合 key 还原成一次 provider 选择。 */
     selectModelKey: (key: string): void => {
       const [providerId, ...modelParts] = key.split(":");

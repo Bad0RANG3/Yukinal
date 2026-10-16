@@ -25,12 +25,12 @@
 import { Icon, type IconName } from "./Icon.js";
 
 /** 首屏或切页时的「正在读取」。结构与 `.loading-panel` 的 CSS 一一对应。 */
-export function LoadingPanel({ title, hint }: { title: string; hint: string }) {
+export function LoadingPanel({ title, hint }: { title: string; hint?: string }) {
   return (
     <div className="loading-panel">
       <div className="loading-spinner" />
       <strong>{title}</strong>
-      <span>{hint}</span>
+      {hint ? <span>{hint}</span> : null}
     </div>
   );
 }
@@ -105,14 +105,14 @@ export function EmptyPanel({
 }: {
   icon?: IconName;
   title: string;
-  body: React.ReactNode;
+  body?: React.ReactNode;
   extraClass?: string;
 }) {
   return (
     <div className={extraClass ? `empty-state page-empty ${extraClass}` : "empty-state page-empty"}>
       {icon ? <Icon name={icon} size="xl" /> : null}
       <h2>{title}</h2>
-      <p>{body}</p>
+      {body ? <p>{body}</p> : null}
     </div>
   );
 }

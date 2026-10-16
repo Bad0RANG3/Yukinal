@@ -79,7 +79,7 @@ export const AGENT_COMMANDS: readonly CommandSpec[] = [
   { name: "new", description: "开始一段新对话", requires: "idle" },
   { name: "clear", description: "清空当前动态", requires: "idle" },
   { name: "history", description: "打开对话记录", requires: "desktop" },
-  { name: "stop", description: "停止正在运行的 Agent", requires: "running" },
+  { name: "stop", description: "停止运行", requires: "running" },
   { name: "help", description: "查看可用命令", requires: "always" },
 ];
 

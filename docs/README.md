@@ -14,6 +14,7 @@ Yukinal 的目标是让 AI 借助已配置的工具与受控 SSH 能力完成服
 | 查看 C++/Python 重写当前阶段与接口 | [重写方案](./rewrite-cpp-python.md) |
 | 判断 Agent 能做什么、何时需要批准 | [安全与数据边界](./security.md) |
 | 安装、开发、测试或准备发布 | [交付与发布](./release.md) |
+| 调整圆角、材质、控件与后续主题皮肤 | [界面表达与皮肤约定](./ui-design-system.md) |
 | 查看版本记录 | [变更记录](./changelog.md) |
 
 第一次接触项目可先读仓库 [README](../README.md)；参与开发再读 [贡献指南](../CONTRIBUTING.md)。

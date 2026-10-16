@@ -177,20 +177,23 @@ export function RemoteFilesPane() {
   return (
     <section className="remote-files-page">
       <form className="files-toolbar" onSubmit={(event) => { event.preventDefault(); navigate(draftPath); }}>
+        <div className="files-location">
         <button type="button" className="button-secondary" onClick={() => navigate(parent)} disabled={path === "/"} title="返回上级目录" aria-label="返回上级目录"><Icon name="arrowUp" size="sm" /></button>
         <input className="form-input files-path-input" value={draftPath} onChange={(event) => setDraftPath(event.target.value)} aria-label="远程路径" title="输入绝对路径，按 Enter 打开" pattern="/.*" required spellCheck={false} />
         <button type="submit" className="button-secondary">前往</button>
         <button type="button" className="button-secondary" onClick={() => void files.refetch()} disabled={files.isFetching} title="刷新远程文件" aria-label="刷新远程文件"><Icon name="refresh" size="sm" />刷新</button>
-        <span className="files-toolbar-spacer" />
+        </div>
+        <div className="files-upload-actions">
         <button type="button" className="button-secondary" onClick={() => void pickLocal("uploadFiles")}>添加文件</button>
         <button type="button" className="button-secondary" onClick={() => void pickLocal("uploadDirectory")}>添加文件夹</button>
         <button type="button" className="button-primary" disabled={!queuedCount} onClick={() => void startUpload()}>上传{queuedCount ? " (" + queuedCount + ")" : ""}</button>
+        </div>
       </form>
       {error ? <p className="file-transfer-alert" role="alert">{error}</p> : null}
       {files.isError ? <ErrorPanel title="无法读取目录" message={errorMessage(files.error)} onRetry={() => void files.refetch()} /> : null}
       <div className="files-layout">
         <div className="file-list-panel">
-          <div className="section-heading"><div><p className="eyebrow">远程文件</p><h2>{path}</h2></div><span className="section-note">{entries.length} 项</span></div>
+          <div className="section-heading"><h2>远程文件</h2><span className="section-note">{entries.length} 项</span></div>
           <div className={"file-drop-zone" + (dropTarget === "remote" ? " file-drop-zone-active" : "")} onDragOver={(event) => { if (event.dataTransfer.types.includes(LOCAL_PATH_HANDLE_MIME)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setDropTarget("remote"); } }} onDragLeave={() => setDropTarget(null)} onDrop={(event) => { event.preventDefault(); transferLocalHandleForDrop(event); }}>
             {files.isLoading ? <p className="muted-copy" role="status">正在加载…</p> : entries.length ? <ul className="remote-file-list">{entries.map((entry) => <li key={entry.path}><button type="button" draggable={entry.type === "file" && (Boolean(downloadTarget) || preparedDrag?.path === entry.path)} onDragStart={(event) => {
               if (preparedDrag?.path === entry.path) {
@@ -201,16 +204,15 @@ export function RemoteFilesPane() {
               event.dataTransfer.setData(REMOTE_FILE_PATH_MIME, entry.path);
               event.dataTransfer.effectAllowed = "copy";
             }} className={"remote-file-row" + (selectedRemote?.path === entry.path ? " remote-file-row-selected" : "")} aria-current={selectedRemote?.path === entry.path ? "true" : undefined} onClick={() => open(entry)}><span className="remote-file-icon"><Icon name={entry.type === "directory" ? "folder" : "file"} size="md" /></span><span className="remote-file-name">{entry.name}</span><span className="remote-file-size">{entry.type === "directory" ? "目录" : formatBytes(entry.size)}</span></button></li>)}</ul> : files.isSuccess ? <p className="muted-copy">目录为空。</p> : null}
-            <p className="file-drop-hint">选择“准备拖到桌面”后，将远端文件拖出 Yukinal 可启动 Windows / macOS / Linux 原生文件拖动。选定下载目录后，可将远端文件拖到右侧本机区域下载；也可将右侧队列中的本机文件拖到这里上传。将本机文件拖入窗口可加入上传队列。</p>
           </div>
         </div>
         <div className="file-preview-panel">
-          <div className="section-heading"><div><p className="eyebrow">预览与本机队列</p><h2>{selectedLocal?.name ?? selectedRemote?.name ?? "选择文件"}</h2></div><span className="section-note">远端文件预览上限 1 MiB</span></div>
+          <div className="section-heading"><h2>预览与本机文件</h2></div>
           <div className={"local-file-queue" + (dropTarget === "local" ? " file-drop-zone-active" : "")} onDragOver={(event) => { if (event.dataTransfer.types.includes(REMOTE_FILE_PATH_MIME)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setDropTarget("local"); } }} onDragLeave={() => setDropTarget(null)} onDrop={(event) => { event.preventDefault(); setDropTarget(null); transferForRemoteDrag(event); }}>
             <div className="download-target-row"><span>{downloadTarget ? "下载到：" + downloadTarget.name : "尚未选择本机下载目录"}</span><button type="button" className="button-secondary" onClick={() => void pickLocal("downloadDirectory")}>选择下载目录</button></div>
-            {localHandles.length ? <ul className="local-handle-list">{localHandles.map((handle) => <li key={handle.handleId}><button type="button" draggable className={"local-handle-row" + (selectedLocal?.handleId === handle.handleId ? " remote-file-row-selected" : "")} onDragStart={(event) => { event.dataTransfer.setData(LOCAL_PATH_HANDLE_MIME, handle.handleId); event.dataTransfer.effectAllowed = "copy"; }} onDragEnd={() => setDropTarget(null)} onClick={() => { setSelectedLocal(handle); setSelectedRemote(null); }}><Icon name={handle.kind === "directory" ? "folder" : "file"} size="sm" /><span>{handle.name}</span><small>{handle.kind === "directory" ? "文件夹" : formatBytes(handle.size ?? 0)}</small></button></li>)}</ul> : <p className="file-drop-hint">拖放到窗口中的本机项目会显示在这里；也可使用“添加文件 / 添加文件夹”。</p>}
+            {localHandles.length ? <ul className="local-handle-list">{localHandles.map((handle) => <li key={handle.handleId}><button type="button" draggable className={"local-handle-row" + (selectedLocal?.handleId === handle.handleId ? " remote-file-row-selected" : "")} onDragStart={(event) => { event.dataTransfer.setData(LOCAL_PATH_HANDLE_MIME, handle.handleId); event.dataTransfer.effectAllowed = "copy"; }} onDragEnd={() => setDropTarget(null)} onClick={() => { setSelectedLocal(handle); setSelectedRemote(null); }}><Icon name={handle.kind === "directory" ? "folder" : "file"} size="sm" /><span>{handle.name}</span><small>{handle.kind === "directory" ? "文件夹" : formatBytes(handle.size ?? 0)}</small></button></li>)}</ul> : <p className="file-drop-hint">暂无本机文件</p>}
           </div>
-          {(selectedLocal?.kind === "file" || selectedRemote?.type === "file") ? <PreviewContent preview={selectedLocal?.kind === "file" ? localPreview.data : remotePreview.data} loading={selectedLocal?.kind === "file" ? localPreview.isLoading : remotePreview.isLoading} error={selectedLocal?.kind === "file" ? localPreview.error : remotePreview.error} onRetry={() => void (selectedLocal?.kind === "file" ? localPreview.refetch() : remotePreview.refetch())} /> : <div className="file-preview-empty"><Icon name="file" size="xxl" /><p>选择本机或远程文件查看预览</p><small>图片直接显示，文本按 UTF-8 读取，二进制文件显示元数据。</small></div>}
+          {(selectedLocal?.kind === "file" || selectedRemote?.type === "file") ? <PreviewContent preview={selectedLocal?.kind === "file" ? localPreview.data : remotePreview.data} loading={selectedLocal?.kind === "file" ? localPreview.isLoading : remotePreview.isLoading} error={selectedLocal?.kind === "file" ? localPreview.error : remotePreview.error} onRetry={() => void (selectedLocal?.kind === "file" ? localPreview.refetch() : remotePreview.refetch())} /> : <div className="file-preview-empty"><Icon name="file" size="lg" /><p>选择文件</p></div>}
           {selectedLocal?.kind === "file" ? <div className="remote-file-actions"><button type="button" className="button-primary" onClick={() => void startUpload([selectedLocal])}>上传到当前远端目录</button></div> : null}
           {selectedRemote?.type === "file" ? <div className="remote-file-actions">
             <button type="button" className="button-secondary file-download-button" onClick={() => downloadTarget ? void startDownloadPaths([selectedRemote.path], downloadTarget) : void pickLocal("downloadDirectory")}>{downloadTarget ? "下载选中文件" : "选择本机目录并下载"}</button>
@@ -220,7 +222,7 @@ export function RemoteFilesPane() {
         </div>
       </div>
       <section className="file-transfers-section" aria-label="文件传输任务">
-        <div className="section-heading"><div><p className="eyebrow">传输任务</p><h2>本机 ↔ {serverId}</h2></div><button type="button" className="button-secondary" onClick={() => void refreshTransfers()}>刷新</button></div>
+        <div className="section-heading"><h2>传输记录</h2><button type="button" className="button-secondary" onClick={() => void refreshTransfers()}>刷新</button></div>
         {activeTransfers.length === 0 && !(transfers.data?.length) ? <p className="muted-copy">暂无传输任务。</p> : null}
         <ul className="transfer-list">{(transfers.data ?? []).map((transfer) => <TransferCard key={transfer.transferId} transfer={transfer} conflictName={conflictName} setConflictName={setConflictName} onCancel={() => void callDesktop(IPC_COMMANDS.fileTransferCancel, { transferId: transfer.transferId }).then(refreshTransfers).catch((reason) => setError(errorMessage(reason)))} onResolve={(action) => void resolveConflict(transfer, action)} />)}</ul>
       </section>

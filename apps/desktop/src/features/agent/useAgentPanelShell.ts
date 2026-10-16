@@ -37,12 +37,14 @@ export function useAgentPanelShell({
   togglePanel,
   onCloseStart,
   onCloseEnd,
+  persistent = false,
 }: {
   agentOpen: boolean;
   close: () => void;
   togglePanel: () => void;
   onCloseStart?: () => void;
   onCloseEnd?: () => void;
+  persistent?: boolean;
 }): AgentPanelShell {
   const panelRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -52,6 +54,7 @@ export function useAgentPanelShell({
   const wasOpen = useRef(agentOpen);
 
   useEffect(() => {
+    if (persistent) return;
     if (agentOpen) {
       hasBeenOpen.current = true;
       setIsClosing(false);
@@ -59,11 +62,12 @@ export function useAgentPanelShell({
       setIsClosing(true);
       onCloseStart?.();
     }
-  }, [agentOpen, isClosing, onCloseStart]);
+  }, [agentOpen, isClosing, onCloseStart, persistent]);
 
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
+    if (persistent) { panel.inert = false; return; }
     panel.inert = !agentOpen;
     const openedInOverlay = agentOpen && !wasOpen.current && window.matchMedia(OVERLAY_QUERY).matches;
     wasOpen.current = agentOpen;
@@ -104,7 +108,7 @@ export function useAgentPanelShell({
       document.removeEventListener("keydown", onKeyDown);
       if (focusFrame !== undefined) cancelAnimationFrame(focusFrame);
     };
-  }, [agentOpen, close]);
+  }, [agentOpen, close, persistent]);
 
   const toggle = useCallback((): void => {
     if (agentOpen) {
@@ -125,7 +129,7 @@ export function useAgentPanelShell({
   );
 
   const panelClosing = !agentOpen && (isClosing || hasBeenOpen.current);
-  const panelClass = panelClosing ? "agent-panel-closing" : !agentOpen ? "agent-panel-hidden" : "";
+  const panelClass = persistent ? "agent-workspace" : panelClosing ? "agent-panel-closing" : !agentOpen ? "agent-panel-hidden" : "";
 
   return { panelRef, closeButtonRef, panelClass, toggle, onAnimationEnd };
 }

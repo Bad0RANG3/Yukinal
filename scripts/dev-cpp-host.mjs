@@ -49,7 +49,7 @@ function spawnLongRunning(command, args, options = {}) {
     cwd: options.cwd ?? root,
     env: options.env ?? process.env,
     stdio: "inherit",
-    windowsHide: true,
+    windowsHide: options.windowsHide ?? true,
   });
   runningChildren.add(child);
   const exit = new Promise((resolveResult) => {
@@ -150,7 +150,10 @@ async function main() {
   let result;
   try {
     await waitForVite(vite.child, url);
-    host = spawnLongRunning(hostExecutable(), ["--dev-url", url]);
+    // The native GUI must be visible. SW_HIDE in STARTUPINFO overrides the
+    // WebView's first ShowWindow call even though its process is running.
+    host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { windowsHide: false });
+    console.log("Desktop live preview is running; saved UI changes update this window automatically.");
     result = await Promise.race([
       vite.exit.then((value) => ({ role: "Vite", value })),
       host.exit.then((value) => ({ role: "C++ host", value })),

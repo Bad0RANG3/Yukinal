@@ -41,17 +41,19 @@ export function NetworkSettings() {
       setDraft(networkProxyForm(saved));
     },
   });
+  const dirty = Boolean(view && form && (
+    form.mode !== view.mode || form.credential.trim() || form.clearCredential
+  ));
+  const updateDraft = (next: NetworkProxyForm) => {
+    setDraft(next);
+    mutation.reset();
+  };
 
   return (
     <section className="settings-card">
       <div className="settings-card-header">
         <div>
-          <p className="eyebrow">网络</p>
           <h2>出站代理</h2>
-          <p>
-            MCP 服务器、OAuth 授权与远端 KRL 下载共用这一份设置。代理只改变连接怎么走：
-            endpoint 仍然必须是 HTTPS，重定向仍然不跟随。
-          </p>
         </div>
         <Icon name="shield" size="lg" />
       </div>
@@ -70,6 +72,7 @@ export function NetworkSettings() {
           <p className="form-hint" role="status">
             {networkProxySummary(view)}
           </p>
+          <fieldset className="settings-form-fields" disabled={mutation.isPending}>
           <div className="settings-form-grid">
             <label className="field-label" htmlFor={field("mode")}>
               出站方式
@@ -78,7 +81,7 @@ export function NetworkSettings() {
                 className="form-input"
                 value={form.mode}
                 onChange={(event) =>
-                  setDraft({
+                  updateDraft({
                     ...form,
                     mode: event.target.value as NetworkProxyMode,
                   })
@@ -98,8 +101,8 @@ export function NetworkSettings() {
                 spellCheck={false}
                 disabled={form.mode !== "system" || form.clearCredential}
                 value={form.credential}
-                placeholder={view.hasCredential ? "留空保留已存凭据" : "代理不需要认证时留空"}
-                onChange={(event) => setDraft({ ...form, credential: event.target.value })}
+                placeholder={view.hasCredential ? "留空保留已存凭据" : "可选"}
+                onChange={(event) => updateDraft({ ...form, credential: event.target.value })}
               />
             </label>
           </div>
@@ -110,31 +113,21 @@ export function NetworkSettings() {
                 disabled={!view.hasCredential}
                 checked={form.clearCredential}
                 onChange={(event) =>
-                  setDraft({ ...form, clearCredential: event.target.checked, credential: "" })
+                  updateDraft({ ...form, clearCredential: event.target.checked, credential: "" })
                 }
               />
               <span>
                 <strong>清除已存凭据</strong>
-                <small>
-                  {view.hasCredential
-                    ? "凭据只存在系统凭据库，界面不回填；删除后代理会按匿名请求发出去。"
-                    : "当前没有已存凭据。"}
-                </small>
-              </span>
-            </label>
-            <label className="settings-check-row">
-              <input type="checkbox" checked readOnly disabled />
-              <span>
-                <strong>代理凭据只进系统凭据库</strong>
-                <small>SQLite、设置响应、日志与错误里都只有引用，没有值。</small>
               </span>
             </label>
           </div>
+          </fieldset>
+          {dirty ? <p className="form-hint" role="status">有未保存的更改</p> : null}
           <div className="settings-card-actions">
             <button
               type="button"
               className="button-primary"
-              disabled={mutation.isPending}
+              disabled={mutation.isPending || !dirty}
               onClick={() => mutation.mutate(form)}
             >
               {mutation.isPending ? "保存中…" : "保存网络设置"}
@@ -151,7 +144,7 @@ export function NetworkSettings() {
       {mutation.isSuccess ? (
         <div className="settings-notice" role="status">
           <Icon name="shield" size="sm" />
-          <span>已保存。修改对下一次连接生效（正在运行的 MCP 服务器需要重启）。</span>
+          <span>已保存，下次连接生效</span>
         </div>
       ) : null}
     </section>

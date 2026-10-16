@@ -334,17 +334,17 @@ export function AgentHistoryPane({
       ? "正在读取记录"
       : `${query.trim() ? "匹配" : "共"} ${total} 段对话${total !== null && rows.length < total ? ` · 已载入 ${rows.length}` : ""}`;
 
-  const emptyState = (): { icon: "search" | "logs" | "sparkle"; title: string; body: string } => {
+  const emptyState = (): { icon: "search" | "logs"; title: string } => {
     if (query.trim()) {
-      return { icon: "search", title: "没有匹配的对话", body: "换个关键词试试，标题和消息正文都会被搜索。" };
+      return { icon: "search", title: "没有匹配的对话" };
     }
     if (filter === "archived") {
-      return { icon: "logs", title: "暂无已归档的对话", body: "归档过的任务会集中显示在这里。" };
+      return { icon: "logs", title: "暂无已归档的对话" };
     }
     if (filter === "all") {
-      return { icon: "sparkle", title: "还没有对话记录", body: "发送第一个任务后，记录会自动保存在这里。" };
+      return { icon: "logs", title: "还没有对话记录" };
     }
-    return { icon: "sparkle", title: "暂无进行中的对话", body: "发送第一个任务后，记录会自动保存在这里。" };
+    return { icon: "logs", title: "暂无进行中的对话" };
   };
 
   const empty = emptyState();
@@ -409,7 +409,6 @@ export function AgentHistoryPane({
           <div className="agent-history-empty">
             <Icon name={empty.icon} size="xl" />
             <strong>{empty.title}</strong>
-            <p>{empty.body}</p>
           </div>
         ) : null}
 
