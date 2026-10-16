@@ -2,6 +2,10 @@
 #include <httplib.h>
 #include <webview/webview.h>
 
+#ifdef _WIN32
+#include "yukinal/desktop_host/windows_window_frame.hpp"
+#endif
+
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -162,6 +166,7 @@ std::optional<std::string> resolve_ui_url(const Options& options, UiServer& ui_s
   return ui_server.url();
 }
 
+
 void rpc_handler(const char* id, const char* request, void* context_pointer) {
   auto& context = *static_cast<BridgeContext*>(context_pointer);
   nlohmann::json reply;
@@ -174,8 +179,16 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
       if (!arguments.is_array() || arguments.size() != 2 || !arguments[0].is_string()) {
         reply = {{"code", "INVALID_REQUEST"}, {"message", "Desktop IPC request is invalid"}};
       } else {
-        const auto result = context.router.invoke(arguments[0].get<std::string>(),
-                                                  std::move(arguments[1]));
+        const auto method = arguments[0].get<std::string>();
+#ifdef _WIN32
+        const auto result = method == "__shell.update_context"
+            ? yukinal::desktop_host::update_shell_context(context.view, arguments[1])
+            : method == "__shell.update_sidebar"
+                ? yukinal::desktop_host::update_shell_sidebar(context.view, arguments[1])
+                : context.router.invoke(method, std::move(arguments[1]));
+#else
+        const auto result = context.router.invoke(method, std::move(arguments[1]));
+#endif
         ok = result.ok;
         reply = result.value;
       }
@@ -272,16 +285,40 @@ int run(const std::vector<std::string>& arguments) {
         [&context](const std::string& event, const nlohmann::json& payload) {
           context.publish_event(event, payload);
         });
+#ifdef _WIN32
+    const bool native_frame = yukinal::desktop_host::install_fused_frame(context.view);
+#endif
     if (webview_set_title(context.view, "Yukinal") != WEBVIEW_ERROR_OK ||
+#ifdef _WIN32
+        webview_set_size(context.view, 1100, 680, WEBVIEW_HINT_MIN) != WEBVIEW_ERROR_OK ||
+#endif
         webview_set_size(context.view, 1440, 900, WEBVIEW_HINT_NONE) != WEBVIEW_ERROR_OK ||
         webview_bind(context.view, "yukinalNativeInvoke", rpc_handler, &context) !=
             WEBVIEW_ERROR_OK ||
         webview_init(context.view, kHostBridge) != WEBVIEW_ERROR_OK ||
+#ifdef _WIN32
+        webview_init(context.view,
+            native_frame ? R"JS((() => {
+              const listeners = new Set();
+              window.__YUKINAL_HOST__.windowShell = {
+                updateContext: (context) => window.__YUKINAL_HOST__.invoke('__shell.update_context', context).then(() => undefined),
+                updateSidebar: (sidebar) => window.__YUKINAL_HOST__.invoke('__shell.update_sidebar', sidebar).then(() => undefined),
+                onAction: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
+                dispatchAction: (action) => { for (const handler of listeners) handler(action); },
+              };
+            })();)JS" : "") != WEBVIEW_ERROR_OK ||
+#endif
         webview_navigate(context.view, url->c_str()) != WEBVIEW_ERROR_OK) {
+#ifdef _WIN32
+      yukinal::desktop_host::uninstall_fused_frame(context.view);
+#endif
       webview_destroy(context.view);
       return 3;
     }
     const auto result = webview_run(context.view);
+#ifdef _WIN32
+    yukinal::desktop_host::uninstall_fused_frame(context.view);
+#endif
     webview_destroy(context.view);
     return result == WEBVIEW_ERROR_OK ? 0 : 3;
   } catch (const webview::exception&) {
