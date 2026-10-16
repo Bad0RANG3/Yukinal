@@ -1017,6 +1017,58 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return provider_command(method, params);
   }
 
+  if (method == "agent_run_start" || method == "agent_run_stop" ||
+      method == "agent_approval_respond") {
+    return agent_run_command(method, params);
+  }
+
+  if (method == "local_file_preview") {
+    if (!exact_string_fields(params, {"handleId"})) {
+      return failure("INVALID_PARAMS", "local_file_preview requires exactly handleId");
+    }
+    const auto handle_id = params.at("handleId").get<std::string>();
+    if (handle_id.empty() || handle_id.size() > 256) {
+      return failure("INVALID_PARAMS", "local_file_preview handleId is invalid");
+    }
+    try {
+      auto preview = local_paths_.read_preview(handle_id, kMaxFilePreviewBytes);
+      return {true, make_file_preview(preview.name, preview.size, std::move(preview.bytes),
+                                      kMaxFilePreviewBytes)};
+    } catch (const std::exception& error) {
+      return failure("LOCAL_FILE_UNAVAILABLE", error.what());
+    }
+  }
+
+  if (method == "local_path_pick") {
+    if (!exact_string_fields(params, {"kind"})) {
+      return failure("INVALID_PARAMS", "local_path_pick requires exactly kind");
+    }
+    const auto kind = params.at("kind").get<std::string>();
+    if (!is_one_of(kind, {"uploadFiles", "uploadDirectory", "downloadDirectory"})) {
+      return failure("INVALID_PARAMS", "local_path_pick kind is invalid");
+    }
+    std::vector<std::filesystem::path> paths;
+    try {
+      paths = pick_local_paths(kind);
+    } catch (const std::exception& error) {
+      return failure("LOCAL_PATH_PICK_UNAVAILABLE", error.what());
+    }
+    auto registration = local_paths_.register_paths(paths);
+    if (!paths.empty() && registration.handles.empty()) {
+      return failure("LOCAL_PATH_REJECTED",
+                     "the selected paths could not be opened; select regular files or folders");
+    }
+    nlohmann::json handles = nlohmann::json::array();
+    for (const auto& handle : registration.handles) {
+      nlohmann::json entry = {{"handleId", handle.handle_id},
+                              {"name", handle.name},
+                              {"kind", handle.kind}};
+      if (handle.size.has_value()) entry["size"] = *handle.size;
+      handles.push_back(std::move(entry));
+    }
+    return {true, {{"handles", std::move(handles)}}};
+  }
+
   if (method == "__events.subscribe") return subscribe(params, true);
   if (method == "__events.unsubscribe") return subscribe(params, false);
 
@@ -1539,6 +1591,37 @@ IpcReply IpcRouter::agent_command(const std::string& method, const nlohmann::jso
     }
   }
   return failure("NOT_IMPLEMENTED", "This Agent command has not migrated yet: " + method);
+}
+
+IpcReply IpcRouter::agent_run_command(const std::string& method,
+                                     const nlohmann::json& params) {
+  static const std::map<std::string, std::string> kMethods = {
+      {"agent_run_start", "agent.run.start"},
+      {"agent_run_stop", "agent.run.stop"},
+      {"agent_approval_respond", "agent.approval.respond"},
+  };
+  const auto found = kMethods.find(method);
+  if (found == kMethods.end()) {
+    return failure("NOT_IMPLEMENTED", "This Agent run command has not migrated yet: " + method);
+  }
+  if (!params.is_object()) {
+    return failure("INVALID_PARAMS", method + " requires an object payload");
+  }
+  // The Python Agent Node validates every run field and owns the durable
+  // admission/approval state, so the host forwards the payload unchanged. A
+  // synchronous start waits for the run's bounded model/tool budget to finish,
+  // while stop and approval responses answer immediately.
+  const auto timeout = method == "agent_run_start"
+                           ? std::chrono::minutes(15)
+                           : std::chrono::seconds(30);
+  try {
+    auto& client = ensure_sidecar();
+    return {true, client.request(found->second, params, timeout)};
+  } catch (const SidecarRpcError& error) {
+    return failure(sidecar_error_code(error.code()), error.what());
+  } catch (const SidecarError& error) {
+    return failure("AGENT_UNAVAILABLE", error.what());
+  }
 }
 
 IpcReply IpcRouter::provider_command(const std::string& method, const nlohmann::json& params) {

@@ -224,6 +224,39 @@ int run_tests(int argc, char** argv) {
   check(router_deleted.ok && router_deleted.value.value("credentialReclaimed", false),
         "provider_delete should reclaim the router provider credential");
 
+  // Agent run forwarding: the sidecar owns admission, stop and approval state,
+  // so the router must relay the three commands instead of returning
+  // NOT_IMPLEMENTED.
+  const auto admitted = router.invoke(
+      "agent_run_start",
+      {{"runId", "run_router_admission"}, {"sessionId", "ses_router"},
+       {"prompt", "Summarize the current server health."}, {"messageId", "msg_router"},
+       {"delivery", "async"}, {"resume", false}});
+  check(admitted.ok && admitted.value.value("runId", std::string()) ==
+                           "run_router_admission" &&
+            admitted.value.value("started", true) == false,
+        "agent_run_start should admit a message without executing it");
+
+  const auto missing_provider = router.invoke(
+      "agent_run_start",
+      {{"runId", "run_router_execute"}, {"sessionId", "ses_router"},
+       {"prompt", "Summarize the current server health."}, {"messageId", "msg_router"},
+       {"delivery", "async"}, {"resume", true}});
+  check(!missing_provider.ok && missing_provider.value.value("code", std::string()) ==
+                                   "INVALID_PARAMS",
+        "agent_run_start should surface the Agent's missing-provider error");
+
+  const auto stopped = router.invoke("agent_run_stop", {{"runId", "run_router_missing"}});
+  check(stopped.ok && stopped.value.value("stopped", true) == false,
+        "agent_run_stop should forward and report an unknown run as not stopped");
+
+  const auto approval = router.invoke(
+      "agent_approval_respond",
+      {{"approvalId", "apr_router_missing"}, {"runId", "run_router_execute"},
+       {"decision", "reject"}, {"respondedAt", "2026-10-16T00:00:00Z"}});
+  check(approval.ok && approval.value.value("accepted", true) == false,
+        "agent_approval_respond should forward and report an unknown approval as stale");
+
   const auto killed = router.invoke("agent_kill", json::object());
   check(killed.ok && killed.value.value("killed", false),
         "agent_kill should stop the running sidecar");

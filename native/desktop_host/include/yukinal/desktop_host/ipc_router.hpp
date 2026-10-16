@@ -2,6 +2,7 @@
 
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/local_paths.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 
 #include <functional>
@@ -40,6 +41,7 @@ class IpcRouter {
   IpcReply host_key_command(const std::string& method,
                             const nlohmann::json& params);
   IpcReply agent_command(const std::string& method, const nlohmann::json& params);
+  IpcReply agent_run_command(const std::string& method, const nlohmann::json& params);
   IpcReply provider_command(const std::string& method, const nlohmann::json& params);
   [[nodiscard]] nlohmann::json handle_host_request(const std::string& method,
                                                    const nlohmann::json& params);
@@ -53,6 +55,7 @@ class IpcRouter {
   std::unordered_map<std::string, std::set<std::string>> subscriptions_;
   std::unique_ptr<SidecarClient> sidecar_;
   std::mutex sidecar_mutex_;
+  LocalPathHandles local_paths_;
   std::function<void(const std::string&, const nlohmann::json&)> event_sink_;
 };
 

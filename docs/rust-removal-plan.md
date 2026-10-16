@@ -34,11 +34,12 @@
 `native/desktop_host/src/sidecar.cpp` 提供 `SidecarClient`：负责 Python Agent 子进程的启动/监管、24 MiB 上限的 NDJSON 分帧、请求/响应按 id 关联、`agent.stream` 通知回传，以及 Python 侧反向 `host.*` RPC 的分发。`native/desktop_host/src/ipc_router.cpp` 通过它实现：
 
 - `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（进程监管与 stderr 尾部）；
+- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（转发到 Python `agent.run.*`/`agent.approval.respond`；payload 原样透传，由 Python Agent Node 负责持久受理、停止与一次性审批，同步 start 使用长超时，宿主的 `host.*` worker 继续应答）；
 - `provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`（转发到 Python `provider.*`）；
 - `host.credentials.set`、`host.credentials.get`、`host.credentials.reclaim`（写/读/回收 OS 凭据库）；
 - `host.mcp.catalog`（当前返回空目录）、`host.tool.cancel`（确认）。
 
-`desktop_host_sidecar_tests` 用真实 Python Agent 验证启动、握手、ping、provider 凭据轮换与回收，以及 router 转发。开发用 `pnpm desktop:dev:cpp` 会探测 `agent/.venv` 并把 `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE` 传给宿主。Agent run、MCP 目录、investigation 与其余 `host.tool.execute` 仍是下一步。
+`desktop_host_sidecar_tests` 用真实 Python Agent 验证启动、握手、ping、provider 凭据轮换与回收，以及 router 转发（含 run 受理、未知 run 停止、过期审批应答，以及缺少 provider 时的错误映射）。开发用 `pnpm desktop:dev:cpp` 会探测 `agent/.venv` 并把 `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE` 传给宿主。MCP 目录、investigation 与其余 `host.tool.execute` 仍是下一步。
 
 ---
 
@@ -47,8 +48,9 @@
 ### A. 纯本机数据 / 本地文件（不触网，最容易先迁）
 
 - ✅ `server_host_key_status`、`server_host_key_forget`（已知主机存储已在 `native/desktop_host/src/host_trust.cpp` 实现；`v1:host:port:SHA256:...` 格式与 `crates/host-trust` 一致）
+- ✅ `local_path_pick`、`local_file_preview`（`native/desktop_host/src/local_paths.cpp` 提供短时句柄表：15 分钟 TTL、2048 句柄上限、256 选取上限、拒绝符号链接与变更类型；预览复用共享的 `FilePreviewResponse`，1 MiB 上限并按文本/图片/二进制分类；Windows 用原生文件/目录对话框，其他平台暂时返回明确错误）
 - `file_transfer_list`、`file_transfer_get`（任务/账本查询）
-- `local_path_pick`、`local_file_preview`、`emit_local_drop`（本机对话框/预览/拖入事件）
+- `emit_local_drop`（OS 拖入事件）
 
 ### B. 需要 C++ SSH / SFTP / PTY 核心（`native/src` 已有能力）
 
@@ -62,16 +64,16 @@
 
 ### C. 走 Python sidecar（Rust 现在就是转发）
 
-✅ Provider 六个命令（`provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`）已由 C++ 宿主经 sidecar 桥转发到 Python，凭据经 `host.credentials.*` 落在 C++ OS 凭据边界。
+✅ Provider 六个命令（`provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`）与 `agent_run_start`、`agent_run_stop`、`agent_approval_respond` 已由 C++ 宿主经 sidecar 桥转发到 Python，凭据经 `host.credentials.*` 落在 C++ OS 凭据边界。
 
 `apps/desktop/src-tauri/src/commands/provider.rs`、`commands/server/mod.rs`、`commands/agent_run.rs`、`commands/investigation.rs` 里的其余命令，实际逻辑在 `agent/src/yukinal_agent/`：
 
 - ✅ provider 六个命令（见上）；
-- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`；
+- ✅ `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（原样转发，Python 拥有持久受理/停止/审批状态）；
 - `server_snapshot`、`server_services`、`server_logs` 的归一化部分；
 - `investigation_*`（15）中的持久化/恢复部分。
 
-这些剩余命令已具备 C++ ↔ Python sidecar 桥，只需在 C++ 宿主补命令转发与 `host.tool.execute` 等 RPC。
+这些剩余命令已具备 C++ ↔ Python sidecar 桥，server 归一化与 `investigation_*` 仍需补 `host.tool.execute` 等 RPC。
 
 ### D. 进程监管与 MCP
 
@@ -140,9 +142,9 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（25）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`provider_*`（6）。
+  - 已实现（30）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
-  - Provider 六个命令与 `agent_spawn/status/kill/logs` 已经走桥；`agent_run_*`、MCP 与 investigation 仍待转发。
+  - Provider 六个命令、`agent_spawn/status/kill/logs` 与 `agent_run_*`/`agent_approval_respond` 已经走桥；MCP 与 investigation 仍待转发。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
 - [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。

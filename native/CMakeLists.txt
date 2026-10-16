@@ -378,6 +378,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/database.cpp
     desktop_host/src/host_trust.cpp
     desktop_host/src/ipc_router.cpp
+    desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
     desktop_host/src/sidecar.cpp
   )
@@ -403,7 +404,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   )
   if(WIN32)
     target_compile_definitions(yukinal_desktop_host_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32 comdlg32 ole32)
     add_executable(yukinal-desktop-host WIN32 desktop_host/src/main.cpp)
     target_compile_definitions(yukinal-desktop-host PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   elseif(APPLE)

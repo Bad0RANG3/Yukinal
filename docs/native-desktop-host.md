@@ -63,8 +63,11 @@ C++; the React UI keeps using the shared IPC contract.
    and supervises the Agent, correlates NDJSON/JSON-RPC frames, streams
    `agent.stream` notifications to the WebView, and answers
    `host.credentials.set/get/reclaim`, `host.mcp.catalog`, and `host.tool.cancel`.
-   `agent_spawn/status/kill/logs` and the six `provider_*` commands are routed
-   through it. Agent runs and the remaining host RPC handlers are next.
+   `agent_spawn/status/kill/logs`, the six `provider_*` commands, and
+   `agent_run_start`/`agent_run_stop`/`agent_approval_respond` are routed through
+   it. The run commands are forwarded unchanged so the Python Agent Node keeps
+   owning durable admission, cancellation and one-time approvals. Remaining host
+   RPC handlers (`host.tool.execute`, investigation and MCP) are next.
 5. Port task history, schedules, recovery, audit and remaining UI commands. Validate
    each command and event against the shared contracts and existing desktop tests.
 6. Build and smoke-test Windows, macOS, and Linux installers (not implemented yet;
@@ -87,6 +90,14 @@ as a mismatch rather than silently replaced. Unmigrated commands return
 The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.
+
+The local file browser's native path selection now runs in C++. `local_path_pick`
+opens the platform file or folder picker and stores the chosen paths in a
+short-lived handle table; `local_file_preview` takes only the opaque handle id
+back, revalidates that the path is still a regular file (not a symlink), and
+returns the shared bounded `FilePreviewResponse` for text, image, or binary
+content. Absolute local paths never cross the IPC boundary, and `emit_local_drop`
+remains the last piece of this group.
 
 The upstream WebView library is MIT licensed and its C++ API supports native
 callbacks in both directions: [webview/webview](https://github.com/webview/webview).

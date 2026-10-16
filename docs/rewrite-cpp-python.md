@@ -876,3 +876,39 @@ host. CTest passed all eleven targets; a Windows-only build issue was fixed by
 setting `CREATE_UNICODE_ENVIRONMENT`, without which `CreateProcessW` rejected any
 non-empty environment block with `ERROR_INVALID_PARAMETER`. Agent runs,
 `host.tool.execute`, MCP catalogs, and investigation forwarding remain.
+
+On 2026-10-16, the C++ host began forwarding the Agent run commands over the
+sidecar bridge. `agent_run_start`, `agent_run_stop`, and
+`agent_approval_respond` now map to the Python Agent Node's `agent.run.start`,
+`agent.run.stop`, and `agent.approval.respond` methods. The host forwards the
+request payload unchanged because the Python runtime owns durable `messageId`
+admission, cancellation, and one-time approval state; the host keeps a long
+timeout only for a synchronous start while its dedicated sidecar host worker
+continues to answer `host.*` calls. `desktop_host_sidecar_tests` now checks that
+`resume: false` admits a message without executing it, that a synchronous
+`resume: true` surfaces the Agent's missing-provider `INVALID_PARAMS` error, and
+that an unknown run and a stale approval answer `stopped: false` and
+`accepted: false` instead of `NOT_IMPLEMENTED`. The canonical `native/build-nmake`
+Release build and all eleven CTest targets passed; the documents were updated to
+match. The separate `native/build-cpp-host` Debug tree aborts in its older desktop
+host tests and was not used for this verification. `host.tool.execute`, MCP
+catalogs, and investigation forwarding remain the next bridge milestones.
+
+On 2026-10-16, the C++ desktop host migrated the local file browser's path
+selection and preview. A new `native/desktop_host/src/local_paths.cpp` owns a
+short-lived handle table behind `local_path_pick` and `local_file_preview`: 15
+minute TTL, 2048 handles, 256 picked paths, and rejection of symlinks or paths
+that changed type after selection. `local_file_preview` revalidates the handle,
+reads at most 1 MiB plus one sentinel byte through a no-follow open, and builds
+the shared `FilePreviewResponse` (`text`, `image`, or `binary`, with incomplete
+trailing UTF-8 still shown as its readable prefix). Windows shows the native file
+and folder dialogs (`GetOpenFileNameW`/`SHBrowseForFolderW`) and the host now
+links `comdlg32`/`ole32`; other platforms fail explicitly. `desktop_host_tests`
+covers text/binary/image classification, truncation, incomplete UTF-8,
+directory rejection, TTL expiry, and unknown handles. During verification an
+MSVC dependency-tracking gap left older desktop test objects linked against the
+resized `IpcRouter`; forcing those objects to rebuild fixed the resulting
+ABI-mismatch crashes. The canonical `native/build-nmake` Release build and all
+eleven CTest targets passed, and `pnpm check` was green. `emit_local_drop`,
+transfer-history queries, the remaining host RPCs, and MCP/investigation
+forwarding remain.
