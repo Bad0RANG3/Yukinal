@@ -378,9 +378,12 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   add_library(yukinal_desktop_host_core
     desktop_host/src/credential_store.cpp
     desktop_host/src/database.cpp
+    desktop_host/src/desktop_target.cpp
     desktop_host/src/host_trust.cpp
     desktop_host/src/ipc_router.cpp
+    desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
+    desktop_host/src/sidecar.cpp
   )
   target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
   if(MSVC)
@@ -404,7 +407,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   )
   if(WIN32)
     target_compile_definitions(yukinal_desktop_host_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32 comdlg32 ole32)
     target_sources(yukinal_desktop_host_core PRIVATE desktop_host/src/window_context.cpp)
     add_executable(yukinal-desktop-host WIN32 desktop_host/src/main.cpp desktop_host/src/windows_window_frame.cpp)
     if(MINGW)
@@ -455,5 +458,34 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     target_link_libraries(yukinal_desktop_host_database_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME desktop_host_database_tests COMMAND yukinal_desktop_host_database_tests)
     add_test(NAME desktop_host_self_check COMMAND yukinal-desktop-host --self-check)
+
+    add_executable(yukinal_desktop_host_sidecar_tests
+      desktop_host/tests/test_sidecar.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_sidecar_tests PRIVATE yukinal_desktop_host_core)
+    if(YUKINAL_ENABLE_AGENT_TESTS)
+      find_package(Python3 3.11 COMPONENTS Interpreter)
+      if(Python3_Interpreter_FOUND)
+        execute_process(
+          COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
+                  ${Python3_EXECUTABLE} -c "import yukinal_agent.sidecar, jsonschema, langgraph, mcp"
+          RESULT_VARIABLE YUKINAL_SIDECAR_IMPORT_RESULT
+          OUTPUT_QUIET
+          ERROR_QUIET
+        )
+        if(YUKINAL_SIDECAR_IMPORT_RESULT EQUAL 0)
+          add_test(
+            NAME desktop_host_sidecar_tests
+            COMMAND yukinal_desktop_host_sidecar_tests
+                    ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../agent/src
+          )
+          set_tests_properties(desktop_host_sidecar_tests PROPERTIES TIMEOUT 120)
+        else()
+          message(STATUS "Agent dependencies are not installed; desktop_host_sidecar_tests is not registered")
+        endif()
+      else()
+        message(STATUS "Python 3.11+ is not available; desktop_host_sidecar_tests is not registered")
+      endif()
+    endif()
   endif()
 endif()

@@ -25,6 +25,8 @@ class DesktopDatabase {
   [[nodiscard]] nlohmann::json list_servers() const;
   [[nodiscard]] std::optional<nlohmann::json> get_server_endpoint(
       const std::string& server_id) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_server_connection(
+      const std::string& server_id) const;
   [[nodiscard]] std::filesystem::path data_directory() const;
   [[nodiscard]] bool is_available() const;
   [[nodiscard]] std::optional<nlohmann::json> get_identity(
@@ -54,6 +56,16 @@ class DesktopDatabase {
   [[nodiscard]] nlohmann::json list_tool_executions(
       const std::optional<std::string>& trace_id,
       const std::optional<std::string>& server_id, int limit) const;
+  [[nodiscard]] nlohmann::json list_file_transfers(
+      const std::optional<std::string>& server_id, int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_file_transfer(
+      const std::string& transfer_id) const;
+  [[nodiscard]] nlohmann::json list_mcp_servers() const;
+  [[nodiscard]] std::optional<nlohmann::json> get_mcp_server(
+      const std::string& server_id) const;
+  void upsert_mcp_server(const nlohmann::json& config) const;
+  [[nodiscard]] std::optional<nlohmann::json> delete_mcp_server(
+      const std::string& server_id) const;
   [[nodiscard]] nlohmann::json list_chat_sessions(
       const std::optional<std::string>& query, const std::optional<bool>& archived,
       int limit, int offset) const;

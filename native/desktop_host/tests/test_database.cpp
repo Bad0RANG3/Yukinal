@@ -1,10 +1,12 @@
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "schema_migrations.hpp"
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -75,6 +77,43 @@ void execute(sqlite3* database, const char* sql) {
   sqlite3_free(error);
   std::cerr << message << '\n';
   std::exit(1);
+}
+
+// Inserts one `file_transfers` row whose snapshot mirrors the row columns, the
+// way the retired Rust transfer manager wrote them.
+void insert_transfer(sqlite3* database, const std::string& id, const std::string& server_id,
+                     const std::string& direction, const std::string& status,
+                     std::int64_t started, std::int64_t updated) {
+  const bool finished = status == "completed";
+  const nlohmann::json snapshot = {
+      {"transferId", id},       {"serverId", server_id},
+      {"direction", direction}, {"status", status},
+      {"startedAtEpochMs", started}, {"updatedAtEpochMs", updated},
+      {"totalFiles", 1},         {"completedFiles", finished ? 1 : 0},
+      {"skippedFiles", 0},       {"totalBytes", 10},
+      {"transferredBytes", finished ? 10 : 4},
+      {"currentItem", nullptr},  {"currentItemBytes", 0},
+      {"currentItemTotalBytes", nullptr}, {"activeConflict", nullptr},
+      {"verifiedFiles", finished ? 1 : 0}, {"unverifiedFiles", 0},
+      {"failures", nlohmann::json::array()}, {"stagingResidue", nlohmann::json::array()},
+  };
+  const auto snapshot_text = snapshot.dump();
+  sqlite3_stmt* statement = nullptr;
+  check(sqlite3_prepare_v2(database,
+                           "INSERT INTO file_transfers (transfer_id, server_id, direction, "
+                           "status, started_at_epoch_ms, updated_at_epoch_ms, snapshot_json, "
+                           "staging_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]')",
+                           -1, &statement, nullptr) == SQLITE_OK,
+        "could not prepare the file transfer fixture insert");
+  sqlite3_bind_text(statement, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 2, server_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 3, direction.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 4, status.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(statement, 5, started);
+  sqlite3_bind_int64(statement, 6, updated);
+  sqlite3_bind_text(statement, 7, snapshot_text.c_str(), -1, SQLITE_TRANSIENT);
+  check(sqlite3_step(statement) == SQLITE_DONE, "could not insert the file transfer fixture");
+  sqlite3_finalize(statement);
 }
 
 void seed_legacy_database(const std::filesystem::path& path) {
@@ -234,6 +273,48 @@ int main() {
     check(executions_response.ok && executions_response.value == expected_trace,
           "the C++ IPC router should expose tool execution records");
 
+    // File transfers: the C++ host owns no transfer manager, so a persisted
+    // in-progress row can only be stale and must read back as `interrupted`.
+    {
+      sqlite3* writer = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+            "could not open the database for the file transfer fixture");
+      insert_transfer(writer, "trf_completed", "srv_01abc", "upload", "completed", 1000, 1000);
+      insert_transfer(writer, "trf_running", "srv_01abc", "download", "running", 500, 2000);
+      insert_transfer(writer, "trf_other", "srv_other", "upload", "failed", 400, 400);
+      sqlite3_close(writer);
+    }
+    const auto transfers = database.list_file_transfers(std::nullopt, 100);
+    check(transfers.at("transfers").size() == 3,
+          "list_file_transfers should return every stored row");
+    check(transfers.at("transfers")[0].at("transferId") == "trf_running" &&
+              transfers.at("transfers")[0].at("status") == "interrupted",
+          "a persisted running transfer should reconcile to interrupted");
+    check(transfers.at("transfers")[1].at("transferId") == "trf_completed" &&
+              transfers.at("transfers")[1].at("status") == "completed",
+          "a completed transfer should stay completed");
+    check(database.list_file_transfers(std::string("srv_01abc"), 100).at("transfers").size() == 2,
+          "list_file_transfers should filter by server id");
+    check(database.list_file_transfers(std::nullopt, 1).at("transfers").size() == 1,
+          "list_file_transfers should honor its bounded limit");
+    const auto fetched = database.get_file_transfer("trf_running");
+    check(fetched.has_value() && fetched->at("status") == "interrupted",
+          "get_file_transfer should return the reconciled snapshot");
+    check(!database.get_file_transfer("trf_missing").has_value(),
+          "get_file_transfer should report an unknown transfer");
+    check(database.list_file_transfers(std::nullopt, 1).at("transfers")[0].at("status") ==
+              "interrupted",
+          "the reconciliation must be persisted, not recomputed from a stale row");
+
+    const auto transfer_list = router.invoke("file_transfer_list", {{"serverId", "srv_01abc"}});
+    check(transfer_list.ok && transfer_list.value.at("transfers").size() == 2,
+          "the C++ IPC router should expose the file transfer ledger");
+    const auto transfer_get = router.invoke("file_transfer_get", {{"transferId", "trf_running"}});
+    check(transfer_get.ok && transfer_get.value.at("transfer").at("status") == "interrupted",
+          "the C++ IPC router should return the reconciled transfer");
+    check(!router.invoke("file_transfer_get", {{"transferId", "trf_missing"}}).ok,
+          "the C++ IPC router should report an unknown transfer");
+
     // Network proxy: the setting is non-secret, the credential is write-only, and
     // every rejection must leave both the database and the credential store alone.
     MemoryCredentialStore memory_credentials;
@@ -336,6 +417,208 @@ int main() {
     check(router.invoke("server_host_key_status", {{"serverId", "srv_01abc"}})
                   .value.at("pinned") == false,
           "the pin must be gone after forget");
+
+    // Desktop SSH target resolver: the Python Agent gets a one-target payload
+    // with secrets only in the credentials map. The C++ host never writes them
+    // into the target JSON.
+    MemoryCredentialStore target_credentials;
+    const auto stored_password = target_credentials.set(
+        "mcp", "target-root-password",
+        yukinal::desktop_host::Secret{std::string_view("s3cret-pass")});
+    {
+      sqlite3* writer = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+            "could not open the database for the SSH target fixture");
+      execute(writer, R"SQL(
+        INSERT INTO servers (
+          id, name, host, port, username, identity_id, group_id, capabilities, status,
+          environment, created_at, updated_at
+        ) VALUES (
+          'srv_target', 'Target', '43.240.221.2', 22, 'root', 'idn_target', NULL, '{}',
+          'disconnected', 'staging', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+        );
+      )SQL");
+      execute(writer, (std::string("INSERT INTO identities (id, label, method, credential_ref, created_at) VALUES ('idn_target', 'Root password', 'password', '") +
+                       stored_password.to_string() +
+                       "', '2026-01-01T00:00:00Z');").c_str());
+      sqlite3_close(writer);
+    }
+    auto target_trust =
+        yukinal::desktop_host::HostTrustStore::load(temporary.path / "known_hosts");
+    target_trust.pin("43.240.221.2", 22, "SHA256:" + std::string(43, 'A'));
+
+    const auto target_payload =
+        yukinal::desktop_host::resolve_ssh_service_target(database, target_credentials,
+                                                          "srv_target");
+    check(target_payload.at("target").at("target_id") == "srv_target" &&
+              target_payload.at("target").at("host") == "43.240.221.2" &&
+              target_payload.at("target").at("port") == 22 &&
+              target_payload.at("target").at("username") == "root",
+          "the resolver should build the target from the stored connection");
+    check(target_payload.at("target").at("auth").at("type") == "password" &&
+              target_payload.at("target").at("auth").at("password_env") == "YK_SSH_PASSWORD",
+          "a password identity should use the password_env auth shape");
+    check(target_payload.at("credentials").at("YK_SSH_PASSWORD") == "s3cret-pass",
+          "the password should travel only in the credentials map");
+    check(target_payload.at("target").at("host_key_fingerprint") ==
+              "SHA256:" + std::string(43, 'A'),
+          "the confirmed pin should be the trust source");
+    check(target_payload.at("target").dump().find("s3cret-pass") == std::string::npos,
+          "the target JSON must never carry the secret value");
+
+    bool unknown_target_rejected = false;
+    try {
+      (void)yukinal::desktop_host::resolve_ssh_service_target(database, target_credentials,
+                                                              "srv_missing");
+    } catch (const std::exception&) {
+      unknown_target_rejected = true;
+    }
+    check(unknown_target_rejected, "an unknown server must be refused");
+
+    const auto probe_payload = yukinal::desktop_host::resolve_ssh_service_probe_target(
+        database, target_credentials, "srv_target");
+    check(probe_payload.at("target").at("probe_only") == true &&
+              probe_payload.at("target").at("auth").at("type") == "probe" &&
+              !probe_payload.at("target").contains("host_key_fingerprint"),
+          "the probe target must carry no identity and no trust source");
+
+    const auto read_target = yukinal::desktop_host::resolve_ssh_service_filesystem_read_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/etc/hosts"}});
+    check(read_target.at("filesystemRead").at("path") == "/etc/hosts" &&
+              read_target.at("filesystemRead").at("maxBytes") == 131072,
+          "a filesystem read target should default to the bounded read size");
+    const auto bounded_read = yukinal::desktop_host::resolve_ssh_service_filesystem_read_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/etc/hosts"}, {"maxBytes", 1024}});
+    check(bounded_read.at("filesystemRead").at("maxBytes") == 1024,
+          "a filesystem read target should honor an explicit maxBytes");
+
+    auto expect_rejected = [&database, &target_credentials](const char* label,
+                                                            const nlohmann::json& request) {
+      bool rejected = false;
+      try {
+        (void)yukinal::desktop_host::resolve_ssh_service_filesystem_read_target(
+            database, target_credentials, request);
+      } catch (const std::exception&) {
+        rejected = true;
+      }
+      check(rejected, label);
+    };
+    expect_rejected("a relative read path must be refused",
+                    {{"serverId", "srv_target"}, {"path", "etc/hosts"}});
+    expect_rejected("a credential path must be refused by the blocklist",
+                    {{"serverId", "srv_target"}, {"path", "/home/deploy/.ssh/id_rsa"}});
+    expect_rejected("an over-limit maxBytes must be refused",
+                    {{"serverId", "srv_target"},
+                     {"path", "/etc/hosts"},
+                     {"maxBytes", 2 * 1024 * 1024}});
+
+    const auto write_target = yukinal::desktop_host::resolve_ssh_service_filesystem_write_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/srv/app.conf"}, {"content", "PORT=8080\n"}});
+    check(write_target.at("filesystemWrite").at("bytesWritten") == 10,
+          "a filesystem write target should report the validated byte count");
+
+    const auto revision = std::string(64, 'a');
+    const auto edit_target = yukinal::desktop_host::resolve_ssh_service_filesystem_edit_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"},
+         {"path", "/srv/app.conf"},
+         {"expectedRevision", revision},
+         {"oldString", "PORT=8080"},
+         {"newString", "PORT=9090"}});
+    check(edit_target.at("filesystemEdit").at("expectedRevision") == revision,
+          "a filesystem edit target should carry the validated revision");
+    bool bad_revision_rejected = false;
+    try {
+      (void)yukinal::desktop_host::resolve_ssh_service_filesystem_edit_target(
+          database, target_credentials,
+          {{"serverId", "srv_target"},
+           {"path", "/srv/app.conf"},
+           {"expectedRevision", "short"},
+           {"oldString", "a"},
+           {"newString", "b"}});
+    } catch (const std::exception&) {
+      bad_revision_rejected = true;
+    }
+    check(bad_revision_rejected, "a malformed edit revision must be refused");
+
+    // MCP server settings: list/save/delete with write-only static header secrets.
+    MemoryCredentialStore mcp_credentials;
+    yukinal::desktop_host::IpcRouter mcp_router(&database, &mcp_credentials);
+    const auto empty_mcp = mcp_router.invoke("mcp_server_list", nlohmann::json::object());
+    check(empty_mcp.ok && empty_mcp.value.at("servers").empty(),
+          "mcp_server_list should start empty");
+
+    nlohmann::json header = {{"name", "Authorization"}, {"secret", "Bearer super-secret"}};
+    nlohmann::json stdio_input = {{"id", "ops-tools"},
+                                  {"label", "Ops tools"},
+                                  {"transport", "stdio"},
+                                  {"command", "npx"},
+                                  {"args", nlohmann::json::array({"-y", "ops-mcp"})},
+                                  {"enabled", true},
+                                  {"httpAuthHeaders", nlohmann::json::array({header})}};
+    nlohmann::json save_params = {{"input", stdio_input}};
+    const auto saved_mcp = mcp_router.invoke("mcp_server_save", save_params);
+    check(saved_mcp.ok, "mcp_server_save should accept a stdio server");
+    check(saved_mcp.value.at("config").at("id") == "ops-tools" &&
+              saved_mcp.value.at("status").at("running") == false &&
+              !saved_mcp.value.contains("unavailable"),
+          "a saved enabled MCP server should be returned available and not running");
+    check(saved_mcp.value.dump().find("super-secret") == std::string::npos,
+          "the header secret must never be returned");
+    check(mcp_credentials.size() == 1,
+          "the header secret should live in the credential store");
+    const auto& saved_header = saved_mcp.value.at("config").at("httpAuthHeaders").at(0);
+    check(saved_header.at("credentialRef").is_string() &&
+              !saved_header.at("credentialRef").get<std::string>().empty(),
+          "the header should carry a credential reference, not the value");
+
+    const auto listed_mcp = mcp_router.invoke("mcp_server_list", nlohmann::json::object());
+    check(listed_mcp.ok && listed_mcp.value.at("servers").size() == 1,
+          "mcp_server_list should return the saved server");
+
+    nlohmann::json disabled_input = {{"id", "ops-tools"},
+                                     {"label", "Ops tools"},
+                                     {"transport", "stdio"},
+                                     {"command", "npx"},
+                                     {"enabled", false}};
+    const auto disabled_mcp =
+        mcp_router.invoke("mcp_server_save", {{"input", disabled_input}});
+    check(disabled_mcp.ok && disabled_mcp.value.at("unavailable").at("code") == "disabled",
+          "a disabled MCP server should report the disabled reason");
+    check(mcp_credentials.size() == 1,
+          "a save without a new secret must preserve the stored header credential");
+
+    nlohmann::json bad_input = {{"id", "bad"},
+                                {"label", "Bad"},
+                                {"transport", "carrier-pigeon"},
+                                {"enabled", true}};
+    check(!mcp_router.invoke("mcp_server_save", {{"input", bad_input}}).ok,
+          "an unknown MCP transport must be refused");
+
+    nlohmann::json oauth_input = {{"id", "oauth"},
+                                  {"label", "OAuth"},
+                                  {"transport", "http"},
+                                  {"url", "https://example.test/mcp"},
+                                  {"enabled", true},
+                                  {"oauth",
+                                   {{"issuer", "https://example.test"},
+                                    {"clientId", ""},
+                                    {"scopes", nlohmann::json::array()}}}};
+    check(!mcp_router.invoke("mcp_server_save", {{"input", oauth_input}}).ok,
+          "OAuth MCP servers are not supported by this host yet");
+
+    const auto deleted_mcp =
+        mcp_router.invoke("mcp_server_delete", {{"serverId", "ops-tools"}});
+    check(deleted_mcp.ok && deleted_mcp.value.at("deleted") == true &&
+              deleted_mcp.value.at("stopped") == false,
+          "mcp_server_delete should remove the row and report nothing running");
+    check(mcp_credentials.size() == 0,
+          "deleting an MCP server should reclaim its header secret");
+    check(!mcp_router.invoke("mcp_server_delete", {{"serverId", "ops-tools"}}).ok,
+          "deleting an unknown MCP server should fail");
   }
 
   sqlite3* readback = nullptr;

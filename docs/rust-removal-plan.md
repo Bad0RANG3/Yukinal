@@ -21,13 +21,25 @@
 
 ---
 
-## 2. C++ 宿主已实现（20）
+## 2. C++ 宿主已实现
 
 `native/desktop_host/src/ipc_router.cpp`
 
 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`chat_session_list`、`chat_session_get`、`chat_session_create`、`chat_message_append`、`chat_session_archive`、`chat_session_rename`、`chat_session_delete`。
 
 带 `desktop_host_*` 的 CTest 目标覆盖这些命令的数据/迁移/self-check。
+
+### 2.1 C++ ↔ Python sidecar 桥（已接通首个里程碑）
+
+`native/desktop_host/src/sidecar.cpp` 提供 `SidecarClient`：负责 Python Agent 子进程的启动/监管、24 MiB 上限的 NDJSON 分帧、请求/响应按 id 关联、`agent.stream` 通知回传，以及 Python 侧反向 `host.*` RPC 的分发。`native/desktop_host/src/ipc_router.cpp` 通过它实现：
+
+- `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（进程监管与 stderr 尾部）；
+- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（转发到 Python `agent.run.*`/`agent.approval.respond`；payload 原样透传，由 Python Agent Node 负责持久受理、停止与一次性审批，同步 start 使用长超时，宿主的 `host.*` worker 继续应答）；
+- `provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`（转发到 Python `provider.*`）；
+- `host.credentials.set`、`host.credentials.get`、`host.credentials.reclaim`（写/读/回收 OS 凭据库）；
+- `host.mcp.catalog`（当前返回空目录）、`host.tool.cancel`（确认）。
+
+`desktop_host_sidecar_tests` 用真实 Python Agent 验证启动、握手、ping、provider 凭据轮换与回收，以及 router 转发（含 run 受理、未知 run 停止、过期审批应答，以及缺少 provider 时的错误映射）。开发用 `pnpm desktop:dev:cpp` 会探测 `agent/.venv` 并把 `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE` 传给宿主。MCP 目录、investigation 与其余 `host.tool.execute` 仍是下一步。
 
 ---
 
@@ -36,8 +48,9 @@
 ### A. 纯本机数据 / 本地文件（不触网，最容易先迁）
 
 - ✅ `server_host_key_status`、`server_host_key_forget`（已知主机存储已在 `native/desktop_host/src/host_trust.cpp` 实现；`v1:host:port:SHA256:...` 格式与 `crates/host-trust` 一致）
-- `file_transfer_list`、`file_transfer_get`（任务/账本查询）
-- `local_path_pick`、`local_file_preview`、`emit_local_drop`（本机对话框/预览/拖入事件）
+- ✅ `local_path_pick`、`local_file_preview`（`native/desktop_host/src/local_paths.cpp` 提供短时句柄表：15 分钟 TTL、2048 句柄上限、256 选取上限、拒绝符号链接与变更类型；预览复用共享的 `FilePreviewResponse`，1 MiB 上限并按文本/图片/二进制分类；Windows 用原生文件/目录对话框，其他平台暂时返回明确错误）
+- `file_transfer_list`、`file_transfer_get`（`native/desktop_host/src/database.cpp` 读取 `file_transfers` 账本；本宿主没有传输管理器，因此持久化的 `queued`/`running`/`waitingConflict` 行在读取时对账为 `interrupted` 并写回，已完成/失败等终态保持不变）
+- `emit_local_drop`（OS 拖入事件）
 
 ### B. 需要 C++ SSH / SFTP / PTY 核心（`native/src` 已有能力）
 
@@ -51,25 +64,28 @@
 
 ### C. 走 Python sidecar（Rust 现在就是转发）
 
-`apps/desktop/src-tauri/src/commands/provider.rs`、`commands/server/mod.rs`、`commands/agent_run.rs`、`commands/investigation.rs` 里的若干命令，实际逻辑在 `agent/src/yukinal_agent/`：
+✅ Provider 六个命令（`provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`）与 `agent_run_start`、`agent_run_stop`、`agent_approval_respond` 已由 C++ 宿主经 sidecar 桥转发到 Python，凭据经 `host.credentials.*` 落在 C++ OS 凭据边界。
 
-- `provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`
-- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`
-- `server_snapshot`、`server_services`、`server_logs` 的归一化部分
-- `investigation_*`（15）中的持久化/恢复部分
+`apps/desktop/src-tauri/src/commands/provider.rs`、`commands/server/mod.rs`、`commands/agent_run.rs`、`commands/investigation.rs` 里的其余命令，实际逻辑在 `agent/src/yukinal_agent/`：
 
-要把这些迁进 C++ 宿主，**必须先有 C++ ↔ Python sidecar 桥**（见 第 4 节）。
+- ✅ provider 六个命令（见上）；
+- ✅ `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（原样转发，Python 拥有持久受理/停止/审批状态）；
+- `server_snapshot`、`server_services`、`server_logs` 的归一化部分；
+- `investigation_*`（15）中的持久化/恢复部分。
+
+这些剩余命令已具备 C++ ↔ Python sidecar 桥，server 归一化与 `investigation_*` 仍需补 `host.tool.execute` 等 RPC。
 
 ### D. 进程监管与 MCP
 
-- `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（Python sidecar 生命周期）
-- `mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`mcp_server_start`、`mcp_server_stop`、`mcp_server_review`、`mcp_oauth_connect`、`mcp_oauth_cancel`
+- ✅ `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（Python sidecar 生命周期）
+- ✅ `mcp_server_list`、`mcp_server_save`、`mcp_server_delete`（`mcp_servers` 表 CRUD + 静态 HTTP 认证头 secret 进 OS 凭据库；OAuth 尚未支持，保存时明确拒绝）
+- `mcp_server_start`、`mcp_server_stop`、`mcp_server_review`、`mcp_oauth_connect`、`mcp_oauth_cancel`（依赖 MCP 进程监管/McpSupervisor 与 OAuth 流程）
 
 ---
 
 ## 4. 关键路径：C++ ↔ Python sidecar 桥
 
-这是 provider / MCP / agent / investigation 的前置，也是整个迁移的瓶颈。参考实现是 `crates/core/src/sidecar/`（约 1100 行）：
+**已接通首个里程碑。** 参考实现是 `crates/core/src/sidecar/`（约 1100 行）：
 
 - `crates/core/src/sidecar/config.rs`：解析 Python/PyInstaller 入口、环境白名单、`YUKINAL_DATA_DIR`。
 - `crates/core/src/sidecar/mod.rs`：`Command` 启动、`env_clear` + 最小环境、stdout/stderr 读取任务、NDJSON 帧（上限 24 MiB）、请求/响应按 `id` 关联、`initialize` 握手、退出与重启监管。
@@ -127,8 +143,9 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（19）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）。
+  - 已实现（40）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
+  - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target` 与文件读/写/编辑目标已实现，MCP 进程目录、investigation 与其余 `host.tool.execute` 仍待补。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
 - [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。

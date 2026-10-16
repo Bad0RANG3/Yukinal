@@ -279,6 +279,10 @@ int run(const std::vector<std::string>& arguments) {
     BridgeContext context(*database);
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
+    context.router.set_event_sink(
+        [&context](const std::string& event, const nlohmann::json& payload) {
+          context.publish_event(event, payload);
+        });
 #ifdef _WIN32
     const bool titlebar_overlay = yukinal::desktop_host::install_fused_frame(context.view);
     const std::string shell_bridge = std::string("window.__YUKINAL_HOST__.windowShell={titlebarOverlay:") +

@@ -857,3 +857,91 @@ returning `NOT_IMPLEMENTED`; packaging/installers are not implemented. From here
 the work is implementation against the shared contract, guided by
 `docs/rust-removal-plan.md`; the pinned reference implementations remain in git
 history.
+
+On 2026-10-16, the C++ desktop host gained the first Python Agent sidecar bridge.
+`native/desktop_host/src/sidecar.cpp` spawns the Agent (`python -m
+yukinal_agent.sidecar` or `YUKINAL_AGENT_ENTRY`), supervises it, speaks the 24 MiB
+NDJSON/JSON-RPC protocol, correlates responses by id, re-publishes `agent.stream`
+notifications through the WebView event bridge, and dispatches the Agent's
+`host.*` requests. The router answers `host.credentials.set/get/reclaim` against
+the OS credential store, returns an empty `host.mcp.catalog`, and acknowledges
+`host.tool.cancel`. On top of that bridge the host now implements
+`agent_spawn`, `agent_status`, `agent_kill`, `agent_logs`, and all six
+`provider_*` commands; API keys never leave the C++ credential boundary. The new
+`desktop_host_sidecar_tests` target runs the real Python Agent and verifies the
+handshake, `system.ping`, provider save/list/activate/delete credential rotation
+and reclamation, and the router forwarding path. `pnpm desktop:dev:cpp` detects
+`agent/.venv` and forwards `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE` to the
+host. CTest passed all eleven targets; a Windows-only build issue was fixed by
+setting `CREATE_UNICODE_ENVIRONMENT`, without which `CreateProcessW` rejected any
+non-empty environment block with `ERROR_INVALID_PARAMETER`. Agent runs,
+`host.tool.execute`, MCP catalogs, and investigation forwarding remain.
+
+On 2026-10-16, the C++ host began forwarding the Agent run commands over the
+sidecar bridge. `agent_run_start`, `agent_run_stop`, and
+`agent_approval_respond` now map to the Python Agent Node's `agent.run.start`,
+`agent.run.stop`, and `agent.approval.respond` methods. The host forwards the
+request payload unchanged because the Python runtime owns durable `messageId`
+admission, cancellation, and one-time approval state; the host keeps a long
+timeout only for a synchronous start while its dedicated sidecar host worker
+continues to answer `host.*` calls. `desktop_host_sidecar_tests` now checks that
+`resume: false` admits a message without executing it, that a synchronous
+`resume: true` surfaces the Agent's missing-provider `INVALID_PARAMS` error, and
+that an unknown run and a stale approval answer `stopped: false` and
+`accepted: false` instead of `NOT_IMPLEMENTED`. The canonical `native/build-nmake`
+Release build and all eleven CTest targets passed; the documents were updated to
+match. The separate `native/build-cpp-host` Debug tree aborts in its older desktop
+host tests and was not used for this verification. `host.tool.execute`, MCP
+catalogs, and investigation forwarding remain the next bridge milestones.
+
+On 2026-10-16, the C++ desktop host migrated the local file browser's path
+selection and preview. A new `native/desktop_host/src/local_paths.cpp` owns a
+short-lived handle table behind `local_path_pick` and `local_file_preview`: 15
+minute TTL, 2048 handles, 256 picked paths, and rejection of symlinks or paths
+that changed type after selection. `local_file_preview` revalidates the handle,
+reads at most 1 MiB plus one sentinel byte through a no-follow open, and builds
+the shared `FilePreviewResponse` (`text`, `image`, or `binary`, with incomplete
+trailing UTF-8 still shown as its readable prefix). Windows shows the native file
+and folder dialogs (`GetOpenFileNameW`/`SHBrowseForFolderW`) and the host now
+links `comdlg32`/`ole32`; other platforms fail explicitly. `desktop_host_tests`
+covers text/binary/image classification, truncation, incomplete UTF-8,
+directory rejection, TTL expiry, and unknown handles. During verification an
+MSVC dependency-tracking gap left older desktop test objects linked against the
+resized `IpcRouter`; forcing those objects to rebuild fixed the resulting
+ABI-mismatch crashes. The canonical `native/build-nmake` Release build and all
+eleven CTest targets passed, and `pnpm check` was green. `emit_local_drop`,
+transfer-history queries, the remaining host RPCs, and MCP/investigation
+forwarding remain.
+
+On 2026-10-16, after merging the Windows desktop shell PR, the C++ desktop host
+took over the file-transfer history reads. `DesktopDatabase::list_file_transfers`
+and `get_file_transfer` decode the bounded `file_transfers` ledger, verify that
+each stored row matches its snapshot (transfer id, server id, direction and
+status), and surface the result through `file_transfer_list` and
+`file_transfer_get`. Because this host owns no transfer manager, a persisted row
+that still claims to be in progress is reconciled to `interrupted` and written
+back once the read statement is closed; terminal rows are unchanged.
+`desktop_host_database_tests` covers ordering, server filtering, the bounded
+limit, both transports, reconciliation and persistence, and the unknown-transfer
+case, while `desktop_host_tests` covers the parameter validation. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets (including the
+merged `window_context_tests`), and `pnpm check` was green. `emit_local_drop`, the
+remaining host RPCs, and MCP/investigation forwarding remain.
+
+On 2026-10-16, the C++ desktop host gained its SSH target resolver and MCP server
+settings. `native/desktop_host/src/desktop_target.cpp` turns a saved server plus
+its identity, OS-credential secret, host-key pin or CA, and proxy route into the
+one-target `{target, credentials}` payload the Python Agent hands to the C++ SSH
+service (`host.ssh.service_target`), plus the Agent file variants
+(`host.ssh.filesystem_read_target`/`write`/`edit`) with the retired Rust path
+policy: absolute bounded paths, a credential/process-secret blocklist, a
+64-hex revision shape, and 512 KiB write/edit caps. Secret values travel only in
+the `credentials` map. Separately, `mcp_server_list`, `mcp_server_save`, and
+`mcp_server_delete` now read and write the `mcp_servers` table; static HTTP auth
+header secrets enter the OS credential store and are reclaimed on delete, while
+OAuth is explicitly refused until the MCP supervisor lands. `desktop_host_database_tests`
+covers the resolver payloads, the path-policy rejections, and the MCP CRUD
+round trip. The canonical `native/build-nmake` Release build passed all twelve
+CTest targets. The in-process SSH commands (`server_logs`/`snapshot`/`services`),
+MCP supervision and catalog, `host.tool.execute`, investigation, and installer
+work remain; real SSH validation is blocked because the test host is filtered.

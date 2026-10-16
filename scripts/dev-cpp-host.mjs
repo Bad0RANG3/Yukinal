@@ -150,9 +150,22 @@ async function main() {
   let result;
   try {
     await waitForVite(vite.child, url);
-    // The native GUI must be visible. SW_HIDE in STARTUPINFO overrides the
-    // WebView's first ShowWindow call even though its process is running.
-    host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { windowsHide: false });
+    const venvPython = join(
+      root,
+      "agent",
+      ".venv",
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    );
+    const hostEnvironment = { ...process.env };
+    if (!hostEnvironment.YUKINAL_AGENT_PYTHON && existsSync(venvPython)) {
+      hostEnvironment.YUKINAL_AGENT_PYTHON = venvPython;
+    }
+    if (!hostEnvironment.YUKINAL_AGENT_SOURCE) {
+      hostEnvironment.YUKINAL_AGENT_SOURCE = join(root, "agent", "src");
+    }
+    // SW_HIDE in STARTUPINFO overrides the WebView's first ShowWindow call.
+    host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { env: hostEnvironment, windowsHide: false });
     console.log("Desktop live preview is running; saved UI changes update this window automatically.");
     result = await Promise.race([
       vite.exit.then((value) => ({ role: "Vite", value })),

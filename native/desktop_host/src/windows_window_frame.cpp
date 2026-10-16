@@ -268,6 +268,12 @@ LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPAR
   const auto result = CallWindowProcW(state->previous, window, message, wparam, lparam);
   if (message == WM_SIZE || message == WM_DPICHANGED) {
     layout_native_content(window, *state);
+    if (message == WM_DPICHANGED) {
+      // Keep DWM's caption strip at the same DPI-scaled height as its WebView
+      // exclusion and hit targets after moving between displays.
+      const MARGINS glass{0, 0, frame_scale(window, kChromeHeight), 0};
+      DwmExtendFrameIntoClientArea(window, &glass);
+    }
   } else if (message == WM_ACTIVATE || message == WM_SETTINGCHANGE) {
     InvalidateRect(window, nullptr, FALSE);
   } else if (message == WM_NCDESTROY) {

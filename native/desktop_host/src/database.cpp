@@ -136,6 +136,126 @@ void bind_optional_text(sqlite3* connection, sqlite3_stmt* statement, int index,
   bind_text(connection, statement, index, *value);
 }
 
+bool is_active_transfer_status(const std::string& status) {
+  return is_one_of(status, {"queued", "running", "waitingConflict"});
+}
+
+bool is_known_transfer_status(const std::string& status) {
+  return is_one_of(status, {"queued", "running", "waitingConflict", "completed", "partial",
+                            "failed", "cancelled", "interrupted"});
+}
+
+std::string json_string_field(const nlohmann::json& value, const char* key) {
+  if (!value.is_object()) return {};
+  const auto found = value.find(key);
+  if (found == value.end() || !found->is_string()) return {};
+  return found->get<std::string>();
+}
+
+// Decodes one `file_transfers` row. A snapshot that still claims to be in
+// progress cannot be live in this host (the C++ host owns no transfer manager),
+// so the caller reconciles it to `interrupted` once the read statement is closed.
+nlohmann::json decode_file_transfer(sqlite3_stmt* row) {
+  const std::string transfer_id = column_text(row, 0);
+  const std::string server_id = column_text(row, 1);
+  const std::string direction = column_text(row, 2);
+  const std::string status = column_text(row, 3);
+  if (!is_one_of(direction, {"upload", "download"})) {
+    throw std::runtime_error("Stored file transfer has an unknown direction");
+  }
+  if (!is_known_transfer_status(status)) {
+    throw std::runtime_error("Stored file transfer has an unknown status");
+  }
+  nlohmann::json snapshot;
+  try {
+    snapshot = nlohmann::json::parse(column_text(row, 6));
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("Stored file transfer snapshot is invalid JSON");
+  }
+  if (!snapshot.is_object() || json_string_field(snapshot, "transferId") != transfer_id ||
+      json_string_field(snapshot, "serverId") != server_id ||
+      json_string_field(snapshot, "direction") != direction ||
+      json_string_field(snapshot, "status") != status) {
+    throw std::runtime_error("Stored file transfer row does not match its snapshot");
+  }
+  return snapshot;
+}
+
+void persist_transfer_status(sqlite3* connection, const std::string& transfer_id,
+                             const nlohmann::json& snapshot) {
+  Statement update(connection,
+                   "UPDATE file_transfers SET status = ?2, snapshot_json = ?3 "
+                   "WHERE transfer_id = ?1");
+  bind_text(connection, update.get(), 1, transfer_id);
+  bind_text(connection, update.get(), 2, json_string_field(snapshot, "status"));
+  bind_text(connection, update.get(), 3, snapshot.dump());
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
+// Rewrites a still-active snapshot to `interrupted` and persists it, because no
+// transfer can outlive the host process that owned it.
+void reconcile_transfer(sqlite3* connection, nlohmann::json& snapshot) {
+  if (!is_active_transfer_status(json_string_field(snapshot, "status"))) return;
+  snapshot["status"] = "interrupted";
+  persist_transfer_status(connection, json_string_field(snapshot, "transferId"), snapshot);
+}
+
+nlohmann::json parse_json_text(const std::string& text, const char* label) {
+  try {
+    return nlohmann::json::parse(text);
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error(std::string("Stored ") + label + " is invalid JSON");
+  }
+}
+
+nlohmann::json mcp_json_array(sqlite3_stmt* row, int column, const char* label) {
+  if (sqlite3_column_type(row, column) == SQLITE_NULL) return nlohmann::json::array();
+  auto value = parse_json_text(column_text(row, column), label);
+  if (!value.is_array()) throw std::runtime_error(std::string("Stored ") + label + " is invalid");
+  return value;
+}
+
+// Decodes one `mcp_servers` row into the shared `McpServerConfig` shape.
+nlohmann::json decode_mcp_server(sqlite3_stmt* row) {
+  const auto transport = std::string(column_text(row, 2));
+  if (!is_one_of(transport, {"stdio", "http"})) {
+    throw std::runtime_error("Stored MCP server has an unknown transport");
+  }
+  const auto trust_level = std::string(column_text(row, 8));
+  if (!is_one_of(trust_level, {"reviewed", "unreviewed"})) {
+    throw std::runtime_error("Stored MCP server has an unknown trust level");
+  }
+  const auto annotation_trust = std::string(column_text(row, 11));
+  if (!is_one_of(annotation_trust, {"none", "trusted"})) {
+    throw std::runtime_error("Stored MCP server has an unknown annotation trust");
+  }
+  nlohmann::json config = {
+      {"id", column_text(row, 0)},
+      {"label", column_text(row, 1)},
+      {"transport", transport},
+      {"enabled", sqlite3_column_int(row, 6) != 0},
+      {"allowedTools", mcp_json_array(row, 7, "MCP allowed tools")},
+      {"trustLevel", trust_level},
+      {"httpAuthHeaders", mcp_json_array(row, 9, "MCP HTTP auth headers")},
+      {"annotationTrust", annotation_trust},
+  };
+  add_optional_text(config, "command", row, 3);
+  add_optional_text(config, "url", row, 5);
+  if (sqlite3_column_type(row, 4) != SQLITE_NULL) {
+    auto args = parse_json_text(column_text(row, 4), "MCP server arguments");
+    if (!args.is_array()) throw std::runtime_error("Stored MCP server arguments are invalid");
+    config["args"] = std::move(args);
+  }
+  if (sqlite3_column_type(row, 10) != SQLITE_NULL) {
+    auto oauth = parse_json_text(column_text(row, 10), "MCP OAuth config");
+    if (!oauth.is_object()) throw std::runtime_error("Stored MCP OAuth config is invalid");
+    config["oauth"] = std::move(oauth);
+  }
+  return config;
+}
+
 void execute_sql(sqlite3* connection, const char* sql) {
   char* error = nullptr;
   if (sqlite3_exec(connection, sql, nullptr, nullptr, &error) == SQLITE_OK) return;
@@ -825,6 +945,39 @@ std::optional<nlohmann::json> DesktopDatabase::get_server_endpoint(
                         {"port", sqlite3_column_int(statement.get(), 1)}};
 }
 
+std::optional<nlohmann::json> DesktopDatabase::get_server_connection(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  const auto columns = table_columns(connection_, "servers");
+  const auto select_optional = [&columns](const char* name) {
+    return columns.contains(name) ? std::string(name) : std::string("NULL AS ") + name;
+  };
+  const auto sql = std::string(
+      "SELECT host, port, username, identity_id, ") +
+      select_optional("host_ca_public_key") + ", " +
+      select_optional("host_principals") + ", " +
+      select_optional("host_krl_path") + ", " +
+      select_optional("host_krl_url") + ", " +
+      select_optional("host_krl_signers") +
+      " FROM servers WHERE id = ?1";
+  Statement statement(connection_, sql.c_str());
+  bind_text(connection_, statement.get(), 1, server_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  nlohmann::json record = {{"host", column_text(statement.get(), 0)},
+                           {"port", sqlite3_column_int(statement.get(), 1)},
+                           {"username", column_text(statement.get(), 2)}};
+  add_optional_text(record, "identityId", statement.get(), 3);
+  add_optional_text(record, "hostCertificateAuthorityPublicKey", statement.get(), 4);
+  add_optional_text(record, "hostPrincipals", statement.get(), 5);
+  add_optional_text(record, "hostRevocationListPath", statement.get(), 6);
+  add_optional_text(record, "hostRevocationListUrl", statement.get(), 7);
+  add_optional_text(record, "hostRevocationListSigners", statement.get(), 8);
+  return record;
+}
+
 nlohmann::json DesktopDatabase::list_servers() const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};
@@ -1373,6 +1526,175 @@ nlohmann::json DesktopDatabase::list_tool_executions(
     executions.push_back(std::move(execution));
   }
   return {{"executions", std::move(executions)}};
+}
+
+nlohmann::json DesktopDatabase::list_file_transfers(
+    const std::optional<std::string>& server_id, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("File transfer limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"transfers", nlohmann::json::array()}};
+
+  std::vector<nlohmann::json> decoded;
+  {
+    const char* sql = server_id.has_value()
+        ? R"SQL(
+            SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+                   updated_at_epoch_ms, snapshot_json, staging_json
+              FROM file_transfers
+             WHERE server_id = ?1
+             ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+             LIMIT ?2
+          )SQL"
+        : R"SQL(
+            SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+                   updated_at_epoch_ms, snapshot_json, staging_json
+              FROM file_transfers
+             ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+             LIMIT ?1
+          )SQL";
+    Statement rows(connection_, sql);
+    int limit_parameter = 1;
+    if (server_id.has_value()) {
+      bind_text(connection_, rows.get(), 1, *server_id);
+      limit_parameter = 2;
+    }
+    if (sqlite3_bind_int(rows.get(), limit_parameter, limit) != SQLITE_OK) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      decoded.push_back(decode_file_transfer(rows.get()));
+    }
+  }
+  for (auto& snapshot : decoded) reconcile_transfer(connection_, snapshot);
+  nlohmann::json transfers = nlohmann::json::array();
+  for (auto& snapshot : decoded) transfers.push_back(std::move(snapshot));
+  return {{"transfers", std::move(transfers)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_file_transfer(
+    const std::string& transfer_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  std::optional<nlohmann::json> snapshot;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+               updated_at_epoch_ms, snapshot_json, staging_json
+          FROM file_transfers
+         WHERE transfer_id = ?1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, transfer_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    snapshot = decode_file_transfer(rows.get());
+  }
+  if (snapshot.has_value()) reconcile_transfer(connection_, *snapshot);
+  return snapshot;
+}
+
+nlohmann::json DesktopDatabase::list_mcp_servers() const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};
+  Statement rows(connection_, R"SQL(
+      SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level,
+             http_auth_headers, oauth, annotation_trust
+        FROM mcp_servers
+       ORDER BY label COLLATE NOCASE, id
+    )SQL");
+  nlohmann::json servers = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    servers.push_back(decode_mcp_server(rows.get()));
+  }
+  return {{"servers", std::move(servers)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_mcp_server(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, label, transport, command, args, url, enabled, allowed_tools, trust_level,
+             http_auth_headers, oauth, annotation_trust
+        FROM mcp_servers
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, server_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_mcp_server(rows.get());
+}
+
+void DesktopDatabase::upsert_mcp_server(const nlohmann::json& config) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local MCP database is unavailable");
+  Statement statement(connection_, R"SQL(
+      INSERT INTO mcp_servers (
+        id, label, transport, command, args, url, enabled, allowed_tools, trust_level,
+        http_auth_headers, oauth, annotation_trust
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+      ON CONFLICT(id) DO UPDATE SET
+        label = excluded.label, transport = excluded.transport, command = excluded.command,
+        args = excluded.args, url = excluded.url, enabled = excluded.enabled,
+        allowed_tools = excluded.allowed_tools, trust_level = excluded.trust_level,
+        http_auth_headers = excluded.http_auth_headers, oauth = excluded.oauth,
+        annotation_trust = excluded.annotation_trust
+    )SQL");
+  bind_text(connection_, statement.get(), 1, config.at("id").get<std::string>());
+  bind_text(connection_, statement.get(), 2, config.at("label").get<std::string>());
+  bind_text(connection_, statement.get(), 3, config.at("transport").get<std::string>());
+  std::optional<std::string> command;
+  if (config.contains("command") && config.at("command").is_string()) {
+    command = config.at("command").get<std::string>();
+  }
+  bind_optional_text(connection_, statement.get(), 4, command);
+  std::optional<std::string> args;
+  if (config.contains("args")) args = config.at("args").dump();
+  bind_optional_text(connection_, statement.get(), 5, args);
+  std::optional<std::string> url;
+  if (config.contains("url") && config.at("url").is_string()) {
+    url = config.at("url").get<std::string>();
+  }
+  bind_optional_text(connection_, statement.get(), 6, url);
+  if (sqlite3_bind_int(statement.get(), 7, config.value("enabled", false) ? 1 : 0) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  bind_text(connection_, statement.get(), 8,
+            config.value("allowedTools", nlohmann::json::array()).dump());
+  bind_text(connection_, statement.get(), 9, config.at("trustLevel").get<std::string>());
+  bind_text(connection_, statement.get(), 10,
+            config.value("httpAuthHeaders", nlohmann::json::array()).dump());
+  std::optional<std::string> oauth;
+  if (config.contains("oauth")) oauth = config.at("oauth").dump();
+  bind_optional_text(connection_, statement.get(), 11, oauth);
+  bind_text(connection_, statement.get(), 12,
+            config.value("annotationTrust", std::string("none")));
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::delete_mcp_server(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local MCP database is unavailable");
+  auto existing = get_mcp_server(server_id);
+  if (!existing.has_value()) return std::nullopt;
+  Statement statement(connection_, "DELETE FROM mcp_servers WHERE id = ?1");
+  bind_text(connection_, statement.get(), 1, server_id);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return existing;
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(
