@@ -1,84 +1,72 @@
-import { useQuery } from "@tanstack/react-query";
-import { IPC_COMMANDS, type Server } from "@yukinal/shared";
-import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { IPC_COMMANDS, type Activity } from "@yukinal/shared";
+import { useEffect } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { errorMessage, formatRelativeTime, formatTimestamp } from "../../lib/format.js";
-import { useHostKeyStatus } from "../../lib/host-key.js";
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
-import { ENVIRONMENT_LABEL_SHORT, SERVER_STATUS_LABEL } from "../../lib/labels.js";
-import { useServerAction, useServers } from "../../lib/servers.js";
+import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
+import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { dashboardResources } from "./dashboard-model.js";
+import { scheduleIntervalLabel } from "../investigations/schedule-ui.js";
 
-export function InfrastructureDashboard({ onAttentionRequested }: { onAttentionRequested?: () => void }) {
+const OUTCOMES = { success: "成功", failure: "失败", cancelled: "已取消", denied: "已拒绝" };
+const SCHEDULE_STATES = { active: "已启用", paused: "已暂停", revoked: "已撤销" };
+
+export function InfrastructureDashboard() {
+  const shell = isDesktopShell();
+  const queryClient = useQueryClient();
   const servers = useServers();
-  const rows = servers.data ?? [];
-  const connected = rows.filter((server) => server.status === "connected").length;
-  return <section className="infrastructure-dashboard" aria-label="服务器仪表台">
-    <div className="dashboard-summary"><div><strong>{rows.length}</strong><span>台服务器</span></div><span>{connected} 已连接</span></div>
-    {servers.isError ? <p className="form-error" role="alert">{errorMessage(servers.error)}</p> : null}
-    {servers.isLoading ? <p className="muted-copy" role="status">正在读取服务器…</p> : null}
-    {!rows.length && !servers.isLoading && !servers.isError ? <div className="dashboard-empty">
-      <h2>暂无服务器</h2>
-    </div> : null}
-    <div className="infrastructure-cards">{rows.map((server) => <InfrastructureCard key={server.id} server={server} onAttentionRequested={onAttentionRequested} />)}</div>
-  </section>;
-}
-
-function InfrastructureCard({ server, onAttentionRequested }: { server: Server; onAttentionRequested?: () => void }) {
-  const ref = useRef<HTMLElement>(null);
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    if (!ref.current) return;
-    const observer = new IntersectionObserver(([entry]) => setVisible(Boolean(entry?.isIntersecting)), { rootMargin: "64px" });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, []);
-  const selectServer = useWorkspaceStore((state) => state.selectServer);
-  const setServerPage = useWorkspaceStore((state) => state.setServerPage);
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
-  const setAgentDraft = useWorkspaceStore((state) => state.setAgentDraft);
-  const agentBusy = useWorkspaceStore((state) => state.agentBusy);
-  const hasDraft = useWorkspaceStore((state) => Boolean(state.agentDraft.trim()) || state.agentAttachments.length > 0);
-  const selected = useWorkspaceStore((state) => state.selectedServerId === server.id);
-  const { action, busy } = useServerAction();
-  const hostKey = useHostKeyStatus(server.id, { enabled: visible });
-  const trusted = Boolean(server.connection.hostCertificateAuthority) || hostKey.data?.pinned === true;
-  const connected = server.status === "connected";
-  const query = useQuery({
-    queryKey: ["serverSnapshot", server.id],
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.serverSnapshot, { serverId: server.id })).snapshot,
-    enabled: visible && connected && trusted && isDesktopShell() && !busy,
-    staleTime: 60_000,
-    refetchInterval: visible ? 60_000 : false,
-    retry: false,
+  const selectTask = useWorkspaceStore((state) => state.selectTask);
+  const activities = useQuery({
+    queryKey: ["activities", "all"], enabled: shell,
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.activityList, { limit: 100 })).activities,
   });
-  const resources = dashboardResources(server.id, query.data);
-  const inspect = () => selectServer(server.id);
-  const askAI = () => {
-    // Only fill an empty draft. Never overwrite the user's ongoing question or send it automatically.
-    if (agentBusy || hasDraft) return;
-    selectServer(server.id);
-    setPrimary("servers");
-    setAgentDraft(`请对 @${server.name} 做一次只读健康巡检，检查系统资源和容器状态，给出异常依据与建议。不要修改文件或重启服务。`);
-    onAttentionRequested?.();
-    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".agent-composer textarea")?.focus());
-  };
-  return <article ref={ref} className={`infrastructure-card ${selected ? "is-selected" : ""}`} aria-label={server.name}>
-    <header className="infrastructure-card-header"><button type="button" className="infrastructure-card-identity" onClick={inspect} title={server.name}><span className="infrastructure-server-icon"><Icon name="servers" size="md" /></span><span><strong>{server.name}</strong><small title={server.connection.host}>{server.connection.host}</small></span></button></header>
-    <div className="infrastructure-card-meta"><span className={`infrastructure-status server-status-${server.status}`}><span className="server-dot" />{SERVER_STATUS_LABEL[server.status]}</span><span>{ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}</span>{server.metadata.region ? <span>{server.metadata.region}</span> : null}</div>
-    <div className="infrastructure-metrics" aria-label="资源使用率"><ResourceMetric label="CPU" value={resources.cpu} /><ResourceMetric label="内存" value={resources.memory} /><ResourceMetric label="磁盘" value={resources.disk} /></div>
-    {resources.snapshot ? <p className="infrastructure-collected"><time dateTime={resources.snapshot.collectedAt} title={formatTimestamp(resources.snapshot.collectedAt)}>{formatRelativeTime(resources.snapshot.collectedAt)}采集</time>{!connected || query.isError ? " · 上次快照" : ""}</p> : <p className="infrastructure-collected">{!connected ? "未连接" : hostKey.isError ? "无法读取身份状态" : !trusted ? "核验主机身份后采集" : query.isFetching ? "正在采集…" : "尚无资源快照"}</p>}
-    {query.isError ? <p className="infrastructure-card-error" role="status">刷新失败：{errorMessage(query.error)}</p> : null}
-    {resources.containers?.length ? <details className="infrastructure-resource-group"><summary><Icon name="services" size="sm" /><span>Docker 容器</span><span>{resources.containers.length}</span><Icon name="chevronDown" size="sm" /></summary><ul>{resources.containers.map((container) => <li key={container.name}><span className={`container-dot ${container.state === "running" ? "container-dot-running" : ""}`} /><span className="resource-identity"><strong title={container.name}>{container.name}</strong><small title={container.image}>{container.image}</small></span><span className="resource-state">{container.state === "running" ? "运行中" : container.state}</span></li>)}</ul><button type="button" className="text-button resource-group-more" onClick={() => { selectServer(server.id); setServerPage("services"); }}>查看服务详情<Icon name="chevronRight" size="xs" /></button></details> : null}
-    <footer className="infrastructure-card-footer"><button type="button" className="text-button" onClick={inspect}>查看详情<Icon name="chevronRight" size="xs" /></button>{connected ? <button type="button" className="text-button" disabled={agentBusy || hasDraft} title={hasDraft ? "先完成当前输入，再开始新的巡检" : "填入巡检草稿"} onClick={askAI}><Icon name="activity" size="sm" />检查资源</button> : <button type="button" className="text-button" disabled={busy || server.status === "connecting"} onClick={() => action.mutate({ type: "connect", serverId: server.id })}><Icon name="connect" size="sm" />连接</button>}</footer>
-    {action.isError ? <p className="infrastructure-card-error" role="alert">{errorMessage(action.error)}</p> : null}
-  </article>;
-}
+  const tasks = useQuery({
+    queryKey: ["investigationTasks"], enabled: shell,
+    queryFn: () => callDesktop("investigation_task_list", {}),
+  });
+  const schedules = useQuery({
+    queryKey: ["investigationSchedules"], enabled: shell,
+    queryFn: () => callDesktop("investigation_schedule_list", {}), refetchInterval: 60_000,
+  });
+  useEffect(() => {
+    if (!shell) return;
+    const subscription = subscribeDesktop("activity.created", (activity) => {
+      queryClient.setQueryData<Activity[]>(["activities", "all"], (current) => current
+        ? [activity, ...current.filter((item) => item.id !== activity.id)].slice(0, 100) : current);
+    });
+    return subscription.stop;
+  }, [shell, queryClient]);
+  const recent = [...(activities.data ?? [])].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const scheduled = [...(schedules.data?.schedules ?? [])].sort((a, b) =>
+    Number(b.status === "active") - Number(a.status === "active") || Date.parse(a.nextRunAt) - Date.parse(b.nextRunAt));
+  const serverNames = new Map((servers.data ?? []).map((server) => [server.id, server.name]));
+  const taskNames = new Map((tasks.data?.tasks ?? []).map((task) => [task.id, task.objective]));
+  const refreshing = activities.isFetching || schedules.isFetching || tasks.isFetching;
 
-function ResourceMetric({ label, value }: { label: string; value?: number }) {
-  const available = value !== undefined && Number.isFinite(value);
-  const percent = available ? Math.max(0, Math.min(100, value)) : undefined;
-  return <div className="infrastructure-metric"><span>{label}</span><strong>{percent === undefined ? "—" : `${Math.round(percent)}%`}</strong><span className={`infrastructure-meter ${percent !== undefined && percent >= 90 ? "is-high" : ""}`} aria-hidden="true"><span style={{ width: `${percent ?? 0}%` }} /></span></div>;
+  return <section className="workspace-dashboard" aria-label="仪表台">
+    <section className="dashboard-section" aria-label="最新记录">
+      <header><h3>最新记录</h3><button type="button" className="icon-button" aria-label="刷新仪表台" title="刷新" disabled={!shell || refreshing} onClick={() => { void activities.refetch(); void schedules.refetch(); void tasks.refetch(); }}><Icon name="refresh" size="sm" /></button><button type="button" className="text-button" onClick={() => setPrimary("activity")}>全部<Icon name="chevronRight" size="xs" /></button></header>
+      {activities.isError ? <p className="dashboard-query-error" role="alert">读取失败：{errorMessage(activities.error)}</p> : null}
+      {activities.isLoading ? <p className="dashboard-placeholder" role="status">正在读取…</p> : null}
+      {activities.isSuccess && !recent.length ? <p className="dashboard-placeholder">暂无记录</p> : null}
+      <div className="dashboard-records">{recent.slice(0, 4).map((activity) => <details key={activity.id} className="dashboard-record">
+        <summary><span className="dashboard-record-copy"><strong>{activity.title}</strong><small>{activity.serverId ? serverNames.get(activity.serverId) ?? activity.serverId : "全局"}<span> · </span><time dateTime={activity.createdAt} title={formatTimestamp(activity.createdAt)}>{formatRelativeTime(activity.createdAt)}</time></small></span><span className={`dashboard-outcome outcome-${activity.outcome ?? "unknown"}`}>{activity.outcome ? OUTCOMES[activity.outcome] : "记录"}</span></summary>
+        <p>{activity.description ?? activity.reason ?? activity.title}</p>
+      </details>)}</div>
+    </section>
+    <section className="dashboard-section" aria-label="定时任务">
+      <header><h3>定时任务</h3><button type="button" className="text-button" onClick={() => setPrimary("tasks")}>全部<Icon name="chevronRight" size="xs" /></button></header>
+      {schedules.isError ? <p className="dashboard-query-error" role="alert">读取失败：{errorMessage(schedules.error)}</p> : null}
+      {tasks.isError ? <p className="dashboard-query-error" role="status">任务名称读取失败：{errorMessage(tasks.error)}</p> : null}
+      {schedules.isLoading ? <p className="dashboard-placeholder" role="status">正在读取…</p> : null}
+      {schedules.isSuccess && !scheduled.length ? <p className="dashboard-placeholder">暂无定时任务</p> : null}
+      <div className="dashboard-schedules">{scheduled.slice(0, 3).map((schedule) => <button type="button" className="dashboard-schedule" key={schedule.id} title={taskNames.get(schedule.taskId) ?? schedule.taskId} onClick={() => { selectTask(schedule.taskId); setPrimary("tasks"); }}>
+        <span className="dashboard-record-copy"><strong>{taskNames.get(schedule.taskId) ?? "定时巡检"}</strong><small>{scheduleIntervalLabel(schedule.intervalSeconds)} · {SCHEDULE_STATES[schedule.status]}</small><small>{schedule.status === "active" ? Date.parse(schedule.nextRunAt) <= Date.now() ? <span title={`计划时间：${formatTimestamp(schedule.nextRunAt)}`}>等待调度</span> : <>下次 <time dateTime={schedule.nextRunAt}>{formatTimestamp(schedule.nextRunAt)}</time></> : schedule.lastRunAt ? <>上次 {formatTimestamp(schedule.lastRunAt)}</> : "尚未执行"}</small></span>
+        <Icon name="chevronRight" size="sm" />
+        {schedule.lastError ? <span className="dashboard-schedule-error" title={schedule.lastError}>{schedule.lastError}</span> : schedule.lastOutcome ? <span className="dashboard-schedule-result" title={schedule.lastOutcome}>{schedule.lastOutcome}</span> : null}
+      </button>)}</div>
+    </section>
+  </section>;
 }

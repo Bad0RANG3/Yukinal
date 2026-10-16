@@ -6,14 +6,12 @@ import { ServerAuthChallengeModal } from "../features/servers/ServerAuthChalleng
 import { HostKeyGate } from "../features/servers/HostKeyGate.js";
 import { InfrastructureDashboard } from "../features/overview/InfrastructureDashboard.js";
 import { Icon, type IconName } from "../components/Icon.js";
-import brandMark from "../assets/brand-mark.png";
 import { PRIMARY_NAV, SERVER_PAGES, useWorkspaceStore, type PrimaryNav, type ServerPage } from "../stores/workspace-store.js";
 import { LivePreviewControl } from "./LivePreviewControl.js";
 import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
 import { WorkpagesDock, WorkpagesLauncher } from "../features/workpages/WorkpagesDock.js";
 import { openNativeWorkpage } from "../lib/ipc.js";
-import { MemoryLibrary } from "../features/agent/MemoryLibrary.js";
 import { useRecentAgentSessions } from "../features/agent/useRecentAgentSessions.js";
 
 const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
@@ -46,7 +44,6 @@ export function AppShell() {
   const setServerPage = useWorkspaceStore((state) => state.setServerPage);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
-  const [memoryOpen, setMemoryOpen] = useState(false);
   const [requestedSessionId, setRequestedSessionId] = useState<string | null>(null);
   const agentBusy = useWorkspaceStore((state) => state.agentBusy);
   const recent = useRecentAgentSessions(selectedServerId, 3);
@@ -110,11 +107,10 @@ export function AppShell() {
   return (
     <div className={`app-shell ai-first ${sidebarOpen ? "navigation-open" : ""} ${contextOpen ? "context-open" : ""}`} data-primary={primary}>
       <aside className="workspace-sidebar" id="workspace-sidebar" ref={sidebarRef} aria-label="工作区导航">
-        <div className="workspace-brand"><img src={brandMark} alt="" /><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
+        <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
         <nav className="workspace-navigation" aria-label="主导航">{PRIMARY_NAV.map((item) => <button type="button" key={item} className={`workspace-nav-item ${primary === item && (item !== "servers" || !serverDetailOpen) ? "is-active" : ""}`} aria-current={primary === item && (item !== "servers" || !serverDetailOpen) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span></button>)}</nav>
         <ServerList embedded onClose={() => setSidebarOpen(false)} onSelect={() => { setSidebarOpen(false); closeGuide(); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); }} />
         {recent.data?.sessions.length ? <section className="sidebar-recent" aria-label="最近任务"><span>最近任务</span>{recent.data.sessions.map((session) => <button type="button" key={session.id} disabled={agentBusy} title={session.title} onClick={() => { setRequestedSessionId(session.id); returnToAI(); }}>{session.title}</button>)}</section> : null}
-        <div className="sidebar-context-actions"><button type="button" className="text-button" disabled={agentBusy} onClick={() => { useWorkspaceStore.getState().selectServer(null); setPrimary("servers"); }}>全局对话</button><button type="button" className="text-button" onClick={() => setMemoryOpen(true)}>记忆库</button></div>
       </aside>
       {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
@@ -144,7 +140,7 @@ export function AppShell() {
             {primary === "agents" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><AgentNistPane onUseAgent={returnToAI} /></Suspense> : null}
             {primary === "tasks" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><InvestigationsPane /></Suspense> : null}
             {primary === "activity" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed /></Suspense> : null}
-            {primary === "servers" && !guideOpen && !detail ? <InfrastructureDashboard onAttentionRequested={returnToAI} /> : null}
+            {primary === "servers" && !guideOpen && !detail ? <InfrastructureDashboard /> : null}
             {detail && !guideOpen ? <>
               {serverPage === "overview" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServerOverview key={selectedServerId} /></Suspense></HostKeyGate> : null}
               {serverPage === "files" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><RemoteFilesPane key={selectedServerId} /></Suspense></HostKeyGate> : null}
@@ -157,7 +153,6 @@ export function AppShell() {
         </div>
       </main>
       <ServerAuthChallengeModal />
-      {memoryOpen ? <MemoryLibrary key={selectedServerId ?? "global"} onClose={() => setMemoryOpen(false)} /> : null}
     </div>
   );
 }

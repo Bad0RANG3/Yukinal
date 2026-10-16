@@ -89,17 +89,20 @@ export function AgentHeader({
 }
 
 /** Shared status content can live inside the composer without duplicating state. */
-export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, agentReady, shell }: {
+export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, agentReady, shell, compact = false, preview = false }: {
   running: boolean;
   runState: string | null;
   tokenUsage: AgentTokenUsage | null;
   contextUsage?: AgentContextUsage | null;
   agentReady: boolean;
   shell: boolean;
+  compact?: boolean;
+  preview?: boolean;
 }) {
   const label = runStateLabel(runState);
+  const statusLabel = preview ? "模拟数据 · 发送已停用" : label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动");
   return <>
-    {running && label ? (
+    {compact ? <span className="agent-status is-icon" role="status" aria-label={statusLabel} title={statusLabel}><Icon name={preview ? "agent" : running ? "refresh" : agentReady ? "connect" : "disconnect"} size="sm" /></span> : running && label ? (
       <span className="agent-status agent-status-active" role="status"><span className="status-pulse" />{label}</span>
     ) : (
       <span className={`agent-status ${agentReady ? "agent-status-ready" : "agent-status-idle"}`} data-idle={!runState || undefined} role="status">
@@ -107,7 +110,7 @@ export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, ag
       </span>
     )}
     {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
-      <span className="agent-context-caption">上下文 </span><span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
+      {compact ? <Icon name="archive" size="xs" /> : <span className="agent-context-caption">上下文 </span>}<span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{!compact && contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
     </span> : null}
     {tokenUsage && !contextUsage ? <span className="agent-token-usage" title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens`}>
       {(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens

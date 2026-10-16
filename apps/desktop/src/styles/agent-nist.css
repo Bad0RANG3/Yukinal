@@ -1,5 +1,6 @@
 /* Local operations roles share the existing provider and conversation pipeline. */
 .agent-nist-page { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; font-size: var(--text-small); overflow-wrap: anywhere; }
+.agent-nist-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .agent-nist-heading > div { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
 .agent-nist-heading h2 { margin: 0; color: var(--text); font-size: var(--text-subheading); font-weight: 600; }
 .agent-nist-heading span { color: var(--faint); font-size: var(--text-caption); }

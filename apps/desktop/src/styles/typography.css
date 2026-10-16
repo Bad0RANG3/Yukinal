@@ -1,3 +1,5 @@
+@font-face { font-family: "Orbitron"; src: url("../assets/fonts/Orbitron-Variable.ttf") format("truetype"); font-weight: 400 900; font-style: normal; font-display: swap; }
+
 /* A shared desktop type scale. The saved UI size remains the user's body size. */
 :root, .app-shell {
   --text-caption: max(11px, calc(var(--ui-font-size, 14px) - 3px));

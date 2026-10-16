@@ -21,6 +21,10 @@
   --danger: #e3e3e3;
   --success: #bdbdbd;
   --info: #b0b0b0;
+  --connection-connected: #9dbda9;
+  --connection-connecting: #d7ba83;
+  --connection-error: #e09696;
+  --connection-disconnected: #a2a2a2;
   --ok-line: #515151;
   --ok-surface: #212121;
   --warn-line: #565656;

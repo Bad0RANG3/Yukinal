@@ -8,6 +8,7 @@
 
 import {
   IPC_COMMANDS,
+  type Activity,
   type AiProviderConfig,
   type InvestigationSchedule,
   type InvestigationScheduleRun,
@@ -489,14 +490,17 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
     }
     case IPC_COMMANDS.fileTransferList:
       return { transfers: TRANSFERS.filter((item) => !paramString(params, "serverId", "") || item.serverId === paramString(params, "serverId", "")) };
-    case IPC_COMMANDS.activityList:
-      return {
-        activities: [
-          { id: "act_preview_health", serverId: "srv_previewdb", type: "health", title: "内存使用率接近阈值", description: "最近一次采集显示内存使用率 82%，建议检查数据库连接池。", source: "system", actor: "collector", outcome: "failure", traceId: "trace_preview", createdAt: AT },
-          { id: "act_preview_agent", serverId: "srv_previewdb", type: "agent_action", title: "Agent 读取了应用日志", description: "只读排查：筛选最近 120 行并发现 3 条数据库连接错误。", source: "agent", actor: "Agent", outcome: "success", traceId: "trace_preview", createdAt: "2026-09-21T07:55:00.000Z" },
-          { id: "act_preview_connection", serverId: "srv_previewrunner", type: "connection", title: "连接已断开", description: "本地审计 fixture：服务器等待重新连接。", source: "user", actor: "用户", outcome: "cancelled", createdAt: "2026-09-21T07:40:00.000Z" },
-        ],
-      };
+    case IPC_COMMANDS.activityList: {
+      const activities: Activity[] = [
+        { id: "act_preview_health", serverId: "srv_previewdb", type: "health", title: "内存使用率接近阈值", description: "最近一次采集显示内存使用率 82%，建议检查数据库连接池。", source: "system", actor: "collector", outcome: "failure", traceId: "trace_preview", createdAt: AT },
+        { id: "act_preview_agent", serverId: "srv_previewdb", type: "agent_action", title: "Agent 读取了应用日志", description: "只读排查：筛选最近 120 行并发现 3 条数据库连接错误。", source: "agent", actor: "Agent", outcome: "success", traceId: "trace_preview", createdAt: "2026-09-21T07:55:00.000Z" },
+        { id: "act_preview_connection", serverId: "srv_previewrunner", type: "connection", title: "连接已断开", description: "本地审计 fixture：服务器等待重新连接。", source: "user", actor: "用户", outcome: "cancelled", createdAt: "2026-09-21T07:40:00.000Z" },
+      ];
+      const serverId = paramString(params, "serverId", "");
+      const requestedLimit = typeof params === "object" && params !== null ? Reflect.get(params, "limit") : undefined;
+      const limit = typeof requestedLimit === "number" && requestedLimit > 0 ? requestedLimit : 100;
+      return { activities: activities.filter((activity) => !serverId || activity.serverId === serverId).slice(0, limit) };
+    }
     case IPC_COMMANDS.toolExecutionList:
       return {
         executions: [

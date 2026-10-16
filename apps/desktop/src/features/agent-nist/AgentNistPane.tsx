@@ -5,6 +5,7 @@ import { errorMessage } from "../../lib/format.js";
 import { useProviders } from "../../lib/providers.js";
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { MemoryLibrary } from "../agent/MemoryLibrary.js";
 import {
   AGENT_NIST_STORAGE_KEY,
   AGENT_TEAMS,
@@ -34,6 +35,8 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
   const agentBusy = useWorkspaceStore((state) => state.agentBusy);
   const agentSessionArchived = useWorkspaceStore((state) => state.agentSessionArchived);
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
+  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [storageKey] = useState(() => `${AGENT_NIST_STORAGE_KEY}${isPreviewFixture() ? ".preview" : ""}`);
   const [config, setConfig] = useState(() => readLocalRoles(storageKey));
   const [teamId, setTeamId] = useState<AgentTeam>("blue");
@@ -98,7 +101,8 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
 
   return <section className="agent-nist-page" aria-labelledby={`${instanceId}-title`}>
     <header className="agent-nist-heading">
-      <div><h2 id={`${instanceId}-title`}>Agent NIST</h2><span>本机配置</span></div>
+      <div><h2 id={`${instanceId}-title`}>Agent NIST</h2></div>
+      <button type="button" className="agent-nist-text-action" onClick={() => setMemoryOpen(true)}><Icon name="archive" size="sm" />记忆库</button>
     </header>
 
     <div className="agent-nist-teams" role="group" aria-label="运维 Agent 队伍">
@@ -164,5 +168,6 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
         </article>;
       })}
     </div>
+    {memoryOpen ? <MemoryLibrary key={selectedServerId ?? "global"} onClose={() => setMemoryOpen(false)} /> : null}
   </section>;
 }

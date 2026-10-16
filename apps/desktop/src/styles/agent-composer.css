@@ -387,62 +387,16 @@
    是一个空框，读不出「不勾 = 每次都会问你」；而「帮我批准」的勾选态又和
    「已经批准了什么」混在一起。现在批准方式是设置面板里的两档选择。 */
 
-/* 当前运行状态的常驻摘要。不展开设置也能一眼看出这次运行会怎样 ——
-   模式是随请求发出的，用户必须能在按下发送前确认它。 */
-.agent-composer-policy {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  margin: 0;
-}
-
-.agent-composer-meta,
-.agent-composer-status {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px 12px;
-}
-
-.agent-composer-meta { justify-content: space-between; }
-.agent-composer-status { margin-left: auto; color: var(--faint); font-size: var(--text-caption); }
-.agent-composer .agent-composer-status .agent-context { flex: 0 1 auto; max-width: 180px; margin: 0; padding: 0; border: 0; background: transparent; font-size: inherit; }
-.agent-composer .agent-composer-status .agent-status { min-height: 0; padding: 0; border: 0; background: transparent; font-size: inherit; }
+.agent-composer-status { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--faint); font-size: var(--text-caption); }
+.agent-composer .agent-composer-status .agent-status { display: inline-flex; min-height: 28px; padding: 0 4px; border: 0; background: transparent; font-size: inherit; }
+.agent-composer .agent-composer-status .agent-status.is-icon::before { display: none; }
+.agent-composer-status .agent-context-usage { display: inline-flex; align-items: center; gap: 4px; font-size: inherit; }
 .agent-composer-status .agent-token-usage { display: inline; }
-.agent-composer-status .agent-context-usage { font-size: inherit; }
+.agent-settings-readonly { display: flex; align-items: center; gap: 8px; font-size: var(--text-caption); color: var(--muted); }
+.agent-settings-readonly input { accent-color: var(--accent); }
 .agent-input-notices:empty { display: none; }
 .agent-composer .agent-input-notices .agent-notice { padding: 0; font-size: var(--text-caption); line-height: 1.5; }
 .agent-composer .agent-input-notices .text-button { font-size: inherit; }
-
-.agent-mode-summary,
-.agent-approval-summary,
-.agent-policy-summary {
-  color: var(--muted);
-  font-size: var(--text-caption);
-  white-space: nowrap;
-}
-
-.agent-mode-summary {
-  border: 1px solid var(--composer-line);
-  border-radius: var(--radius-pill);
-  padding: 2px 7px;
-}
-
-.agent-policy-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.agent-policy-summary.has-warning {
-  border: 1px solid var(--warn-line);
-  border-radius: var(--radius-pill);
-  background: var(--warn-surface);
-  color: var(--text);
-  padding: 2px 7px;
-}
 
 .agent-settings-warning {
   margin: 0;
@@ -454,16 +408,6 @@
   font-size: var(--text-caption);
   line-height: 1.5;
 }
-
-/* 只读类模式给一个明确的视觉标记：它改变的是「能不能改东西」，
-   和模型、批准方式不是一个层级的信息。 */
-.agent-mode-summary.is-readonly {
-  border-color: var(--warn-line);
-  background: var(--warn-surface);
-  color: var(--text);
-}
-
-/* Mode and approval summaries share the same text tone. */
 
 .agent-settings-trigger.is-open {
   background: var(--surface-4);
@@ -780,7 +724,7 @@
   }
 }
 
-.agent-role-picker { display: flex; min-width: 0; max-width: 170px; }
+.agent-role-picker { display: flex; min-width: 0; width: 100%; }
 .agent-role-picker select { width: 100%; min-width: 0; min-height: 28px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); padding: 3px 20px 3px 6px; font: inherit; font-size: var(--text-caption); text-overflow: ellipsis; cursor: pointer; }
 .agent-role-picker select:hover { background: var(--material-hover); color: var(--text); }
 .agent-role-picker select option, .agent-role-picker select optgroup { background: var(--surface-2); color: var(--text); }
@@ -788,14 +732,12 @@
 .agent-reply-meta strong { color: var(--muted); font-weight: 600; }
 .agent-reply-meta > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-@container agent-composer (max-width: 460px) {
+@container agent-composer (max-width: 360px) {
   .agent-composer-toolbar-right { flex: 1 1 100%; }
   .agent-composer-status { margin-left: 0; }
-  .agent-role-picker { max-width: 130px; }
   .agent-model-value { max-width: 120px; }
 }
 
 @container agent-workspace (max-width: 580px) {
-  .agent-role-picker { max-width: 130px; }
   .agent-role-picker select { font-size: var(--text-caption); }
 }

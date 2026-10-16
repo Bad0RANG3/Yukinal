@@ -92,9 +92,6 @@ button:disabled {
 .app-shell {
   display: grid;
   height: 100%;
-  /* Preserve monochrome rendering for embedded assets and terminal ANSI colors.
-     Material and status colors are declared centrally in materials.css. */
-  filter: grayscale(1);
 }
 
 .app-rail {
@@ -103,13 +100,7 @@ button:disabled {
   align-items: center;
 }
 
-/* 左上角这枚标记就是任务栏里那枚应用图标本身：src/assets/brand-mark.png 取自应用图标
-   的 128px 一档，所以换了图标就跟着换。
-   图标自带一圈透明留白和 #09090b 的深色底板，底色因此直接取底板同色：留白落在同色底上，
-   rail 里只剩环与节点，不用再画内描边。容器只负责摆位与悬浮反馈，原来那套字形、字重
-   样式随 "Y" 一起删掉了。
-   `.app-shell` 上的 grayscale(1) 会把这枚图标一起压成灰阶（和整屏的灰阶契约一致）：
-   要看它本来的青色，得在这里单独写 filter: grayscale(0)，那属于打破既有契约，别顺手加。 */
+
 .brand-mark {
   display: grid;
   place-items: center;

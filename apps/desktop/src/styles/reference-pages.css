@@ -35,9 +35,6 @@
 .overview-page .overview-collector-details li { flex-wrap: wrap; }
 .overview-page .overview-collector-details time { flex-basis: 100%; }
 .overview-page .container-name { min-width: 0; overflow-wrap: anywhere; }
-.ai-first .dashboard-summary, .ai-first .dashboard-summary > div { flex-wrap: wrap; }
-.ai-first .infrastructure-card-identity strong { white-space: normal; overflow-wrap: anywhere; }
-.ai-first .infrastructure-resource-group summary > span { min-width: 0; }
 .activity-list { display: flex; flex-direction: column; border: 1px solid var(--line); overflow: hidden; }
 .activity-row { display: flex; gap: 12px; padding: var(--space-card); border-bottom: 1px solid var(--line); }
 .activity-row:last-child { border-bottom: 0; }

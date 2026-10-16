@@ -38,7 +38,6 @@ import { AgentFeed } from "./AgentFeed.js";
 import { AgentHeader, AgentRunStatus } from "./AgentHeader.js";
 import { AgentHistoryPane } from "./AgentHistoryPane.js";
 import { AgentNotices } from "./AgentNotices.js";
-import { AgentStarters } from "./AgentStarters.js";
 import {
   commandHelpText,
   resolveMentionedServer,
@@ -164,9 +163,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   });
 
   const canSend = shell && agentRunning && run.listening && models.providerReady && !sessions.archived && !resettingContext && !openingSession;
-  const starterBlockedReason = sessions.archived ? "恢复当前对话后，可以继续准备任务。"
-    : run.running ? "当前任务完成后，可以选择新的起点。"
-    : prompt.trim() || attachments.length ? "先完成当前草稿，再选择新的起点。" : null;
 
   const commandContext: CommandContext = { running: run.running, archived: sessions.archived, desktop: shell };
 
@@ -469,7 +465,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
               <AgentComposer
                 notices={<>
                   {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
-                  {preview ? <p className="agent-notice" role="status">模拟预览 · 可输入草稿，暂不发送请求。</p> : <AgentNotices
+                  {!preview ? <AgentNotices
                     shell={shell}
                     agentRunning={agentRunning}
                     providerReady={models.providerReady}
@@ -480,19 +476,14 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                     spawnError={spawnAgent.error?.message}
                     onSpawn={() => spawnAgent.mutate()}
                     onOpenSettings={() => setPrimary("settings")}
-                  />}
+                  /> : null}
                   {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
                   {contextError ? <div className="agent-history-error agent-history-error-inline" role="alert">{contextError}</div> : null}
                   {roles.notice ? <div className="agent-history-error agent-history-error-inline" role="status">{roles.notice}</div> : null}
                 </>}
                 status={<>
-                  <div className="agent-context">
-                    <Icon name="servers" size="sm" />
-                    <span title={(run.running ? runContext : focusServer?.name) ?? "全局工作区"}>
-                      {(run.running ? runContext : focusServer?.name) ?? "全局工作区"}
-                    </span>
-                  </div>
-                  <AgentRunStatus running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
+                  <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectServer(null)}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
+                  <AgentRunStatus compact preview={preview} running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
                 </>}
                 prompt={prompt}
                 onPromptChange={setPrompt}
@@ -523,14 +514,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 onSelectRole={setSelectedRoleId}
                 commandContext={commandContext}
               />
-              {workspace && run.entries.length === 0 ? <AgentStarters
-                blockedReason={starterBlockedReason}
-                onPick={(text) => {
-                  if (sessions.archived || run.running || prompt.trim() || attachments.length) return;
-                  setPrompt(text);
-                  requestAnimationFrame(() => panel.panelRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus());
-                }}
-              /> : null}
             </div>
           </div>
         </>

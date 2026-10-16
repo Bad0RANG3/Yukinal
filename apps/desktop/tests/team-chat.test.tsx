@@ -103,10 +103,9 @@ const composerProps: ComponentProps<typeof AgentComposer> = {
   commandContext: { running: false, archived: false, desktop: true },
 };
 
-test("running composer preserves stop admission and locks draft, role and model controls", () => {
+test("running composer preserves stop admission and locks draft and model controls", () => {
   const markup = renderToStaticMarkup(<AgentComposer {...composerProps} running canStop stopping={false} />);
   assert.match(markup, /<textarea[^>]+disabled=""/u);
-  assert.match(markup, /<select[^>]+aria-label="回复角色"[^>]+disabled=""/u);
   assert.match(markup, /<button[^>]+aria-label="选择模型"[^>]+disabled=""/u);
   assert.equal(markup.includes('aria-label="发送消息"'), false);
   const stop = markup.match(/<button[^>]+aria-label="停止运行"[^>]*>/u)?.[0];

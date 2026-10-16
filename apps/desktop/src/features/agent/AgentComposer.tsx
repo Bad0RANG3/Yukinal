@@ -59,7 +59,7 @@ import {
   type MentionCandidate,
   type Submission,
 } from "./composer-triggers.js";
-import { APPROVAL_OPTIONS, APPROVAL_ORDER, RUN_MODE_ORDER, RUN_MODE_SPECS, approvalOptionSpec, runModeSpec } from "./run-mode.js";
+import { APPROVAL_OPTIONS, APPROVAL_ORDER, approvalOptionSpec, runModeSpec } from "./run-mode.js";
 import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
@@ -598,31 +598,20 @@ export function AgentComposer({
             tabIndex={-1}
             onAnimationEnd={settingsPresence.onAnimationEnd}
           >
+            {roles.length ? <section className="agent-settings-group">
+              <p className="agent-settings-title">回复角色</p>
+              <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
+                <span className="sr-only">回复角色</span>
+                <select aria-label="回复角色" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
+                  <option value="">自动匹配</option>
+                  {AGENT_TEAMS.map((team) => <optgroup key={team.id} label={team.label}>
+                    {roles.filter((role) => role.team === team.id).map((role) => <option key={role.id} value={role.id}>{team.label} · {role.name}</option>)}
+                  </optgroup>)}
+                </select>
+              </label>
+            </section> : null}
             <section className="agent-settings-group">
-              <p className="agent-settings-title">运行模式</p>
-              <ul className="agent-settings-options">
-                {RUN_MODE_ORDER.map((key) => {
-                  const spec = RUN_MODE_SPECS[key];
-                  return (
-                  <li key={spec.mode}>
-                    <button
-                      type="button"
-                      className={`agent-settings-option ${spec.mode === runMode ? "is-selected" : ""}`}
-                      aria-pressed={spec.mode === runMode}
-                      // 运行中不允许切换：模式是随请求发出去的，中途改变会让
-                      // 「这次运行到底受哪个模式约束」变得说不清。
-                      disabled={running}
-                      onClick={() => onRunModeChange(spec.mode)}
-                    >
-                      <span className="agent-settings-option-label">
-                        {spec.label}
-                        {spec.readOnly ? <span className="agent-settings-badge">不改动</span> : null}
-                      </span>
-                    </button>
-                  </li>
-                  );
-                })}
-              </ul>
+              <label className="agent-settings-readonly"><input type="checkbox" checked={modeSpec.readOnly} disabled={running} onChange={(event) => onRunModeChange(event.target.checked ? "readonly" : "goal")} />仅只读</label>
             </section>
 
             <section className="agent-settings-group">
@@ -735,29 +724,20 @@ export function AgentComposer({
               type="button"
               ref={settingsTriggerRef}
               className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
-              aria-label={`运行设置：${modeSpec.label}，${approvalSpec.label}，${policySpec.label}`}
+              aria-label={`运行设置：${modeSpec.readOnly ? "仅只读，" : ""}${approvalSpec.label}，${policySpec.label}`}
               aria-expanded={menuOpen}
               aria-haspopup="dialog"
-              title="运行模式与批准方式"
+              title={`${modeSpec.readOnly ? "只读 · " : ""}${approvalSpec.label} · ${policyWarning ?? policySpec.label}`}
               onClick={() => {
                 setMenuOpen((open) => !open);
                 setTrigger(null);
               }}
             >
-              <span>{modeSpec.label}</span>
-              <Icon name="chevronDown" size="xs" />
+              <Icon name={policyWarning ? "warning" : "shield"} size="md" />
             </button>
+            {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
           </div>
           <div className="agent-composer-toolbar-right">
-            {roles.length ? <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
-              <span className="sr-only">回复角色</span>
-              <select aria-label="回复角色" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
-                <option value="">自动匹配</option>
-                {AGENT_TEAMS.map((team) => <optgroup key={team.id} label={team.label}>
-                  {roles.filter((role) => role.team === team.id).map((role) => <option key={role.id} value={role.id}>{team.label} · {role.name}</option>)}
-                </optgroup>)}
-              </select>
-            </label> : null}
             {models.length ? (
               <ModelPicker
                 choices={models}
@@ -799,16 +779,6 @@ export function AgentComposer({
               <span>{stopping ? "停止中" : "停止"}</span>
             </button> : null}
           </div>
-        </div>
-        <div className="agent-composer-meta">
-          <div className="agent-composer-policy" aria-label="本次运行方式">
-            <span className="agent-approval-summary" title={approvalSpec.summary}>{approvalSpec.label}</span>
-            <span className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`} title={policyWarning ?? policySpec.summary}>
-              {policyWarning ? <Icon name="warning" size="sm" /> : null}
-              {policySpec.label}
-            </span>
-          </div>
-          {status ? <div className="agent-composer-status" aria-label="运行状态">{status}</div> : running ? <span className="agent-running-label" role="status"><span className="agent-running-dot" aria-hidden="true" />运行中</span> : null}
         </div>
         {notices ? <div className="agent-input-notices">{notices}</div> : null}
       </div>

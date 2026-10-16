@@ -48,6 +48,15 @@ test("development fixture data satisfies the real IPC response contracts", () =>
   }
 });
 
+test("activity examples honor the selected server and requested result limit", () => {
+  const activities = (serverId?: string, limit = 100) => response(IPC_COMMANDS.activityList, { serverId, limit }) as ReturnType<typeof IPC_SCHEMAS.activity_list.response.parse>;
+  assert.equal(activities().activities.length, 3);
+  assert.equal(activities("srv_previewdb").activities.length, 2);
+  assert.ok(activities("srv_previewdb").activities.every((activity) => activity.serverId === "srv_previewdb"));
+  assert.equal(activities("srv_previewdb", 1).activities.length, 1);
+  assert.deepEqual(activities("srv_previewapi").activities, []);
+});
+
 test("new snapshots stay fresh between independent polling and display-clock ticks", (context) => {
   let requestTime = Date.parse("2026-10-16T04:00:00.000Z");
   const mountedAt = requestTime - 9_500;

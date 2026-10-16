@@ -12,7 +12,7 @@ const snapshot: ServerSnapshot = {
   disks: [{ device: "sda", mountPoint: "/", totalBytes: 100, usedBytes: 70, usagePercent: 70 }],
   docker: { available: true, containers: [{ name: "api", image: "api:1", state: "running", status: "Up", restartCount: 0 }] },
 };
-test("a dashboard card cannot display another server's metrics or nested resources", () => {
+test("resource views cannot display another server's metrics or nested resources", () => {
   const resources = dashboardResources("srv_other", snapshot);
   assert.equal(resources.snapshot, undefined);
   assert.equal(resources.cpu, undefined);
