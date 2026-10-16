@@ -891,6 +891,39 @@ std::optional<nlohmann::json> DesktopDatabase::get_server_endpoint(
                         {"port", sqlite3_column_int(statement.get(), 1)}};
 }
 
+std::optional<nlohmann::json> DesktopDatabase::get_server_connection(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  const auto columns = table_columns(connection_, "servers");
+  const auto select_optional = [&columns](const char* name) {
+    return columns.contains(name) ? std::string(name) : std::string("NULL AS ") + name;
+  };
+  const auto sql = std::string(
+      "SELECT host, port, username, identity_id, ") +
+      select_optional("host_ca_public_key") + ", " +
+      select_optional("host_principals") + ", " +
+      select_optional("host_krl_path") + ", " +
+      select_optional("host_krl_url") + ", " +
+      select_optional("host_krl_signers") +
+      " FROM servers WHERE id = ?1";
+  Statement statement(connection_, sql.c_str());
+  bind_text(connection_, statement.get(), 1, server_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  nlohmann::json record = {{"host", column_text(statement.get(), 0)},
+                           {"port", sqlite3_column_int(statement.get(), 1)},
+                           {"username", column_text(statement.get(), 2)}};
+  add_optional_text(record, "identityId", statement.get(), 3);
+  add_optional_text(record, "hostCertificateAuthorityPublicKey", statement.get(), 4);
+  add_optional_text(record, "hostPrincipals", statement.get(), 5);
+  add_optional_text(record, "hostRevocationListPath", statement.get(), 6);
+  add_optional_text(record, "hostRevocationListUrl", statement.get(), 7);
+  add_optional_text(record, "hostRevocationListSigners", statement.get(), 8);
+  return record;
+}
+
 nlohmann::json DesktopDatabase::list_servers() const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};

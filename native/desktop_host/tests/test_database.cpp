@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "schema_migrations.hpp"
@@ -416,6 +417,70 @@ int main() {
     check(router.invoke("server_host_key_status", {{"serverId", "srv_01abc"}})
                   .value.at("pinned") == false,
           "the pin must be gone after forget");
+
+    // Desktop SSH target resolver: the Python Agent gets a one-target payload
+    // with secrets only in the credentials map. The C++ host never writes them
+    // into the target JSON.
+    MemoryCredentialStore target_credentials;
+    const auto stored_password = target_credentials.set(
+        "mcp", "target-root-password",
+        yukinal::desktop_host::Secret{std::string_view("s3cret-pass")});
+    {
+      sqlite3* writer = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+            "could not open the database for the SSH target fixture");
+      execute(writer, R"SQL(
+        INSERT INTO servers (
+          id, name, host, port, username, identity_id, group_id, capabilities, status,
+          environment, created_at, updated_at
+        ) VALUES (
+          'srv_target', 'Target', '43.240.221.2', 22, 'root', 'idn_target', NULL, '{}',
+          'disconnected', 'staging', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+        );
+      )SQL");
+      execute(writer, (std::string("INSERT INTO identities (id, label, method, credential_ref, created_at) VALUES ('idn_target', 'Root password', 'password', '") +
+                       stored_password.to_string() +
+                       "', '2026-01-01T00:00:00Z');").c_str());
+      sqlite3_close(writer);
+    }
+    auto target_trust =
+        yukinal::desktop_host::HostTrustStore::load(temporary.path / "known_hosts");
+    target_trust.pin("43.240.221.2", 22, "SHA256:" + std::string(43, 'A'));
+
+    const auto target_payload =
+        yukinal::desktop_host::resolve_ssh_service_target(database, target_credentials,
+                                                          "srv_target");
+    check(target_payload.at("target").at("target_id") == "srv_target" &&
+              target_payload.at("target").at("host") == "43.240.221.2" &&
+              target_payload.at("target").at("port") == 22 &&
+              target_payload.at("target").at("username") == "root",
+          "the resolver should build the target from the stored connection");
+    check(target_payload.at("target").at("auth").at("type") == "password" &&
+              target_payload.at("target").at("auth").at("password_env") == "YK_SSH_PASSWORD",
+          "a password identity should use the password_env auth shape");
+    check(target_payload.at("credentials").at("YK_SSH_PASSWORD") == "s3cret-pass",
+          "the password should travel only in the credentials map");
+    check(target_payload.at("target").at("host_key_fingerprint") ==
+              "SHA256:" + std::string(43, 'A'),
+          "the confirmed pin should be the trust source");
+    check(target_payload.at("target").dump().find("s3cret-pass") == std::string::npos,
+          "the target JSON must never carry the secret value");
+
+    bool unknown_target_rejected = false;
+    try {
+      (void)yukinal::desktop_host::resolve_ssh_service_target(database, target_credentials,
+                                                              "srv_missing");
+    } catch (const std::exception&) {
+      unknown_target_rejected = true;
+    }
+    check(unknown_target_rejected, "an unknown server must be refused");
+
+    const auto probe_payload = yukinal::desktop_host::resolve_ssh_service_probe_target(
+        database, target_credentials, "srv_target");
+    check(probe_payload.at("target").at("probe_only") == true &&
+              probe_payload.at("target").at("auth").at("type") == "probe" &&
+              !probe_payload.at("target").contains("host_key_fingerprint"),
+          "the probe target must carry no identity and no trust source");
   }
 
   sqlite3* readback = nullptr;

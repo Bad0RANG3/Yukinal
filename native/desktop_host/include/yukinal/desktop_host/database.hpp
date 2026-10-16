@@ -25,6 +25,8 @@ class DesktopDatabase {
   [[nodiscard]] nlohmann::json list_servers() const;
   [[nodiscard]] std::optional<nlohmann::json> get_server_endpoint(
       const std::string& server_id) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_server_connection(
+      const std::string& server_id) const;
   [[nodiscard]] std::filesystem::path data_directory() const;
   [[nodiscard]] bool is_available() const;
   [[nodiscard]] std::optional<nlohmann::json> get_identity(

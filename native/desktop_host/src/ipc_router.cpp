@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/network_proxy.hpp"
 
@@ -1729,6 +1730,23 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
     }
     credentials_->erase(CredentialReference::parse(params.at("reference").get<std::string>()));
     return {{"reclaimed", true}};
+  }
+  if (method == "host.ssh.service_target") {
+    if (database_ == nullptr || !database_->is_available()) {
+      throw SidecarRpcError(-32603, "the local server database is unavailable");
+    }
+    const auto server_id =
+        params.is_object() ? params.value("serverId", std::string()) : std::string();
+    if (server_id.empty()) {
+      throw SidecarRpcError(-32602, "host.ssh.service_target requires serverId");
+    }
+    try {
+      return resolve_ssh_service_target(*database_, *credentials_, server_id);
+    } catch (const SidecarRpcError&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw SidecarRpcError(-32603, error.what());
+    }
   }
   if (method == "host.tool.cancel") {
     return {{"cancelled", false}};
