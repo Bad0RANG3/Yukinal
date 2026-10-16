@@ -2658,6 +2658,150 @@ void DesktopDatabase::mark_filesystem_backup_deleted(const std::string& server_i
   }
 }
 
+namespace {
+
+bool is_host_tool_call_status(const std::string& value) {
+  return is_one_of(value, {"running", "success", "failed", "cancelled", "uncertain"});
+}
+
+std::string decode_host_tool_call_status(const std::string& raw) {
+  if (!is_host_tool_call_status(raw)) {
+    throw std::runtime_error("Unknown host tool call status `" + raw + "`");
+  }
+  return raw;
+}
+
+bool is_valid_host_tool_call_text(const std::string& value, std::size_t max_length) {
+  return !value.empty() && value.size() <= max_length && !has_control_characters(value);
+}
+
+}  // namespace
+
+std::optional<std::string> DesktopDatabase::host_tool_call_status(
+    const std::string& trace_id, const std::string& call_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement statement(
+      connection_,
+      "SELECT status FROM host_tool_calls WHERE trace_id = ?1 AND call_id = ?2");
+  bind_text(connection_, statement.get(), 1, trace_id);
+  bind_text(connection_, statement.get(), 2, call_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_host_tool_call_status(column_text(statement.get(), 0));
+}
+
+nlohmann::json DesktopDatabase::claim_host_tool_call(const nlohmann::json& input) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!input.is_object()) throw std::invalid_argument("The host tool call is invalid");
+  const auto required = [&input](const char* key) {
+    const auto found = input.find(key);
+    if (found == input.end() || !found->is_string() ||
+        !is_valid_host_tool_call_text(found->get<std::string>(), 4096)) {
+      throw std::invalid_argument("The host tool call is invalid");
+    }
+    return found->get<std::string>();
+  };
+  const auto trace_id = required("traceId");
+  const auto call_id = required("callId");
+  const auto tool_name = required("toolName");
+  const auto request_fingerprint = required("requestFingerprint");
+  const auto started_at = required("startedAt");
+  const auto task_id = optional_record_text(input, "taskId");
+  const auto plan_id = optional_record_text(input, "planId");
+  const auto plan_step_id = optional_record_text(input, "planStepId");
+  const auto action_fingerprint = optional_record_text(input, "actionFingerprint");
+
+  // A resumed durable plan may produce a new provider call id for the same
+  // logical action. Keep failed rows retryable, but block an action that is
+  // still running, already succeeded, or whose remote effect is uncertain.
+  if (task_id.has_value() && plan_id.has_value() && plan_step_id.has_value() &&
+      action_fingerprint.has_value()) {
+    Statement existing(connection_, R"SQL(
+        SELECT request_fingerprint, status
+          FROM host_tool_calls
+         WHERE task_id = ?1 AND plan_id = ?2 AND plan_step_id = ?3
+           AND action_fingerprint = ?4
+           AND status IN ('running', 'success', 'uncertain')
+         ORDER BY started_at DESC LIMIT 1
+      )SQL");
+    bind_text(connection_, existing.get(), 1, *task_id);
+    bind_text(connection_, existing.get(), 2, *plan_id);
+    bind_text(connection_, existing.get(), 3, *plan_step_id);
+    bind_text(connection_, existing.get(), 4, *action_fingerprint);
+    const auto result = sqlite3_step(existing.get());
+    if (result == SQLITE_ROW) {
+      return {{"claimed", false},
+              {"requestFingerprint", column_text(existing.get(), 0)},
+              {"status", decode_host_tool_call_status(column_text(existing.get(), 1))}};
+    }
+    if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+
+  {
+    Statement insert(connection_, R"SQL(
+        INSERT OR IGNORE INTO host_tool_calls (
+          trace_id, call_id, task_id, plan_id, plan_step_id, tool_name,
+          request_fingerprint, action_fingerprint, status, started_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
+      )SQL");
+    bind_text(connection_, insert.get(), 1, trace_id);
+    bind_text(connection_, insert.get(), 2, call_id);
+    bind_optional_text(connection_, insert.get(), 3, task_id);
+    bind_optional_text(connection_, insert.get(), 4, plan_id);
+    bind_optional_text(connection_, insert.get(), 5, plan_step_id);
+    bind_text(connection_, insert.get(), 6, tool_name);
+    bind_text(connection_, insert.get(), 7, request_fingerprint);
+    bind_optional_text(connection_, insert.get(), 8, action_fingerprint);
+    bind_text(connection_, insert.get(), 9, started_at);
+    if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    if (sqlite3_changes(connection_) == 1) return {{"claimed", true}};
+  }
+
+  Statement existing(connection_,
+                     "SELECT request_fingerprint, status FROM host_tool_calls "
+                     "WHERE trace_id = ?1 AND call_id = ?2");
+  bind_text(connection_, existing.get(), 1, trace_id);
+  bind_text(connection_, existing.get(), 2, call_id);
+  if (sqlite3_step(existing.get()) != SQLITE_ROW) {
+    throw std::runtime_error("The host tool call could not be read back");
+  }
+  return {{"claimed", false},
+          {"requestFingerprint", column_text(existing.get(), 0)},
+          {"status", decode_host_tool_call_status(column_text(existing.get(), 1))}};
+}
+
+void DesktopDatabase::finish_host_tool_call(const std::string& trace_id,
+                                            const std::string& call_id,
+                                            const std::string& status,
+                                            const std::string& ended_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!is_host_tool_call_status(status)) {
+    throw std::invalid_argument("The host tool call status is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      UPDATE host_tool_calls
+         SET status = ?3, ended_at = ?4
+       WHERE trace_id = ?1 AND call_id = ?2 AND status = 'running'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, trace_id);
+  bind_text(connection_, statement.get(), 2, call_id);
+  bind_text(connection_, statement.get(), 3, status);
+  bind_text(connection_, statement.get(), 4, ended_at);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) != 1) {
+    throw std::invalid_argument("host tool call `" + trace_id + "/" + call_id +
+                                "` was not running");
+  }
+}
+
 nlohmann::json DesktopDatabase::list_investigation_tasks(
     const std::optional<std::string>& status, int limit) const {
   std::lock_guard lock(mutex_);

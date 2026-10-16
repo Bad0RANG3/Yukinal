@@ -2967,6 +2967,201 @@ int main(int argc, char** argv) {
       std::cerr << "SSH filesystem action target block failed: " << error.what() << '\n';
       std::exit(4);
     }
+
+    // ── Host tool call idempotency ledger ────────────────────────────────────
+    try {
+      const std::string running_fingerprint(64, 'a');
+      const std::string running_action(64, 'b');
+      const nlohmann::json ledger_claim = {
+          {"traceId", "trace_ledger"},
+          {"callId", "call_ledger"},
+          {"taskId", "itask_backup_target"},
+          {"planId", "iplan_ledger"},
+          {"planStepId", "step_ledger"},
+          {"toolName", "filesystem.write"},
+          {"requestFingerprint", running_fingerprint},
+          {"actionFingerprint", running_action},
+          {"startedAt", "2026-01-06T00:00:00Z"}};
+      check(database.claim_host_tool_call(ledger_claim).value("claimed", false) == true,
+            "a new guarded host tool call should be claimed");
+      check(database.host_tool_call_status("trace_ledger", "call_ledger").value_or("") == "running",
+            "a claimed host tool call should be recorded as running");
+      const auto duplicate_claim = database.claim_host_tool_call(ledger_claim);
+      check(duplicate_claim.value("claimed", true) == false &&
+                duplicate_claim.value("requestFingerprint", std::string()) == running_fingerprint &&
+                duplicate_claim.value("status", std::string()) == "running",
+            "claiming the same host tool call key should return the existing row");
+      nlohmann::json resumed_claim = ledger_claim;
+      resumed_claim["callId"] = "call_ledger_resumed";
+      check(database.claim_host_tool_call(resumed_claim).value("claimed", true) == false,
+            "a new call id for the same running planned action should be blocked");
+      database.finish_host_tool_call("trace_ledger", "call_ledger", "success",
+                                     "2026-01-06T00:01:00Z");
+      check(database.host_tool_call_status("trace_ledger", "call_ledger").value_or("") == "success",
+            "finishing a host tool call should record its terminal status");
+      bool double_finish_rejected = false;
+      try {
+        database.finish_host_tool_call("trace_ledger", "call_ledger", "failed",
+                                       "2026-01-06T00:02:00Z");
+      } catch (const std::invalid_argument&) {
+        double_finish_rejected = true;
+      }
+      check(double_finish_rejected, "a host tool call may only be finished once");
+      bool bad_status_rejected = false;
+      try {
+        database.finish_host_tool_call("trace_ledger", "call_ledger", "bogus",
+                                       "2026-01-06T00:03:00Z");
+      } catch (const std::invalid_argument&) {
+        bad_status_rejected = true;
+      }
+      check(bad_status_rejected, "an unknown host tool call status must be refused");
+    } catch (const std::exception& error) {
+      std::cerr << "host tool call ledger block failed: " << error.what() << '\n';
+      std::exit(5);
+    }
+
+    // ── Filesystem backup metadata queries ───────────────────────────────────
+    // `host.filesystem.backup.list_query` and `..._retention_scan` are guarded
+    // reads: they resolve the durable plan binding, then serve the host-owned
+    // ledger for the task's registered server only.
+    try {
+      yukinal::desktop_host::IpcRouter query_router(&database, &target_credentials);
+      const std::string query_path = "/srv/app.conf";
+      const std::string query_unknown = "/srv/other.conf";
+      const nlohmann::json query_target = {
+          {"host", "remote"}, {"serverId", "srv_target"}, {"environment", "staging"}};
+      const auto query_plan = [&](const std::string& plan_id, int revision_number,
+                                  const std::string& step_id, const std::string& tool_name,
+                                  const nlohmann::json& input_bindings) {
+        return nlohmann::json{
+            {"id", plan_id},
+            {"taskId", "itask_backup_target"},
+            {"revision", revision_number},
+            {"status", "active"},
+            {"createdAt", "2026-01-06T00:00:00Z"},
+            {"updatedAt", "2026-01-06T00:00:00Z"},
+            {"currentStepId", step_id},
+            {"approval", {{"status", "approved"}}},
+            {"steps",
+             nlohmann::json::array({{{"id", step_id},
+                                     {"ordinal", 0},
+                                     {"kind", "action"},
+                                     {"title", "Query the backup metadata"},
+                                     {"status", "pending"},
+                                     {"attempts", 0},
+                                     {"maxAttempts", 1},
+                                     {"allowedTools", nlohmann::json::array({tool_name})},
+                                     {"evidenceIds", nlohmann::json::array()},
+                                     {"inputBindings", input_bindings}}})}};
+      };
+      const auto query_backups =
+          database.list_available_filesystem_backups_for_server("srv_target", std::nullopt, 10);
+      check(query_backups.at("records").size() == 1,
+            "the query fixture should see exactly one available server backup");
+      const auto query_backup =
+          query_backups.at("records").at(0).at("backupPath").get<std::string>();
+
+      database.save_investigation_plan(query_plan("iplan_bt_6", 6, "step_bt_list",
+                                                  "filesystem.backup.list", {{"path", query_path}}));
+      const nlohmann::json list_call = {
+          {"callId", "call_list_1"},
+          {"traceId", "trace_list_1"},
+          {"toolName", "filesystem.backup.list"},
+          {"input", {{"path", query_path}}},
+          {"target", query_target},
+          {"taskId", "itask_backup_target"},
+          {"planId", "iplan_bt_6"},
+          {"planStepId", "step_bt_list"},
+          {"evidenceIds", nlohmann::json::array()}};
+      const auto list = query_router.handle_host_request("host.filesystem.backup.list_query",
+                                                         {{"toolCall", list_call}});
+      check(list.value("status", std::string()) == "success" &&
+                list.at("output").at("truncated") == false &&
+                list.at("output").at("records").size() == 1 &&
+                list.at("output").at("records").at(0).at("backupPath") == query_backup &&
+                list.at("output").at("records").at(0).at("status") == "available",
+            "the backup list query should return the host-owned ledger record");
+      const auto list_replay = query_router.handle_host_request(
+          "host.filesystem.backup.list_query", {{"toolCall", list_call}});
+      check(list_replay == list,
+            "an identical guarded host call should replay its in-memory response");
+      check(database.host_tool_call_status("trace_list_1", "call_list_1").value_or("") == "success",
+            "a completed guarded query should close its ledger row");
+
+      // The same plan step with a tampered input fails the plan binding.
+      nlohmann::json tampered_call = list_call;
+      tampered_call["input"] = {{"path", query_unknown}};
+      const auto tampered = query_router.handle_host_request("host.filesystem.backup.list_query",
+                                                             {{"toolCall", tampered_call}});
+      check(tampered.value("status", std::string()) == "failed" &&
+                tampered.at("error").at("code") == "plan_deviation",
+            "a guarded query whose input deviates from its plan step must be refused");
+
+      // A reused call id bound to a different host action is a hard refusal.
+      database.save_investigation_plan(query_plan("iplan_bt_7", 7, "step_bt_list2",
+                                                  "filesystem.backup.list",
+                                                  {{"path", query_unknown}}));
+      nlohmann::json reused_call = list_call;
+      reused_call["input"] = {{"path", query_unknown}};
+      reused_call["planId"] = "iplan_bt_7";
+      reused_call["planStepId"] = "step_bt_list2";
+      const auto reused = query_router.handle_host_request("host.filesystem.backup.list_query",
+                                                           {{"toolCall", reused_call}});
+      check(reused.value("status", std::string()) == "failed" &&
+                reused.at("error").at("code") == "plan_deviation" &&
+                reused.at("error").at("detail").at("code") == "duplicate_call" &&
+                reused.at("error").at("detail").at("action") == "deny",
+            "reusing a call id for a different host action must be refused");
+
+      database.save_investigation_plan(query_plan("iplan_bt_8", 8, "step_bt_retention",
+                                                  "filesystem.backup.retention",
+                                                  {{"pathPrefix", "/srv"}}));
+      const nlohmann::json retention_call = {
+          {"callId", "call_ret_1"},
+          {"traceId", "trace_ret_1"},
+          {"toolName", "filesystem.backup.retention"},
+          {"input", {{"pathPrefix", "/srv"}, {"keepLatest", 1}}},
+          {"target", query_target},
+          {"taskId", "itask_backup_target"},
+          {"planId", "iplan_bt_8"},
+          {"planStepId", "step_bt_retention"},
+          {"evidenceIds", nlohmann::json::array()}};
+      const auto retention = query_router.handle_host_request(
+          "host.filesystem.backup.retention_scan", {{"toolCall", retention_call}});
+      check(retention.value("status", std::string()) == "success" &&
+                retention.at("output").at("truncated") == false &&
+                retention.at("output").at("records").size() == 1 &&
+                retention.at("output").at("records").at(0).at("path") == query_path &&
+                retention.at("output").at("records").at(0).at("bytesBackedUp") == 2048 &&
+                retention.at("output").at("evaluatedAtEpochSeconds").is_number_integer(),
+            "the retention scan should return the available server backups with a scan clock");
+
+      const auto missing_filter = query_router.handle_host_request(
+          "host.filesystem.backup.retention_scan",
+          {{"toolCall",
+            {{"callId", "call_ret_bad"},
+             {"traceId", "trace_ret_bad"},
+             {"toolName", "filesystem.backup.retention"},
+             {"input", nlohmann::json::object()},
+             {"target", query_target},
+             {"taskId", "itask_backup_target"}}}});
+      check(missing_filter.value("status", std::string()) == "failed" &&
+                missing_filter.at("error").at("code") == "invalid_input",
+            "the retention scan should require keepLatest or olderThanDays");
+
+      bool bad_envelope_rejected = false;
+      try {
+        (void)query_router.handle_host_request("host.filesystem.backup.list_query",
+                                               {{"toolCall", nlohmann::json::object()}});
+      } catch (const yukinal::desktop_host::SidecarRpcError& error) {
+        bad_envelope_rejected = error.code() == -32602;
+      }
+      check(bad_envelope_rejected,
+            "a malformed backup query envelope must be a parameter error");
+    } catch (const std::exception& error) {
+      std::cerr << "filesystem backup query block failed: " << error.what() << '\n';
+      std::exit(6);
+    }
   }
 
   sqlite3* readback = nullptr;

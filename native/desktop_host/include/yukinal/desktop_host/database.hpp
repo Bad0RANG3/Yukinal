@@ -173,6 +173,17 @@ class DesktopDatabase {
   void mark_filesystem_backup_deleted(const std::string& server_id, const std::string& path,
                                       const std::string& backup_path,
                                       const std::string& now) const;
+  // ── Host tool call idempotency ledger ───────────────────────────────────────
+  // The row records a call's intent and terminal state, never its output: a
+  // guarded call may replay only while the host process still holds the response.
+  // `claim_host_tool_call` returns `{"claimed":true}` for a fresh reservation or
+  // `{"claimed":false,"requestFingerprint":...,"status":...}` for an existing key.
+  // A row that is not `running` cannot be finished (`std::invalid_argument`).
+  [[nodiscard]] std::optional<std::string> host_tool_call_status(
+      const std::string& trace_id, const std::string& call_id) const;
+  [[nodiscard]] nlohmann::json claim_host_tool_call(const nlohmann::json& input) const;
+  void finish_host_tool_call(const std::string& trace_id, const std::string& call_id,
+                             const std::string& status, const std::string& ended_at) const;
   /** SHA-256 (lowercase hex) of the canonical JSON serialization used for evidence. */
   [[nodiscard]] static std::string content_hash(const nlohmann::json& content);
   [[nodiscard]] nlohmann::json list_chat_sessions(

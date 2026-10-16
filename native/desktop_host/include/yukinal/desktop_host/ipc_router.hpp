@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace yukinal::desktop_host {
@@ -88,6 +89,11 @@ class IpcRouter {
     std::chrono::steady_clock::time_point expires_at;
   };
   std::map<std::string, ProbeTicket> probe_tickets_;
+  // Bounded in-memory replay cache for guarded host tool calls. The durable
+  // ledger records only intent/terminal state; a response may be replayed only
+  // while this process still holds it (matching the retired Rust host).
+  std::mutex host_tool_replay_mutex_;
+  std::map<std::pair<std::string, std::string>, nlohmann::json> host_tool_replays_;
   std::function<void(const std::string&, const nlohmann::json&)> event_sink_;
 };
 

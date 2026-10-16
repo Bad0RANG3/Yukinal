@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_ssh.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
@@ -643,10 +644,27 @@ std::optional<std::string> read_environment(const char* name) {
 /* ── Investigation host RPC (Agent → host) ──────────────────────────────── */
 
 constexpr const char* kToolServerExec = "server.exec";
+constexpr const char* kToolServerInfo = "server.info";
+constexpr const char* kToolServerLogs = "server.logs";
+constexpr const char* kToolServerServices = "server.services";
+constexpr const char* kToolDockerPs = "docker.ps";
+constexpr const char* kToolDockerLogs = "docker.logs";
+constexpr const char* kToolDockerInspect = "docker.inspect";
+constexpr const char* kToolDockerRestart = "docker.restart";
+constexpr const char* kToolSystemdInspect = "systemd.inspect";
+constexpr const char* kToolSystemdRestart = "systemd.restart";
+constexpr const char* kToolPackageInspect = "package.inspect";
+constexpr const char* kToolPackageInstall = "package.install";
+constexpr const char* kToolFilesystemRead = "filesystem.read";
 constexpr const char* kToolFilesystemBackup = "filesystem.backup";
+constexpr const char* kToolFilesystemBackupList = "filesystem.backup.list";
+constexpr const char* kToolFilesystemBackupRetention = "filesystem.backup.retention";
+constexpr const char* kToolFilesystemBackupCleanup = "filesystem.backup.cleanup";
+constexpr const char* kToolFilesystemRestore = "filesystem.restore";
 constexpr const char* kToolFilesystemWrite = "filesystem.write";
 constexpr const char* kToolFilesystemEdit = "filesystem.edit";
 constexpr const char* kToolInvestigationArtifact = "investigation.artifact";
+constexpr std::size_t kMaxHostToolReplayCache = 256;
 
 nlohmann::json investigation_error(std::string code, std::string message, bool retryable) {
   return {{"code", std::move(code)}, {"message", std::move(message)}, {"retryable", retryable}};
@@ -1358,6 +1376,234 @@ std::optional<nlohmann::json> check_plan_for_tool(
     }
   }
   return std::nullopt;
+}
+
+/* ── Host tool call idempotency (durable call ledger + bounded replay) ─────── */
+
+nlohmann::json host_tool_failed(const std::string& code, const std::string& message,
+                                bool retryable,
+                                const std::optional<nlohmann::json>& detail) {
+  nlohmann::json error = investigation_error(code, message, retryable);
+  if (detail.has_value()) error["detail"] = *detail;
+  return {{"status", "failed"}, {"error", std::move(error)}};
+}
+
+nlohmann::json host_tool_success(const nlohmann::json& output) {
+  return {{"status", "success"}, {"output", output}};
+}
+
+nlohmann::json optional_json_field(const nlohmann::json& value, const char* key) {
+  const auto found = value.find(key);
+  if (found == value.end() || found->is_null()) return nullptr;
+  return *found;
+}
+
+bool present_json_text(const nlohmann::json& value, const char* key) {
+  const auto found = value.find(key);
+  return found != value.end() && found->is_string();
+}
+
+nlohmann::json host_tool_scope_json(const nlohmann::json& target) {
+  nlohmann::json scope = nlohmann::json::object();
+  scope["host"] = json_text_field(target, "host");
+  scope["serverId"] = optional_json_field(target, "serverId");
+  scope["workspaceId"] = optional_json_field(target, "workspaceId");
+  scope["environment"] = json_text_field(target, "environment");
+  return scope;
+}
+
+std::string host_tool_request_fingerprint(const nlohmann::json& request) {
+  nlohmann::json canonical = nlohmann::json::object();
+  canonical["runId"] = optional_json_field(request, "runId");
+  canonical["traceId"] = json_text_field(request, "traceId");
+  canonical["callId"] = json_text_field(request, "callId");
+  canonical["toolName"] = json_text_field(request, "toolName");
+  canonical["input"] = request.contains("input") ? request.at("input") : nlohmann::json::object();
+  canonical["target"] = host_tool_scope_json(request.value("target", nlohmann::json::object()));
+  canonical["taskId"] = optional_json_field(request, "taskId");
+  canonical["planId"] = optional_json_field(request, "planId");
+  canonical["planStepId"] = optional_json_field(request, "planStepId");
+  canonical["evidenceIds"] = optional_json_field(request, "evidenceIds");
+  return content_revision_hex(canonical.dump());
+}
+
+std::string host_tool_action_fingerprint(const nlohmann::json& request) {
+  nlohmann::json canonical = nlohmann::json::object();
+  canonical["toolName"] = json_text_field(request, "toolName");
+  canonical["input"] = request.contains("input") ? request.at("input") : nlohmann::json::object();
+  canonical["target"] = host_tool_scope_json(request.value("target", nlohmann::json::object()));
+  canonical["taskId"] = optional_json_field(request, "taskId");
+  canonical["planId"] = optional_json_field(request, "planId");
+  canonical["planStepId"] = optional_json_field(request, "planStepId");
+  canonical["evidenceIds"] = optional_json_field(request, "evidenceIds");
+  return content_revision_hex(canonical.dump());
+}
+
+bool host_tool_is_effectful(const std::string& tool_name) {
+  return is_one_of(tool_name, {kToolDockerRestart, kToolServerExec, kToolSystemdRestart,
+                               kToolPackageInstall, kToolFilesystemWrite, kToolFilesystemEdit,
+                               kToolFilesystemBackup, kToolFilesystemBackupCleanup,
+                               kToolFilesystemRestore});
+}
+
+bool host_tool_is_plan_bound_observation(const std::string& tool_name) {
+  return is_one_of(tool_name, {kToolServerInfo, kToolServerLogs, kToolServerServices,
+                               kToolDockerPs, kToolDockerLogs, kToolDockerInspect,
+                               kToolSystemdInspect, kToolPackageInspect, kToolFilesystemRead,
+                               kToolFilesystemBackupList, kToolFilesystemBackupRetention});
+}
+
+bool plan_allows_repeated_observation(const nlohmann::json& plan,
+                                      const std::string& plan_step_id) {
+  if (json_text_field(plan, "currentStepId") != plan_step_id) return false;
+  bool verification_step = false;
+  for (const auto& step : plan.value("steps", nlohmann::json::array())) {
+    if (json_text_field(step, "id") == plan_step_id &&
+        json_text_field(step, "kind") == "verification") {
+      verification_step = true;
+    }
+  }
+  if (!verification_step) return false;
+  return plan.contains("observationWindow") && plan.at("observationWindow").is_object() &&
+         json_text_field(plan.at("observationWindow"), "status") == "running";
+}
+
+/** Whether this host tool needs the durable idempotency ledger. */
+bool host_tool_requires_idempotency(DesktopDatabase& database,
+                                    const nlohmann::json& request) {
+  const auto tool_name = json_text_field(request, "toolName");
+  if (host_tool_is_effectful(tool_name)) return true;
+  const bool planned = present_json_text(request, "taskId") &&
+                       present_json_text(request, "planId") &&
+                       present_json_text(request, "planStepId") &&
+                       host_tool_is_plan_bound_observation(tool_name);
+  if (!planned) return false;
+  // Observation windows intentionally reuse one verification step while the host
+  // advances its sample clock, so the ordinary one-call-per-step fence must not
+  // reject a legitimate later sample.
+  auto plan = database.latest_investigation_plan(request.at("taskId").get<std::string>());
+  if (plan.has_value() &&
+      plan_allows_repeated_observation(*plan, request.at("planStepId").get<std::string>())) {
+    return false;
+  }
+  return true;
+}
+
+struct HostToolCallDecision {
+  bool respond = false;
+  nlohmann::json response;
+  bool execute = false;
+  std::optional<std::pair<std::string, std::string>> token;
+};
+
+std::string host_tool_response_status(const nlohmann::json& response) {
+  const auto status = json_text_field(response, "status");
+  if (status == "success") return "success";
+  if (status == "cancelled") return "uncertain";
+  if (status == "failed") {
+    const auto code =
+        json_text_field(response.value("error", nlohmann::json::object()), "code");
+    if (is_one_of(code, {"transport", "timeout", "cancelled", "execution_failed"})) {
+      return "uncertain";
+    }
+    return "failed";
+  }
+  return "uncertain";
+}
+
+HostToolCallDecision prepare_host_tool_call(
+    DesktopDatabase& database, const nlohmann::json& request, std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  HostToolCallDecision decision;
+  if (!host_tool_requires_idempotency(database, request)) {
+    decision.execute = true;
+    return decision;
+  }
+  const auto trace_id = json_text_field(request, "traceId");
+  const auto call_id = json_text_field(request, "callId");
+  if (trim_ascii(trace_id).empty() || trim_ascii(call_id).empty()) {
+    decision.respond = true;
+    decision.response = host_tool_failed(
+        "invalid_input",
+        "guarded host tool requests require non-empty traceId and callId", false, std::nullopt);
+    return decision;
+  }
+  const auto fingerprint = host_tool_request_fingerprint(request);
+  std::optional<std::string> action_fingerprint;
+  if (present_json_text(request, "taskId") && present_json_text(request, "planId") &&
+      present_json_text(request, "planStepId")) {
+    action_fingerprint = host_tool_action_fingerprint(request);
+  }
+  nlohmann::json claim_input = nlohmann::json::object();
+  claim_input["traceId"] = trace_id;
+  claim_input["callId"] = call_id;
+  for (const char* key : {"taskId", "planId", "planStepId"}) {
+    if (present_json_text(request, key)) claim_input[key] = request.at(key);
+  }
+  claim_input["toolName"] = json_text_field(request, "toolName");
+  claim_input["requestFingerprint"] = fingerprint;
+  if (action_fingerprint.has_value()) claim_input["actionFingerprint"] = *action_fingerprint;
+  claim_input["startedAt"] = iso8601_now();
+
+  const auto claim = database.claim_host_tool_call(claim_input);
+  if (claim.value("claimed", false)) {
+    decision.execute = true;
+    decision.token = std::make_pair(trace_id, call_id);
+    return decision;
+  }
+  const auto existing_fingerprint = claim.value("requestFingerprint", std::string());
+  const auto status = claim.value("status", std::string());
+  decision.respond = true;
+  if (existing_fingerprint != fingerprint) {
+    nlohmann::json detail = nlohmann::json::object();
+    detail["code"] = "duplicate_call";
+    detail["action"] = "deny";
+    detail["status"] = status;
+    decision.response = host_tool_failed(
+        "plan_deviation",
+        "callId was already used for a different host action; refusing to guess which request "
+        "is authoritative",
+        false, detail);
+    return decision;
+  }
+  {
+    std::lock_guard lock(replay_mutex);
+    const auto found = replays.find({trace_id, call_id});
+    if (found != replays.end()) {
+      decision.response = found->second;
+      return decision;
+    }
+  }
+  nlohmann::json detail = nlohmann::json::object();
+  detail["code"] = "duplicate_call";
+  detail["action"] = "wait_user";
+  detail["status"] = status;
+  detail["traceId"] = trace_id;
+  detail["callId"] = call_id;
+  decision.response = host_tool_failed(
+      "plan_deviation",
+      "this host action was already started, but its response is no longer available; reconcile "
+      "the target before issuing a new call",
+      false, detail);
+  return decision;
+}
+
+void finish_host_tool_call(
+    DesktopDatabase& database, const nlohmann::json& /*request*/,
+    const std::optional<std::pair<std::string, std::string>>& token,
+    const nlohmann::json& response, std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  if (!token.has_value()) return;
+  const auto status = host_tool_response_status(response);
+  database.finish_host_tool_call(token->first, token->second, status, iso8601_now());
+  // Never persist raw remote output: a successful or deterministic validation
+  // failure may be replayed only while this process still holds the response.
+  if (status == "uncertain") return;
+  std::lock_guard lock(replay_mutex);
+  if (replays.size() >= kMaxHostToolReplayCache && replays.find(*token) == replays.end()) {
+    replays.erase(replays.begin());
+  }
+  replays[*token] = response;
 }
 
 nlohmann::json handle_plan_record(DesktopDatabase& database, const nlohmann::json& params) {
@@ -3169,6 +3415,334 @@ nlohmann::json handle_ssh_filesystem_cleanup_target(DesktopDatabase& database,
   }
   payload["filesystemCleanup"] = {{"items", std::move(bindings)}};
   return payload;
+}
+
+/* ── Filesystem backup metadata queries (list + retention scan) ────────────── */
+
+bool valid_remote_query_path(const std::string& value) {
+  if (value.empty() || value.size() > 4096) return false;
+  if (value.front() != '/') return false;
+  return !has_control_characters(value);
+}
+
+nlohmann::json filesystem_backup_query_tool_call(const nlohmann::json& params,
+                                                 const char* what) {
+  if (!only_fields(params, {"toolCall"}, {"toolCall"}) || !params.at("toolCall").is_object()) {
+    throw SidecarRpcError(-32602, std::string("the ") + what + " is invalid");
+  }
+  const auto& tool_call = params.at("toolCall");
+  const std::set<std::string> allowed = {"callId",     "runId",      "traceId", "toolName",
+                                         "input",      "target",     "taskId",  "planId",
+                                         "planStepId", "evidenceIds", "approvalId"};
+  if (!only_fields(tool_call, allowed,
+                   {"callId", "traceId", "toolName", "input", "target"})) {
+    throw SidecarRpcError(-32602, std::string("the ") + what + " is invalid");
+  }
+  if (!tool_call.at("callId").is_string() || !tool_call.at("traceId").is_string() ||
+      !tool_call.at("toolName").is_string() || !tool_call.at("input").is_object() ||
+      !tool_call.at("target").is_object()) {
+    throw SidecarRpcError(-32602, std::string("the ") + what + " is invalid");
+  }
+  return tool_call;
+}
+
+/** Returns the failure envelope to report, or `nullopt` when the scope is valid. */
+std::optional<nlohmann::json> validate_filesystem_backup_query_scope(
+    DesktopDatabase& database, const std::string& server_id, const std::string& task_id,
+    const nlohmann::json& target) {
+  if (json_text_field(target, "host") != "remote" ||
+      json_text_field(target, "serverId") != server_id) {
+    return host_tool_failed(
+        "denied_by_policy",
+        "filesystem backup metadata target does not match the selected server", false,
+        std::nullopt);
+  }
+  const nlohmann::json* server = nullptr;
+  const auto servers = database.list_servers().value("servers", nlohmann::json::array());
+  for (const auto& candidate : servers) {
+    if (json_text_field(candidate, "id") == server_id) {
+      server = &candidate;
+      break;
+    }
+  }
+  if (server == nullptr) {
+    return host_tool_failed("not_found",
+                            "the selected filesystem backup server was not found", false,
+                            std::nullopt);
+  }
+  const auto metadata = server->value("metadata", nlohmann::json::object());
+  if (json_text_field(metadata, "environment") != json_text_field(target, "environment")) {
+    return host_tool_failed(
+        "denied_by_policy",
+        "filesystem backup metadata environment does not match the selected server", false,
+        std::nullopt);
+  }
+  const auto workspace_id = json_text_field(target, "workspaceId");
+  if (!workspace_id.empty()) {
+    bool attached = false;
+    for (const auto& id : metadata.value("workspaceIds", nlohmann::json::array())) {
+      if (id.is_string() && id.get<std::string>() == workspace_id) attached = true;
+    }
+    if (!attached) {
+      return host_tool_failed(
+          "denied_by_policy",
+          "filesystem backup metadata target is not attached to that workspace", false,
+          std::nullopt);
+    }
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return host_tool_failed("not_found", "the durable investigation task was not found", false,
+                            std::nullopt);
+  }
+  if (json_text_field(*task, "serverId") != server_id) {
+    return host_tool_failed(
+        "denied_by_policy",
+        "filesystem backup metadata target does not match the task's registered server", false,
+        std::nullopt);
+  }
+  if (!same_investigation_target(task->value("scope", nlohmann::json::object()), target)) {
+    return host_tool_failed("denied_by_policy",
+                            "filesystem backup metadata target does not match the task scope",
+                            false, std::nullopt);
+  }
+  return std::nullopt;
+}
+
+HostToolCallDecision prepare_filesystem_backup_query_call(
+    DesktopDatabase& database, const nlohmann::json& request, const char* expected_tool,
+    std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  HostToolCallDecision decision;
+  if (json_text_field(request, "toolName") != expected_tool) {
+    decision.respond = true;
+    decision.response = host_tool_failed(
+        "denied_by_policy",
+        "filesystem backup query tool name does not match its host endpoint", false,
+        std::nullopt);
+    return decision;
+  }
+  const auto target = request.value("target", nlohmann::json::object());
+  const auto server_id = json_text_field(target, "serverId");
+  const auto task_id = json_text_field(request, "taskId");
+  if (server_id.empty() || task_id.empty()) {
+    decision.respond = true;
+    decision.response = host_tool_failed(
+        "durable_task_required",
+        "filesystem backup metadata requires a durable investigation task", false, std::nullopt);
+    return decision;
+  }
+  if (auto failure = validate_filesystem_backup_query_scope(database, server_id, task_id, target);
+      failure.has_value()) {
+    decision.respond = true;
+    decision.response = *failure;
+    return decision;
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    decision.respond = true;
+    decision.response = host_tool_failed(
+        "not_found", "the durable investigation task was not found", false, std::nullopt);
+    return decision;
+  }
+  if (auto violation = task_guardrail_violation(*task, json_text_field(request, "toolName"),
+                                                request.value("input", nlohmann::json::object()));
+      violation.has_value()) {
+    std::optional<nlohmann::json> detail = std::nullopt;
+    const auto code = json_text_field(*violation, "code");
+    if (!code.empty()) detail = nlohmann::json{{"code", code}};
+    decision.respond = true;
+    decision.response = host_tool_failed("denied_by_policy",
+                                         json_text_field(*violation, "message"), false, detail);
+    return decision;
+  }
+  const auto binding = [&request](const char* key) -> std::optional<nlohmann::json> {
+    if (!request.contains(key) || request.at(key).is_null()) return std::nullopt;
+    return request.at(key);
+  };
+  if (auto deviation = check_plan_for_tool(database, *task, json_text_field(request, "toolName"),
+                                           target, request.value("input", nlohmann::json::object()),
+                                           request.contains("planId") && request.at("planId").is_string()
+                                               ? std::optional<std::string>(request.at("planId").get<std::string>())
+                                               : std::nullopt,
+                                           request.contains("planStepId") && request.at("planStepId").is_string()
+                                               ? std::optional<std::string>(request.at("planStepId").get<std::string>())
+                                               : std::nullopt,
+                                           binding("evidenceIds"));
+      deviation.has_value()) {
+    decision.respond = true;
+    decision.response = host_tool_failed("plan_deviation",
+                                         json_text_field(*deviation, "message"), false, *deviation);
+    return decision;
+  }
+  return prepare_host_tool_call(database, request, replay_mutex, replays);
+}
+
+nlohmann::json handle_filesystem_backup_list_query(
+    DesktopDatabase& database, const nlohmann::json& params, std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  const auto tool_call =
+      filesystem_backup_query_tool_call(params, "filesystem backup list query");
+  if (json_text_field(tool_call, "toolName") != kToolFilesystemBackupList) {
+    return host_tool_failed("denied_by_policy",
+                            "filesystem backup list query has an unexpected tool name", false,
+                            std::nullopt);
+  }
+  const auto input = tool_call.value("input", nlohmann::json::object());
+  if (!only_fields(input, {"status", "path", "limit"}, {})) {
+    return host_tool_failed("invalid_input", "filesystem.backup.list input is invalid", false,
+                            std::nullopt);
+  }
+  std::optional<std::string> path;
+  if (input.contains("path") && !input.at("path").is_null()) {
+    if (!input.at("path").is_string()) {
+      return host_tool_failed("invalid_input", "filesystem.backup.list input is invalid", false,
+                              std::nullopt);
+    }
+    path = input.at("path").get<std::string>();
+    if (!valid_remote_query_path(*path)) {
+      return host_tool_failed(
+          "invalid_input",
+          "remote path must be 1-4096 characters, absolute, and free of control characters",
+          false, std::nullopt);
+    }
+  }
+  std::optional<std::string> status;
+  if (input.contains("status") && !input.at("status").is_null()) {
+    if (!input.at("status").is_string()) {
+      return host_tool_failed("invalid_input", "filesystem.backup.list input is invalid", false,
+                              std::nullopt);
+    }
+    const auto raw = input.at("status").get<std::string>();
+    if (!is_one_of(raw, {"available", "restored", "deleted"})) {
+      return host_tool_failed(
+          "invalid_input",
+          "filesystem.backup.list status must be available, restored, or deleted", false,
+          std::nullopt);
+    }
+    status = raw;
+  }
+  int limit = 64;
+  if (input.contains("limit") && !input.at("limit").is_null()) {
+    if (!input.at("limit").is_number_integer()) {
+      return host_tool_failed("invalid_input", "filesystem.backup.list input is invalid", false,
+                              std::nullopt);
+    }
+    limit = input.at("limit").get<int>();
+  }
+  if (limit < 1 || limit > 128) {
+    return host_tool_failed("invalid_input",
+                            "filesystem.backup.list limit must be between 1 and 128", false,
+                            std::nullopt);
+  }
+  auto decision = prepare_filesystem_backup_query_call(
+      database, tool_call, kToolFilesystemBackupList, replay_mutex, replays);
+  if (decision.respond) return decision.response;
+  const auto target = tool_call.value("target", nlohmann::json::object());
+  const auto server_id = json_text_field(target, "serverId");
+  const auto task_id = json_text_field(tool_call, "taskId");
+  nlohmann::json response;
+  try {
+    response = host_tool_success(
+        database.list_filesystem_backups_for_task(server_id, task_id, status, path, limit));
+  } catch (const std::invalid_argument& error) {
+    response = host_tool_failed("invalid_input", error.what(), false, std::nullopt);
+  } catch (const std::exception& error) {
+    response = host_tool_failed("internal", error.what(), false, std::nullopt);
+  }
+  finish_host_tool_call(database, tool_call, decision.token, response, replay_mutex, replays);
+  return response;
+}
+
+nlohmann::json handle_filesystem_backup_retention_scan(
+    DesktopDatabase& database, const nlohmann::json& params, std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  const auto tool_call =
+      filesystem_backup_query_tool_call(params, "filesystem backup retention scan");
+  if (json_text_field(tool_call, "toolName") != kToolFilesystemBackupRetention) {
+    return host_tool_failed("denied_by_policy",
+                            "filesystem backup retention scan has an unexpected tool name",
+                            false, std::nullopt);
+  }
+  const auto input = tool_call.value("input", nlohmann::json::object());
+  if (!only_fields(input, {"pathPrefix", "keepLatest", "olderThanDays"}, {})) {
+    return host_tool_failed("invalid_input", "filesystem.backup.retention input is invalid",
+                            false, std::nullopt);
+  }
+  const auto has_keep_latest = input.contains("keepLatest") && !input.at("keepLatest").is_null();
+  const auto has_older_than =
+      input.contains("olderThanDays") && !input.at("olderThanDays").is_null();
+  if (!has_keep_latest && !has_older_than) {
+    return host_tool_failed(
+        "invalid_input", "filesystem.backup.retention requires keepLatest or olderThanDays",
+        false, std::nullopt);
+  }
+  if (has_keep_latest) {
+    if (!input.at("keepLatest").is_number_integer() || input.at("keepLatest").get<int>() < 1 ||
+        input.at("keepLatest").get<int>() > 64) {
+      return host_tool_failed(
+          "invalid_input", "filesystem.backup.retention keepLatest must be between 1 and 64",
+          false, std::nullopt);
+    }
+  }
+  if (has_older_than) {
+    if (!input.at("olderThanDays").is_number_integer() ||
+        input.at("olderThanDays").get<std::int64_t>() < 1 ||
+        input.at("olderThanDays").get<std::int64_t>() > 3650) {
+      return host_tool_failed(
+          "invalid_input", "filesystem.backup.retention olderThanDays must be between 1 and 3650",
+          false, std::nullopt);
+    }
+  }
+  std::optional<std::string> path_prefix;
+  if (input.contains("pathPrefix") && !input.at("pathPrefix").is_null()) {
+    if (!input.at("pathPrefix").is_string()) {
+      return host_tool_failed("invalid_input", "filesystem.backup.retention input is invalid",
+                              false, std::nullopt);
+    }
+    path_prefix = input.at("pathPrefix").get<std::string>();
+    if (!valid_remote_query_path(*path_prefix)) {
+      return host_tool_failed(
+          "invalid_input",
+          "remote path must be 1-4096 characters, absolute, and free of control characters",
+          false, std::nullopt);
+    }
+  }
+  auto decision = prepare_filesystem_backup_query_call(
+      database, tool_call, kToolFilesystemBackupRetention, replay_mutex, replays);
+  if (decision.respond) return decision.response;
+  const auto target = tool_call.value("target", nlohmann::json::object());
+  const auto server_id = json_text_field(target, "serverId");
+  nlohmann::json response;
+  try {
+    const auto scan = database.list_available_filesystem_backups_for_server(server_id, path_prefix,
+                                                                           512);
+    nlohmann::json records = nlohmann::json::array();
+    for (const auto& record : scan.value("records", nlohmann::json::array())) {
+      const auto path = json_text_field(record, "path");
+      if (path_prefix.has_value() && path.rfind(*path_prefix, 0) != 0) continue;
+      nlohmann::json item = nlohmann::json::object();
+      item["id"] = json_text_field(record, "id");
+      item["path"] = path;
+      item["backupPath"] = json_text_field(record, "backupPath");
+      item["revision"] = json_text_field(record, "revision");
+      item["taskId"] = optional_json_field(record, "taskId");
+      item["createdAt"] = json_text_field(record, "createdAt");
+      item["bytesBackedUp"] = record.value("bytesBackedUp", 0);
+      records.push_back(std::move(item));
+    }
+    nlohmann::json output = nlohmann::json::object();
+    output["records"] = std::move(records);
+    output["truncated"] = scan.value("truncated", false);
+    output["evaluatedAtEpochSeconds"] = now_epoch_seconds();
+    response = host_tool_success(output);
+  } catch (const std::invalid_argument& error) {
+    response = host_tool_failed("invalid_input", error.what(), false, std::nullopt);
+  } catch (const std::exception& error) {
+    response = host_tool_failed("internal", error.what(), false, std::nullopt);
+  }
+  finish_host_tool_call(database, tool_call, decision.token, response, replay_mutex, replays);
+  return response;
 }
 
 nlohmann::json handle_finding_record(DesktopDatabase& database, const nlohmann::json& params) {
@@ -7196,6 +7770,24 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
         return handle_filesystem_backup_restored(*database_, params);
       }
       return handle_filesystem_backup_deleted(*database_, params);
+    } catch (const SidecarRpcError&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw SidecarRpcError(-32000, error.what());
+    }
+  }
+  if (method == "host.filesystem.backup.list_query" ||
+      method == "host.filesystem.backup.retention_scan") {
+    if (database_ == nullptr || !database_->is_available()) {
+      throw SidecarRpcError(-32603, "the local server database is unavailable");
+    }
+    try {
+      if (method == "host.filesystem.backup.list_query") {
+        return handle_filesystem_backup_list_query(*database_, params, host_tool_replay_mutex_,
+                                                   host_tool_replays_);
+      }
+      return handle_filesystem_backup_retention_scan(*database_, params, host_tool_replay_mutex_,
+                                                     host_tool_replays_);
     } catch (const SidecarRpcError&) {
       throw;
     } catch (const std::exception& error) {
