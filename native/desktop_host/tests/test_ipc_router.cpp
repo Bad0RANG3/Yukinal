@@ -151,6 +151,10 @@ int main() {
                        {{"terminalSessionId", "term_x"}, {"data", "ls\n"}})
                .ok,
         "terminal_write should report a missing local database");
+  check(!router.invoke("mcp_server_start", {{"serverId", "mcp_echo"}}).ok,
+        "mcp_server_start should report a missing local database");
+  check(!router.invoke("mcp_server_stop", {{"serverId", "mcp_echo"}}).ok,
+        "mcp_server_stop should report a missing local database");
   check(!router.invoke("server_host_key_probe", nlohmann::json::object()).ok,
         "server_host_key_probe should require a server id");
   check(!router.invoke("server_host_key_probe", {{"serverId", "srv_ok"}}).ok,

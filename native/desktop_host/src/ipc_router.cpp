@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_ssh.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/desktop_terminal.hpp"
@@ -658,6 +659,7 @@ IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentia
     }
     if (sink) sink(event, payload);
   });
+  mcp_ = std::make_unique<McpSupervisor>(database_, credentials_);
 }
 
 IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
@@ -1084,7 +1086,8 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   }
 
   if (method == "mcp_server_list" || method == "mcp_server_save" ||
-      method == "mcp_server_delete" || method == "mcp_server_review") {
+      method == "mcp_server_delete" || method == "mcp_server_review" ||
+      method == "mcp_server_start" || method == "mcp_server_stop") {
     return mcp_command(method, params);
   }
 
@@ -2358,6 +2361,25 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
     }
   }
 
+  if (method == "mcp_server_start" || method == "mcp_server_stop") {
+    if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
+      return failure("INVALID_PARAMS", method + " requires exactly serverId");
+    }
+    const auto server_id = trim_ascii(params.at("serverId").get<std::string>());
+    if (server_id.empty() || server_id.size() > 160 || has_control_characters(server_id)) {
+      return failure("INVALID_PARAMS", method + " serverId is invalid");
+    }
+    if (mcp_ == nullptr) {
+      return failure("MCP_UNAVAILABLE", "The MCP supervisor is unavailable");
+    }
+    try {
+      return method == "mcp_server_start" ? IpcReply{true, mcp_->start(server_id)}
+                                           : IpcReply{true, mcp_->stop(server_id)};
+    } catch (const std::exception& error) {
+      return failure("MCP_ERROR", error.what());
+    }
+  }
+
   if (method == "mcp_server_review") {
     const std::set<std::string> allowed = {"serverId", "allowedTools", "trustLevel",
                                            "annotationTrust"};
@@ -2480,7 +2502,41 @@ IpcReply IpcRouter::provider_command(const std::string& method, const nlohmann::
 nlohmann::json IpcRouter::handle_host_request(const std::string& method,
                                               const nlohmann::json& params) {
   if (method == "host.mcp.catalog") {
-    return {{"servers", nlohmann::json::array()}, {"failures", nlohmann::json::array()}};
+    if (mcp_ == nullptr) {
+      return nlohmann::json{{"servers", nlohmann::json::array()},
+                            {"failures", nlohmann::json::array()}};
+    }
+    try {
+      return mcp_->catalog();
+    } catch (const std::exception&) {
+      return nlohmann::json{
+          {"servers", nlohmann::json::array()},
+          {"failures",
+           nlohmann::json::array({nlohmann::json{{"serverId", "mcp"},
+                                                 {"code", "request_failed"},
+                                                 {"message", "The MCP catalog could not be built"}}})}};
+    }
+  }
+  if (method == "host.tool.execute") {
+    const auto tool_name =
+        params.is_object() ? params.value("toolName", std::string()) : std::string();
+    const auto failed = [](const std::string& code, const std::string& message) {
+      return nlohmann::json{{"status", "failed"},
+                            {"error", nlohmann::json{{"code", code}, {"message", message}}}};
+    };
+    if (tool_name.rfind("mcp.", 0) != 0) {
+      return failed("unsupported_tool", "this desktop host does not execute that tool");
+    }
+    if (mcp_ == nullptr) return failed("mcp_unavailable", "The MCP supervisor is unavailable");
+    const auto input = params.contains("input") ? params.at("input") : nlohmann::json::object();
+    if (!input.is_object()) {
+      return failed("invalid_arguments", "MCP tool arguments must be an object");
+    }
+    try {
+      return nlohmann::json{{"status", "success"}, {"output", mcp_->call(tool_name, input)}};
+    } catch (const std::exception& error) {
+      return failed("mcp_call_failed", error.what());
+    }
   }
   if (method == "host.credentials.set") {
     if (!params.is_object() || !params.contains("service") || !params.contains("account") ||

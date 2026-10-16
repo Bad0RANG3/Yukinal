@@ -1029,3 +1029,19 @@ process supervisor, `host.mcp.catalog`, `host.tool.execute` for `mcp.*` tools,
 OAuth, the investigation RPCs, the file transfer actions, installers, and real
 SSH validation remain; the supervisor is a full MCP client (handshake, paginated
 `tools/list`, timeouts, shutdown) and is the next large MCP milestone.
+
+Later on 2026-10-16, the C++ host added the MCP supervisor. A new
+`native/desktop_host/src/desktop_mcp.cpp` spawns one stdio MCP child per server on
+demand, performs the `initialize` handshake plus `notifications/initialized`, and
+caches the `tools/list` result; the process stays alive for tool calls. The host
+now answers `host.mcp.catalog` with one entry per enabled, reviewed server
+(filtered by `allowedTools`), computing the effective risk from the server's
+`annotationTrust` and tool annotations (`none` → critical, `trusted` +
+`readOnlyHint` → low, `trusted` + `destructiveHint:false` → medium, else high).
+`host.tool.execute` routes `mcp.*` names to `tools/call` and returns the shared
+`HostMcpToolCallOutput`. `mcp_server_start`/`mcp_server_stop` drive the same
+supervisor for the settings UI. Only stdio is supported; HTTP transport, OAuth,
+pagination and cancellation are the next MCP steps. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets. The
+investigation RPCs, the file transfer actions, installers, and real SSH/MCP
+validation remain.
