@@ -237,6 +237,12 @@ void bind_optional_text(sqlite3* connection, sqlite3_stmt* statement, int index,
   bind_text(connection, statement, index, *value);
 }
 
+void bind_int64(sqlite3* connection, sqlite3_stmt* statement, int index, std::int64_t value) {
+  if (sqlite3_bind_int64(statement, index, value) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
 bool is_active_transfer_status(const std::string& status) {
   return is_one_of(status, {"queued", "running", "waitingConflict"});
 }
@@ -492,6 +498,53 @@ nlohmann::json decode_investigation_step(sqlite3_stmt* row) {
   return step;
 }
 
+// Decodes one `investigation_schedules` row. The column order below matches every
+// schedule SELECT in this file: 0 id, 1 task_id, 2 status, 3 interval_seconds,
+// 4 cooldown_seconds, 5 dedupe_window_seconds, 6 max_concurrent_runs, 7 budget,
+// 8 notification_policy, 9 next_run_at, 10 last_run_at, 11 last_outcome,
+// 12 last_error, 13 created_at, 14 updated_at, 15 baseline_run_id.
+nlohmann::json decode_investigation_schedule(sqlite3_stmt* row) {
+  nlohmann::json schedule = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"status", column_text(row, 2)},
+      {"intervalSeconds", sqlite3_column_int64(row, 3)},
+      {"cooldownSeconds", sqlite3_column_int64(row, 4)},
+      {"dedupeWindowSeconds", sqlite3_column_int64(row, 5)},
+      {"maxConcurrentRuns", sqlite3_column_int64(row, 6)},
+      {"budget", parse_json_text(column_text(row, 7), "schedule budget")},
+      {"notificationPolicy", column_text(row, 8)},
+      {"nextRunAt", column_text(row, 9)},
+      {"createdAt", column_text(row, 13)},
+      {"updatedAt", column_text(row, 14)},
+  };
+  add_optional_text(schedule, "lastRunAt", row, 10);
+  add_optional_text(schedule, "lastOutcome", row, 11);
+  add_optional_text(schedule, "lastError", row, 12);
+  add_optional_text(schedule, "baselineRunId", row, 15);
+  return schedule;
+}
+
+// Decodes one `investigation_schedule_runs` row into the shared shape: 0 id,
+// 1 schedule_id, 2 task_id, 3 status, 4 scheduled_at, 5 claimed_at, 6 started_at,
+// 7 finished_at, 8 dedupe_key, 9 outcome, 10 error.
+nlohmann::json decode_investigation_schedule_run(sqlite3_stmt* row) {
+  nlohmann::json run = {
+      {"id", column_text(row, 0)},
+      {"scheduleId", column_text(row, 1)},
+      {"taskId", column_text(row, 2)},
+      {"status", column_text(row, 3)},
+      {"scheduledAt", column_text(row, 4)},
+      {"dedupeKey", column_text(row, 8)},
+  };
+  add_optional_text(run, "claimedAt", row, 5);
+  add_optional_text(run, "startedAt", row, 6);
+  add_optional_text(run, "finishedAt", row, 7);
+  add_optional_text(run, "outcome", row, 9);
+  add_optional_text(run, "error", row, 10);
+  return run;
+}
+
 std::optional<nlohmann::json> load_investigation_task_row(sqlite3* connection,
                                                            const std::string& task_id) {
   Statement rows(connection, R"SQL(
@@ -507,6 +560,39 @@ std::optional<nlohmann::json> load_investigation_task_row(sqlite3* connection,
   if (result == SQLITE_DONE) return std::nullopt;
   if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
   return decode_investigation_task(rows.get());
+}
+
+const char* kScheduleColumns =
+    "id, task_id, status, interval_seconds, cooldown_seconds, dedupe_window_seconds, "
+    "max_concurrent_runs, budget, notification_policy, next_run_at, last_run_at, "
+    "last_outcome, last_error, created_at, updated_at, baseline_run_id";
+
+std::optional<nlohmann::json> load_investigation_schedule_row(sqlite3* connection,
+                                                             const std::string& schedule_id) {
+  const std::string sql = std::string("SELECT ") + kScheduleColumns +
+                          " FROM investigation_schedules WHERE id = ?1";
+  Statement rows(connection, sql.c_str());
+  bind_text(connection, rows.get(), 1, schedule_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return decode_investigation_schedule(rows.get());
+}
+
+const char* kScheduleRunColumns =
+    "id, schedule_id, task_id, status, scheduled_at, claimed_at, started_at, "
+    "finished_at, dedupe_key, outcome, error";
+
+std::optional<nlohmann::json> load_investigation_schedule_run_row(
+    sqlite3* connection, const std::string& run_id) {
+  const std::string sql = std::string("SELECT ") + kScheduleRunColumns +
+                          " FROM investigation_schedule_runs WHERE id = ?1";
+  Statement rows(connection, sql.c_str());
+  bind_text(connection, rows.get(), 1, run_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return decode_investigation_schedule_run(rows.get());
 }
 
 // Decodes one `mcp_servers` row into the shared `McpServerConfig` shape.
@@ -1229,6 +1315,116 @@ std::optional<std::string> investigation_task_status(sqlite3* connection,
 
 bool terminal_task_status(const std::string& status) {
   return is_one_of(status, {"completed", "failed", "stopped", "expired"});
+}
+
+// ── Investigation schedule helpers ──────────────────────────────────────────
+std::int64_t saturating_add(std::int64_t left, std::int64_t right) {
+  if (right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right) {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  return left + right;
+}
+
+std::int64_t saturating_sub(std::int64_t left, std::int64_t right) {
+  if (right > 0 && left < std::numeric_limits<std::int64_t>::min() + right) {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  if (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  return left - right;
+}
+
+std::optional<std::int64_t> iso8601_utc_epoch(const std::string& value) {
+  if (!iso8601_utc_text(value)) return std::nullopt;
+  std::tm utc{};
+  std::istringstream stream(value);
+  stream >> std::get_time(&utc, "%Y-%m-%dT%H:%M:%S");
+  if (stream.fail()) return std::nullopt;
+#ifdef _WIN32
+  const auto seconds = _mkgmtime(&utc);
+#else
+  const auto seconds = timegm(&utc);
+#endif
+  if (seconds == static_cast<std::time_t>(-1)) return std::nullopt;
+  return static_cast<std::int64_t>(seconds);
+}
+
+std::string iso8601_utc_from_epoch(std::int64_t epoch_seconds) {
+  const auto time = static_cast<std::time_t>(epoch_seconds);
+  std::tm utc{};
+#ifdef _WIN32
+  gmtime_s(&utc, &time);
+#else
+  gmtime_r(&time, &utc);
+#endif
+  std::ostringstream rendered;
+  rendered << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+  return rendered.str();
+}
+
+// A schedule run id is derived from `(scheduleId, dedupeKey)` so a duplicate tick
+// or a second scheduler loop can never fabricate a second run for one bucket.
+std::string schedule_run_id(const std::string& schedule_id, const std::string& dedupe_key) {
+  std::string seed = schedule_id;
+  seed.push_back('\0');
+  seed += dedupe_key;
+  return "schedrun_" + sha256_hex(seed);
+}
+
+// Mirrors the Rust database `validate_schedule_shape`, the last line of defence
+// before a schedule row or run is written.
+void validate_schedule_shape(const nlohmann::json& schedule) {
+  const auto id = schedule.value("id", std::string());
+  const auto task_id = schedule.value("taskId", std::string());
+  if (id.empty() || task_id.empty()) {
+    throw std::invalid_argument("schedule id and task id are required");
+  }
+  const auto interval = schedule.value("intervalSeconds", std::int64_t{0});
+  const auto cooldown = schedule.value("cooldownSeconds", std::int64_t{0});
+  const auto dedupe = schedule.value("dedupeWindowSeconds", std::int64_t{0});
+  const auto concurrent = schedule.value("maxConcurrentRuns", std::int64_t{0});
+  if (interval == 0 || cooldown > 86400 || dedupe == 0 || dedupe > 86400 || concurrent == 0 ||
+      concurrent > 16) {
+    throw std::invalid_argument("schedule bounds are invalid");
+  }
+  if (interval > 86400) {
+    throw std::invalid_argument("schedule interval is too large");
+  }
+  if (!iso8601_utc_text(schedule.value("nextRunAt", std::string()))) {
+    throw std::invalid_argument("schedule nextRunAt must be a UTC timestamp");
+  }
+}
+
+void insert_investigation_schedule_run(sqlite3* connection, const nlohmann::json& run) {
+  Statement insert(connection, R"SQL(
+      INSERT INTO investigation_schedule_runs (
+        id, schedule_id, task_id, status, scheduled_at, claimed_at, started_at,
+        finished_at, dedupe_key, outcome, error
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+    )SQL");
+  bind_text(connection, insert.get(), 1, run.value("id", std::string()));
+  bind_text(connection, insert.get(), 2, run.value("scheduleId", std::string()));
+  bind_text(connection, insert.get(), 3, run.value("taskId", std::string()));
+  bind_text(connection, insert.get(), 4, run.value("status", std::string()));
+  bind_text(connection, insert.get(), 5, run.value("scheduledAt", std::string()));
+  const auto optional = [&run](const char* key) -> std::optional<std::string> {
+    const auto found = run.find(key);
+    if (found == run.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  bind_optional_text(connection, insert.get(), 6, optional("claimedAt"));
+  bind_optional_text(connection, insert.get(), 7, optional("startedAt"));
+  bind_optional_text(connection, insert.get(), 8, optional("finishedAt"));
+  bind_text(connection, insert.get(), 9, run.value("dedupeKey", std::string()));
+  bind_optional_text(connection, insert.get(), 10, optional("outcome"));
+  bind_optional_text(connection, insert.get(), 11, optional("error"));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
 }
 
 }  // namespace
@@ -3203,6 +3399,392 @@ std::optional<nlohmann::json> DesktopDatabase::investigation_retention_prune(
                         {"cutoffAt", cutoff_at},
                         {"deleted", std::move(deleted)},
                         {"skipped", std::move(skipped)}};
+}
+
+nlohmann::json DesktopDatabase::list_investigation_schedules(int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Schedule limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"schedules", nlohmann::json::array()}};
+  nlohmann::json schedules = nlohmann::json::array();
+  const std::string sql = std::string("SELECT ") + kScheduleColumns +
+                          " FROM investigation_schedules ORDER BY next_run_at ASC, id ASC "
+                          "LIMIT ?1";
+  Statement rows(connection_, sql.c_str());
+  bind_int64(connection_, rows.get(), 1, limit);
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    schedules.push_back(decode_investigation_schedule(rows.get()));
+  }
+  return {{"schedules", std::move(schedules)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_schedule(
+    const std::string& schedule_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  return load_investigation_schedule_row(connection_, schedule_id);
+}
+
+nlohmann::json DesktopDatabase::list_investigation_schedule_runs(
+    const std::string& schedule_id, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Schedule run limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"runs", nlohmann::json::array()}};
+  nlohmann::json runs = nlohmann::json::array();
+  const std::string sql = std::string("SELECT ") + kScheduleRunColumns +
+                          " FROM investigation_schedule_runs WHERE schedule_id = ?1 "
+                          "ORDER BY scheduled_at DESC, id DESC LIMIT ?2";
+  Statement rows(connection_, sql.c_str());
+  bind_text(connection_, rows.get(), 1, schedule_id);
+  bind_int64(connection_, rows.get(), 2, limit);
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    runs.push_back(decode_investigation_schedule_run(rows.get()));
+  }
+  return {{"runs", std::move(runs)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_schedule_run(
+    const std::string& run_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  return load_investigation_schedule_run_row(connection_, run_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::create_investigation_schedule(
+    const nlohmann::json& schedule) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  validate_schedule_shape(schedule);
+  const auto schedule_id = schedule.value("id", std::string());
+  const auto task_id = schedule.value("taskId", std::string());
+  {
+    Statement task(connection_,
+                   "SELECT mode, automation_level FROM investigation_tasks WHERE id = ?1");
+    bind_text(connection_, task.get(), 1, task_id);
+    const auto result = sqlite3_step(task.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    if (std::string(column_text(task.get(), 0)) != "readonly" ||
+        std::string(column_text(task.get(), 1)) != "readonly") {
+      throw std::invalid_argument(
+          "scheduler triggers may only target read-only investigation tasks");
+    }
+  }
+  const auto optional = [&schedule](const char* key) -> std::optional<std::string> {
+    const auto found = schedule.find(key);
+    if (found == schedule.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_schedules (
+        id, task_id, status, interval_seconds, cooldown_seconds, dedupe_window_seconds,
+        max_concurrent_runs, budget, notification_policy, next_run_at, last_run_at,
+        last_outcome, last_error, created_at, updated_at, baseline_run_id
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    )SQL");
+  bind_text(connection_, insert.get(), 1, schedule_id);
+  bind_text(connection_, insert.get(), 2, task_id);
+  bind_text(connection_, insert.get(), 3, schedule.value("status", std::string("active")));
+  bind_int64(connection_, insert.get(), 4, schedule.value("intervalSeconds", std::int64_t{0}));
+  bind_int64(connection_, insert.get(), 5, schedule.value("cooldownSeconds", std::int64_t{0}));
+  bind_int64(connection_, insert.get(), 6,
+             schedule.value("dedupeWindowSeconds", std::int64_t{0}));
+  bind_int64(connection_, insert.get(), 7, schedule.value("maxConcurrentRuns", std::int64_t{0}));
+  bind_text(connection_, insert.get(), 8,
+            schedule.contains("budget") ? schedule.at("budget").dump() : "{}");
+  bind_text(connection_, insert.get(), 9,
+            schedule.value("notificationPolicy", std::string("on_change")));
+  bind_text(connection_, insert.get(), 10, schedule.value("nextRunAt", std::string()));
+  bind_optional_text(connection_, insert.get(), 11, optional("lastRunAt"));
+  bind_optional_text(connection_, insert.get(), 12, optional("lastOutcome"));
+  bind_optional_text(connection_, insert.get(), 13, optional("lastError"));
+  bind_text(connection_, insert.get(), 14, schedule.value("createdAt", std::string()));
+  bind_text(connection_, insert.get(), 15, schedule.value("updatedAt", std::string()));
+  bind_optional_text(connection_, insert.get(), 16, optional("baselineRunId"));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return load_investigation_schedule_row(connection_, schedule_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::update_investigation_schedule(
+    const nlohmann::json& schedule) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  validate_schedule_shape(schedule);
+  const auto schedule_id = schedule.value("id", std::string());
+  const auto optional = [&schedule](const char* key) -> std::optional<std::string> {
+    const auto found = schedule.find(key);
+    if (found == schedule.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_schedules SET status = ?2, interval_seconds = ?3,
+             cooldown_seconds = ?4, dedupe_window_seconds = ?5, max_concurrent_runs = ?6,
+             budget = ?7, notification_policy = ?8, next_run_at = ?9, last_run_at = ?10,
+             last_outcome = ?11, last_error = ?12, updated_at = ?13, baseline_run_id = ?14
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, update.get(), 1, schedule_id);
+  bind_text(connection_, update.get(), 2, schedule.value("status", std::string("active")));
+  bind_int64(connection_, update.get(), 3, schedule.value("intervalSeconds", std::int64_t{0}));
+  bind_int64(connection_, update.get(), 4, schedule.value("cooldownSeconds", std::int64_t{0}));
+  bind_int64(connection_, update.get(), 5,
+             schedule.value("dedupeWindowSeconds", std::int64_t{0}));
+  bind_int64(connection_, update.get(), 6, schedule.value("maxConcurrentRuns", std::int64_t{0}));
+  bind_text(connection_, update.get(), 7,
+            schedule.contains("budget") ? schedule.at("budget").dump() : "{}");
+  bind_text(connection_, update.get(), 8,
+            schedule.value("notificationPolicy", std::string("on_change")));
+  bind_text(connection_, update.get(), 9, schedule.value("nextRunAt", std::string()));
+  bind_optional_text(connection_, update.get(), 10, optional("lastRunAt"));
+  bind_optional_text(connection_, update.get(), 11, optional("lastOutcome"));
+  bind_optional_text(connection_, update.get(), 12, optional("lastError"));
+  bind_text(connection_, update.get(), 13, schedule.value("updatedAt", std::string()));
+  bind_optional_text(connection_, update.get(), 14, optional("baselineRunId"));
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  return load_investigation_schedule_row(connection_, schedule_id);
+}
+
+nlohmann::json DesktopDatabase::claim_due_investigation_schedule_runs(
+    const std::string& now, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("schedule tick limit must be between 1 and 100");
+  }
+  nlohmann::json claimed = nlohmann::json::array();
+  nlohmann::json skipped = nlohmann::json::array();
+  if (connection_ == nullptr) {
+    return {{"claimed", std::move(claimed)}, {"skipped", std::move(skipped)}};
+  }
+  const auto now_epoch = iso8601_utc_epoch(now);
+  if (!now_epoch.has_value()) {
+    throw std::invalid_argument("scheduler now must be a UTC timestamp");
+  }
+  Transaction transaction(connection_);
+  std::vector<nlohmann::json> due;
+  {
+    const std::string sql =
+        std::string("SELECT ") + kScheduleColumns +
+        " FROM investigation_schedules WHERE status = 'active' AND next_run_at <= ?1 "
+        "ORDER BY next_run_at ASC, id ASC LIMIT ?2";
+    Statement rows(connection_, sql.c_str());
+    bind_text(connection_, rows.get(), 1, now);
+    bind_int64(connection_, rows.get(), 2, limit);
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      due.push_back(decode_investigation_schedule(rows.get()));
+    }
+  }
+  // A run that already occupies this dedupe bucket only advances the trigger.
+  const auto advance_schedule = [&](const std::string& schedule_id,
+                                    const std::string& next_run_at) {
+    Statement update(connection_, R"SQL(
+        UPDATE investigation_schedules SET next_run_at = ?2, updated_at = ?3 WHERE id = ?1
+      )SQL");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    bind_text(connection_, update.get(), 2, next_run_at);
+    bind_text(connection_, update.get(), 3, now);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  // A skipped trigger is itself a terminal schedule outcome.
+  const auto finish_skipped_schedule = [&](const std::string& schedule_id,
+                                           const std::string& next_run_at,
+                                           const std::optional<std::string>& last_run_at,
+                                           const std::string& outcome) {
+    Statement update(connection_, R"SQL(
+        UPDATE investigation_schedules SET next_run_at = ?2, last_run_at = ?3,
+               last_outcome = ?4, last_error = NULL, updated_at = ?5 WHERE id = ?1
+      )SQL");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    bind_text(connection_, update.get(), 2, next_run_at);
+    bind_optional_text(connection_, update.get(), 3, last_run_at);
+    bind_text(connection_, update.get(), 4, outcome);
+    bind_text(connection_, update.get(), 5, now);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  // A claimed run preserves the previous terminal outcome so the scheduler can
+  // give the sidecar a meaningful changed/no_change/baseline follow-up prompt.
+  const auto claim_schedule = [&](const std::string& schedule_id,
+                                  const std::string& next_run_at) {
+    Statement update(connection_, R"SQL(
+        UPDATE investigation_schedules SET next_run_at = ?2, last_run_at = ?3, updated_at = ?3
+         WHERE id = ?1
+      )SQL");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    bind_text(connection_, update.get(), 2, next_run_at);
+    bind_text(connection_, update.get(), 3, now);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  const auto revoke = [&](const std::string& schedule_id) {
+    Statement update(connection_, "UPDATE investigation_schedules SET status = 'revoked' WHERE id = ?1");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  const auto previous_last_run = [](const nlohmann::json& schedule)
+      -> std::optional<std::string> {
+    if (schedule.contains("lastRunAt") && schedule.at("lastRunAt").is_string()) {
+      return schedule.at("lastRunAt").get<std::string>();
+    }
+    return std::nullopt;
+  };
+  for (const auto& schedule : due) {
+    const auto schedule_id = schedule.value("id", std::string());
+    const auto task_id = schedule.value("taskId", std::string());
+    std::optional<std::array<std::string, 3>> task;  // status, mode, automation
+    {
+      Statement row(connection_,
+                    "SELECT status, mode, automation_level FROM investigation_tasks WHERE id = ?1");
+      bind_text(connection_, row.get(), 1, task_id);
+      const auto result = sqlite3_step(row.get());
+      if (result == SQLITE_ROW) {
+        task = std::array<std::string, 3>{std::string(column_text(row.get(), 0)),
+                                          std::string(column_text(row.get(), 1)),
+                                          std::string(column_text(row.get(), 2))};
+      } else if (result != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+    }
+    const auto due_at = schedule.value("nextRunAt", std::string());
+    const auto due_epoch = iso8601_utc_epoch(due_at).value_or(*now_epoch);
+    const auto dedupe_window = schedule.value("dedupeWindowSeconds", std::int64_t{1});
+    const auto dedupe_bucket = due_epoch / std::max<std::int64_t>(dedupe_window, 1);
+    const auto dedupe_key = "bucket:" + std::to_string(dedupe_bucket);
+    const auto interval = schedule.value("intervalSeconds", std::int64_t{0});
+    const auto next_run_at = iso8601_utc_from_epoch(saturating_add(*now_epoch, interval));
+    std::optional<nlohmann::json> existing;
+    {
+      Statement row(connection_, R"SQL(
+          SELECT id, schedule_id, task_id, status, scheduled_at, claimed_at, started_at,
+                 finished_at, dedupe_key, outcome, error
+            FROM investigation_schedule_runs WHERE schedule_id = ?1 AND dedupe_key = ?2
+        )SQL");
+      bind_text(connection_, row.get(), 1, schedule_id);
+      bind_text(connection_, row.get(), 2, dedupe_key);
+      const auto result = sqlite3_step(row.get());
+      if (result == SQLITE_ROW) existing = decode_investigation_schedule_run(row.get());
+      else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    if (existing.has_value()) {
+      advance_schedule(schedule_id, next_run_at);
+      const bool task_terminal = task.has_value() && terminal_task_status((*task)[0]);
+      if (task_terminal || existing->value("outcome", std::string()) == "task_terminal") {
+        revoke(schedule_id);
+      }
+      const auto status = existing->value("status", std::string());
+      if (status == "claimed" || status == "running") {
+        claimed.push_back(*existing);
+      } else {
+        skipped.push_back(*existing);
+      }
+      continue;
+    }
+    std::optional<std::string> reason;
+    if (!task.has_value()) {
+      reason = "task_missing";
+    } else {
+      const auto& status = (*task)[0];
+      const auto& mode = (*task)[1];
+      const auto& automation = (*task)[2];
+      if (mode == "readonly" && automation == "readonly" &&
+          is_one_of(status, {"pending", "investigating", "waiting_user"})) {
+        reason = std::nullopt;
+      } else if (terminal_task_status(status)) {
+        reason = "task_terminal";
+      } else {
+        reason = "task_not_readonly_or_waiting_user";
+      }
+    }
+    int active_count = 0;
+    {
+      Statement count(connection_, R"SQL(
+          SELECT COUNT(*) FROM investigation_schedule_runs
+           WHERE schedule_id = ?1 AND status IN ('queued','claimed','running')
+        )SQL");
+      bind_text(connection_, count.get(), 1, schedule_id);
+      if (sqlite3_step(count.get()) != SQLITE_ROW) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      active_count = sqlite3_column_int(count.get(), 0);
+    }
+    const auto max_concurrent = schedule.value("maxConcurrentRuns", std::int64_t{1});
+    const auto cooldown = schedule.value("cooldownSeconds", std::int64_t{0});
+    bool cooldown_active = false;
+    if (schedule.contains("lastRunAt") && schedule.at("lastRunAt").is_string()) {
+      if (const auto last = iso8601_utc_epoch(schedule.at("lastRunAt").get<std::string>());
+          last.has_value()) {
+        cooldown_active = saturating_sub(*now_epoch, *last) < cooldown;
+      }
+    }
+    std::optional<std::string> concurrency_reason = reason;
+    if (!concurrency_reason.has_value()) {
+      if (cooldown_active) {
+        concurrency_reason = "cooldown";
+      } else if (active_count >= max_concurrent) {
+        concurrency_reason = "concurrency_limit";
+      }
+    }
+    nlohmann::json run = {
+        {"id", schedule_run_id(schedule_id, dedupe_key)},
+        {"scheduleId", schedule_id},
+        {"taskId", task_id},
+        {"scheduledAt", due_at},
+        {"dedupeKey", dedupe_key},
+    };
+    if (concurrency_reason.has_value()) {
+      run["status"] = "skipped";
+      run["finishedAt"] = now;
+      run["outcome"] = *concurrency_reason;
+    } else {
+      run["status"] = "claimed";
+      run["claimedAt"] = now;
+    }
+    insert_investigation_schedule_run(connection_, run);
+    if (concurrency_reason.has_value()) {
+      skipped.push_back(run);
+      finish_skipped_schedule(schedule_id, next_run_at, previous_last_run(schedule),
+                              *concurrency_reason);
+      if (*concurrency_reason == "task_terminal") revoke(schedule_id);
+    } else {
+      claimed.push_back(run);
+      claim_schedule(schedule_id, next_run_at);
+    }
+  }
+  transaction.commit();
+  return {{"claimed", std::move(claimed)}, {"skipped", std::move(skipped)}};
+}
+
+int DesktopDatabase::investigation_evidence_count_for_run(const std::string& run_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return 0;
+  Statement count(connection_, "SELECT COUNT(*) FROM investigation_evidence WHERE run_id = ?1");
+  bind_text(connection_, count.get(), 1, run_id);
+  if (sqlite3_step(count.get()) != SQLITE_ROW) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return sqlite3_column_int(count.get(), 0);
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(

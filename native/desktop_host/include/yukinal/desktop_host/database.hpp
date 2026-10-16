@@ -122,6 +122,21 @@ class DesktopDatabase {
   [[nodiscard]] std::optional<nlohmann::json> investigation_retention_prune(
       const std::string& task_id, const std::string& cutoff_at, const nlohmann::json& items,
       const std::string& audit_id, const std::string& now) const;
+  // ── Investigation schedules (durable read-only triggers) ────────────────────
+  [[nodiscard]] nlohmann::json list_investigation_schedules(int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_schedule(
+      const std::string& schedule_id) const;
+  [[nodiscard]] nlohmann::json list_investigation_schedule_runs(
+      const std::string& schedule_id, int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_schedule_run(
+      const std::string& run_id) const;
+  [[nodiscard]] std::optional<nlohmann::json> create_investigation_schedule(
+      const nlohmann::json& schedule) const;
+  [[nodiscard]] std::optional<nlohmann::json> update_investigation_schedule(
+      const nlohmann::json& schedule) const;
+  [[nodiscard]] nlohmann::json claim_due_investigation_schedule_runs(
+      const std::string& now, int limit) const;
+  [[nodiscard]] int investigation_evidence_count_for_run(const std::string& run_id) const;
   /** SHA-256 (lowercase hex) of the canonical JSON serialization used for evidence. */
   [[nodiscard]] static std::string content_hash(const nlohmann::json& content);
   [[nodiscard]] nlohmann::json list_chat_sessions(

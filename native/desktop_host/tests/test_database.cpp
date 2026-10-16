@@ -1599,6 +1599,189 @@ int main(int argc, char** argv) {
       check(router.invoke("investigation_retention_preview", {{"taskId", "itask_write"}}).ok,
             "retention preview should default its cutoff and limit");
     }
+
+    // ── investigation_schedule_* ─────────────────────────────────────────────
+    // Durable read-only triggers: create, list, update, runs, and the due-claiming
+    // tick that funnels every trigger through one dedupe bucket.
+    {
+      const nlohmann::json readonly_task = {
+          {"id", "itask_sched"},
+          {"objective", "Poll nginx health"},
+          {"successCriteria", nlohmann::json::array({"collect readonly samples"})},
+          {"scope",
+           {{"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}}},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "readonly"},
+          {"permissionMode", "ask"},
+          {"automationLevel", "readonly"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 6}, {"maxRunMs", 60000}, {"maxAttempts", 2}}},
+          {"createdBy", "user"},
+          {"createdAt", "2026-01-02T00:00:00Z"},
+          {"updatedAt", "2026-01-02T00:00:00Z"},
+      };
+      (void)database.create_investigation_task(readonly_task);
+
+      const auto created = router.invoke(
+          "investigation_schedule_create",
+          {{"input",
+            {{"taskId", "itask_sched"},
+             {"intervalSeconds", 60},
+             {"cooldownSeconds", 0},
+             {"dedupeWindowSeconds", 60},
+             {"notificationPolicy", "on_change"},
+             {"nextRunAt", "2026-02-01T00:00:00Z"}}}});
+      check(created.ok && created.value.at("schedule").at("taskId") == "itask_sched" &&
+                created.value.at("schedule").at("status") == "active" &&
+                created.value.at("schedule").at("intervalSeconds") == 60 &&
+                created.value.at("schedule").at("maxConcurrentRuns") == 1 &&
+                created.value.at("schedule").at("dedupeWindowSeconds") == 60 &&
+                created.value.at("schedule").at("budget").at("maxSteps") == 6 &&
+                created.value.at("schedule").at("budget").at("maxAttempts") == 2 &&
+                created.value.at("schedule").at("notificationPolicy") == "on_change",
+            "schedule create should default the optional bounds from the task envelope");
+      const std::string schedule_id =
+          created.value.at("schedule").at("id").get<std::string>();
+
+      const auto listed = router.invoke("investigation_schedule_list", nlohmann::json::object());
+      check(listed.ok && listed.value.at("schedules").size() == 1 &&
+                listed.value.at("schedules").at(0).at("id") == schedule_id,
+            "schedule list should expose the durable trigger");
+      check(!router.invoke("investigation_schedule_list", {{"unexpected", 1}}).ok,
+            "investigation_schedule_list does not accept parameters");
+
+      // A due read-only trigger is claimed exactly once for its dedupe bucket.
+      const auto tick = router.invoke(
+          "investigation_schedule_tick", {{"input", {{"now", "2026-02-01T00:00:01Z"}}}});
+      check(tick.ok && tick.value.at("claimed").size() == 1 &&
+                tick.value.at("claimed").at(0).at("scheduleId") == schedule_id &&
+                tick.value.at("claimed").at(0).at("taskId") == "itask_sched" &&
+                tick.value.at("claimed").at(0).at("status") == "claimed" &&
+                tick.value.at("skipped").empty(),
+            "a due read-only trigger should be claimed exactly once");
+      const auto repeat = router.invoke(
+          "investigation_schedule_tick", {{"input", {{"now", "2026-02-01T00:00:01Z"}}}});
+      check(repeat.ok && repeat.value.at("claimed").empty() &&
+                repeat.value.at("skipped").empty(),
+            "a second tick at the same instant must not fabricate a run");
+
+      // The in-flight claimed run makes the next bucket skip on the concurrency cap.
+      const auto limited = router.invoke(
+          "investigation_schedule_tick", {{"input", {{"now", "2026-02-01T00:01:02Z"}}}});
+      check(limited.ok && limited.value.at("claimed").empty() &&
+                limited.value.at("skipped").size() == 1 &&
+                limited.value.at("skipped").at(0).at("outcome") == "concurrency_limit" &&
+                limited.value.at("skipped").at(0).at("status") == "skipped",
+            "an in-flight run should make the next tick skip on the concurrency limit");
+
+      const auto runs =
+          router.invoke("investigation_schedule_runs", {{"scheduleId", schedule_id}});
+      check(runs.ok && runs.value.at("runs").size() == 2 &&
+                runs.value.at("runs").at(0).at("status") == "skipped" &&
+                runs.value.at("runs").at(1).at("status") == "claimed" &&
+                !runs.value.at("runs").at(0).at("dedupeKey").get<std::string>().empty(),
+            "schedule runs should expose the claimed and skipped attempts newest first");
+      check(!router.invoke("investigation_schedule_runs", nlohmann::json::object()).ok,
+            "investigation_schedule_runs requires a scheduleId");
+
+      // The last skipped outcome is persisted on the trigger.
+      const auto after_skip =
+          router.invoke("investigation_schedule_list", nlohmann::json::object());
+      check(after_skip.value.at("schedules").at(0).at("lastOutcome") == "concurrency_limit" &&
+                after_skip.value.at("schedules").at(0).at("lastRunAt").is_string(),
+            "a skipped trigger should record its terminal outcome");
+
+      const auto paused = router.invoke(
+          "investigation_schedule_update",
+          {{"input", {{"scheduleId", schedule_id}, {"status", "paused"}, {"intervalSeconds", 120}}}});
+      check(paused.ok && paused.value.at("schedule").at("status") == "paused" &&
+                paused.value.at("schedule").at("intervalSeconds") == 120,
+            "schedule update should apply bounded changes");
+      const auto revoked = router.invoke(
+          "investigation_schedule_update",
+          {{"input", {{"scheduleId", schedule_id}, {"status", "revoked"}}}});
+      check(revoked.ok && revoked.value.at("schedule").at("status") == "revoked",
+            "a schedule can be revoked");
+      check(!router
+                 .invoke("investigation_schedule_update",
+                         {{"input", {{"scheduleId", schedule_id}, {"status", "active"}}}})
+                 .ok,
+            "revoked schedules cannot be reactivated");
+      const auto after_revoke = router.invoke(
+          "investigation_schedule_tick", {{"input", {{"now", "2026-02-01T05:00:00Z"}}}});
+      check(after_revoke.ok && after_revoke.value.at("claimed").empty() &&
+                after_revoke.value.at("skipped").empty(),
+            "a revoked trigger must not be claimed");
+
+      // Baseline selection requires an existing succeeded run that carries evidence.
+      check(!router
+                 .invoke("investigation_schedule_update",
+                         {{"input",
+                           {{"scheduleId", schedule_id}, {"baselineRunId", "schedrun_missing"}}}})
+                 .ok,
+            "baseline selection must reference an existing schedule run");
+
+      // A trigger whose read-only task reaches a terminal status revokes itself on
+      // the next due tick instead of launching anything.
+      nlohmann::json terminal_task = readonly_task;
+      terminal_task["id"] = "itask_sched_term";
+      (void)database.create_investigation_task(terminal_task);
+      const auto term_created = router.invoke(
+          "investigation_schedule_create",
+          {{"input",
+            {{"taskId", "itask_sched_term"},
+             {"intervalSeconds", 60},
+             {"cooldownSeconds", 0},
+             {"nextRunAt", "2026-03-01T00:00:00Z"}}}});
+      check(term_created.ok, "a second read-only trigger should be creatable");
+      const std::string term_id = term_created.value.at("schedule").at("id").get<std::string>();
+      check(database
+                .set_investigation_task_status("itask_sched_term", "completed",
+                                               std::optional<std::string>(
+                                                   "2026-03-01T00:00:00Z"),
+                                               "2026-03-01T00:00:00Z")
+                .has_value(),
+            "the scheduler fixture task should move to a terminal status");
+      const auto term_tick = router.invoke(
+          "investigation_schedule_tick", {{"input", {{"now", "2026-03-01T00:00:01Z"}}}});
+      check(term_tick.ok && term_tick.value.at("skipped").size() == 1 &&
+                term_tick.value.at("skipped").at(0).at("scheduleId") == term_id &&
+                term_tick.value.at("skipped").at(0).at("outcome") == "task_terminal",
+            "a trigger whose task is terminal should record a task_terminal skip");
+      const auto term_state = database.get_investigation_schedule(term_id);
+      check(term_state.has_value() && term_state->at("status") == "revoked",
+            "a terminal task should revoke its trigger");
+
+      // Rejected create inputs.
+      check(!router
+                 .invoke("investigation_schedule_create",
+                         {{"input", {{"taskId", "itask_write"}, {"intervalSeconds", 60}}}})
+                 .ok,
+            "scheduler triggers may only target read-only tasks");
+      check(!router
+                 .invoke("investigation_schedule_create",
+                         {{"input", {{"taskId", "itask_sched"}, {"intervalSeconds", 0}}}})
+                 .ok,
+            "a schedule interval must be positive");
+      check(!router
+                 .invoke("investigation_schedule_create",
+                         {{"input", {{"taskId", "itask_missing"}, {"intervalSeconds", 60}}}})
+                 .ok,
+            "scheduling an unknown task should fail");
+      check(!router
+                 .invoke("investigation_schedule_create",
+                         {{"input",
+                           {{"taskId", "itask_sched"},
+                            {"intervalSeconds", 60},
+                            {"budget", {{"maxSteps", 0}, {"maxRunMs", 1}, {"maxAttempts", 1}}}}}})
+                 .ok,
+            "a schedule budget must stay inside the supported bounds");
+      check(!router.invoke("investigation_schedule_tick", {{"input", {{"limit", 0}}}}).ok,
+            "a schedule tick limit must be between 1 and 100");
+    }
   }
 
   sqlite3* readback = nullptr;

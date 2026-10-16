@@ -2172,6 +2172,11 @@ constexpr size_t kMaxGuardrailPathPrefixes = 128;
 constexpr size_t kMaxGuardrailNameChars = 256;
 constexpr size_t kMaxGuardrailPathChars = 4096;
 constexpr std::int64_t kMaxGuardrailWindowSeconds = 1095LL * 86400;
+constexpr int kScheduleListLimit = 100;
+constexpr std::int64_t kDefaultScheduleCooldownSeconds = 300;
+constexpr std::int64_t kDefaultScheduleDedupeSeconds = 300;
+constexpr std::int64_t kDefaultScheduleMaxConcurrentRuns = 1;
+constexpr int kDefaultScheduleTickLimit = 16;
 
 std::optional<std::string> normalized_opaque_id(const std::string& raw) {
   const auto value = trim_ascii(raw);
@@ -2414,6 +2419,61 @@ std::optional<nlohmann::json> issue_command_grant(
 
 // Builds a validated `InvestigationTask` row from a create input. Returns
 // `std::nullopt` and fills `error` when the input is rejected.
+// Mirrors the Rust `validate_scheduler_task`: a durable trigger may only target a
+// live, read-only investigation task.
+std::optional<std::string> scheduler_task_error(const nlohmann::json& task) {
+  if (json_text_field(task, "mode") != "readonly" ||
+      json_text_field(task, "automationLevel") != "readonly") {
+    return "scheduler triggers can only target read-only tasks";
+  }
+  if (is_one_of(json_text_field(task, "status"),
+                {"completed", "failed", "stopped", "expired"})) {
+    return "terminal investigation tasks cannot be scheduled";
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> schedule_budget_error(const nlohmann::json& budget) {
+  if (!budget.is_object() ||
+      !only_fields(budget, {"maxSteps", "maxRunMs", "maxAttempts"},
+                   {"maxSteps", "maxRunMs", "maxAttempts"}) ||
+      !budget.at("maxSteps").is_number_integer() || !budget.at("maxRunMs").is_number_integer() ||
+      !budget.at("maxAttempts").is_number_integer()) {
+    return "schedule budget is invalid";
+  }
+  const auto steps = budget.at("maxSteps").get<std::int64_t>();
+  const auto run_ms = budget.at("maxRunMs").get<std::int64_t>();
+  const auto attempts = budget.at("maxAttempts").get<std::int64_t>();
+  if (steps < 1 || steps > kMaxBudgetSteps || run_ms < 1 || run_ms > kMaxBudgetRunMs ||
+      attempts < 1 || attempts > kMaxBudgetAttempts) {
+    return "schedule budget is outside the supported bounds";
+  }
+  return std::nullopt;
+}
+
+// Mirrors the Rust `validate_schedule_input`: the last host-owned bounds check
+// before a schedule is persisted.
+std::optional<std::string> schedule_input_error(const nlohmann::json& schedule) {
+  const auto interval = schedule.value("intervalSeconds", std::int64_t{0});
+  if (interval < 1 || interval > 86400) return "intervalSeconds must be between 1 and 86400";
+  const auto cooldown = schedule.value("cooldownSeconds", std::int64_t{0});
+  if (cooldown > 86400) return "cooldownSeconds must be at most 86400";
+  const auto dedupe = schedule.value("dedupeWindowSeconds", std::int64_t{0});
+  if (dedupe < 1 || dedupe > 86400) return "dedupeWindowSeconds must be between 1 and 86400";
+  const auto concurrent = schedule.value("maxConcurrentRuns", std::int64_t{0});
+  if (concurrent < 1 || concurrent > 16) return "maxConcurrentRuns must be between 1 and 16";
+  if (!schedule.contains("budget")) return "schedule budget is required";
+  if (const auto budget_error = schedule_budget_error(schedule.at("budget"));
+      budget_error.has_value()) {
+    return budget_error;
+  }
+  if (!schedule.contains("nextRunAt") || !schedule.at("nextRunAt").is_string() ||
+      !parse_iso8601_utc_seconds(schedule.at("nextRunAt").get<std::string>()).has_value()) {
+    return "nextRunAt must be a UTC timestamp";
+  }
+  return std::nullopt;
+}
+
 std::optional<nlohmann::json> build_investigation_task(const nlohmann::json& input,
                                                        DesktopDatabase& database,
                                                        std::string& error) {
@@ -3124,6 +3184,318 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     } catch (...) {
       return failure("STORAGE_ERROR",
                      "The local investigation database could not prune the requested history");
+    }
+  }
+
+  if (method == "investigation_schedule_list") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!params.empty()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_list does not accept parameters");
+    }
+    try {
+      return {true, database_->list_investigation_schedules(kScheduleListLimit)};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not read schedules");
+    }
+  }
+
+  if (method == "investigation_schedule_runs") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"scheduleId"}, {"scheduleId"}) ||
+        !params.at("scheduleId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_runs requires exactly scheduleId");
+    }
+    auto schedule_id = normalized_opaque_id(params.at("scheduleId").get<std::string>());
+    if (!schedule_id.has_value()) {
+      return failure("INVALID_PARAMS",
+                     "investigation_schedule_runs scheduleId must be 1 to 256 visible characters");
+    }
+    try {
+      return {true, database_->list_investigation_schedule_runs(*schedule_id, kScheduleListLimit)};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not read schedule runs");
+    }
+  }
+
+  if (method == "investigation_schedule_create") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_create requires an input object");
+    }
+    const auto& input = params.at("input");
+    if (!only_fields(input,
+                     {"id", "taskId", "intervalSeconds", "cooldownSeconds", "dedupeWindowSeconds",
+                      "maxConcurrentRuns", "budget", "notificationPolicy", "nextRunAt"},
+                     {"taskId", "intervalSeconds"}) ||
+        !input.at("taskId").is_string() || !input.at("intervalSeconds").is_number_integer()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_create input is invalid");
+    }
+    if ((input.contains("id") && !input.at("id").is_string()) ||
+        (input.contains("cooldownSeconds") && !input.at("cooldownSeconds").is_number_integer()) ||
+        (input.contains("dedupeWindowSeconds") &&
+         !input.at("dedupeWindowSeconds").is_number_integer()) ||
+        (input.contains("maxConcurrentRuns") &&
+         !input.at("maxConcurrentRuns").is_number_integer()) ||
+        (input.contains("notificationPolicy") && !input.at("notificationPolicy").is_string()) ||
+        (input.contains("nextRunAt") && !input.at("nextRunAt").is_string()) ||
+        (input.contains("budget") && !input.at("budget").is_object())) {
+      return failure("INVALID_PARAMS",
+                     "investigation_schedule_create optional fields are the wrong type");
+    }
+    auto task_id = normalized_opaque_id(input.at("taskId").get<std::string>());
+    if (!task_id.has_value()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_create taskId is invalid");
+    }
+    std::optional<nlohmann::json> task;
+    try {
+      task = load_investigation_task(*database_, *task_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local investigation database could not read the task");
+    }
+    if (!task.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    if (const auto task_error = scheduler_task_error(*task); task_error.has_value()) {
+      return failure("INVALID_STATE", *task_error);
+    }
+    std::optional<std::string> schedule_id;
+    if (input.contains("id")) {
+      schedule_id = normalized_opaque_id(input.at("id").get<std::string>());
+      if (!schedule_id.has_value()) {
+        return failure("INVALID_PARAMS", "schedule id must be between 1 and 256 visible characters");
+      }
+    } else {
+      schedule_id = next_id("schedule");
+    }
+    const auto now = iso8601_now();
+    nlohmann::json schedule = {
+        {"id", *schedule_id},
+        {"taskId", *task_id},
+        {"status", "active"},
+        {"intervalSeconds", input.at("intervalSeconds").get<std::int64_t>()},
+        {"cooldownSeconds", input.contains("cooldownSeconds")
+                                ? input.at("cooldownSeconds").get<std::int64_t>()
+                                : kDefaultScheduleCooldownSeconds},
+        {"dedupeWindowSeconds", input.contains("dedupeWindowSeconds")
+                                    ? input.at("dedupeWindowSeconds").get<std::int64_t>()
+                                    : kDefaultScheduleDedupeSeconds},
+        {"maxConcurrentRuns", input.contains("maxConcurrentRuns")
+                                  ? input.at("maxConcurrentRuns").get<std::int64_t>()
+                                  : kDefaultScheduleMaxConcurrentRuns},
+        {"budget", input.contains("budget") ? input.at("budget") : task->at("budget")},
+        {"notificationPolicy", input.contains("notificationPolicy")
+                                   ? input.at("notificationPolicy").get<std::string>()
+                                   : std::string("on_change")},
+        {"nextRunAt", input.contains("nextRunAt") ? input.at("nextRunAt").get<std::string>() : now},
+        {"createdAt", now},
+        {"updatedAt", now},
+    };
+    if (const auto input_error = schedule_input_error(schedule); input_error.has_value()) {
+      return failure("INVALID_PARAMS", *input_error);
+    }
+    try {
+      auto created = database_->create_investigation_schedule(schedule);
+      if (!created.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+      return {true, {{"schedule", std::move(*created)}}};
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not create the schedule");
+    }
+  }
+
+  if (method == "investigation_schedule_update") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_update requires an input object");
+    }
+    const auto& input = params.at("input");
+    if (!only_fields(input,
+                     {"scheduleId", "status", "intervalSeconds", "cooldownSeconds",
+                      "dedupeWindowSeconds", "maxConcurrentRuns", "budget", "notificationPolicy",
+                      "nextRunAt", "baselineRunId"},
+                     {"scheduleId"}) ||
+        !input.at("scheduleId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_update input is invalid");
+    }
+    if ((input.contains("status") && !input.at("status").is_string()) ||
+        (input.contains("intervalSeconds") && !input.at("intervalSeconds").is_number_integer()) ||
+        (input.contains("cooldownSeconds") && !input.at("cooldownSeconds").is_number_integer()) ||
+        (input.contains("dedupeWindowSeconds") &&
+         !input.at("dedupeWindowSeconds").is_number_integer()) ||
+        (input.contains("maxConcurrentRuns") &&
+         !input.at("maxConcurrentRuns").is_number_integer()) ||
+        (input.contains("budget") && !input.at("budget").is_object()) ||
+        (input.contains("notificationPolicy") && !input.at("notificationPolicy").is_string()) ||
+        (input.contains("nextRunAt") && !input.at("nextRunAt").is_string()) ||
+        (input.contains("baselineRunId") && !input.at("baselineRunId").is_string() &&
+         !input.at("baselineRunId").is_null())) {
+      return failure("INVALID_PARAMS",
+                     "investigation_schedule_update optional fields are the wrong type");
+    }
+    if (input.contains("status") &&
+        !is_one_of(input.at("status").get<std::string>(), {"active", "paused", "revoked"})) {
+      return failure("INVALID_PARAMS", "investigation_schedule_update status is invalid");
+    }
+    if (input.contains("notificationPolicy") &&
+        !is_one_of(input.at("notificationPolicy").get<std::string>(),
+                   {"silent", "on_change", "always", "failed_runs_only"})) {
+      return failure("INVALID_PARAMS",
+                     "investigation_schedule_update notificationPolicy is invalid");
+    }
+    auto schedule_id = normalized_opaque_id(input.at("scheduleId").get<std::string>());
+    if (!schedule_id.has_value()) {
+      return failure("INVALID_PARAMS",
+                     "investigation_schedule_update scheduleId must be 1 to 256 visible characters");
+    }
+    std::optional<nlohmann::json> schedule;
+    std::optional<nlohmann::json> task;
+    try {
+      schedule = database_->get_investigation_schedule(*schedule_id);
+      if (schedule.has_value()) {
+        task = load_investigation_task(*database_, schedule->value("taskId", std::string()));
+      }
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not read the schedule");
+    }
+    if (!schedule.has_value()) {
+      return failure("NOT_FOUND", "The investigation schedule was not found");
+    }
+    if (!task.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+
+    const bool baseline_only_update =
+        input.contains("baselineRunId") && !input.contains("status") &&
+        !input.contains("intervalSeconds") && !input.contains("cooldownSeconds") &&
+        !input.contains("dedupeWindowSeconds") && !input.contains("maxConcurrentRuns") &&
+        !input.contains("budget") && !input.contains("notificationPolicy") &&
+        !input.contains("nextRunAt");
+    const bool requires_live_task =
+        !(input.contains("status") && input.at("status").get<std::string>() == "revoked");
+    if (!baseline_only_update && requires_live_task) {
+      if (const auto task_error = scheduler_task_error(*task); task_error.has_value()) {
+        return failure("INVALID_STATE", *task_error);
+      }
+    }
+    if (schedule->value("status", std::string()) == "revoked" && input.contains("status") &&
+        input.at("status").get<std::string>() != "revoked") {
+      return failure("INVALID_STATE", "revoked schedules cannot be reactivated");
+    }
+    auto updated = *schedule;
+    if (input.contains("status")) updated["status"] = input.at("status").get<std::string>();
+    if (input.contains("intervalSeconds")) {
+      updated["intervalSeconds"] = input.at("intervalSeconds").get<std::int64_t>();
+    }
+    if (input.contains("cooldownSeconds")) {
+      updated["cooldownSeconds"] = input.at("cooldownSeconds").get<std::int64_t>();
+    }
+    if (input.contains("dedupeWindowSeconds")) {
+      updated["dedupeWindowSeconds"] = input.at("dedupeWindowSeconds").get<std::int64_t>();
+    }
+    if (input.contains("maxConcurrentRuns")) {
+      updated["maxConcurrentRuns"] = input.at("maxConcurrentRuns").get<std::int64_t>();
+    }
+    if (input.contains("budget")) updated["budget"] = input.at("budget");
+    if (input.contains("notificationPolicy")) {
+      updated["notificationPolicy"] = input.at("notificationPolicy").get<std::string>();
+    }
+    if (input.contains("nextRunAt")) updated["nextRunAt"] = input.at("nextRunAt").get<std::string>();
+    if (input.contains("baselineRunId")) {
+      if (input.at("baselineRunId").is_null()) {
+        updated.erase("baselineRunId");
+      } else {
+        auto baseline_run_id =
+            normalized_opaque_id(input.at("baselineRunId").get<std::string>());
+        if (!baseline_run_id.has_value()) {
+          return failure("INVALID_PARAMS",
+                         "baseline run id must be between 1 and 256 visible characters");
+        }
+        std::optional<nlohmann::json> baseline_run;
+        try {
+          baseline_run = database_->get_investigation_schedule_run(*baseline_run_id);
+        } catch (...) {
+          return failure("STORAGE_ERROR",
+                         "The local investigation database could not read the baseline run");
+        }
+        if (!baseline_run.has_value()) {
+          return failure("NOT_FOUND", "The baseline schedule run was not found");
+        }
+        if (baseline_run->value("scheduleId", std::string()) != *schedule_id) {
+          return failure("INVALID_PARAMS", "baseline run must belong to this schedule");
+        }
+        if (baseline_run->value("status", std::string()) != "succeeded") {
+          return failure("INVALID_PARAMS", "baseline run must be a succeeded schedule run");
+        }
+        if (database_->investigation_evidence_count_for_run(*baseline_run_id) <= 0) {
+          return failure("INVALID_PARAMS",
+                         "baseline run must contain at least one evidence item");
+        }
+        updated["baselineRunId"] = *baseline_run_id;
+      }
+    }
+    updated["updatedAt"] = iso8601_now();
+    if (const auto input_error = schedule_input_error(updated); input_error.has_value()) {
+      return failure("INVALID_PARAMS", *input_error);
+    }
+    try {
+      auto result = database_->update_investigation_schedule(updated);
+      if (!result.has_value()) {
+        return failure("NOT_FOUND", "The investigation schedule was not found");
+      }
+      return {true, {{"schedule", std::move(*result)}}};
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not update the schedule");
+    }
+  }
+
+  if (method == "investigation_schedule_tick") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_schedule_tick requires an input object");
+    }
+    const auto& input = params.at("input");
+    if (!only_fields(input, {"now", "limit"}, {}) ||
+        (input.contains("now") && !input.at("now").is_string()) ||
+        (input.contains("limit") && !input.at("limit").is_number_integer())) {
+      return failure("INVALID_PARAMS", "investigation_schedule_tick input is invalid");
+    }
+    std::string now = iso8601_now();
+    if (input.contains("now")) {
+      now = trim_ascii(input.at("now").get<std::string>());
+      if (now.empty() || now.size() > 80 || !parse_iso8601_utc_seconds(now).has_value()) {
+        return failure("INVALID_PARAMS",
+                       "investigation_schedule_tick now must be a UTC ISO-8601 timestamp");
+      }
+    }
+    int limit = kDefaultScheduleTickLimit;
+    if (input.contains("limit")) {
+      const auto requested = input.at("limit").get<std::int64_t>();
+      if (requested < 1 || requested > 100) {
+        return failure("INVALID_PARAMS", "schedule tick limit must be between 1 and 100");
+      }
+      limit = static_cast<int>(requested);
+    }
+    try {
+      return {true, database_->claim_due_investigation_schedule_runs(now, limit)};
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not claim due schedule runs");
     }
   }
 
