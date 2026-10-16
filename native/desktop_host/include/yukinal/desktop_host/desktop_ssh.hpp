@@ -1,0 +1,41 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+
+namespace yukinal::desktop_host {
+
+class DesktopDatabase;
+class CredentialStore;
+
+// The bounded outcome of one structured SSH operation. Transport failures keep a
+// stable `error_code`; a completed command keeps its exit code and output.
+struct SshCommandResult {
+  bool completed = false;
+  int exit_code = -1;
+  std::string stdout_text;
+  std::string stderr_text;
+  std::string error_code;
+  std::string error_message;
+};
+
+// Runs the read-only `server_logs` operation through the in-process C++ SSH core
+// using the same resolved target and credentials as the Agent host RPC. Throws
+// std::runtime_error when the target cannot be represented or this build has no
+// SSH core. The caller applies the Python normalizer to the returned output.
+[[nodiscard]] SshCommandResult run_server_logs(const DesktopDatabase& database,
+                                               const CredentialStore& credentials,
+                                               const std::string& server_id,
+                                               std::optional<std::uint32_t> since_seconds,
+                                               const std::string& unit,
+                                               int timeout_seconds);
+
+// Probes the configured host key without authenticating. The returned fingerprint
+// is untrusted until the user confirms it.
+[[nodiscard]] SshCommandResult run_host_key_probe(const DesktopDatabase& database,
+                                                  const CredentialStore& credentials,
+                                                  const std::string& server_id,
+                                                  int timeout_seconds);
+
+}  // namespace yukinal::desktop_host

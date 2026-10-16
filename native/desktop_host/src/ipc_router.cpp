@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 
+#include "yukinal/desktop_host/desktop_ssh.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/network_proxy.hpp"
@@ -19,6 +20,7 @@
 #include <iomanip>
 #include <initializer_list>
 #include <map>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <string_view>
@@ -272,6 +274,37 @@ std::string next_id(const char* prefix) {
 bool valid_event_name(const std::string& value) {
   static const std::regex pattern(R"(^[a-z][a-z0-9_.-]{0,95}$)");
   return std::regex_match(value, pattern);
+}
+
+std::string new_probe_ticket() {
+  std::random_device device;
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string ticket = "probe_";
+  ticket.reserve(6 + 64);
+  for (int index = 0; index < 32; ++index) {
+    const auto byte = static_cast<unsigned>(device() & 0xFFu);
+    ticket.push_back(kHex[byte >> 4]);
+    ticket.push_back(kHex[byte & 0x0Fu]);
+  }
+  return ticket;
+}
+
+bool valid_host_key_fingerprint(const std::string& value) {
+  if (value.size() != 7 + 43 || value.rfind("SHA256:", 0) != 0) return false;
+  return std::all_of(value.begin() + 7, value.end(), [](unsigned char byte) {
+    return std::isalnum(byte) != 0 || byte == '+' || byte == '/';
+  });
+}
+
+const char* comparison_word(HostKeyComparison comparison) {
+  switch (comparison) {
+    case HostKeyComparison::Matches:
+      return "matches";
+    case HostKeyComparison::Mismatch:
+      return "mismatch";
+    default:
+      return "unpinned";
+  }
 }
 
 bool valid_subscription_token(const std::string& value) {
@@ -638,6 +671,11 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "server_host_key_status" || method == "server_host_key_forget") {
     return host_key_command(method, params);
+  }
+
+  if (method == "server_host_key_probe" || method == "server_host_key_trust" ||
+      method == "server_logs") {
+    return server_read_command(method, params);
   }
 
   if (method == "core_ping") {
@@ -1511,6 +1549,183 @@ IpcReply IpcRouter::host_key_command(const std::string& method,
   } catch (const std::exception&) {
     return failure("STORAGE_ERROR",
                    "The local known-hosts store could not be read or written");
+  }
+}
+
+std::string IpcRouter::issue_probe_ticket(const std::string& server_id, const std::string& host,
+                                          int port, const std::string& fingerprint) {
+  const auto ticket = new_probe_ticket();
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard lock(mutex_);
+  for (auto item = probe_tickets_.begin(); item != probe_tickets_.end();) {
+    if (item->second.expires_at <= now) {
+      item = probe_tickets_.erase(item);
+    } else {
+      ++item;
+    }
+  }
+  probe_tickets_[ticket] = ProbeTicket{server_id, host, port, fingerprint,
+                                       now + std::chrono::minutes(5)};
+  return ticket;
+}
+
+std::optional<std::string> IpcRouter::claim_probe_ticket(
+    const std::string& ticket, const std::string& server_id, const std::string& host, int port,
+    const std::string& fingerprint) {
+  std::lock_guard lock(mutex_);
+  const auto found = probe_tickets_.find(ticket);
+  if (found == probe_tickets_.end()) {
+    return "host-key probe ticket is missing or was already used; probe again before trusting";
+  }
+  const auto entry = found->second;
+  probe_tickets_.erase(found);
+  if (entry.expires_at <= std::chrono::steady_clock::now()) {
+    return "host-key probe ticket expired; probe the server again before trusting";
+  }
+  if (entry.server_id != server_id || entry.host != host || entry.port != port) {
+    return "the server endpoint changed after the probe; probe the current endpoint again";
+  }
+  if (entry.fingerprint != fingerprint) {
+    return "the fingerprint does not match the server-issued probe ticket; probe again";
+  }
+  return std::nullopt;
+}
+
+IpcReply IpcRouter::server_read_command(const std::string& method,
+                                        const nlohmann::json& params) {
+  if (database_ == nullptr || !database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+  if (method != "server_logs") {
+    const bool trust = method == "server_host_key_trust";
+    const std::set<std::string> fields =
+        trust ? std::set<std::string>{"serverId", "probeTicket", "fingerprint"}
+              : std::set<std::string>{"serverId"};
+    if (!only_fields(params, fields, fields)) {
+      return failure("INVALID_PARAMS", method + " parameters are invalid");
+    }
+    if (!params.at("serverId").is_string()) {
+      return failure("INVALID_PARAMS", method + " serverId must be a string");
+    }
+    const auto server_id = params.at("serverId").get<std::string>();
+    if (!valid_server_id(server_id)) {
+      return failure("INVALID_PARAMS", method + " serverId is invalid");
+    }
+    std::optional<nlohmann::json> endpoint;
+    try {
+      endpoint = database_->get_server_endpoint(server_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local server database could not read the server");
+    }
+    if (!endpoint.has_value()) return failure("NOT_FOUND", "The server was not found");
+    const auto host = endpoint->at("host").get<std::string>();
+    const auto port = endpoint->at("port").get<int>();
+    if (host.empty() || port < 1 || port > 65535) {
+      return failure("STORAGE_ERROR", "The stored server endpoint is invalid");
+    }
+
+    if (method == "server_host_key_probe") {
+      SshCommandResult probe;
+      try {
+        probe = run_host_key_probe(*database_, *credentials_, server_id, 15);
+      } catch (const std::exception& error) {
+        return failure("SSH_UNAVAILABLE", error.what());
+      }
+      if (!probe.error_code.empty()) {
+        return failure("SSH_ERROR",
+                       probe.error_message.empty() ? probe.error_code : probe.error_message);
+      }
+      const auto fingerprint = probe.stdout_text;
+      if (!valid_host_key_fingerprint(fingerprint)) {
+        return failure("SSH_ERROR",
+                       "The SSH service returned an invalid host-key fingerprint");
+      }
+      HostKeyCheck check;
+      try {
+        auto store = HostTrustStore::load(database_->data_directory() / "known_hosts");
+        check = store.check(host, static_cast<std::uint16_t>(port), fingerprint);
+      } catch (...) {
+        return failure("STORAGE_ERROR", "The local known-hosts store could not be read");
+      }
+      const auto ticket = issue_probe_ticket(server_id, host, port, fingerprint);
+      nlohmann::json response = {{"host", host},
+                                 {"port", port},
+                                 {"probeTicket", ticket},
+                                 {"presentedFingerprint", fingerprint},
+                                 {"comparison", comparison_word(check.comparison)}};
+      if (check.pinned.has_value()) response["pinnedFingerprint"] = *check.pinned;
+      return {true, std::move(response)};
+    }
+
+    // server_host_key_trust
+    if (!params.at("probeTicket").is_string() || !params.at("fingerprint").is_string()) {
+      return failure("INVALID_PARAMS", "server_host_key_trust parameters are invalid");
+    }
+    const auto ticket = params.at("probeTicket").get<std::string>();
+    const auto fingerprint = params.at("fingerprint").get<std::string>();
+    if (ticket.empty() || ticket.size() > 256 || !valid_host_key_fingerprint(fingerprint)) {
+      return failure("INVALID_PARAMS", "server_host_key_trust parameters are invalid");
+    }
+    const auto claim_error = claim_probe_ticket(ticket, server_id, host, port, fingerprint);
+    if (claim_error.has_value()) return failure("INVALID_PARAMS", *claim_error);
+    try {
+      auto store = HostTrustStore::load(database_->data_directory() / "known_hosts");
+      const auto existing = store.pinned_fingerprint(host, static_cast<std::uint16_t>(port));
+      if (existing.has_value() && *existing != fingerprint) {
+        return failure("HOST_KEY_MISMATCH",
+                       "This host is already pinned to a different fingerprint; forget it first, "
+                       "then probe and confirm again");
+      }
+      const bool already_pinned = existing.has_value();
+      if (!already_pinned) store.pin(host, static_cast<std::uint16_t>(port), fingerprint);
+      return {true, {{"host", host},
+                     {"port", port},
+                     {"fingerprint", fingerprint},
+                     {"alreadyPinned", already_pinned}}};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local known-hosts store could not be written");
+    }
+  }
+
+  // server_logs
+  if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
+    return failure("INVALID_PARAMS", "server_logs requires exactly serverId");
+  }
+  const auto server_id = params.at("serverId").get<std::string>();
+  if (!valid_server_id(server_id)) {
+    return failure("INVALID_PARAMS", "server_logs serverId is invalid");
+  }
+  SshCommandResult raw;
+  try {
+    raw = run_server_logs(*database_, *credentials_, server_id, std::nullopt, "", 20);
+  } catch (const std::exception& error) {
+    return failure("SSH_UNAVAILABLE", error.what());
+  }
+  if (!raw.error_code.empty()) {
+    return failure("SSH_ERROR", raw.error_message.empty() ? raw.error_code : raw.error_message);
+  }
+  try {
+    auto& client = ensure_sidecar();
+    client.ensure_started(std::chrono::milliseconds(60000));
+    const auto normalized = client.request(
+        "server.logs.normalize",
+        {{"stdout", raw.stdout_text}, {"arguments", nlohmann::json::object()}},
+        std::chrono::milliseconds(15000));
+    if (!normalized.is_object() || normalized.value("ok", false) != true) {
+      return failure("NORMALIZE_ERROR",
+                     normalized.value("message",
+                                      std::string("The Agent could not parse the log output")));
+    }
+    if (!normalized.contains("output")) {
+      return failure("NORMALIZE_ERROR", "The Agent returned no normalized logs");
+    }
+    return {true, normalized.at("output")};
+  } catch (const SidecarRpcError& error) {
+    return failure(sidecar_error_code(error.code()), error.what());
+  } catch (const SidecarError& error) {
+    return failure("AGENT_UNAVAILABLE", error.what());
+  } catch (const std::exception& error) {
+    return failure("NORMALIZE_ERROR", error.what());
   }
 }
 

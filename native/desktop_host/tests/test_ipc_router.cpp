@@ -111,6 +111,27 @@ int main() {
   check(!router.invoke("file_transfer_get", {{"transferId", "trf_01"}}).ok,
         "file_transfer_get should report a missing local database");
 
+  check(!router.invoke("server_logs", nlohmann::json::object()).ok,
+        "server_logs should require a server id");
+  check(!router.invoke("server_logs", {{"serverId", "not-a-server"}}).ok,
+        "server_logs should reject a malformed server id");
+  check(!router.invoke("server_logs", {{"serverId", "srv_ok"}}).ok,
+        "server_logs should report a missing local database");
+  check(!router.invoke("server_host_key_probe", nlohmann::json::object()).ok,
+        "server_host_key_probe should require a server id");
+  check(!router.invoke("server_host_key_probe", {{"serverId", "srv_ok"}}).ok,
+        "server_host_key_probe should report a missing local database");
+  check(!router.invoke("server_host_key_trust",
+                       {{"serverId", "srv_ok"}, {"probeTicket", "probe_x"}})
+               .ok,
+        "server_host_key_trust should require a fingerprint");
+  check(!router.invoke("server_host_key_trust",
+                       {{"serverId", "srv_ok"},
+                        {"probeTicket", "probe_x"},
+                        {"fingerprint", "SHA256:short"}})
+               .ok,
+        "server_host_key_trust should reject an invalid fingerprint");
+
   using yukinal::desktop_host::kLocalHandleTtlMillis;
   using yukinal::desktop_host::kMaxFilePreviewBytes;
   using yukinal::desktop_host::LocalPathHandles;

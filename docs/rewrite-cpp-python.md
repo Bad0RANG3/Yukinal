@@ -945,3 +945,21 @@ round trip. The canonical `native/build-nmake` Release build passed all twelve
 CTest targets. The in-process SSH commands (`server_logs`/`snapshot`/`services`),
 MCP supervision and catalog, `host.tool.execute`, investigation, and installer
 work remain; real SSH validation is blocked because the test host is filtered.
+
+On 2026-10-16, the C++ host gained its first SSH-backed UI commands.
+`native/desktop_host/src/desktop_ssh.cpp` reuses the router's target resolver to
+build a `TargetConfig`, sets the resolved credentials in the process environment
+for the duration of one call, and runs the in-process `server_logs` and
+`host_key_probe` core operations (a build without the SSH core returns an
+explicit error). `server_logs` then applies the Python `server.logs.normalize`
+RPC and returns its normalized output. `server_host_key_probe` issues a
+single-use, five-minute probe ticket bound to the server id, host, port and
+fingerprint and reports the presented fingerprint plus the pin comparison;
+`server_host_key_trust` claims that ticket, refuses a different existing pin, and
+otherwise writes the pin. `desktop_host_tests` covers the new parameter
+validation. A second MSVC dependency-tracking gap left objects compiled against
+the previous `IpcRouter` layout; forcing those targets to rebuild removed the
+startup access violations. The canonical `native/build-nmake` Release build
+passed all twelve CTest targets. `server_snapshot`/`server_services`, MCP
+supervision and catalog, `host.tool.execute`, investigation, the remaining file
+and terminal commands, and installer work remain.

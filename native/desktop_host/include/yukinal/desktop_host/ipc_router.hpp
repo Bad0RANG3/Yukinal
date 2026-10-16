@@ -5,13 +5,17 @@
 #include "yukinal/desktop_host/local_paths.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 
+#include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace yukinal::desktop_host {
 
@@ -40,6 +44,14 @@ class IpcRouter {
                                  nlohmann::json& params);
   IpcReply host_key_command(const std::string& method,
                             const nlohmann::json& params);
+  IpcReply server_read_command(const std::string& method,
+                               const nlohmann::json& params);
+  [[nodiscard]] std::string issue_probe_ticket(const std::string& server_id,
+                                               const std::string& host, int port,
+                                               const std::string& fingerprint);
+  [[nodiscard]] std::optional<std::string> claim_probe_ticket(
+      const std::string& ticket, const std::string& server_id, const std::string& host,
+      int port, const std::string& fingerprint);
   IpcReply agent_command(const std::string& method, const nlohmann::json& params);
   IpcReply agent_run_command(const std::string& method, const nlohmann::json& params);
   IpcReply mcp_command(const std::string& method, const nlohmann::json& params);
@@ -57,6 +69,14 @@ class IpcRouter {
   std::unique_ptr<SidecarClient> sidecar_;
   std::mutex sidecar_mutex_;
   LocalPathHandles local_paths_;
+  struct ProbeTicket {
+    std::string server_id;
+    std::string host;
+    int port = 0;
+    std::string fingerprint;
+    std::chrono::steady_clock::time_point expires_at;
+  };
+  std::map<std::string, ProbeTicket> probe_tickets_;
   std::function<void(const std::string&, const nlohmann::json&)> event_sink_;
 };
 
