@@ -21,8 +21,10 @@ const ActivityFeed = lazy(async () => ({ default: (await import("../features/act
 const ServicesPane = lazy(async () => ({ default: (await import("../features/services/ServicesPane.js")).ServicesPane }));
 const LogsPane = lazy(async () => ({ default: (await import("../features/logs/LogsPane.js")).LogsPane }));
 const InvestigationsPane = lazy(async () => ({ default: (await import("../features/investigations/InvestigationsPane.js")).InvestigationsPane }));
+const AgentNistPane = lazy(async () => ({ default: (await import("../features/agent-nist/AgentNistPane.js")).AgentNistPane }));
 const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = {
   servers: { label: "仪表台", icon: "servers" },
+  agents: { label: "Agent NIST", icon: "agent" },
   tasks: { label: "排查任务", icon: "activity" }, activity: { label: "动态", icon: "activity" }, settings: { label: "设置", icon: "settings" },
 };
 const SERVER_PAGE_LABEL: Record<ServerPage, string> = {
@@ -124,6 +126,7 @@ export function AppShell() {
           {guideOpen ? <Suspense fallback={<PageLoadingFallback />}><GettingStarted onClose={closeGuide} /></Suspense> : null}
           <div hidden={guideOpen} className="workspace-pages">
             {primary === "settings" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><RuntimeSettings /></Suspense> : null}
+            {primary === "agents" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><AgentNistPane onUseAgent={returnToAI} /></Suspense> : null}
             {primary === "tasks" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><InvestigationsPane /></Suspense> : null}
             {primary === "activity" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed /></Suspense> : null}
             {primary === "servers" && !guideOpen && !detail ? <InfrastructureDashboard onAttentionRequested={returnToAI} /> : null}

@@ -1,0 +1,39 @@
+/* Local operations roles share the existing provider and conversation pipeline. */
+.agent-nist-page { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; font-size: var(--text-small); overflow-wrap: anywhere; }
+.agent-nist-heading > div { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
+.agent-nist-heading h2 { margin: 0; color: var(--text); font-size: var(--text-subheading); font-weight: 600; }
+.agent-nist-heading span { color: var(--faint); font-size: var(--text-caption); }
+.agent-nist-heading p, .agent-nist-team-purpose p { margin: 6px 0 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.55; }
+.agent-nist-teams { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--edge-normal); }
+.agent-nist-teams button { min-width: 0; min-height: var(--height-control); padding: 8px 4px; border: 0; border-bottom: 1px solid transparent; color: var(--faint); background: transparent; font: inherit; font-size: var(--text-label); cursor: pointer; }
+.agent-nist-teams button:hover { color: var(--text); }
+.agent-nist-teams button.is-selected { border-bottom-color: var(--accent); color: var(--text); }
+.agent-nist-team-purpose strong { color: var(--muted); font-size: var(--text-label); font-weight: 500; }
+.agent-nist-notice { margin: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.55; }
+.agent-nist-notice p { margin: 0; }
+.agent-nist-notice.is-error { color: var(--danger); }
+.agent-nist-roles { min-width: 0; border-top: 1px solid var(--edge-normal); }
+.agent-nist-role { min-width: 0; padding: 16px 0; border-bottom: 1px solid var(--edge-normal); }
+.agent-nist-role-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.agent-nist-role-heading h3 { min-width: 0; margin: 0; color: var(--text); font-size: var(--text-label); font-weight: 600; overflow-wrap: anywhere; }
+.agent-nist-text-action { display: inline-flex; align-items: center; justify-content: center; gap: 5px; max-width: 100%; min-height: 28px; padding: 2px 0; border: 0; color: var(--muted); background: transparent; font: inherit; font-size: var(--text-caption); line-height: 1.5; cursor: pointer; }
+.agent-nist-text-action:hover { color: var(--text); }
+.agent-nist-role-heading .agent-nist-text-action { flex: 0 0 auto; }
+.agent-nist-responsibility { margin: 8px 0 12px; color: var(--muted); font-size: var(--text-caption); line-height: 1.65; white-space: pre-wrap; }
+.agent-nist-binding { display: grid; gap: 6px; margin: 0; }
+.agent-nist-binding > div { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: baseline; gap: 10px; }
+.agent-nist-binding dt, .agent-nist-binding dd { margin: 0; min-width: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; overflow-wrap: anywhere; }
+.agent-nist-binding dd { color: var(--muted); }
+.agent-nist-role-reason { margin: 9px 0 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
+.agent-nist-role-actions, .agent-nist-editor-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-width: 0; margin-top: 12px; }
+.agent-nist-role-actions .button-secondary, .agent-nist-editor-actions .button-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; padding: 6px 10px; border-color: var(--edge-normal); border-radius: var(--radius-control); background: transparent; font-size: var(--text-caption); white-space: normal; }
+.agent-nist-editor { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--edge-subtle); }
+.agent-nist-editor .form-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; color: var(--muted); font-size: var(--text-caption); }
+.agent-nist-editor :is(input, textarea, select) { width: 100%; min-width: 0; max-width: 100%; font-size: var(--text-caption); }
+.agent-nist-editor textarea { min-height: 100px; resize: vertical; line-height: 1.55; }
+.agent-nist-editor-actions { margin-top: 0; }
+.agent-nist-footnote { margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
+@container reference (min-width: 600px) {
+  .agent-nist-roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
+  .agent-nist-team-purpose { max-width: 680px; }
+}

@@ -12,10 +12,11 @@ import {
   type ChatMessage,
   type ChatSession,
 } from "@yukinal/shared";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { sessionTitleFromPrompt } from "./transcript.js";
 
 /** 预览模式没有数据库，但输入框仍要能用；这个 id 永远不会被持久化。 */
@@ -49,17 +50,24 @@ export type ChatSessions = {
 export function useChatSessions(): ChatSessions {
   const shell = isDesktopShell();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [archived, setArchived] = useState(false);
+  const archived = useWorkspaceStore((state) => state.agentSessionArchived);
+  const setArchived = useWorkspaceStore((state) => state.setAgentSessionArchived);
   const [error, setError] = useState<string | null>(null);
   /**
    * 事件回调只注册一次，因此它必须读到「此刻」的会话 id，而不是注册时的闭包值。
    */
   const activeSessionIdRef = useRef<string | null>(null);
 
+  // Session identity is owned by this mounted panel. Dropping it must also drop
+  // the shared archived/history state rather than leaving a stale editor guard.
+  useEffect(() => () => {
+    useWorkspaceStore.setState({ agentSessionArchived: false, agentHistoryOpen: false });
+  }, []);
+
   const activate = useCallback((sessionId: string | null, nextArchived: boolean): void => {
     activeSessionIdRef.current = sessionId;
     setActiveSessionId(sessionId);
-    setArchived(nextArchived);
+    useWorkspaceStore.setState({ agentSessionArchived: nextArchived, agentHistoryOpen: false });
   }, []);
 
   const recordMessage = useCallback(
@@ -138,7 +146,7 @@ export function useChatSessions(): ChatSessions {
   const noteSessionUpdated = useCallback((session: ChatSession): void => {
     if (session.id !== activeSessionIdRef.current) return;
     setArchived(Boolean(session.archivedAt));
-  }, []);
+  }, [setArchived]);
 
   const noteSessionDeleted = useCallback((sessionId: string): boolean => {
     if (sessionId !== activeSessionIdRef.current) return false;

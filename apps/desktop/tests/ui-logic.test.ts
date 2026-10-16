@@ -3,7 +3,7 @@ import { afterEach, test } from "node:test";
 import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, IPC_COMMANDS, isReadOnlyRunMode } from "@yukinal/shared";
 import { callDesktop } from "../src/lib/ipc.js";
 import { installHost, removeHost } from "./host-mock.js";
-import { useWorkspaceStore } from "../src/stores/workspace-store.js";
+import { PRIMARY_NAV, useWorkspaceStore } from "../src/stores/workspace-store.js";
 import { buildServerInput, type ServerFormValues } from "../src/features/servers/server-form.js";
 import { RunLifecycle } from "../src/features/agent/run-lifecycle.js";
 import {
@@ -57,6 +57,24 @@ test("opening the task workspace from a selected server keeps that server availa
 
   assert.equal(useWorkspaceStore.getState().primary, "tasks");
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
+});
+
+test("Agent NIST follows the dashboard and navigation preserves the current target and draft", () => {
+  assert.deepEqual(PRIMARY_NAV.slice(0, 2), ["servers", "agents"]);
+  const workspace = useWorkspaceStore.getState();
+  workspace.selectServer("srv_role_target");
+  workspace.setServerPage("logs");
+  workspace.setAgentDraft("尚未发送的排查内容");
+  workspace.selectProvider("prv_existing", "ops-model");
+  workspace.setPrimary("agents");
+  workspace.syncServerSelection(["srv_role_target"]);
+  const state = useWorkspaceStore.getState();
+  assert.equal(state.primary, "agents");
+  assert.equal(state.selectedServerId, "srv_role_target");
+  assert.equal(state.serverPage, "logs");
+  assert.equal(state.agentDraft, "尚未发送的排查内容");
+  assert.equal(state.selectedProviderId, "prv_existing");
+  assert.equal(state.selectedModel, "ops-model");
 });
 
 test("every desktop command sends the shared flat contract to the host", async () => {

@@ -27,6 +27,17 @@ test("browser and older native hosts need no presentation capability", async () 
   await updateNativeWindowContext(context);
 });
 
+test("Agent NIST context crosses only the presentation bridge and preserves busy state", async () => {
+  const agents: WindowShellContext = { section: "agents", serverName: null, serverStatus: null, agentBusy: true };
+  const received: WindowShellContext[] = [];
+  installHost({
+    invoke: async () => { assert.fail("Agent NIST context must not invoke a business command"); },
+    windowShell: { updateContext: async (value) => { received.push(value); } },
+  });
+  await updateNativeWindowContext(agents);
+  assert.deepEqual(received, [agents]);
+});
+
 test("malformed context is rejected before it reaches the native capability", async () => {
   let calls = 0;
   installHost({ windowShell: { updateContext: async () => { calls += 1; } } });

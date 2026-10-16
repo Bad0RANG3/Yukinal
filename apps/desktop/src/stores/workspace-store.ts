@@ -1,7 +1,7 @@
 /**
  * Main navigation skeleton:
  *
- *   Servers | Tasks | Activity | Settings         <- primary nav
+ *   Servers | Agent NIST | Tasks | Activity | Settings <- primary nav
  *   Overview | Terminal | Files | Logs | Services  <- server-scoped pages
  *   AI workspace (persistent center) | Dashboard / selected server (right)
  *
@@ -12,7 +12,7 @@ import { create } from "zustand";
 
 import type { AgentPromptPart } from "@yukinal/shared";
 
-export const PRIMARY_NAV = ["servers", "tasks", "activity", "settings"] as const;
+export const PRIMARY_NAV = ["servers", "agents", "tasks", "activity", "settings"] as const;
 export type PrimaryNav = (typeof PRIMARY_NAV)[number];
 
 export const SERVER_PAGES = ["overview", "terminal", "files", "logs", "services", "activity"] as const;
@@ -31,9 +31,15 @@ export interface WorkspaceState {
   agentDraft: string;
   agentAttachments: AgentPromptPart[];
   agentBusy: boolean;
+  /** Shared composition view, so preparing a role can reveal the existing editor. */
+  agentHistoryOpen: boolean;
+  /** The active chat's editability comes from useChatSessions, never from a role. */
+  agentSessionArchived: boolean;
   setAgentDraft(draft: string): void;
   setAgentAttachments(attachments: AgentPromptPart[]): void;
   setAgentBusy(busy: boolean): void;
+  setAgentHistoryOpen(open: boolean): void;
+  setAgentSessionArchived(archived: boolean): void;
   setPrimary(primary: PrimaryNav): void;
   setServerPage(page: ServerPage): void;
   selectServer(serverId: string | null): void;
@@ -57,9 +63,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   agentDraft: "",
   agentAttachments: [],
   agentBusy: false,
+  agentHistoryOpen: false,
+  agentSessionArchived: false,
   setAgentDraft: (agentDraft) => set({ agentDraft }),
   setAgentAttachments: (agentAttachments) => set({ agentAttachments }),
   setAgentBusy: (agentBusy) => set({ agentBusy }),
+  setAgentHistoryOpen: (agentHistoryOpen) => set({ agentHistoryOpen }),
+  setAgentSessionArchived: (agentSessionArchived) => set({ agentSessionArchived }),
   setPrimary: (primary) => set(primary === "servers" ? { primary, serverDetailOpen: false } : { primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers", serverDetailOpen: true }),
   selectServer: (selectedServerId) => set((state) => ({

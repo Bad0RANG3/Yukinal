@@ -18,7 +18,7 @@ int main() {
   using yukinal::desktop_host::window_context_label;
   const json base{{"section", "servers"}, {"serverName", nullptr},
                   {"serverStatus", nullptr}, {"agentBusy", false}};
-  for (const auto* section : {"servers", "projects", "tasks", "activity", "settings"}) {
+  for (const auto* section : {"servers", "agents", "projects", "tasks", "activity", "settings"}) {
     auto context = base;
     context["section"] = section;
     check(window_context_label(context).has_value(), "all workspace sections should be accepted");
@@ -37,6 +37,12 @@ int main() {
   context["section"] = "settings";
   check(window_context_label(context) == L"\u8bbe\u7f6e  \u00b7  Agent \u8fd0\u884c\u4e2d",
         "other sections should not show stale selected-server context");
+  context["section"] = "agents";
+  check(window_context_label(context) == L"Agent NIST  \u00b7  Agent \u8fd0\u884c\u4e2d",
+        "Agent NIST should retain busy state without stale server identity");
+  context["agentBusy"] = false;
+  check(window_context_label(context) == L"Agent NIST",
+        "the agents section should use the Agent NIST caption");
 
   std::vector<json> invalid{nullptr, json::array(), json::object()};
   for (const auto* field : {"section", "serverName", "serverStatus", "agentBusy"}) {
