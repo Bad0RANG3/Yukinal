@@ -387,6 +387,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
     desktop_host/src/sidecar.cpp
+    desktop_host/src/transfer_types.cpp
   )
   target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
   # The Streamable HTTP MCP transport uses the same httplib as the in-process SSH
@@ -463,6 +464,12 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     )
     target_link_libraries(yukinal_desktop_host_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME desktop_host_tests COMMAND yukinal_desktop_host_tests)
+
+    add_executable(yukinal_desktop_host_transfer_tests
+      desktop_host/tests/test_transfer.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_transfer_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME transfer_tests COMMAND yukinal_desktop_host_transfer_tests)
 
     add_executable(yukinal_desktop_host_database_tests
       desktop_host/tests/test_database.cpp

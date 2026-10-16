@@ -1246,7 +1246,7 @@ failure or a retryable unknown outcome all close the call. `desktop_host_databas
 covers every gate in order, the malformed-envelope parameter errors, the missing
 ledger-row RPC error and the success/failure/unknown completion paths.
 
-The file-transfer work (§3.3) opened with its durable metadata store.
+The file-transfer work opened with its durable metadata store.
 `DesktopDatabase::{insert,update}_file_transfer`, `file_transfer_staging` and
 `recover_file_transfers` (`native/desktop_host/src/database.cpp`) persist the
 bounded `TransferSnapshot` next to the host-private staging inventory, mirroring
@@ -1260,3 +1260,16 @@ still carry staging residue keep being returned until the manager clears them.
 `desktop_host_database_tests` covers the insert/update/duplicate/missing paths, the
 private staging read, the recovery rewrite and its idempotence, the 500-row terminal
 prune, and the metadata validation failures.
+
+The transfer contract module landed next: `transfer_types`
+(`native/desktop_host/include/yukinal/desktop_host/transfer_types.hpp` plus
+`src/transfer_types.cpp`) ports the retired Rust `transfer::types` seam — the
+`TransferSnapshot` struct with its exact 19-field camelCase IPC serialization, the
+host-private tagged staging inventory, the conflict request/action shapes, the
+status/direction/policy/failure-kind enums, and the pure helpers (`safe_name`,
+remote-path validation, `remote_child`, the transfer-scoped staging basename check,
+snapshot construction and id generation). Optional failure fields are omitted rather
+than serialized as null so the strict shared Zod object accepts them. A new
+`transfer_tests` target covers the enum round trips, the snapshot shape, the staging
+round trip, conflict-action parsing, the name/path guards and the staging ownership
+marker.
