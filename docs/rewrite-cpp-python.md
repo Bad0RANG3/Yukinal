@@ -1045,3 +1045,13 @@ pagination and cancellation are the next MCP steps. The canonical
 `native/build-nmake` Release build passed all twelve CTest targets. The
 investigation RPCs, the file transfer actions, installers, and real SSH/MCP
 validation remain.
+
+Later on 2026-10-16, the MCP supervisor gained an end-to-end CTest. The database
+test executable now re-enters a minimal stdio MCP server when spawned with
+`--mcp-mock`; `desktop_host_database_tests` saves such a server, calls
+`McpSupervisor::catalog()`, and checks that the reviewed read-only `echo` tool is
+exposed as `mcp.mcp_mock.echo` with `risk: low`, then calls the tool and checks
+the returned content, and rejects an unknown tool. This exercises the real child
+spawn, newline-delimited JSON-RPC handshake, `tools/list` and `tools/call`
+without a third-party MCP package. The canonical `native/build-nmake` Release
+build passed all twelve CTest targets.

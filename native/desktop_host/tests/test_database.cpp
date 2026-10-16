@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
@@ -173,10 +174,48 @@ int query_integer(sqlite3* database, const char* sql) {
   return value;
 }
 
+// A minimal stdio MCP server used as the supervisor test fixture. The same test
+// executable re-enters here when the supervisor spawns it with `--mcp-mock`.
+int run_mcp_mock() {
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    auto frame = nlohmann::json::parse(line, nullptr, false);
+    if (frame.is_discarded() || !frame.is_object() || !frame.contains("id")) continue;
+    const auto id = frame.at("id");
+    const auto method = frame.value("method", std::string());
+    nlohmann::json response = {{"jsonrpc", "2.0"}, {"id", id}};
+    if (method == "initialize") {
+      response["result"] = {{"protocolVersion", "2024-11-05"},
+                            {"capabilities", nlohmann::json::object()},
+                            {"serverInfo", {{"name", "mock"}, {"version", "1.0"}}}};
+    } else if (method == "tools/list") {
+      response["result"] = {
+          {"tools",
+           nlohmann::json::array({nlohmann::json{{"name", "echo"},
+                                                 {"description", "Echo a value"},
+                                                 {"inputSchema", {{"type", "object"}}},
+                                                 {"annotations", {{"readOnlyHint", true}}}}})}};
+    } else if (method == "tools/call") {
+      const auto name = frame.at("params").value("name", std::string());
+      response["result"] = {
+          {"content", nlohmann::json::array({nlohmann::json{{"type", "text"},
+                                                             {"text", "echo:" + name}}})},
+          {"isError", false}};
+    } else {
+      response["error"] = {{"code", -32601}, {"message", "not found"}};
+    }
+    std::cout << response.dump() << "\n" << std::flush;
+  }
+  return 0;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   using yukinal::desktop_host::DesktopDatabase;
+  if (argc >= 2 && std::string(argv[1]) == "--mcp-mock") return run_mcp_mock();
+  const std::filesystem::path test_executable =
+      argc > 0 ? std::filesystem::path(argv[0]) : std::filesystem::path();
 
   TemporaryDatabaseDirectory temporary;
   seed_legacy_database(temporary.path);
@@ -685,6 +724,40 @@ int main() {
           "server_auth_cancel should reject an empty challenge id");
     check(!router.invoke("server_disconnect", {{"serverId", "srv_missing"}}).ok,
           "server_disconnect should reject an unknown server");
+
+    // MCP supervisor: spawn this test executable as a stdio MCP server and verify
+    // the catalog and one tool call end to end.
+    if (!test_executable.empty()) {
+      database.upsert_mcp_server({{"id", "mcp_mock"},
+                                  {"label", "Mock"},
+                                  {"transport", "stdio"},
+                                  {"command", test_executable.string()},
+                                  {"args", nlohmann::json::array({"--mcp-mock"})},
+                                  {"enabled", true},
+                                  {"allowedTools", nlohmann::json::array({"echo"})},
+                                  {"trustLevel", "reviewed"},
+                                  {"annotationTrust", "trusted"}});
+      yukinal::desktop_host::McpSupervisor supervisor(&database, &mcp_credentials);
+      const auto catalog = supervisor.catalog();
+      check(catalog.at("servers").size() == 1 &&
+                catalog.at("servers").at(0).at("tools").size() == 1,
+            "the MCP catalog should expose the one reviewed tool");
+      const auto& tool = catalog.at("servers").at(0).at("tools").at(0);
+      check(tool.at("name") == "mcp.mcp_mock.echo" && tool.at("risk") == "low",
+            "a reviewed read-only MCP tool should be low risk");
+      const auto output = supervisor.call("mcp.mcp_mock.echo", nlohmann::json::object());
+      check(output.at("serverId") == "mcp_mock" && output.at("isError") == false &&
+                output.at("text") == "echo:echo",
+            "the MCP tool call should return its content");
+      bool bad_name_rejected = false;
+      try {
+        (void)supervisor.call("mcp.mcp_mock.missing", nlohmann::json::object());
+      } catch (const std::exception&) {
+        bad_name_rejected = true;
+      }
+      check(bad_name_rejected, "an unknown MCP tool should be refused");
+      supervisor.stop("mcp_mock");
+    }
   }
 
   sqlite3* readback = nullptr;
