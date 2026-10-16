@@ -248,6 +248,150 @@ nlohmann::json decode_investigation_task(sqlite3_stmt* row) {
   return task;
 }
 
+nlohmann::json decode_investigation_evidence(sqlite3_stmt* row) {
+  nlohmann::json evidence = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"scope", parse_json_text(column_text(row, 2), "evidence scope")},
+      {"kind", column_text(row, 3)},
+      {"sourceTool", column_text(row, 4)},
+      {"collectedAt", column_text(row, 5)},
+      {"inputSummary", column_text(row, 6)},
+      {"contentType", column_text(row, 7)},
+      {"contentHash", column_text(row, 9)},
+      {"truncated", sqlite3_column_int(row, 10) != 0},
+      {"redactionStatus", column_text(row, 11)},
+  };
+  if (std::string(column_text(row, 7)) == "json") {
+    evidence["content"] = parse_json_text(column_text(row, 8), "evidence content");
+  } else {
+    evidence["content"] = column_text(row, 8);
+  }
+  add_optional_text(evidence, "runId", row, 12);
+  return evidence;
+}
+
+nlohmann::json decode_investigation_finding(sqlite3_stmt* row) {
+  nlohmann::json finding = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"title", column_text(row, 2)},
+      {"kind", column_text(row, 3)},
+      {"statement", column_text(row, 4)},
+      {"evidenceIds", parse_json_text(column_text(row, 5), "finding evidence ids")},
+      {"confidence", column_text(row, 6)},
+      {"createdAt", column_text(row, 8)},
+  };
+  add_optional_text(finding, "nextVerification", row, 7);
+  return finding;
+}
+
+nlohmann::json decode_investigation_brief(sqlite3_stmt* row) {
+  nlohmann::json brief = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"generatedAt", column_text(row, 2)},
+      {"status", column_text(row, 3)},
+      {"findingIds", parse_json_text(column_text(row, 4), "brief finding ids")},
+      {"options", parse_json_text(column_text(row, 5), "brief options")},
+  };
+  add_optional_text(brief, "selectedOptionId", row, 6);
+  add_optional_text(brief, "planId", row, 7);
+  return brief;
+}
+
+nlohmann::json decode_investigation_plan(sqlite3_stmt* row) {
+  nlohmann::json plan = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"revision", sqlite3_column_int64(row, 2)},
+      {"status", column_text(row, 3)},
+      {"createdAt", column_text(row, 4)},
+      {"updatedAt", column_text(row, 5)},
+      {"steps", parse_json_text(column_text(row, 7), "plan steps")},
+  };
+  add_optional_text(plan, "currentStepId", row, 6);
+  if (sqlite3_column_type(row, 8) != SQLITE_NULL) {
+    plan["approval"] = parse_json_text(column_text(row, 8), "plan approval");
+  }
+  if (sqlite3_column_type(row, 9) != SQLITE_NULL) {
+    plan["observationWindow"] =
+        parse_json_text(column_text(row, 9), "plan observation window");
+  }
+  return plan;
+}
+
+nlohmann::json decode_investigation_artifact(sqlite3_stmt* row) {
+  nlohmann::json artifact = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"phase", column_text(row, 3)},
+      {"kind", column_text(row, 4)},
+      {"status", column_text(row, 5)},
+      {"title", column_text(row, 6)},
+      {"summary", column_text(row, 7)},
+      {"content", parse_json_text(column_text(row, 8), "artifact content")},
+      {"evidenceIds", parse_json_text(column_text(row, 9), "artifact evidence ids")},
+      {"createdAt", column_text(row, 10)},
+      {"updatedAt", column_text(row, 11)},
+  };
+  add_optional_text(artifact, "runId", row, 2);
+  add_optional_text(artifact, "planId", row, 12);
+  add_optional_text(artifact, "planStepId", row, 13);
+  return artifact;
+}
+
+nlohmann::json decode_investigation_run(sqlite3_stmt* row) {
+  nlohmann::json run = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"attempt", sqlite3_column_int64(row, 5)},
+      {"phase", column_text(row, 6)},
+      {"status", column_text(row, 7)},
+      {"startedAt", column_text(row, 8)},
+      {"updatedAt", column_text(row, 9)},
+  };
+  add_optional_text(run, "sessionId", row, 2);
+  add_optional_text(run, "messageId", row, 3);
+  add_optional_text(run, "traceId", row, 4);
+  add_optional_text(run, "endedAt", row, 10);
+  if (sqlite3_column_type(row, 11) != SQLITE_NULL) {
+    run["checkpoint"] = parse_json_text(column_text(row, 11), "run checkpoint");
+  }
+  if (sqlite3_column_type(row, 12) != SQLITE_NULL) {
+    run["failure"] = parse_json_text(column_text(row, 12), "run failure");
+  }
+  return run;
+}
+
+nlohmann::json decode_investigation_step(sqlite3_stmt* row) {
+  nlohmann::json step = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"runId", column_text(row, 2)},
+      {"ordinal", sqlite3_column_int64(row, 3)},
+      {"kind", column_text(row, 4)},
+      {"title", column_text(row, 5)},
+      {"status", column_text(row, 6)},
+      {"attempt", sqlite3_column_int64(row, 7)},
+      {"evidenceIds", parse_json_text(column_text(row, 12), "step evidence ids")},
+  };
+  add_optional_text(step, "toolName", row, 8);
+  if (sqlite3_column_type(row, 9) != SQLITE_NULL) {
+    step["target"] = parse_json_text(column_text(row, 9), "step target");
+  }
+  add_optional_text(step, "inputSummary", row, 10);
+  add_optional_text(step, "outputSummary", row, 11);
+  add_optional_text(step, "startedAt", row, 13);
+  add_optional_text(step, "endedAt", row, 14);
+  if (sqlite3_column_type(row, 15) != SQLITE_NULL) {
+    step["failure"] = parse_json_text(column_text(row, 15), "step failure");
+  }
+  add_optional_text(step, "planId", row, 16);
+  add_optional_text(step, "planStepId", row, 17);
+  return step;
+}
+
 // Decodes one `mcp_servers` row into the shared `McpServerConfig` shape.
 nlohmann::json decode_mcp_server(sqlite3_stmt* row) {
   const auto transport = std::string(column_text(row, 2));
@@ -1840,6 +1984,128 @@ nlohmann::json DesktopDatabase::list_investigation_tasks(
     tasks.push_back(decode_investigation_task(rows.get()));
   }
   return {{"tasks", std::move(tasks)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_task(
+    const std::string& task_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  nlohmann::json task;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+               permission_mode, automation_level, status, max_steps, max_run_ms,
+               max_attempts, created_by, phase, created_at, updated_at, completed_at,
+               active_run_id, last_failure, guardrails
+          FROM investigation_tasks
+         WHERE id = ?1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    task = decode_investigation_task(rows.get());
+  }
+  const auto collect = [&](const char* sql,
+                           nlohmann::json (*decode)(sqlite3_stmt*)) {
+    nlohmann::json items = nlohmann::json::array();
+    Statement rows(connection_, sql);
+    bind_text(connection_, rows.get(), 1, task_id);
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      items.push_back(decode(rows.get()));
+    }
+    return items;
+  };
+  auto evidence = collect(
+      R"SQL(
+        SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary,
+               content_type, content, content_hash, truncated, redaction_status, run_id
+          FROM investigation_evidence
+         WHERE task_id = ?1
+         ORDER BY collected_at DESC, id
+      )SQL",
+      decode_investigation_evidence);
+  auto findings = collect(
+      R"SQL(
+        SELECT id, task_id, title, kind, statement, evidence_ids, confidence,
+               next_verification, created_at
+          FROM investigation_findings
+         WHERE task_id = ?1
+         ORDER BY created_at DESC, id
+      )SQL",
+      decode_investigation_finding);
+  auto artifacts = collect(
+      R"SQL(
+        SELECT id, task_id, run_id, phase, kind, status, title, summary, content,
+               evidence_ids, created_at, updated_at, plan_id, plan_step_id
+          FROM investigation_artifacts
+         WHERE task_id = ?1
+         ORDER BY updated_at DESC, id DESC
+      )SQL",
+      decode_investigation_artifact);
+  auto runs = collect(
+      R"SQL(
+        SELECT id, task_id, session_id, message_id, trace_id, attempt, phase, status,
+               started_at, updated_at, ended_at, checkpoint, failure
+          FROM investigation_runs
+         WHERE task_id = ?1
+         ORDER BY updated_at DESC, id
+      )SQL",
+      decode_investigation_run);
+  auto steps = collect(
+      R"SQL(
+        SELECT id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name,
+               target, input_summary, output_summary, evidence_ids, started_at, ended_at,
+               failure, plan_id, plan_step_id
+          FROM investigation_steps
+         WHERE task_id = ?1
+         ORDER BY ordinal, id
+      )SQL",
+      decode_investigation_step);
+
+  std::optional<nlohmann::json> brief;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT id, task_id, generated_at, status, finding_ids, options, selected_option_id,
+               plan_id
+          FROM investigation_decision_briefs
+         WHERE task_id = ?1
+         ORDER BY generated_at DESC, id DESC
+         LIMIT 1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_ROW) brief = decode_investigation_brief(rows.get());
+    else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  std::optional<nlohmann::json> plan;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT id, task_id, revision, status, created_at, updated_at, current_step_id, steps,
+               approval, observation_window
+          FROM investigation_plans
+         WHERE task_id = ?1
+         ORDER BY (status IN ('draft','active')) DESC, revision DESC, id DESC
+         LIMIT 1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_ROW) plan = decode_investigation_plan(rows.get());
+    else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+
+  nlohmann::json detail = {{"task", std::move(task)},
+                           {"evidence", std::move(evidence)},
+                           {"findings", std::move(findings)},
+                           {"artifacts", std::move(artifacts)},
+                           {"runs", std::move(runs)},
+                           {"steps", std::move(steps)}};
+  if (brief.has_value()) detail["decisionBrief"] = std::move(*brief);
+  if (plan.has_value()) detail["plan"] = std::move(*plan);
+  return detail;
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(

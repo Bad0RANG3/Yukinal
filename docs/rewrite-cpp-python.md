@@ -1074,3 +1074,14 @@ investigation commands (task detail/create/start/stop/recover, schedules,
 retention, briefs) and their evidence/plan/ledger infrastructure remain, as do
 the MCP HTTP transport and OAuth, the file transfer actions, installers, and
 real validation.
+
+Later on 2026-10-16, the C++ host added `investigation_task_get`. It returns the
+decoded task plus its `evidence`, `findings`, `artifacts`, `runs` and `steps`
+collections, the latest `decisionBrief` and the active (or latest) `plan`, with
+nested JSON columns (evidence content, plan steps/approval/observation window,
+artifact content, step target/failure, run checkpoint/failure) passed through
+unchanged so the shared schema stays the contract. `desktop_host_database_tests`
+inserts a task, a finding and an active plan and checks the decoded detail,
+the empty collections and the unknown-task case. Task create/start/stop/recover,
+schedules, retention and brief selection remain, as do the MCP HTTP transport
+and OAuth, the file transfer actions, installers, and real validation.

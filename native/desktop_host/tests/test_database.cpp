@@ -795,6 +795,20 @@ int main(int argc, char** argv) {
           '{"forbiddenTools":[],"forbiddenPathPrefixes":[]}'
         );
       )SQL");
+      execute(writer, R"SQL(
+        INSERT INTO investigation_findings (
+          id, task_id, title, kind, statement, evidence_ids, confidence, created_at
+        ) VALUES (
+          'ifind_1', 'itask_1', 'Nginx active', 'fact', 'nginx is active', '[]', 'high',
+          '2026-01-01T00:01:00Z'
+        );
+        INSERT INTO investigation_plans (
+          id, task_id, revision, status, created_at, updated_at, current_step_id, steps
+        ) VALUES (
+          'iplan_1', 'itask_1', 1, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+          NULL, '[]'
+        );
+      )SQL");
       sqlite3_close(writer);
     }
     const auto tasks = router.invoke("investigation_task_list", nlohmann::json::object());
@@ -812,6 +826,17 @@ int main(int argc, char** argv) {
           "investigation_task_list should filter by status");
     check(!router.invoke("investigation_task_list", {{"status", "bogus"}}).ok,
           "investigation_task_list should reject an unknown status");
+
+    const auto detail = router.invoke("investigation_task_get", {{"taskId", "itask_1"}});
+    check(detail.ok && detail.value.at("task").at("id") == "itask_1" &&
+              detail.value.at("findings").size() == 1 &&
+              detail.value.at("findings").at(0).at("title") == "Nginx active" &&
+              detail.value.at("plan").at("id") == "iplan_1" &&
+              detail.value.at("evidence").empty() && detail.value.at("runs").empty() &&
+              detail.value.at("steps").empty() && detail.value.at("artifacts").empty(),
+          "investigation_task_get should return the task, findings and active plan");
+    check(!router.invoke("investigation_task_get", {{"taskId", "itask_missing"}}).ok,
+          "investigation_task_get should report an unknown task");
   }
 
   sqlite3* readback = nullptr;

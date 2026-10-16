@@ -740,6 +740,27 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     }
   }
 
+  if (method == "investigation_task_get") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"taskId"}, {"taskId"}) || !params.at("taskId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_task_get requires exactly taskId");
+    }
+    const auto task_id = params.at("taskId").get<std::string>();
+    if (task_id.empty() || task_id.size() > 256) {
+      return failure("INVALID_PARAMS", "investigation_task_get taskId is invalid");
+    }
+    try {
+      auto detail = database_->get_investigation_task(task_id);
+      if (!detail.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+      return {true, std::move(*detail)};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not read the task");
+    }
+  }
+
   if (method == "core_ping") {
     if (!params.empty()) {
       return failure("INVALID_PARAMS", "core_ping does not accept parameters");

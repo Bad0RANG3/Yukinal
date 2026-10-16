@@ -76,6 +76,8 @@ class DesktopDatabase {
   void insert_snapshot(const nlohmann::json& snapshot) const;
   [[nodiscard]] nlohmann::json list_investigation_tasks(
       const std::optional<std::string>& status, int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_task(
+      const std::string& task_id) const;
   [[nodiscard]] nlohmann::json list_chat_sessions(
       const std::optional<std::string>& query, const std::optional<bool>& archived,
       int limit, int offset) const;
