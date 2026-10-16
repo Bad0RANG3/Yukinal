@@ -1459,6 +1459,146 @@ int main(int argc, char** argv) {
                     "stopped",
             "a stop continuation should terminate the task");
     }
+
+    // ── investigation_retention_preview / prune ─────────────────────────────
+    // Retention is a two-step, reference-aware cleanup of terminal task history.
+    {
+      const nlohmann::json ret_content = {{"note", "retention"}};
+      const auto ret_hash = DesktopDatabase::content_hash(ret_content);
+      const nlohmann::json base_evidence = {
+          {"taskId", "itask_write"},
+          {"scope", {{"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}}},
+          {"kind", "file"},
+          {"sourceTool", "filesystem.read"},
+          {"inputSummary", "retention fixture"},
+          {"contentType", "json"},
+          {"content", ret_content},
+          {"contentHash", ret_hash},
+          {"truncated", false},
+          {"redactionStatus", "redacted"},
+      };
+      auto drop_evidence = base_evidence;
+      drop_evidence["id"] = "iev_ret_drop";
+      drop_evidence["collectedAt"] = "2025-12-01T00:00:00Z";
+      database.record_investigation_evidence(drop_evidence);
+      auto keep_evidence = base_evidence;
+      keep_evidence["id"] = "iev_ret_keep";
+      keep_evidence["collectedAt"] = "2025-12-02T00:00:00Z";
+      database.record_investigation_evidence(keep_evidence);
+
+      // Evidence referenced by a finding is protected from retention.
+      database.record_investigation_finding({
+          {"id", "ifind_ret"},
+          {"taskId", "itask_write"},
+          {"title", "retention keep"},
+          {"kind", "fact"},
+          {"statement", "keep this evidence"},
+          {"evidenceIds", nlohmann::json::array({"iev_ret_keep"})},
+          {"confidence", "high"},
+          {"createdAt", "2026-01-01T00:07:00Z"},
+      });
+
+      const auto make_artifact = [](const std::string& id, const std::string& status,
+                                    const std::string& updated) {
+        return nlohmann::json{
+            {"id", id},
+            {"taskId", "itask_write"},
+            {"phase", "investigating"},
+            {"kind", "change_plan"},
+            {"status", status},
+            {"title", "retention artifact"},
+            {"summary", "retention artifact"},
+            {"content", {{"note", "artifact"}}},
+            {"evidenceIds", nlohmann::json::array()},
+            {"createdAt", "2025-11-01T00:00:00Z"},
+            {"updatedAt", updated},
+        };
+      };
+      database.upsert_investigation_artifact(
+          make_artifact("iart_ret_drop", "superseded", "2025-12-05T00:00:00Z"));
+      database.upsert_investigation_artifact(
+          make_artifact("iart_ret_live", "ready", "2025-12-06T00:00:00Z"));
+
+      const std::string cutoff = "2026-06-01T00:00:00Z";
+      const auto contains_id = [](const nlohmann::json& array, const std::string& id) {
+        for (const auto& entry : array) {
+          if (entry.value("id", std::string()) == id) return true;
+        }
+        return false;
+      };
+      const auto preview = router.invoke(
+          "investigation_retention_preview", {{"taskId", "itask_write"}, {"cutoffAt", cutoff}});
+      check(preview.ok && preview.value.at("preview").at("taskId") == "itask_write" &&
+                preview.value.at("preview").at("cutoffAt") == cutoff &&
+                preview.value.at("preview").at("truncated") == false &&
+                contains_id(preview.value.at("preview").at("candidates"), "iev_ret_drop") &&
+                contains_id(preview.value.at("preview").at("candidates"), "iart_ret_drop") &&
+                !contains_id(preview.value.at("preview").at("candidates"), "iev_ret_keep") &&
+                !contains_id(preview.value.at("preview").at("candidates"), "iart_ret_live") &&
+                preview.value.at("preview").at("protectedCount").get<int>() >= 2 &&
+                preview.value.at("preview").at("candidateBytes").get<int>() > 0,
+            "investigation_retention_preview should report only unreferenced old history");
+
+      const auto prune = router.invoke(
+          "investigation_retention_prune",
+          {{"input",
+            {{"taskId", "itask_write"},
+             {"cutoffAt", cutoff},
+             {"confirmation", "delete_unreferenced"},
+             {"items", nlohmann::json::array(
+                 {{{"id", "iev_ret_drop"}, {"kind", "evidence"}},
+                  {{"id", "iev_ret_keep"}, {"kind", "evidence"}},
+                  {{"id", "iart_ret_drop"}, {"kind", "artifact"}},
+                  {{"id", "iev_ret_missing"}, {"kind", "evidence"}}})}}}});
+      check(prune.ok && contains_id(prune.value.at("result").at("deleted"), "iev_ret_drop") &&
+                contains_id(prune.value.at("result").at("deleted"), "iart_ret_drop") &&
+                contains_id(prune.value.at("result").at("skipped"), "iev_ret_keep") &&
+                contains_id(prune.value.at("result").at("skipped"), "iev_ret_missing"),
+            "investigation_retention_prune should delete only the named unreferenced items");
+      check(!database.get_investigation_evidence("iev_ret_drop").has_value() &&
+                database.get_investigation_evidence("iev_ret_keep").has_value(),
+            "prune should remove the dropped evidence and keep referenced evidence");
+      const auto artifacts_after = database.list_investigation_artifacts("itask_write", 32);
+      check(!contains_id(artifacts_after.at("artifacts"), "iart_ret_drop") &&
+                contains_id(artifacts_after.at("artifacts"), "iart_ret_live"),
+            "prune should remove only superseded artifacts");
+
+      bool audit_recorded = false;
+      // Bind the response to a named value: iterating over `.at()` of a temporary
+      // JSON would iterate a dangling reference (no lifetime extension).
+      const auto audit_activities = database.list_activities(std::nullopt, 20);
+      for (const auto& activity : audit_activities.at("activities")) {
+        if (activity.value("type", std::string()) == "agent_action" &&
+            activity.value("description", std::string())
+                    .find("retention prune task=itask_write") != std::string::npos) {
+          audit_recorded = true;
+        }
+      }
+      check(audit_recorded, "retention prune should record an audit activity");
+
+      check(!router
+                 .invoke(
+                     "investigation_retention_prune",
+                     {{"input",
+                       {{"taskId", "itask_write"},
+                        {"cutoffAt", cutoff},
+                        {"confirmation", "nope"},
+                        {"items", nlohmann::json::array(
+                                      {{{"id", "iev_ret_keep"}, {"kind", "evidence"}}})}}}})
+                 .ok,
+            "retention prune requires the explicit confirmation literal");
+      check(!router.invoke("investigation_retention_preview", {{"taskId", "itask_created"}}).ok,
+            "retention is available only for terminal tasks");
+      check(!router.invoke("investigation_retention_preview", {{"taskId", "itask_missing"}}).ok,
+            "retention preview should report an unknown task");
+      check(!router
+                 .invoke("investigation_retention_preview",
+                         {{"taskId", "itask_write"}, {"limit", 0}})
+                 .ok,
+            "retention preview should reject an out-of-range limit");
+      check(router.invoke("investigation_retention_preview", {{"taskId", "itask_write"}}).ok,
+            "retention preview should default its cutoff and limit");
+    }
   }
 
   sqlite3* readback = nullptr;

@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <initializer_list>
@@ -1140,6 +1141,94 @@ std::optional<nlohmann::json> read_identity(sqlite3* connection,
   add_optional_text(identity, "privateKeyPath", statement.get(), 5);
   add_optional_text(identity, "certificatePath", statement.get(), 6);
   return identity;
+}
+
+// ── Investigation retention helpers ─────────────────────────────────────────
+bool iso8601_utc_text(const std::string& value) {
+  if (value.size() < 19 || value.size() > 80) return false;
+  std::tm utc{};
+  std::istringstream stream(value);
+  stream >> std::get_time(&utc, "%Y-%m-%dT%H:%M:%S");
+  if (stream.fail()) return false;
+#ifdef _WIN32
+  return _mkgmtime(&utc) != static_cast<std::time_t>(-1);
+#else
+  return timegm(&utc) != static_cast<std::time_t>(-1);
+#endif
+}
+
+void collect_json_string_ids(const std::string& raw, std::set<std::string>& out) {
+  nlohmann::json parsed;
+  try {
+    parsed = nlohmann::json::parse(raw);
+  } catch (const nlohmann::json::exception&) {
+    return;
+  }
+  if (!parsed.is_array()) return;
+  for (const auto& entry : parsed) {
+    if (entry.is_string()) out.insert(entry.get<std::string>());
+  }
+}
+
+// Evidence ids referenced by any finding, step, artifact, brief option or plan
+// step are never retention candidates.
+std::set<std::string> collect_protected_evidence(sqlite3* connection,
+                                                 const std::string& task_id) {
+  std::set<std::string> protected_ids;
+  const auto collect_direct = [&](const char* sql) {
+    Statement statement(connection, sql);
+    bind_text(connection, statement.get(), 1, task_id);
+    for (;;) {
+      const auto result = sqlite3_step(statement.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+      collect_json_string_ids(column_text(statement.get(), 0), protected_ids);
+    }
+  };
+  collect_direct("SELECT evidence_ids FROM investigation_findings WHERE task_id = ?1");
+  collect_direct("SELECT evidence_ids FROM investigation_steps WHERE task_id = ?1");
+  collect_direct("SELECT evidence_ids FROM investigation_artifacts WHERE task_id = ?1");
+  const auto collect_nested = [&](const char* sql) {
+    Statement statement(connection, sql);
+    bind_text(connection, statement.get(), 1, task_id);
+    for (;;) {
+      const auto result = sqlite3_step(statement.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+      nlohmann::json parsed;
+      try {
+        parsed = nlohmann::json::parse(column_text(statement.get(), 0));
+      } catch (const nlohmann::json::exception&) {
+        continue;
+      }
+      if (!parsed.is_array()) continue;
+      for (const auto& entry : parsed) {
+        if (!entry.is_object()) continue;
+        const auto ids = entry.find("evidenceIds");
+        if (ids == entry.end() || !ids->is_array()) continue;
+        for (const auto& id : *ids) {
+          if (id.is_string()) protected_ids.insert(id.get<std::string>());
+        }
+      }
+    }
+  };
+  collect_nested("SELECT options FROM investigation_decision_briefs WHERE task_id = ?1");
+  collect_nested("SELECT steps FROM investigation_plans WHERE task_id = ?1");
+  return protected_ids;
+}
+
+std::optional<std::string> investigation_task_status(sqlite3* connection,
+                                                     const std::string& task_id) {
+  Statement statement(connection, "SELECT status FROM investigation_tasks WHERE id = ?1");
+  bind_text(connection, statement.get(), 1, task_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return std::string(column_text(statement.get(), 0));
+}
+
+bool terminal_task_status(const std::string& status) {
+  return is_one_of(status, {"completed", "failed", "stopped", "expired"});
 }
 
 }  // namespace
@@ -2870,6 +2959,250 @@ std::optional<nlohmann::json> DesktopDatabase::select_investigation_brief_option
     throw std::runtime_error(sqlite3_errmsg(connection_));
   }
   return get_investigation_brief(brief_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::investigation_retention_preview(
+    const std::string& task_id, const std::string& cutoff_at, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  if (!iso8601_utc_text(cutoff_at)) {
+    throw std::invalid_argument("retention cutoff must be a UTC ISO-8601 timestamp");
+  }
+  if (limit < 1 || limit > 128) {
+    throw std::invalid_argument("retention preview limit must be between 1 and 128");
+  }
+  const auto status = investigation_task_status(connection_, task_id);
+  if (!status.has_value()) return std::nullopt;
+  if (!terminal_task_status(*status)) {
+    throw std::invalid_argument("retention is available only for terminal investigation tasks");
+  }
+  const auto protected_ids = collect_protected_evidence(connection_, task_id);
+  std::vector<nlohmann::json> candidates;
+  std::int64_t candidate_bytes = 0;
+  std::int64_t protected_count = 0;
+  const auto collect = [&](const char* sql, const char* kind, const char* reason,
+                           bool can_be_protected, bool count_protected) {
+    Statement statement(connection_, sql);
+    bind_text(connection_, statement.get(), 1, task_id);
+    bind_text(connection_, statement.get(), 2, cutoff_at);
+    for (;;) {
+      const auto result = sqlite3_step(statement.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      const auto id = std::string(column_text(statement.get(), 0));
+      if (can_be_protected && protected_ids.find(id) != protected_ids.end()) {
+        if (count_protected) ++protected_count;
+        continue;
+      }
+      const auto bytes = sqlite3_column_int64(statement.get(), 3);
+      candidate_bytes += bytes;
+      candidates.push_back({{"id", id},
+                            {"taskId", column_text(statement.get(), 1)},
+                            {"kind", kind},
+                            {"createdAt", column_text(statement.get(), 2)},
+                            {"bytes", bytes},
+                            {"reason", reason}});
+    }
+  };
+  collect(R"SQL(
+      SELECT id, task_id, collected_at, length(CAST(content AS BLOB))
+        FROM investigation_evidence
+       WHERE task_id = ?1 AND collected_at < ?2
+    )SQL",
+          "evidence", "unreferenced_evidence", true, true);
+  collect(R"SQL(
+      SELECT id, task_id, updated_at, length(CAST(content AS BLOB))
+        FROM investigation_artifacts
+       WHERE task_id = ?1 AND status = 'superseded' AND updated_at < ?2
+    )SQL",
+          "artifact", "superseded_artifact", false, false);
+  std::sort(candidates.begin(), candidates.end(),
+            [](const nlohmann::json& left, const nlohmann::json& right) {
+              const auto left_time = left.value("createdAt", std::string());
+              const auto right_time = right.value("createdAt", std::string());
+              if (left_time != right_time) return left_time < right_time;
+              const auto left_kind = left.value("kind", std::string());
+              const auto right_kind = right.value("kind", std::string());
+              if (left_kind != right_kind) return left_kind < right_kind;
+              return left.value("id", std::string()) < right.value("id", std::string());
+            });
+  const auto total_candidates = static_cast<std::int64_t>(candidates.size());
+  nlohmann::json bounded = nlohmann::json::array();
+  for (std::int64_t index = 0; index < total_candidates && index < limit; ++index) {
+    bounded.push_back(candidates[static_cast<size_t>(index)]);
+  }
+  return nlohmann::json{{"taskId", task_id},
+                        {"cutoffAt", cutoff_at},
+                        {"candidates", std::move(bounded)},
+                        {"protectedCount", protected_count},
+                        {"candidateBytes", candidate_bytes},
+                        {"truncated", total_candidates > limit}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::investigation_retention_prune(
+    const std::string& task_id, const std::string& cutoff_at, const nlohmann::json& items,
+    const std::string& audit_id, const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  if (!iso8601_utc_text(cutoff_at)) {
+    throw std::invalid_argument("retention cutoff must be a UTC ISO-8601 timestamp");
+  }
+  if (!items.is_array() || items.empty() || items.size() > 128) {
+    throw std::invalid_argument("retention prune requires between 1 and 128 items");
+  }
+  const auto status = investigation_task_status(connection_, task_id);
+  if (!status.has_value()) return std::nullopt;
+  if (!terminal_task_status(*status)) {
+    throw std::invalid_argument("retention is available only for terminal investigation tasks");
+  }
+  Transaction transaction(connection_);
+  const auto protected_ids = collect_protected_evidence(connection_, task_id);
+  nlohmann::json deleted = nlohmann::json::array();
+  nlohmann::json skipped = nlohmann::json::array();
+  std::set<std::string> seen;
+  for (const auto& item : items) {
+    if (!item.is_object()) {
+      throw std::invalid_argument("retention prune items must be objects");
+    }
+    const auto id = item.value("id", std::string());
+    const auto kind = item.value("kind", std::string());
+    if (kind != "evidence" && kind != "artifact") {
+      throw std::invalid_argument("retention item kind must be evidence or artifact");
+    }
+    if (id.empty()) throw std::invalid_argument("retention item id is required");
+    if (!seen.insert(kind + "\x1f" + id).second) {
+      throw std::invalid_argument("retention prune items must be unique");
+    }
+    if (kind == "evidence") {
+      Statement read(connection_, R"SQL(
+          SELECT id, task_id, collected_at, length(CAST(content AS BLOB))
+            FROM investigation_evidence
+           WHERE id = ?1 AND task_id = ?2
+        )SQL");
+      bind_text(connection_, read.get(), 1, id);
+      bind_text(connection_, read.get(), 2, task_id);
+      const auto result = sqlite3_step(read.get());
+      if (result == SQLITE_DONE) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "not_found"}});
+        continue;
+      }
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      const auto owner = std::string(column_text(read.get(), 1));
+      const auto created_at = std::string(column_text(read.get(), 2));
+      const auto bytes = sqlite3_column_int64(read.get(), 3);
+      if (created_at >= cutoff_at) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "newer_than_cutoff"}});
+        continue;
+      }
+      if (protected_ids.find(id) != protected_ids.end()) {
+        skipped.push_back(
+            {{"id", id}, {"kind", kind}, {"reason", "referenced_by_task_history"}});
+        continue;
+      }
+      Statement remove(connection_, R"SQL(
+          DELETE FROM investigation_evidence
+           WHERE id = ?1 AND task_id = ?2 AND collected_at < ?3
+        )SQL");
+      bind_text(connection_, remove.get(), 1, id);
+      bind_text(connection_, remove.get(), 2, task_id);
+      bind_text(connection_, remove.get(), 3, cutoff_at);
+      if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      if (sqlite3_changes(connection_) == 1) {
+        deleted.push_back({{"id", id},
+                           {"taskId", owner},
+                           {"kind", kind},
+                           {"createdAt", created_at},
+                           {"bytes", bytes},
+                           {"reason", "unreferenced_evidence"}});
+      } else {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "changed_during_prune"}});
+      }
+    } else {
+      Statement read(connection_, R"SQL(
+          SELECT id, task_id, updated_at, length(CAST(content AS BLOB)), status
+            FROM investigation_artifacts
+           WHERE id = ?1 AND task_id = ?2
+        )SQL");
+      bind_text(connection_, read.get(), 1, id);
+      bind_text(connection_, read.get(), 2, task_id);
+      const auto result = sqlite3_step(read.get());
+      if (result == SQLITE_DONE) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "not_found"}});
+        continue;
+      }
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      const auto owner = std::string(column_text(read.get(), 1));
+      const auto updated_at = std::string(column_text(read.get(), 2));
+      const auto bytes = sqlite3_column_int64(read.get(), 3);
+      const auto artifact_status = std::string(column_text(read.get(), 4));
+      if (artifact_status != "superseded") {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "artifact_not_superseded"}});
+        continue;
+      }
+      if (updated_at >= cutoff_at) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "newer_than_cutoff"}});
+        continue;
+      }
+      Statement remove(connection_, R"SQL(
+          DELETE FROM investigation_artifacts
+           WHERE id = ?1 AND task_id = ?2 AND status = 'superseded' AND updated_at < ?3
+        )SQL");
+      bind_text(connection_, remove.get(), 1, id);
+      bind_text(connection_, remove.get(), 2, task_id);
+      bind_text(connection_, remove.get(), 3, cutoff_at);
+      if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      if (sqlite3_changes(connection_) == 1) {
+        deleted.push_back({{"id", id},
+                           {"taskId", owner},
+                           {"kind", kind},
+                           {"createdAt", updated_at},
+                           {"bytes", bytes},
+                           {"reason", "superseded_artifact"}});
+      } else {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "changed_during_prune"}});
+      }
+    }
+  }
+  std::int64_t deleted_evidence = 0;
+  std::int64_t deleted_artifacts = 0;
+  for (const auto& entry : deleted) {
+    if (entry.value("kind", std::string()) == "evidence") {
+      ++deleted_evidence;
+    } else {
+      ++deleted_artifacts;
+    }
+  }
+  const std::string description =
+      "retention prune task=" + task_id + " cutoff=" + cutoff_at +
+      " deleted_evidence=" + std::to_string(deleted_evidence) +
+      " deleted_artifacts=" + std::to_string(deleted_artifacts) +
+      " skipped=" + std::to_string(skipped.size());
+  Statement activity(connection_, R"SQL(
+      INSERT INTO activities (
+        id, server_id, workspace_id, type, title, description, source, actor,
+        reason, outcome, trace_id, created_at
+      )
+      SELECT ?1, server_id, workspace_id, 'agent_action',
+             '清理排查任务历史数据', ?2, 'user', 'user',
+             'explicit_retention_prune', 'success', ?1, ?3
+      FROM investigation_tasks WHERE id = ?4
+    )SQL");
+  bind_text(connection_, activity.get(), 1, audit_id);
+  bind_text(connection_, activity.get(), 2, description);
+  bind_text(connection_, activity.get(), 3, now);
+  bind_text(connection_, activity.get(), 4, task_id);
+  if (sqlite3_step(activity.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  transaction.commit();
+  return nlohmann::json{{"taskId", task_id},
+                        {"cutoffAt", cutoff_at},
+                        {"deleted", std::move(deleted)},
+                        {"skipped", std::move(skipped)}};
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(

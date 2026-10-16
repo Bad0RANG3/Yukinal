@@ -3017,6 +3017,116 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return {true, {{"brief", std::move(*brief)}, {"continuation", continuation}}};
   }
 
+  if (method == "investigation_retention_preview") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"taskId", "cutoffAt", "limit"}, {"taskId"}) ||
+        !params.at("taskId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_retention_preview parameters are invalid");
+    }
+    auto task_id = normalized_opaque_id(params.at("taskId").get<std::string>());
+    if (!task_id.has_value()) {
+      return failure("INVALID_PARAMS", "investigation_retention_preview taskId is invalid");
+    }
+    std::string cutoff;
+    if (params.contains("cutoffAt")) {
+      if (!params.at("cutoffAt").is_string()) {
+        return failure("INVALID_PARAMS", "investigation_retention_preview cutoffAt is invalid");
+      }
+      cutoff = trim_ascii(params.at("cutoffAt").get<std::string>());
+      if (cutoff.empty() || cutoff.size() > 80 ||
+          !parse_iso8601_utc_seconds(cutoff).has_value()) {
+        return failure("INVALID_PARAMS", "retention cutoff must be a UTC ISO-8601 timestamp");
+      }
+    } else {
+      cutoff = iso8601_from_epoch(now_epoch_seconds() - 30LL * 86400);
+    }
+    int limit = 64;
+    if (params.contains("limit")) {
+      if (!params.at("limit").is_number_integer()) {
+        return failure("INVALID_PARAMS",
+                       "investigation_retention_preview limit must be an integer");
+      }
+      const auto requested = params.at("limit").get<std::int64_t>();
+      if (requested < 1 || requested > 128) {
+        return failure("INVALID_PARAMS", "retention preview limit must be between 1 and 128");
+      }
+      limit = static_cast<int>(requested);
+    }
+    try {
+      auto preview = database_->investigation_retention_preview(*task_id, cutoff, limit);
+      if (!preview.has_value()) {
+        return failure("NOT_FOUND", "The investigation task was not found");
+      }
+      return {true, {{"preview", std::move(*preview)}}};
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not build the retention preview");
+    }
+  }
+
+  if (method == "investigation_retention_prune") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_retention_prune requires an input object");
+    }
+    const auto& input = params.at("input");
+    if (!only_fields(input, {"taskId", "cutoffAt", "items", "confirmation"},
+                     {"taskId", "cutoffAt", "items", "confirmation"}) ||
+        !input.at("taskId").is_string() || !input.at("cutoffAt").is_string() ||
+        !input.at("confirmation").is_string() || !input.at("items").is_array()) {
+      return failure("INVALID_PARAMS", "investigation_retention_prune input is invalid");
+    }
+    auto task_id = normalized_opaque_id(input.at("taskId").get<std::string>());
+    if (!task_id.has_value()) {
+      return failure("INVALID_PARAMS", "investigation_retention_prune taskId is invalid");
+    }
+    const auto cutoff = trim_ascii(input.at("cutoffAt").get<std::string>());
+    if (cutoff.empty() || cutoff.size() > 80 || !parse_iso8601_utc_seconds(cutoff).has_value()) {
+      return failure("INVALID_PARAMS", "retention cutoff must be a UTC ISO-8601 timestamp");
+    }
+    if (input.at("confirmation").get<std::string>() != "delete_unreferenced") {
+      return failure("INVALID_PARAMS",
+                     "retention prune requires confirmation=delete_unreferenced");
+    }
+    const auto& items = input.at("items");
+    if (items.empty() || items.size() > 128) {
+      return failure("INVALID_PARAMS", "retention prune requires between 1 and 128 items");
+    }
+    nlohmann::json normalized_items = nlohmann::json::array();
+    for (const auto& item : items) {
+      if (!item.is_object() ||
+          !only_fields(item, {"id", "kind"}, {"id", "kind"}) || !item.at("id").is_string() ||
+          !item.at("kind").is_string()) {
+        return failure("INVALID_PARAMS", "each retention prune item requires an id and kind");
+      }
+      auto item_id = normalized_opaque_id(item.at("id").get<std::string>());
+      const auto kind = item.at("kind").get<std::string>();
+      if (!item_id.has_value() || (kind != "evidence" && kind != "artifact")) {
+        return failure("INVALID_PARAMS", "retention prune items are invalid");
+      }
+      normalized_items.push_back({{"id", *item_id}, {"kind", kind}});
+    }
+    try {
+      auto result = database_->investigation_retention_prune(
+          *task_id, cutoff, normalized_items, next_id("retention"), iso8601_now());
+      if (!result.has_value()) {
+        return failure("NOT_FOUND", "The investigation task was not found");
+      }
+      return {true, {{"result", std::move(*result)}}};
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not prune the requested history");
+    }
+  }
+
   if (method == "core_ping") {
     if (!params.empty()) {
       return failure("INVALID_PARAMS", "core_ping does not accept parameters");

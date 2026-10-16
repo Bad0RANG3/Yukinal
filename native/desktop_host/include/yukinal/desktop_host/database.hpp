@@ -117,6 +117,11 @@ class DesktopDatabase {
   [[nodiscard]] std::optional<nlohmann::json> select_investigation_brief_option(
       const std::string& task_id, const std::string& brief_id,
       const std::string& option_id) const;
+  [[nodiscard]] std::optional<nlohmann::json> investigation_retention_preview(
+      const std::string& task_id, const std::string& cutoff_at, int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> investigation_retention_prune(
+      const std::string& task_id, const std::string& cutoff_at, const nlohmann::json& items,
+      const std::string& audit_id, const std::string& now) const;
   /** SHA-256 (lowercase hex) of the canonical JSON serialization used for evidence. */
   [[nodiscard]] static std::string content_hash(const nlohmann::json& content);
   [[nodiscard]] nlohmann::json list_chat_sessions(
