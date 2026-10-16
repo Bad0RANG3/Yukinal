@@ -32,7 +32,7 @@
   --focus-line: #717171;
   --focus-halo: #c7c7c71a;
   --composer-bg: transparent;
-  --composer-surface: #282828;
+  --composer-surface: #1d1d1d;
   --composer-line: var(--edge-emphasis);
   --composer-accent: var(--accent);
   --composer-accent-hover: var(--text);

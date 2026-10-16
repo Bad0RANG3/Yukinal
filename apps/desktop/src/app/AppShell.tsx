@@ -9,6 +9,7 @@ import { Icon, type IconName } from "../components/Icon.js";
 import brandMark from "../assets/brand-mark.png";
 import { PRIMARY_NAV, SERVER_PAGES, useWorkspaceStore, type PrimaryNav, type ServerPage } from "../stores/workspace-store.js";
 import { LivePreviewControl } from "./LivePreviewControl.js";
+import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
 
 const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
@@ -24,10 +25,9 @@ const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = 
   servers: { label: "仪表台", icon: "servers" },
   tasks: { label: "排查任务", icon: "activity" }, activity: { label: "动态", icon: "activity" }, settings: { label: "设置", icon: "settings" },
 };
-const SERVER_PAGE_META: Record<ServerPage, { label: string; icon: IconName }> = {
-  overview: { label: "概览", icon: "servers" }, terminal: { label: "终端", icon: "terminal" },
-  files: { label: "文件", icon: "folder" }, logs: { label: "日志", icon: "logs" },
-  services: { label: "服务", icon: "services" }, activity: { label: "活动", icon: "activity" },
+const SERVER_PAGE_LABEL: Record<ServerPage, string> = {
+  overview: "概览", terminal: "终端", files: "文件",
+  logs: "日志", services: "服务", activity: "活动",
 };
 function PageLoadingFallback() { return <div className="compact-empty" role="status">正在加载页面…</div>; }
 
@@ -114,13 +114,12 @@ export function AppShell() {
         </>} />
       </div>
       <main className="workspace-main workspace-inspector" id="workspace-inspector" ref={inspectorRef} tabIndex={-1} aria-label="仪表台与参考资料">
-        <header className="workspace-header is-titleless">
+        {detail && !guideOpen ? <ServerInspectorHeader onBack={() => setPrimary("servers")} onClose={returnToAI} /> : <header className="workspace-header is-titleless">
           <div className="workspace-header-meta">
-            {detail && !guideOpen ? <button type="button" className="text-button" onClick={() => setPrimary("servers")}>全部</button> : null}
             <button type="button" className="icon-button context-close" aria-label="回到对话" onClick={returnToAI}><Icon name="close" /></button>
           </div>
-        </header>
-        {detail && !guideOpen ? <div className="server-tabs" role="tablist" aria-label="服务器视图">{SERVER_PAGES.map((page, index) => <button key={page} type="button" role="tab" id={`server-tab-${page}`} aria-controls="server-view" aria-selected={serverPage === page} tabIndex={serverPage === page ? 0 : -1} onKeyDown={(event) => navigateTab(event, index)} onClick={() => setServerPage(page)} className={`server-tab ${serverPage === page ? "server-tab-active" : ""}`}><Icon name={SERVER_PAGE_META[page].icon} size="sm" /><span>{SERVER_PAGE_META[page].label}</span></button>)}</div> : null}
+        </header>}
+        {detail && !guideOpen ? <div className="server-tabs" role="tablist" aria-label="服务器视图">{SERVER_PAGES.map((page, index) => <button key={page} type="button" role="tab" id={`server-tab-${page}`} aria-controls="server-view" aria-selected={serverPage === page} tabIndex={serverPage === page ? 0 : -1} onKeyDown={(event) => navigateTab(event, index)} onClick={() => setServerPage(page)} className={`server-tab ${serverPage === page ? "server-tab-active" : ""}`}><span>{SERVER_PAGE_LABEL[page]}</span></button>)}</div> : null}
         <div className="workspace-content" id={detail ? "server-view" : undefined} role={detail && !guideOpen ? "tabpanel" : undefined} aria-labelledby={detail && !guideOpen ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
           {guideOpen ? <Suspense fallback={<PageLoadingFallback />}><GettingStarted onClose={closeGuide} /></Suspense> : null}
           <div hidden={guideOpen} className="workspace-pages">

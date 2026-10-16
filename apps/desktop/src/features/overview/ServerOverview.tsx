@@ -18,7 +18,6 @@ import {
 } from "@yukinal/shared";
 
 import { errorMessage, formatBytes } from "../../lib/format.js";
-import { EnvBadge } from "../../components/EnvBadge.js";
 import { EmptyPanel, ErrorPanel, LoadingPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
@@ -138,7 +137,7 @@ function gaugeClass(usage: number | undefined, thresholds: { warning: number; cr
   return usage === undefined ? "unknown" : healthClass(usage, thresholds);
 }
 
-function MetricCard({
+function ResourceRow({
   label,
   usage,
   thresholds,
@@ -152,16 +151,14 @@ function MetricCard({
   const status = gaugeClass(usage, thresholds);
   const width = usage === undefined ? 0 : Math.min(100, Math.max(0, Math.round(usage)));
   return (
-    <div className="metric-card">
-      <div className="metric-card-topline">
-        <span>{label}</span>
-        <span className={`metric-status metric-status-${status}`}>{HEALTH_LABEL[status]}</span>
-      </div>
+    <div className="overview-resource-row" role="group" aria-label={`${label} ${HEALTH_LABEL[status]}`}>
+      <span className="overview-resource-label">{label}</span>
       <strong>{usage === undefined ? "—" : `${Math.round(usage)}%`}</strong>
-      <div className="metric-track" aria-hidden="true">
+      <span className={`metric-status metric-status-${status}`}>{HEALTH_LABEL[status]}</span>
+      <div className="overview-resource-track" aria-hidden="true">
         <div className={`metric-fill metric-fill-${status}`} style={{ width: `${width}%` }} />
       </div>
-      <span className="metric-hint">{hint}</span>
+      <span className="overview-resource-hint">{hint}</span>
     </div>
   );
 }
@@ -203,8 +200,7 @@ export function ServerOverview() {
   if (server.status !== "connected" && !snapshot) {
     return <div className="empty-state page-empty connection-empty">
       <span className="empty-icon"><Icon name="connect" size="xxl" /></span>
-      <EnvBadge environment={server.metadata.environment} serverName={server.name} />
-      <h2>{server.name}</h2>
+      <h2>尚未连接</h2>
       <p>{server.connection.username}@{server.connection.host}:{server.connection.port}</p>
       <small>建立 SSH 连接后，查看系统资源与服务状态。</small>
       <button type="button" className="button-primary" disabled={busy || server.status === "connecting"} onClick={() => action.mutate({ type: "connect", serverId: server.id })}><Icon name="connect" size="md" />{busy || server.status === "connecting" ? "正在连接…" : "连接服务器"}</button>
@@ -263,7 +259,6 @@ function OverviewContent({
   connectionError?: string;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  const setServerPage = useWorkspaceStore((state) => state.setServerPage);
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 10_000);
@@ -289,16 +284,26 @@ function OverviewContent({
   const freshnessLabel = connected
     ? age.kind === "stale" ? "快照已过期" : age.kind === "unknown" ? "新鲜度未知" : "采集较新"
     : "缓存快照";
-  const connectionLabel = server.status === "connected"
-    ? "SSH 已连接"
-    : server.status === "connecting"
-      ? "正在连接"
-      : server.status === "error"
-        ? "连接异常"
-        : "未连接";
+  const network = sampleFor(snapshot, "network")?.ok === false ? undefined : snapshot.network;
+  const resourceIssues = [
+    ...(cpu && gaugeClass(cpu.usagePercent, HEALTH_THRESHOLDS.cpu) !== "healthy" ? [`CPU ${Math.round(cpu.usagePercent)}%`] : []),
+    ...(memory && gaugeClass(memory.usagePercent, HEALTH_THRESHOLDS.memory) !== "healthy" ? [`内存 ${Math.round(memory.usagePercent)}%`] : []),
+    ...disks.filter((disk) => gaugeClass(disk.usagePercent, HEALTH_THRESHOLDS.disk) !== "healthy").map((disk) => `${disk.mountPoint} 磁盘 ${Math.round(disk.usagePercent)}%`),
+  ];
+  const resourceSummary = resourceIssues.length > 0
+    ? resourceIssues.join(" · ")
+    : !cpu || !memory || disks.length === 0
+      ? "部分资源读数不可用，请查看采集诊断。"
+      : "CPU、内存与磁盘均在健康阈值内。";
+  const failedSamples = (snapshot.collectors ?? []).filter((sample) => !sample.ok);
+  const diagnosticsExpanded = collection.kind !== "complete" || age.kind !== "fresh" || !connected || failedSamples.length > 0;
+  const runningContainers = docker?.containers.filter((container) => container.state === "running").length ?? 0;
+  const otherContainers = (docker?.containers.length ?? 0) - runningContainers;
+  const diagnosticsLabel = failedSamples.length > 0 ? `${failedSamples.length} 项失败` : collection.label;
+  const reportedCollectors = COLLECTORS.filter((collector) => collection.sampleMap.has(collector.id)).length;
 
   return (
-    <div className="overview-page">
+    <div className="overview-page overview-inspector">
       {!connected ? (
         <section className={"overview-connection-notice overview-connection-" + server.status} role={server.status === "error" ? "alert" : "status"}>
           <div>
@@ -312,114 +317,104 @@ function OverviewContent({
         </section>
       ) : null}
 
-      <section className="overview-hero">
-        <div>
-          <div className="identity-line">
-            <EnvBadge environment={server.metadata.environment} serverName={server.name} region={server.metadata.region} />
-            <span className={"overview-connection-label overview-connection-label-" + server.status}>{connectionLabel}</span>
-            <span className={`health-label health-label-${health}`}>
-              <span className={`health-dot ${HEALTH_DOT[health]}`} />
-              {HEALTH_LABEL[health]}
-            </span>
-          </div>
-          <p className="overview-subtitle">
-            {os ? os.distribution + " " + os.version : "操作系统未知"} · {server.connection.username}@{server.connection.host}
-          </p>
+      <section className="overview-status" aria-label="服务器健康摘要">
+        <div className="overview-status-heading">
+          <strong className={`health-label health-label-${health}`}>
+            <span className={`health-dot ${HEALTH_DOT[health]}`} />
+            {HEALTH_LABEL[health]}
+          </strong>
+          <button type="button" className="icon-button overview-refresh" onClick={onRefresh} disabled={!connected || refreshing} title={refreshing ? "正在采集新快照" : connected ? "刷新服务器状态" : "重新连接后才能刷新"} aria-label={refreshing ? "正在采集新快照" : connected ? "刷新服务器状态" : "重新连接后才能刷新"}>
+            <Icon name="refresh" size="sm" />
+          </button>
         </div>
-        <button type="button" className="button-secondary refresh-button" onClick={onRefresh} disabled={!connected || refreshing} title={connected ? "刷新服务器状态" : "重新连接后才能刷新"} aria-label={connected ? "刷新服务器状态" : "重新连接后才能刷新"}>
-          <Icon name="refresh" size="sm" /> {refreshing ? "采集中" : connected ? "刷新状态" : "连接后刷新"}
-        </button>
+        <p className="overview-resource-summary">{resourceSummary}</p>
+        <div className="overview-observed-at">
+          <span className={"overview-freshness overview-freshness-" + freshnessKind}><span aria-hidden="true" />{freshnessLabel}</span>
+          <time dateTime={snapshot.collectedAt} title={"本地时间 " + formatTimestamp(snapshot.collectedAt)}>{age.label}</time>
+        </div>
+        {diagnosticsExpanded ? <p className="overview-collection-warning" role="status">{diagnosticsLabel} · {collection.description}</p> : null}
+        {refreshing ? <p className="overview-collection-progress" role="status">正在采集，当前显示上次完成的结果。</p> : null}
       </section>
 
-      <section className={"overview-observation overview-observation-" + collection.kind} aria-label="状态数据来源和采集情况">
-        <div className="overview-observation-heading">
-          <span className={"overview-freshness overview-freshness-" + freshnessKind}><span aria-hidden="true" />{freshnessLabel}</span>
-          <strong>{collection.label}</strong>
-          <span>来源：SSH 远端采集器</span>
+      <section className="overview-resources" aria-label="系统资源读数">
+        <div className="overview-resource-list">
+          <ResourceRow label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} hint={cpu ? `${cpu.cores} 核处理器` : "采集器未返回可用读数"} />
+          <ResourceRow label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} hint={memory ? `${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}` : "采集器未返回可用读数"} />
+          <ResourceRow label="磁盘" usage={diskUsage} thresholds={HEALTH_THRESHOLDS.disk} hint={disks.length ? `${disks.length} 个挂载点 · 显示最高占用` : "采集器未返回可用读数"} />
         </div>
-        <p>
-          最后采集：<time dateTime={snapshot.collectedAt} title={"本地时间 " + formatTimestamp(snapshot.collectedAt)}>{formatTimestamp(snapshot.collectedAt)}（{age.label}）</time>
-          {!connected ? " · 当前显示缓存数据" : " · 每 15 秒自动采集"}
-        </p>
-        <p className="overview-collector-summary">{collection.description}</p>
-        {refreshing ? <p className="overview-refreshing" role="status">正在采集新快照；页面仍显示最近一次已完成的结果。</p> : null}
-        <details className="overview-collector-details">
-          <summary>查看采集器明细</summary>
-          <ul>
-            {COLLECTORS.map((collector) => {
-              const sample = collection.sampleMap.get(collector.id);
-              const state = sample ? sample.ok ? "success" : "failure" : "unknown";
-              const stateLabel = sample ? sample.ok ? "成功" : "失败" : "未报告";
-              return (
-                <li key={collector.id}>
-                  <span>{collector.label}</span>
-                  <span className={"overview-collector-state overview-collector-state-" + state}>{stateLabel}</span>
-                  {sample ? <time dateTime={sample.collectedAt}>{formatTimestamp(sample.collectedAt)}</time> : <span>本次快照无状态记录</span>}
-                </li>
-              );
-            })}
+        <button type="button" className="button-secondary overview-task-action" onClick={() => setPrimary("tasks")} aria-label={`在 ${server.name} 上创建任务`}><Icon name="agent" size="sm" /><span>创建排查任务</span><Icon name="chevronRight" size="sm" /></button>
+      </section>
+
+      <details className="overview-inspector-section">
+        <summary><Icon name="chevronRight" size="xs" /><span>系统属性</span><small>{os ? `${os.distribution} ${os.version}` : "信息不完整"}</small></summary>
+        <div className="overview-section-content">
+          <dl className="overview-properties">
+            <div><dt>主机名</dt><dd>{os?.hostname ?? "—"}</dd></div>
+            <div><dt>系统</dt><dd>{os ? `${os.distribution} ${os.version}` : "—"}</dd></div>
+            <div><dt>内核</dt><dd>{os?.kernel ?? "—"}</dd></div>
+            <div><dt>架构</dt><dd>{os?.arch ?? "—"}</dd></div>
+            <div><dt>运行时间</dt><dd>{formatUptime(uptime)}</dd></div>
+            <div><dt>处理器</dt><dd>{cpu?.model ?? "—"}</dd></div>
+            <div><dt>核心数</dt><dd>{cpu?.cores ?? "—"}</dd></div>
+            <div><dt>系统负载</dt><dd>{cpu?.loadAverage.join(" / ") ?? "—"}</dd></div>
+            <div><dt>总内存</dt><dd>{formatBytes(memory?.totalBytes)}</dd></div>
+            <div><dt>可用内存</dt><dd>{formatBytes(memory?.availableBytes)}</dd></div>
+          </dl>
+          <h3 className="overview-subsection-title">磁盘挂载</h3>
+          {disks.length === 0 ? <p className="muted-copy">尚无可用磁盘读数。</p> : <ul className="overview-property-list">{disks.map((disk, index) => <li key={`${disk.device}-${disk.mountPoint}-${index}`}>
+            <strong>{disk.mountPoint}</strong><span>{disk.device}</span>
+            <span>{formatBytes(disk.usedBytes)} / {formatBytes(disk.totalBytes)} · {Math.round(disk.usagePercent)}%</span>
+          </li>)}</ul>}
+          <h3 className="overview-subsection-title">网络累计流量</h3>
+          {!network?.length ? <p className="muted-copy">尚无可用网络读数。</p> : <ul className="overview-property-list">{network.map((item, index) => <li key={`${item.name}-${index}`}>
+            <strong>{item.name}</strong><span>接收 {formatBytes(item.rxBytes)} · 发送 {formatBytes(item.txBytes)}</span>
+          </li>)}</ul>}
+        </div>
+      </details>
+
+      <details className="overview-inspector-section" key={`docker-${server.id}-${otherContainers > 0}`} open={otherContainers > 0}>
+        <summary><Icon name="chevronRight" size="xs" /><span>Docker</span><small>{docker?.available ? `${docker.containers.length} 个容器${otherContainers > 0 ? ` · ${otherContainers} 非运行` : ""}` : "不可用"}</small></summary>
+        <div className="overview-section-content">
+          {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有容器。</p> : <ul className="overview-container-list">
+            {docker.containers.map((container, index) => <li key={`${container.name}-${index}`}>
+              <div><span className={`container-dot ${container.state === "running" ? "container-dot-running" : ""}`} /><strong>{container.name}</strong><small>{container.state}</small></div>
+              <span>{container.image}</span><span>{container.status} · 重启 {container.restartCount} 次</span>
+            </li>)}
+          </ul>}
+        </div>
+      </details>
+
+      <RecentServerActivity serverId={server.id} />
+
+      <details className="overview-inspector-section overview-diagnostics" key={`diagnostics-${server.id}-${diagnosticsExpanded}`} open={diagnosticsExpanded}>
+        <summary><Icon name="chevronRight" size="xs" /><span>采集诊断</span><small>{reportedCollectors}/{COLLECTORS.length} · {diagnosticsLabel}</small></summary>
+        <div className="overview-section-content">
+          <p className="overview-diagnostics-description">{collection.description}</p>
+          <dl className="overview-properties">
+            <div><dt>数据来源</dt><dd>SSH 远端采集器</dd></div>
+            <div><dt>最后采集</dt><dd><time dateTime={snapshot.collectedAt}>{formatTimestamp(snapshot.collectedAt)}</time></dd></div>
+            <div><dt>更新频率</dt><dd>{connected ? "每 15 秒自动采集" : "连接后恢复自动采集"}</dd></div>
+            {!connected ? <div><dt>当前数据</dt><dd>缓存快照</dd></div> : null}
+          </dl>
+          <ul className="overview-collector-list">
+            {COLLECTORS.map((collector) => <CollectorRow key={collector.id} label={collector.label} sample={collection.sampleMap.get(collector.id)} />)}
             {(snapshot.collectors ?? [])
               .filter((sample) => !COLLECTORS.some((collector) => collector.id === normalizeCollectorId(sample.collectorId)))
-              .map((sample, index) => (
-                <li key={sample.collectorId + "-" + index}>
-                  <span>{sample.collectorId}</span>
-                  <span className={"overview-collector-state overview-collector-state-" + (sample.ok ? "success" : "failure")}>{sample.ok ? "成功" : "失败"}</span>
-                  <time dateTime={sample.collectedAt}>{formatTimestamp(sample.collectedAt)}</time>
-                </li>
-              ))}
+              .map((sample, index) => <CollectorRow key={`${sample.collectorId}-${index}`} label={sample.collectorId} sample={sample} />)}
           </ul>
-        </details>
-      </section>
-
-      <nav className="overview-shortcuts" aria-label="服务器运维入口">
-        <button type="button" className="button-primary" onClick={() => setPrimary("tasks")} aria-label={`在 ${server.name} 上创建任务`}><Icon name="agent" size="sm" />创建任务</button>
-        <button type="button" className="button-secondary" onClick={() => setServerPage("services")}><Icon name="services" size="sm" />查看服务</button>
-        <button type="button" className="button-secondary" onClick={() => setServerPage("logs")}><Icon name="logs" size="sm" />查看日志</button>
-        <button type="button" className="button-secondary" onClick={() => setServerPage("files")}><Icon name="file" size="sm" />浏览文件</button>
-        <button type="button" className="button-secondary" onClick={() => setServerPage("activity")}><Icon name="activity" size="sm" />活动记录</button>
-      </nav>
-
-      <dl className="server-facts">
-        <div><dt>区域</dt><dd>{server.metadata.region ?? "未设置"}</dd></div>
-        <div><dt>计算</dt><dd>{cpu?.cores === undefined ? "—" : `${cpu.cores} 核 CPU`}</dd></div>
-        <div><dt>内存</dt><dd>{formatBytes(memory?.totalBytes)}</dd></div>
-        <div><dt>运行时间</dt><dd>{formatUptime(uptime)}</dd></div>
-      </dl>
-
-      <section className="section-block">
-        <div className="section-heading">
-          <div><h2>系统健康</h2></div>
-          <span className="section-note">{connected ? "每 15 秒自动采集" : "连接后恢复自动采集"}</span>
         </div>
-        <div className="metric-grid">
-          <MetricCard label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} hint={`${cpu?.cores ?? "—"} 核处理器`} />
-          <MetricCard label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} hint={memory ? `${formatBytes(memory.usedBytes)} 已使用` : "采集器未返回数据"} />
-          <MetricCard label="磁盘" usage={diskUsage} thresholds={HEALTH_THRESHOLDS.disk} hint={disks.length ? `${disks.length} 个挂载点` : "未发现磁盘数据"} />
-        </div>
-      </section>
-
-      {health !== "healthy" ? (
-        <section className={`attention-panel attention-${health}`}>
-          <span className="attention-icon"><Icon name="warning" size="md" /></span>
-          <div><strong>{health === "critical" ? "需要立即关注" : "有资源接近阈值"}</strong><p>CPU、内存或磁盘至少一项已达到 {health === "critical" ? "严重" : "警告"} 阈值。</p></div>
-        </section>
-      ) : null}
-
-      <section className="split-sections">
-        <div className="section-block section-block-flex">
-          <div className="section-heading"><div><h2>Docker</h2></div><span className="section-note">{docker?.available ? `${docker.containers.length} 个容器` : "不可用"}</span></div>
-          {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有运行中的容器。</p> : (
-            <ul className="container-list">
-              {docker.containers.slice(0, 8).map((container, index) => (
-                <li key={`${container.name}-${index}`}><span className={`container-dot ${container.state === "running" ? "container-dot-running" : ""}`} /><span className="container-name">{container.name}</span><span className="container-meta">{container.image} · {container.status}</span></li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <RecentServerActivity serverId={server.id} />
-      </section>
+      </details>
     </div>
   );
+}
+
+function CollectorRow({ label, sample }: { label: string; sample?: CollectorSample }) {
+  const state = sample ? sample.ok ? "success" : "failure" : "unknown";
+  return <li>
+    <span>{label}</span><span className={`overview-collector-state overview-collector-state-${state}`}>{sample ? sample.ok ? "成功" : "失败" : "未报告"}</span>
+    {sample ? <time dateTime={sample.collectedAt}>{formatTimestamp(sample.collectedAt)}</time> : <small>本次快照无状态记录</small>}
+    {sample?.error ? <p className="overview-collector-error">{sample.error}</p> : null}
+  </li>;
 }
 
 function RecentServerActivity({ serverId }: { serverId: string }) {
@@ -443,11 +438,9 @@ function RecentServerActivity({ serverId }: { serverId: string }) {
 
   const rows = activities.data?.slice(0, 3) ?? [];
   return (
-    <div className="section-block section-block-flex">
-      <div className="section-heading">
-        <div><h2>最近动态</h2></div>
-        <button type="button" className="button-secondary" onClick={() => setServerPage("activity")}>全部活动</button>
-      </div>
+    <details className="overview-inspector-section">
+      <summary><Icon name="chevronRight" size="xs" /><span>最近动态</span><small>{activities.isLoading ? "读取中" : activities.isError ? "读取失败" : rows.length > 0 ? `最近 ${rows.length} 条` : "暂无动态"}</small></summary>
+      <div className="overview-section-content">
       {activities.isLoading ? <p className="muted-copy" role="status">正在读取服务器动态…</p> : null}
       {activities.isError ? <p className="error-copy" role="alert">无法读取服务器动态：{errorMessage(activities.error)}</p> : null}
       {!activities.isLoading && !activities.isError && rows.length === 0 ? <div className="activity-empty"><Icon name="activity" size="lg" /><p>暂无动态</p></div> : null}
@@ -458,7 +451,9 @@ function RecentServerActivity({ serverId }: { serverId: string }) {
           <time dateTime={activity.createdAt}>{formatTimestamp(activity.createdAt)}</time>
         </li>
       ))}</ul> : null}
-    </div>
+      <button type="button" className="overview-all-activity" onClick={() => setServerPage("activity")}>查看全部活动<Icon name="chevronRight" size="xs" /></button>
+      </div>
+    </details>
   );
 }
 
