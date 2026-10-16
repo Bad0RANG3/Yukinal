@@ -837,6 +837,28 @@ int main(int argc, char** argv) {
           "investigation_task_get should return the task, findings and active plan");
     check(!router.invoke("investigation_task_get", {{"taskId", "itask_missing"}}).ok,
           "investigation_task_get should report an unknown task");
+
+    const auto status_update = router.invoke(
+        "investigation_task_status_update",
+        {{"taskId", "itask_1"}, {"status", "waiting_user"}});
+    check(status_update.ok && status_update.value.at("task").at("status") == "waiting_user" &&
+              !status_update.value.at("task").contains("completedAt"),
+          "a non-terminal status update should clear the completion time");
+    const auto stopped_task =
+        router.invoke("investigation_task_stop", {{"taskId", "itask_1"}});
+    check(stopped_task.ok && stopped_task.value.at("task").at("status") == "stopped" &&
+              stopped_task.value.at("task").contains("completedAt"),
+          "investigation_task_stop should stop an active task and record completion");
+    const auto stopped_again =
+        router.invoke("investigation_task_stop", {{"taskId", "itask_1"}});
+    check(stopped_again.ok && stopped_again.value.at("task").at("status") == "stopped",
+          "stopping an already-stopped task should be idempotent");
+    check(!router.invoke("investigation_task_status_update",
+                         {{"taskId", "itask_1"}, {"status", "bogus"}})
+               .ok,
+          "investigation_task_status_update should reject an unknown status");
+    check(!router.invoke("investigation_task_stop", {{"taskId", "itask_missing"}}).ok,
+          "investigation_task_stop should report an unknown task");
   }
 
   sqlite3* readback = nullptr;

@@ -78,6 +78,11 @@ class DesktopDatabase {
       const std::optional<std::string>& status, int limit) const;
   [[nodiscard]] std::optional<nlohmann::json> get_investigation_task(
       const std::string& task_id) const;
+  [[nodiscard]] std::optional<nlohmann::json> set_investigation_task_status(
+      const std::string& task_id, const std::string& status,
+      const std::optional<std::string>& completed_at, const std::string& updated_at) const;
+  [[nodiscard]] std::optional<std::string> active_investigation_run_id(
+      const std::string& task_id) const;
   [[nodiscard]] nlohmann::json list_chat_sessions(
       const std::optional<std::string>& query, const std::optional<bool>& archived,
       int limit, int offset) const;

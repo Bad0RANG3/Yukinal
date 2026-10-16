@@ -1085,3 +1085,13 @@ inserts a task, a finding and an active plan and checks the decoded detail,
 the empty collections and the unknown-task case. Task create/start/stop/recover,
 schedules, retention and brief selection remain, as do the MCP HTTP transport
 and OAuth, the file transfer actions, installers, and real validation.
+
+Later on 2026-10-16, the C++ host added `investigation_task_status_update` and
+`investigation_task_stop`. A non-terminal status clears the completion time; a
+terminal one stamps it. Stop is idempotent, refuses a completed/failed/expired
+task, best-effort cancels the task's active Agent run through the sidecar, then
+persists the terminal state. `desktop_host_database_tests` covers the status
+write, the stop, its idempotence and the rejections. The remaining investigation
+commands (create/start/recover, schedules, retention, brief selection), the MCP
+HTTP transport and OAuth, the file transfer actions, installers, and real
+validation remain.

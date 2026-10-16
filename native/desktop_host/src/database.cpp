@@ -2108,6 +2108,52 @@ std::optional<nlohmann::json> DesktopDatabase::get_investigation_task(
   return detail;
 }
 
+std::optional<nlohmann::json> DesktopDatabase::set_investigation_task_status(
+    const std::string& task_id, const std::string& status,
+    const std::optional<std::string>& completed_at, const std::string& updated_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_tasks
+         SET status = ?2, completed_at = ?3, updated_at = ?4
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, update.get(), 1, task_id);
+  bind_text(connection_, update.get(), 2, status);
+  bind_optional_text(connection_, update.get(), 3, completed_at);
+  bind_text(connection_, update.get(), 4, updated_at);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+             permission_mode, automation_level, status, max_steps, max_run_ms,
+             max_attempts, created_by, phase, created_at, updated_at, completed_at,
+             active_run_id, last_failure, guardrails
+        FROM investigation_tasks
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, task_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_task(rows.get());
+}
+
+std::optional<std::string> DesktopDatabase::active_investigation_run_id(
+    const std::string& task_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, "SELECT active_run_id FROM investigation_tasks WHERE id = ?1");
+  bind_text(connection_, rows.get(), 1, task_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_column_type(rows.get(), 0) == SQLITE_NULL) return std::nullopt;
+  return std::string(column_text(rows.get(), 0));
+}
+
 nlohmann::json DesktopDatabase::list_chat_sessions(
     const std::optional<std::string>& query, const std::optional<bool>& archived,
     int limit, int offset) const {

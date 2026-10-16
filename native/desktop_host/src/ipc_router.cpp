@@ -761,6 +761,96 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     }
   }
 
+  if (method == "investigation_task_status_update") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    const std::set<std::string> fields = {"taskId", "status", "completedAt"};
+    if (!only_fields(params, fields, {"taskId", "status"}) ||
+        !params.at("taskId").is_string() || !params.at("status").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_task_status_update parameters are invalid");
+    }
+    const auto task_id = params.at("taskId").get<std::string>();
+    const auto status = params.at("status").get<std::string>();
+    if (task_id.empty() || task_id.size() > 256) {
+      return failure("INVALID_PARAMS", "investigation_task_status_update taskId is invalid");
+    }
+    if (!is_one_of(status, {"pending", "investigating", "waiting_user", "executing",
+                            "verifying", "completed", "failed", "stopped", "expired"})) {
+      return failure("INVALID_PARAMS", "investigation_task_status_update status is invalid");
+    }
+    std::optional<std::string> completed_at;
+    if (params.contains("completedAt")) {
+      if (!params.at("completedAt").is_string()) {
+        return failure("INVALID_PARAMS", "investigation_task_status_update completedAt is invalid");
+      }
+      completed_at = params.at("completedAt").get<std::string>();
+      if (completed_at->empty() || completed_at->size() > 80) {
+        return failure("INVALID_PARAMS", "investigation_task_status_update completedAt is invalid");
+      }
+    }
+    const auto now = iso8601_now();
+    const bool terminal = is_one_of(status, {"completed", "failed", "stopped", "expired"});
+    if (!terminal) {
+      completed_at = std::nullopt;
+    } else if (!completed_at.has_value()) {
+      completed_at = now;
+    }
+    try {
+      auto updated = database_->set_investigation_task_status(task_id, status, completed_at, now);
+      if (!updated.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+      return {true, {{"task", std::move(*updated)}}};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not update the task");
+    }
+  }
+
+  if (method == "investigation_task_stop") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"taskId"}, {"taskId"}) || !params.at("taskId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_task_stop requires exactly taskId");
+    }
+    const auto task_id = params.at("taskId").get<std::string>();
+    if (task_id.empty() || task_id.size() > 256) {
+      return failure("INVALID_PARAMS", "investigation_task_stop taskId is invalid");
+    }
+    std::optional<nlohmann::json> task;
+    try {
+      task = database_->get_investigation_task(task_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local investigation database could not read the task");
+    }
+    if (!task.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    const auto status = task->at("task").value("status", std::string());
+    if (status == "stopped") return {true, {{"task", task->at("task")}}};
+    if (is_one_of(status, {"completed", "failed", "expired"})) {
+      return failure("INVALID_STATE",
+                     "completed, failed, or expired investigation tasks cannot be stopped");
+    }
+    // Best-effort cancel of the durable Agent run; a missing or already-finished
+    // run is not an error, and the task state below is the authoritative stop.
+    try {
+      if (const auto run_id = database_->active_investigation_run_id(task_id);
+          run_id.has_value() && sidecar_ != nullptr && sidecar_->status().running) {
+        (void)ensure_sidecar().request("agent.run.stop", {{"runId", *run_id}},
+                                       std::chrono::seconds(15));
+      }
+    } catch (...) {
+    }
+    try {
+      const auto now = iso8601_now();
+      auto updated = database_->set_investigation_task_status(task_id, "stopped", now, now);
+      if (!updated.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+      return {true, {{"task", std::move(*updated)}}};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not stop the task");
+    }
+  }
+
   if (method == "core_ping") {
     if (!params.empty()) {
       return failure("INVALID_PARAMS", "core_ping does not accept parameters");

@@ -74,7 +74,8 @@
 - ✅ `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（原样转发，Python 拥有持久受理/停止/审批状态）；
 - `server_snapshot`、`server_services`、`server_logs` 的归一化部分；
 - ✅ `investigation_task_list`（只读：从 `investigation_tasks` 解码为共享 `InvestigationTask`，按 `status` 过滤 + `limit`）
-- ✅ `investigation_task_get`（只读：任务 + evidence/findings/artifacts/runs/steps 子集合，以及最新 decisionBrief 与活跃 plan）；其余 `investigation_*`（创建/启动/停止/恢复、schedule、retention、brief 选择）待做
+- ✅ `investigation_task_get`（只读：任务 + evidence/findings/artifacts/runs/steps 子集合，以及最新 decisionBrief 与活跃 plan）
+- ✅ `investigation_task_status_update`、`investigation_task_stop`（状态写入 + 完成时间；stop 幂等，并对 active run 尽力发 `agent.run.stop`）；`investigation_task_create`/`start`/`recover`、schedule、retention、brief 选择待做
 
 这些剩余命令已具备 C++ ↔ Python sidecar 桥，server 归一化与 `investigation_*` 仍需补 `host.tool.execute` 等 RPC。
 
@@ -149,7 +150,7 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（61）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`server_connect`、`server_disconnect`、`server_auth_respond`、`server_auth_cancel`、`terminal_open`、`terminal_write`、`terminal_resize`、`terminal_close`、`investigation_task_list`、`investigation_task_get`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`server_host_key_probe`、`server_host_key_trust`、`server_logs`、`server_services`、`server_snapshot`、`remote_file_list`、`remote_file_read`、`remote_file_preview`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`mcp_server_review`、`mcp_server_start`、`mcp_server_stop`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
+  - 已实现（63）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`server_connect`、`server_disconnect`、`server_auth_respond`、`server_auth_cancel`、`terminal_open`、`terminal_write`、`terminal_resize`、`terminal_close`、`investigation_task_list`、`investigation_task_get`、`investigation_task_status_update`、`investigation_task_stop`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`server_host_key_probe`、`server_host_key_trust`、`server_logs`、`server_services`、`server_snapshot`、`remote_file_list`、`remote_file_read`、`remote_file_preview`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`mcp_server_review`、`mcp_server_start`、`mcp_server_stop`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
   - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target` 与文件读/写/编辑目标已实现，MCP 进程目录、investigation 与其余 `host.tool.execute` 仍待补。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
