@@ -3,6 +3,8 @@
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 
+#include <httplib.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -13,9 +15,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -80,6 +84,142 @@ std::string effective_risk(const std::string& annotation_trust, const nlohmann::
   return "high";
 }
 
+// One Streamable HTTP endpoint split into the pieces httplib wants: an
+// origin (`scheme://host:port`) and the path to POST JSON-RPC frames to.
+struct HttpUrlParts {
+  std::string origin;
+  std::string path;
+};
+
+bool parse_http_url(const std::string& url, HttpUrlParts& out) {
+  const bool secure = url.rfind("https://", 0) == 0;
+  const bool plain = url.rfind("http://", 0) == 0;
+  if (!secure && !plain) return false;
+  const std::size_t base = secure ? 8 : 7;
+  const auto slash = url.find('/', base);
+  const std::string authority =
+      slash == std::string::npos ? url.substr(base) : url.substr(base, slash - base);
+  const std::string path = slash == std::string::npos ? std::string("/") : url.substr(slash);
+  if (authority.empty()) return false;
+  std::string host;
+  std::string port;
+  if (authority.front() == '[') {
+    const auto close = authority.find(']');
+    if (close == std::string::npos) return false;
+    host = authority.substr(0, close + 1);
+    if (close + 1 < authority.size()) {
+      if (authority.at(close + 1) != ':') return false;
+      port = authority.substr(close + 2);
+    }
+  } else {
+    const auto colon = authority.find(':');
+    if (colon == std::string::npos) {
+      host = authority;
+    } else {
+      host = authority.substr(0, colon);
+      port = authority.substr(colon + 1);
+    }
+  }
+  if (host.empty()) return false;
+  if (port.empty()) port = secure ? "443" : "80";
+  out.origin = (secure ? "https://" : "http://") + host + ":" + port;
+  out.path = path;
+  return true;
+}
+
+// Lower-case, trimmed media type without its parameters.
+std::string content_type_kind(std::string value) {
+  const auto semicolon = value.find(';');
+  if (semicolon != std::string::npos) value.resize(semicolon);
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    value.erase(value.begin());
+  }
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+    value.pop_back();
+  }
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char byte) {
+    return static_cast<char>(std::tolower(byte));
+  });
+  return value;
+}
+
+std::string truncate_text(std::string value, std::size_t limit) {
+  if (value.size() > limit) {
+    value.resize(limit);
+    value += "...";
+  }
+  return value;
+}
+
+// Decodes the `data:` payloads of one SSE body the way the Rust transport's
+// decoder did: comments ignored, `\r` stripped, multi-line data joined with
+// newlines, oversized events dropped.
+std::vector<std::string> decode_sse(const std::string& body) {
+  std::vector<std::string> events;
+  std::string data;
+  bool discarding = false;
+  const auto finish_line = [&](std::string line) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) {
+      if (!data.empty()) {
+        events.push_back(data);
+        data.clear();
+      }
+      discarding = false;
+      return;
+    }
+    if (discarding || line.front() == ':') return;
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) return;
+    if (line.compare(0, colon, "data") != 0) return;
+    std::string value = line.substr(colon + 1);
+    if (!value.empty() && value.front() == ' ') value.erase(value.begin());
+    if (data.size() + value.size() + 1 > kMaxFrameBytes) {
+      data.clear();
+      discarding = true;
+      return;
+    }
+    if (!data.empty()) data.push_back('\n');
+    data += value;
+  };
+  std::size_t start = 0;
+  for (std::size_t index = 0; index <= body.size(); ++index) {
+    if (index == body.size() || body.at(index) == '\n') {
+      finish_line(body.substr(start, index - start));
+      start = index + 1;
+      if (index == body.size()) break;
+    }
+  }
+  if (!discarding && !data.empty()) events.push_back(data);
+  return events;
+}
+
+// Finds the JSON-RPC response frame for `id` in one payload (or a batch),
+// returning whether it was found and, if so, its result or error text.
+bool take_json_response(const nlohmann::json& payload, long long id,
+                        nlohmann::json& result, std::string& error_message) {
+  if (payload.is_array()) {
+    for (const auto& frame : payload) {
+      if (take_json_response(frame, id, result, error_message)) return true;
+    }
+    return false;
+  }
+  if (!payload.is_object() || !payload.contains("id") ||
+      !payload.at("id").is_number_integer() || payload.at("id").get<long long>() != id) {
+    return false;
+  }
+  if (payload.contains("error")) {
+    const auto& error = payload.at("error");
+    error_message = error.is_object() && error.contains("message") &&
+                            error.at("message").is_string()
+                        ? error.at("message").get<std::string>()
+                        : std::string("the MCP server rejected the request");
+    return true;
+  }
+  result = payload.value("result", nlohmann::json());
+  return true;
+}
+
 }  // namespace
 
 struct McpSupervisor::Impl {
@@ -109,6 +249,14 @@ struct McpSupervisor::Impl {
     std::string server_version;
     nlohmann::json tools = nlohmann::json::array();
     std::vector<std::string> stderr_tail;
+    // "stdio" (a child process) or "http" (one Streamable HTTP endpoint). The
+    // process fields below are unused for HTTP sessions.
+    std::string transport = "stdio";
+    std::string http_origin;
+    std::string http_path;
+    std::vector<std::pair<std::string, std::string>> http_headers;
+    std::string http_session_id;
+    std::vector<std::string> diagnostics;
 #ifdef _WIN32
     HANDLE process = nullptr;
     HANDLE stdin_write = nullptr;
@@ -306,8 +454,135 @@ struct McpSupervisor::Impl {
 #endif
   }
 
+  nlohmann::json http_send(const std::shared_ptr<Session>& session, const nlohmann::json& frame,
+                           std::optional<long long> wait_for, int timeout_seconds) {
+    httplib::Client client(session->http_origin);
+    client.set_connection_timeout(10, 0);
+    client.set_read_timeout(timeout_seconds, 0);
+    client.set_write_timeout(timeout_seconds, 0);
+    client.set_follow_location(false);
+    const auto body = frame.dump();
+    if (body.size() > kMaxFrameBytes) {
+      throw std::runtime_error("the MCP HTTP frame exceeds the size limit");
+    }
+    auto response =
+        client.Post(session->http_path, http_headers_for(session), body, "application/json");
+    if (!response) {
+      throw std::runtime_error("the MCP HTTP request failed: " +
+                               httplib::to_string(response.error()));
+    }
+    const auto returned_session = response->get_header_value("Mcp-Session-Id");
+    if (!returned_session.empty()) {
+      if (returned_session.size() > 1024 ||
+          returned_session.find_first_of("\r\n") != std::string::npos) {
+        throw std::runtime_error("the MCP server returned an invalid Mcp-Session-Id");
+      }
+      std::lock_guard lock(session->mutex);
+      session->http_session_id = returned_session;
+    }
+    const auto status = response->status;
+    if (status == 404 && !session->http_session_id.empty()) {
+      {
+        std::lock_guard lock(session->mutex);
+        session->running = false;
+      }
+      throw std::runtime_error("HTTP 404: the MCP session is no longer known");
+    }
+    if (status < 200 || status >= 300) {
+      throw std::runtime_error("HTTP " + std::to_string(status) + ": " +
+                               truncate_text(response->body, 2000));
+    }
+    if (status == 202 || status == 204) return nlohmann::json();
+    const auto kind = content_type_kind(response->get_header_value("Content-Type"));
+    if (kind.empty() && !wait_for.has_value()) return nlohmann::json();
+    if (kind == "text/event-stream" || (kind.empty() && wait_for.has_value())) {
+      if (!wait_for.has_value()) return nlohmann::json();
+      for (const auto& event : decode_sse(response->body)) {
+        auto parsed = nlohmann::json::parse(event, nullptr, false);
+        if (parsed.is_discarded()) continue;
+        nlohmann::json result;
+        std::string error_message;
+        if (take_json_response(parsed, *wait_for, result, error_message)) {
+          if (!error_message.empty()) throw std::runtime_error(error_message);
+          return result;
+        }
+      }
+      throw std::runtime_error("the MCP server did not answer over the event stream");
+    }
+    if (kind == "application/json") {
+      auto parsed = nlohmann::json::parse(response->body, nullptr, false);
+      if (parsed.is_discarded()) {
+        throw std::runtime_error("the MCP server returned invalid JSON");
+      }
+      if (!wait_for.has_value()) return nlohmann::json();
+      nlohmann::json result;
+      std::string error_message;
+      if (!take_json_response(parsed, *wait_for, result, error_message)) {
+        throw std::runtime_error("the MCP server answered an unexpected request id");
+      }
+      if (!error_message.empty()) throw std::runtime_error(error_message);
+      return result;
+    }
+    throw std::runtime_error("the MCP HTTP response has unsupported content type \"" + kind +
+                             "\"");
+  }
+
+  // Applies the static auth headers plus the negotiated session and protocol
+  // headers to one HTTP request.
+  httplib::Headers http_headers_for(const std::shared_ptr<Session>& session) const {
+    httplib::Headers headers = {{"Accept", "application/json, text/event-stream"}};
+    for (const auto& [name, value] : session->http_headers) headers.emplace(name, value);
+    std::string session_id;
+    std::string protocol_version;
+    {
+      std::lock_guard lock(session->mutex);
+      session_id = session->http_session_id;
+      protocol_version = session->protocol_version;
+    }
+    if (!session_id.empty()) headers.emplace("Mcp-Session-Id", session_id);
+    if (!protocol_version.empty()) headers.emplace("Mcp-Protocol-Version", protocol_version);
+    return headers;
+  }
+
+  nlohmann::json http_request(const std::shared_ptr<Session>& session, const std::string& method,
+                              const nlohmann::json& params, int timeout_seconds) {
+    long long id = 0;
+    {
+      std::lock_guard lock(session->mutex);
+      if (!session->running) throw std::runtime_error("the MCP server is not running");
+      id = session->next_id++;
+    }
+    return http_send(session,
+                     {{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}},
+                     id, timeout_seconds);
+  }
+
+  void delete_http_session(const std::shared_ptr<Session>& session) {
+    std::string session_id;
+    {
+      std::lock_guard lock(session->mutex);
+      session_id = session->http_session_id;
+    }
+    if (session_id.empty()) return;
+    httplib::Client client(session->http_origin);
+    client.set_connection_timeout(10, 0);
+    client.set_read_timeout(2, 0);
+    client.set_write_timeout(2, 0);
+    client.set_follow_location(false);
+    auto response = client.Delete(session->http_path, http_headers_for(session));
+    if (!response) return;
+    const auto status = response->status;
+    if ((status >= 200 && status < 300) || status == 405 || status == 404) {
+      std::lock_guard lock(session->mutex);
+      session->http_session_id.clear();
+    }
+  }
+
   nlohmann::json request(const std::shared_ptr<Session>& session, const std::string& method,
                          const nlohmann::json& params, int timeout_seconds) {
+    if (session->transport == "http") {
+      return http_request(session, method, params, timeout_seconds);
+    }
     auto pending = std::make_shared<Pending>();
     long long id = 0;
     {
@@ -333,6 +608,12 @@ struct McpSupervisor::Impl {
   }
 
   void notify(const std::shared_ptr<Session>& session, const std::string& method) {
+    if (session->transport == "http") {
+      http_send(session,
+                {{"jsonrpc", "2.0"}, {"method", method}, {"params", nlohmann::json::object()}},
+                std::nullopt, 20);
+      return;
+    }
     write_line(session, {{"jsonrpc", "2.0"}, {"method", method}});
   }
 
@@ -353,6 +634,19 @@ struct McpSupervisor::Impl {
 
   void shutdown(const std::shared_ptr<Session>& session) {
     if (!session) return;
+    if (session->transport == "http") {
+      const bool was_running = session->running;
+      session->running = false;
+      if (was_running) {
+        try {
+          delete_http_session(session);
+        } catch (const std::exception&) {
+          // A server that will not terminate the session cleanly is not an error
+          // on shutdown; the process is going away either way.
+        }
+      }
+      return;
+    }
     close_stdin(session);
 #ifdef _WIN32
     if (session->process != nullptr) {
@@ -506,10 +800,95 @@ struct McpSupervisor::Impl {
 #endif
   }
 
+  // Performs the initialize handshake and the paginated tools/list walk for a
+  // session, whatever its transport (request/notify dispatch on `transport`).
+  void handshake_and_list(const std::shared_ptr<Session>& session) {
+    const auto initialized = request(
+        session, "initialize",
+        {{"protocolVersion", kProtocolVersion},
+         {"capabilities", nlohmann::json::object()},
+         {"clientInfo", {{"name", kClientName}, {"version", kClientVersion}}}},
+        20);
+    session->protocol_version = initialized.value("protocolVersion", std::string());
+    if (initialized.contains("serverInfo") && initialized.at("serverInfo").is_object()) {
+      session->server_name = initialized.at("serverInfo").value("name", std::string());
+      session->server_version = initialized.at("serverInfo").value("version", std::string());
+    }
+    notify(session, "notifications/initialized");
+    session->tools = nlohmann::json::array();
+    std::string cursor;
+    for (int page = 0; page < 100; ++page) {
+      nlohmann::json list_params = nlohmann::json::object();
+      if (!cursor.empty()) list_params["cursor"] = cursor;
+      const auto listed = request(session, "tools/list", list_params, 20);
+      if (listed.is_object() && listed.contains("tools") && listed.at("tools").is_array()) {
+        for (const auto& tool : listed.at("tools")) session->tools.push_back(tool);
+        if (session->tools.size() > 10000) {
+          throw std::runtime_error("the MCP server exposed too many tools");
+        }
+      }
+      std::string next;
+      if (listed.is_object() && listed.contains("nextCursor") &&
+          listed.at("nextCursor").is_string()) {
+        next = listed.at("nextCursor").get<std::string>();
+      }
+      if (next.empty()) break;
+      cursor = next;
+    }
+  }
+
+  std::shared_ptr<Session> start_http_server(const nlohmann::json& row) {
+    const auto server_id = row.value("id", std::string());
+    const auto url = row.value("url", std::string());
+    HttpUrlParts parts;
+    if (!parse_http_url(url, parts)) {
+      throw std::runtime_error("the MCP HTTP url is invalid");
+    }
+    auto session = std::make_shared<Session>();
+    session->server_id = server_id;
+    session->segment = sanitize_segment(server_id);
+    session->label = row.value("label", server_id);
+    session->annotation_trust = row.value("annotationTrust", std::string("none"));
+    session->allowed_tools = row.value("allowedTools", nlohmann::json::array());
+    session->transport = "http";
+    session->http_origin = parts.origin;
+    session->http_path = parts.path;
+    session->running = true;
+    // Static auth headers: the reference is resolved against the OS credential
+    // store, so the plaintext never leaves it. A missing secret is not fatal;
+    // the server's own 401 is the real answer.
+    for (const auto& header : row.value("httpAuthHeaders", nlohmann::json::array())) {
+      if (!header.is_object()) continue;
+      const auto name = header.value("name", std::string());
+      const auto reference = header.value("credentialRef", std::string());
+      if (name.empty() || reference.empty()) continue;
+      try {
+        const auto secret = credentials->get(CredentialReference::parse(reference));
+        std::string value(reinterpret_cast<const char*>(secret.data()), secret.size());
+        session->http_headers.emplace_back(name, std::move(value));
+      } catch (const std::exception&) {
+        continue;
+      }
+    }
+    try {
+      handshake_and_list(session);
+    } catch (...) {
+      session->running = false;
+      throw;
+    }
+    {
+      std::lock_guard lock(mutex);
+      sessions[server_id] = session;
+    }
+    return session;
+  }
+
   std::shared_ptr<Session> start_server(const nlohmann::json& row) {
     const auto server_id = row.value("id", std::string());
-    if (row.value("transport", std::string()) != "stdio") {
-      throw std::runtime_error("only stdio MCP servers are supported by this host yet");
+    const auto transport = row.value("transport", std::string());
+    if (transport == "http") return start_http_server(row);
+    if (transport != "stdio") {
+      throw std::runtime_error("the MCP server has an unsupported transport");
     }
     const auto command = row.value("command", std::string());
     if (command.empty()) throw std::runtime_error("the MCP server has no command");
@@ -525,38 +904,7 @@ struct McpSupervisor::Impl {
     session->reader = std::thread([this, session] { reader_loop(session); });
     session->stderr_reader = std::thread([this, session] { stderr_loop(session); });
     try {
-      const auto initialized = request(
-          session, "initialize",
-          {{"protocolVersion", kProtocolVersion},
-           {"capabilities", nlohmann::json::object()},
-           {"clientInfo", {{"name", kClientName}, {"version", kClientVersion}}}},
-          20);
-      session->protocol_version = initialized.value("protocolVersion", std::string());
-      if (initialized.contains("serverInfo") && initialized.at("serverInfo").is_object()) {
-        session->server_name = initialized.at("serverInfo").value("name", std::string());
-        session->server_version = initialized.at("serverInfo").value("version", std::string());
-      }
-      notify(session, "notifications/initialized");
-      session->tools = nlohmann::json::array();
-      std::string cursor;
-      for (int page = 0; page < 100; ++page) {
-        nlohmann::json list_params = nlohmann::json::object();
-        if (!cursor.empty()) list_params["cursor"] = cursor;
-        const auto listed = request(session, "tools/list", list_params, 20);
-        if (listed.is_object() && listed.contains("tools") && listed.at("tools").is_array()) {
-          for (const auto& tool : listed.at("tools")) session->tools.push_back(tool);
-          if (session->tools.size() > 10000) {
-            throw std::runtime_error("the MCP server exposed too many tools");
-          }
-        }
-        std::string next;
-        if (listed.is_object() && listed.contains("nextCursor") &&
-            listed.at("nextCursor").is_string()) {
-          next = listed.at("nextCursor").get<std::string>();
-        }
-        if (next.empty()) break;
-        cursor = next;
-      }
+      handshake_and_list(session);
     } catch (...) {
       shutdown(session);
       throw;
@@ -608,7 +956,7 @@ struct McpSupervisor::Impl {
                                   : nlohmann::json(session->server_version)},
             {"toolCount", session->tools.size()},
             {"stderrTail", session->stderr_tail},
-            {"diagnostics", nlohmann::json::array()}};
+            {"diagnostics", session->diagnostics}};
   }
 };
 

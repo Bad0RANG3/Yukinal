@@ -75,7 +75,9 @@
 - `server_snapshot`、`server_services`、`server_logs` 的归一化部分；
 - ✅ `investigation_task_list`（只读：从 `investigation_tasks` 解码为共享 `InvestigationTask`，按 `status` 过滤 + `limit`）
 - ✅ `investigation_task_get`（只读：任务 + evidence/findings/artifacts/runs/steps 子集合，以及最新 decisionBrief 与活跃 plan）
-- ✅ `investigation_task_status_update`、`investigation_task_stop`（状态写入 + 完成时间；stop 幂等，并对 active run 尽力发 `agent.run.stop`）；`investigation_task_create`/`start`/`recover`、schedule、retention、brief 选择待做
+- ✅ `investigation_task_status_update`、`investigation_task_stop`（状态写入 + 完成时间；stop 幂等，并对 active run 尽力发 `agent.run.stop`）
+- ✅ investigation 写入组：`investigation_task_create`、`investigation_task_start`（构造 prompt 并走 sidecar `agent.run.start`、写 `investigation_runs` 绑定）、`investigation_task_recover`、`investigation_brief_select`、`investigation_retention_preview`/`prune`、`investigation_schedule_list`/`runs`/`create`/`update`/`tick`
+- ✅ 对应 host RPC：`host.investigation.plan.record`/`check`/`step_result`、`evidence.record`/`fetch`/`search`/`correlate`/`compare`、`finding.record`、`brief.record`、`artifact.record`、`retention.preview`、`filesystem_backup.register`/`restored`/`deleted`、`host.filesystem.backup.list_query`/`retention_scan`、`host.context.fetch`、`host.ssh.filesystem_backup_target`/`restore_target`/`cleanup_target`，以及 `host_tool_calls` 账本（幂等 + 重放缓存 + fingerprint）
 
 这些剩余命令已具备 C++ ↔ Python sidecar 桥，server 归一化与 `investigation_*` 仍需补 `host.tool.execute` 等 RPC。
 
@@ -84,9 +86,9 @@
 - ✅ `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（Python sidecar 生命周期）
 - ✅ `mcp_server_list`、`mcp_server_save`、`mcp_server_delete`（`mcp_servers` 表 CRUD + 静态 HTTP 认证头 secret 进 OS 凭据库；OAuth 尚未支持，保存时明确拒绝）
 - ✅ `mcp_server_review`（写回 `allowedTools`/`trustLevel`/`annotationTrust`；只暴露已审核的工具）
-- ✅ `mcp_server_start`、`mcp_server_stop`（`native/desktop_host/src/desktop_mcp.cpp`：按需派生 stdio MCP 子进程，`initialize` 握手 + `notifications/initialized` + `tools/list`，进程常驻供调用；仅支持 stdio，HTTP/OAuth 待做）
+- ✅ `mcp_server_start`、`mcp_server_stop`（`native/desktop_host/src/desktop_mcp.cpp`：stdio 按需派生 MCP 子进程；Streamable HTTP 用 `httplib` POST JSON-RPC、识别 `Mcp-Session-Id`/`Mcp-Protocol-Version`、解析 JSON 或 SSE 响应、shutdown 时 DELETE 会话；两条传输都走 `initialize` 握手 + `notifications/initialized` + `tools/list`，静态认证头 secret 从 OS 凭据库解析；OAuth/DPoP 与 GET 长连事件流待做）
 - ✅ `host.mcp.catalog`（对启用且已审核的服务器起进程、按 `allowedTools` 过滤、按 `annotationTrust`+注解算风险；`host.tool.execute` 的 `mcp.*` 分支已接 `tools/call`）
-- `mcp_oauth_connect`、`mcp_oauth_cancel`（OAuth 与 HTTP 传输待做）
+- `mcp_oauth_connect`、`mcp_oauth_cancel`（OAuth 与 DPoP 待做；HTTP 传输已实现）
 
 ---
 

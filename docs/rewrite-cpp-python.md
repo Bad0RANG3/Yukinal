@@ -1095,3 +1095,43 @@ write, the stop, its idempotence and the rejections. The remaining investigation
 commands (create/start/recover, schedules, retention, brief selection), the MCP
 HTTP transport and OAuth, the file transfer actions, installers, and real
 validation remain.
+
+Later on 2026-10-17, the C++ host finished the investigation write path and the
+host-side investigation/evidence/context RPCs the Agent needs: `investigation_task_create`,
+`investigation_task_start` (builds the autonomous prompt and starts the Agent run
+through the sidecar, binding it to a new `investigation_runs` row),
+`investigation_task_recover`, `investigation_brief_select`,
+`investigation_retention_preview`/`prune`, and the schedule
+`list`/`runs`/`create`/`update`/`tick` commands; plus
+`host.investigation.plan.record`/`check`/`step_result`,
+`evidence.record`/`fetch`/`search`/`correlate`/`compare`, `finding.record`,
+`brief.record`, `artifact.record`, `retention.preview`,
+`filesystem_backup.register`/`restored`/`deleted`,
+`host.filesystem.backup.list_query`/`retention_scan`, `host.context.fetch`, the
+SSH filesystem backup/restore/cleanup targets, and the `host_tool_calls` ledger
+(idempotent claim/finish, bounded in-memory replay cache, canonical-JSON
+fingerprints). Each landed as its own commit; the canonical `native/build-nmake`
+Release build passed all twelve CTest targets and `pnpm check` was green after
+each. The MCP `tools/list`/`host.tool.execute` non-MCP branch, OAuth, the file
+transfer actions, installers, and real SSH/MCP validation remain.
+
+Later on 2026-10-17, the C++ MCP supervisor gained the Streamable HTTP transport.
+`native/desktop_host/src/desktop_mcp.cpp` now starts an `http`-transport server
+without spawning a process: it POSTs each JSON-RPC frame with
+`Accept: application/json, text/event-stream`, captures and replays
+`Mcp-Session-Id`, sends `Mcp-Protocol-Version` after the handshake, accepts either
+a JSON or an SSE (`data:` lines) response for one request, terminates the session
+with `DELETE` on shutdown, and resolves the server's static `httpAuthHeaders`
+secrets from the OS credential store so no plaintext is stored in the database.
+`Yukinal`'s `yukinal_desktop_host_core` links the same `httplib` as the in-process
+SSH core and gates `CPPHTTPLIB_OPENSSL_SUPPORT` on `YUKINAL_BUILD_SSH_SERVICE` so
+both translation units agree on one httplib ABI. `desktop_host_database_tests`
+now runs a loopback `httplib::Server` that answers `initialize` over JSON,
+`tools/list` over SSE and `tools/call` over JSON, requires the static
+`Authorization` header and the issued session id on follow-up requests, and
+verifies the catalog (`mcp.mcp_http_mock.echo`, `risk: low`), a tool call, and the
+`DELETE` on stop. The canonical `native/build-nmake` Release build passed all
+twelve CTest targets and `pnpm check` was green. OAuth and DPoP, the optional
+long-lived GET event stream, MCP call cancellation, the `host.tool.execute`
+non-MCP branch, the file transfer actions, installers, and real SSH/MCP
+validation remain.

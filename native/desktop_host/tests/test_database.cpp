@@ -5,6 +5,9 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "schema_migrations.hpp"
 
+#include <httplib.h>
+
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +17,7 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -775,6 +779,132 @@ int main(int argc, char** argv) {
       check(unreviewed_rejected,
             "a tool that was not reviewed must not be callable even if the server lists it");
       supervisor.stop("mcp_mock");
+      // The stdio server row stays in the database; disable it so the HTTP
+      // catalog below only starts the server it is testing.
+      auto stdio_row = database.get_mcp_server("mcp_mock").value();
+      stdio_row["enabled"] = false;
+      database.upsert_mcp_server(stdio_row);
+    }
+
+    // MCP Streamable HTTP transport: one loopback httplib server answers the
+    // handshake over JSON, tools/list over an SSE stream, and tools/call over
+    // JSON, and requires both the static Authorization header and the issued
+    // session id on every follow-up request.
+    {
+      httplib::Server http_mcp;
+      std::atomic<bool> saw_session{false};
+      std::atomic<bool> saw_delete{false};
+      http_mcp.Delete("/mcp", [&](const httplib::Request& request, httplib::Response& response) {
+        if (request.get_header_value("Authorization") != "Bearer s3cret") {
+          response.status = 401;
+          return;
+        }
+        if (request.get_header_value("Mcp-Session-Id") == "sess-http-1") saw_delete = true;
+        response.status = 200;
+      });
+      http_mcp.Post("/mcp", [&](const httplib::Request& request, httplib::Response& response) {
+        if (request.get_header_value("Authorization") != "Bearer s3cret") {
+          response.status = 401;
+          return;
+        }
+        auto frame = nlohmann::json::parse(request.body, nullptr, false);
+        if (frame.is_discarded() || !frame.is_object()) {
+          response.status = 400;
+          return;
+        }
+        const auto method = frame.value("method", std::string());
+        response.set_header("Mcp-Session-Id", "sess-http-1");
+        if (method == "initialize") {
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"protocolVersion", "2024-11-05"},
+                               {"capabilities", nlohmann::json::object()},
+                               {"serverInfo", {{"name", "http-mock"}, {"version", "1.0"}}}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        if (method == "notifications/initialized") {
+          response.status = 202;
+          return;
+        }
+        if (!frame.contains("id")) {
+          response.status = 400;
+          return;
+        }
+        if (request.get_header_value("Mcp-Session-Id") == "sess-http-1") saw_session = true;
+        if (method == "tools/list") {
+          // Answer over SSE so the transport's event-stream decoding is covered.
+          const auto reply =
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"tools", nlohmann::json::array({nlohmann::json{
+                                             {"name", "echo"},
+                                             {"description", "Echo a value"},
+                                             {"inputSchema", {{"type", "object"}}},
+                                             {"annotations", {{"readOnlyHint", true}}}}})}}}}
+                  .dump();
+          response.set_content("data: " + reply + "\n\n", "text/event-stream");
+          return;
+        }
+        if (method == "tools/call") {
+          const auto name = frame.at("params").value("name", std::string());
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"content", nlohmann::json::array({nlohmann::json{
+                                                 {"type", "text"}, {"text", "http:" + name}}})},
+                               {"isError", false}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        response.status = 400;
+      });
+      const int http_port = http_mcp.bind_to_any_port("127.0.0.1");
+      check(http_port > 0, "the MCP HTTP mock could not bind a loopback port");
+      std::thread http_mock_thread([&http_mcp] { http_mcp.listen_after_bind(); });
+      http_mcp.wait_until_ready();
+      const auto header_reference =
+          mcp_credentials
+              .set("mcp", "mcp-header-test", yukinal::desktop_host::Secret{"Bearer s3cret"})
+              .to_string();
+      database.upsert_mcp_server(
+          {{"id", "mcp_http_mock"},
+           {"label", "HTTP Mock"},
+           {"transport", "http"},
+           {"url", "http://127.0.0.1:" + std::to_string(http_port) + "/mcp"},
+           {"enabled", true},
+           {"allowedTools", nlohmann::json::array({"echo"})},
+           {"trustLevel", "reviewed"},
+           {"annotationTrust", "trusted"},
+           {"httpAuthHeaders",
+            nlohmann::json::array({nlohmann::json{{"name", "Authorization"},
+                                                  {"credentialRef", header_reference}}})}});
+      yukinal::desktop_host::McpSupervisor http_supervisor(&database, &mcp_credentials);
+      const auto http_catalog = http_supervisor.catalog();
+      check(http_catalog.at("servers").size() == 1 &&
+                http_catalog.at("servers").at(0).at("serverId") == "mcp_http_mock" &&
+                http_catalog.at("servers").at(0).at("tools").size() == 1 &&
+                http_catalog.at("servers").at(0).at("tools").at(0).at("name") ==
+                    "mcp.mcp_http_mock.echo",
+            "the HTTP MCP catalog should expose the reviewed tool over SSE");
+      check(http_catalog.at("servers").at(0).at("tools").at(0).at("risk") == "low",
+            "a reviewed read-only HTTP MCP tool should be low risk");
+      check(saw_session.load(), "the HTTP MCP session must carry the issued Mcp-Session-Id");
+      const auto http_output =
+          http_supervisor.call("mcp.mcp_http_mock.echo", nlohmann::json::object());
+      check(http_output.at("serverId") == "mcp_http_mock" &&
+                http_output.at("isError") == false && http_output.at("text") == "http:echo",
+            "the HTTP MCP tool call should return its content");
+      http_supervisor.stop("mcp_http_mock");
+      check(saw_delete.load(), "stopping an HTTP MCP server should terminate its session");
+      http_mcp.stop();
+      http_mock_thread.join();
     }
 
     // Investigation task list: host-owned rows decode into the shared contract.
