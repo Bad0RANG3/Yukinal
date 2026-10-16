@@ -42,6 +42,7 @@ class IpcRouter {
                             const nlohmann::json& params);
   IpcReply agent_command(const std::string& method, const nlohmann::json& params);
   IpcReply agent_run_command(const std::string& method, const nlohmann::json& params);
+  IpcReply mcp_command(const std::string& method, const nlohmann::json& params);
   IpcReply provider_command(const std::string& method, const nlohmann::json& params);
   [[nodiscard]] nlohmann::json handle_host_request(const std::string& method,
                                                    const nlohmann::json& params);

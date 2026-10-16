@@ -77,8 +77,9 @@
 
 ### D. 进程监管与 MCP
 
-- `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（Python sidecar 生命周期）
-- `mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`mcp_server_start`、`mcp_server_stop`、`mcp_server_review`、`mcp_oauth_connect`、`mcp_oauth_cancel`
+- ✅ `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（Python sidecar 生命周期）
+- ✅ `mcp_server_list`、`mcp_server_save`、`mcp_server_delete`（`mcp_servers` 表 CRUD + 静态 HTTP 认证头 secret 进 OS 凭据库；OAuth 尚未支持，保存时明确拒绝）
+- `mcp_server_start`、`mcp_server_stop`、`mcp_server_review`、`mcp_oauth_connect`、`mcp_oauth_cancel`（依赖 MCP 进程监管/McpSupervisor 与 OAuth 流程）
 
 ---
 
@@ -142,9 +143,9 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（37）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
+  - 已实现（40）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
-  - Provider 六个命令、`agent_spawn/status/kill/logs` 与 `agent_run_*`/`agent_approval_respond` 已经走桥；MCP 与 investigation 仍待转发。
+  - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target` 与文件读/写/编辑目标已实现，MCP 进程目录、investigation 与其余 `host.tool.execute` 仍待补。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
 - [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。

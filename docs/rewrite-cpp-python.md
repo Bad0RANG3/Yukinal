@@ -927,3 +927,21 @@ case, while `desktop_host_tests` covers the parameter validation. The canonical
 `native/build-nmake` Release build passed all twelve CTest targets (including the
 merged `window_context_tests`), and `pnpm check` was green. `emit_local_drop`, the
 remaining host RPCs, and MCP/investigation forwarding remain.
+
+On 2026-10-16, the C++ desktop host gained its SSH target resolver and MCP server
+settings. `native/desktop_host/src/desktop_target.cpp` turns a saved server plus
+its identity, OS-credential secret, host-key pin or CA, and proxy route into the
+one-target `{target, credentials}` payload the Python Agent hands to the C++ SSH
+service (`host.ssh.service_target`), plus the Agent file variants
+(`host.ssh.filesystem_read_target`/`write`/`edit`) with the retired Rust path
+policy: absolute bounded paths, a credential/process-secret blocklist, a
+64-hex revision shape, and 512 KiB write/edit caps. Secret values travel only in
+the `credentials` map. Separately, `mcp_server_list`, `mcp_server_save`, and
+`mcp_server_delete` now read and write the `mcp_servers` table; static HTTP auth
+header secrets enter the OS credential store and are reclaimed on delete, while
+OAuth is explicitly refused until the MCP supervisor lands. `desktop_host_database_tests`
+covers the resolver payloads, the path-policy rejections, and the MCP CRUD
+round trip. The canonical `native/build-nmake` Release build passed all twelve
+CTest targets. The in-process SSH commands (`server_logs`/`snapshot`/`services`),
+MCP supervision and catalog, `host.tool.execute`, investigation, and installer
+work remain; real SSH validation is blocked because the test host is filtered.

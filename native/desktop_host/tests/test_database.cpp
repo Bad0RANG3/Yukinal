@@ -543,6 +543,82 @@ int main() {
       bad_revision_rejected = true;
     }
     check(bad_revision_rejected, "a malformed edit revision must be refused");
+
+    // MCP server settings: list/save/delete with write-only static header secrets.
+    MemoryCredentialStore mcp_credentials;
+    yukinal::desktop_host::IpcRouter mcp_router(&database, &mcp_credentials);
+    const auto empty_mcp = mcp_router.invoke("mcp_server_list", nlohmann::json::object());
+    check(empty_mcp.ok && empty_mcp.value.at("servers").empty(),
+          "mcp_server_list should start empty");
+
+    nlohmann::json header = {{"name", "Authorization"}, {"secret", "Bearer super-secret"}};
+    nlohmann::json stdio_input = {{"id", "ops-tools"},
+                                  {"label", "Ops tools"},
+                                  {"transport", "stdio"},
+                                  {"command", "npx"},
+                                  {"args", nlohmann::json::array({"-y", "ops-mcp"})},
+                                  {"enabled", true},
+                                  {"httpAuthHeaders", nlohmann::json::array({header})}};
+    nlohmann::json save_params = {{"input", stdio_input}};
+    const auto saved_mcp = mcp_router.invoke("mcp_server_save", save_params);
+    check(saved_mcp.ok, "mcp_server_save should accept a stdio server");
+    check(saved_mcp.value.at("config").at("id") == "ops-tools" &&
+              saved_mcp.value.at("status").at("running") == false &&
+              !saved_mcp.value.contains("unavailable"),
+          "a saved enabled MCP server should be returned available and not running");
+    check(saved_mcp.value.dump().find("super-secret") == std::string::npos,
+          "the header secret must never be returned");
+    check(mcp_credentials.size() == 1,
+          "the header secret should live in the credential store");
+    const auto& saved_header = saved_mcp.value.at("config").at("httpAuthHeaders").at(0);
+    check(saved_header.at("credentialRef").is_string() &&
+              !saved_header.at("credentialRef").get<std::string>().empty(),
+          "the header should carry a credential reference, not the value");
+
+    const auto listed_mcp = mcp_router.invoke("mcp_server_list", nlohmann::json::object());
+    check(listed_mcp.ok && listed_mcp.value.at("servers").size() == 1,
+          "mcp_server_list should return the saved server");
+
+    nlohmann::json disabled_input = {{"id", "ops-tools"},
+                                     {"label", "Ops tools"},
+                                     {"transport", "stdio"},
+                                     {"command", "npx"},
+                                     {"enabled", false}};
+    const auto disabled_mcp =
+        mcp_router.invoke("mcp_server_save", {{"input", disabled_input}});
+    check(disabled_mcp.ok && disabled_mcp.value.at("unavailable").at("code") == "disabled",
+          "a disabled MCP server should report the disabled reason");
+    check(mcp_credentials.size() == 1,
+          "a save without a new secret must preserve the stored header credential");
+
+    nlohmann::json bad_input = {{"id", "bad"},
+                                {"label", "Bad"},
+                                {"transport", "carrier-pigeon"},
+                                {"enabled", true}};
+    check(!mcp_router.invoke("mcp_server_save", {{"input", bad_input}}).ok,
+          "an unknown MCP transport must be refused");
+
+    nlohmann::json oauth_input = {{"id", "oauth"},
+                                  {"label", "OAuth"},
+                                  {"transport", "http"},
+                                  {"url", "https://example.test/mcp"},
+                                  {"enabled", true},
+                                  {"oauth",
+                                   {{"issuer", "https://example.test"},
+                                    {"clientId", ""},
+                                    {"scopes", nlohmann::json::array()}}}};
+    check(!mcp_router.invoke("mcp_server_save", {{"input", oauth_input}}).ok,
+          "OAuth MCP servers are not supported by this host yet");
+
+    const auto deleted_mcp =
+        mcp_router.invoke("mcp_server_delete", {{"serverId", "ops-tools"}});
+    check(deleted_mcp.ok && deleted_mcp.value.at("deleted") == true &&
+              deleted_mcp.value.at("stopped") == false,
+          "mcp_server_delete should remove the row and report nothing running");
+    check(mcp_credentials.size() == 0,
+          "deleting an MCP server should reclaim its header secret");
+    check(!mcp_router.invoke("mcp_server_delete", {{"serverId", "ops-tools"}}).ok,
+          "deleting an unknown MCP server should fail");
   }
 
   sqlite3* readback = nullptr;

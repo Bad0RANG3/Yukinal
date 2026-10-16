@@ -1023,6 +1023,11 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return agent_run_command(method, params);
   }
 
+  if (method == "mcp_server_list" || method == "mcp_server_save" ||
+      method == "mcp_server_delete") {
+    return mcp_command(method, params);
+  }
+
   if (method == "local_file_preview") {
     if (!exact_string_fields(params, {"handleId"})) {
       return failure("INVALID_PARAMS", "local_file_preview requires exactly handleId");
@@ -1671,6 +1676,250 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
     return failure(sidecar_error_code(error.code()), error.what());
   } catch (const SidecarError& error) {
     return failure("AGENT_UNAVAILABLE", error.what());
+  }
+}
+
+IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json& params) {
+  if (database_ == nullptr || !database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+
+  const auto view_for = [](const nlohmann::json& config) {
+    nlohmann::json view = {
+        {"config", config},
+        {"status",
+         {{"serverId", config.at("id")},
+          {"running", false},
+          {"toolCount", 0},
+          {"stderrTail", nlohmann::json::array()},
+          {"diagnostics", nlohmann::json::array()}}},
+        {"tools", nlohmann::json::array()},
+    };
+    if (!config.value("enabled", false)) {
+      view["unavailable"] = {{"code", "disabled"},
+                             {"message", "This MCP server is disabled."}};
+    }
+    return view;
+  };
+
+  if (method == "mcp_server_list") {
+    if (!params.empty()) {
+      return failure("INVALID_PARAMS", "mcp_server_list does not accept parameters");
+    }
+    try {
+      const auto servers = database_->list_mcp_servers().at("servers");
+      nlohmann::json views = nlohmann::json::array();
+      for (const auto& config : servers) views.push_back(view_for(config));
+      return {true, {{"servers", std::move(views)}}};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local MCP database could not read its servers");
+    }
+  }
+
+  if (method == "mcp_server_save") {
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "mcp_server_save requires exactly one input object");
+    }
+    const auto& input = params.at("input");
+    static const std::set<std::string> kAllowed = {
+        "id", "label", "transport", "command", "args", "url", "httpAuthHeaders", "oauth",
+        "enabled", "annotationTrust"};
+    if (!only_fields(input, kAllowed, {"id", "label", "transport", "enabled"}) ||
+        !input.at("id").is_string() || !input.at("label").is_string() ||
+        !input.at("transport").is_string() || !input.at("enabled").is_boolean()) {
+      return failure("INVALID_PARAMS", "mcp_server_save input does not match the contract");
+    }
+    if (input.contains("oauth")) {
+      return failure("NOT_IMPLEMENTED",
+                     "OAuth MCP servers are not supported by this host yet");
+    }
+    const auto server_id = trim_ascii(input.at("id").get<std::string>());
+    const auto label = input.at("label").get<std::string>();
+    const auto transport = input.at("transport").get<std::string>();
+    if (server_id.empty() || server_id.size() > 160 || has_control_characters(server_id)) {
+      return failure("INVALID_PARAMS", "mcp_server_save id is invalid");
+    }
+    if (label.size() > 200 || has_control_characters(label)) {
+      return failure("INVALID_PARAMS", "mcp_server_save label is invalid");
+    }
+    if (transport != "stdio" && transport != "http") {
+      return failure("INVALID_PARAMS", "mcp_server_save transport must be stdio or http");
+    }
+
+    std::optional<nlohmann::json> existing;
+    try {
+      existing = database_->get_mcp_server(server_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local MCP database could not read the server");
+    }
+
+    nlohmann::json config = {
+        {"id", server_id},
+        {"label", label},
+        {"transport", transport},
+        {"enabled", input.at("enabled").get<bool>()},
+        {"allowedTools", existing.has_value()
+                             ? existing->value("allowedTools", nlohmann::json::array())
+                             : nlohmann::json::array()},
+        {"trustLevel", existing.has_value()
+                           ? existing->value("trustLevel", std::string("unreviewed"))
+                           : std::string("unreviewed")},
+    };
+    if (input.contains("annotationTrust")) {
+      if (!input.at("annotationTrust").is_string() ||
+          !is_one_of(input.at("annotationTrust").get<std::string>(), {"none", "trusted"})) {
+        return failure("INVALID_PARAMS", "mcp_server_save annotationTrust is invalid");
+      }
+      config["annotationTrust"] = input.at("annotationTrust");
+    } else {
+      config["annotationTrust"] = existing.has_value()
+                                       ? existing->value("annotationTrust", std::string("none"))
+                                       : std::string("none");
+    }
+
+    if (transport == "stdio") {
+      if (!input.contains("command") || !input.at("command").is_string()) {
+        return failure("INVALID_PARAMS", "a stdio MCP server requires command");
+      }
+      const auto command = input.at("command").get<std::string>();
+      if (command.empty() || command.size() > 1024 || has_control_characters(command)) {
+        return failure("INVALID_PARAMS", "mcp_server_save command is invalid");
+      }
+      config["command"] = command;
+      if (input.contains("args")) {
+        if (!input.at("args").is_array() || input.at("args").size() > 64) {
+          return failure("INVALID_PARAMS", "mcp_server_save args are invalid");
+        }
+        for (const auto& argument : input.at("args")) {
+          if (!argument.is_string() || argument.get<std::string>().size() > 1024) {
+            return failure("INVALID_PARAMS", "mcp_server_save args are invalid");
+          }
+        }
+        config["args"] = input.at("args");
+      }
+    } else {
+      if (!input.contains("url") || !input.at("url").is_string()) {
+        return failure("INVALID_PARAMS", "an http MCP server requires url");
+      }
+      const auto url = input.at("url").get<std::string>();
+      const bool secure =
+          url.size() > 8 && url.rfind("https://", 0) == 0 && url.size() <= 2048 &&
+          !has_control_characters(url) && url.find('?') == std::string::npos &&
+          url.find('#') == std::string::npos;
+      const bool loopback =
+          url.size() > 7 && url.rfind("http://", 0) == 0 && url.size() <= 2048 &&
+          !has_control_characters(url) && url.find('?') == std::string::npos &&
+          url.find('#') == std::string::npos &&
+          (url.substr(7).rfind("127.0.0.1", 0) == 0 ||
+           url.substr(7).rfind("localhost", 0) == 0 || url.substr(7).rfind("[::1]", 0) == 0);
+      if (!secure && !loopback) {
+        return failure("INVALID_PARAMS", "an http MCP url must use HTTPS or loopback HTTP");
+      }
+      config["url"] = url;
+    }
+
+    // Static HTTP auth headers: a new secret enters the OS credential store; a
+    // missing one preserves the stored header with the same name.
+    std::vector<std::string> staged_references;
+    nlohmann::json headers = nlohmann::json::array();
+    if (input.contains("httpAuthHeaders")) {
+      if (!input.at("httpAuthHeaders").is_array() || input.at("httpAuthHeaders").size() > 32) {
+        return failure("INVALID_PARAMS", "mcp_server_save httpAuthHeaders are invalid");
+      }
+      std::set<std::string> names;
+      for (const auto& entry : input.at("httpAuthHeaders")) {
+        if (!entry.is_object() || !entry.contains("name") || !entry.at("name").is_string()) {
+          return failure("INVALID_PARAMS", "mcp_server_save httpAuthHeaders are invalid");
+        }
+        const auto name = entry.at("name").get<std::string>();
+        if (name.size() > 128 || has_control_characters(name)) {
+          return failure("INVALID_PARAMS", "mcp_server_save header name is invalid");
+        }
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char byte) {
+          return static_cast<char>(std::tolower(byte));
+        });
+        if (!names.insert(lower).second) {
+          return failure("INVALID_PARAMS", "mcp_server_save header names must be unique");
+        }
+        std::string reference;
+        if (entry.contains("secret") && entry.at("secret").is_string() &&
+            !entry.at("secret").get<std::string>().empty()) {
+          const auto secret = entry.at("secret").get<std::string>();
+          if (secret.size() > 8192) {
+            return failure("INVALID_PARAMS", "mcp_server_save header secret is too long");
+          }
+          try {
+            reference = credentials_
+                            ->set("mcp", "mcp-header-" + next_id("credential"),
+                                  Secret{std::string_view(secret)})
+                            .to_string();
+          } catch (...) {
+            return failure("CREDENTIAL_ERROR",
+                           "The operating system credential store could not save the header secret");
+          }
+          staged_references.push_back(reference);
+        } else if (existing.has_value()) {
+          for (const auto& stored : existing->value("httpAuthHeaders", nlohmann::json::array())) {
+            if (!stored.is_object() || !stored.value("name", std::string()).size()) continue;
+            std::string stored_lower = stored.value("name", std::string());
+            std::transform(stored_lower.begin(), stored_lower.end(), stored_lower.begin(),
+                           [](unsigned char byte) { return static_cast<char>(std::tolower(byte)); });
+            if (stored_lower == lower) reference = stored.value("credentialRef", std::string());
+          }
+        }
+        headers.push_back({{"name", name}, {"credentialRef", reference}});
+      }
+    } else if (existing.has_value()) {
+      headers = existing->value("httpAuthHeaders", nlohmann::json::array());
+    }
+    config["httpAuthHeaders"] = std::move(headers);
+
+    try {
+      database_->upsert_mcp_server(config);
+    } catch (...) {
+      std::string ignored;
+      (void)clean_credential_references(database_, *credentials_, staged_references, ignored);
+      return failure("STORAGE_ERROR", "The local MCP database could not save the server");
+    }
+    try {
+      return {true, view_for(database_->get_mcp_server(server_id).value())};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The saved MCP server could not be read back");
+    }
+  }
+
+  // mcp_server_delete
+  if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
+    return failure("INVALID_PARAMS", "mcp_server_delete requires exactly serverId");
+  }
+  const auto server_id = trim_ascii(params.at("serverId").get<std::string>());
+  if (server_id.empty() || server_id.size() > 160 || has_control_characters(server_id)) {
+    return failure("INVALID_PARAMS", "mcp_server_delete serverId is invalid");
+  }
+  try {
+    auto removed = database_->delete_mcp_server(server_id);
+    if (!removed.has_value()) return failure("NOT_FOUND", "The MCP server was not found");
+    std::vector<std::string> references;
+    for (const auto& header : removed->value("httpAuthHeaders", nlohmann::json::array())) {
+      if (header.is_object() && header.contains("credentialRef") &&
+          header.at("credentialRef").is_string()) {
+        references.push_back(header.at("credentialRef").get<std::string>());
+      }
+    }
+    if (removed->contains("oauth") && removed->at("oauth").is_object()) {
+      for (const auto* key : {"clientSecretRef", "credentialRef", "dpopKeyRef"}) {
+        const auto& oauth = removed->at("oauth");
+        if (oauth.contains(key) && oauth.at(key).is_string()) {
+          references.push_back(oauth.at(key).get<std::string>());
+        }
+      }
+    }
+    std::string cleanup_error;
+    (void)clean_credential_references(database_, *credentials_, references, cleanup_error);
+    return {true, {{"deleted", true}, {"stopped", false}}};
+  } catch (...) {
+    return failure("STORAGE_ERROR", "The local MCP database could not delete the server");
   }
 }
 
