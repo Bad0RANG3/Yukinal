@@ -155,7 +155,7 @@ export function AppShell() {
                 <span className="rail-icon" aria-hidden="true">
                   <Icon name={meta.icon} size="lg" />
                 </span>
-                <span>{meta.label}</span>
+                <span>{item === "tasks" ? "排查" : meta.label}</span>
               </button>
             );
           })}

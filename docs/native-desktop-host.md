@@ -25,6 +25,50 @@ are not implemented yet; the command-level gap list and implementation order are
 
 ## Native WebView and IPC
 
+Product decisions and implementation boundaries are defined in the
+[Windows desktop window direction](./desktop-window-direction.md).
+
+### Windows window geometry
+
+The Windows host owns the two rounded boundaries. DWM supplies the outer
+top-level window corners and system caption buttons. A native title/status strip
+occupies the top of the client area; the embedded WebView child is inset by
+8 logical pixels from the side/bottom edges and clipped with a 14-pixel corner radius.
+The strip is 40 logical pixels high. These are initial product values, scaled
+by the window DPI, rather than HIG requirements.
+
+React fills that child window and owns only content layout. It does not draw an
+outer window, caption buttons, or a second title bar. Browser development mode
+previews content only. Maximizing lets Windows square the outer boundary while
+retaining the inset content surface. Window movement, resizing, system menus,
+caption actions, and Snap hit testing stay with Win32 and DWM.
+
+Native acceptance must check drag, edge/corner resize, caption-button hover,
+Snap Layouts, minimize/restore, maximize/restore, inactive appearance, and moving
+between displays with different DPI. A browser screenshot or build success
+does not verify these behaviors.
+
+### Integrated application shell
+
+The native frame is an application control surface. It shares the content's
+workspace context rather than maintaining an independent selection or task
+model. `WindowFrame` observes the existing workspace store and server query;
+the optional Windows `windowShell.updateContext` capability sends the selected
+section, server name, connection state, and Agent busy state to the native host.
+The title/status strip and the OS window title reflect that same context.
+`WindowShellContextSchema` is the presentation contract; the host independently
+validates its bounded fields. Credentials, prompts, and approval grants do not
+belong in that context.
+
+As functions move into the frame, native controls must dispatch explicit actions
+to the existing application services. Navigation, selected server, task state,
+and approvals keep one source of truth. The shell must not acquire a separate
+Agent loop or a parallel server-action path. Visual tokens, typography, spacing,
+focus, and active/inactive states should evolve with the content design as one
+system, while Win32 continues to own native geometry and window management.
+The current increment synchronizes context; shell business-action controls and
+shared theme-token transport remain future work.
+
 The C++ window uses the pinned `webview/webview` C++ library over the operating
 system WebView: WebView2 on Windows, WebKit on macOS, and WebKitGTK on Linux. The
 React code still owns appearance, navigation, and interaction. Production serves

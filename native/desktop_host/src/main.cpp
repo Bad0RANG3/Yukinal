@@ -2,6 +2,21 @@
 #include <httplib.h>
 #include <webview/webview.h>
 
+#ifdef _WIN32
+#include <dwmapi.h>
+#include "yukinal/desktop_host/window_context.hpp"
+
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#endif
+
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -162,6 +177,260 @@ std::optional<std::string> resolve_ui_url(const Options& options, UiServer& ui_s
   return ui_server.url();
 }
 
+#ifdef _WIN32
+constexpr COLORREF kOuterColor = RGB(0x25, 0x25, 0x25);
+constexpr wchar_t kFrameProperty[] = L"YukinalFrame";
+constexpr int kChromeHeight = 40;
+constexpr int kContentInset = 8;
+constexpr int kContentRadius = 14;
+
+struct FrameState {
+  HWND widget = nullptr;
+  WNDPROC previous = nullptr;
+  bool reshaping = false;
+  std::wstring context_label;
+};
+
+FrameState* frame_state(HWND window) {
+  return static_cast<FrameState*>(GetPropW(window, kFrameProperty));
+}
+
+UINT frame_dpi(HWND window) {
+  auto get_dpi = reinterpret_cast<UINT(WINAPI*)(HWND)>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+  const UINT dpi = get_dpi == nullptr ? 96 : get_dpi(window);
+  return dpi == 0 ? 96 : dpi;
+}
+
+int frame_scale(HWND window, int value) {
+  return MulDiv(value, static_cast<int>(frame_dpi(window)), 96);
+}
+
+int frame_metric(HWND window, int metric) {
+  auto for_dpi = reinterpret_cast<int(WINAPI*)(int, UINT)>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetSystemMetricsForDpi"));
+  return for_dpi == nullptr ? GetSystemMetrics(metric) : for_dpi(metric, frame_dpi(window));
+}
+
+void layout_native_content(HWND window, FrameState& state) {
+  if (state.reshaping || !IsWindow(state.widget) || IsIconic(window)) return;
+  state.reshaping = true;
+  RECT client{};
+  GetClientRect(window, &client);
+  const int inset = frame_scale(window, kContentInset);
+  const int top = frame_scale(window, kChromeHeight);
+  const int width = (client.right - 2 * inset) > 0 ? client.right - 2 * inset : 1;
+  const int height = (client.bottom - top - inset) > 0 ? client.bottom - top - inset : 1;
+  // Moving the actual WebView child also updates the controller bounds through
+  // its WM_SIZE handler. These are window coordinates, never CSS padding.
+  MoveWindow(state.widget, inset, top, width, height, TRUE);
+  const int diameter = frame_scale(window, 2 * kContentRadius);
+  const HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter);
+  if (region != nullptr && !SetWindowRgn(state.widget, region, TRUE)) DeleteObject(region);
+  InvalidateRect(window, nullptr, FALSE);
+  state.reshaping = false;
+}
+
+void paint_native_chrome(HWND window) {
+  PAINTSTRUCT paint{};
+  const HDC window_dc = BeginPaint(window, &paint);
+  RECT client{};
+  GetClientRect(window, &client);
+  const HBRUSH background = CreateSolidBrush(kOuterColor);
+  FillRect(window_dc, &client, background);
+  // The inset border belongs to the native child window, like its clipping.
+  const int inset = frame_scale(window, kContentInset);
+  const int top = frame_scale(window, kChromeHeight);
+  const HPEN border = CreatePen(PS_SOLID, 1, RGB(54, 54, 56));
+  const HGDIOBJ previous_pen = SelectObject(window_dc, border);
+  const HGDIOBJ previous_brush = SelectObject(window_dc, GetStockObject(HOLLOW_BRUSH));
+  RoundRect(window_dc, inset - 1, top - 1, client.right - inset + 1,
+      client.bottom - inset + 1, frame_scale(window, kContentRadius * 2),
+      frame_scale(window, kContentRadius * 2));
+  SelectObject(window_dc, previous_brush);
+  SelectObject(window_dc, previous_pen);
+  DeleteObject(border);
+  // GDI's default alpha is zero. On an extended DWM caption that produces a
+  // washed-out system tint. Composite an opaque 32-bit strip so the caption
+  // matches the application surface while DWM still draws its native controls.
+  BITMAPINFO info{};
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  info.bmiHeader.biWidth = client.right;
+  info.bmiHeader.biHeight = -top;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  void* pixels = nullptr;
+  const HBITMAP bitmap = CreateDIBSection(window_dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+  const HDC dc = CreateCompatibleDC(window_dc);
+  if (bitmap == nullptr || dc == nullptr || pixels == nullptr) {
+    if (dc != nullptr) DeleteDC(dc);
+    if (bitmap != nullptr) DeleteObject(bitmap);
+    DeleteObject(background);
+    EndPaint(window, &paint);
+    return;
+  }
+  const HGDIOBJ previous_bitmap = SelectObject(dc, bitmap);
+  const RECT caption{0, 0, client.right, top};
+  FillRect(dc, &caption, background);
+  DeleteObject(background);
+  SetBkMode(dc, TRANSPARENT);
+  const bool active = GetActiveWindow() == window;
+  SetTextColor(dc, active ? RGB(220, 220, 224) : RGB(150, 150, 156));
+  const HFONT font = CreateFontW(-frame_scale(window, 12), 0, 0, 0, FW_SEMIBOLD,
+      FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+  const HGDIOBJ previous_font = SelectObject(dc, font);
+  // Reserve the system caption-button strip, including at high DPI.
+  RECT brand{frame_scale(window, 20), 0, frame_scale(window, 75), top};
+  DrawTextW(dc, L"Yukinal", -1, &brand, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+  const HFONT context_font = CreateFontW(-frame_scale(window, 12), 0, 0, 0, FW_NORMAL,
+      FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+  SelectObject(dc, context_font);
+  SetTextColor(dc, active ? RGB(161, 161, 169) : RGB(128, 128, 136));
+  RECT divider{frame_scale(window, 78), 0, frame_scale(window, 88), top};
+  DrawTextW(dc, L"/", -1, &divider, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+  RECT title{frame_scale(window, 96), 0,
+             client.right - frame_scale(window, 160), top};
+  const auto* state = frame_state(window);
+  DrawTextW(dc, state ? state->context_label.c_str() : L"", -1, &title,
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+  SelectObject(dc, previous_font);
+  DeleteObject(context_font);
+  DeleteObject(font);
+  GdiFlush();
+  auto* bytes = static_cast<unsigned char*>(pixels);
+  const int caption_start = (std::max)(0, static_cast<int>(client.right) - frame_scale(window, 160));
+  for (int row = 0; row < top; ++row) {
+    for (int column = 0; column < client.right; ++column) {
+      const size_t pixel = (static_cast<size_t>(row) * client.right + column) * 4;
+      if (column < caption_start) {
+        bytes[pixel + 3] = 255;
+      } else {
+        // Leave DWM's caption-button strip transparent, including its hover
+        // visuals. Painting it opaque would cover the system controls.
+        bytes[pixel] = bytes[pixel + 1] = bytes[pixel + 2] = bytes[pixel + 3] = 0;
+      }
+    }
+  }
+  BitBlt(window_dc, 0, 0, client.right, top, dc, 0, 0, SRCCOPY);
+  SelectObject(dc, previous_bitmap);
+  DeleteDC(dc);
+  DeleteObject(bitmap);
+  EndPaint(window, &paint);
+}
+
+LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  auto* state = frame_state(window);
+  if (state == nullptr || state->previous == nullptr) return DefWindowProcW(window, message, wparam, lparam);
+
+  // Keep Windows caption buttons and Snap Layouts, rather than HTML replicas.
+  LRESULT dwm_result = 0;
+  const bool dwm_handled = DwmDefWindowProc(window, message, wparam, lparam, &dwm_result) != FALSE;
+  if (message == WM_NCHITTEST) {
+    if (dwm_handled) return dwm_result;
+    const auto standard = CallWindowProcW(state->previous, window, message, wparam, lparam);
+    if (standard != HTCLIENT) return standard;
+    RECT bounds{};
+    GetWindowRect(window, &bounds);
+    const int x = static_cast<short>(LOWORD(lparam));
+    const int y = static_cast<short>(HIWORD(lparam));
+    const int edge = frame_metric(window, SM_CYFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
+    if (!IsZoomed(window) && y < bounds.top + edge) return HTTOP;
+    POINT point{x, y};
+    ScreenToClient(window, &point);
+    // Leave the native caption-button strip to DefWindowProc even if DWM
+    // reports no hit; it must never become part of the draggable title.
+    if (point.x >= bounds.right - bounds.left - frame_scale(window, 160)) return HTCLIENT;
+    if (point.y < frame_scale(window, kChromeHeight)) return HTCAPTION;
+    return HTCLIENT;
+  }
+  if (message == WM_NCCALCSIZE && wparam) {
+    auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+    const int x = frame_metric(window, SM_CXFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
+    const int y = frame_metric(window, SM_CYFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
+    // Preserve native resize edges. Only the top caption joins our chrome.
+    params->rgrc[0].left += x;
+    params->rgrc[0].right -= x;
+    params->rgrc[0].bottom -= y;
+    if (IsZoomed(window)) params->rgrc[0].top += y;
+    return 0;
+  }
+  if (message == WM_PAINT) { paint_native_chrome(window); return 0; }
+  if (message == WM_ERASEBKGND) return 1;
+  if (dwm_handled) return dwm_result;
+
+  const auto result = CallWindowProcW(state->previous, window, message, wparam, lparam);
+  if (message == WM_SIZE || message == WM_DPICHANGED) {
+    layout_native_content(window, *state);
+    if (message == WM_DPICHANGED) {
+      const MARGINS glass{0, 0, frame_scale(window, kChromeHeight), 0};
+      DwmExtendFrameIntoClientArea(window, &glass);
+    }
+  } else if (message == WM_ACTIVATE || message == WM_SETTINGCHANGE) {
+    InvalidateRect(window, nullptr, FALSE);
+  } else if (message == WM_NCDESTROY) {
+    RemovePropW(window, kFrameProperty);
+    delete state;
+  }
+  return result;
+}
+
+void install_fused_frame(webview_t view) {
+  auto window = static_cast<HWND>(webview_get_window(view));
+  auto widget = static_cast<HWND>(webview_get_native_handle(view, WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET));
+  if (window == nullptr || widget == nullptr || frame_state(window) != nullptr) return;
+  auto state = std::make_unique<FrameState>();
+  state->widget = widget;
+  if (!SetPropW(window, kFrameProperty, state.get())) return;
+  state->previous = reinterpret_cast<WNDPROC>(
+      SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(fused_frame_proc)));
+  if (state->previous == nullptr) { RemovePropW(window, kFrameProperty); return; }
+  auto* installed = state.release();
+  // WS_CAPTION remains present so DWM owns minimize/maximize/close and Snap.
+  const auto style = GetWindowLongPtrW(window, GWL_STYLE);
+  SetWindowLongPtrW(window, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME |
+                    WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_CLIPCHILDREN);
+  // DWM needs the entire caption strip to render the native window controls.
+  const MARGINS glass{0, 0, frame_scale(window, kChromeHeight), 0};
+  DwmExtendFrameIntoClientArea(window, &glass);
+  const int corners = DWMWCP_ROUND;
+  DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+  DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &kOuterColor, sizeof(kOuterColor));
+  const BOOL dark = TRUE;
+  DwmSetWindowAttribute(window, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+  SetWindowPos(window, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  layout_native_content(window, *installed);
+}
+
+// This channel changes presentation only. Future native actions must route back
+// to the existing application commands, never create a second execution path.
+yukinal::desktop_host::IpcReply update_shell_context(webview_t view, const nlohmann::json& params) {
+  const auto label = yukinal::desktop_host::window_context_label(params);
+  if (!label) return {false, {{"code", "INVALID_REQUEST"}, {"message", "Window context is invalid"}}};
+  const auto window = static_cast<HWND>(webview_get_window(view));
+  auto* state = window == nullptr ? nullptr : frame_state(window);
+  if (state == nullptr) return {false, {{"code", "UNAVAILABLE"}, {"message", "Native window shell is unavailable"}}};
+  state->context_label = *label;
+  const std::wstring window_title = L"Yukinal  |  " + *label;
+  SetWindowTextW(window, window_title.c_str());
+  InvalidateRect(window, nullptr, FALSE);
+  return {true, nlohmann::json::object()};
+}
+
+void uninstall_fused_frame(webview_t view) {
+  const auto window = static_cast<HWND>(webview_get_window(view));
+  if (window == nullptr) return;
+  if (auto* state = frame_state(window)) {
+    SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(state->previous));
+    RemovePropW(window, kFrameProperty);
+    delete state;
+  }
+}
+#endif
+
 void rpc_handler(const char* id, const char* request, void* context_pointer) {
   auto& context = *static_cast<BridgeContext*>(context_pointer);
   nlohmann::json reply;
@@ -174,8 +443,14 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
       if (!arguments.is_array() || arguments.size() != 2 || !arguments[0].is_string()) {
         reply = {{"code", "INVALID_REQUEST"}, {"message", "Desktop IPC request is invalid"}};
       } else {
-        const auto result = context.router.invoke(arguments[0].get<std::string>(),
-                                                  std::move(arguments[1]));
+        const auto method = arguments[0].get<std::string>();
+#ifdef _WIN32
+        const auto result = method == "__shell.update_context"
+            ? update_shell_context(context.view, arguments[1])
+            : context.router.invoke(method, std::move(arguments[1]));
+#else
+        const auto result = context.router.invoke(method, std::move(arguments[1]));
+#endif
         ok = result.ok;
         reply = result.value;
       }
@@ -268,16 +543,30 @@ int run(const std::vector<std::string>& arguments) {
     BridgeContext context(*database);
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
+#ifdef _WIN32
+    install_fused_frame(context.view);
+#endif
     if (webview_set_title(context.view, "Yukinal") != WEBVIEW_ERROR_OK ||
         webview_set_size(context.view, 1440, 900, WEBVIEW_HINT_NONE) != WEBVIEW_ERROR_OK ||
         webview_bind(context.view, "yukinalNativeInvoke", rpc_handler, &context) !=
             WEBVIEW_ERROR_OK ||
         webview_init(context.view, kHostBridge) != WEBVIEW_ERROR_OK ||
+#ifdef _WIN32
+        webview_init(context.view,
+            "window.__YUKINAL_HOST__.windowShell={updateContext:(context)=>"
+            "window.__YUKINAL_HOST__.invoke('__shell.update_context',context).then(()=>undefined)};") != WEBVIEW_ERROR_OK ||
+#endif
         webview_navigate(context.view, url->c_str()) != WEBVIEW_ERROR_OK) {
+#ifdef _WIN32
+      uninstall_fused_frame(context.view);
+#endif
       webview_destroy(context.view);
       return 3;
     }
     const auto result = webview_run(context.view);
+#ifdef _WIN32
+    uninstall_fused_frame(context.view);
+#endif
     webview_destroy(context.view);
     return result == WEBVIEW_ERROR_OK ? 0 : 3;
   } catch (const webview::exception&) {

@@ -10,6 +10,8 @@
 
 ## 当前状态
 
+2026-10-16 Windows [桌面窗口方向](./desktop-window-direction.md)确定了原生外框、内层 WebView 圆角与工作区状态互联。Windows / MinGW 的宿主构建、4 项宿主 CTest，以及包含类型、JS 单测、前端构建和 Python sidecar smoke 的 `pnpm check` 已通过。独立测试数据窗口已验证服务器到项目的原生标题同步、系统最大化和标题带双击还原。系统还原按钮的自动点击未确认成功，需人工复核；拖动、边角缩放、按钮悬停、Snap、最小化恢复、激活状态及跨屏 DPI 仍待完整验收。窗体业务动作、运行时主题同步及安装包尚未实现；该窗口基线不构成发布验收。
+
 2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
 
 仓库版本为 `1.0.0`，用于标记当前跨层接口基线。三平台安装包已在 CI runner 完成限定范围的安装/复制冒烟；这不代表用户干净环境、完整桌面 GUI 或真实 Provider、MCP 和远端维护场景都已验收。版本号以 `packages/shared/src/version.ts` 为源，并由测试检查各清单与 IPC fixture。

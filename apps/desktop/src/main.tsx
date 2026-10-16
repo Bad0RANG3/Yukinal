@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 
 import { AppShell } from "./app/AppShell.js";
+import { WindowFrame } from "./app/WindowFrame.js";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -19,6 +20,8 @@ if (!container) throw new Error("#root is missing from index.html");
 
 createRoot(container).render(
   <QueryClientProvider client={queryClient}>
-    <AppShell />
+    <WindowFrame>
+      <AppShell />
+    </WindowFrame>
   </QueryClientProvider>,
 );
