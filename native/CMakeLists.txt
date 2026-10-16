@@ -378,6 +378,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/database.cpp
     desktop_host/src/desktop_ssh.cpp
     desktop_host/src/desktop_target.cpp
+    desktop_host/src/desktop_terminal.cpp
     desktop_host/src/host_trust.cpp
     desktop_host/src/ipc_router.cpp
     desktop_host/src/local_paths.cpp

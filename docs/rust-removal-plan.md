@@ -58,7 +58,7 @@
 - ✅ `remote_file_list`、`remote_file_read`、`remote_file_preview`（in-process SFTP core：有界目录列表（≤4096 项，名称归一化成绝对路径）、1 MiB 有界读取（有损 UTF-8）、preview 先 stat 确认常规文件再读，复用共享 `make_file_preview`；浏览器路径策略不套用 Agent 凭据黑名单）
 - `file_prepare_remote_drag`、`file_drag_out_start`
 - `file_transfer_upload`、`file_transfer_download`、`file_transfer_cancel`、`file_transfer_resolve_conflict`、`transfer`
-- `terminal_open`、`terminal_write`、`terminal_resize`、`terminal_close`（C++ PTY）
+- ✅ `terminal_open`、`terminal_write`、`terminal_resize`、`terminal_close`（`native/desktop_host/src/desktop_terminal.cpp` 生成单目标临时配置并启动 `yukinal-ssh-service --terminal --cols --rows` 子进程（凭据走子进程环境），按 NDJSON 帧转发 `terminal.opened`/`terminal.data`/`terminal.closed` 事件；真实 PTY 验收待靶机放通）
 - ✅ `server_connect`、`server_disconnect`（in-process `connection_check`，成功/失败写 server status + 活动记录；disconnect 幂等）；`server_auth_respond`、`server_auth_cancel`（有界校验；键盘交互挑战由 C++ PTY worker 持有，暂未接 PTY 时正确返回 `accepted:false`）
 - ✅ `server_logs`（`native/desktop_host/src/desktop_ssh.cpp` 用 in-process C++ SSH core 调 `server_logs`，再把原始 stdout 交给 Python `server.logs.normalize` 归一化）
 - ✅ `server_services`（同上，跑 `service_inventory` + Python `server.services.normalize`）
@@ -145,7 +145,7 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（52）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`server_connect`、`server_disconnect`、`server_auth_respond`、`server_auth_cancel`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`server_host_key_probe`、`server_host_key_trust`、`server_logs`、`server_services`、`server_snapshot`、`remote_file_list`、`remote_file_read`、`remote_file_preview`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
+  - 已实现（56）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`server_connect`、`server_disconnect`、`server_auth_respond`、`server_auth_cancel`、`terminal_open`、`terminal_write`、`terminal_resize`、`terminal_close`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`server_host_key_probe`、`server_host_key_trust`、`server_logs`、`server_services`、`server_snapshot`、`remote_file_list`、`remote_file_read`、`remote_file_preview`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
   - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target` 与文件读/写/编辑目标已实现，MCP 进程目录、investigation 与其余 `host.tool.execute` 仍待补。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。

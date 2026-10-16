@@ -2,6 +2,7 @@
 
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/local_paths.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 
@@ -48,6 +49,8 @@ class IpcRouter {
                                const nlohmann::json& params);
   IpcReply connection_command(const std::string& method,
                               const nlohmann::json& params);
+  IpcReply terminal_command(const std::string& method,
+                            const nlohmann::json& params);
   [[nodiscard]] std::string issue_probe_ticket(const std::string& server_id,
                                                const std::string& host, int port,
                                                const std::string& fingerprint);
@@ -70,6 +73,7 @@ class IpcRouter {
   std::unordered_map<std::string, std::set<std::string>> subscriptions_;
   std::unique_ptr<SidecarClient> sidecar_;
   std::mutex sidecar_mutex_;
+  std::unique_ptr<TerminalManager> terminals_;
   LocalPathHandles local_paths_;
   struct ProbeTicket {
     std::string server_id;

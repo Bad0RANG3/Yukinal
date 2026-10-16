@@ -1005,3 +1005,17 @@ new validation. The canonical `native/build-nmake` Release build passed all twel
 CTest targets. The terminal commands, file transfer actions, MCP supervision and
 catalog, `host.tool.execute`, investigation, installers, and real SSH validation
 remain.
+
+Later on 2026-10-16, the C++ host added the interactive terminal. A new
+`native/desktop_host/src/desktop_terminal.cpp` owns one SSH service child per
+session: it resolves the target, writes a one-target temporary configuration,
+passes the credentials only through the child environment, and spawns
+`yukinal-ssh-service --config … --terminal --cols … --rows …`. A reader thread
+parses the child's NDJSON frames and re-publishes them as `terminal.opened`,
+`terminal.data` (base64 output decoded to UTF-8) and `terminal.closed`; the
+`terminal_write`/`terminal_resize`/`terminal_close` commands write the matching
+frames back. `desktop_host_tests` covers the new parameter validation. The
+canonical `native/build-nmake` Release build passed all twelve CTest targets. A
+real PTY session against an OpenSSH server remains unverified because the test
+host is filtered; the file transfer actions, MCP supervision and catalog,
+`host.tool.execute`, investigation, and installers remain.

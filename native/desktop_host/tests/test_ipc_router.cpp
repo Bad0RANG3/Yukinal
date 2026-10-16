@@ -143,6 +143,14 @@ int main() {
                        {{"authId", "auth_x"}, {"responses", nlohmann::json::array({"otp"})}})
                .ok,
         "server_auth_respond should report a missing local database");
+  check(!router.invoke("terminal_open",
+                       {{"serverId", "srv_ok"}, {"cols", 80}, {"rows", 24}})
+               .ok,
+        "terminal_open should report a missing local database");
+  check(!router.invoke("terminal_write",
+                       {{"terminalSessionId", "term_x"}, {"data", "ls\n"}})
+               .ok,
+        "terminal_write should report a missing local database");
   check(!router.invoke("server_host_key_probe", nlohmann::json::object()).ok,
         "server_host_key_probe should require a server id");
   check(!router.invoke("server_host_key_probe", {{"serverId", "srv_ok"}}).ok,

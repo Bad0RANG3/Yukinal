@@ -2,6 +2,7 @@
 
 #include "yukinal/desktop_host/desktop_ssh.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/network_proxy.hpp"
 
@@ -648,6 +649,15 @@ IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentia
     (void)clean_credential_references(database_, *credentials_, pending, ignored_error);
   } catch (...) {
   }
+  terminals_ = std::make_unique<TerminalManager>(database_, credentials_);
+  terminals_->set_event_sink([this](const std::string& event, const nlohmann::json& payload) {
+    std::function<void(const std::string&, const nlohmann::json&)> sink;
+    {
+      std::lock_guard lock(mutex_);
+      sink = event_sink_;
+    }
+    if (sink) sink(event, payload);
+  });
 }
 
 IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
@@ -683,6 +693,11 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   if (method == "server_connect" || method == "server_disconnect" ||
       method == "server_auth_respond" || method == "server_auth_cancel") {
     return connection_command(method, params);
+  }
+
+  if (method == "terminal_open" || method == "terminal_write" ||
+      method == "terminal_resize" || method == "terminal_close") {
+    return terminal_command(method, params);
   }
 
   if (method == "core_ping") {
@@ -1894,6 +1909,78 @@ IpcReply IpcRouter::connection_command(const std::string& method,
                    "The local server database could not update the connection state");
   }
   return {true, {{"status", "connected"}}};
+}
+
+IpcReply IpcRouter::terminal_command(const std::string& method,
+                                     const nlohmann::json& params) {
+  if (database_ == nullptr || !database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+  if (terminals_ == nullptr) {
+    return failure("TERMINAL_UNAVAILABLE", "The SSH terminal manager is unavailable");
+  }
+  if (method == "terminal_open") {
+    if (!only_fields(params, {"serverId", "cols", "rows"}, {"serverId", "cols", "rows"}) ||
+        !params.at("serverId").is_string() || !params.at("cols").is_number_integer() ||
+        !params.at("rows").is_number_integer()) {
+      return failure("INVALID_PARAMS", "terminal_open parameters are invalid");
+    }
+    const auto server_id = params.at("serverId").get<std::string>();
+    const auto cols = params.at("cols").get<int>();
+    const auto rows = params.at("rows").get<int>();
+    if (!valid_server_id(server_id) || cols < 1 || cols > 1000 || rows < 1 || rows > 1000) {
+      return failure("INVALID_PARAMS", "terminal_open parameters are invalid");
+    }
+    try {
+      return {true, {{"terminalSessionId", terminals_->open(server_id, cols, rows)}}};
+    } catch (const std::exception& error) {
+      return failure("TERMINAL_ERROR", error.what());
+    }
+  }
+
+  const bool write = method == "terminal_write";
+  const bool resize = method == "terminal_resize";
+  const std::set<std::string> fields =
+      write ? std::set<std::string>{"terminalSessionId", "data"}
+            : resize ? std::set<std::string>{"terminalSessionId", "cols", "rows"}
+                     : std::set<std::string>{"terminalSessionId"};
+  if (!only_fields(params, fields, fields) || !params.at("terminalSessionId").is_string()) {
+    return failure("INVALID_PARAMS", method + " parameters are invalid");
+  }
+  const auto session_id = params.at("terminalSessionId").get<std::string>();
+  if (session_id.empty() || session_id.size() > 256) {
+    return failure("INVALID_PARAMS", method + " session id is invalid");
+  }
+
+  if (write) {
+    if (!params.at("data").is_string()) {
+      return failure("INVALID_PARAMS", "terminal_write data is invalid");
+    }
+    const auto data = params.at("data").get<std::string>();
+    if (data.size() > 64 * 1024) {
+      return failure("INVALID_PARAMS", "terminal_write data is too large");
+    }
+    if (!terminals_->write(session_id, data)) {
+      return failure("TERMINAL_NOT_FOUND", "The terminal session is not available");
+    }
+    return {true, nlohmann::json::object()};
+  }
+  if (resize) {
+    if (!params.at("cols").is_number_integer() || !params.at("rows").is_number_integer()) {
+      return failure("INVALID_PARAMS", "terminal_resize dimensions are invalid");
+    }
+    const auto cols = params.at("cols").get<int>();
+    const auto rows = params.at("rows").get<int>();
+    if (cols < 1 || cols > 1000 || rows < 1 || rows > 1000) {
+      return failure("INVALID_PARAMS", "terminal_resize dimensions are invalid");
+    }
+    if (!terminals_->resize(session_id, cols, rows)) {
+      return failure("TERMINAL_NOT_FOUND", "The terminal session is not available");
+    }
+    return {true, nlohmann::json::object()};
+  }
+  (void)terminals_->close(session_id);
+  return {true, nlohmann::json::object()};
 }
 
 void IpcRouter::set_event_sink(
