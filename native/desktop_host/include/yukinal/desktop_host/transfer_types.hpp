@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,31 @@ std::optional<ConflictActionKind> parse_conflict_action_kind(const std::string& 
 std::optional<TransferFailureKind> parse_transfer_failure_kind(const std::string& value);
 
 bool is_terminal(TransferStatus status);
+
+// The one error type the transfer subsystem throws, mirroring the retired Rust
+// `TransferError`. `failure_kind()` maps it onto the failure recorded in a
+// snapshot. `Local`/`SourceChanged` are local I/O, `Remote`/`AlreadyExists` are
+// remote I/O and cancellation is reported as remote I/O, matching Rust.
+enum class TransferErrorCode {
+  InvalidInput,
+  Local,
+  Remote,
+  AlreadyExists,
+  Unsupported,
+  SourceChanged,
+  Verification,
+  Cancelled,
+};
+
+class TransferError : public std::runtime_error {
+ public:
+  TransferError(TransferErrorCode code, const std::string& message);
+  [[nodiscard]] TransferErrorCode code() const noexcept { return code_; }
+  [[nodiscard]] TransferFailureKind failure_kind() const noexcept;
+
+ private:
+  TransferErrorCode code_;
+};
 
 struct ConflictRequest {
   std::uint64_t item_index = 0;

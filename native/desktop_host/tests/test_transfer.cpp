@@ -3,11 +3,16 @@
 // encoding and the path/name helpers the transfer manager relies on. They never
 // touch the database or the network.
 
+#include "yukinal/desktop_host/transfer_local.hpp"
 #include "yukinal/desktop_host/transfer_types.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <string>
 #include <vector>
@@ -33,6 +38,17 @@ void expect_invalid(F&& call, const char* message) {
   std::exit(1);
 }
 
+template <typename F>
+void expect_transfer_error(F&& call, TransferErrorCode code, const char* message) {
+  try {
+    call();
+  } catch (const TransferError& error) {
+    if (error.code() == code) return;
+  }
+  std::cerr << message << '\n';
+  std::exit(1);
+}
+
 std::vector<std::string> split(const std::string& value, char separator) {
   std::vector<std::string> parts;
   std::size_t from = 0;
@@ -51,6 +67,137 @@ bool all_digits(const std::string& value) {
          std::all_of(value.begin(), value.end(), [](unsigned char byte) {
            return byte >= '0' && byte <= '9';
          });
+}
+
+struct TemporaryDirectory {
+  std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("yukinal-transfer-" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  TemporaryDirectory() { std::filesystem::create_directories(path); }
+  ~TemporaryDirectory() {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+  }
+};
+
+void write_file(const std::filesystem::path& path, const std::string& content) {
+  std::ofstream out(path, std::ios::binary);
+  out << content;
+}
+
+std::string read_file(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Local filesystem seam: fingerprints, exclusive staging, publication and
+// restart cleanup. Exercises real files in a temporary directory.
+void run_local_checks() {
+  TemporaryDirectory temporary;
+  const auto source = temporary.path / "source.txt";
+  write_file(source, "hello world");
+
+  const auto fingerprint = local_source_fingerprint(source);
+  check(fingerprint.size == 11, "a local source fingerprint must report its size");
+  verify_local_source_unchanged(source, fingerprint);
+  write_file(source, "hello world!");
+  bool changed = false;
+  try {
+    verify_local_source_unchanged(source, fingerprint);
+  } catch (const TransferError& error) {
+    changed = error.code() == TransferErrorCode::SourceChanged;
+  }
+  check(changed, "a changed local source must be reported as SourceChanged");
+
+  const auto directory = temporary.path / "tree";
+  std::filesystem::create_directories(directory / "b");
+  write_file(directory / "a.txt", "a");
+  write_file(directory / "b" / "c.txt", "c");
+  const auto children = read_local_directory(directory);
+  check(children.size() == 2 && children[0].filename() == "a.txt" &&
+            children[1].filename() == "b",
+        "read_local_directory must return sorted children");
+  expect_transfer_error([&] { (void)read_local_directory(source); },
+                        TransferErrorCode::InvalidInput,
+                        "read_local_directory must reject a regular file");
+
+  const auto target = directory / "report.txt";
+  auto staging = create_local_staging_file(target, "tr_abc-def", 0);
+  check(is_owned_staging_name(staging.path().filename().string(), "tr_abc-def") &&
+            staging.path().filename().string().find(".yukinal-tr_abcdef-0-0.part") !=
+                std::string::npos,
+        "a staging file must carry the transfer-scoped basename");
+  staging.write("payload", 7);
+  staging.close();
+  auto second = create_local_staging_file(target, "tr_abc-def", 0);
+  check(second.path() != staging.path() &&
+            second.path().filename().string().find("-0-1.part") != std::string::npos,
+        "a second staging file must use the next attempt suffix");
+  second.close();
+  remove_local_staging(second.path());
+  check(!std::filesystem::exists(second.path()),
+        "remove_local_staging must delete the staging file");
+
+  publish_local_no_replace(staging.path(), target);
+  check(read_file(target) == "payload" && !std::filesystem::exists(staging.path()),
+        "no-replace publication must move the staged content into place");
+  bool duplicate = false;
+  auto again = create_local_staging_file(target, "tr_abc-def", 0);
+  again.write("other", 5);
+  again.close();
+  try {
+    publish_local_no_replace(again.path(), target);
+  } catch (const TransferError& error) {
+    duplicate = error.code() == TransferErrorCode::InvalidInput;
+  }
+  check(duplicate, "no-replace publication must reject an existing destination");
+  remove_local_staging(again.path());
+
+  const auto expected = *path_fingerprint_if_regular(target);
+  auto replacement = create_local_staging_file(target, "tr_abc-def", 1);
+  replacement.write("replaced", 8);
+  replacement.close();
+  publish_local_replace(replacement.path(), target, expected);
+  check(read_file(target) == "replaced",
+        "replace publication must overwrite the destination");
+
+  const auto stale = *path_fingerprint_if_regular(target);
+  auto conflicting = create_local_staging_file(target, "tr_abc-def", 2);
+  conflicting.write("x", 1);
+  conflicting.close();
+  write_file(target, "changed after staging");
+  bool stale_rejected = false;
+  try {
+    publish_local_replace(conflicting.path(), target, stale);
+  } catch (const TransferError& error) {
+    stale_rejected = error.code() == TransferErrorCode::InvalidInput;
+  }
+  check(stale_rejected, "replace publication must reject a destination that changed");
+  remove_local_staging(conflicting.path());
+
+  check(!path_fingerprint_if_regular(temporary.path / "absent.txt").has_value(),
+        "an absent destination must have no fingerprint");
+  expect_transfer_error([&] { (void)path_fingerprint_if_regular(directory); },
+                        TransferErrorCode::InvalidInput,
+                        "a non-regular destination must be rejected");
+  ensure_download_directory(directory);
+  expect_transfer_error([&] { ensure_download_directory(temporary.path / "absent-dir"); },
+                        TransferErrorCode::InvalidInput,
+                        "a missing download directory must be rejected");
+  expect_transfer_error([&] { ensure_download_directory(source); },
+                        TransferErrorCode::InvalidInput,
+                        "a file download destination must be rejected");
+
+  const auto recovered = directory / ".report.txt.yukinal-tr_abcdef-3-0.part";
+  write_file(recovered, "residue");
+  remove_recovered_local_staging(recovered, "tr_abc-def");
+  check(!std::filesystem::exists(recovered),
+        "recovery must remove its own staging residue");
+  remove_recovered_local_staging(recovered, "tr_abc-def");
+  expect_transfer_error(
+      [&] { remove_recovered_local_staging(directory / "other.txt", "tr_abc-def"); },
+      TransferErrorCode::InvalidInput, "recovery must reject a non-owned path");
 }
 
 }  // namespace
@@ -268,6 +415,8 @@ int main() {
   const auto parts = split(*ids.begin(), '_');
   check(parts.size() == 4 && parts[0] == "tr" && all_digits(parts[3]),
         "a generated transfer id must follow tr_<pid>_<nanos>_<seq>");
+
+  run_local_checks();
 
   std::cout << "transfer contract tests: green\n";
   return 0;

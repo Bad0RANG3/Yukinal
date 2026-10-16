@@ -173,6 +173,28 @@ bool is_terminal(TransferStatus status) {
   return true;
 }
 
+TransferError::TransferError(TransferErrorCode code, const std::string& message)
+    : std::runtime_error(message), code_(code) {}
+
+TransferFailureKind TransferError::failure_kind() const noexcept {
+  switch (code_) {
+    case TransferErrorCode::InvalidInput:
+      return TransferFailureKind::InvalidInput;
+    case TransferErrorCode::Local:
+    case TransferErrorCode::SourceChanged:
+      return TransferFailureKind::LocalIo;
+    case TransferErrorCode::Remote:
+    case TransferErrorCode::AlreadyExists:
+    case TransferErrorCode::Cancelled:
+      return TransferFailureKind::RemoteIo;
+    case TransferErrorCode::Unsupported:
+      return TransferFailureKind::Unsupported;
+    case TransferErrorCode::Verification:
+      return TransferFailureKind::Verification;
+  }
+  return TransferFailureKind::LocalIo;
+}
+
 nlohmann::json transfer_item_failure_json(const TransferItemFailure& failure) {
   nlohmann::json value = {
       {"item", failure.item},

@@ -1273,3 +1273,26 @@ than serialized as null so the strict shared Zod object accepts them. A new
 `transfer_tests` target covers the enum round trips, the snapshot shape, the staging
 round trip, conflict-action parsing, the name/path guards and the staging ownership
 marker.
+
+The local filesystem seam landed next. `transfer_local`
+(`native/desktop_host/include/yukinal/desktop_host/transfer_local.hpp` plus
+`src/transfer_local.cpp`) ports the retired Rust `transfer::local` helpers: the
+`LocalFingerprint`/`LocalSource` handles, `local_source_fingerprint` and the
+unchanged-source re-check that raises `SourceChanged`, `read_local_directory` for
+recursive upload walks, exclusive `create_local_staging_file` writing
+`.<name>.yukinal-<owner>-<item>-<attempt>.part` (the owner is the transfer id with
+`-` removed, matching the Rust naming exactly), no-replace publication via a hard
+link, fingerprinted replace publication that refuses a destination that changed
+while the transfer was staged, `path_fingerprint_if_regular` for the overwrite
+guard, and `remove_recovered_local_staging`, which deletes only a staging file
+whose basename is owned by the transfer. `TransferError` now derives from
+`std::runtime_error` and carries a `TransferErrorCode`, so the seam reports the
+same failure kinds the manager will translate to IPC. Because `std::filesystem`
+reports a missing path as `file_type::not_found` *without* setting the error code,
+a shared `status_missing` helper checks both. `transfer_tests` drives these
+helpers against real files in a temporary directory: fingerprints, the
+changed-source abort, directory listing, exclusive staging and attempt suffixes,
+no-replace/replace publication with the duplicate and stale-target refusals, the
+download-directory guard and the recovery cleanup. The canonical
+`native/build-nmake` Release build passed all thirteen CTest targets and
+`pnpm check` was green.
