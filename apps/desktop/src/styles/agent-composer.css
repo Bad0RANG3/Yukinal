@@ -30,11 +30,13 @@
 }
 
 .agent-input-region {
+  min-width: 0;
   flex: 0 0 auto;
 }
 
 .agent-input-notices:not(:empty) {
-  padding: 0 12px 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .agent-composer {
@@ -44,8 +46,10 @@
 }
 
 .agent-composer-shell {
+  container: agent-composer / inline-size;
   position: relative;
   display: flex;
+  min-width: 0;
   min-height: 94px;
   flex-direction: column;
   justify-content: space-between;
@@ -341,9 +345,26 @@
 }
 
 .agent-composer-toolbar-right {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 100%;
+  margin-left: auto;
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+
+.agent-composer-tool.agent-settings-trigger {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  padding-inline: 6px;
+  white-space: nowrap;
+}
+
+.agent-settings-trigger.is-readonly {
+  color: var(--text);
+  background: var(--warn-surface);
 }
 
 .agent-composer-tool {
@@ -373,8 +394,27 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px 12px;
-  margin: 8px 4px 0;
+  margin: 0;
 }
+
+.agent-composer-meta,
+.agent-composer-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+}
+
+.agent-composer-meta { justify-content: space-between; }
+.agent-composer-status { margin-left: auto; color: var(--faint); font-size: var(--text-caption); }
+.agent-composer .agent-composer-status .agent-context { flex: 0 1 auto; max-width: 180px; margin: 0; padding: 0; border: 0; background: transparent; font-size: inherit; }
+.agent-composer .agent-composer-status .agent-status { min-height: 0; padding: 0; border: 0; background: transparent; font-size: inherit; }
+.agent-composer-status .agent-token-usage { display: inline; }
+.agent-composer-status .agent-context-usage { font-size: inherit; }
+.agent-input-notices:empty { display: none; }
+.agent-composer .agent-input-notices .agent-notice { padding: 0; font-size: var(--text-caption); line-height: 1.5; }
+.agent-composer .agent-input-notices .text-button { font-size: inherit; }
 
 .agent-mode-summary,
 .agent-approval-summary,
@@ -676,16 +716,6 @@
 
 /* 停止条：只在运行中出现，和发送按钮互斥，各自都有文字说明。
    中断是安全功能 —— 它不能藏在一个「看着像禁用」的图标后面。 */
-.agent-running-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border-top: 1px solid var(--composer-line);
-  margin-top: 8px;
-  padding-top: 8px;
-}
-
 .agent-running-label {
   display: inline-flex;
   align-items: center;
@@ -726,6 +756,8 @@
   opacity: var(--opacity-disabled);
 }
 
+.agent-stop-button.is-closing { animation: pop-exit var(--motion-fast) ease both; }
+
 .agent-composer-input:disabled {
   cursor: not-allowed;
   opacity: var(--opacity-disabled);
@@ -755,7 +787,13 @@
 .agent-reply-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; margin-bottom: 6px; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
 .agent-reply-meta strong { color: var(--muted); font-weight: 600; }
 .agent-reply-meta > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-composer-toolbar-left:has(.agent-role-picker) { flex-wrap: wrap; }
+
+@container agent-composer (max-width: 460px) {
+  .agent-composer-toolbar-right { flex: 1 1 100%; }
+  .agent-composer-status { margin-left: 0; }
+  .agent-role-picker { max-width: 130px; }
+  .agent-model-value { max-width: 120px; }
+}
 
 @container agent-workspace (max-width: 580px) {
   .agent-role-picker { max-width: 130px; }

@@ -35,7 +35,7 @@ import { usePreferencesStore } from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { AgentComposer } from "./AgentComposer.js";
 import { AgentFeed } from "./AgentFeed.js";
-import { AgentHeader } from "./AgentHeader.js";
+import { AgentHeader, AgentRunStatus } from "./AgentHeader.js";
 import { AgentHistoryPane } from "./AgentHistoryPane.js";
 import { AgentNotices } from "./AgentNotices.js";
 import { AgentStarters } from "./AgentStarters.js";
@@ -428,12 +428,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         closeButtonRef={panel.closeButtonRef}
         workspace={workspace}
         workspaceControls={workspaceControls}
-        context={<div className="agent-context">
-          <Icon name="servers" size="sm" />
-          <span title={(run.running ? runContext : focusServer?.name) ?? "全局工作区"}>
-            {(run.running ? runContext : focusServer?.name) ?? "全局工作区"}
-          </span>
-        </div>}
+        showStatus={false}
       />
       {workspaceWorkpages}
 
@@ -455,8 +450,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         />
       </div> : null}
         <>
-          {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
-
           <div className={`agent-conversation ${run.entries.length === 0 ? "is-empty" : "has-messages"}`}>
             <AgentFeed
               entries={run.entries}
@@ -473,25 +466,34 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
             />
 
             <div className="agent-input-region">
-              <div className="agent-input-notices">
-                {preview ? <p className="agent-notice" role="status">模拟预览 · 可输入草稿，暂不发送请求。</p> : <AgentNotices
-                  shell={shell}
-                  agentRunning={agentRunning}
-                  providerReady={models.providerReady}
-                  agentExited={Boolean(agentStatus.data?.lastExit)}
-                  restart={agentStatus.data?.restart}
-                  statusUnreadable={agentStatus.isError}
-                  spawning={spawnAgent.isPending}
-                  spawnError={spawnAgent.error?.message}
-                  onSpawn={() => spawnAgent.mutate()}
-                  onOpenSettings={() => setPrimary("settings")}
-                />}
-                {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
-                {contextError ? <div className="agent-history-error agent-history-error-inline" role="alert">{contextError}</div> : null}
-                {roles.notice ? <div className="agent-history-error agent-history-error-inline" role="status">{roles.notice}</div> : null}
-              </div>
-
               <AgentComposer
+                notices={<>
+                  {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
+                  {preview ? <p className="agent-notice" role="status">模拟预览 · 可输入草稿，暂不发送请求。</p> : <AgentNotices
+                    shell={shell}
+                    agentRunning={agentRunning}
+                    providerReady={models.providerReady}
+                    agentExited={Boolean(agentStatus.data?.lastExit)}
+                    restart={agentStatus.data?.restart}
+                    statusUnreadable={agentStatus.isError}
+                    spawning={spawnAgent.isPending}
+                    spawnError={spawnAgent.error?.message}
+                    onSpawn={() => spawnAgent.mutate()}
+                    onOpenSettings={() => setPrimary("settings")}
+                  />}
+                  {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
+                  {contextError ? <div className="agent-history-error agent-history-error-inline" role="alert">{contextError}</div> : null}
+                  {roles.notice ? <div className="agent-history-error agent-history-error-inline" role="status">{roles.notice}</div> : null}
+                </>}
+                status={<>
+                  <div className="agent-context">
+                    <Icon name="servers" size="sm" />
+                    <span title={(run.running ? runContext : focusServer?.name) ?? "全局工作区"}>
+                      {(run.running ? runContext : focusServer?.name) ?? "全局工作区"}
+                    </span>
+                  </div>
+                  <AgentRunStatus running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
+                </>}
                 prompt={prompt}
                 onPromptChange={setPrompt}
                 attachments={attachments}

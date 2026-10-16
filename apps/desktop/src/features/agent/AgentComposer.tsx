@@ -8,8 +8,7 @@
  * 模块内部，对外只暴露「有哪些服务器可提及」和一个「执行了这个命令」回调 ——
  * 这样面板不必知道弹窗的存在，而候选逻辑本身已在 composer-triggers 里被单独测试。
  *
- * 尚未接入的能力（语音）一律呈现为 disabled 并写明原因，
- * 不留「看起来能点、点了没反应」的假入口。
+ * 只呈现已经接入的输入能力。
  */
 
 import {
@@ -19,6 +18,7 @@ import {
   useState,
   type ClipboardEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 
 import {
@@ -96,6 +96,8 @@ export function AgentComposer({
   roles = [],
   selectedRoleId = null,
   onSelectRole,
+  notices,
+  status,
 }: {
   prompt: string;
   onPromptChange: (value: string) => void;
@@ -128,7 +130,7 @@ export function AgentComposer({
   targetEnvironment: Environment;
   models: ReadonlyArray<{ key: string; label: string; providerLabel?: string }>;
   selectedModelKey: string | null;
-  /** 当前选中模型的完整名称，用于在输入框上方显示当前运行目标。 */
+  /** 当前选中模型的完整名称。 */
   selectedModelLabel: string | null;
   onSelectModel: (key: string) => void;
   /** 可被 @ 提及的服务器。 */
@@ -137,6 +139,8 @@ export function AgentComposer({
   roles?: readonly AgentRole[];
   selectedRoleId?: string | null;
   onSelectRole?: (roleId: string | null) => void;
+  notices?: ReactNode;
+  status?: ReactNode;
 }) {
   const modeSpec = runModeSpec(runMode);
   const approvalSpec = approvalOptionSpec(permissionMode);
@@ -211,7 +215,7 @@ export function AgentComposer({
   const suggestionsPresence = usePresence(open, { exitAnimation: "popover-exit" });
   const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
   const sendPresence = usePresence(hasContent && !running, { exitAnimation: "pop-exit" });
-  const runningPresence = usePresence(running, { exitAnimation: "expand-exit" });
+  const runningPresence = usePresence(running, { exitAnimation: "pop-exit" });
 
   /* 面板打开时把焦点送进去。
      这不是锦上添花，是这一处原先真的走不通：面板在 DOM 里排在工具栏**之前**，
@@ -694,22 +698,6 @@ export function AgentComposer({
 
         <div className="agent-composer-toolbar">
           <div className="agent-composer-toolbar-left">
-            {/* 运行设置独立于附件入口，只读模式下也能调整下一次运行。 */}
-            <button
-              type="button"
-              ref={settingsTriggerRef}
-              className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}`}
-              aria-label="运行设置"
-              aria-expanded={menuOpen}
-              aria-haspopup="dialog"
-              title="运行模式与批准方式"
-              onClick={() => {
-                setMenuOpen((open) => !open);
-                setTrigger(null);
-              }}
-            >
-              <Icon name="settings" size="md" />
-            </button>
             <button
               type="button"
               className="agent-composer-tool"
@@ -743,6 +731,24 @@ export function AgentComposer({
             >
               <Icon name="file" size="md" />
             </button>
+            <button
+              type="button"
+              ref={settingsTriggerRef}
+              className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
+              aria-label={`运行设置：${modeSpec.label}，${approvalSpec.label}，${policySpec.label}`}
+              aria-expanded={menuOpen}
+              aria-haspopup="dialog"
+              title="运行模式与批准方式"
+              onClick={() => {
+                setMenuOpen((open) => !open);
+                setTrigger(null);
+              }}
+            >
+              <span>{modeSpec.label}</span>
+              <Icon name="chevronDown" size="xs" />
+            </button>
+          </div>
+          <div className="agent-composer-toolbar-right">
             {roles.length ? <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
               <span className="sr-only">回复角色</span>
               <select aria-label="回复角色" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
@@ -761,8 +767,6 @@ export function AgentComposer({
                 disabled={running}
               />
             ) : <span className="agent-model-empty">未配置模型</span>}
-          </div>
-          <div className="agent-composer-toolbar-right">
             {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
                 点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。
                 语音若要做，应作为真实能力连同它的权限与降级路径一起加回来。 */}
@@ -782,47 +786,31 @@ export function AgentComposer({
                 <Icon name="arrowUp" size="md" />
               </button>
             ) : null}
-          </div>
-        </div>
-
-        {runningPresence.mounted ? (
-          <div
-            className={`agent-running-bar ${runningPresence.closing ? "is-closing" : ""}`}
-            onAnimationEnd={runningPresence.onAnimationEnd}
-          >
-            <span className="agent-running-label">
-              <span className="agent-running-dot" aria-hidden="true" />
-              运行中
-            </span>
-            <button
+            {runningPresence.mounted ? <button
               type="button"
-              className="agent-stop-button"
+              className={`agent-stop-button${runningPresence.closing ? " is-closing" : ""}`}
               aria-label="停止运行"
               title={stopping ? "停止中" : "停止运行"}
               disabled={!canStop}
               onClick={onStop}
+              onAnimationEnd={runningPresence.onAnimationEnd}
             >
               <Icon name="stop" size="sm" />
-              停止
-            </button>
+              <span>{stopping ? "停止中" : "停止"}</span>
+            </button> : null}
           </div>
-        ) : null}
-      </div>
-      {/* 权限与策略始终可见，独立换行，不被模型名称或发送按钮挤掉。 */}
-      <div className="agent-composer-policy" aria-label="本次运行方式">
-        <span className={`agent-mode-summary ${modeSpec.readOnly ? "is-readonly" : ""}`}>
-          {modeSpec.label}
-        </span>
-        <span className="agent-approval-summary" title={approvalSpec.summary}>
-          {approvalSpec.label}
-        </span>
-        <span
-          className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`}
-          title={policyWarning ?? policySpec.summary}
-        >
-          {policyWarning ? <Icon name="warning" size="sm" /> : null}
-          {policySpec.label}
-        </span>
+        </div>
+        <div className="agent-composer-meta">
+          <div className="agent-composer-policy" aria-label="本次运行方式">
+            <span className="agent-approval-summary" title={approvalSpec.summary}>{approvalSpec.label}</span>
+            <span className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`} title={policyWarning ?? policySpec.summary}>
+              {policyWarning ? <Icon name="warning" size="sm" /> : null}
+              {policySpec.label}
+            </span>
+          </div>
+          {status ? <div className="agent-composer-status" aria-label="运行状态">{status}</div> : running ? <span className="agent-running-label" role="status"><span className="agent-running-dot" aria-hidden="true" />运行中</span> : null}
+        </div>
+        {notices ? <div className="agent-input-notices">{notices}</div> : null}
       </div>
     </footer>
   );

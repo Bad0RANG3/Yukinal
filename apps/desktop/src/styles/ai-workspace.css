@@ -108,11 +108,11 @@
 /* Both scrollbar gutters reserve the same width. Subtract that reservation
    from the padding so the text and composer share the exact same column. */
 .ai-first .agent-feed { padding: 32px max(calc(var(--ai-content-inset) - var(--scrollbar-size)), calc((100% - var(--ai-reading-width)) / 2 - var(--scrollbar-size))); gap: 24px; scrollbar-gutter: stable both-edges; }
-.ai-first .agent-entry { position: relative; flex: 0 0 auto; min-width: 0; font-size: var(--text-body); line-height: 1.75; }
+.ai-first .agent-entry { position: relative; flex: 0 0 auto; min-width: 0; font-size: var(--text-small); line-height: 1.75; }
 .ai-first .agent-entry-user { align-self: flex-end; max-width: 85%; padding: 12px 16px; border-color: var(--edge-subtle); border-radius: var(--radius-card); background: var(--material-hover); }
 .ai-first .agent-entry-assistant { border: 0; background: transparent; padding: 0; }
 .ai-first :is(.agent-entry-user, .agent-entry-assistant) > .entry-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.ai-first .agent-entry-body, .ai-first .markdown-body { font-size: var(--text-body); line-height: 1.75; }
+.ai-first .agent-entry-body, .ai-first .markdown-body { font-size: var(--text-small); line-height: 1.75; }
 .ai-first .entry-label, .ai-first .agent-reasoning-summary { font-size: var(--text-caption); }
 .ai-first .agent-reasoning-text, .ai-first .agent-notice { font-size: var(--text-small); line-height: 1.7; }
 .ai-first .agent-conversation.is-empty { justify-content: center; padding-block: 32px clamp(64px, 10vh, 112px); }
@@ -123,25 +123,26 @@
 .ai-first .agent-empty p { max-width: 52ch; margin: 0; font-size: var(--text-body); line-height: 1.75; color: var(--muted); }
 .ai-first .agent-input-region { width: min(calc(100% - 2 * var(--ai-content-inset)), var(--ai-reading-width)); align-self: center; padding-bottom: var(--ai-content-inset); }
 .ai-first .agent-conversation.is-empty .agent-input-region { padding-bottom: 0; }
-.ai-first .agent-input-notices:not(:empty) { display: flex; flex-direction: column; gap: 8px; max-height: min(160px, 20vh); margin-bottom: 12px; padding: 0; overflow: auto; }
+.ai-first .agent-input-notices:not(:empty) { display: flex; flex-direction: column; gap: 6px; max-height: min(160px, 20vh); margin: 0; padding: 0; overflow: auto; }
 .ai-first .agent-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0; padding: 0 4px; border: 0; background: transparent; color: var(--muted); }
 .ai-first .agent-notice .text-button { flex-shrink: 0; padding: 3px 0; background: transparent; color: var(--text); font-size: var(--text-label); }
 .ai-first .agent-notice > span:first-child { flex: 1 1 220px; }
 .ai-first .agent-notice-error { flex-basis: 100%; margin: 0; }
 .ai-first .agent-history-error-inline { margin: 0; }
 .ai-first .agent-composer { width: 100%; padding: 0; border: 0; background: transparent; }
-.ai-first .agent-composer-shell { min-height: 108px; gap: 12px; padding: 14px 12px 10px; border-radius: var(--radius-panel); background: var(--composer-surface); box-shadow: none; transition: border-color var(--motion-fast) ease; }
+.ai-first .agent-composer-shell { min-height: 108px; gap: 10px; padding: 14px 12px 10px; border-radius: var(--radius-panel); background: var(--composer-surface); box-shadow: none; transition: border-color var(--motion-fast) ease; }
 .ai-first .agent-composer-shell:focus-within { border-color: var(--focus-line); box-shadow: none; }
 .ai-first .agent-composer-toolbar { min-height: 32px; margin: 0; padding: 0; border: 0; }
-.ai-first .agent-composer-toolbar-left { flex: 1 1 0; gap: 4px; }
-.ai-first .agent-composer-toolbar-right { min-width: 32px; }
+.ai-first .agent-composer-toolbar-left { flex: 0 1 auto; gap: 4px; }
+.ai-first .agent-composer-toolbar-right { min-width: 0; margin-left: auto; }
 .ai-first .agent-composer-tool { width: 28px; height: 28px; border-radius: var(--radius-control); background: transparent; }
+.ai-first .agent-composer-tool.agent-settings-trigger { width: auto; }
 .ai-first .agent-composer-input { min-height: 40px; max-height: 180px; }
 .ai-first .agent-send-button { display: grid; place-items: center; width: 32px; min-width: 32px; height: 32px; padding: 0; border-radius: var(--radius-circle); }
-.ai-first .agent-composer-policy { margin: 8px 4px 0; gap: 6px 12px; }
+.ai-first .agent-composer-policy { margin: 0; gap: 6px 10px; }
 .ai-first .agent-mode-summary:not(.is-readonly) { padding: 0; border: 0; }
 .ai-first .agent-conversation.is-empty .agent-settings-panel { max-height: min(440px, 38vh); }
-.ai-first .agent-composer textarea { font-size: var(--text-body); line-height: 1.6; }
+.ai-first .agent-composer textarea { font-size: var(--text-small); line-height: 1.6; }
 .ai-first .agent-composer :is(.agent-composer-select, .agent-model-trigger, .agent-composer-tool, .agent-run-mode, .agent-policy-trigger) { font-size: var(--text-label); }
 
 /* Task starters prepare the existing draft; they never execute a request. */

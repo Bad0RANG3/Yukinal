@@ -219,7 +219,7 @@ std::optional<Options> parse_options(const std::vector<std::string>& arguments) 
 }
 
 bool valid_dev_url(const std::string& value) {
-  static const std::regex pattern(R"(^http://127\.0\.0\.1:[1-9][0-9]{0,4}/?$)");
+  static const std::regex pattern(R"(^http://127\.0\.0\.1:[1-9][0-9]{0,4}/?(\?fixture=1)?$)");
   if (!std::regex_match(value, pattern)) return false;
   const auto colon = value.rfind(':');
   try {
@@ -454,7 +454,8 @@ int run(const std::vector<std::string>& arguments) {
         return {false, {{"code", "SHUTTING_DOWN"}, {"message", "The app is closing"}}};
       }
       install_workpage_lifecycle(*child);
-      const auto child_url = *url + "?workpage=" + kind + "&server=" + server_id;
+      const auto child_url = *url + (url->find('?') == std::string::npos ? "?" : "&") +
+          "workpage=" + kind + "&server=" + server_id;
       if (webview_navigate(child->view, child_url.c_str()) != WEBVIEW_ERROR_OK) {
         uninstall_workpage_lifecycle(*child);
         destroy_bridge_window(*child);

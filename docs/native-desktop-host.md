@@ -62,7 +62,7 @@ has messages, the transcript scrolls above the bottom input area. Transcript and
 input widths share a maximum 760-pixel reading measure, bounded by the frame
 in narrower windows; readiness notices stay beside the input they explain.
 The dark shell uses separate window, content, and raised-control surfaces. The
-composer shares the AI surface's #282828 background and has no glow, gradient,
+composer uses #1d1d1d within the AI surface's #282828 background and has no glow, gradient,
 or shadow in resting, focused, or attachment-drag states. Nested server resources
 use a recessed surface. The outer-to-AI boundary uses only a faint edge and
 soft contact shadow, including its native caption cap. The welcome title is centered above the input; the
@@ -181,6 +181,9 @@ as a mismatch rather than silently replaced. Unmigrated commands return
 The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.
+The development URL also accepts the exact `?fixture=1` query for local mock
+data. Auxiliary workpage windows retain this query. Other paths, queries and
+non-loopback hosts remain rejected.
 
 The local file browser's native path selection now runs in C++. `local_path_pick`
 opens the platform file or folder picker and stores the chosen paths in a

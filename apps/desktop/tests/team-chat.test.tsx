@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ComponentProps } from "react";
 import type { AgentPromptPart, ChatMessage } from "@yukinal/shared";
 
 import { AgentEntryView } from "../src/features/agent/AgentEntryView.js";
 import { AgentHeader } from "../src/features/agent/AgentHeader.js";
+import { AgentComposer } from "../src/features/agent/AgentComposer.js";
+import { defaultAgentRoles } from "../src/features/agent-nist/agent-nist.js";
 import { appendAssistantDelta, entriesFromMessages, settleAssistantText } from "../src/features/agent/transcript.js";
 import { conversationKey, recalledDraft, rememberDraft, type SessionDraft } from "../src/features/agent/session-drafts.js";
 import { matchMentions } from "../src/features/agent/composer-triggers.js";
@@ -88,4 +91,28 @@ test("English team aliases find the same visible mention without changing the in
   assert.equal(matchMentions(candidates, "red")[0]?.label, "红队");
   assert.equal(matchMentions(candidates, "红")[0]?.id, "team:red");
   assert.equal(matchMentions(candidates, "blue").length, 0);
+});
+
+const composerProps: ComponentProps<typeof AgentComposer> = {
+  prompt: "检查连接", attachments: [], onPromptChange: () => {}, onAttachmentsChange: () => {},
+  onSubmit: () => {}, onStop: () => {}, running: false, stopping: false, canSend: true, canStop: false,
+  permissionMode: "ask", onPermissionModeChange: () => {}, runMode: "goal", onRunModeChange: () => {},
+  delivery: "async", onDeliveryChange: () => {}, runPolicy: null, onRunPolicyChange: () => {}, targetEnvironment: "unknown",
+  models: [{ key: "provider:model", label: "vendor/model" }], selectedModelKey: "provider:model", selectedModelLabel: "Provider · model", onSelectModel: () => {},
+  roles: defaultAgentRoles(), onSelectRole: () => {}, mentions: [],
+  commandContext: { running: false, archived: false, desktop: true },
+};
+
+test("running composer preserves stop admission and locks draft, role and model controls", () => {
+  const markup = renderToStaticMarkup(<AgentComposer {...composerProps} running canStop stopping={false} />);
+  assert.match(markup, /<textarea[^>]+disabled=""/u);
+  assert.match(markup, /<select[^>]+aria-label="回复角色"[^>]+disabled=""/u);
+  assert.match(markup, /<button[^>]+aria-label="选择模型"[^>]+disabled=""/u);
+  assert.equal(markup.includes('aria-label="发送消息"'), false);
+  const stop = markup.match(/<button[^>]+aria-label="停止运行"[^>]*>/u)?.[0];
+  assert.ok(stop);
+  assert.equal(stop.includes('disabled=""'), false);
+  const stopping = renderToStaticMarkup(<AgentComposer {...composerProps} running stopping canStop={false} />);
+  assert.match(stopping, /<button[^>]+aria-label="停止运行"[^>]+disabled=""/u);
+  assert.ok(stopping.includes("停止中"));
 });

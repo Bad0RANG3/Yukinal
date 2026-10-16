@@ -29,6 +29,7 @@ export function AgentHeader({
   context,
   taskTitle = "新任务",
   contextUsage,
+  showStatus = true,
 }: {
   running: boolean;
   runState: string | null;
@@ -47,9 +48,8 @@ export function AgentHeader({
   context?: ReactNode;
   taskTitle?: string;
   contextUsage?: AgentContextUsage | null;
+  showStatus?: boolean;
 }) {
-  const label = runStateLabel(runState);
-
   return (
     <header className="agent-header">
       <div className="agent-task-heading">
@@ -69,24 +69,7 @@ export function AgentHeader({
         {context}
       </div>
       <div className="agent-header-actions">
-        {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
-          <span className="agent-context-caption">上下文 </span><span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
-        </span> : null}
-        {tokenUsage && !contextUsage ? (
-          <span
-            className="agent-token-usage"
-            title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens`}
-          >
-            {(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens
-          </span>
-        ) : null}
-        {running && label ? (
-          <span className="agent-status agent-status-active"><span className="status-pulse" />{label}</span>
-        ) : (
-          <span className={`agent-status ${agentReady ? "agent-status-ready" : "agent-status-idle"}`} data-idle={!runState || undefined}>
-            {label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动")}
-          </span>
-        )}
+        {showStatus ? <AgentRunStatus running={running} runState={runState} tokenUsage={tokenUsage} contextUsage={contextUsage} agentReady={agentReady} shell={shell} /> : null}
         {workspaceControls ? <div className="agent-workspace-controls">{workspaceControls}</div> : null}
         {!workspace ? <button
           ref={closeButtonRef}
@@ -103,4 +86,31 @@ export function AgentHeader({
       </div>
     </header>
   );
+}
+
+/** Shared status content can live inside the composer without duplicating state. */
+export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, agentReady, shell }: {
+  running: boolean;
+  runState: string | null;
+  tokenUsage: AgentTokenUsage | null;
+  contextUsage?: AgentContextUsage | null;
+  agentReady: boolean;
+  shell: boolean;
+}) {
+  const label = runStateLabel(runState);
+  return <>
+    {running && label ? (
+      <span className="agent-status agent-status-active" role="status"><span className="status-pulse" />{label}</span>
+    ) : (
+      <span className={`agent-status ${agentReady ? "agent-status-ready" : "agent-status-idle"}`} data-idle={!runState || undefined} role="status">
+        {label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动")}
+      </span>
+    )}
+    {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
+      <span className="agent-context-caption">上下文 </span><span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
+    </span> : null}
+    {tokenUsage && !contextUsage ? <span className="agent-token-usage" title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens`}>
+      {(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens
+    </span> : null}
+  </>;
 }
