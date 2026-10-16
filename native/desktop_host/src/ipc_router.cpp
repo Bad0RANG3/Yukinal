@@ -702,6 +702,44 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return terminal_command(method, params);
   }
 
+  if (method == "investigation_task_list") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"status", "limit"}, {})) {
+      return failure("INVALID_PARAMS", "investigation_task_list received an unexpected parameter");
+    }
+    std::optional<std::string> status;
+    if (params.contains("status")) {
+      if (!params.at("status").is_string()) {
+        return failure("INVALID_PARAMS", "investigation_task_list status must be a string");
+      }
+      const auto value = params.at("status").get<std::string>();
+      if (!is_one_of(value, {"pending", "investigating", "waiting_user", "executing",
+                            "verifying", "completed", "failed", "stopped", "expired"})) {
+        return failure("INVALID_PARAMS", "investigation_task_list status is invalid");
+      }
+      status = value;
+    }
+    int limit = 50;
+    if (params.contains("limit")) {
+      if (!params.at("limit").is_number_integer()) {
+        return failure("INVALID_PARAMS", "investigation_task_list limit must be an integer");
+      }
+      const auto requested = params.at("limit").get<std::int64_t>();
+      if (requested < 1 || requested > 100) {
+        return failure("INVALID_PARAMS", "investigation_task_list limit must be between 1 and 100");
+      }
+      limit = static_cast<int>(requested);
+    }
+    try {
+      return {true, database_->list_investigation_tasks(status, limit)};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not read its tasks");
+    }
+  }
+
   if (method == "core_ping") {
     if (!params.empty()) {
       return failure("INVALID_PARAMS", "core_ping does not accept parameters");

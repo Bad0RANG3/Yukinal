@@ -776,6 +776,42 @@ int main(int argc, char** argv) {
             "a tool that was not reviewed must not be callable even if the server lists it");
       supervisor.stop("mcp_mock");
     }
+
+    // Investigation task list: host-owned rows decode into the shared contract.
+    {
+      sqlite3* writer = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+            "could not open the database for the investigation fixture");
+      execute(writer, R"SQL(
+        INSERT INTO investigation_tasks (
+          id, workspace_id, server_id, objective, success_criteria, scope, mode,
+          permission_mode, automation_level, status, max_steps, max_run_ms, created_at,
+          updated_at, max_attempts, created_by, phase, guardrails
+        ) VALUES (
+          'itask_1', NULL, 'srv_01abc', 'Check nginx', '["nginx is active"]',
+          '{"host":"remote","serverId":"srv_01abc","environment":"staging"}',
+          'goal', 'ask', 'propose', 'investigating', 8, 120000,
+          '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 3, 'user', 'investigating',
+          '{"forbiddenTools":[],"forbiddenPathPrefixes":[]}'
+        );
+      )SQL");
+      sqlite3_close(writer);
+    }
+    const auto tasks = router.invoke("investigation_task_list", nlohmann::json::object());
+    check(tasks.ok && tasks.value.at("tasks").size() == 1,
+          "investigation_task_list should return the stored task");
+    const auto& task = tasks.value.at("tasks").at(0);
+    check(task.at("id") == "itask_1" && task.at("objective") == "Check nginx" &&
+              task.at("status") == "investigating" && task.at("phase") == "investigating" &&
+              task.at("budget").at("maxAttempts") == 3 &&
+              task.at("successCriteria").size() == 1 && task.at("scope").at("host") == "remote",
+          "investigation_task_list should decode the shared task contract");
+    check(router.invoke("investigation_task_list", {{"status", "completed"}})
+                  .value.at("tasks")
+                  .empty(),
+          "investigation_task_list should filter by status");
+    check(!router.invoke("investigation_task_list", {{"status", "bogus"}}).ok,
+          "investigation_task_list should reject an unknown status");
   }
 
   sqlite3* readback = nullptr;

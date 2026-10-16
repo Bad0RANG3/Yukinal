@@ -1063,3 +1063,14 @@ tool cannot be invoked before an explicit review. The mock MCP server now
 paginates (`echo`, then `secret`) to exercise both: the catalog still exposes
 only the reviewed `echo`, and `mcp.mcp_mock.secret` is refused. The canonical
 `native/build-nmake` Release build passed all twelve CTest targets.
+
+Later on 2026-10-16, the C++ host added `investigation_task_list`. It reads the
+host-owned `investigation_tasks` rows (status filter, bounded limit, newest
+first) and decodes each into the shared `InvestigationTask` contract, including
+the JSON success criteria, scope, guardrails and last failure plus the derived
+budget. `desktop_host_database_tests` inserts a task and checks the decoded
+fields, the status filter and the rejection of an unknown status. The remaining
+investigation commands (task detail/create/start/stop/recover, schedules,
+retention, briefs) and their evidence/plan/ledger infrastructure remain, as do
+the MCP HTTP transport and OAuth, the file transfer actions, installers, and
+real validation.

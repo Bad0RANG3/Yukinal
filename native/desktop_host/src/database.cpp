@@ -217,6 +217,37 @@ nlohmann::json mcp_json_array(sqlite3_stmt* row, int column, const char* label) 
   return value;
 }
 
+// Decodes one `investigation_tasks` row into the shared `InvestigationTask` shape.
+nlohmann::json decode_investigation_task(sqlite3_stmt* row) {
+  nlohmann::json task = {
+      {"id", column_text(row, 0)},
+      {"objective", column_text(row, 3)},
+      {"successCriteria", parse_json_text(column_text(row, 4), "investigation success criteria")},
+      {"scope", parse_json_text(column_text(row, 5), "investigation scope")},
+      {"guardrails", parse_json_text(column_text(row, 20), "investigation guardrails")},
+      {"mode", column_text(row, 6)},
+      {"permissionMode", column_text(row, 7)},
+      {"automationLevel", column_text(row, 8)},
+      {"createdBy", column_text(row, 13)},
+      {"phase", column_text(row, 14)},
+      {"status", column_text(row, 9)},
+      {"budget",
+       {{"maxSteps", sqlite3_column_int64(row, 10)},
+        {"maxRunMs", sqlite3_column_int64(row, 11)},
+        {"maxAttempts", sqlite3_column_int64(row, 12)}}},
+      {"createdAt", column_text(row, 15)},
+      {"updatedAt", column_text(row, 16)},
+  };
+  add_optional_text(task, "workspaceId", row, 1);
+  add_optional_text(task, "serverId", row, 2);
+  add_optional_text(task, "completedAt", row, 17);
+  add_optional_text(task, "activeRunId", row, 18);
+  if (sqlite3_column_type(row, 19) != SQLITE_NULL) {
+    task["lastFailure"] = parse_json_text(column_text(row, 19), "investigation last failure");
+  }
+  return task;
+}
+
 // Decodes one `mcp_servers` row into the shared `McpServerConfig` shape.
 nlohmann::json decode_mcp_server(sqlite3_stmt* row) {
   const auto transport = std::string(column_text(row, 2));
@@ -1763,6 +1794,52 @@ void DesktopDatabase::insert_snapshot(const nlohmann::json& snapshot) const {
   if (sqlite3_step(statement.get()) != SQLITE_DONE) {
     throw std::runtime_error(sqlite3_errmsg(connection_));
   }
+}
+
+nlohmann::json DesktopDatabase::list_investigation_tasks(
+    const std::optional<std::string>& status, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Investigation task limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"tasks", nlohmann::json::array()}};
+  const char* sql = status.has_value()
+      ? R"SQL(
+          SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+                 permission_mode, automation_level, status, max_steps, max_run_ms,
+                 max_attempts, created_by, phase, created_at, updated_at, completed_at,
+                 active_run_id, last_failure, guardrails
+            FROM investigation_tasks
+           WHERE status = ?1
+           ORDER BY updated_at DESC
+           LIMIT ?2
+        )SQL"
+      : R"SQL(
+          SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+                 permission_mode, automation_level, status, max_steps, max_run_ms,
+                 max_attempts, created_by, phase, created_at, updated_at, completed_at,
+                 active_run_id, last_failure, guardrails
+            FROM investigation_tasks
+           ORDER BY updated_at DESC
+           LIMIT ?1
+        )SQL";
+  Statement rows(connection_, sql);
+  int limit_parameter = 1;
+  if (status.has_value()) {
+    bind_text(connection_, rows.get(), 1, *status);
+    limit_parameter = 2;
+  }
+  if (sqlite3_bind_int(rows.get(), limit_parameter, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  nlohmann::json tasks = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    tasks.push_back(decode_investigation_task(rows.get()));
+  }
+  return {{"tasks", std::move(tasks)}};
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(
