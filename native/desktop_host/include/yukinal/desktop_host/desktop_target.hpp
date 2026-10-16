@@ -24,6 +24,13 @@ class CredentialStore;
     const DesktopDatabase& database, const CredentialStore& credentials,
     const std::string& server_id);
 
+// Whether the configured connection uses only auth and trust modes the C++ SSH
+// service supports. Mirrors the retired Rust `ssh_service::supports_cpp_target`
+// so the effectful-action host RPC can fail closed with `unsupported_route`
+// before the Python Agent starts the service.
+[[nodiscard]] bool supports_ssh_service_target(const DesktopDatabase& database,
+                                               const std::string& server_id);
+
 // Filesystem targets extend the base target with the host-validated operation
 // metadata. The path policy (absolute path, bounded length, credential-secret
 // blocklist) is enforced here, before the Python Agent starts the C++ service.

@@ -4046,6 +4046,419 @@ int main(int argc, char** argv) {
       std::cerr << "host action approval block failed: " << error.what() << '\n';
       std::exit(7);
     }
+
+    // ── SSH effectful action targets and completion ──────────────────────────
+    // `host.ssh.effectful_action_target` re-validates the exact action input,
+    // binds it to the durable task, plan step and one-shot host ticket, then
+    // resolves a runnable C++ SSH target. `..._finished` records the terminal
+    // outcome on the same idempotency row. Both mirror the retired Rust host.
+    try {
+      const nlohmann::json effect_target = {
+          {"host", "remote"}, {"serverId", "srv_target"}, {"environment", "staging"}};
+      check(yukinal::desktop_host::supports_ssh_service_target(database, "srv_target"),
+            "the pinned password target must be runnable by the C++ SSH service");
+
+      const auto effect_task = [&](const std::string& id, const std::string& server_id,
+                                   const nlohmann::json& scope,
+                                   const nlohmann::json& forbidden) {
+        return nlohmann::json{
+            {"id", id},
+            {"serverId", server_id},
+            {"objective", "Exercise the SSH effectful action gate"},
+            {"successCriteria", nlohmann::json::array({"action gated"})},
+            {"scope", scope},
+            {"guardrails",
+             {{"forbiddenTools", forbidden},
+              {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+            {"mode", "goal"},
+            {"permissionMode", "auto"},
+            {"automationLevel", "execute"},
+            {"phase", "investigating"},
+            {"status", "pending"},
+            {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+            {"createdBy", "user"},
+            {"createdAt", "2026-01-06T00:00:00Z"},
+            {"updatedAt", "2026-01-06T00:00:00Z"}};
+      };
+      const auto effect_plan = [](const std::string& plan_id, const std::string& task_id,
+                                  const std::string& step_id, const std::string& tool_name,
+                                  const nlohmann::json& input_bindings) {
+        return nlohmann::json{
+            {"id", plan_id},
+            {"taskId", task_id},
+            {"revision", 1},
+            {"status", "active"},
+            {"createdAt", "2026-01-06T00:00:00Z"},
+            {"updatedAt", "2026-01-06T00:00:00Z"},
+            {"currentStepId", step_id},
+            {"approval", {{"status", "approved"}}},
+            {"steps",
+             nlohmann::json::array({{{"id", step_id},
+                                     {"ordinal", 0},
+                                     {"kind", "action"},
+                                     {"title", "Run the approved command"},
+                                     {"status", "running"},
+                                     {"attempts", 0},
+                                     {"maxAttempts", 1},
+                                     {"allowedTools", nlohmann::json::array({tool_name})},
+                                     {"evidenceIds", nlohmann::json::array()},
+                                     {"inputBindings", input_bindings}}})}};
+      };
+
+      (void)database.create_investigation_task(
+          effect_task("itask_effect", "srv_target", effect_target, nlohmann::json::array()));
+      database.save_investigation_plan(effect_plan(
+          "iplan_effect", "itask_effect", "step_effect", "server.exec",
+          {{"command", "uptime"}}));
+      (void)database.create_investigation_task(effect_task(
+          "itask_effect_scope", "srv_target",
+          {{"host", "remote"},
+           {"serverId", "srv_target"},
+           {"workspaceId", "ws_scope"},
+           {"environment", "staging"}},
+          nlohmann::json::array()));
+      database.save_investigation_plan(effect_plan(
+          "iplan_effect_scope", "itask_effect_scope", "step_effect_scope", "server.exec",
+          {{"command", "uptime"}}));
+      (void)database.create_investigation_task(effect_task(
+          "itask_effect_guard", "srv_target", effect_target,
+          nlohmann::json::array({"server.exec"})));
+      database.save_investigation_plan(effect_plan(
+          "iplan_effect_guard", "itask_effect_guard", "step_effect_guard", "server.exec",
+          {{"command", "uptime"}}));
+      (void)database.create_investigation_task(effect_task(
+          "itask_effect_server", "srv_other", effect_target, nlohmann::json::array()));
+
+      yukinal::desktop_host::IpcRouter effect_router(&database, &target_credentials);
+
+      const auto exec_input = [](const std::string& command) {
+        return nlohmann::json{{"command", command},
+                              {"purpose", "gather a probe"},
+                              {"timeoutMs", 5000},
+                              {"maxOutputBytes", 4096}};
+      };
+      const auto exec_call = [&](const std::string& trace, const std::string& call,
+                                 const std::string& task, const std::string& plan,
+                                 const std::string& step, const nlohmann::json& target,
+                                 const nlohmann::json& input) {
+        return nlohmann::json{{"callId", call},
+                              {"runId", "run_effect"},
+                              {"traceId", trace},
+                              {"toolName", "server.exec"},
+                              {"input", input},
+                              {"target", target},
+                              {"taskId", task},
+                              {"planId", plan},
+                              {"planStepId", step},
+                              {"evidenceIds", nlohmann::json::array()}};
+      };
+      const auto failure_code = [](const nlohmann::json& payload) {
+        return payload.value("status", std::string()) == "failed"
+                   ? payload.at("error").value("code", std::string())
+                   : std::string();
+      };
+      const auto call_target = [&](const nlohmann::json& tool_call) {
+        return effect_router.handle_host_request("host.ssh.effectful_action_target",
+                                                 {{"toolCall", tool_call}});
+      };
+
+      // A malformed envelope is a parameter error, never a domain failure.
+      bool effect_envelope_rejected = false;
+      try {
+        (void)effect_router.handle_host_request(
+            "host.ssh.effectful_action_target", {{"toolCall", nlohmann::json::object()}});
+      } catch (const yukinal::desktop_host::SidecarRpcError& error) {
+        effect_envelope_rejected = error.code() == -32602;
+      }
+      check(effect_envelope_rejected,
+            "a malformed effectful action envelope must be a parameter error");
+
+      // The exact action input is validated before any target is resolved.
+      {
+        auto call = exec_call("trace_eff_input", "call_eff_input", "itask_effect",
+                              "iplan_effect", "step_effect", effect_target,
+                              {{"command", "uptime"}, {"timeoutMs", 5000},
+                               {"maxOutputBytes", 4096}});
+        check(failure_code(call_target(call)) == "invalid_input",
+              "an effectful input missing its required purpose must be refused");
+      }
+      {
+        auto call = exec_call("trace_eff_sysd", "call_eff_sysd", "itask_effect",
+                              "iplan_effect", "step_effect", effect_target,
+                              {{"service", "not-a-unit"}});
+        call["toolName"] = "systemd.restart";
+        check(failure_code(call_target(call)) == "invalid_input",
+              "a systemd unit without the .service suffix must be refused");
+      }
+
+      // Durable identities and a remote srv_ server are required first.
+      {
+        auto call = exec_call("trace_eff_nosrv", "call_eff_nosrv", "itask_effect",
+                              "iplan_effect", "step_effect",
+                              {{"host", "remote"}, {"environment", "staging"}},
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "durable_plan_required",
+              "an action without a server id must require a durable plan");
+      }
+      {
+        auto call = exec_call("trace_eff_plan", "call_eff_plan", "itask_effect", "", "",
+                              effect_target, exec_input("uptime"));
+        const auto payload = call_target(call);
+        check(failure_code(payload) == "durable_plan_required" &&
+                  payload.at("error").at("detail").value("code", std::string()) ==
+                      "durable_plan_required",
+              "an action without a plan binding must require a durable plan");
+      }
+      {
+        auto call = exec_call("trace_eff_host", "call_eff_host", "itask_effect",
+                              "iplan_effect", "step_effect",
+                              {{"host", "local"}, {"serverId", "srv_target"},
+                               {"environment", "staging"}},
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an effectful action must target a remote server");
+      }
+      {
+        auto call = exec_call("trace_eff_prefix", "call_eff_prefix", "itask_effect",
+                              "iplan_effect", "step_effect",
+                              {{"host", "remote"}, {"serverId", "prod_target"},
+                               {"environment", "staging"}},
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an effectful action must reference a srv_-prefixed server");
+      }
+      {
+        auto call = exec_call("trace_eff_run", "call_eff_run", "itask_effect",
+                              "iplan_effect", "step_effect", effect_target,
+                              exec_input("uptime"));
+        call["runId"] = nlohmann::json::array();
+        check(failure_code(call_target(call)) == "invalid_input",
+              "an effectful action must carry a valid durable run identity");
+      }
+
+      // The selected server, task and plan binding are all re-checked.
+      {
+        auto call = exec_call("trace_eff_unknown", "call_eff_unknown", "itask_effect",
+                              "iplan_effect", "step_effect",
+                              {{"host", "remote"}, {"serverId", "srv_missing"},
+                               {"environment", "staging"}},
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "not_found",
+              "an effectful action on an unknown server must not be found");
+      }
+      {
+        auto call = exec_call("trace_eff_env", "call_eff_env", "itask_effect",
+                              "iplan_effect", "step_effect",
+                              {{"host", "remote"}, {"serverId", "srv_target"},
+                               {"environment", "production"}},
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an environment that does not match the server must be refused");
+      }
+      {
+        auto call = exec_call("trace_eff_ws", "call_eff_ws", "itask_effect",
+                              "iplan_effect", "step_effect",
+                              {{"host", "remote"}, {"serverId", "srv_target"},
+                               {"workspaceId", "ws_other"}, {"environment", "staging"}},
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an unattached workspace must be refused");
+      }
+      {
+        auto call = exec_call("trace_eff_task", "call_eff_task", "itask_missing",
+                              "iplan_effect", "step_effect", effect_target,
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "not_found",
+              "an effectful action must reference an existing task");
+      }
+      {
+        auto call = exec_call("trace_eff_task_srv", "call_eff_task_srv",
+                              "itask_effect_server", "iplan_effect", "step_effect",
+                              effect_target, exec_input("uptime"));
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an effectful action must match the task's registered server");
+      }
+      {
+        auto call = exec_call("trace_eff_scope", "call_eff_scope", "itask_effect_scope",
+                              "iplan_effect_scope", "step_effect_scope", effect_target,
+                              exec_input("uptime"));
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an effectful action must match the task scope");
+      }
+      {
+        auto call = exec_call("trace_eff_guard", "call_eff_guard", "itask_effect_guard",
+                              "iplan_effect_guard", "step_effect_guard", effect_target,
+                              exec_input("uptime"));
+        const auto payload = call_target(call);
+        check(failure_code(payload) == "denied_by_policy" &&
+                  payload.at("error").at("detail").value("code", std::string()) ==
+                      "scope_forbidden",
+              "a guardrail-forbidden tool must be denied at the host");
+      }
+      {
+        auto call = exec_call("trace_eff_dev", "call_eff_dev", "itask_effect",
+                              "iplan_effect", "step_effect", effect_target,
+                              exec_input("whoami"));
+        check(failure_code(call_target(call)) == "plan_deviation",
+              "an input that deviates from the plan binding must be refused");
+      }
+
+      // With every check passing, the one-shot host ticket is the last gate.
+      {
+        auto call = exec_call("trace_eff_ticket", "call_eff_ticket", "itask_effect",
+                              "iplan_effect", "step_effect", effect_target,
+                              exec_input("uptime"));
+        const auto payload = call_target(call);
+        check(failure_code(payload) == "denied_by_policy" &&
+                  payload.at("error").at("detail").value("code", std::string()) ==
+                      "approval_ticket",
+              "an effectful action without a host ticket must fail closed");
+      }
+
+      // Completion re-validates the tool call and mirrors the exact outcome.
+      const auto finish_call = [&](const std::string& trace, const std::string& call,
+                                   const nlohmann::json& input, const std::string& outcome,
+                                   const std::optional<nlohmann::json>& result) {
+        nlohmann::json params = {
+            {"toolCall",
+             {{"callId", call},
+              {"traceId", trace},
+              {"toolName", "server.exec"},
+              {"input", input},
+              {"target", effect_target}}},
+            {"outcome", outcome}};
+        if (result.has_value()) params["result"] = *result;
+        return params;
+      };
+      const auto finish = [&](const nlohmann::json& params) {
+        return effect_router.handle_host_request("host.ssh.effectful_action_finished",
+                                                 params);
+      };
+      const auto exec_result = [](int exit_code, const std::string& stdout_text) {
+        return nlohmann::json{{"state", "completed"},
+                              {"exitCode", exit_code},
+                              {"stdout", stdout_text},
+                              {"stderr", ""},
+                              {"stdoutTruncated", false},
+                              {"stderrTruncated", false},
+                              {"durationMs", 12}};
+      };
+      const auto claim_running = [&](const std::string& trace, const std::string& call,
+                                     const std::string& tool_name) {
+        check(database
+                  .claim_host_tool_call({{"traceId", trace},
+                                         {"callId", call},
+                                         {"toolName", tool_name},
+                                         {"requestFingerprint", std::string(64, 'd')},
+                                         {"startedAt", "2026-01-06T00:00:00Z"}})
+                  .value("claimed", false),
+              "the completion fixture should own a running host tool call");
+      };
+
+      bool finish_envelope_rejected = false;
+      try {
+        (void)finish({{"toolCall", {{"callId", "c"}}}, {"outcome", "succeeded"},
+                      {"extra", true}});
+      } catch (const yukinal::desktop_host::SidecarRpcError& error) {
+        finish_envelope_rejected = error.code() == -32602;
+      }
+      check(finish_envelope_rejected,
+            "a malformed completion envelope must be a parameter error");
+
+      // A structured action must not carry a command result, and an unknown
+      // outcome cannot include a completed result.
+      {
+        auto params = finish_call("trace_fin_struct", "call_fin_struct",
+                                  {{"service", "nginx.service"}}, "succeeded",
+                                  exec_input("uptime"));
+        params["toolCall"]["toolName"] = "systemd.restart";
+        check(failure_code(finish(params)) == "invalid_input",
+              "only server.exec may return a command result payload");
+      }
+      {
+        auto params = finish_call("trace_fin_unknown_res", "call_fin_unknown_res",
+                                  exec_input("uptime"), "unknown", exec_input("uptime"));
+        check(failure_code(finish(params)) == "invalid_input",
+              "an unknown server.exec outcome cannot carry a result");
+      }
+      // A success requires a bounded, exit-zero result.
+      {
+        auto params = finish_call("trace_fin_noresult", "call_fin_noresult",
+                                  exec_input("uptime"), "succeeded", std::nullopt);
+        check(failure_code(finish(params)) == "invalid_input",
+              "server.exec success requires its bounded command result");
+      }
+      {
+        auto params = finish_call("trace_fin_exit", "call_fin_exit", exec_input("uptime"),
+                                  "succeeded", exec_result(1, "boom"));
+        check(failure_code(finish(params)) == "invalid_input",
+              "server.exec success must have exit code zero");
+      }
+      // A missing ledger row is a transport-level error, never a success.
+      {
+        auto params = finish_call("trace_fin_missing", "call_fin_missing",
+                                  exec_input("uptime"), "succeeded",
+                                  exec_result(0, "ok"));
+        bool missing_row_rejected = false;
+        try {
+          (void)finish(params);
+        } catch (const yukinal::desktop_host::SidecarRpcError&) {
+          missing_row_rejected = true;
+        }
+        check(missing_row_rejected,
+              "completing a call with no running ledger row must be an RPC error");
+      }
+      // A success is recorded against the running row and finishes it.
+      {
+        claim_running("trace_fin_ok", "call_fin_ok", "server.exec");
+        auto params = finish_call("trace_fin_ok", "call_fin_ok", exec_input("uptime"),
+                                  "succeeded", exec_result(0, "up 3 days"));
+        const auto payload = finish(params);
+        check(payload.value("status", std::string()) == "success" &&
+                  payload.value("finished", false) &&
+                  database.host_tool_call_status("trace_fin_ok", "call_fin_ok")
+                          .value_or("") == "success",
+              "an approved server.exec completion should finish its ledger row");
+      }
+      // An execution failure is recorded as an uncertain, retryable terminal
+      // state, and it still finishes the running row.
+      {
+        claim_running("trace_fin_fail", "call_fin_fail", "server.exec");
+        auto params = finish_call("trace_fin_fail", "call_fin_fail", exec_input("uptime"),
+                                  "failed", exec_result(2, ""));
+        const auto payload = finish(params);
+        check(payload.value("finished", false) &&
+                  database.host_tool_call_status("trace_fin_fail", "call_fin_fail")
+                          .value_or("") == "uncertain",
+              "a failed action should finish its ledger row as uncertain");
+      }
+      // An unknown outcome is retryable and also records an uncertain state.
+      {
+        claim_running("trace_fin_unknown", "call_fin_unknown", "server.exec");
+        auto params = finish_call("trace_fin_unknown", "call_fin_unknown",
+                                  exec_input("uptime"), "unknown", std::nullopt);
+        const auto payload = finish(params);
+        check(payload.value("finished", false) &&
+                  database.host_tool_call_status("trace_fin_unknown", "call_fin_unknown")
+                          .value_or("") == "uncertain",
+              "an unknown action outcome should record an uncertain state");
+      }
+      // A structured restart succeeds with its fixed output shape.
+      {
+        claim_running("trace_fin_sysd", "call_fin_sysd", "systemd.restart");
+        auto params = finish_call("trace_fin_sysd", "call_fin_sysd",
+                                  {{"service", "nginx.service"}}, "succeeded", std::nullopt);
+        params["toolCall"]["toolName"] = "systemd.restart";
+        const auto payload = finish(params);
+        check(payload.value("finished", false) &&
+                  database.host_tool_call_status("trace_fin_sysd", "call_fin_sysd")
+                          .value_or("") == "success",
+              "a structured restart completion should finish its ledger row");
+      }
+    } catch (const std::exception& error) {
+      std::cerr << "SSH effectful action block failed: " << error.what() << '\n';
+      std::exit(8);
+    }
   }
 
   sqlite3* readback = nullptr;

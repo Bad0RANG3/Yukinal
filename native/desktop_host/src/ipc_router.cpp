@@ -3695,6 +3695,670 @@ nlohmann::json handle_ssh_filesystem_cleanup_target(DesktopDatabase& database,
   return payload;
 }
 
+/* ── SSH effectful action targets (systemd/docker/package/server.exec) ─────── */
+// A durable task, an active ChangePlan step and a host-minted approval ticket are
+// the prerequisites for the four effectful SSH actions. The host validates the
+// exact input, the task scope, the plan step and the one-shot ticket before it
+// resolves a runnable C++ service target. This mirrors the retired Rust
+// `resolve_ssh_effectful_action_target`/`finish_ssh_effectful_action`.
+
+constexpr int kDefaultSystemdRestartTimeout = 30;
+constexpr int kMaxSystemdRestartTimeout = 120;
+constexpr int kDefaultDockerRestartTimeout = 10;
+constexpr int kMaxDockerRestartTimeout = 120;
+constexpr int kDefaultPackageInstallTimeout = 180;
+constexpr int kMaxPackageInstallTimeout = 600;
+constexpr std::size_t kServerExecMaxCommandChars = 16384;
+constexpr std::size_t kServerExecMaxPurposeChars = 512;
+constexpr std::uint64_t kServerExecMaxTimeoutMs = 120000;
+constexpr std::uint64_t kServerExecMaxOutputBytes = 65536;
+constexpr std::size_t kServerExecMaxEnvVars = 16;
+
+bool is_ascii_alphanumeric(unsigned char byte) {
+  return (byte >= '0' && byte <= '9') || (byte >= 'A' && byte <= 'Z') ||
+         (byte >= 'a' && byte <= 'z');
+}
+
+bool json_uint_value(const nlohmann::json& value, std::uint64_t& out) {
+  if (value.is_number_unsigned()) {
+    out = value.get<std::uint64_t>();
+    return true;
+  }
+  if (value.is_number_integer()) {
+    const auto signed_value = value.get<std::int64_t>();
+    if (signed_value < 0) return false;
+    out = static_cast<std::uint64_t>(signed_value);
+    return true;
+  }
+  return false;
+}
+
+bool json_int32_value(const nlohmann::json& value, int& out) {
+  if (value.is_number_unsigned()) {
+    const auto unsigned_value = value.get<std::uint64_t>();
+    if (unsigned_value > 2147483647ULL) return false;
+    out = static_cast<int>(unsigned_value);
+    return true;
+  }
+  if (value.is_number_integer()) {
+    const auto signed_value = value.get<std::int64_t>();
+    if (signed_value < -2147483648LL || signed_value > 2147483647LL) return false;
+    out = static_cast<int>(signed_value);
+    return true;
+  }
+  return false;
+}
+
+/** Returns false when a present, non-null field is not a non-negative integer. */
+bool optional_uint_field(const nlohmann::json& input, const char* key, bool& present,
+                         std::uint64_t& out) {
+  present = false;
+  const auto found = input.find(key);
+  if (found == input.end() || found->is_null()) return true;
+  present = true;
+  return json_uint_value(*found, out);
+}
+
+bool safe_systemd_service_ref(const std::string& value) {
+  if (value.size() < 8 || value.size() > 128 ||
+      value.compare(value.size() - 8, 8, ".service") != 0) {
+    return false;
+  }
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [](unsigned char byte) {
+    return is_ascii_alphanumeric(byte) || byte == '_' || byte == '.' || byte == '@' ||
+           byte == ':' || byte == '-';
+  });
+}
+
+bool safe_container_ref(const std::string& value) {
+  if (value.empty() || value.size() > 128) return false;
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [](unsigned char byte) {
+    return is_ascii_alphanumeric(byte) || byte == '_' || byte == '.' || byte == '-';
+  });
+}
+
+bool safe_package_ref(const std::string& value) {
+  if (value.empty() || value.size() > 128) return false;
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [](unsigned char byte) {
+    return is_ascii_alphanumeric(byte) || byte == '+' || byte == '.' || byte == '_' ||
+           byte == ':' || byte == '-';
+  });
+}
+
+bool safe_package_version(const std::string& value) {
+  if (value.empty() || value.size() > 128) return false;
+  if (!is_ascii_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [](unsigned char byte) {
+    return is_ascii_alphanumeric(byte) || byte == '+' || byte == '.' || byte == '_' ||
+           byte == ':' || byte == '~' || byte == '^' || byte == '-';
+  });
+}
+
+/** Parsed `server.exec` input; the fields the host re-checks on completion. */
+struct ServerExecInput {
+  std::string command;
+  std::string purpose;
+  std::uint64_t timeout_ms = 0;
+  std::uint64_t max_output_bytes = 0;
+  std::optional<std::string> workdir;
+};
+
+bool valid_server_exec_workdir(const std::string& workdir) {
+  if (workdir.empty() || workdir.size() > 4096 || workdir.front() != '/' ||
+      workdir.find('\0') != std::string::npos || has_control_characters(workdir)) {
+    return false;
+  }
+  std::size_t begin = 0;
+  for (;;) {
+    const auto end = workdir.find('/', begin);
+    const auto part = workdir.substr(begin, end == std::string::npos
+                                                ? std::string::npos
+                                                : end - begin);
+    if (part == "." || part == "..") return false;
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  return true;
+}
+
+/** Mirrors the retired Rust `validate_server_exec_input`; empty = valid. */
+std::string parse_server_exec_input(const nlohmann::json& input, ServerExecInput& out) {
+  if (!only_fields(input,
+                   {"command", "purpose", "timeoutMs", "maxOutputBytes", "workdir", "env"},
+                   {"command", "purpose", "timeoutMs", "maxOutputBytes"})) {
+    return "server.exec input is invalid";
+  }
+  if (!input.at("command").is_string() || !input.at("purpose").is_string() ||
+      !json_uint_value(input.at("timeoutMs"), out.timeout_ms) ||
+      !json_uint_value(input.at("maxOutputBytes"), out.max_output_bytes)) {
+    return "server.exec input is invalid";
+  }
+  out.command = input.at("command").get<std::string>();
+  out.purpose = input.at("purpose").get<std::string>();
+  if (trim_ascii(out.command).empty() ||
+      utf8_character_count(out.command) > kServerExecMaxCommandChars ||
+      out.command.find('\0') != std::string::npos) {
+    return "command must contain 1 to " + std::to_string(kServerExecMaxCommandChars) +
+           " characters and no NUL";
+  }
+  if (trim_ascii(out.purpose).empty() ||
+      utf8_character_count(out.purpose) > kServerExecMaxPurposeChars ||
+      has_control_characters(out.purpose)) {
+    return "purpose must contain 1 to " + std::to_string(kServerExecMaxPurposeChars) +
+           " printable characters";
+  }
+  if (out.timeout_ms == 0 || out.timeout_ms > kServerExecMaxTimeoutMs) {
+    return "timeoutMs must be between 1 and " + std::to_string(kServerExecMaxTimeoutMs);
+  }
+  if (out.max_output_bytes == 0 || out.max_output_bytes > kServerExecMaxOutputBytes) {
+    return "maxOutputBytes must be between 1 and " +
+           std::to_string(kServerExecMaxOutputBytes);
+  }
+  if (const auto found = input.find("workdir"); found != input.end() && !found->is_null()) {
+    if (!found->is_string()) return "server.exec input is invalid";
+    out.workdir = found->get<std::string>();
+    if (!valid_server_exec_workdir(*out.workdir)) {
+      return "workdir must be a bounded absolute POSIX path without dot traversal or control "
+             "characters";
+    }
+  }
+  if (const auto found = input.find("env"); found != input.end() && !found->is_null()) {
+    if (!found->is_object()) return "server.exec input is invalid";
+    if (found->size() > kServerExecMaxEnvVars) {
+      return "env may contain at most " + std::to_string(kServerExecMaxEnvVars) + " variables";
+    }
+    for (auto item = found->begin(); item != found->end(); ++item) {
+      const auto allowed_name =
+          is_one_of(item.key(), {"LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_TIME",
+                                 "LC_NUMERIC", "LC_COLLATE", "TZ", "TERM"});
+      const auto valid_value = item.value().is_string() &&
+                               item.value().get<std::string>().size() <= 256 &&
+                               !has_control_characters(item.value().get<std::string>());
+      if (!allowed_name || !valid_value) {
+        return "environment variable `" + item.key() +
+               "` is not on the non-sensitive allowlist or has an invalid value";
+      }
+    }
+  }
+  return {};
+}
+
+/** Returns the `invalid_input` envelope to report, or `nullopt` when valid. */
+std::optional<nlohmann::json> validate_ssh_effectful_action_input(
+    const nlohmann::json& tool_call) {
+  const auto tool_name = json_text_field(tool_call, "toolName");
+  const auto input = tool_call.value("input", nlohmann::json::object());
+  const auto fail = [](const std::string& message) {
+    return host_tool_failed("invalid_input", message, false, std::nullopt);
+  };
+  if (tool_name == kToolSystemdRestart) {
+    if (!only_fields(input, {"service", "timeoutSeconds"}, {"service"}) ||
+        !input.at("service").is_string()) {
+      return fail("systemd.restart input is invalid");
+    }
+    if (!safe_systemd_service_ref(input.at("service").get<std::string>())) {
+      return fail("service must be a .service unit without shell metacharacters");
+    }
+    bool present = false;
+    std::uint64_t timeout = 0;
+    if (!optional_uint_field(input, "timeoutSeconds", present, timeout)) {
+      return fail("systemd.restart input is invalid");
+    }
+    if (present && (timeout < 1 || timeout > kMaxSystemdRestartTimeout)) {
+      return fail("timeoutSeconds must be between 1 and " +
+                  std::to_string(kMaxSystemdRestartTimeout));
+    }
+    return std::nullopt;
+  }
+  if (tool_name == kToolDockerRestart) {
+    if (!only_fields(input, {"container", "timeoutSeconds"}, {"container"}) ||
+        !input.at("container").is_string()) {
+      return fail("docker.restart input is invalid");
+    }
+    if (!safe_container_ref(input.at("container").get<std::string>())) {
+      return fail("container must be a Docker name or id without shell metacharacters");
+    }
+    bool present = false;
+    std::uint64_t timeout = 0;
+    if (!optional_uint_field(input, "timeoutSeconds", present, timeout)) {
+      return fail("docker.restart input is invalid");
+    }
+    if (present && (timeout < 1 || timeout > kMaxDockerRestartTimeout)) {
+      return fail("timeoutSeconds must be between 1 and " +
+                  std::to_string(kMaxDockerRestartTimeout));
+    }
+    return std::nullopt;
+  }
+  if (tool_name == kToolPackageInstall) {
+    if (!only_fields(input, {"manager", "package", "version", "timeoutSeconds"},
+                     {"manager", "package"}) ||
+        !input.at("manager").is_string() || !input.at("package").is_string()) {
+      return fail("package.install input is invalid");
+    }
+    if (!is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf"})) {
+      return fail("package manager must be apt or dnf");
+    }
+    if (!safe_package_ref(input.at("package").get<std::string>())) {
+      return fail("package must be a safe reference without shell metacharacters");
+    }
+    if (const auto found = input.find("version"); found != input.end() && !found->is_null()) {
+      if (!found->is_string()) return fail("package.install input is invalid");
+      if (!safe_package_version(found->get<std::string>())) {
+        return fail("package version contains unsupported characters");
+      }
+    }
+    bool present = false;
+    std::uint64_t timeout = 0;
+    if (!optional_uint_field(input, "timeoutSeconds", present, timeout)) {
+      return fail("package.install input is invalid");
+    }
+    if (present && (timeout < 1 || timeout > kMaxPackageInstallTimeout)) {
+      return fail("timeoutSeconds must be between 1 and " +
+                  std::to_string(kMaxPackageInstallTimeout));
+    }
+    return std::nullopt;
+  }
+  if (tool_name == kToolServerExec) {
+    ServerExecInput parsed;
+    const auto error = parse_server_exec_input(input, parsed);
+    if (!error.empty()) return fail(error);
+    return std::nullopt;
+  }
+  return host_tool_failed("denied_by_policy",
+                          "the requested SSH action is not supported by this route", false,
+                          std::nullopt);
+}
+
+/** Validated `server.exec` result; bounds mirror the retired Rust parser. */
+struct HostServerExecResult {
+  std::string state;
+  int exit_code = 0;
+  std::string stdout_text;
+  std::string stderr_text;
+  bool stdout_truncated = false;
+  bool stderr_truncated = false;
+  std::uint64_t duration_ms = 0;
+};
+
+bool parse_host_server_exec_result(const nlohmann::json& value,
+                                   const ServerExecInput& input,
+                                   HostServerExecResult& out) {
+  const std::set<std::string> fields = {"state",       "exitCode",        "stdout",
+                                        "stderr",      "stdoutTruncated", "stderrTruncated",
+                                        "durationMs"};
+  if (!only_fields(value, fields, fields)) return false;
+  if (!value.at("state").is_string() || !value.at("stdout").is_string() ||
+      !value.at("stderr").is_string() || !value.at("stdoutTruncated").is_boolean() ||
+      !value.at("stderrTruncated").is_boolean() ||
+      !json_int32_value(value.at("exitCode"), out.exit_code) ||
+      !json_uint_value(value.at("durationMs"), out.duration_ms)) {
+    return false;
+  }
+  out.state = value.at("state").get<std::string>();
+  out.stdout_text = value.at("stdout").get<std::string>();
+  out.stderr_text = value.at("stderr").get<std::string>();
+  out.stdout_truncated = value.at("stdoutTruncated").get<bool>();
+  out.stderr_truncated = value.at("stderrTruncated").get<bool>();
+  if (out.state != "completed" || out.exit_code < 0 || out.exit_code > 255) return false;
+  const auto output_bytes = out.stdout_text.size() + out.stderr_text.size();
+  if (output_bytes > input.max_output_bytes * 3) return false;
+  if (out.duration_ms > input.timeout_ms + 10000) return false;
+  return true;
+}
+
+nlohmann::json effectful_action_tool_call_object(const nlohmann::json& tool_call,
+                                                 const char* method) {
+  const std::set<std::string> allowed = {"callId",     "runId",       "traceId",  "toolName",
+                                         "input",      "target",      "taskId",   "planId",
+                                         "planStepId", "evidenceIds", "approvalId"};
+  if (!only_fields(tool_call, allowed,
+                   {"callId", "traceId", "toolName", "input", "target"}) ||
+      !tool_call.at("callId").is_string() || !tool_call.at("traceId").is_string() ||
+      !tool_call.at("toolName").is_string() || !tool_call.at("target").is_object()) {
+    throw SidecarRpcError(-32602, std::string("the ") + method + " request is invalid");
+  }
+  return tool_call;
+}
+
+/**
+ * Whether an effectful call omitted one of the three durable identifiers. Every
+ * Agent-side effectful call must carry taskId, planId and planStepId.
+ */
+bool effectful_action_requires_durable_plan(const nlohmann::json& tool_call) {
+  if (!host_tool_is_effectful(json_text_field(tool_call, "toolName"))) return false;
+  const auto present = [&tool_call](const char* key) {
+    const auto found = tool_call.find(key);
+    return found != tool_call.end() && found->is_string() &&
+           !trim_ascii(found->get<std::string>()).empty();
+  };
+  return !(present("taskId") && present("planId") && present("planStepId"));
+}
+
+nlohmann::json host_action_approval_failure(HostApprovalLedger::TicketError error) {
+  std::string message;
+  switch (error) {
+    case HostApprovalLedger::TicketError::Missing:
+      message = "host action has no host-issued approval ticket";
+      break;
+    case HostApprovalLedger::TicketError::Expired:
+      message = "host action approval ticket has expired";
+      break;
+    case HostApprovalLedger::TicketError::Mismatch:
+      message = "host action does not match the approved run, call, target, plan, or input";
+      break;
+    case HostApprovalLedger::TicketError::NotApproved:
+      message = "host action approval has not been accepted";
+      break;
+  }
+  return host_tool_failed("denied_by_policy", message, false,
+                          nlohmann::json{{"code", "approval_ticket"}});
+}
+
+nlohmann::json handle_ssh_effectful_action_target(
+    DesktopDatabase& database, const CredentialStore& credentials, HostApprovalLedger& approvals,
+    const nlohmann::json& params, std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  if (!only_fields(params, {"toolCall"}, {"toolCall"}) || !params.at("toolCall").is_object()) {
+    throw SidecarRpcError(-32602, "the SSH action target request is invalid");
+  }
+  const auto tool_call =
+      effectful_action_tool_call_object(params.at("toolCall"), "SSH action target");
+  if (auto failure = validate_ssh_effectful_action_input(tool_call); failure.has_value()) {
+    return *failure;
+  }
+  const auto tool_name = json_text_field(tool_call, "toolName");
+  const auto target = tool_call.value("target", nlohmann::json::object());
+  const auto server_id = json_text_field(target, "serverId");
+  const auto task_id = json_text_field(tool_call, "taskId");
+  if (server_id.empty() || task_id.empty()) {
+    return host_tool_failed("durable_plan_required",
+                            "this SSH action requires a durable remote action plan", false,
+                            std::nullopt);
+  }
+  if (json_text_field(target, "host") != "remote" || server_id.rfind("srv_", 0) != 0) {
+    return host_tool_failed("denied_by_policy",
+                            "this SSH action requires a resolved remote server", false,
+                            std::nullopt);
+  }
+  const auto run_id = json_text_field(tool_call, "runId");
+  if (!is_call_identity(run_id) || trim_ascii(run_id).empty()) {
+    return host_tool_failed("invalid_input",
+                            "the SSH action requires a valid durable run identity", false,
+                            std::nullopt);
+  }
+  if (effectful_action_requires_durable_plan(tool_call)) {
+    return host_tool_failed("durable_plan_required",
+                            "this SSH action requires a durable task, ChangePlan and action step",
+                            false, nlohmann::json{{"code", "durable_plan_required"}});
+  }
+  const nlohmann::json* server = nullptr;
+  const auto servers = database.list_servers().value("servers", nlohmann::json::array());
+  for (const auto& candidate : servers) {
+    if (json_text_field(candidate, "id") == server_id) {
+      server = &candidate;
+      break;
+    }
+  }
+  if (server == nullptr) {
+    return host_tool_failed("not_found", "the selected server was not found", false,
+                            std::nullopt);
+  }
+  const auto metadata = server->value("metadata", nlohmann::json::object());
+  if (json_text_field(metadata, "environment") != json_text_field(target, "environment")) {
+    return host_tool_failed(
+        "denied_by_policy",
+        "the SSH action target environment does not match the selected server", false,
+        std::nullopt);
+  }
+  const auto workspace_id = json_text_field(target, "workspaceId");
+  if (!workspace_id.empty()) {
+    bool attached = false;
+    for (const auto& id : metadata.value("workspaceIds", nlohmann::json::array())) {
+      if (id.is_string() && id.get<std::string>() == workspace_id) attached = true;
+    }
+    if (!attached) {
+      return host_tool_failed(
+          "denied_by_policy", "the SSH action target is not attached to that workspace", false,
+          std::nullopt);
+    }
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return host_tool_failed("not_found", "the durable investigation task was not found", false,
+                            std::nullopt);
+  }
+  if (json_text_field(*task, "serverId") != server_id) {
+    return host_tool_failed(
+        "denied_by_policy", "the SSH action target does not match the task's registered server",
+        false, std::nullopt);
+  }
+  if (!same_investigation_target(task->value("scope", nlohmann::json::object()), target)) {
+    return host_tool_failed("denied_by_policy",
+                            "the SSH action target does not match the task scope", false,
+                            std::nullopt);
+  }
+  const auto input = tool_call.value("input", nlohmann::json::object());
+  if (auto violation = task_guardrail_violation(*task, tool_name, input);
+      violation.has_value()) {
+    const auto code = json_text_field(*violation, "code");
+    std::optional<nlohmann::json> detail = std::nullopt;
+    if (!code.empty()) detail = nlohmann::json{{"code", code}};
+    return host_tool_failed("denied_by_policy", json_text_field(*violation, "message"), false,
+                            detail);
+  }
+  const auto binding_field = [&tool_call](const char* key) -> std::optional<nlohmann::json> {
+    const auto found = tool_call.find(key);
+    if (found == tool_call.end() || found->is_null()) return std::nullopt;
+    return *found;
+  };
+  const auto plan_id = json_text_field(tool_call, "planId");
+  const auto plan_step_id = json_text_field(tool_call, "planStepId");
+  if (auto deviation = check_plan_for_tool(
+          database, *task, tool_name, target, input,
+          plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id),
+          plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id),
+          binding_field("evidenceIds"));
+      deviation.has_value()) {
+    return host_tool_failed("plan_deviation", json_text_field(*deviation, "message"), false,
+                            *deviation);
+  }
+  if (!supports_ssh_service_target(database, server_id)) {
+    return host_tool_failed("unsupported_route",
+                            "the selected SSH target is not supported by the C++ SSH service",
+                            false, std::nullopt);
+  }
+
+  auto decision = prepare_host_tool_call(database, tool_call, replay_mutex, replays);
+  if (decision.respond) {
+    if (json_text_field(decision.response, "status") == "success") {
+      if (tool_name == kToolServerExec) {
+        ServerExecInput parsed;
+        if (!parse_server_exec_input(input, parsed).empty()) {
+          return host_tool_failed("invalid_response",
+                                  "the cached server.exec result is invalid", false,
+                                  std::nullopt);
+        }
+        if (!decision.response.contains("output")) {
+          return host_tool_failed("invalid_response",
+                                  "the cached server.exec result is unavailable", false,
+                                  std::nullopt);
+        }
+        HostServerExecResult cached;
+        if (!parse_host_server_exec_result(decision.response.at("output"), parsed, cached)) {
+          return host_tool_failed("invalid_response",
+                                  "the cached server.exec result is invalid", false,
+                                  std::nullopt);
+        }
+        return {{"status", "already_completed"}, {"output", decision.response.at("output")}};
+      }
+      return {{"status", "already_completed"}};
+    }
+    return decision.response;
+  }
+  const auto token = decision.token;
+
+  HostApprovalLedger::ExecutionBinding binding;
+  binding.approval_id = json_text_field(tool_call, "approvalId");
+  binding.run_id = std::optional<std::string>(run_id);
+  binding.trace_id = json_text_field(tool_call, "traceId");
+  binding.call_id = json_text_field(tool_call, "callId");
+  binding.tool_name = tool_name;
+  binding.input_fingerprint = content_revision_hex(input.dump());
+  binding.target_host = json_text_field(target, "host");
+  binding.server_id = std::optional<std::string>(server_id);
+  binding.workspace_id =
+      workspace_id.empty() ? std::nullopt : std::optional<std::string>(workspace_id);
+  binding.environment = json_text_field(target, "environment");
+  binding.task_id = std::optional<std::string>(task_id);
+  binding.plan_id = plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id);
+  binding.plan_step_id =
+      plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id);
+  if (tool_call.contains("evidenceIds") && tool_call.at("evidenceIds").is_array()) {
+    std::vector<std::string> ids;
+    for (const auto& item : tool_call.at("evidenceIds")) {
+      if (item.is_string()) ids.push_back(item.get<std::string>());
+    }
+    binding.evidence_ids = std::move(ids);
+  }
+  const auto ticket =
+      binding.approval_id.empty()
+          ? std::optional<HostApprovalLedger::TicketError>(
+                HostApprovalLedger::TicketError::Missing)
+          : approvals.consume(binding, [] { return now_epoch_seconds(); });
+  if (ticket.has_value()) {
+    const auto response = host_action_approval_failure(*ticket);
+    finish_host_tool_call(database, tool_call, token, response, replay_mutex, replays);
+    return response;
+  }
+
+  nlohmann::json target_data;
+  try {
+    target_data = resolve_ssh_service_target(database, credentials, server_id);
+  } catch (const std::exception& error) {
+    const auto response = host_tool_failed("transport", error.what(), false, std::nullopt);
+    finish_host_tool_call(database, tool_call, token, response, replay_mutex, replays);
+    return response;
+  }
+  nlohmann::json response = {{"status", "success"}, {"targetData", target_data}};
+  if (tool_name == kToolServerExec) {
+    auto& resolved_target = response["targetData"]["target"];
+    if (!resolved_target.is_object() ||
+        json_text_field(resolved_target, "target_id") != server_id) {
+      return host_tool_failed(
+          "denied_by_policy",
+          "the resolved SSH target does not match the approved server", false, std::nullopt);
+    }
+    resolved_target["allow_server_exec"] = true;
+  }
+  return response;
+}
+
+nlohmann::json handle_ssh_effectful_action_finished(
+    DesktopDatabase& database, const nlohmann::json& params, std::mutex& replay_mutex,
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+  if (!only_fields(params, {"toolCall", "outcome", "result"}, {"toolCall", "outcome"}) ||
+      !params.at("toolCall").is_object() || !params.at("outcome").is_string()) {
+    throw SidecarRpcError(-32602, "the SSH action completion request is invalid");
+  }
+  const auto tool_call =
+      effectful_action_tool_call_object(params.at("toolCall"), "SSH action completion");
+  if (auto failure = validate_ssh_effectful_action_input(tool_call); failure.has_value()) {
+    return *failure;
+  }
+  const auto tool_name = json_text_field(tool_call, "toolName");
+  const auto call_id = json_text_field(tool_call, "callId");
+  const auto trace_id = json_text_field(tool_call, "traceId");
+  if (!is_call_identity(call_id) || !is_call_identity(trace_id)) {
+    return host_tool_failed("invalid_input", "SSH action completion call identity is invalid",
+                            false, std::nullopt);
+  }
+  const auto outcome = params.at("outcome").get<std::string>();
+  const bool has_result = params.contains("result") && !params.at("result").is_null();
+  if (tool_name != kToolServerExec && has_result) {
+    return host_tool_failed("invalid_input",
+                            "only server.exec accepts a command result payload", false,
+                            std::nullopt);
+  }
+  if (tool_name == kToolServerExec && outcome == "unknown" && has_result) {
+    return host_tool_failed(
+        "invalid_input", "an unknown server.exec outcome cannot include a completed result",
+        false, std::nullopt);
+  }
+  const auto input = tool_call.value("input", nlohmann::json::object());
+  std::optional<nlohmann::json> output;
+  std::optional<int> server_exec_exit_code;
+  if (tool_name == kToolSystemdRestart) {
+    output = nlohmann::json{{"service", input.at("service")}, {"restarted", true}};
+  } else if (tool_name == kToolDockerRestart) {
+    output = nlohmann::json{{"container", input.at("container")}, {"restarted", true}};
+  } else if (tool_name == kToolPackageInstall) {
+    nlohmann::json installed = {{"manager", input.at("manager")},
+                                {"package", input.at("package")},
+                                {"installed", true}};
+    if (input.contains("version") && !input.at("version").is_null()) {
+      installed["version"] = input.at("version");
+    }
+    output = std::move(installed);
+  } else if (tool_name == kToolServerExec) {
+    ServerExecInput parsed;
+    if (!parse_server_exec_input(input, parsed).empty()) {
+      return host_tool_failed("invalid_input", "server.exec completion input is invalid", false,
+                              std::nullopt);
+    }
+    if (has_result) {
+      HostServerExecResult result;
+      if (!parse_host_server_exec_result(params.at("result"), parsed, result)) {
+        return host_tool_failed("invalid_input", "server.exec completion result is invalid",
+                                false, std::nullopt);
+      }
+      output = params.at("result");
+      server_exec_exit_code = result.exit_code;
+    }
+    if (!output.has_value() && outcome == "succeeded") {
+      return host_tool_failed(
+          "invalid_input", "server.exec success requires its bounded command result", false,
+          std::nullopt);
+    }
+  } else {
+    return host_tool_failed("denied_by_policy", "unsupported SSH action", false, std::nullopt);
+  }
+
+  nlohmann::json response;
+  if (outcome == "succeeded") {
+    if (tool_name == kToolServerExec && server_exec_exit_code != 0) {
+      return host_tool_failed("invalid_input", "server.exec success must have exit code zero",
+                              false, std::nullopt);
+    }
+    if (!output.has_value()) {
+      return host_tool_failed("invalid_input", "SSH action result is missing", false,
+                              std::nullopt);
+    }
+    response = host_tool_success(*output);
+  } else if (outcome == "failed") {
+    if (tool_name == kToolServerExec && server_exec_exit_code == 0) {
+      return host_tool_failed(
+          "invalid_input", "server.exec failure cannot carry a successful exit code", false,
+          std::nullopt);
+    }
+    std::optional<nlohmann::json> detail = std::nullopt;
+    if (tool_name == kToolServerExec && output.has_value()) detail = output;
+    response = host_tool_failed("execution_failed",
+                                tool_name + " did not complete successfully", false, detail);
+  } else if (outcome == "unknown") {
+    response = host_tool_failed("transport", tool_name + " outcome is unknown", true,
+                                std::nullopt);
+  } else {
+    return host_tool_failed("invalid_input", "SSH action outcome is invalid", false,
+                            std::nullopt);
+  }
+  const std::optional<std::pair<std::string, std::string>> token = std::make_pair(trace_id, call_id);
+  finish_host_tool_call(database, tool_call, token, response, replay_mutex, replays);
+  return {{"status", "success"}, {"finished", true}};
+}
+
 /* ── Filesystem backup metadata queries (list + retention scan) ────────────── */
 
 bool valid_remote_query_path(const std::string& value) {
@@ -8392,6 +9056,24 @@ nlohmann::json IpcRouter::handle_host_request(
     }
     credentials_->erase(CredentialReference::parse(params.at("reference").get<std::string>()));
     return {{"reclaimed", true}};
+  }
+  if (method == "host.ssh.effectful_action_target" ||
+      method == "host.ssh.effectful_action_finished") {
+    if (database_ == nullptr || !database_->is_available()) {
+      throw SidecarRpcError(-32603, "the local server database is unavailable");
+    }
+    try {
+      if (method == "host.ssh.effectful_action_target") {
+        return handle_ssh_effectful_action_target(*database_, *credentials_, approvals_, params,
+                                                  host_tool_replay_mutex_, host_tool_replays_);
+      }
+      return handle_ssh_effectful_action_finished(*database_, params, host_tool_replay_mutex_,
+                                                  host_tool_replays_);
+    } catch (const SidecarRpcError&) {
+      throw;
+    } catch (const std::exception& error) {
+      throw SidecarRpcError(-32000, error.what());
+    }
   }
   if (method == "host.ssh.service_target" || method == "host.ssh.filesystem_read_target" ||
       method == "host.ssh.filesystem_write_target" ||

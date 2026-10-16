@@ -140,6 +140,21 @@ ProxyRoute resolve_proxy_route(const DesktopNetworkProxyConfig& config,
   return route;
 }
 
+bool supports_host_ca_algorithm(const std::string& algorithm) {
+  return algorithm == "ssh-ed25519" || algorithm == "ssh-rsa" ||
+         algorithm == "ecdsa-sha2-nistp256" || algorithm == "ecdsa-sha2-nistp384" ||
+         algorithm == "ecdsa-sha2-nistp521";
+}
+
+// Whether the outbound proxy route can be represented by the C++ SSH service.
+// Only the route shape is inspected here; unlike `resolve_proxy_route` no proxy
+// secret is read, because this probe never starts a session.
+bool proxy_route_is_supported(const DesktopDatabase& database) {
+  if (database.network_proxy_config().mode != "system") return true;
+  const auto resolution = resolve_network_proxy(true);
+  return resolution.value("kind", std::string()) != "unusable";
+}
+
 nlohmann::json build_trust_source(const nlohmann::json& server, const std::string& host,
                                   int port, const std::string& data_directory) {
   nlohmann::json target = nlohmann::json::object();
@@ -395,6 +410,43 @@ nlohmann::json resolve_ssh_service_probe_target(const DesktopDatabase& database,
     target["proxy"] = std::move(proxy_json);
   }
   return {{"target", std::move(target)}, {"credentials", std::move(credentials_out)}};
+}
+
+bool supports_ssh_service_target(const DesktopDatabase& database,
+                                 const std::string& server_id) {
+  if (!valid_server_id(server_id)) return false;
+  const auto record = database.get_server_connection(server_id);
+  if (!record.has_value()) return false;
+  std::optional<std::string> host_ca_algorithm;
+  if (record->contains("hostCertificateAuthorityPublicKey") &&
+      record->at("hostCertificateAuthorityPublicKey").is_string()) {
+    const auto authority = record->at("hostCertificateAuthorityPublicKey").get<std::string>();
+    const auto separator = authority.find_first_of(" \t\r\n\f\v");
+    host_ca_algorithm = authority.substr(0, separator);
+  }
+  if (host_ca_algorithm.has_value() && !supports_host_ca_algorithm(*host_ca_algorithm)) {
+    return false;
+  }
+  const auto identity_id = optional_text(*record, "identityId");
+  if (!identity_id.has_value()) return false;
+  const auto identity = database.get_identity(*identity_id);
+  if (!identity.has_value()) return false;
+  const auto method = identity->value("method", std::string());
+  bool identity_supported =
+      method == "password" || method == "privateKey" || method == "agent";
+  if (!identity_supported && method == "certificate") {
+    identity_supported = optional_text(*identity, "certificatePath").has_value() ||
+                         optional_text(*identity, "privateKeyPath").has_value();
+  }
+  if (!identity_supported) return false;
+  if (!proxy_route_is_supported(database)) return false;
+  if (host_ca_algorithm.has_value()) return supports_host_ca_algorithm(*host_ca_algorithm);
+  const auto host = record->value("host", std::string());
+  const auto port = record->value("port", 0);
+  if (!valid_text(host, 253) || port < 1 || port > 65535) return false;
+  return HostTrustStore::load(std::filesystem::path(database.data_directory()) / "known_hosts")
+      .pinned_fingerprint(host, static_cast<std::uint16_t>(port))
+      .has_value();
 }
 
 nlohmann::json resolve_ssh_service_filesystem_read_target(const DesktopDatabase& database,

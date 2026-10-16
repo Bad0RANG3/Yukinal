@@ -1225,3 +1225,23 @@ refusal, forged/unapproved/replayed requests, every binding field that burns a
 ticket, expired/session/rejected outcomes, and the mid-response wait for the
 host acknowledgement. Wiring the ledger into `host.ssh.effectful_action_target`
 and `..._finished` is the next commit.
+
+The second piece of the effectful-action block landed: `host.ssh.effectful_action_target`
+and `host.ssh.effectful_action_finished` are now served in C++
+(`native/desktop_host/src/ipc_router.cpp`), mirroring the retired Rust
+`resolve_ssh_effectful_action_target`/`finish_ssh_effectful_action`. The target call
+re-validates the exact action input — `systemd.restart`, `docker.restart`,
+`package.install` and the bounded `server.exec` command, env allowlist, workdir and
+byte/timeout limits — then requires `taskId`/`planId`/`planStepId`, a remote
+`srv_`-prefixed server, a valid run identity, a registered server whose environment,
+workspace and scope all match the durable task, no task-guardrail violation and no
+plan deviation before it resolves a C++-supported target. It then claims the
+`host_tool_calls` idempotency row, consumes the one-shot approval ticket bound to
+the exact input fingerprint (failing closed with `approval_ticket` when none
+matches) and returns the `targetData`; `server.exec` additionally verifies the
+resolved target id and sets `allow_server_exec`. The completion call validates the
+outcome against the tool (`succeeded`, `failed`, `unknown`), reconstructs the fixed
+output shape and finishes the same ledger row, so a success, a deterministic
+failure or a retryable unknown outcome all close the call. `desktop_host_database_tests`
+covers every gate in order, the malformed-envelope parameter errors, the missing
+ledger-row RPC error and the success/failure/unknown completion paths.

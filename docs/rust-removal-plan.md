@@ -77,7 +77,7 @@
 - ✅ `investigation_task_get`（只读：任务 + evidence/findings/artifacts/runs/steps 子集合，以及最新 decisionBrief 与活跃 plan）
 - ✅ `investigation_task_status_update`、`investigation_task_stop`（状态写入 + 完成时间；stop 幂等，并对 active run 尽力发 `agent.run.stop`）
 - ✅ investigation 写入组：`investigation_task_create`、`investigation_task_start`（构造 prompt 并走 sidecar `agent.run.start`、写 `investigation_runs` 绑定）、`investigation_task_recover`、`investigation_brief_select`、`investigation_retention_preview`/`prune`、`investigation_schedule_list`/`runs`/`create`/`update`/`tick`
-- ✅ 对应 host RPC：`host.investigation.plan.record`/`check`/`step_result`、`evidence.record`/`fetch`/`search`/`correlate`/`compare`、`finding.record`、`brief.record`、`artifact.record`、`retention.preview`、`filesystem_backup.register`/`restored`/`deleted`、`host.filesystem.backup.list_query`/`retention_scan`、`host.context.fetch`、`host.ssh.filesystem_backup_target`/`restore_target`/`cleanup_target`，以及 `host_tool_calls` 账本（幂等 + 重放缓存 + fingerprint）
+- ✅ 对应 host RPC：`host.investigation.plan.record`/`check`/`step_result`、`evidence.record`/`fetch`/`search`/`correlate`/`compare`、`finding.record`、`brief.record`、`artifact.record`、`retention.preview`、`filesystem_backup.register`/`restored`/`deleted`、`host.filesystem.backup.list_query`/`retention_scan`、`host.context.fetch`、`host.ssh.filesystem_backup_target`/`restore_target`/`cleanup_target`、`host.ssh.effectful_action_target`/`_finished`（四个变更动作：输入精确校验 + durable task/plan 绑定 + 任务范围/护栏/plan 偏差 + C++ 目标支持性 + 一次性宿主审批票据 + `host_tool_calls` 完成记账），以及 `host_tool_calls` 账本（幂等 + 重放缓存 + fingerprint）
 
 这些剩余命令已具备 C++ ↔ Python sidecar 桥，server 归一化与 `investigation_*` 仍需补 `host.tool.execute` 等 RPC。
 
@@ -155,7 +155,7 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
   - 已实现（63）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`server_connect`、`server_disconnect`、`server_auth_respond`、`server_auth_cancel`、`terminal_open`、`terminal_write`、`terminal_resize`、`terminal_close`、`investigation_task_list`、`investigation_task_get`、`investigation_task_status_update`、`investigation_task_stop`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`server_host_key_probe`、`server_host_key_trust`、`server_logs`、`server_services`、`server_snapshot`、`remote_file_list`、`remote_file_read`、`remote_file_preview`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`mcp_server_list`、`mcp_server_save`、`mcp_server_delete`、`mcp_server_review`、`mcp_server_start`、`mcp_server_stop`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
-  - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target` 与文件读/写/编辑目标已实现，MCP 进程目录、investigation 与其余 `host.tool.execute` 仍待补。
+  - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target`、文件读/写/编辑目标与四个变更动作的 `effectful_action_target`/`_finished` 已实现，MCP 进程目录、investigation 与其余 `host.tool.execute` 仍待补。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
 - [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。
