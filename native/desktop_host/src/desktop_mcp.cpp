@@ -537,9 +537,25 @@ struct McpSupervisor::Impl {
         session->server_version = initialized.at("serverInfo").value("version", std::string());
       }
       notify(session, "notifications/initialized");
-      const auto listed = request(session, "tools/list", nlohmann::json::object(), 20);
-      if (listed.is_object() && listed.contains("tools") && listed.at("tools").is_array()) {
-        session->tools = listed.at("tools");
+      session->tools = nlohmann::json::array();
+      std::string cursor;
+      for (int page = 0; page < 100; ++page) {
+        nlohmann::json list_params = nlohmann::json::object();
+        if (!cursor.empty()) list_params["cursor"] = cursor;
+        const auto listed = request(session, "tools/list", list_params, 20);
+        if (listed.is_object() && listed.contains("tools") && listed.at("tools").is_array()) {
+          for (const auto& tool : listed.at("tools")) session->tools.push_back(tool);
+          if (session->tools.size() > 10000) {
+            throw std::runtime_error("the MCP server exposed too many tools");
+          }
+        }
+        std::string next;
+        if (listed.is_object() && listed.contains("nextCursor") &&
+            listed.at("nextCursor").is_string()) {
+          next = listed.at("nextCursor").get<std::string>();
+        }
+        if (next.empty()) break;
+        cursor = next;
       }
     } catch (...) {
       shutdown(session);
@@ -695,14 +711,20 @@ nlohmann::json McpSupervisor::call(const std::string& internal_name,
   }
   if (!session) throw std::runtime_error("the MCP server is not running");
   std::string remote;
+  bool reviewed = false;
   for (const auto& descriptor : session->tools) {
     if (descriptor.is_object() &&
         sanitize_segment(descriptor.value("name", std::string())) == tool_segment) {
       remote = descriptor.value("name", std::string());
+      reviewed = std::any_of(session->allowed_tools.begin(), session->allowed_tools.end(),
+                             [&](const auto& item) {
+                               return item.is_string() && item.get<std::string>() == remote;
+                             });
       break;
     }
   }
   if (remote.empty()) throw std::runtime_error("the MCP server does not expose that tool");
+  if (!reviewed) throw std::runtime_error("that MCP tool has not been reviewed");
   const auto result = impl_->request(
       session, "tools/call", {{"name", remote}, {"arguments", arguments}}, 60);
   const bool is_error = result.value("isError", false);

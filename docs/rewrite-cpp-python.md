@@ -1055,3 +1055,11 @@ the returned content, and rejects an unknown tool. This exercises the real child
 spawn, newline-delimited JSON-RPC handshake, `tools/list` and `tools/call`
 without a third-party MCP package. The canonical `native/build-nmake` Release
 build passed all twelve CTest targets.
+
+Later on 2026-10-16, the MCP `tools/list` walk now follows `nextCursor` for up
+to 100 pages (capped at 10,000 tools), and `McpSupervisor::call` refuses a tool
+that the server lists but the server row never reviewed, so a newly advertised
+tool cannot be invoked before an explicit review. The mock MCP server now
+paginates (`echo`, then `secret`) to exercise both: the catalog still exposes
+only the reviewed `echo`, and `mcp.mcp_mock.secret` is refused. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets.

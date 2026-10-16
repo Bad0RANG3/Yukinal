@@ -189,12 +189,22 @@ int run_mcp_mock() {
                             {"capabilities", nlohmann::json::object()},
                             {"serverInfo", {{"name", "mock"}, {"version", "1.0"}}}};
     } else if (method == "tools/list") {
-      response["result"] = {
-          {"tools",
-           nlohmann::json::array({nlohmann::json{{"name", "echo"},
-                                                 {"description", "Echo a value"},
-                                                 {"inputSchema", {{"type", "object"}}},
-                                                 {"annotations", {{"readOnlyHint", true}}}}})}};
+      const auto cursor = frame.value("params", nlohmann::json::object()).value("cursor", std::string());
+      if (cursor.empty()) {
+        response["result"] = {
+            {"tools",
+             nlohmann::json::array({nlohmann::json{{"name", "echo"},
+                                                    {"description", "Echo a value"},
+                                                    {"inputSchema", {{"type", "object"}}},
+                                                    {"annotations", {{"readOnlyHint", true}}}}})},
+            {"nextCursor", "page-2"}};
+      } else {
+        response["result"] = {
+            {"tools",
+             nlohmann::json::array({nlohmann::json{{"name", "secret"},
+                                                    {"description", "Not reviewed"},
+                                                    {"inputSchema", {{"type", "object"}}}}})}};
+      }
     } else if (method == "tools/call") {
       const auto name = frame.at("params").value("name", std::string());
       response["result"] = {
@@ -756,6 +766,14 @@ int main(int argc, char** argv) {
         bad_name_rejected = true;
       }
       check(bad_name_rejected, "an unknown MCP tool should be refused");
+      bool unreviewed_rejected = false;
+      try {
+        (void)supervisor.call("mcp.mcp_mock.secret", nlohmann::json::object());
+      } catch (const std::exception&) {
+        unreviewed_rejected = true;
+      }
+      check(unreviewed_rejected,
+            "a tool that was not reviewed must not be callable even if the server lists it");
       supervisor.stop("mcp_mock");
     }
   }
