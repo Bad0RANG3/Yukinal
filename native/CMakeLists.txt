@@ -374,6 +374,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   set(YUKINAL_DESKTOP_VERSION "${CMAKE_MATCH_1}")
 
   add_library(yukinal_desktop_host_core
+    desktop_host/src/content_hash.cpp
     desktop_host/src/credential_store.cpp
     desktop_host/src/database.cpp
     desktop_host/src/desktop_approval.cpp
@@ -388,6 +389,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/network_proxy.cpp
     desktop_host/src/sidecar.cpp
     desktop_host/src/transfer_local.cpp
+    desktop_host/src/transfer_manager.cpp
     desktop_host/src/transfer_types.cpp
   )
   target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
@@ -471,6 +473,12 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     )
     target_link_libraries(yukinal_desktop_host_transfer_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME transfer_tests COMMAND yukinal_desktop_host_transfer_tests)
+
+    add_executable(yukinal_desktop_host_transfer_manager_tests
+      desktop_host/tests/test_transfer_manager.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_transfer_manager_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME transfer_manager_tests COMMAND yukinal_desktop_host_transfer_manager_tests)
 
     add_executable(yukinal_desktop_host_database_tests
       desktop_host/tests/test_database.cpp

@@ -1296,3 +1296,61 @@ no-replace/replace publication with the duplicate and stale-target refusals, the
 download-directory guard and the recovery cleanup. The canonical
 `native/build-nmake` Release build passed all thirteen CTest targets and
 `pnpm check` was green.
+
+The transfer manager itself landed next, completing the local half of the
+file-transfer block. `transfer_backend`
+(`native/desktop_host/include/yukinal/desktop_host/transfer_backend.hpp`) declares
+the two seams the manager drives: `TransferBackend`, a minimal streaming remote
+surface (`lstat` with no-follow semantics, `list_dir`, `open_read`,
+`create_exclusive`, `create_dir`, `remove_file`, `publish_no_replace`,
+`rename_replace` and a `remove_recovered_staging` that fails closed by default),
+and `TransferHistoryStore`, the durable snapshot/staging seam ported from the
+retired Rust `RemoteTransferBackend` and `TransferHistoryStore` traits.
+`transfer_manager.hpp`/`src/transfer_manager.cpp` port the retired Rust
+`TransferManager`: one detached worker per transfer, a cancellable counting
+semaphore that admits at most three at a time (polled every 20 ms so a queued
+transfer observes cancellation), and an `active_workers`/`workers_cv` pair that
+`shutdown` waits on. Copying streams one 64 KiB buffer at a time and accumulates
+an incremental SHA-256, so no file is ever buffered whole; the shared
+`ContentHasher` was extracted into `content_revision.hpp` with its implementation
+in a new `content_hash.cpp`, and `database.cpp` now hashes through it instead of
+its own private `Sha256`. An upload opens the local source, streams it into an
+exclusive remote staging file, re-checks the source fingerprint and staged size
+and type, compares the remote staging SHA-256 against the local digest, and only
+then publishes with a no-replace rename or a fingerprinted atomic replace,
+removing the staging link afterwards and recording residue if that fails. A
+download stages locally, re-walks the remote path chain before the open (SFTP v3
+has no no-follow flag), re-checks the source stat after the open, streams,
+verifies the local staging digest, reads the remote source a second time to
+detect a mid-transfer change, re-checks the final stat and publishes without
+replacement or with the recorded destination fingerprint. Both directions walk
+directory trees, refuse symlinks, special files and unsafe names, and accumulate
+per-item failures instead of aborting the batch. A conflict under the `ask`
+policy parks the worker on a per-job decision queue (20 ms polling with cancel
+wakeups) and accepts `skip`, `overwrite` or `rename`; `overwrite` is only offered
+and admitted when the backend advertises atomic replace, and otherwise fails
+closed with an `Unsupported` failure. The final status is `cancelled` when the
+job was cancelled, `partial` when any item failed or was skipped with at least one
+completion, `failed` otherwise, or `completed`. Snapshots publish immediately on a
+lifecycle change, at most ten times a second for intermediate progress, and force
+a durable write whenever the staging inventory changes. Durability is fail-closed:
+`persist_initial` and the staging writes surface a persistence failure, and a
+terminal history write that fails demotes the live view to `failed` with a
+`transfer history` failure instead of claiming success. `with_history` runs
+synchronous startup recovery: active rows become `interrupted`, validated local
+staging files are removed, remote staging records stay pending an authenticated
+session with a recorded note, and `reconcile_remote_staging` retries owned remote
+staging removal only through an already-connected backend and clears the resolved
+residue and note. A new `transfer_manager_tests` target drives all of this with an
+in-memory backend and history store: file and directory upload/download, both
+directions' conflict resolutions, the overwrite refusal without atomic replace,
+cancelling a transfer that is waiting on a conflict and one that is still queued,
+shutdown marking an unfinished transfer `interrupted`, the three-way parallel cap
+(measured by peak concurrent backend reads) and single-permit serialisation,
+startup recovery plus remote-staging reconciliation, the fail-closed terminal
+history write (observed through the snapshot subscription, because the durable row
+correctly stays non-terminal), and the list/get/limit error paths. The
+`native/build-nmake` Release build then passed all fourteen CTest targets,
+`pnpm check` was green and publication hygiene was green. The SFTP adapter and the
+`file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring are the
+next commit.
