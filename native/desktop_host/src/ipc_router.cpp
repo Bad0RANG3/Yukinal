@@ -12,12 +12,15 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <initializer_list>
+#include <map>
 #include <regex>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 #ifdef _WIN32
@@ -38,6 +41,24 @@ namespace {
 
 IpcReply failure(std::string code, std::string message) {
   return {false, {{"code", std::move(code)}, {"message", std::move(message)}}};
+}
+
+std::string sidecar_error_code(int code) {
+  switch (code) {
+    case -32700:
+    case -32600:
+      return "INVALID_REQUEST";
+    case -32601:
+      return "METHOD_NOT_FOUND";
+    case -32602:
+      return "INVALID_PARAMS";
+    case -32603:
+      return "AGENT_ERROR";
+    case -32604:
+      return "NOT_IMPLEMENTED";
+    default:
+      return "AGENT_ERROR";
+  }
 }
 
 bool exact_string_fields(const nlohmann::json& value,
@@ -565,6 +586,22 @@ std::wstring utf8_to_wide(const std::string& value) {
 }
 #endif
 
+std::optional<std::string> read_environment(const char* name) {
+#ifdef _WIN32
+  const auto required = GetEnvironmentVariableA(name, nullptr, 0);
+  if (required == 0) return std::nullopt;
+  std::string value(required, '\0');
+  const auto written = GetEnvironmentVariableA(name, value.data(), required);
+  if (written == 0 || written >= required) return std::nullopt;
+  value.resize(written);
+  return value;
+#else
+  const auto* value = std::getenv(name);
+  if (value == nullptr) return std::nullopt;
+  return std::string(value);
+#endif
+}
+
 }  // namespace
 
 IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
@@ -969,6 +1006,17 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     }
   }
 
+  if (method == "agent_spawn" || method == "agent_status" || method == "agent_kill" ||
+      method == "agent_logs") {
+    return agent_command(method, params);
+  }
+
+  if (method == "provider_list" || method == "provider_save" ||
+      method == "provider_activate" || method == "provider_delete" ||
+      method == "provider_models" || method == "provider_test") {
+    return provider_command(method, params);
+  }
+
   if (method == "__events.subscribe") return subscribe(params, true);
   if (method == "__events.unsubscribe") return subscribe(params, false);
 
@@ -1357,6 +1405,203 @@ IpcReply IpcRouter::host_key_command(const std::string& method,
     return failure("STORAGE_ERROR",
                    "The local known-hosts store could not be read or written");
   }
+}
+
+void IpcRouter::set_event_sink(
+    std::function<void(const std::string&, const nlohmann::json&)> sink) {
+  std::lock_guard lock(mutex_);
+  event_sink_ = std::move(sink);
+}
+
+void IpcRouter::configure_sidecar() {
+  SidecarLaunch launch;
+  if (const auto entry = read_environment("YUKINAL_AGENT_ENTRY");
+      entry.has_value() && !entry->empty()) {
+    launch.program = *entry;
+  } else {
+    auto python = read_environment("YUKINAL_AGENT_PYTHON");
+    if (!python.has_value() || python->empty()) python = read_environment("YUKINAL_PYTHON");
+    if (!python.has_value() || python->empty()) python = std::string("python");
+    launch.program = *python;
+    launch.args = {"-m", "yukinal_agent.sidecar"};
+  }
+  if (const auto source = read_environment("YUKINAL_AGENT_SOURCE");
+      source.has_value() && !source->empty()) {
+    launch.environment.push_back({"PYTHONPATH", *source});
+  }
+  for (const auto* name : {"YUKINAL_SSH_API_TOKEN", "YUKINAL_SSH_API_URL",
+                           "YUKINAL_SSH_SERVICE_AUTOCONFIG", "YUKINAL_SSH_SERVICE_BINARY",
+                           "YUKINAL_SSH_SERVICE_CONFIG"}) {
+    if (const auto value = read_environment(name); value.has_value() && !value->empty()) {
+      launch.environment.push_back({name, *value});
+    }
+  }
+  if (database_ != nullptr) {
+    launch.data_directory = database_->data_directory().string();
+  } else if (const auto data = read_environment("YUKINAL_DATA_DIR"); data.has_value()) {
+    launch.data_directory = *data;
+  }
+  launch.client_version = YUKINAL_DESKTOP_VERSION;
+  sidecar_->configure(std::move(launch));
+  sidecar_->set_host_handler([this](const std::string& method, const nlohmann::json& params) {
+    return handle_host_request(method, params);
+  });
+  sidecar_->set_notification_sink([this](const std::string& method,
+                                         const nlohmann::json& params) {
+    std::function<void(const std::string&, const nlohmann::json&)> sink;
+    {
+      std::lock_guard lock(mutex_);
+      sink = event_sink_;
+    }
+    if (!sink) return;
+    if (method == "agent.stream" && params.is_object() && params.contains("type") &&
+        params.at("type").is_string()) {
+      sink(params.at("type").get<std::string>(), params);
+    } else {
+      sink(method, params);
+    }
+  });
+}
+
+SidecarClient& IpcRouter::ensure_sidecar() {
+  std::lock_guard lock(sidecar_mutex_);
+  if (!sidecar_) {
+    sidecar_ = std::make_unique<SidecarClient>();
+    configure_sidecar();
+  }
+  return *sidecar_;
+}
+
+IpcReply IpcRouter::agent_command(const std::string& method, const nlohmann::json& params) {
+  if (!params.empty()) {
+    return failure("INVALID_PARAMS", method + " does not accept parameters");
+  }
+  if (method == "agent_status") {
+    const SidecarStatus status = sidecar_ ? sidecar_->status() : SidecarStatus{};
+    nlohmann::json response = {
+        {"running", status.running},
+        {"pid", status.pid.has_value() ? nlohmann::json(*status.pid) : nlohmann::json(nullptr)},
+        {"protocolVersion", status.protocol_version.has_value()
+                                ? nlohmann::json(*status.protocol_version)
+                                : nlohmann::json(nullptr)},
+        {"agentVersion", status.agent_version.has_value() ? nlohmann::json(*status.agent_version)
+                                                          : nlohmann::json(nullptr)},
+        {"toolCount", (status.running && status.tool_count.has_value())
+                          ? nlohmann::json(*status.tool_count)
+                          : nlohmann::json(nullptr)},
+        {"entry", status.entry.empty() ? nlohmann::json(nullptr) : nlohmann::json(status.entry)},
+        {"startedAt", status.started_at.has_value() ? nlohmann::json(*status.started_at)
+                                                     : nlohmann::json(nullptr)},
+        {"lastExit", nullptr},
+    };
+    if (status.last_exit.has_value()) {
+      response["lastExit"] = {
+          {"code", status.last_exit->code.has_value() ? nlohmann::json(*status.last_exit->code)
+                                                       : nlohmann::json(nullptr)},
+          {"signal", status.last_exit->signal.empty() ? nlohmann::json(nullptr)
+                                                       : nlohmann::json(status.last_exit->signal)},
+          {"at", status.last_exit->at}};
+    }
+    return {true, std::move(response)};
+  }
+  if (method == "agent_logs") {
+    std::vector<std::string> lines;
+    std::size_t capacity = 200;
+    if (sidecar_) {
+      lines = sidecar_->log_lines();
+      capacity = sidecar_->log_capacity();
+    }
+    return {true, {{"lines", std::move(lines)}, {"capacity", capacity}}};
+  }
+  if (method == "agent_kill") {
+    bool killed = false;
+    if (sidecar_ && sidecar_->status().running) {
+      sidecar_->stop();
+      killed = true;
+    }
+    return {true, {{"killed", killed}}};
+  }
+  if (method == "agent_spawn") {
+    try {
+      auto& client = ensure_sidecar();
+      const auto started = client.ensure_started(std::chrono::milliseconds(60000));
+      return {true,
+              {{"pid", started.pid},
+               {"protocolVersion", started.protocol_version},
+               {"agentVersion", started.agent_version},
+               {"entry", started.entry},
+               {"toolCount", started.tool_count},
+               {"alreadyRunning", started.already_running}}};
+    } catch (const SidecarRpcError& error) {
+      return failure(sidecar_error_code(error.code()), error.what());
+    } catch (const SidecarError& error) {
+      return failure("AGENT_UNAVAILABLE", error.what());
+    }
+  }
+  return failure("NOT_IMPLEMENTED", "This Agent command has not migrated yet: " + method);
+}
+
+IpcReply IpcRouter::provider_command(const std::string& method, const nlohmann::json& params) {
+  static const std::map<std::string, std::string> kMethods = {
+      {"provider_list", "provider.list"},
+      {"provider_save", "provider.save"},
+      {"provider_activate", "provider.activate"},
+      {"provider_delete", "provider.delete"},
+      {"provider_models", "provider.models"},
+      {"provider_test", "provider.test"},
+  };
+  const auto found = kMethods.find(method);
+  if (found == kMethods.end()) {
+    return failure("NOT_IMPLEMENTED", "This provider command has not migrated yet: " + method);
+  }
+  try {
+    auto& client = ensure_sidecar();
+    return {true, client.request(found->second, params, std::chrono::milliseconds(60000))};
+  } catch (const SidecarRpcError& error) {
+    return failure(sidecar_error_code(error.code()), error.what());
+  } catch (const SidecarError& error) {
+    return failure("AGENT_UNAVAILABLE", error.what());
+  }
+}
+
+nlohmann::json IpcRouter::handle_host_request(const std::string& method,
+                                              const nlohmann::json& params) {
+  if (method == "host.mcp.catalog") {
+    return {{"servers", nlohmann::json::array()}, {"failures", nlohmann::json::array()}};
+  }
+  if (method == "host.credentials.set") {
+    if (!params.is_object() || !params.contains("service") || !params.contains("account") ||
+        !params.contains("secret") || !params.at("service").is_string() ||
+        !params.at("account").is_string() || !params.at("secret").is_string()) {
+      throw SidecarRpcError(-32602,
+                            "host.credentials.set requires service, account, and secret");
+    }
+    const auto reference = credentials_->set(
+        params.at("service").get<std::string>(), params.at("account").get<std::string>(),
+        Secret{std::string_view(params.at("secret").get<std::string>())});
+    return {{"credentialRef", reference.to_string()}};
+  }
+  if (method == "host.credentials.get") {
+    if (!params.is_object() || !params.contains("reference") ||
+        !params.at("reference").is_string()) {
+      throw SidecarRpcError(-32602, "host.credentials.get requires a reference");
+    }
+    const auto secret =
+        credentials_->get(CredentialReference::parse(params.at("reference").get<std::string>()));
+    return {{"secret", std::string(reinterpret_cast<const char*>(secret.data()), secret.size())}};
+  }
+  if (method == "host.credentials.reclaim") {
+    if (!params.is_object() || !params.contains("reference") ||
+        !params.at("reference").is_string()) {
+      throw SidecarRpcError(-32602, "host.credentials.reclaim requires a reference");
+    }
+    credentials_->erase(CredentialReference::parse(params.at("reference").get<std::string>()));
+    return {{"reclaimed", true}};
+  }
+  if (method == "host.tool.cancel") {
+    return {{"cancelled", false}};
+  }
+  throw SidecarRpcError(-32601, "The desktop host does not implement " + method);
 }
 
 IpcReply IpcRouter::subscribe(const nlohmann::json& params, bool add) {

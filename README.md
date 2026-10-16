@@ -39,7 +39,12 @@ still in progress. Current components include:
 
 The Python JSON-RPC layer handles initialization, health, tool catalogs,
 provider checks and model catalogs, text runs, cancellation, and a bidirectional
-JSON-RPC bridge to the desktop host. Python runs can execute the existing
+JSON-RPC bridge to the desktop host. The C++ host now owns the Agent process:
+`native/desktop_host/src/sidecar.cpp` launches and supervises it, and the router
+routes `agent_spawn`/`agent_status`/`agent_kill`/`agent_logs` plus the six
+`provider_*` commands through it, answering the Agent's `host.credentials.*` calls
+against the OS credential store. Agent runs and the remaining host RPC handlers
+are the next bridge milestones. Python runs can execute the existing
 read-only server tools through the host and can use MCP tools the host marks
 low-risk. On the desktop, `server.info` gathers its fixed SSH command batch
 through the C++ service, normalizes its snapshot in Python, and sends the

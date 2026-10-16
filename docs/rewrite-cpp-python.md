@@ -857,3 +857,22 @@ returning `NOT_IMPLEMENTED`; packaging/installers are not implemented. From here
 the work is implementation against the shared contract, guided by
 `docs/rust-removal-plan.md`; the pinned reference implementations remain in git
 history.
+
+On 2026-10-16, the C++ desktop host gained the first Python Agent sidecar bridge.
+`native/desktop_host/src/sidecar.cpp` spawns the Agent (`python -m
+yukinal_agent.sidecar` or `YUKINAL_AGENT_ENTRY`), supervises it, speaks the 24 MiB
+NDJSON/JSON-RPC protocol, correlates responses by id, re-publishes `agent.stream`
+notifications through the WebView event bridge, and dispatches the Agent's
+`host.*` requests. The router answers `host.credentials.set/get/reclaim` against
+the OS credential store, returns an empty `host.mcp.catalog`, and acknowledges
+`host.tool.cancel`. On top of that bridge the host now implements
+`agent_spawn`, `agent_status`, `agent_kill`, `agent_logs`, and all six
+`provider_*` commands; API keys never leave the C++ credential boundary. The new
+`desktop_host_sidecar_tests` target runs the real Python Agent and verifies the
+handshake, `system.ping`, provider save/list/activate/delete credential rotation
+and reclamation, and the router forwarding path. `pnpm desktop:dev:cpp` detects
+`agent/.venv` and forwards `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE` to the
+host. CTest passed all eleven targets; a Windows-only build issue was fixed by
+setting `CREATE_UNICODE_ENVIRONMENT`, without which `CreateProcessW` rejected any
+non-empty environment block with `ERROR_INVALID_PARAMETER`. Agent runs,
+`host.tool.execute`, MCP catalogs, and investigation forwarding remain.

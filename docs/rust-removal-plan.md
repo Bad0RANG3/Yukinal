@@ -21,13 +21,24 @@
 
 ---
 
-## 2. C++ 宿主已实现（20）
+## 2. C++ 宿主已实现
 
 `native/desktop_host/src/ipc_router.cpp`
 
 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`chat_session_list`、`chat_session_get`、`chat_session_create`、`chat_message_append`、`chat_session_archive`、`chat_session_rename`、`chat_session_delete`。
 
 带 `desktop_host_*` 的 CTest 目标覆盖这些命令的数据/迁移/self-check。
+
+### 2.1 C++ ↔ Python sidecar 桥（已接通首个里程碑）
+
+`native/desktop_host/src/sidecar.cpp` 提供 `SidecarClient`：负责 Python Agent 子进程的启动/监管、24 MiB 上限的 NDJSON 分帧、请求/响应按 id 关联、`agent.stream` 通知回传，以及 Python 侧反向 `host.*` RPC 的分发。`native/desktop_host/src/ipc_router.cpp` 通过它实现：
+
+- `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（进程监管与 stderr 尾部）；
+- `provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`（转发到 Python `provider.*`）；
+- `host.credentials.set`、`host.credentials.get`、`host.credentials.reclaim`（写/读/回收 OS 凭据库）；
+- `host.mcp.catalog`（当前返回空目录）、`host.tool.cancel`（确认）。
+
+`desktop_host_sidecar_tests` 用真实 Python Agent 验证启动、握手、ping、provider 凭据轮换与回收，以及 router 转发。开发用 `pnpm desktop:dev:cpp` 会探测 `agent/.venv` 并把 `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE` 传给宿主。Agent run、MCP 目录、investigation 与其余 `host.tool.execute` 仍是下一步。
 
 ---
 
@@ -51,14 +62,16 @@
 
 ### C. 走 Python sidecar（Rust 现在就是转发）
 
-`apps/desktop/src-tauri/src/commands/provider.rs`、`commands/server/mod.rs`、`commands/agent_run.rs`、`commands/investigation.rs` 里的若干命令，实际逻辑在 `agent/src/yukinal_agent/`：
+✅ Provider 六个命令（`provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`）已由 C++ 宿主经 sidecar 桥转发到 Python，凭据经 `host.credentials.*` 落在 C++ OS 凭据边界。
 
-- `provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`
-- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`
-- `server_snapshot`、`server_services`、`server_logs` 的归一化部分
-- `investigation_*`（15）中的持久化/恢复部分
+`apps/desktop/src-tauri/src/commands/provider.rs`、`commands/server/mod.rs`、`commands/agent_run.rs`、`commands/investigation.rs` 里的其余命令，实际逻辑在 `agent/src/yukinal_agent/`：
 
-要把这些迁进 C++ 宿主，**必须先有 C++ ↔ Python sidecar 桥**（见 第 4 节）。
+- ✅ provider 六个命令（见上）；
+- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`；
+- `server_snapshot`、`server_services`、`server_logs` 的归一化部分；
+- `investigation_*`（15）中的持久化/恢复部分。
+
+这些剩余命令已具备 C++ ↔ Python sidecar 桥，只需在 C++ 宿主补命令转发与 `host.tool.execute` 等 RPC。
 
 ### D. 进程监管与 MCP
 
@@ -69,7 +82,7 @@
 
 ## 4. 关键路径：C++ ↔ Python sidecar 桥
 
-这是 provider / MCP / agent / investigation 的前置，也是整个迁移的瓶颈。参考实现是 `crates/core/src/sidecar/`（约 1100 行）：
+**已接通首个里程碑。** 参考实现是 `crates/core/src/sidecar/`（约 1100 行）：
 
 - `crates/core/src/sidecar/config.rs`：解析 Python/PyInstaller 入口、环境白名单、`YUKINAL_DATA_DIR`。
 - `crates/core/src/sidecar/mod.rs`：`Command` 启动、`env_clear` + 最小环境、stdout/stderr 读取任务、NDJSON 帧（上限 24 MiB）、请求/响应按 `id` 关联、`initialize` 握手、退出与重启监管。
@@ -127,8 +140,9 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（19）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）。
+  - 已实现（25）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
+  - Provider 六个命令与 `agent_spawn/status/kill/logs` 已经走桥；`agent_run_*`、MCP 与 investigation 仍待转发。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
 - [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。

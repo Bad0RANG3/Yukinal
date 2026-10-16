@@ -59,7 +59,12 @@ C++; the React UI keeps using the shared IPC contract.
    to C++. Continue using the C++ SSH service implementation already in `native/`.
 4. Connect the Python sidecar to the C++ host RPC. C++ remains the authority for
    identity, target scope, approvals, and persistence; Python runs model and tool
-   workflows.
+   workflows. This is now started: `native/desktop_host/src/sidecar.cpp` launches
+   and supervises the Agent, correlates NDJSON/JSON-RPC frames, streams
+   `agent.stream` notifications to the WebView, and answers
+   `host.credentials.set/get/reclaim`, `host.mcp.catalog`, and `host.tool.cancel`.
+   `agent_spawn/status/kill/logs` and the six `provider_*` commands are routed
+   through it. Agent runs and the remaining host RPC handlers are next.
 5. Port task history, schedules, recovery, audit and remaining UI commands. Validate
    each command and event against the shared contracts and existing desktop tests.
 6. Build and smoke-test Windows, macOS, and Linux installers (not implemented yet;

@@ -6,7 +6,9 @@
 
 截至 2026-10-15，上一检查点为 `d2594ff`（`Move schema migrations to C++ desktop host`）。当前 C++ 桌面宿主可打开 React UI、提供本机 IPC 桥、初始化 SQLite 数据库并执行版本 1 到 36 的迁移，已实现服务器增删改、OS 凭据库读写、活动记录、聊天历史命令，以及本轮迁入的网络代理设置命令（`network_proxy_get`、`network_proxy_save`）。网络代理的入参校验、入参中写入凭据的擦除、凭据轮换/保留/清除与失败回收都落在 C++；解析结果区分环境变量、Windows/macOS 系统代理与 PAC 失败关闭。
 
-C++ 桌面宿主核心、Windows 可执行文件及桌面宿主测试（IPC router、数据库迁移、self-check）已在本机构建并通过。数据库测试已改为用真实的前 8 段迁移构造 v8 库，再验证迁移到 36 与旧数据可读；上一检查点遗留的“迁移后仍为 v8”断言已失效并被替换。
+C++ 桌面宿主核心、Windows 可执行文件及桌面宿主测试（IPC router、数据库迁移、self-check、sidecar 桥）已在本机构建并通过。数据库测试已改为用真实的前 8 段迁移构造 v8 库，再验证迁移到 36 与旧数据可读；上一检查点遗留的“迁移后仍为 v8”断言已失效并被替换。
+
+本轮接入了 **C++ ↔ Python sidecar 桥的首个里程碑**（`native/desktop_host/src/sidecar.cpp` + `include/yukinal/desktop_host/sidecar.hpp`）：宿主可以启动/监管 Python Agent 子进程，按其 NDJSON/JSON-RPC 协议完成 `initialize` 与 `tools.list` 握手，把 `agent.stream` 通知回传为 WebView 事件，并处理 Python 侧发出的 `host.credentials.set/get/reclaim`、`host.mcp.catalog`（当前为空目录）与 `host.tool.cancel`。在此基础上迁入了 `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs` 与 Provider 六个命令（`provider_list/save/activate/delete/models/test`）。Provider API key 仍只进 OS 凭据库，由 `host.credentials.*` 读写。`desktop_host_sidecar_tests` 用真实 Python Agent 验证了启动、ping、API key 轮换/回收与 router 转发；`pnpm desktop:dev:cpp` 会自动探测 `agent/.venv` 并传入 `YUKINAL_AGENT_PYTHON`/`YUKINAL_AGENT_SOURCE`。
 
 Rust/Tauri 宿主与 legacy Node agent 已按 `rust-removal-plan.md` 从仓库删除；C++ WebView 宿主是唯一桌面宿主，`pnpm check` 不再依赖 cargo。因此 C++ 宿主目前是**唯一载体**：尚未迁移的命令返回 `NOT_IMPLEMENTED`，前端也不再回退 Tauri。新功能实现应落在 C++ 桌面宿主或 Python Agent 中，跨层命令和数据形状以 `packages/shared` 为准。命令级缺口、依赖顺序和实现指导见 `docs/rust-removal-plan.md`。
 
@@ -37,9 +39,9 @@ Python Agent ── LangGraph / models / tools / MCP
 
 ## C++ 宿主已有命令
 
-当前 IPC router 已处理 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`，以及聊天会话的 list/get/create、消息追加、归档、重命名和删除。事件订阅桥已提供通用 plumbing；未实现的命令返回 `NOT_IMPLEMENTED`，不会回退调用 Tauri。
+当前 IPC router 已处理 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`，聊天会话的 list/get/create、消息追加、归档、重命名和删除，以及经 sidecar 桥的 `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs` 与 Provider 六个命令。事件订阅桥已提供通用 plumbing；未实现的命令返回 `NOT_IMPLEMENTED`，不会回退调用 Tauri。
 
-Provider、MCP、服务器连接与主机信任（探针/确认）、终端、文件浏览/传输、桌面任务恢复和 Python Agent 桥接还没有全部迁入 C++ 桌面宿主。独立 SSH 服务中已有的能力不等于 UI 到 C++ 宿主的命令路径已经完成。
+Provider 的命令转发、凭据边界和 Agent 进程监管已接通；Agent run、MCP、服务器连接与主机信任（探针/确认）、终端、文件浏览/传输、桌面任务恢复仍未全部迁入 C++ 桌面宿主。独立 SSH 服务中已有的能力不等于 UI 到 C++ 宿主的命令路径已经完成。
 
 ## 构建和本机启动
 
@@ -68,11 +70,11 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 
 ## 下一步施工顺序
 
-1. 迁移 Provider 配置读写与模型目录，保证 API key 轮换、删除和失败清理遵循同一套凭据约束。
+1. ✅ Provider 配置读写、模型目录与 Agent 进程监管已迁入 C++ 宿主（经 sidecar 桥）；剩余：`agent_run_start`/`agent_run_stop`/`agent_approval_respond` 转发与 `host.tool.execute`（含 desktop SSH 工具）。
 2. 迁移 MCP 配置、风险注解信任、服务器生命周期、OAuth 与进程监督；区分“设置已保存”和“服务已运行”。
 3. 将服务器连接、Host Key 确认、终端、文件浏览、传输和审批流程接入 C++ 桌面宿主；复用现有 C++ SSH/SFTP/PTY 服务，不保留 Rust SSH 回退。
-4. 将 Python Agent 连接到 C++ 宿主 RPC，迁移剩余任务、审计、计划、恢复与事件命令，并逐项对照 shared schema 和 UI 使用点。
-5. 完成 Windows、macOS、Linux 桌面构建和安装后验收，再移除 Tauri/Rust 桌面宿主及只服务于旧宿主的代码。
+4. 迁移剩余任务、审计、计划、恢复与事件命令，并逐项对照 shared schema 和 UI 使用点。
+5. 完成 Windows、macOS、Linux 桌面构建和安装后验收。
 
 每一轮只纳入已完成且可复核的文件，更新相应文档，构建受影响的 C++ 目标，再按用户要求推送。不要把 `ssh_agent_development_brief.md` 加入提交；它是工作区中的任务输入。Git author 和 committer 必须设为 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 

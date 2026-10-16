@@ -268,6 +268,10 @@ int run(const std::vector<std::string>& arguments) {
     BridgeContext context(*database);
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
+    context.router.set_event_sink(
+        [&context](const std::string& event, const nlohmann::json& payload) {
+          context.publish_event(event, payload);
+        });
     if (webview_set_title(context.view, "Yukinal") != WEBVIEW_ERROR_OK ||
         webview_set_size(context.view, 1440, 900, WEBVIEW_HINT_NONE) != WEBVIEW_ERROR_OK ||
         webview_bind(context.view, "yukinalNativeInvoke", rpc_handler, &context) !=
