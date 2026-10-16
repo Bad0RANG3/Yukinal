@@ -24,20 +24,6 @@ import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js"
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
 
-const HEALTH_DOT: Record<HealthClass | "unknown", string> = {
-  healthy: "health-dot-healthy",
-  warning: "health-dot-warning",
-  critical: "health-dot-critical",
-  unknown: "health-dot-unknown",
-};
-
-const HEALTH_LABEL: Record<HealthClass | "unknown", string> = {
-  healthy: "健康",
-  warning: "需要关注",
-  critical: "严重",
-  unknown: "未知",
-};
-
 const SNAPSHOT_STALE_AFTER_MS = 45_000;
 
 const COLLECTORS = [
@@ -151,10 +137,9 @@ function ResourceRow({
   const status = gaugeClass(usage, thresholds);
   const width = usage === undefined ? 0 : Math.min(100, Math.max(0, Math.round(usage)));
   return (
-    <div className="overview-resource-row" role="group" aria-label={`${label} ${HEALTH_LABEL[status]}`}>
+    <div className="overview-resource-row" role="group" aria-label={`${label} ${usage === undefined ? "读数不可用" : `${Math.round(usage)}%`}`}>
       <span className="overview-resource-label">{label}</span>
       <strong>{usage === undefined ? "—" : `${Math.round(usage)}%`}</strong>
-      <span className={`metric-status metric-status-${status}`}>{HEALTH_LABEL[status]}</span>
       <div className="overview-resource-track" aria-hidden="true">
         <div className={`metric-fill metric-fill-${status}`} style={{ width: `${width}%` }} />
       </div>
@@ -265,7 +250,6 @@ function OverviewContent({
     return () => window.clearInterval(interval);
   }, []);
 
-  const health = snapshot.health;
   const osSample = sampleFor(snapshot, "os");
   const os = osSample?.ok === false ? undefined : snapshot.os;
   const cpuSample = sampleFor(snapshot, "cpu");
@@ -285,16 +269,6 @@ function OverviewContent({
     ? age.kind === "stale" ? "快照已过期" : age.kind === "unknown" ? "新鲜度未知" : "采集较新"
     : "缓存快照";
   const network = sampleFor(snapshot, "network")?.ok === false ? undefined : snapshot.network;
-  const resourceIssues = [
-    ...(cpu && gaugeClass(cpu.usagePercent, HEALTH_THRESHOLDS.cpu) !== "healthy" ? [`CPU ${Math.round(cpu.usagePercent)}%`] : []),
-    ...(memory && gaugeClass(memory.usagePercent, HEALTH_THRESHOLDS.memory) !== "healthy" ? [`内存 ${Math.round(memory.usagePercent)}%`] : []),
-    ...disks.filter((disk) => gaugeClass(disk.usagePercent, HEALTH_THRESHOLDS.disk) !== "healthy").map((disk) => `${disk.mountPoint} 磁盘 ${Math.round(disk.usagePercent)}%`),
-  ];
-  const resourceSummary = resourceIssues.length > 0
-    ? resourceIssues.join(" · ")
-    : !cpu || !memory || disks.length === 0
-      ? "部分资源读数不可用，请查看采集诊断。"
-      : "CPU、内存与磁盘均在健康阈值内。";
   const failedSamples = (snapshot.collectors ?? []).filter((sample) => !sample.ok);
   const diagnosticsExpanded = collection.kind !== "complete" || age.kind !== "fresh" || !connected || failedSamples.length > 0;
   const runningContainers = docker?.containers.filter((container) => container.state === "running").length ?? 0;
@@ -317,20 +291,15 @@ function OverviewContent({
         </section>
       ) : null}
 
-      <section className="overview-status" aria-label="服务器健康摘要">
+      <section className="overview-status" aria-label="采集状态">
         <div className="overview-status-heading">
-          <strong className={`health-label health-label-${health}`}>
-            <span className={`health-dot ${HEALTH_DOT[health]}`} />
-            {HEALTH_LABEL[health]}
-          </strong>
+          <div className="overview-observed-at">
+            <span className={"overview-freshness overview-freshness-" + freshnessKind}><span aria-hidden="true" />{freshnessLabel}</span>
+            <time dateTime={snapshot.collectedAt} title={"本地时间 " + formatTimestamp(snapshot.collectedAt)}>{age.label}</time>
+          </div>
           <button type="button" className="icon-button overview-refresh" onClick={onRefresh} disabled={!connected || refreshing} title={refreshing ? "正在采集新快照" : connected ? "刷新服务器状态" : "重新连接后才能刷新"} aria-label={refreshing ? "正在采集新快照" : connected ? "刷新服务器状态" : "重新连接后才能刷新"}>
             <Icon name="refresh" size="sm" />
           </button>
-        </div>
-        <p className="overview-resource-summary">{resourceSummary}</p>
-        <div className="overview-observed-at">
-          <span className={"overview-freshness overview-freshness-" + freshnessKind}><span aria-hidden="true" />{freshnessLabel}</span>
-          <time dateTime={snapshot.collectedAt} title={"本地时间 " + formatTimestamp(snapshot.collectedAt)}>{age.label}</time>
         </div>
         {diagnosticsExpanded ? <p className="overview-collection-warning" role="status">{diagnosticsLabel} · {collection.description}</p> : null}
         {refreshing ? <p className="overview-collection-progress" role="status">正在采集，当前显示上次完成的结果。</p> : null}
@@ -372,7 +341,7 @@ function OverviewContent({
         </div>
       </details>
 
-      <details className="overview-inspector-section" key={`docker-${server.id}-${otherContainers > 0}`} open={otherContainers > 0}>
+      <details className="overview-inspector-section" key={`docker-${server.id}`}>
         <summary><Icon name="chevronRight" size="xs" /><span>Docker</span><small>{docker?.available ? `${docker.containers.length} 个容器${otherContainers > 0 ? ` · ${otherContainers} 非运行` : ""}` : "不可用"}</small></summary>
         <div className="overview-section-content">
           {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有容器。</p> : <ul className="overview-container-list">

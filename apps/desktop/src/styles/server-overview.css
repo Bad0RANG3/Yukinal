@@ -8,20 +8,16 @@
 }
 .overview-status { padding-bottom: 6px; }
 .overview-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.overview-status-heading .health-label { min-width: 0; font-size: var(--text-subheading); font-weight: 600; }
-.overview-status-heading .health-dot { box-shadow: none; }
 .overview-status .overview-refresh { width: 28px; height: 28px; flex: 0 0 auto; border: 0; background: transparent; }
-.overview-resource-summary { margin: 8px 0; color: var(--muted); font-size: var(--text-label); line-height: 1.55; overflow-wrap: anywhere; }
 .overview-observed-at { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--faint); font-size: var(--text-caption); }
 .overview-observed-at .overview-freshness { padding: 0; border: 0; border-radius: 0; background: transparent; white-space: normal; }
 .overview-collection-warning, .overview-collection-progress { margin: 8px 0 0; color: var(--warning); font-size: var(--text-caption); line-height: 1.5; }
 .overview-collection-progress { color: var(--faint); }
 .overview-resources { padding: 8px 0 var(--space-card); }
 .overview-resource-list { display: grid; gap: 0; }
-.overview-resource-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: baseline; gap: 5px 8px; min-width: 0; padding: 9px 0; }
+.overview-resource-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 8px; min-width: 0; padding: 8px 0; }
 .overview-resource-label { color: var(--muted); font-size: var(--text-label); }
 .overview-resource-row strong { color: var(--text); font-size: var(--text-body); font-weight: 600; font-variant-numeric: tabular-nums; }
-.overview-resource-row .metric-status { font-size: var(--text-caption); }
 .overview-resource-track { grid-column: 1 / -1; height: 3px; overflow: hidden; background: var(--material-active); }
 .overview-resource-track .metric-fill { border-radius: 0; }
 .overview-resource-hint { grid-column: 1 / -1; min-width: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.4; }

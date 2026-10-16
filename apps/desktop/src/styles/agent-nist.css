@@ -4,7 +4,7 @@
 .agent-nist-heading h2 { margin: 0; color: var(--text); font-size: var(--text-subheading); font-weight: 600; }
 .agent-nist-heading span { color: var(--faint); font-size: var(--text-caption); }
 .agent-nist-heading p, .agent-nist-team-purpose p { margin: 6px 0 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.55; }
-.agent-nist-teams { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--edge-normal); }
+.agent-nist-teams { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--edge-normal); }
 .agent-nist-teams button { min-width: 0; min-height: var(--height-control); padding: 8px 4px; border: 0; border-bottom: 1px solid transparent; color: var(--faint); background: transparent; font: inherit; font-size: var(--text-label); cursor: pointer; }
 .agent-nist-teams button:hover { color: var(--text); }
 .agent-nist-teams button.is-selected { border-bottom-color: var(--accent); color: var(--text); }
@@ -34,6 +34,7 @@
 .agent-nist-editor-actions { margin-top: 0; }
 .agent-nist-footnote { margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
 @container reference (min-width: 600px) {
+  .agent-nist-teams { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .agent-nist-roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
   .agent-nist-team-purpose { max-width: 680px; }
 }

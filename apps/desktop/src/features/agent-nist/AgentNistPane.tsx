@@ -105,7 +105,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
     <div className="agent-nist-teams" role="group" aria-label="运维 Agent 队伍">
       {AGENT_TEAMS.map((candidate) => <button key={candidate.id} type="button" aria-pressed={candidate.id === teamId} className={candidate.id === teamId ? "is-selected" : ""} onClick={() => setTeamId(candidate.id)}>{candidate.label}</button>)}
     </div>
-    <div className="agent-nist-team-purpose"><strong>{team.description}</strong><p>{team.purpose}</p></div>
+    <div className="agent-nist-team-purpose"><strong>{team.englishName} · {team.description}</strong><p>{team.purpose}</p></div>
 
     {config.notice ? <p className="agent-nist-notice" role="status">{config.notice}</p> : null}
     {providers.isLoading ? <p className="agent-nist-notice" id={queryStateId} role="status">正在读取 AI 连接…</p> : null}

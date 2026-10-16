@@ -4,6 +4,7 @@ import type { AgentPromptPart, AiProviderConfig } from "@yukinal/shared";
 
 import {
   AGENT_NIST_STORAGE_KEY,
+  AGENT_TEAMS,
   defaultAgentRoles,
   handoffAgentRole,
   loadAgentRoles,
@@ -36,6 +37,51 @@ function memoryStorage() {
   return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
 }
 
+test("the seven-team catalog keeps one stable assignment per role across reloads", () => {
+  const storage = memoryStorage();
+  const defaults = defaultAgentRoles();
+  assert.equal(new Set(defaults.map((role) => role.id)).size, defaults.length);
+  assert.deepEqual(new Set(defaults.map((role) => role.team)), new Set(["blue", "red", "purple", "white", "yellow", "orange", "green"]));
+  for (const team of AGENT_TEAMS) {
+    const roles = defaults.filter((role) => role.team === team.id);
+    assert.equal(roles.length, 2);
+    roles[0]!.providerId = `connection-${team.id}`;
+    roles[0]!.model = `model-${team.id}`;
+  }
+  saveAgentRoles(storage, defaults);
+  assert.deepEqual(loadAgentRoles(storage).roles, defaults);
+});
+
+test("upgrading the original catalog updates untouched fields and preserves custom duties and model assignments", () => {
+  const storage = memoryStorage();
+  const legacy = JSON.stringify({ version: 1, roles: [
+    { id: "red-review", name: "风险审查", responsibility: "自定义测试范围：仅预发布。", providerId: "red-connection", model: "red-model" },
+    { id: "orange-incident", name: "自定义协作角色", responsibility: "整理故障影响、时间线、已完成操作、待确认事项与下一步优先级。围绕已有证据协调排查和交接，明确需要用户决策的节点，不捏造执行结果。", providerId: "orange-connection", model: "orange-model" },
+  ] });
+  storage.values.set(AGENT_NIST_STORAGE_KEY, legacy);
+  const loaded = loadAgentRoles(storage);
+  const defaults = defaultAgentRoles();
+  assert.equal(loaded.notice, null);
+  assert.equal(loaded.roles.length, 14);
+  assert.deepEqual(loaded.roles.find((role) => role.id === "red-review"), {
+    ...defaults.find((role) => role.id === "red-review"), responsibility: "自定义测试范围：仅预发布。", providerId: "red-connection", model: "red-model",
+  });
+  assert.deepEqual(loaded.roles.find((role) => role.id === "orange-incident"), {
+    ...defaults.find((role) => role.id === "orange-incident"), name: "自定义协作角色", providerId: "orange-connection", model: "orange-model",
+  });
+  assert.equal(storage.values.get(AGENT_NIST_STORAGE_KEY), legacy, "loading must not write storage");
+  saveAgentRoles(storage, loaded.roles);
+  assert.deepEqual(loadAgentRoles(storage).roles, loaded.roles);
+});
+
+test("newly saved custom values matching an old default are not migrated on later reloads", () => {
+  const storage = memoryStorage();
+  const roles = defaultAgentRoles();
+  roles.find((role) => role.id === "orange-incident")!.name = "故障协调";
+  saveAgentRoles(storage, roles);
+  assert.equal(loadAgentRoles(storage).roles.find((role) => role.id === "orange-incident")?.name, "故障协调");
+});
+
 test("local role configuration survives reload and stores only role fields", () => {
   const storage = memoryStorage();
   const roles = defaultAgentRoles();
@@ -67,7 +113,7 @@ test("preview role bindings use separate storage and never replace the real loca
 
 test("unreadable role storage falls back without overwriting stored data or caller edits", () => {
   const storage = memoryStorage();
-  for (const saved of ["invalid JSON", JSON.stringify({ version: 2, roles: [] })]) {
+  for (const saved of ["invalid JSON", JSON.stringify({ version: 2, roles: [] }), JSON.stringify({ version: 1, catalogVersion: 99, roles: [] })]) {
     storage.values.set(AGENT_NIST_STORAGE_KEY, saved);
     const loaded = loadAgentRoles(storage);
     assert.ok(loaded.notice);
