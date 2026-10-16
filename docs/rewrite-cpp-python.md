@@ -1202,3 +1202,26 @@ to granted), mid-poll cancellation and the supervisor's bearer-token integration
 plus router validation and the idle-cancel answer. The canonical
 `native/build-nmake` Release build passed all twelve CTest targets and
 `pnpm check` was green. The optional long-lived GET event stream remains.
+
+The first piece of the effectful-action block also landed: the host now owns its
+own approval-ticket ledger. `native/desktop_host/src/desktop_approval.cpp`
+(`HostApprovalLedger`) mirrors the retired Rust `state/approval.rs`. When the
+sidecar emits an `agent.waiting_approval` notification for one of the four
+effectful SSH actions (`server.exec`, `docker.restart`, `systemd.restart`,
+`package.install`), `IpcRouter`'s sidecar notification sink records a ticket that
+binds the exact run, trace, call, tool, target, durable task/plan/step and a
+host-recomputed canonical-JSON fingerprint of the action's `hostInput` — the
+sidecar's own fingerprint is deliberately not trusted. The `hostInput` is then
+stripped from the event forwarded to the UI, matching the retired host, so command
+text never reaches the WebView. A ticket becomes executable only when
+`agent_approval_respond` learns the sidecar accepted an `approve_once` decision;
+rejections, session grants, mismatched run ids, expired events (past the 180 s TTL)
+and malformed events all fail closed. A restored sidecar re-emitting the same
+pending approval with a fresh deadline refreshes the ticket instead of duplicating
+it, and one ticket is consumed exactly once against the matching request.
+`desktop_host_database_tests` covers the record/approve/consume cycle, the
+structured-restart binding, the restored-deadline refresh and conflicting replay
+refusal, forged/unapproved/replayed requests, every binding field that burns a
+ticket, expired/session/rejected outcomes, and the mid-response wait for the
+host acknowledgement. Wiring the ledger into `host.ssh.effectful_action_target`
+and `..._finished` is the next commit.

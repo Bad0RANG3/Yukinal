@@ -34,7 +34,7 @@
 `native/desktop_host/src/sidecar.cpp` 提供 `SidecarClient`：负责 Python Agent 子进程的启动/监管、24 MiB 上限的 NDJSON 分帧、请求/响应按 id 关联、`agent.stream` 通知回传，以及 Python 侧反向 `host.*` RPC 的分发。`native/desktop_host/src/ipc_router.cpp` 通过它实现：
 
 - `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（进程监管与 stderr 尾部）；
-- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（转发到 Python `agent.run.*`/`agent.approval.respond`；payload 原样透传，由 Python Agent Node 负责持久受理、停止与一次性审批，同步 start 使用长超时，宿主的 `host.*` worker 继续应答）；
+- `agent_run_start`、`agent_run_stop`、`agent_approval_respond`（转发到 Python `agent.run.*`/`agent.approval.respond`；payload 原样透传，由 Python Agent Node 负责持久受理、停止与一次性审批，同步 start 使用长超时，宿主的 `host.*` worker 继续应答；`agent_approval_respond` 另把 `agent.waiting_approval` 通知镜像进宿主自己的 `HostApprovalLedger`（`desktop_host/src/desktop_approval.cpp`）：仅当侧车确认接受 `approve_once` 时才签发一次性的宿主票据，且转发给 UI 前剥掉 `hostInput`）；
 - `provider_list`、`provider_save`、`provider_activate`、`provider_delete`、`provider_models`、`provider_test`（转发到 Python `provider.*`）；
 - `host.credentials.set`、`host.credentials.get`、`host.credentials.reclaim`（写/读/回收 OS 凭据库）；
 - `host.mcp.catalog`（当前返回空目录）、`host.tool.cancel`（确认）。

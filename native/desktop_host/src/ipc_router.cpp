@@ -7537,17 +7537,38 @@ void IpcRouter::configure_sidecar() {
   });
   sidecar_->set_notification_sink([this](const std::string& method,
                                          const nlohmann::json& params) {
+    // A host action approval ticket is minted here, from the raw notification,
+    // before the `hostInput` it fingerprints is stripped from the projected event.
+    if (method == "agent.stream" && params.is_object() &&
+        params.value("type", std::string()) == "agent.waiting_approval" &&
+        params.contains("approval") && params.at("approval").is_object() &&
+        is_host_approval_tool_name(
+            params.at("approval").value("toolName", std::string()))) {
+      try {
+        approvals_.record_waiting_event(params, now_epoch_seconds());
+      } catch (const std::exception&) {
+        // A malformed or unsupported approval simply mints no ticket; the
+        // effectful action that uses it later fails closed.
+      }
+    }
+    // `hostInput` crosses the local sidecar pipe only so the host can fingerprint
+    // the exact executor input. Keep it out of UI events, like the retired host.
+    nlohmann::json projected = params;
+    if (projected.is_object() && projected.contains("approval") &&
+        projected.at("approval").is_object()) {
+      projected["approval"].erase("hostInput");
+    }
     std::function<void(const std::string&, const nlohmann::json&)> sink;
     {
       std::lock_guard lock(mutex_);
       sink = event_sink_;
     }
     if (!sink) return;
-    if (method == "agent.stream" && params.is_object() && params.contains("type") &&
-        params.at("type").is_string()) {
-      sink(params.at("type").get<std::string>(), params);
+    if (method == "agent.stream" && projected.is_object() && projected.contains("type") &&
+        projected.at("type").is_string()) {
+      sink(projected.at("type").get<std::string>(), projected);
     } else {
-      sink(method, params);
+      sink(method, projected);
     }
   });
 }
@@ -7651,12 +7672,64 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   const auto timeout = method == "agent_run_start"
                            ? std::chrono::minutes(15)
                            : std::chrono::seconds(30);
+  if (method != "agent_approval_respond") {
+    try {
+      auto& client = ensure_sidecar();
+      return {true, client.request(found->second, params, timeout)};
+    } catch (const SidecarRpcError& error) {
+      return failure(sidecar_error_code(error.code()), error.what());
+    } catch (const SidecarError& error) {
+      return failure("AGENT_UNAVAILABLE", error.what());
+    }
+  }
+
+  // Approval responses are the one Agent command the host also mirrors into its
+  // own ticket ledger: a host action ticket only becomes executable when the
+  // sidecar accepted an approve-once decision. The sidecar still owns the actual
+  // admission decision, so a decision the host does not track still forwards.
+  std::string approval_id;
+  std::string approval_run_id;
+  std::string decision;
+  if (!params.contains("approvalId") || !params.contains("runId") ||
+      !params.contains("decision") ||
+      !valid_request_text(params, "approvalId", 256, true, approval_id) ||
+      !valid_request_text(params, "runId", 256, true, approval_run_id) ||
+      !valid_request_text(params, "decision", 32, true, decision)) {
+    return failure("INVALID_PARAMS",
+                   "agent_approval_respond requires approvalId, runId and decision");
+  }
+  std::optional<HostApprovalLedger::ResponseToken> token;
+  try {
+    token = approvals_.begin_response(approval_id, approval_run_id, decision,
+                                      now_epoch_seconds());
+  } catch (const std::exception& error) {
+    return failure("INVALID_PARAMS", error.what());
+  }
+  const auto finish = [this, &token](bool accepted) {
+    if (!token.has_value()) return;
+    try {
+      approvals_.finish_response(*token, accepted, now_epoch_seconds());
+    } catch (const std::exception&) {
+      // The ticket left the responding state out from under us; nothing to do.
+    }
+  };
   try {
     auto& client = ensure_sidecar();
-    return {true, client.request(found->second, params, timeout)};
+    const auto response = client.request(found->second, params, timeout);
+    const auto accepted =
+        response.is_object() ? response.value("accepted", nlohmann::json()) : nlohmann::json();
+    if (!accepted.is_boolean()) {
+      finish(false);
+      return failure("AGENT_PROTOCOL_ERROR",
+                     "the Agent returned an invalid approval response");
+    }
+    finish(accepted.get<bool>());
+    return {true, {{"accepted", accepted.get<bool>()}}};
   } catch (const SidecarRpcError& error) {
+    finish(false);
     return failure(sidecar_error_code(error.code()), error.what());
   } catch (const SidecarError& error) {
+    finish(false);
     return failure("AGENT_UNAVAILABLE", error.what());
   }
 }

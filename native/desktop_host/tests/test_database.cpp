@@ -1,4 +1,6 @@
+#include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_approval.hpp"
 #include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_oauth.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
@@ -3767,6 +3769,282 @@ int main(int argc, char** argv) {
     } catch (const std::exception& error) {
       std::cerr << "filesystem backup query block failed: " << error.what() << '\n';
       std::exit(6);
+    }
+
+    // ── Host action approval ledger ──────────────────────────────────────────
+    // `agent.waiting_approval` notifications mint one-time host tickets. An
+    // effectful SSH action consumes exactly one, only when the ticket was
+    // approved for its exact run, call, target, plan and input binding.
+    try {
+      using ApprovalLedger = yukinal::desktop_host::HostApprovalLedger;
+      using TicketError = ApprovalLedger::TicketError;
+      constexpr std::int64_t kApprovalNow = 1'800'000'000;
+      const std::string sidecar_fingerprint =
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      const std::string input_fingerprint =
+          "e7f4c8955b0f073290e4877f41c370cedd9083cd502d18a58294774789adc689";
+      const auto now_fn = []() -> std::int64_t { return kApprovalNow; };
+
+      const auto waiting_event = [&sidecar_fingerprint]() {
+        return nlohmann::json{
+            {"type", "agent.waiting_approval"},
+            {"runId", "run_1"},
+            {"taskId", "task_1"},
+            {"approval",
+             {{"approvalId", "apr_1"},
+              {"runId", "run_1"},
+              {"traceId", "trace_1"},
+              {"callId", "call_1"},
+              {"toolName", "server.exec"},
+              {"input", {{"command", "systemctl restart api"}}},
+              {"hostInput", {{"command", "systemctl restart api"}}},
+              {"inputFingerprint", sidecar_fingerprint},
+              {"target",
+               {{"host", "remote"},
+                {"serverId", "srv_1"},
+                {"workspaceId", "workspace_1"},
+                {"environment", "staging"}}},
+              {"planId", "plan_1"},
+              {"planStepId", "step_1"},
+              {"evidenceIds", nlohmann::json::array({"ev_1"})},
+              {"expiresAt", "2027-01-15T08:02:00Z"}}},
+            {"at", "2027-01-15T08:00:00Z"}};
+      };
+      const auto execution_binding = [&input_fingerprint]() {
+        return ApprovalLedger::ExecutionBinding{
+            "apr_1",
+            "run_1",
+            "trace_1",
+            "call_1",
+            "server.exec",
+            input_fingerprint,
+            "remote",
+            "srv_1",
+            "workspace_1",
+            "staging",
+            "task_1",
+            "plan_1",
+            "step_1",
+            std::vector<std::string>{"ev_1"}};
+      };
+      const auto approve_once = [&](ApprovalLedger& ledger) {
+        const auto token =
+            ledger.begin_response("apr_1", "run_1", "approve_once", kApprovalNow);
+        check(token.has_value(), "an approve-once decision should open a ticket");
+        ledger.finish_response(*token, true, kApprovalNow);
+      };
+
+      check(yukinal::desktop_host::is_host_approval_tool_name("server.exec") &&
+                yukinal::desktop_host::is_host_approval_tool_name("docker.restart") &&
+                yukinal::desktop_host::is_host_approval_tool_name("systemd.restart") &&
+                yukinal::desktop_host::is_host_approval_tool_name("package.install") &&
+                !yukinal::desktop_host::is_host_approval_tool_name("filesystem.write"),
+            "only the four effectful SSH actions require a host approval ticket");
+
+      // A user approval mints one exact ticket that is consumed once.
+      ApprovalLedger ledger;
+      check(ledger.record_waiting_event(waiting_event(), kApprovalNow),
+            "a well-formed host action approval should be recorded");
+      approve_once(ledger);
+      check(!ledger.consume(execution_binding(), now_fn).has_value(),
+            "an approved ticket should be consumed by its exact request");
+      check(ledger.consume(execution_binding(), now_fn) == TicketError::Missing,
+            "a consumed ticket must not be reusable");
+
+      // The recorded input fingerprint is the host's canonical JSON hash.
+      check(yukinal::desktop_host::content_revision_hex(
+                nlohmann::json{{"command", "systemctl restart api"}}.dump()) ==
+                input_fingerprint,
+            "the approval input fingerprint should hash the canonical host input");
+
+      // A structured restart action binds the same way.
+      {
+        ApprovalLedger structured;
+        auto event = waiting_event();
+        event["approval"]["approvalId"] = "apr_docker";
+        event["approval"]["toolName"] = "docker.restart";
+        event["approval"]["input"] = {{"container", "api"}, {"timeoutSeconds", 20}};
+        event["approval"]["hostInput"] = {{"container", "api"}, {"timeoutSeconds", 20}};
+        check(structured.record_waiting_event(event, kApprovalNow),
+              "a structured restart approval should be recorded");
+        const auto token =
+            structured.begin_response("apr_docker", "run_1", "approve_once", kApprovalNow);
+        structured.finish_response(*token, true, kApprovalNow);
+        auto binding = execution_binding();
+        binding.approval_id = "apr_docker";
+        binding.tool_name = "docker.restart";
+        binding.input_fingerprint = yukinal::desktop_host::content_revision_hex(
+            nlohmann::json{{"container", "api"}, {"timeoutSeconds", 20}}.dump());
+        check(!structured.consume(binding, now_fn).has_value(),
+              "a structured restart ticket should bind to its exact input");
+      }
+
+      // A restored sidecar re-emits the same pending approval with a fresh
+      // deadline; the ticket follows that event rather than being duplicated.
+      {
+        ApprovalLedger restored;
+        check(restored.record_waiting_event(waiting_event(), kApprovalNow),
+              "the first pending approval should be recorded");
+        auto replayed = waiting_event();
+        replayed["approval"]["expiresAt"] = "2027-01-15T08:03:00Z";
+        check(restored.record_waiting_event(replayed, kApprovalNow),
+              "the exact replayed approval should refresh the existing ticket");
+        bool conflicting = false;
+        try {
+          auto other = waiting_event();
+          other["approval"]["callId"] = "call_other";
+          restored.record_waiting_event(other, kApprovalNow);
+        } catch (const std::runtime_error&) {
+          conflicting = true;
+        }
+        check(conflicting,
+              "a replay of one approval id with a different binding must be refused");
+        const auto token = restored.begin_response("apr_1", "run_1", "approve_once",
+                                                   kApprovalNow + 150);
+        restored.finish_response(*token, true, kApprovalNow + 150);
+        check(!restored.consume(execution_binding(), [] { return kApprovalNow + 150; })
+                   .has_value(),
+              "the refreshed ticket should still be consumable inside its new deadline");
+      }
+
+      // Tickets fail closed for forged, unapproved and replayed requests.
+      {
+        ApprovalLedger closed;
+        check(closed.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "an unknown approval id must have no ticket");
+        check(closed.record_waiting_event(waiting_event(), kApprovalNow),
+              "a pending approval should be recorded");
+        check(closed.consume(execution_binding(), now_fn) == TicketError::NotApproved,
+              "a pending approval must not execute before it is answered");
+        approve_once(closed);
+        auto forged = execution_binding();
+        forged.approval_id = "apr_forged";
+        check(closed.consume(forged, now_fn) == TicketError::Missing,
+              "a forged approval id must not match");
+        check(!closed.consume(execution_binding(), now_fn).has_value(),
+              "the genuine request should still consume its ticket");
+        check(closed.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "the ticket must stay consumed");
+      }
+
+      // Changing any approved binding field burns the ticket.
+      {
+        struct Mismatch {
+          const char* field;
+          const char* value;
+        };
+        const std::string other_fingerprint(64, 'f');
+        const std::string empty_value;
+        const Mismatch mismatches[] = {
+            {"run", "run_other"},    {"trace", "trace_other"}, {"call", "call_other"},
+            {"tool", "package.install"}, {"input", other_fingerprint.c_str()},
+            {"server", "srv_other"}, {"workspace", empty_value.c_str()},
+            {"environment", "production"}, {"task", "task_other"},
+            {"plan", "plan_other"},  {"step", "step_other"},
+            {"evidence", empty_value.c_str()},
+        };
+        for (const auto& mismatch : mismatches) {
+          ApprovalLedger isolated;
+          isolated.record_waiting_event(waiting_event(), kApprovalNow);
+          approve_once(isolated);
+          auto binding = execution_binding();
+          const std::string field = mismatch.field;
+          const std::string value = mismatch.value;
+          if (field == "run") binding.run_id = value;
+          else if (field == "trace") binding.trace_id = value;
+          else if (field == "call") binding.call_id = value;
+          else if (field == "tool") binding.tool_name = value;
+          else if (field == "input") binding.input_fingerprint = value;
+          else if (field == "server") binding.server_id = value;
+          else if (field == "workspace") binding.workspace_id = std::nullopt;
+          else if (field == "environment") binding.environment = value;
+          else if (field == "task") binding.task_id = value;
+          else if (field == "plan") binding.plan_id = value;
+          else if (field == "step") binding.plan_step_id = value;
+          else binding.evidence_ids = std::nullopt;
+          check(isolated.consume(binding, now_fn) == TicketError::Mismatch,
+                "a changed binding field must burn the approved ticket");
+          check(isolated.consume(execution_binding(), now_fn) == TicketError::Missing,
+                "a burned ticket must not be replayable");
+        }
+      }
+
+      // Expired, mismatched-run, session and rejected approvals never issue one.
+      {
+        ApprovalLedger rejected_ledger;
+        rejected_ledger.record_waiting_event(waiting_event(), kApprovalNow);
+        bool wrong_run = false;
+        try {
+          rejected_ledger.begin_response("apr_1", "run_other", "approve_once", kApprovalNow);
+        } catch (const std::runtime_error&) {
+          wrong_run = true;
+        }
+        check(wrong_run, "an approval run id mismatch must be refused");
+        bool session = false;
+        try {
+          rejected_ledger.begin_response("apr_1", "run_1", "approve_session", kApprovalNow);
+        } catch (const std::runtime_error&) {
+          session = true;
+        }
+        check(session, "a session grant must not answer a per-call host action");
+        const auto rejected =
+            rejected_ledger.begin_response("apr_1", "run_1", "reject", kApprovalNow);
+        rejected_ledger.finish_response(*rejected, true, kApprovalNow);
+        check(rejected_ledger.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "a rejected approval must issue no ticket");
+
+        auto expired_event = waiting_event();
+        expired_event["approval"]["expiresAt"] = "2027-01-15T07:59:59Z";
+        bool expired_rejected = false;
+        try {
+          rejected_ledger.record_waiting_event(expired_event, kApprovalNow);
+        } catch (const std::runtime_error&) {
+          expired_rejected = true;
+        }
+        check(expired_rejected, "an expired approval event must be refused");
+
+        ApprovalLedger late;
+        late.record_waiting_event(waiting_event(), kApprovalNow);
+        const auto late_token =
+            late.begin_response("apr_1", "run_1", "approve_once", kApprovalNow);
+        late.finish_response(*late_token, true, kApprovalNow);
+        check(late.consume(execution_binding(), [] { return kApprovalNow + 121; }) ==
+                  TicketError::Expired,
+              "a ticket consumed past its deadline must report expiry");
+
+        ApprovalLedger unaccepted;
+        unaccepted.record_waiting_event(waiting_event(), kApprovalNow);
+        const auto unaccepted_token =
+            unaccepted.begin_response("apr_1", "run_1", "approve_once", kApprovalNow);
+        unaccepted.finish_response(*unaccepted_token, false, kApprovalNow);
+        check(unaccepted.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "a response the sidecar did not accept must issue no ticket");
+      }
+
+      // A request racing the approval RPC waits for the host acknowledgement.
+      {
+        ApprovalLedger racing;
+        racing.record_waiting_event(waiting_event(), kApprovalNow);
+        const auto racing_token =
+            racing.begin_response("apr_1", "run_1", "approve_once", kApprovalNow);
+        check(racing_token.has_value(), "the racing approval should open a ticket");
+        std::atomic<bool> finished{false};
+        std::optional<TicketError> result{TicketError::NotApproved};
+        std::thread worker([&] {
+          result = racing.consume(execution_binding(), now_fn);
+          finished.store(true);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        check(!finished.load(),
+              "consuming a ticket mid-response must wait for the acknowledgement");
+        racing.finish_response(*racing_token, true, kApprovalNow);
+        worker.join();
+        check(!result.has_value(),
+              "the waiting consumer should resume once the response is accepted");
+      }
+    } catch (const std::exception& error) {
+      std::cerr << "host action approval block failed: " << error.what() << '\n';
+      std::exit(7);
     }
   }
 

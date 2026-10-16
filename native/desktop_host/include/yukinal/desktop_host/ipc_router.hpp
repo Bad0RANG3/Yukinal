@@ -2,6 +2,7 @@
 
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_approval.hpp"
 #include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/local_paths.hpp"
@@ -102,6 +103,10 @@ class IpcRouter {
   // `mcp_oauth_cancel` (on another thread) stop it.
   std::mutex oauth_flows_mutex_;
   std::map<std::string, std::shared_ptr<std::atomic<bool>>> oauth_flows_;
+  // Host-issued, one-time tickets for effectful SSH actions. Filled from
+  // `agent.waiting_approval` notifications and consumed by
+  // `host.ssh.effectful_action_target`.
+  HostApprovalLedger approvals_;
   std::function<void(const std::string&, const nlohmann::json&)> event_sink_;
 };
 

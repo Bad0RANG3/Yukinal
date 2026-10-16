@@ -376,6 +376,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   add_library(yukinal_desktop_host_core
     desktop_host/src/credential_store.cpp
     desktop_host/src/database.cpp
+    desktop_host/src/desktop_approval.cpp
     desktop_host/src/desktop_mcp.cpp
     desktop_host/src/desktop_oauth.cpp
     desktop_host/src/desktop_ssh.cpp
