@@ -1019,3 +1019,13 @@ canonical `native/build-nmake` Release build passed all twelve CTest targets. A
 real PTY session against an OpenSSH server remains unverified because the test
 host is filtered; the file transfer actions, MCP supervision and catalog,
 `host.tool.execute`, investigation, and installers remain.
+
+Later on 2026-10-16, the C++ host added `mcp_server_review`. It rewrites a
+server's `allowedTools`, `trustLevel` and optional `annotationTrust`, which is
+the deliberate decision that lets the catalog expose specific third-party tools
+to the model; a server with no reviewed tools exposes none. Duplicate tool names
+are rejected. `desktop_host_database_tests` covers the review round trip. The MCP
+process supervisor, `host.mcp.catalog`, `host.tool.execute` for `mcp.*` tools,
+OAuth, the investigation RPCs, the file transfer actions, installers, and real
+SSH validation remain; the supervisor is a full MCP client (handshake, paginated
+`tools/list`, timeouts, shutdown) and is the next large MCP milestone.

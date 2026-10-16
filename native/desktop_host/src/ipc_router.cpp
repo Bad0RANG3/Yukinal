@@ -1084,7 +1084,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   }
 
   if (method == "mcp_server_list" || method == "mcp_server_save" ||
-      method == "mcp_server_delete") {
+      method == "mcp_server_delete" || method == "mcp_server_review") {
     return mcp_command(method, params);
   }
 
@@ -2355,6 +2355,68 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
       return {true, view_for(database_->get_mcp_server(server_id).value())};
     } catch (...) {
       return failure("STORAGE_ERROR", "The saved MCP server could not be read back");
+    }
+  }
+
+  if (method == "mcp_server_review") {
+    const std::set<std::string> allowed = {"serverId", "allowedTools", "trustLevel",
+                                           "annotationTrust"};
+    if (!only_fields(params, allowed, {"serverId", "allowedTools", "trustLevel"}) ||
+        !params.at("serverId").is_string() || !params.at("allowedTools").is_array() ||
+        !params.at("trustLevel").is_string()) {
+      return failure("INVALID_PARAMS", "mcp_server_review input does not match the contract");
+    }
+    const auto server_id = trim_ascii(params.at("serverId").get<std::string>());
+    if (server_id.empty() || server_id.size() > 160 || has_control_characters(server_id)) {
+      return failure("INVALID_PARAMS", "mcp_server_review serverId is invalid");
+    }
+    const auto trust = params.at("trustLevel").get<std::string>();
+    if (!is_one_of(trust, {"reviewed", "unreviewed"})) {
+      return failure("INVALID_PARAMS", "mcp_server_review trustLevel is invalid");
+    }
+    const auto& tools = params.at("allowedTools");
+    if (tools.size() > 512) {
+      return failure("INVALID_PARAMS", "mcp_server_review allows at most 512 tools");
+    }
+    std::set<std::string> seen;
+    nlohmann::json allowed_tools = nlohmann::json::array();
+    for (const auto& tool : tools) {
+      if (!tool.is_string()) {
+        return failure("INVALID_PARAMS", "mcp_server_review allowedTools are invalid");
+      }
+      auto name = trim_ascii(tool.get<std::string>());
+      if (name.empty() || name.size() > 256 || !seen.insert(name).second) {
+        return failure("INVALID_PARAMS", "mcp_server_review allowedTools are invalid");
+      }
+      allowed_tools.push_back(std::move(name));
+    }
+    std::optional<std::string> annotation_trust;
+    if (params.contains("annotationTrust")) {
+      if (!params.at("annotationTrust").is_string() ||
+          !is_one_of(params.at("annotationTrust").get<std::string>(), {"none", "trusted"})) {
+        return failure("INVALID_PARAMS", "mcp_server_review annotationTrust is invalid");
+      }
+      annotation_trust = params.at("annotationTrust").get<std::string>();
+    }
+    std::optional<nlohmann::json> existing;
+    try {
+      existing = database_->get_mcp_server(server_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local MCP database could not read the server");
+    }
+    if (!existing.has_value()) return failure("NOT_FOUND", "The MCP server was not found");
+    (*existing)["allowedTools"] = std::move(allowed_tools);
+    (*existing)["trustLevel"] = trust;
+    if (annotation_trust.has_value()) (*existing)["annotationTrust"] = *annotation_trust;
+    try {
+      database_->upsert_mcp_server(*existing);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local MCP database could not save the review");
+    }
+    try {
+      return {true, view_for(database_->get_mcp_server(server_id).value())};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The reviewed MCP server could not be read back");
     }
   }
 

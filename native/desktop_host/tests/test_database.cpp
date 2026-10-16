@@ -610,6 +610,24 @@ int main() {
     check(!mcp_router.invoke("mcp_server_save", {{"input", oauth_input}}).ok,
           "OAuth MCP servers are not supported by this host yet");
 
+    const auto reviewed_mcp = mcp_router.invoke(
+        "mcp_server_review",
+        {{"serverId", "ops-tools"},
+         {"allowedTools", nlohmann::json::array({"echo"})},
+         {"trustLevel", "reviewed"},
+         {"annotationTrust", "trusted"}});
+    check(reviewed_mcp.ok && reviewed_mcp.value.at("config").at("allowedTools").size() == 1 &&
+              reviewed_mcp.value.at("config").at("trustLevel") == "reviewed" &&
+              reviewed_mcp.value.at("config").at("annotationTrust") == "trusted",
+          "mcp_server_review should record the reviewed tool surface");
+    check(!mcp_router
+               .invoke("mcp_server_review",
+                       {{"serverId", "ops-tools"},
+                        {"allowedTools", nlohmann::json::array({"echo", "echo"})},
+                        {"trustLevel", "reviewed"}})
+               .ok,
+          "mcp_server_review should reject duplicate tool names");
+
     const auto deleted_mcp =
         mcp_router.invoke("mcp_server_delete", {{"serverId", "ops-tools"}});
     check(deleted_mcp.ok && deleted_mcp.value.at("deleted") == true &&
