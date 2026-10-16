@@ -859,6 +859,348 @@ int main(int argc, char** argv) {
           "investigation_task_status_update should reject an unknown status");
     check(!router.invoke("investigation_task_stop", {{"taskId", "itask_missing"}}).ok,
           "investigation_task_stop should report an unknown task");
+
+    // ── Investigation write foundation ───────────────────────────────────────
+    // Durable tasks, plans, evidence, findings and briefs round-trip through the
+    // shared JSON contract and enforce the hash and redaction guards.
+    {
+      const nlohmann::json content = {{"path", "/etc/nginx/nginx.conf"}, {"active", true}};
+      const auto content_hash = DesktopDatabase::content_hash(content);
+      check(DesktopDatabase::content_hash(nlohmann::json{{"a", 1}}) ==
+                "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862",
+            "content_hash should be the SHA-256 of the canonical JSON serialization");
+      check(content_hash.size() == 64 &&
+                content_hash != DesktopDatabase::content_hash(nlohmann::json{{"a", 2}}),
+            "content_hash should be a stable lowercase hex digest");
+
+      const nlohmann::json task = {
+          {"id", "itask_write"},
+          {"serverId", "srv_01abc"},
+          {"objective", "Verify nginx"},
+          {"successCriteria", nlohmann::json::array({"nginx active"})},
+          {"scope",
+           {{"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}}},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "goal"},
+          {"permissionMode", "ask"},
+          {"automationLevel", "propose"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+          {"createdBy", "user"},
+          {"createdAt", "2026-01-01T00:00:00Z"},
+          {"updatedAt", "2026-01-01T00:00:00Z"},
+      };
+      const auto created = database.create_investigation_task(task);
+      check(created.has_value() && created->at("id") == "itask_write" &&
+                created->at("status") == "pending" && created->at("phase") == "investigating" &&
+                created->at("budget").at("maxAttempts") == 3 &&
+                created->at("scope").at("environment") == "staging" &&
+                created->at("guardrails").contains("forbiddenTools"),
+            "create_investigation_task should persist and echo the shared task contract");
+      bool missing_id_rejected = false;
+      try {
+        (void)database.create_investigation_task(nlohmann::json{{"objective", "x"}});
+      } catch (const std::invalid_argument&) {
+        missing_id_rejected = true;
+      }
+      check(missing_id_rejected, "create_investigation_task should require an id");
+
+      // Evidence and runs are linked by foreign key, so the write path needs a real run
+      // row before evidence can carry a run id.
+      {
+        sqlite3* writer = nullptr;
+        check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+              "could not open the database for the investigation run fixture");
+        execute(writer, R"SQL(
+          INSERT INTO investigation_runs (
+            id, task_id, attempt, phase, status, started_at, updated_at
+          ) VALUES (
+            'run_1', 'itask_write', 1, 'investigating', 'running',
+            '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+          );
+        )SQL");
+        sqlite3_close(writer);
+      }
+
+      const auto progressed = database.update_investigation_task_progress(
+          "itask_write", "investigating", "recovery", std::string("run_1"), std::nullopt,
+          "2026-01-01T00:00:30Z", std::nullopt);
+      check(progressed.has_value() && progressed->at("status") == "investigating" &&
+                progressed->at("phase") == "recovery" &&
+                progressed->at("activeRunId") == "run_1" && !progressed->contains("completedAt"),
+            "update_investigation_task_progress should write status, phase and active run");
+      check(!database
+                 .update_investigation_task_progress("itask_missing", "investigating", "recon",
+                                                     std::nullopt, std::nullopt,
+                                                     "2026-01-01T00:00:30Z", std::nullopt)
+                 .has_value(),
+            "update_investigation_task_progress should report an unknown task");
+
+      const nlohmann::json plan = {
+          {"id", "iplan_write"},
+          {"taskId", "itask_write"},
+          {"revision", 1},
+          {"status", "active"},
+          {"createdAt", "2026-01-01T00:00:30Z"},
+          {"updatedAt", "2026-01-01T00:00:30Z"},
+          {"currentStepId", "step_collect"},
+          {"approval", {{"status", "pending"}}},
+          {"steps",
+           nlohmann::json::array(
+               {{{"id", "step_collect"},
+                 {"ordinal", 0},
+                 {"kind", "evidence"},
+                 {"title", "Collect config"},
+                 {"status", "pending"},
+                 {"attempts", 0},
+                 {"maxAttempts", 1},
+                 {"allowedTools", nlohmann::json::array({"filesystem.read"})}}})},
+      };
+      database.save_investigation_plan(plan);
+      const auto latest = database.latest_investigation_plan("itask_write");
+      check(latest.has_value() && latest->at("id") == "iplan_write" &&
+                latest->at("revision") == 1 && latest->at("status") == "active" &&
+                latest->at("currentStepId") == "step_collect" &&
+                latest->at("approval").at("status") == "pending" &&
+                latest->at("steps").at(0).at("allowedTools").at(0) == "filesystem.read",
+            "latest_investigation_plan should round-trip the saved plan");
+      check(database.get_investigation_plan("iplan_write") == latest,
+            "get_investigation_plan should match latest_investigation_plan");
+      check(!database.get_investigation_plan("iplan_missing").has_value(),
+            "get_investigation_plan should report an unknown plan");
+
+      auto second_plan = plan;
+      second_plan["id"] = "iplan_write_2";
+      second_plan["revision"] = 2;
+      second_plan["createdAt"] = "2026-01-01T00:01:00Z";
+      second_plan["updatedAt"] = "2026-01-01T00:01:00Z";
+      database.save_investigation_plan(second_plan);
+      check(database.latest_investigation_plan("itask_write")->at("id") == "iplan_write_2" &&
+                database.get_investigation_plan("iplan_write")->at("status") == "superseded",
+            "saving a new plan should supersede the previous active revision");
+
+      const nlohmann::json artifact = {
+          {"id", "iartifact_write"},
+          {"taskId", "itask_write"},
+          {"planId", "iplan_write_2"},
+          {"planStepId", "step_collect"},
+          {"phase", "investigating"},
+          {"kind", "change_plan"},
+          {"status", "ready"},
+          {"title", "Pending change plan"},
+          {"summary", "Saved"},
+          {"content", second_plan},
+          {"evidenceIds", nlohmann::json::array({"iev_write"})},
+          {"createdAt", "2026-01-01T00:01:00Z"},
+          {"updatedAt", "2026-01-01T00:01:00Z"},
+      };
+      database.upsert_investigation_artifact(artifact);
+      const auto artifacts = database.list_investigation_artifacts("itask_write", 10);
+      check(artifacts.at("artifacts").size() == 1 &&
+                artifacts.at("artifacts").at(0).at("kind") == "change_plan" &&
+                artifacts.at("artifacts").at(0).at("planId") == "iplan_write_2" &&
+                artifacts.at("artifacts").at(0).at("planStepId") == "step_collect" &&
+                artifacts.at("artifacts").at(0).at("content").at("id") == "iplan_write_2",
+            "list_investigation_artifacts should round-trip the plan artifact");
+
+      const nlohmann::json evidence = {
+          {"id", "iev_write"},
+          {"taskId", "itask_write"},
+          {"scope",
+           {{"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}}},
+          {"kind", "file"},
+          {"sourceTool", "filesystem.read"},
+          {"collectedAt", "2026-01-01T00:02:00Z"},
+          {"inputSummary", "read nginx.conf"},
+          {"contentType", "json"},
+          {"content", content},
+          {"contentHash", content_hash},
+          {"truncated", false},
+          {"redactionStatus", "redacted"},
+      };
+      database.record_investigation_evidence(evidence);
+      const auto stored_evidence = database.get_investigation_evidence("iev_write");
+      check(stored_evidence.has_value() && stored_evidence->at("content") == content &&
+                stored_evidence->at("contentHash") == content_hash &&
+                !stored_evidence->contains("runId") &&
+                stored_evidence->at("truncated") == false,
+            "get_investigation_evidence should round-trip the persisted content");
+      const auto deduped = database.find_investigation_evidence_in_run(evidence);
+      check(!deduped.has_value(),
+            "find_investigation_evidence_in_run should ignore evidence without a run id");
+      auto run_evidence = evidence;
+      run_evidence["id"] = "iev_run";
+      run_evidence["sourceTool"] = "filesystem.stat";
+      run_evidence["runId"] = "run_1";
+      database.record_investigation_evidence(run_evidence);
+      const auto matched = database.find_investigation_evidence_in_run(run_evidence);
+      check(matched.has_value() && matched->at("id") == "iev_run" &&
+                matched->at("runId") == "run_1",
+            "find_investigation_evidence_in_run should match an identical run record");
+      const auto search = database.search_investigation_evidence(
+          "itask_write", {{"sourceTool", "filesystem.read"}, {"limit", 10}});
+      check(search.is_array() && search.size() == 1 && search.at(0).at("id") == "iev_write",
+            "search_investigation_evidence should filter by source tool");
+      check(database
+                .search_investigation_evidence("itask_write",
+                                               {{"sourceTool", "process.list"}, {"limit", 10}})
+                .empty(),
+            "search_investigation_evidence should exclude other source tools");
+
+      bool hash_mismatch_rejected = false;
+      try {
+        auto tampered = evidence;
+        tampered["id"] = "iev_tampered";
+        tampered["contentHash"] = std::string(64, '0');
+        database.record_investigation_evidence(tampered);
+      } catch (const std::invalid_argument&) {
+        hash_mismatch_rejected = true;
+      }
+      check(hash_mismatch_rejected,
+            "record_investigation_evidence should reject a mismatched content hash");
+
+      bool unredacted_rejected = false;
+      try {
+        auto unredacted = evidence;
+        unredacted["id"] = "iev_unredacted";
+        unredacted["redactionStatus"] = "unknown";
+        database.record_investigation_evidence(unredacted);
+      } catch (const std::invalid_argument&) {
+        unredacted_rejected = true;
+      }
+      check(unredacted_rejected,
+            "record_investigation_evidence should reject unredacted content");
+
+      const nlohmann::json finding = {
+          {"id", "ifind_write"},
+          {"taskId", "itask_write"},
+          {"title", "nginx active"},
+          {"kind", "fact"},
+          {"statement", "nginx is active"},
+          {"evidenceIds", nlohmann::json::array({"iev_write"})},
+          {"confidence", "high"},
+          {"createdAt", "2026-01-01T00:03:00Z"},
+      };
+      database.record_investigation_finding(finding);
+      const auto stored_finding = database.get_investigation_finding("ifind_write");
+      check(stored_finding.has_value() && stored_finding->at("title") == "nginx active" &&
+                stored_finding->at("evidenceIds").at(0) == "iev_write" &&
+                !stored_finding->contains("nextVerification"),
+            "record_investigation_finding should round-trip the shared finding contract");
+
+      const nlohmann::json brief = {
+          {"id", "ibrief_write"},
+          {"taskId", "itask_write"},
+          {"planId", "iplan_write_2"},
+          {"generatedAt", "2026-01-01T00:04:00Z"},
+          {"status", "draft"},
+          {"findingIds", nlohmann::json::array({"ifind_write"})},
+          {"options",
+           nlohmann::json::array(
+               {{{"id", "opt_restart"}, {"title", "Restart nginx"}, {"status", "proposed"}},
+                {{"id", "opt_wait"}, {"title", "Wait"}, {"status", "proposed"}}})},
+      };
+      database.record_investigation_brief(brief);
+      const auto stored_brief = database.get_investigation_brief("ibrief_write");
+      check(stored_brief.has_value() && stored_brief->at("status") == "draft" &&
+                stored_brief->at("options").size() == 2 &&
+                !stored_brief->contains("selectedOptionId"),
+            "record_investigation_brief should round-trip the decision brief");
+      const auto selected = database.select_investigation_brief_option(
+          "itask_write", "ibrief_write", "opt_restart");
+      check(selected.has_value() && selected->at("status") == "selected" &&
+                selected->at("selectedOptionId") == "opt_restart" &&
+                selected->at("options").at(0).at("status") == "selected" &&
+                selected->at("options").at(1).at("status") == "rejected",
+            "select_investigation_brief_option should select one option and reject the rest");
+      bool wrong_task_rejected = false;
+      try {
+        (void)database.select_investigation_brief_option("itask_1", "ibrief_write", "opt_wait");
+      } catch (const std::invalid_argument&) {
+        wrong_task_rejected = true;
+      }
+      check(wrong_task_rejected,
+            "select_investigation_brief_option should reject a brief from another task");
+
+      // The Agent→host RPC entry point dispatches to the same durable store and
+      // keeps enforcing the scope, hash and plan guards.
+      const auto recorded_plan = router.handle_host_request(
+          "host.investigation.plan.record", {{"plan", second_plan}});
+      check(recorded_plan.value("recorded", false) == true &&
+                recorded_plan.at("plan").at("id") == "iplan_write_2" &&
+                recorded_plan.at("plan").at("status") == "active",
+            "host.investigation.plan.record should persist a plan through the host RPC");
+
+      const nlohmann::json host_content = {{"note", "host-recorded"}};
+      const nlohmann::json host_evidence = {
+          {"id", "iev_host"},
+          {"taskId", "itask_write"},
+          {"scope",
+           {{"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}}},
+          {"kind", "tool_result"},
+          {"sourceTool", "filesystem.read"},
+          {"collectedAt", "2026-01-01T00:05:00Z"},
+          {"inputSummary", "host read"},
+          {"contentType", "json"},
+          {"content", host_content},
+          {"contentHash", DesktopDatabase::content_hash(host_content)},
+          {"truncated", false},
+          {"redactionStatus", "redacted"},
+      };
+      const auto recorded_evidence = router.handle_host_request(
+          "host.investigation.evidence.record", {{"evidence", host_evidence}});
+      check(recorded_evidence.value("recorded", false) == true &&
+                recorded_evidence.value("reused", true) == false &&
+                recorded_evidence.value("evidenceId", std::string()) == "iev_host",
+            "host.investigation.evidence.record should record new evidence");
+      const auto reused_evidence = router.handle_host_request(
+          "host.investigation.evidence.record", {{"evidence", host_evidence}});
+      check(reused_evidence.value("recorded", false) == true &&
+                reused_evidence.value("reused", false) == true &&
+                reused_evidence.value("evidenceId", std::string()) == "iev_host",
+            "host.investigation.evidence.record should reuse identical run evidence");
+
+      const auto out_of_scope = router.handle_host_request(
+          "host.investigation.evidence.record",
+          {{"evidence",
+            {{"id", "iev_out_of_scope"},
+             {"taskId", "itask_write"},
+             {"scope", {{"host", "remote"}, {"serverId", "srv_other"}}},
+             {"kind", "file"},
+             {"sourceTool", "filesystem.read"},
+             {"collectedAt", "2026-01-01T00:02:00Z"},
+             {"inputSummary", "x"},
+             {"contentType", "json"},
+             {"content", content},
+             {"contentHash", content_hash},
+             {"truncated", false},
+             {"redactionStatus", "redacted"}}}});
+      check(out_of_scope.value("recorded", true) == false &&
+                out_of_scope.at("error").at("code") == "denied_by_policy",
+            "host.investigation.evidence.record should deny an out-of-scope target");
+
+      const auto deviation = router.handle_host_request(
+          "host.investigation.plan.check",
+          {{"taskId", "itask_write"},
+           {"toolName", "server.exec"},
+           {"target", {{"host", "remote"}, {"serverId", "srv_01abc"}}},
+           {"input", nlohmann::json::object()}});
+      check(deviation.value("status", std::string()) == "deviation" &&
+                deviation.at("deviation").at("code") == "tool_not_allowed",
+            "host.investigation.plan.check should report a disallowed tool as a deviation");
+
+      bool unknown_rejected = false;
+      try {
+        (void)router.handle_host_request("host.investigation.bogus", nlohmann::json::object());
+      } catch (const yukinal::desktop_host::SidecarRpcError& error) {
+        unknown_rejected = error.code() == -32601;
+      }
+      check(unknown_rejected,
+            "the host RPC entry point should reject an unknown investigation method");
+    }
   }
 
   sqlite3* readback = nullptr;

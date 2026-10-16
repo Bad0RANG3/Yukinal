@@ -83,6 +83,42 @@ class DesktopDatabase {
       const std::optional<std::string>& completed_at, const std::string& updated_at) const;
   [[nodiscard]] std::optional<std::string> active_investigation_run_id(
       const std::string& task_id) const;
+  // ── Investigation write path (durable task + Agent host RPC) ────────────────
+  // Not-found is reported with `std::nullopt`; validation failures throw
+  // `std::invalid_argument`; any other failure throws `std::runtime_error`.
+  [[nodiscard]] std::optional<nlohmann::json> create_investigation_task(
+      const nlohmann::json& task) const;
+  [[nodiscard]] std::optional<nlohmann::json> update_investigation_task_progress(
+      const std::string& task_id, const std::string& status, const std::string& phase,
+      const std::optional<std::string>& active_run_id,
+      const std::optional<nlohmann::json>& last_failure, const std::string& updated_at,
+      const std::optional<std::string>& completed_at) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_plan(
+      const std::string& plan_id) const;
+  [[nodiscard]] std::optional<nlohmann::json> latest_investigation_plan(
+      const std::string& task_id) const;
+  void save_investigation_plan(const nlohmann::json& plan) const;
+  void upsert_investigation_artifact(const nlohmann::json& artifact) const;
+  [[nodiscard]] nlohmann::json list_investigation_artifacts(const std::string& task_id,
+                                                            int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> find_investigation_evidence_in_run(
+      const nlohmann::json& evidence) const;
+  void record_investigation_evidence(const nlohmann::json& evidence) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_evidence(
+      const std::string& evidence_id) const;
+  [[nodiscard]] nlohmann::json search_investigation_evidence(
+      const std::string& task_id, const nlohmann::json& query) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_finding(
+      const std::string& finding_id) const;
+  void record_investigation_finding(const nlohmann::json& finding) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_investigation_brief(
+      const std::string& brief_id) const;
+  void record_investigation_brief(const nlohmann::json& brief) const;
+  [[nodiscard]] std::optional<nlohmann::json> select_investigation_brief_option(
+      const std::string& task_id, const std::string& brief_id,
+      const std::string& option_id) const;
+  /** SHA-256 (lowercase hex) of the canonical JSON serialization used for evidence. */
+  [[nodiscard]] static std::string content_hash(const nlohmann::json& content);
   [[nodiscard]] nlohmann::json list_chat_sessions(
       const std::optional<std::string>& query, const std::optional<bool>& archived,
       int limit, int offset) const;

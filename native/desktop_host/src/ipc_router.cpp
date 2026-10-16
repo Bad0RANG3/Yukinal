@@ -638,6 +638,1523 @@ std::optional<std::string> read_environment(const char* name) {
 #endif
 }
 
+/* ── Investigation host RPC (Agent → host) ──────────────────────────────── */
+
+constexpr const char* kToolServerExec = "server.exec";
+constexpr const char* kToolFilesystemBackup = "filesystem.backup";
+constexpr const char* kToolFilesystemWrite = "filesystem.write";
+constexpr const char* kToolFilesystemEdit = "filesystem.edit";
+constexpr const char* kToolInvestigationArtifact = "investigation.artifact";
+
+nlohmann::json investigation_error(std::string code, std::string message, bool retryable) {
+  return {{"code", std::move(code)}, {"message", std::move(message)}, {"retryable", retryable}};
+}
+
+nlohmann::json record_failure_json(std::string code, std::string message, bool retryable) {
+  return {{"recorded", false},
+          {"error", investigation_error(std::move(code), std::move(message), retryable)}};
+}
+
+std::string json_text_field(const nlohmann::json& value, const char* key,
+                            const char* fallback = "") {
+  if (!value.is_object()) return fallback;
+  const auto found = value.find(key);
+  if (found == value.end() || !found->is_string()) return fallback;
+  return found->get<std::string>();
+}
+
+bool json_bool_field(const nlohmann::json& value, const char* key, bool fallback = false) {
+  if (!value.is_object()) return fallback;
+  const auto found = value.find(key);
+  if (found == value.end() || !found->is_boolean()) return fallback;
+  return found->get<bool>();
+}
+
+std::optional<nlohmann::json> load_investigation_task(DesktopDatabase& database,
+                                                      const std::string& task_id) {
+  auto detail = database.get_investigation_task(task_id);
+  if (!detail.has_value()) return std::nullopt;
+  const auto found = detail->find("task");
+  if (found == detail->end()) return std::nullopt;
+  return *found;
+}
+
+/** Whether two ToolTarget-shaped values denote the same place. */
+bool same_investigation_target(const nlohmann::json& left, const nlohmann::json& right) {
+  if (!left.is_object() || !right.is_object()) return false;
+  return json_text_field(left, "host") == json_text_field(right, "host") &&
+         json_text_field(left, "serverId") == json_text_field(right, "serverId") &&
+         json_text_field(left, "workspaceId") == json_text_field(right, "workspaceId") &&
+         json_text_field(left, "environment") == json_text_field(right, "environment");
+}
+
+std::optional<std::int64_t> parse_iso8601_utc_seconds(const std::string& value) {
+  if (value.size() < 19) return std::nullopt;
+  std::tm utc{};
+  std::istringstream stream(value);
+  stream >> std::get_time(&utc, "%Y-%m-%dT%H:%M:%S");
+  if (stream.fail()) return std::nullopt;
+#ifdef _WIN32
+  const auto seconds = _mkgmtime(&utc);
+#else
+  const auto seconds = timegm(&utc);
+#endif
+  if (seconds == static_cast<std::time_t>(-1)) return std::nullopt;
+  std::int64_t result = static_cast<std::int64_t>(seconds);
+  // A trailing timezone offset (`+HH:MM`/`-HH:MM`) adjusts the instant; `Z`, a
+  // fractional part, or end-of-string all mean UTC.
+  if (value.size() > 19 && (value[19] == '+' || value[19] == '-')) {
+    if (value.size() < 25) return std::nullopt;
+    const int hours = std::stoi(value.substr(20, 2));
+    const int minutes = std::stoi(value.substr(23, 2));
+    const std::int64_t offset = static_cast<std::int64_t>(hours) * 3600 + minutes * 60;
+    result += value[19] == '+' ? -offset : offset;
+  }
+  return result;
+}
+
+std::string iso8601_from_epoch(std::int64_t epoch_seconds) {
+  const auto time = static_cast<std::time_t>(epoch_seconds);
+  std::tm utc{};
+#ifdef _WIN32
+  gmtime_s(&utc, &time);
+#else
+  gmtime_r(&time, &utc);
+#endif
+  std::ostringstream rendered;
+  rendered << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+  return rendered.str();
+}
+
+std::int64_t now_epoch_seconds() {
+  return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+}
+
+// The parts of a plan that require a fresh approval. Runtime progress is host-owned
+// and excluded, so an idempotent replay cannot reset or widen an approved plan.
+nlohmann::json plan_definition(const nlohmann::json& plan) {
+  nlohmann::json value = plan;
+  if (!value.is_object()) return value;
+  for (const char* key : {"revision", "status", "createdAt", "updatedAt", "currentStepId",
+                          "approval"}) {
+    value.erase(key);
+  }
+  if (value.contains("steps") && value.at("steps").is_array()) {
+    for (auto& step : value["steps"]) {
+      if (!step.is_object()) continue;
+      for (const char* key : {"attempts", "status", "startedAt", "endedAt", "lastDeviation"}) {
+        step.erase(key);
+      }
+    }
+  }
+  if (value.contains("observationWindow") && value.at("observationWindow").is_object()) {
+    auto& window = value["observationWindow"];
+    for (const char* key : {"status", "sampleCount", "startedAt", "deadlineAt",
+                            "deadlineEpochSeconds", "lastSampleAt", "lastSampleEpochSeconds",
+                            "lastFailure"}) {
+      window.erase(key);
+    }
+  }
+  return value;
+}
+
+void merge_plan_runtime(nlohmann::json& plan, const nlohmann::json& previous) {
+  plan["revision"] = previous.value("revision", std::int64_t{1});
+  plan["status"] = previous.value("status", std::string("active"));
+  plan["createdAt"] = previous.value("createdAt", std::string());
+  if (previous.contains("currentStepId")) {
+    plan["currentStepId"] = previous.at("currentStepId");
+  } else {
+    plan.erase("currentStepId");
+  }
+  if (previous.contains("approval")) {
+    plan["approval"] = previous.at("approval");
+  } else {
+    plan.erase("approval");
+  }
+  if (!plan.contains("steps") || !plan.at("steps").is_array() || !previous.contains("steps") ||
+      !previous.at("steps").is_array()) {
+    return;
+  }
+  for (auto& step : plan["steps"]) {
+    const auto id = step.value("id", std::string());
+    for (const auto& prior : previous.at("steps")) {
+      if (prior.value("id", std::string()) != id) continue;
+      step["attempts"] = prior.value("attempts", 0);
+      step["status"] = prior.value("status", std::string("pending"));
+      for (const char* key : {"startedAt", "endedAt", "lastDeviation"}) {
+        if (prior.contains(key)) {
+          step[key] = prior.at(key);
+        } else {
+          step.erase(key);
+        }
+      }
+      break;
+    }
+  }
+}
+
+void normalize_new_plan_runtime(nlohmann::json& plan, const std::string& now) {
+  plan["status"] = "active";
+  plan["createdAt"] = now;
+  plan["updatedAt"] = now;
+  if (plan.contains("steps") && plan.at("steps").is_array() && !plan.at("steps").empty()) {
+    plan["currentStepId"] = plan.at("steps")[0].value("id", std::string());
+  }
+  int index = 0;
+  for (auto& step : plan["steps"]) {
+    step["attempts"] = 0;
+    step["status"] = index == 0 ? "running" : "pending";
+    if (index == 0) {
+      step["startedAt"] = now;
+    } else {
+      step.erase("startedAt");
+    }
+    step.erase("endedAt");
+    step.erase("lastDeviation");
+    ++index;
+  }
+}
+
+nlohmann::json plan_deviation_json(const std::string& code, const std::string& action,
+                                   const std::string& message, const std::string& tool_name,
+                                   const std::string& at,
+                                   const std::optional<std::string>& plan_id,
+                                   const std::optional<std::string>& step_id) {
+  nlohmann::json deviation = {{"code", code},
+                              {"action", action},
+                              {"message", message},
+                              {"toolName", tool_name},
+                              {"at", at}};
+  if (plan_id.has_value()) deviation["planId"] = *plan_id;
+  if (step_id.has_value()) deviation["stepId"] = *step_id;
+  return deviation;
+}
+
+std::string normalize_guardrail_path(const std::string& value) {
+  std::vector<std::string> parts;
+  std::stringstream stream(value);
+  std::string part;
+  while (std::getline(stream, part, '/')) {
+    if (part.empty() || part == ".") continue;
+    if (part == "..") {
+      if (!parts.empty()) parts.pop_back();
+      continue;
+    }
+    parts.push_back(part);
+  }
+  if (parts.empty()) return "/";
+  std::string result;
+  for (const auto& item : parts) {
+    result += "/";
+    result += item;
+  }
+  return result;
+}
+
+bool path_is_under_prefix(const std::string& path, const std::string& prefix) {
+  const auto normalized_path = normalize_guardrail_path(path);
+  const auto normalized_prefix = normalize_guardrail_path(prefix);
+  return normalized_prefix == "/" || normalized_path == normalized_prefix ||
+         normalized_path.rfind(normalized_prefix + "/", 0) == 0;
+}
+
+void collect_input_path_values(const nlohmann::json& input, std::vector<std::string>& out) {
+  if (!input.is_object()) return;
+  for (const char* key : {"path", "backupPath", "workdir"}) {
+    const auto found = input.find(key);
+    if (found != input.end() && found->is_string()) out.push_back(found->get<std::string>());
+  }
+  const auto items = input.find("items");
+  if (items != input.end() && items->is_array()) {
+    for (const auto& item : *items) collect_input_path_values(item, out);
+  }
+}
+
+std::optional<nlohmann::json> task_guardrail_violation(const nlohmann::json& task,
+                                                        const std::string& tool_name,
+                                                        const nlohmann::json& input) {
+  const auto guardrails = task.value("guardrails", nlohmann::json::object());
+  if (!guardrails.is_object()) return std::nullopt;
+  const auto now = now_epoch_seconds();
+  const auto not_before = json_text_field(guardrails, "notBeforeAt");
+  if (!not_before.empty()) {
+    const auto parsed = parse_iso8601_utc_seconds(not_before);
+    if (!parsed.has_value()) {
+      return plan_deviation_json("outside_time_window", "wait_user",
+                                 "task guardrail notBeforeAt is invalid; execution is blocked",
+                                 tool_name, iso8601_now(), std::nullopt, std::nullopt);
+    }
+    if (now < *parsed) {
+      return plan_deviation_json("outside_time_window", "wait_user",
+                                 "task execution is not allowed before " + not_before, tool_name,
+                                 iso8601_now(), std::nullopt, std::nullopt);
+    }
+  }
+  const auto expires = json_text_field(guardrails, "expiresAt");
+  if (!expires.empty()) {
+    const auto parsed = parse_iso8601_utc_seconds(expires);
+    if (!parsed.has_value()) {
+      return plan_deviation_json("outside_time_window", "wait_user",
+                                 "task guardrail expiresAt is invalid; execution is blocked",
+                                 tool_name, iso8601_now(), std::nullopt, std::nullopt);
+    }
+    if (now >= *parsed) {
+      return plan_deviation_json("outside_time_window", "wait_user",
+                                 "task execution time window expired at " + expires, tool_name,
+                                 iso8601_now(), std::nullopt, std::nullopt);
+    }
+  }
+  const auto forbidden_tools = guardrails.find("forbiddenTools");
+  if (forbidden_tools != guardrails.end() && forbidden_tools->is_array()) {
+    for (const auto& entry : *forbidden_tools) {
+      if (entry.is_string() && entry.get<std::string>() == tool_name) {
+        return plan_deviation_json("scope_forbidden", "wait_user",
+                                   "tool `" + tool_name + "` is forbidden by the task guardrails",
+                                   tool_name, iso8601_now(), std::nullopt, std::nullopt);
+      }
+    }
+  }
+  const auto forbidden_prefixes = guardrails.find("forbiddenPathPrefixes");
+  if (forbidden_prefixes != guardrails.end() && forbidden_prefixes->is_array()) {
+    std::vector<std::string> paths;
+    collect_input_path_values(input, paths);
+    for (const auto& prefix : *forbidden_prefixes) {
+      if (!prefix.is_string()) continue;
+      for (const auto& path : paths) {
+        if (path_is_under_prefix(path, prefix.get<std::string>())) {
+          return plan_deviation_json(
+              "scope_forbidden", "wait_user",
+              "path `" + path + "` is forbidden by the task guardrail prefix `" +
+                  prefix.get<std::string>() + "`",
+              tool_name, iso8601_now(), std::nullopt, std::nullopt);
+        }
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::string validate_task_guardrails_for_plan_step(const nlohmann::json& task,
+                                                   const nlohmann::json& step) {
+  const auto guardrails = task.value("guardrails", nlohmann::json::object());
+  const auto forbidden = guardrails.contains("forbiddenTools") &&
+                                 guardrails.at("forbiddenTools").is_array()
+                             ? guardrails.at("forbiddenTools")
+                             : nlohmann::json::array();
+  const auto tools = step.contains("allowedTools") && step.at("allowedTools").is_array()
+                         ? step.at("allowedTools")
+                         : nlohmann::json::array();
+  const auto step_id = json_text_field(step, "id");
+  if (!forbidden.empty()) {
+    for (const auto& tool : tools) {
+      if (tool.is_string() && tool.get<std::string>() == "*") {
+        return "plan step `" + step_id +
+               "` uses wildcard tools while task guardrails forbid specific tools; enumerate "
+               "only allowed tools";
+      }
+    }
+  }
+  for (const auto& tool : tools) {
+    if (!tool.is_string()) continue;
+    for (const auto& banned : forbidden) {
+      if (banned.is_string() && banned.get<std::string>() == tool.get<std::string>()) {
+        return "plan step `" + step_id + "` allows tool `" + tool.get<std::string>() +
+               "`, which is forbidden by the task guardrails";
+      }
+    }
+  }
+  const auto bindings = step.find("inputBindings");
+  if (bindings != step.end() && bindings->is_object()) {
+    nlohmann::json input = nlohmann::json::object();
+    for (auto it = bindings->begin(); it != bindings->end(); ++it) {
+      if (!it.value().is_string()) {
+        input[it.key()] = it.value();
+        continue;
+      }
+      const auto raw = it.value().get<std::string>();
+      nlohmann::json parsed;
+      try {
+        parsed = nlohmann::json::parse(raw);
+      } catch (const nlohmann::json::exception&) {
+        input[it.key()] = raw;
+        continue;
+      }
+      input[it.key()] = (parsed.is_array() || parsed.is_object()) ? parsed : nlohmann::json(raw);
+    }
+    auto violation = task_guardrail_violation(task, "plan.binding", input);
+    if (violation.has_value() && violation->value("code", std::string()) == "scope_forbidden") {
+      return "plan step `" + step_id + "` violates task guardrails: " +
+             violation->value("message", std::string());
+    }
+  }
+  return "";
+}
+
+std::string validate_input_bindings(const nlohmann::json& step) {
+  const auto found = step.find("inputBindings");
+  if (found == step.end() || found->is_null()) return "";
+  const auto step_id = json_text_field(step, "id");
+  if (!found->is_object()) return "plan step `" + step_id + "` has an invalid input binding";
+  if (found->size() > 8) return "plan step `" + step_id + "` has too many input bindings";
+  for (auto it = found->begin(); it != found->end(); ++it) {
+    if (trim_ascii(it.key()).empty() || utf8_character_count(it.key()) > 64) {
+      return "plan step `" + step_id + "` has an invalid input binding";
+    }
+    if (!it.value().is_string()) return "plan step `" + step_id + "` has an invalid input binding";
+    const auto text = it.value().get<std::string>();
+    if (text.empty() || utf8_character_count(text) > 16384) {
+      return "plan step `" + step_id + "` has an invalid input binding";
+    }
+  }
+  return "";
+}
+
+std::string validate_observation_window(const nlohmann::json& window,
+                                        const nlohmann::json& steps) {
+  const auto duration = window.value("durationSeconds", 0);
+  if (duration == 0 || duration > 86400) {
+    return "observation duration must be between 1 and 86400 seconds";
+  }
+  const auto interval = window.value("intervalSeconds", 0);
+  if (interval == 0 || interval > duration) {
+    return "observation interval must be between 1 and the duration";
+  }
+  const auto tools =
+      window.contains("allowedTools") && window.at("allowedTools").is_array()
+          ? window.at("allowedTools")
+          : nlohmann::json::array();
+  if (tools.empty() || tools.size() > 32) {
+    return "observation window needs 1 to 32 allowed read tools";
+  }
+  const auto criteria =
+      window.contains("successCriteria") && window.at("successCriteria").is_array()
+          ? window.at("successCriteria")
+          : nlohmann::json::array();
+  if (criteria.empty() || criteria.size() > 16) {
+    return "observation window needs 1 to 16 success criteria";
+  }
+  for (const auto& tool : tools) {
+    if (!tool.is_string() || trim_ascii(tool.get<std::string>()).empty() ||
+        tool.get<std::string>().size() > 256) {
+      return "observation tools must be bounded names";
+    }
+  }
+  for (const auto& criterion : criteria) {
+    if (!criterion.is_string() || trim_ascii(criterion.get<std::string>()).empty() ||
+        utf8_character_count(criterion.get<std::string>()) > 1024) {
+      return "observation success criteria must be bounded text";
+    }
+  }
+  if (!steps.is_array() || steps.empty()) {
+    return "observation window requires the final plan step to be verification";
+  }
+  const auto& verification = steps.back();
+  if (json_text_field(verification, "kind") != "verification") {
+    return "observation window requires the final plan step to be verification";
+  }
+  const auto allowed = verification.value("allowedTools", nlohmann::json::array());
+  for (const auto& tool : tools) {
+    bool matched = false;
+    if (allowed.is_array()) {
+      for (const auto& candidate : allowed) {
+        if (candidate.is_string() && candidate == tool) {
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (!matched) return "observation tools must be allowed by the final verification step";
+  }
+  return "";
+}
+
+bool auto_medium_tools_allowed(const nlohmann::json& tools) {
+  if (!tools.is_array()) return false;
+  const auto name_allowed = [](const std::string& name) {
+    return name == kToolFilesystemBackup || name == kToolFilesystemEdit ||
+           name == kToolFilesystemWrite;
+  };
+  if (tools.size() == 1 && tools[0].is_string()) return name_allowed(tools[0].get<std::string>());
+  if (tools.size() == 2) {
+    bool has_backup = false;
+    bool has_write = false;
+    for (const auto& tool : tools) {
+      if (!tool.is_string()) return false;
+      const auto name = tool.get<std::string>();
+      if (!name_allowed(name)) return false;
+      if (name == kToolFilesystemBackup) has_backup = true;
+      if (name == kToolFilesystemWrite || name == kToolFilesystemEdit) has_write = true;
+    }
+    return has_backup && has_write;
+  }
+  return false;
+}
+
+bool task_allows_auto_medium_action(const nlohmann::json& task, const nlohmann::json& step) {
+  const auto target = step.contains("target") && step.at("target").is_object()
+                          ? step.at("target")
+                          : task.value("scope", nlohmann::json::object());
+  const auto environment = json_text_field(target, "environment");
+  return json_text_field(task, "permissionMode") == "auto" &&
+         json_text_field(task, "mode") == "goal" &&
+         json_text_field(task, "automationLevel") == "execute" &&
+         json_text_field(target, "host") == "remote" &&
+         (environment == "development" || environment == "staging") &&
+         json_text_field(step, "riskLevel") == "medium" &&
+         auto_medium_tools_allowed(step.value("allowedTools", nlohmann::json::array()));
+}
+
+std::string validate_playbook_step(const nlohmann::json& step) {
+  const auto step_id = json_text_field(step, "id");
+  const auto kind = json_text_field(step, "kind");
+  if (json_bool_field(step, "requiresBaseline") && kind != "action") {
+    return "only action step `" + step_id + "` may require a baseline";
+  }
+  if (kind != "action") return "";
+  if (trim_ascii(json_text_field(step, "preview")).empty()) {
+    return "action step `" + step_id + "` must include a bounded preview";
+  }
+  const auto has_nonempty = [&step](const char* key) {
+    const auto found = step.find(key);
+    return found != step.end() && found->is_array() && !found->empty();
+  };
+  if (!has_nonempty("verificationCriteria") && !has_nonempty("successCriteria")) {
+    return "action step `" + step_id + "` must declare verification criteria";
+  }
+  const auto risk = json_text_field(step, "riskLevel");
+  if ((risk == "high" || risk == "critical") && !json_bool_field(step, "requiresApproval")) {
+    return "high-risk action step `" + step_id + "` must require approval";
+  }
+  if (json_text_field(step, "idempotency") == "unsafe" &&
+      trim_ascii(json_text_field(step, "rollback")).empty()) {
+    return "unsafe action step `" + step_id + "` must declare rollback details";
+  }
+  return "";
+}
+
+bool plan_binding_matches(const std::optional<nlohmann::json>& plan,
+                          const nlohmann::json& step,
+                          const std::optional<std::string>& expected_plan_id,
+                          const std::optional<std::string>& expected_step_id,
+                          const std::optional<nlohmann::json>& expected_evidence_ids) {
+  if (!expected_plan_id.has_value() && !expected_step_id.has_value() &&
+      !expected_evidence_ids.has_value()) {
+    return true;
+  }
+  if (!plan.has_value()) return false;
+  return expected_plan_id == std::optional<std::string>(json_text_field(*plan, "id")) &&
+         expected_step_id == std::optional<std::string>(json_text_field(step, "id")) &&
+         expected_evidence_ids ==
+             std::optional<nlohmann::json>(step.value("evidenceIds", nlohmann::json::array()));
+}
+
+bool input_bindings_match(const nlohmann::json& step, const nlohmann::json& input) {
+  const auto found = step.find("inputBindings");
+  if (found == step.end() || found->is_null() || !found->is_object()) {
+    return found == step.end() || found->is_null();
+  }
+  if (!input.is_object()) return false;
+  for (auto it = found->begin(); it != found->end(); ++it) {
+    if (!it.value().is_string()) return false;
+    const auto expected = it.value().get<std::string>();
+    const auto actual = input.find(it.key());
+    if (actual == input.end()) return false;
+    if (actual->is_string()) {
+      if (actual->get<std::string>() != expected) return false;
+      continue;
+    }
+    if (actual->is_array() || actual->is_object()) {
+      try {
+        if (nlohmann::json::parse(expected) == *actual) continue;
+      } catch (const nlohmann::json::exception&) {
+      }
+      return false;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool baseline_artifact_matches_plan(const nlohmann::json& artifacts,
+                                    const nlohmann::json& plan) {
+  if (!artifacts.is_array()) return false;
+  const auto plan_id = json_text_field(plan, "id");
+  const auto steps = plan.value("steps", nlohmann::json::array());
+  for (const auto& artifact : artifacts) {
+    if (json_text_field(artifact, "kind") != "baseline") continue;
+    const auto status = json_text_field(artifact, "status");
+    if (status != "ready" && status != "succeeded") continue;
+    if (json_text_field(artifact, "planId") != plan_id) continue;
+    const auto evidence = artifact.value("evidenceIds", nlohmann::json::array());
+    if (!evidence.is_array() || evidence.empty()) continue;
+    const auto plan_step_id = json_text_field(artifact, "planStepId");
+    if (plan_step_id.empty() || !steps.is_array()) continue;
+    for (const auto& step : steps) {
+      if (json_text_field(step, "id") == plan_step_id &&
+          json_text_field(step, "kind") == "evidence" &&
+          json_text_field(step, "status") == "succeeded") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Returns the deviation to report, or `nullopt` when the call is allowed. */
+std::optional<nlohmann::json> check_plan_for_tool(
+    DesktopDatabase& database, const nlohmann::json& task, const std::string& tool_name,
+    const nlohmann::json& target, const nlohmann::json& input,
+    const std::optional<std::string>& binding_plan_id,
+    const std::optional<std::string>& binding_step_id,
+    const std::optional<nlohmann::json>& binding_evidence_ids) {
+  if (auto violation = task_guardrail_violation(task, tool_name, input);
+      violation.has_value()) {
+    return violation;
+  }
+  const auto at = iso8601_now();
+  const auto task_id = json_text_field(task, "id");
+  auto plan = database.latest_investigation_plan(task_id);
+  if (!plan.has_value()) {
+    return plan_deviation_json(
+        "missing_plan", "replan",
+        "durable task has no active plan; create investigation.plan before using a task tool",
+        tool_name, at, std::nullopt, std::nullopt);
+  }
+  const auto current_step_id = json_text_field(*plan, "currentStepId");
+  if (current_step_id.empty()) {
+    return plan_deviation_json("no_active_step", "replan", "active plan has no current step",
+                               tool_name, at, json_text_field(*plan, "id"), std::nullopt);
+  }
+  const auto steps = plan->value("steps", nlohmann::json::array());
+  const nlohmann::json* step = nullptr;
+  for (const auto& candidate : steps) {
+    if (json_text_field(candidate, "id") == current_step_id) {
+      step = &candidate;
+      break;
+    }
+  }
+  if (step == nullptr) {
+    return plan_deviation_json("no_active_step", "replan",
+                               "active plan points to a missing current step", tool_name, at,
+                               json_text_field(*plan, "id"), current_step_id);
+  }
+  const auto plan_id = json_text_field(*plan, "id");
+  const auto step_id = json_text_field(*step, "id");
+  const auto step_kind = json_text_field(*step, "kind");
+  if (tool_name == kToolServerExec && step_kind != "action") {
+    return plan_deviation_json("tool_not_allowed", "deny",
+                               "server.exec is available only in an action plan step", tool_name,
+                               at, plan_id, step_id);
+  }
+  if (!plan_binding_matches(plan, *step, binding_plan_id, binding_step_id,
+                            binding_evidence_ids)) {
+    return plan_deviation_json(
+        "binding_mismatch", "deny",
+        "tool request is not bound to the plan revision, current step and evidence set returned "
+        "by the host",
+        tool_name, at, plan_id, step_id);
+  }
+  const auto step_status = json_text_field(*step, "status");
+  if (step_status != "pending" && step_status != "running") {
+    return plan_deviation_json("no_active_step", "replan",
+                               "current plan step is no longer runnable", tool_name, at, plan_id,
+                               step_id);
+  }
+  if (step->value("attempts", 0) >= step->value("maxAttempts", 1)) {
+    return plan_deviation_json("step_budget_exhausted", "wait_user",
+                               "current plan step has exhausted its retry budget", tool_name, at,
+                               plan_id, step_id);
+  }
+  if (plan->contains("observationWindow") && plan->at("observationWindow").is_object() &&
+      json_text_field(plan->at("observationWindow"), "status") == "running") {
+    const auto allowed = plan->at("observationWindow").value("allowedTools", nlohmann::json::array());
+    bool matched = false;
+    if (allowed.is_array()) {
+      for (const auto& candidate : allowed) {
+        if (candidate.is_string() && candidate.get<std::string>() == tool_name) matched = true;
+      }
+    }
+    if (step_kind != "verification" || !matched) {
+      return plan_deviation_json(
+          "tool_not_allowed", "wait_user",
+          "observation window only permits its declared verification read tools", tool_name, at,
+          plan_id, step_id);
+    }
+  }
+  if (step_kind == "action") {
+    const auto automation = json_text_field(task, "automationLevel");
+    const auto approval = plan->contains("approval") && plan->at("approval").is_object()
+                              ? json_text_field(plan->at("approval"), "status")
+                              : std::string();
+    if (automation == "readonly") {
+      return plan_deviation_json(
+          "tool_not_allowed", "deny",
+          "this task is read-only; action steps are available for planning but cannot execute",
+          tool_name, at, plan_id, step_id);
+    }
+    if (automation == "propose" && approval != "approved") {
+      return plan_deviation_json(
+          "no_active_step", "wait_user",
+          "proposal-mode action is waiting for the user to select and approve a decision option",
+          tool_name, at, plan_id, step_id);
+    }
+  }
+  if (step_kind == "action" && json_bool_field(*step, "requiresBaseline")) {
+    auto artifacts = database.list_investigation_artifacts(task_id, 128);
+    if (!baseline_artifact_matches_plan(artifacts.value("artifacts", nlohmann::json::array()),
+                                        *plan)) {
+      return plan_deviation_json(
+          "evidence_missing", "replan",
+          "current action step requires a ready baseline artifact bound to this plan revision",
+          tool_name, at, plan_id, step_id);
+    }
+  }
+  const auto allowed_tools = step->value("allowedTools", nlohmann::json::array());
+  bool tool_allowed = false;
+  if (allowed_tools.is_array()) {
+    for (const auto& allowed : allowed_tools) {
+      if (allowed.is_string() &&
+          (allowed.get<std::string>() == "*" || allowed.get<std::string>() == tool_name)) {
+        tool_allowed = true;
+        break;
+      }
+    }
+  }
+  if (tool_name != kToolInvestigationArtifact && !tool_allowed) {
+    return plan_deviation_json("tool_not_allowed", "replan",
+                               "tool `" + tool_name + "` is not allowed by the current plan step",
+                               tool_name, at, plan_id, step_id);
+  }
+  if (!input_bindings_match(*step, input)) {
+    return plan_deviation_json(
+        "binding_mismatch", "deny",
+        "tool input does not match the exact arguments bound by the active plan step", tool_name,
+        at, plan_id, step_id);
+  }
+  const auto expected = step->contains("target") && step->at("target").is_object()
+                            ? step->at("target")
+                            : task.value("scope", nlohmann::json::object());
+  if (!same_investigation_target(expected, target)) {
+    return plan_deviation_json("target_mismatch", "wait_user",
+                               "tool target does not match the active plan step scope", tool_name,
+                               at, plan_id, step_id);
+  }
+  const auto evidence_ids = step->value("evidenceIds", nlohmann::json::array());
+  if (evidence_ids.is_array()) {
+    for (const auto& evidence_id : evidence_ids) {
+      if (!evidence_id.is_string()) continue;
+      auto evidence = database.get_investigation_evidence(evidence_id.get<std::string>());
+      if (!evidence.has_value() || json_text_field(*evidence, "taskId") != task_id) {
+        return plan_deviation_json(
+            "evidence_missing", "replan",
+            "plan step requires missing evidence `" + evidence_id.get<std::string>() + "`",
+            tool_name, at, plan_id, step_id);
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+nlohmann::json handle_plan_record(DesktopDatabase& database, const nlohmann::json& params) {
+  if (!params.is_object() || !params.contains("plan") || !params.at("plan").is_object()) {
+    return record_failure_json("invalid_input", "invalid investigation plan", false);
+  }
+  nlohmann::json plan = params.at("plan");
+  const auto task_id = json_text_field(plan, "taskId");
+  const auto plan_id = json_text_field(plan, "id");
+  if (task_id.empty() || plan_id.empty()) {
+    return record_failure_json("invalid_input", "invalid investigation plan", false);
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return record_failure_json("not_found", "investigation task was not found", false);
+  }
+  if (!plan.contains("steps") || !plan.at("steps").is_array() || plan.at("steps").empty()) {
+    return record_failure_json("invalid_input", "investigation plan needs at least one step",
+                               false);
+  }
+  if (plan.at("steps").size() > 64) {
+    return record_failure_json("invalid_input", "investigation plan has too many steps", false);
+  }
+  auto previous = database.latest_investigation_plan(task_id);
+  auto existing_by_id = database.get_investigation_plan(plan_id);
+  const bool same_plan = previous.has_value() && json_text_field(*previous, "id") == plan_id;
+  if (existing_by_id.has_value() && !same_plan) {
+    return record_failure_json(
+        "plan_deviation",
+        "plan id already belongs to an older revision; create a new plan id", false);
+  }
+  if (previous.has_value() && existing_by_id.has_value()) {
+    if (json_text_field(*previous, "id") != json_text_field(*existing_by_id, "id") ||
+        plan_definition(*previous) != plan_definition(plan)) {
+      return record_failure_json(
+          "plan_deviation",
+          "an existing plan id cannot be reused with a different definition; create a new plan id",
+          false);
+    }
+    merge_plan_runtime(plan, *previous);
+  } else {
+    plan["revision"] = previous.has_value() ? previous->value("revision", std::int64_t{0}) + 1
+                                            : std::int64_t{1};
+    plan["status"] = "active";
+    plan["approval"] = {{"status", "pending"}};
+  }
+  if (plan.contains("observationWindow") && plan.at("observationWindow").is_object()) {
+    if (auto error = validate_observation_window(plan.at("observationWindow"), plan.at("steps"));
+        !error.empty()) {
+      return record_failure_json("invalid_input", error, false);
+    }
+    bool preserved = false;
+    if (previous.has_value() && previous->contains("observationWindow") &&
+        previous->at("observationWindow").is_object()) {
+      const auto& prior = previous->at("observationWindow");
+      const auto& current = plan.at("observationWindow");
+      const bool matches = prior.value("durationSeconds", 0) ==
+                               current.value("durationSeconds", -1) &&
+                           prior.value("intervalSeconds", 0) ==
+                               current.value("intervalSeconds", -1) &&
+                           prior.value("allowedTools", nlohmann::json::array()) ==
+                               current.value("allowedTools", nlohmann::json::array()) &&
+                           prior.value("successCriteria", nlohmann::json::array()) ==
+                               current.value("successCriteria", nlohmann::json::array());
+      if (matches) {
+        plan["observationWindow"] = prior;
+        preserved = true;
+      }
+    }
+    if (!preserved) {
+      plan["observationWindow"] =
+          plan.value("observationWindow", nlohmann::json::object());
+      auto& window = plan["observationWindow"];
+      window["status"] = "pending";
+      window["sampleCount"] = 0;
+      for (const char* key : {"startedAt", "deadlineAt", "deadlineEpochSeconds", "lastSampleAt",
+                              "lastSampleEpochSeconds", "lastFailure"}) {
+        window.erase(key);
+      }
+    }
+  }
+  if (!plan.contains("currentStepId") && !same_plan) {
+    plan["currentStepId"] = plan.at("steps")[0].value("id", std::string());
+  }
+  std::set<std::string> ids;
+  int index = 0;
+  for (const auto& step : plan.at("steps")) {
+    const auto step_id = json_text_field(step, "id");
+    if (!ids.insert(step_id).second) {
+      return record_failure_json("invalid_input",
+                                 "investigation plan step ids must be unique", false);
+    }
+    if (step.value("ordinal", -1) != index) {
+      return record_failure_json("invalid_input",
+                                 "investigation plan step ordinals must be consecutive", false);
+    }
+    const auto allowed = step.value("allowedTools", nlohmann::json::array());
+    if (!allowed.is_array() || allowed.empty()) {
+      return record_failure_json("invalid_input",
+                                 "plan step `" + step_id + "` must allow at least one tool",
+                                 false);
+    }
+    if (auto error = validate_playbook_step(step); !error.empty()) {
+      return record_failure_json("invalid_input", error, false);
+    }
+    if (json_text_field(step, "kind") == "action" &&
+        !json_bool_field(step, "requiresApproval") &&
+        !task_allows_auto_medium_action(*task, step)) {
+      return record_failure_json(
+          "denied_by_policy",
+          "action step `" + step_id +
+              "` may omit approval only for an auto executable goal on a remote development or "
+              "staging target, and only for a medium-risk action using one of {filesystem.backup, "
+              "filesystem.edit, filesystem.write} (or the backup+write pair)",
+          false);
+    }
+    if (auto error = validate_input_bindings(step); !error.empty()) {
+      return record_failure_json("invalid_input", error, false);
+    }
+    if (auto error = validate_task_guardrails_for_plan_step(*task, step); !error.empty()) {
+      return record_failure_json("denied_by_policy", error, false);
+    }
+    if (step.contains("target") && step.at("target").is_object() &&
+        !same_investigation_target(task->value("scope", nlohmann::json::object()),
+                                   step.at("target"))) {
+      return record_failure_json(
+          "denied_by_policy", "plan step `" + step_id + "` expands the task target scope", false);
+    }
+    const auto evidence_ids = step.value("evidenceIds", nlohmann::json::array());
+    if (evidence_ids.is_array()) {
+      for (const auto& evidence_id : evidence_ids) {
+        if (!evidence_id.is_string()) continue;
+        auto evidence = database.get_investigation_evidence(evidence_id.get<std::string>());
+        if (!evidence.has_value()) {
+          return record_failure_json(
+              "evidence_missing", "evidence `" + evidence_id.get<std::string>() + "` was not found",
+              true);
+        }
+        if (json_text_field(*evidence, "taskId") != task_id) {
+          return record_failure_json(
+              "denied_by_policy",
+              "plan step `" + step_id + "` references evidence from another task", false);
+        }
+      }
+    }
+    ++index;
+  }
+  if (plan.contains("currentStepId") && plan.at("currentStepId").is_string() &&
+      !ids.count(plan.at("currentStepId").get<std::string>())) {
+    return record_failure_json("invalid_input", "currentStepId is not a plan step", false);
+  }
+  if (!same_plan) normalize_new_plan_runtime(plan, iso8601_now());
+  try {
+    database.save_investigation_plan(plan);
+  } catch (const std::invalid_argument& error) {
+    return record_failure_json("invalid_input", error.what(), false);
+  }
+  nlohmann::json evidence_ids = nlohmann::json::array();
+  for (const auto& step : plan.at("steps")) {
+    const auto ids_field = step.value("evidenceIds", nlohmann::json::array());
+    if (ids_field.is_array()) {
+      for (const auto& evidence_id : ids_field) evidence_ids.push_back(evidence_id);
+    }
+  }
+  nlohmann::json artifact = {{"id", "artifact_change_plan_" + plan_id},
+                             {"taskId", task_id},
+                             {"phase", "decision"},
+                             {"kind", "investigation_plan"},
+                             {"status", "ready"},
+                             {"title", "Pending change plan"},
+                             {"summary", "Plan revision saved; action steps run only after scope, "
+                                         "baseline and approval conditions are met."},
+                             {"content", plan},
+                             {"evidenceIds", evidence_ids},
+                             {"createdAt", plan.value("createdAt", std::string())},
+                             {"updatedAt", plan.value("updatedAt", std::string())}};
+  const auto kind = "change_plan";
+  artifact["kind"] = kind;
+  if (plan.contains("currentStepId")) artifact["planStepId"] = plan.at("currentStepId");
+  if (task->contains("activeRunId")) artifact["runId"] = task->at("activeRunId");
+  artifact["planId"] = plan_id;
+  try {
+    database.upsert_investigation_artifact(artifact);
+  } catch (const std::exception& error) {
+    return record_failure_json("internal", error.what(), false);
+  }
+  return {{"recorded", true}, {"plan", plan}};
+}
+
+nlohmann::json handle_plan_check(DesktopDatabase& database, const nlohmann::json& params) {
+  if (!params.is_object()) {
+    return {{"status", "failed"},
+            {"error", investigation_error("invalid_input", "invalid plan check request", false)}};
+  }
+  const auto task_id = json_text_field(params, "taskId");
+  const auto tool_name = json_text_field(params, "toolName");
+  if (task_id.empty() || tool_name.empty() || !params.contains("input") ||
+      !params.contains("target") || !params.at("target").is_object()) {
+    return {{"status", "failed"},
+            {"error", investigation_error("invalid_input", "invalid plan check request", false)}};
+  }
+  const auto host = json_text_field(params.at("target"), "host");
+  if (host != "local" && host != "remote") {
+    return {{"status", "failed"},
+            {"error", investigation_error("invalid_input", "unknown tool target host", false)}};
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return {{"status", "failed"},
+            {"error", investigation_error("not_found", "investigation task was not found", false)}};
+  }
+  if (auto deviation = check_plan_for_tool(database, *task, tool_name, params.at("target"),
+                                           params.at("input"), std::nullopt, std::nullopt,
+                                           std::nullopt);
+      deviation.has_value()) {
+    return {{"status", "deviation"}, {"deviation", *deviation}};
+  }
+  auto plan = database.latest_investigation_plan(task_id);
+  if (!plan.has_value()) {
+    return {{"status", "failed"},
+            {"error", investigation_error("internal", "active plan disappeared during check", false)}};
+  }
+  const auto current_step_id = json_text_field(*plan, "currentStepId");
+  const auto steps = plan->value("steps", nlohmann::json::array());
+  for (const auto& step : steps) {
+    if (json_text_field(step, "id") != current_step_id) continue;
+    return {{"status", "allowed"},
+            {"planId", json_text_field(*plan, "id")},
+            {"stepId", current_step_id},
+            {"stepKind", json_text_field(step, "kind")},
+            {"evidenceIds", step.value("evidenceIds", nlohmann::json::array())},
+            {"requiresApproval", json_bool_field(step, "requiresApproval")}};
+  }
+  return {{"status", "failed"},
+          {"error", investigation_error("internal", "active plan step disappeared during check",
+                                        false)}};
+}
+
+bool task_can_transition(const std::string& from, const std::string& to) {
+  if (from == to) return true;
+  if (from == "pending") {
+    return to == "investigating" || to == "stopped" || to == "expired";
+  }
+  if (from == "investigating") {
+    return to == "waiting_user" || to == "executing" || to == "verifying" || to == "completed" ||
+           to == "failed" || to == "stopped" || to == "expired";
+  }
+  if (from == "waiting_user") {
+    return to == "investigating" || to == "executing" || to == "stopped" || to == "expired";
+  }
+  if (from == "executing") {
+    return to == "verifying" || to == "failed" || to == "stopped" || to == "expired";
+  }
+  if (from == "verifying") {
+    return to == "waiting_user" || to == "completed" || to == "failed" || to == "stopped" ||
+           to == "expired";
+  }
+  return false;
+}
+
+nlohmann::json handle_plan_step_result(DesktopDatabase& database,
+                                       const nlohmann::json& params) {
+  if (!params.is_object()) {
+    return record_failure_json("invalid_input", "invalid plan step result request", false);
+  }
+  const auto task_id = json_text_field(params, "taskId");
+  const auto plan_id = json_text_field(params, "planId");
+  const auto step_id = json_text_field(params, "stepId");
+  const auto status = json_text_field(params, "status");
+  if (task_id.empty() || plan_id.empty() || step_id.empty() || status.empty()) {
+    return record_failure_json("invalid_input", "invalid plan step result request", false);
+  }
+  if (status != "success" && status != "failed" && status != "cancelled") {
+    return record_failure_json("invalid_input", "unknown plan step result status", false);
+  }
+  auto plan = database.get_investigation_plan(plan_id);
+  if (!plan.has_value()) {
+    return record_failure_json("not_found", "investigation plan was not found", false);
+  }
+  if (json_text_field(*plan, "taskId") != task_id) {
+    return record_failure_json("denied_by_policy",
+                               "plan does not belong to the current investigation task", false);
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return record_failure_json("not_found", "investigation task was not found", false);
+  }
+  if (json_text_field(*plan, "currentStepId") != step_id) {
+    return record_failure_json("plan_deviation",
+                               "plan step result does not match the current active step", false);
+  }
+  const auto now = iso8601_now();
+  auto& steps = (*plan)["steps"];
+  int step_index = -1;
+  for (size_t i = 0; i < steps.size(); ++i) {
+    if (json_text_field(steps[i], "id") == step_id) {
+      step_index = static_cast<int>(i);
+      break;
+    }
+  }
+  if (step_index < 0) {
+    return record_failure_json("not_found", "plan step was not found", false);
+  }
+  const auto step_kind = json_text_field(steps[step_index], "kind");
+  const auto retryable = json_bool_field(params, "retryable");
+  const auto output_summary = json_text_field(params, "outputSummary");
+  const bool requires_baseline = json_bool_field(steps[step_index], "requiresBaseline");
+  if (status == "success" && requires_baseline) {
+    auto artifacts = database.list_investigation_artifacts(task_id, 128);
+    if (!baseline_artifact_matches_plan(artifacts.value("artifacts", nlohmann::json::array()),
+                                        *plan)) {
+      return record_failure_json(
+          "evidence_missing",
+          "action step completed without a ready baseline bound to this plan revision", true);
+    }
+  }
+  if (status == "success" && step_kind == "verification") {
+    auto artifacts = database.list_investigation_artifacts(task_id, 128);
+    bool has_verification = false;
+    for (const auto& artifact : artifacts.value("artifacts", nlohmann::json::array())) {
+      if (json_text_field(artifact, "kind") == "verification" &&
+          json_text_field(artifact, "status") == "succeeded" &&
+          json_text_field(artifact, "planId") == plan_id &&
+          json_text_field(artifact, "planStepId") == step_id) {
+        has_verification = true;
+      }
+    }
+    if (!has_verification) {
+      return record_failure_json(
+          "evidence_missing",
+          "verification step must record a succeeded verification artifact before it can advance",
+          true);
+    }
+  }
+  if (step_kind == "verification" && plan->contains("observationWindow") &&
+      plan->at("observationWindow").is_object()) {
+    auto& window = (*plan)["observationWindow"];
+    const auto window_status = json_text_field(window, "status");
+    if (status != "success" && window_status == "running") {
+      const auto failure_message = output_summary.empty() ? std::string("observation sample failed")
+                                                          : output_summary;
+      window["status"] = "failed";
+      window["lastFailure"] = failure_message;
+      (*plan)["updatedAt"] = now;
+      database.save_investigation_plan(*plan);
+      nlohmann::json failure = {{"code", "command_failed"},
+                                {"message", failure_message},
+                                {"retryable", false},
+                                {"attempt", steps[step_index].value("attempts", 0) + 1},
+                                {"at", now},
+                                {"detail", {{"planId", plan_id},
+                                            {"stepId", step_id},
+                                            {"observation", "failed"},
+                                            {"status", status}}}};
+      nlohmann::json failure_artifact = {
+          {"id", "artifact_observation_failure_" + plan_id + "_" + step_id},
+          {"taskId", task_id},
+          {"planId", plan_id},
+          {"planStepId", step_id},
+          {"phase", "recovery"},
+          {"kind", "failure"},
+          {"status", "failed"},
+          {"title", "Observation window failure"},
+          {"summary", failure_message},
+          {"content", failure},
+          {"evidenceIds", steps[step_index].value("evidenceIds", nlohmann::json::array())},
+          {"createdAt", now},
+          {"updatedAt", now}};
+      if (task->contains("activeRunId")) failure_artifact["runId"] = task->at("activeRunId");
+      database.upsert_investigation_artifact(failure_artifact);
+      const auto current_status = json_text_field(*task, "status");
+      if (task_can_transition(current_status, "waiting_user")) {
+        if (!database
+                 .update_investigation_task_progress(
+                     task_id, "waiting_user", "recovery",
+                     task->contains("activeRunId")
+                         ? std::optional<std::string>(task->at("activeRunId").get<std::string>())
+                         : std::nullopt,
+                     failure, now, std::nullopt)
+                 .has_value()) {
+          return record_failure_json("not_found", "investigation task was not found", false);
+        }
+      }
+      return {{"recorded", true}, {"observation", "failed"}, {"plan", *plan}};
+    }
+    if (status == "success") {
+      const auto epoch = now_epoch_seconds();
+      bool sampled = false;
+      std::optional<std::string> next_sample_at;
+      if (window_status == "pending") {
+        const auto deadline = epoch + window.value("durationSeconds", std::int64_t{0});
+        window["status"] = "running";
+        window["sampleCount"] = 1;
+        window["startedAt"] = now;
+        window["deadlineEpochSeconds"] = deadline;
+        window["deadlineAt"] = iso8601_from_epoch(deadline);
+        window["lastSampleEpochSeconds"] = epoch;
+        window["lastSampleAt"] = now;
+        sampled = true;
+        next_sample_at = iso8601_from_epoch(epoch + window.value("intervalSeconds", std::int64_t{0}));
+      } else if (window_status == "running") {
+        const auto deadline = window.value("deadlineEpochSeconds", epoch);
+        if (epoch >= deadline) {
+          window["status"] = "succeeded";
+          window["sampleCount"] = window.value("sampleCount", 0) + 1;
+          window["lastSampleEpochSeconds"] = epoch;
+          window["lastSampleAt"] = now;
+        } else {
+          const auto last = window.value("lastSampleEpochSeconds", std::int64_t{0});
+          const auto interval = window.value("intervalSeconds", std::int64_t{0});
+          if (epoch - last < interval) {
+            next_sample_at = iso8601_from_epoch(last + interval);
+          } else {
+            window["sampleCount"] = window.value("sampleCount", 0) + 1;
+            window["lastSampleEpochSeconds"] = epoch;
+            window["lastSampleAt"] = now;
+            sampled = true;
+            next_sample_at = iso8601_from_epoch(epoch + interval);
+          }
+        }
+      } else if (window_status == "failed" || window_status == "cancelled") {
+        return record_failure_json(
+            "invalid_input",
+            "observation window is no longer runnable; re-plan before sampling again", false);
+      }
+      if (json_text_field(window, "status") == "running" &&
+          (sampled || next_sample_at.has_value())) {
+        (*plan)["updatedAt"] = now;
+        database.save_investigation_plan(*plan);
+        nlohmann::json response = {{"recorded", true},
+                                   {"observation", "running"},
+                                   {"sampleAccepted", sampled},
+                                   {"plan", *plan}};
+        if (next_sample_at.has_value()) response["nextSampleAt"] = *next_sample_at;
+        return response;
+      }
+    }
+  }
+  auto& step = steps[step_index];
+  const auto current_step_status = json_text_field(step, "status");
+  if (current_step_status != "pending" && current_step_status != "running") {
+    return record_failure_json("invalid_input", "plan step is no longer active", false);
+  }
+  step["attempts"] = step.value("attempts", 0) + 1;
+  if (!step.contains("startedAt")) step["startedAt"] = now;
+  step["endedAt"] = now;
+  bool blocked = false;
+  if (status == "success") {
+    step["status"] = "succeeded";
+    step.erase("lastDeviation");
+    const size_t next_index = static_cast<size_t>(step_index) + 1;
+    if (next_index < steps.size()) {
+      steps[next_index]["status"] = "running";
+      if (!steps[next_index].contains("startedAt")) steps[next_index]["startedAt"] = now;
+      (*plan)["currentStepId"] = steps[next_index].value("id", std::string());
+    } else {
+      (*plan)["currentStepId"] = nullptr;
+      (*plan)["status"] = "completed";
+    }
+  } else {
+    const auto max_attempts = step.value("maxAttempts", 1);
+    if (!retryable || step.value("attempts", 0) >= max_attempts) {
+      step["status"] = "blocked";
+      blocked = true;
+    } else {
+      step["status"] = "pending";
+    }
+  }
+  (*plan)["updatedAt"] = now;
+  try {
+    database.save_investigation_plan(*plan);
+  } catch (const std::invalid_argument& error) {
+    return record_failure_json("invalid_input", error.what(), false);
+  }
+  if (blocked) {
+    const auto failure_code = status == "cancelled" ? "cancelled" : "command_failed";
+    const auto failure_message =
+        output_summary.empty() ? std::string("Plan step did not complete; waiting for a decision")
+                               : output_summary;
+    nlohmann::json failure = {{"code", failure_code},
+                              {"message", failure_message},
+                              {"retryable", false},
+                              {"attempt", steps[step_index].value("attempts", 0)},
+                              {"at", now},
+                              {"detail", {{"planId", plan_id},
+                                          {"stepId", step_id},
+                                          {"status", status},
+                                          {"retryable", retryable}}}};
+    nlohmann::json failure_artifact = {
+        {"id", "artifact_failure_" + plan_id + "_" + step_id},
+        {"taskId", task_id},
+        {"planId", plan_id},
+        {"planStepId", step_id},
+        {"phase", "recovery"},
+        {"kind", "failure"},
+        {"status", "failed"},
+        {"title", "Plan step failed"},
+        {"summary", failure_message},
+        {"content", failure},
+        {"evidenceIds", steps[step_index].value("evidenceIds", nlohmann::json::array())},
+        {"createdAt", now},
+        {"updatedAt", now}};
+    if (task->contains("activeRunId")) failure_artifact["runId"] = task->at("activeRunId");
+    database.upsert_investigation_artifact(failure_artifact);
+    const auto current_status = json_text_field(*task, "status");
+    if (task_can_transition(current_status, "failed")) {
+      if (!database
+               .update_investigation_task_progress(
+                   task_id, "failed", "recovery",
+                   task->contains("activeRunId")
+                       ? std::optional<std::string>(task->at("activeRunId").get<std::string>())
+                       : std::nullopt,
+                   failure, now, std::nullopt)
+               .has_value()) {
+        return record_failure_json("not_found", "investigation task was not found", false);
+      }
+    }
+    return {{"recorded", true}, {"plan", *plan}};
+  }
+  std::string desired_status = "waiting_user";
+  if (json_text_field(*plan, "status") == "completed" && step_kind == "verification") {
+    desired_status = "completed";
+  } else if ((*plan).contains("currentStepId") && (*plan).at("currentStepId").is_string()) {
+    const auto next_id = (*plan).at("currentStepId").get<std::string>();
+    for (const auto& candidate : steps) {
+      if (json_text_field(candidate, "id") != next_id) continue;
+      const auto kind = json_text_field(candidate, "kind");
+      desired_status = kind == "action"        ? "executing"
+                       : kind == "verification" ? "verifying"
+                       : kind == "decision"     ? "waiting_user"
+                                                : "investigating";
+      break;
+    }
+  }
+  const auto current_status = json_text_field(*task, "status");
+  if (current_status != desired_status && task_can_transition(current_status, desired_status)) {
+    const auto completed_at = desired_status == "completed"
+                                  ? std::optional<std::string>(now)
+                                  : std::nullopt;
+    if (!database.set_investigation_task_status(task_id, desired_status, completed_at, now)
+             .has_value()) {
+      return record_failure_json("not_found", "investigation task was not found", false);
+    }
+  }
+  return {{"recorded", true}, {"plan", *plan}};
+}
+
+nlohmann::json handle_evidence_record(DesktopDatabase& database, const nlohmann::json& params) {
+  if (!params.is_object() || !params.contains("evidence") ||
+      !params.at("evidence").is_object()) {
+    return record_failure_json("invalid_input", "invalid evidence", false);
+  }
+  nlohmann::json evidence = params.at("evidence");
+  const auto task_id = json_text_field(evidence, "taskId");
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return record_failure_json("not_found",
+                               "investigation task `" + task_id + "` was not found", false);
+  }
+  if (!same_investigation_target(task->value("scope", nlohmann::json::object()),
+                                 evidence.value("scope", nlohmann::json::object()))) {
+    return record_failure_json(
+        "denied_by_policy", "evidence target does not match the investigation task scope", false);
+  }
+  // The host owns the run association; an untrusted run id is overwritten.
+  if (task->contains("activeRunId") && task->at("activeRunId").is_string()) {
+    evidence["runId"] = task->at("activeRunId");
+  } else {
+    evidence.erase("runId");
+  }
+  if (!evidence.contains("content")) {
+    return record_failure_json("invalid_input", "evidence content is required", false);
+  }
+  if (evidence.at("content").dump().size() > 1048576) {
+    return record_failure_json("invalid_input", "evidence content exceeds 1048576 bytes", false);
+  }
+  if (json_text_field(evidence, "redactionStatus", "unknown") == "unknown") {
+    return record_failure_json("invalid_input", "evidence must be redacted before persistence",
+                               false);
+  }
+  if (DesktopDatabase::content_hash(evidence.at("content")) !=
+      json_text_field(evidence, "contentHash")) {
+    return record_failure_json("invalid_input", "evidence contentHash does not match content",
+                               false);
+  }
+  auto existing = database.find_investigation_evidence_in_run(evidence);
+  if (existing.has_value()) {
+    return {{"recorded", true},
+            {"evidenceId", json_text_field(*existing, "id")},
+            {"reused", true}};
+  }
+  try {
+    database.record_investigation_evidence(evidence);
+  } catch (const std::invalid_argument& error) {
+    return record_failure_json("invalid_input", error.what(), false);
+  }
+  return {{"recorded", true}, {"evidenceId", json_text_field(evidence, "id")}, {"reused", false}};
+}
+
+nlohmann::json evidence_failed(std::string code, std::string message) {
+  return {{"status", "failed"},
+          {"error", investigation_error(std::move(code), std::move(message), false)}};
+}
+
+nlohmann::json handle_evidence_fetch(DesktopDatabase& database, const nlohmann::json& params) {
+  const auto task_id = params.is_object() ? json_text_field(params, "taskId") : std::string();
+  const auto evidence_id =
+      params.is_object() ? json_text_field(params, "evidenceId") : std::string();
+  if (task_id.empty() || evidence_id.empty()) {
+    return evidence_failed("invalid_input", "taskId and evidenceId are required");
+  }
+  auto evidence = database.get_investigation_evidence(evidence_id);
+  if (!evidence.has_value()) return {{"status", "not_found"}};
+  if (json_text_field(*evidence, "taskId") != task_id) {
+    return evidence_failed("denied_by_policy",
+                           "evidence does not belong to the current investigation task");
+  }
+  return {{"status", "success"}, {"evidence", *evidence}};
+}
+
+nlohmann::json evidence_summary(const nlohmann::json& evidence) {
+  nlohmann::json summary = evidence;
+  summary.erase("content");
+  return summary;
+}
+
+nlohmann::json handle_evidence_search(DesktopDatabase& database, const nlohmann::json& params) {
+  const auto task_id = params.is_object() ? json_text_field(params, "taskId") : std::string();
+  if (task_id.empty() || task_id.size() > 256) {
+    return evidence_failed("invalid_input", "taskId must be between 1 and 256 characters");
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return evidence_failed("not_found", "investigation task was not found");
+  }
+  const auto limit = params.value("limit", 32);
+  if (limit < 1 || limit > 64) {
+    return evidence_failed("invalid_input", "limit must be between 1 and 64");
+  }
+  auto query = nlohmann::json::object();
+  query["limit"] = limit;
+  query["scope"] = task->value("scope", nlohmann::json::object());
+  if (params.contains("target") && params.at("target").is_object()) {
+    if (!same_investigation_target(task->value("scope", nlohmann::json::object()),
+                                   params.at("target"))) {
+      return evidence_failed("denied_by_policy",
+                             "evidence target does not match the investigation task scope");
+    }
+    query["scope"] = params.at("target");
+  }
+  for (const char* key : {"sourceTool", "kind", "from", "to"}) {
+    if (params.contains(key) && params.at(key).is_string()) query[key] = params.at(key);
+  }
+  nlohmann::json results;
+  try {
+    results = database.search_investigation_evidence(task_id, query);
+  } catch (const std::invalid_argument& error) {
+    return evidence_failed("invalid_input", error.what());
+  }
+  nlohmann::json summaries = nlohmann::json::array();
+  for (const auto& item : results) summaries.push_back(evidence_summary(item));
+  return {{"status", "success"}, {"evidence", summaries}};
+}
+
+nlohmann::json handle_finding_record(DesktopDatabase& database, const nlohmann::json& params) {
+  if (!params.is_object() || !params.contains("finding") || !params.at("finding").is_object()) {
+    return record_failure_json("invalid_input", "invalid finding", false);
+  }
+  nlohmann::json finding = params.at("finding");
+  const auto task_id = json_text_field(finding, "taskId");
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return record_failure_json("not_found", "investigation task was not found", false);
+  }
+  const auto evidence_ids = finding.value("evidenceIds", nlohmann::json::array());
+  if (evidence_ids.empty() && json_text_field(finding, "kind") != "unknown") {
+    return record_failure_json(
+        "invalid_input", "fact and inference findings require at least one evidence reference",
+        false);
+  }
+  for (const auto& evidence_id : evidence_ids) {
+    if (!evidence_id.is_string()) continue;
+    auto evidence = database.get_investigation_evidence(evidence_id.get<std::string>());
+    if (!evidence.has_value()) {
+      return record_failure_json(
+          "invalid_input", "evidence `" + evidence_id.get<std::string>() + "` was not found", false);
+    }
+    if (json_text_field(*evidence, "taskId") != task_id) {
+      return record_failure_json("denied_by_policy",
+                                 "finding references evidence from another task", false);
+    }
+  }
+  try {
+    database.record_investigation_finding(finding);
+  } catch (const std::invalid_argument& error) {
+    return record_failure_json("invalid_input", error.what(), false);
+  }
+  return {{"recorded", true}, {"finding", finding}};
+}
+
+nlohmann::json handle_brief_record(DesktopDatabase& database, const nlohmann::json& params) {
+  if (!params.is_object() || !params.contains("brief") || !params.at("brief").is_object()) {
+    return record_failure_json("invalid_input", "invalid decision brief", false);
+  }
+  nlohmann::json brief = params.at("brief");
+  const auto task_id = json_text_field(brief, "taskId");
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return record_failure_json("not_found", "investigation task was not found", false);
+  }
+  const auto plan_id = json_text_field(brief, "planId");
+  if (!plan_id.empty()) {
+    auto current_plan = database.latest_investigation_plan(task_id);
+    if (!current_plan.has_value() || json_text_field(*current_plan, "id") != plan_id) {
+      return record_failure_json("plan_deviation",
+                                 "decision brief must describe the current plan revision", false);
+    }
+  }
+  nlohmann::json finding_ids = nlohmann::json::array();
+  const auto top_findings = brief.value("findingIds", nlohmann::json::array());
+  if (top_findings.is_array()) {
+    for (const auto& id : top_findings) finding_ids.push_back(id);
+  }
+  const auto options = brief.value("options", nlohmann::json::array());
+  if (options.is_array()) {
+    for (const auto& option : options) {
+      const auto option_findings = option.value("findingIds", nlohmann::json::array());
+      if (option_findings.is_array()) {
+        for (const auto& id : option_findings) finding_ids.push_back(id);
+      }
+    }
+  }
+  for (const auto& finding_id : finding_ids) {
+    if (!finding_id.is_string()) continue;
+    auto finding = database.get_investigation_finding(finding_id.get<std::string>());
+    if (!finding.has_value()) {
+      return record_failure_json(
+          "invalid_input", "finding `" + finding_id.get<std::string>() + "` was not found", false);
+    }
+    if (json_text_field(*finding, "taskId") != task_id) {
+      return record_failure_json("denied_by_policy",
+                                 "decision brief references a finding from another task", false);
+    }
+  }
+  try {
+    database.record_investigation_brief(brief);
+  } catch (const std::invalid_argument& error) {
+    return record_failure_json("invalid_input", error.what(), false);
+  }
+  return {{"recorded", true}, {"brief", brief}};
+}
+
+nlohmann::json handle_artifact_record(DesktopDatabase& database, const nlohmann::json& params) {
+  if (!params.is_object() || !params.contains("artifact") ||
+      !params.at("artifact").is_object()) {
+    return record_failure_json("invalid_input", "invalid investigation artifact", false);
+  }
+  nlohmann::json artifact = params.at("artifact");
+  artifact["planId"] = params.contains("planId") ? params.at("planId") : nlohmann::json(nullptr);
+  artifact["planStepId"] =
+      params.contains("planStepId") ? params.at("planStepId") : nlohmann::json(nullptr);
+  if (artifact.at("planId").is_null()) artifact.erase("planId");
+  if (artifact.at("planStepId").is_null()) artifact.erase("planStepId");
+  const auto task_id = json_text_field(artifact, "taskId");
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) {
+    return record_failure_json("not_found", "investigation task was not found", false);
+  }
+  const auto evidence_ids = artifact.value("evidenceIds", nlohmann::json::array());
+  if (evidence_ids.is_array()) {
+    for (const auto& evidence_id : evidence_ids) {
+      if (!evidence_id.is_string()) continue;
+      auto evidence = database.get_investigation_evidence(evidence_id.get<std::string>());
+      if (!evidence.has_value()) {
+        return record_failure_json(
+            "invalid_input", "evidence `" + evidence_id.get<std::string>() + "` was not found",
+            false);
+      }
+      if (json_text_field(*evidence, "taskId") != task_id) {
+        return record_failure_json("denied_by_policy",
+                                   "artifact references evidence from another task", false);
+      }
+    }
+  }
+  if (!artifact.contains("content")) {
+    return record_failure_json("invalid_input", "artifact content is required", false);
+  }
+  if (artifact.at("content").dump().size() > 1048576) {
+    return record_failure_json("invalid_input",
+                               "investigation artifact content exceeds the 1 MiB limit", false);
+  }
+  try {
+    database.upsert_investigation_artifact(artifact);
+  } catch (const std::invalid_argument& error) {
+    return record_failure_json("invalid_input", error.what(), false);
+  }
+  return {{"recorded", true}, {"artifact", artifact}};
+}
+
 }  // namespace
 
 IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
@@ -2664,6 +4181,48 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
            nlohmann::json::array({nlohmann::json{{"serverId", "mcp"},
                                                  {"code", "request_failed"},
                                                  {"message", "The MCP catalog could not be built"}}})}};
+    }
+  }
+  if (method == "host.investigation.plan.record" ||
+      method == "host.investigation.plan.check" ||
+      method == "host.investigation.plan.step_result" ||
+      method == "host.investigation.evidence.record" ||
+      method == "host.investigation.evidence.fetch" ||
+      method == "host.investigation.evidence.search" ||
+      method == "host.investigation.finding.record" ||
+      method == "host.investigation.brief.record" ||
+      method == "host.investigation.artifact.record") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return record_failure_json("internal", "the local server database is unavailable", false);
+    }
+    try {
+      if (method == "host.investigation.plan.record") {
+        return handle_plan_record(*database_, params);
+      }
+      if (method == "host.investigation.plan.check") {
+        return handle_plan_check(*database_, params);
+      }
+      if (method == "host.investigation.plan.step_result") {
+        return handle_plan_step_result(*database_, params);
+      }
+      if (method == "host.investigation.evidence.record") {
+        return handle_evidence_record(*database_, params);
+      }
+      if (method == "host.investigation.evidence.fetch") {
+        return handle_evidence_fetch(*database_, params);
+      }
+      if (method == "host.investigation.evidence.search") {
+        return handle_evidence_search(*database_, params);
+      }
+      if (method == "host.investigation.finding.record") {
+        return handle_finding_record(*database_, params);
+      }
+      if (method == "host.investigation.brief.record") {
+        return handle_brief_record(*database_, params);
+      }
+      return handle_artifact_record(*database_, params);
+    } catch (const std::exception& error) {
+      return record_failure_json("internal", error.what(), false);
     }
   }
   if (method == "host.tool.execute") {

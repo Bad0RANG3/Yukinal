@@ -34,6 +34,11 @@ class IpcRouter {
   IpcReply invoke(const std::string& method, nlohmann::json params);
   [[nodiscard]] std::set<std::string> subscribers(const std::string& event) const;
 
+  // The Agent→host request entry point the sidecar dispatches through. Exposed so
+  // the host RPC surface can be exercised directly in tests.
+  [[nodiscard]] nlohmann::json handle_host_request(const std::string& method,
+                                                   const nlohmann::json& params);
+
   // Delivers Agent sidecar notifications (for example `agent.started`) to the
   // WebView bridge. Set once at startup; safe to call from the sidecar thread.
   void set_event_sink(std::function<void(const std::string&, const nlohmann::json&)> sink);
@@ -62,8 +67,6 @@ class IpcRouter {
   IpcReply agent_run_command(const std::string& method, const nlohmann::json& params);
   IpcReply mcp_command(const std::string& method, const nlohmann::json& params);
   IpcReply provider_command(const std::string& method, const nlohmann::json& params);
-  [[nodiscard]] nlohmann::json handle_host_request(const std::string& method,
-                                                   const nlohmann::json& params);
   SidecarClient& ensure_sidecar();
   void configure_sidecar();
 
