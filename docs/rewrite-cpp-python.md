@@ -1153,3 +1153,24 @@ the call promptly; the pool path is exercised by the existing
 passed all twelve CTest targets and `pnpm check` was green. OAuth and DPoP, the
 optional long-lived GET event stream, the `host.tool.execute` non-MCP branch, the
 file transfer actions, installers, and real SSH/MCP validation remain.
+
+Later on 2026-10-17, `mcp_server_save` learned to persist OAuth configuration (the
+first half of the OAuth block). `resolve_oauth_config` in
+`native/desktop_host/src/ipc_router.cpp` mirrors the retired Rust
+`commands/mcp/configuration.rs`: it trims and validates the issuer with the same
+HTTPS-or-loopback URL rules as the MCP endpoint, defaults `flow` to
+`authorization_code` and `clientAuth` to `none`, rejects a static `Authorization`
+header alongside OAuth, de-duplicates the scopes, and stages a write-only client
+secret in the OS credential store. The flow, client auth, DPoP flag, issuer and
+client id are treated as the stored identity: keeping all of them preserves the
+token, secret and DPoP key references, while changing any of them drops them and
+reclaims the retired credential references. A stored row whose OAuth is configured
+but never connected is reported as `invalid_config` from `mcp_server_list`/`save`
+and from `mcp_server_start` instead of being launched into a certain 401. The
+`mcp_oauth_connect`/`mcp_oauth_cancel` commands, the discovery/registration/token
+exchange, DPoP and the supervisor's bearer token source remain; this commit is the
+configuration/persistence half only. `desktop_host_database_tests` now covers the
+accept path, the defaulted fields, the unconnected report, secret preservation,
+method-switch reclamation and the mutual-exclusion/stdio refusals. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets and
+`pnpm check` was green.

@@ -693,11 +693,77 @@ int main(int argc, char** argv) {
                                   {"url", "https://example.test/mcp"},
                                   {"enabled", true},
                                   {"oauth",
-                                   {{"issuer", "https://example.test"},
+                                   {{"issuer", "https://auth.example.test/"},
                                     {"clientId", ""},
-                                    {"scopes", nlohmann::json::array()}}}};
-    check(!mcp_router.invoke("mcp_server_save", {{"input", oauth_input}}).ok,
-          "OAuth MCP servers are not supported by this host yet");
+                                    {"scopes", nlohmann::json::array({"read", "write"})}}}};
+    const auto saved_oauth = mcp_router.invoke("mcp_server_save", {{"input", oauth_input}});
+    check(saved_oauth.ok, "mcp_server_save should accept an HTTP OAuth server");
+    const auto& oauth_config = saved_oauth.value.at("config").at("oauth");
+    check(oauth_config.at("issuer") == "https://auth.example.test" &&
+              oauth_config.at("flow") == "authorization_code" &&
+              oauth_config.at("clientAuth") == "none" && oauth_config.at("dpop") == false &&
+              oauth_config.at("scopes").size() == 2,
+          "a saved OAuth server should store the trimmed issuer, defaults and scopes");
+    check(!oauth_config.contains("tokenEndpoint") && !oauth_config.contains("credentialRef"),
+          "an unconnected OAuth server should not carry a token endpoint");
+    check(saved_oauth.value.at("unavailable").at("code") == "invalid_config",
+          "an unconnected OAuth server should report why it cannot run");
+    const auto started_unconnected =
+        mcp_router.invoke("mcp_server_start", {{"serverId", "oauth"}});
+    check(started_unconnected.ok &&
+              started_unconnected.value.at("unavailable").at("code") == "invalid_config",
+          "starting an unconnected OAuth server should report the reason, not launch");
+    check(mcp_credentials.size() == 1,
+          "a public OAuth client should not stage a client secret");
+
+    nlohmann::json secret_input = oauth_input;
+    secret_input["oauth"]["clientId"] = "client-1";
+    secret_input["oauth"]["clientAuth"] = "client_secret_post";
+    secret_input["oauth"]["clientSecret"] = "shh-1";
+    const auto with_secret = mcp_router.invoke("mcp_server_save", {{"input", secret_input}});
+    check(with_secret.ok &&
+              with_secret.value.at("config").at("oauth").at("clientAuth") == "client_secret_post" &&
+              with_secret.value.dump().find("shh-1") == std::string::npos,
+          "a client secret must be stored by reference and never returned");
+    check(mcp_credentials.size() == 2,
+          "the OAuth client secret should live in the credential store");
+
+    // Re-saving the same identity without a new secret preserves the stored one.
+    nlohmann::json rotate = secret_input;
+    rotate["oauth"].erase("clientSecret");
+    check(mcp_router.invoke("mcp_server_save", {{"input", rotate}}).ok &&
+              mcp_credentials.size() == 2,
+          "re-saving the same OAuth identity should preserve the stored client secret");
+
+    // Switching the client auth method drops the old secret (the user is telling us
+    // the previous way of authenticating was wrong).
+    rotate["oauth"]["clientAuth"] = "none";
+    check(mcp_router.invoke("mcp_server_save", {{"input", rotate}}).ok &&
+              mcp_credentials.size() == 1,
+          "switching away from client secret auth should reclaim the stored secret");
+    rotate["oauth"]["clientAuth"] = "client_secret_post";
+    check(!mcp_router.invoke("mcp_server_save", {{"input", rotate}}).ok,
+          "client secret auth without a new or carried secret must be refused");
+    rotate["oauth"]["clientSecret"] = "shh-2";
+    check(mcp_router.invoke("mcp_server_save", {{"input", rotate}}).ok &&
+              mcp_credentials.size() == 2,
+          "a re-entered client secret should be accepted after a method switch");
+
+    nlohmann::json stdio_oauth = oauth_input;
+    stdio_oauth["transport"] = "stdio";
+    stdio_oauth["command"] = "npx";
+    stdio_oauth.erase("url");
+    check(!mcp_router.invoke("mcp_server_save", {{"input", stdio_oauth}}).ok,
+          "OAuth settings on a stdio server must be refused");
+
+    nlohmann::json oauth_with_auth_header = oauth_input;
+    oauth_with_auth_header["httpAuthHeaders"] = nlohmann::json::array({header});
+    check(!mcp_router.invoke("mcp_server_save", {{"input", oauth_with_auth_header}}).ok,
+          "OAuth and a static Authorization header are mutually exclusive");
+
+    check(mcp_router.invoke("mcp_server_delete", {{"serverId", "oauth"}}).ok &&
+              mcp_credentials.size() == 1,
+          "deleting an OAuth server should reclaim its client secret");
 
     const auto reviewed_mcp = mcp_router.invoke(
         "mcp_server_review",

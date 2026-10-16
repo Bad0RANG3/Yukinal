@@ -529,6 +529,283 @@ bool clean_credential_references(DesktopDatabase* database,
   return all_recovered;
 }
 
+std::string ascii_lower(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char byte) { return static_cast<char>(std::tolower(byte)); });
+  return value;
+}
+
+bool ipv4_loopback(const std::string& host) {
+  int octets[4] = {0, 0, 0, 0};
+  std::size_t start = 0;
+  for (int index = 0; index < 4; ++index) {
+    const auto dot = host.find('.', start);
+    const auto end = dot == std::string::npos ? host.size() : dot;
+    if (end == start || end - start > 3) return false;
+    int value = 0;
+    for (std::size_t position = start; position < end; ++position) {
+      if (!std::isdigit(static_cast<unsigned char>(host[position]))) return false;
+      value = value * 10 + (host[position] - '0');
+    }
+    if (value > 255) return false;
+    octets[index] = value;
+    if (index < 3) {
+      if (dot == std::string::npos) return false;
+      start = dot + 1;
+    } else if (dot != std::string::npos) {
+      return false;
+    }
+  }
+  return octets[0] == 127;
+}
+
+// `validate_http_url` from the retired core: HTTPS anywhere, plain HTTP only on
+// loopback, and never a fragment, query, or embedded credentials.
+bool is_loopback_host(std::string host) {
+  if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+    host = host.substr(1, host.size() - 2);
+  }
+  const auto lowered = ascii_lower(host);
+  if (lowered == "localhost") return true;
+  if (lowered.size() > 10 && lowered.compare(lowered.size() - 10, 10, ".localhost") == 0) {
+    return true;
+  }
+  if (lowered == "::1") return true;
+  return ipv4_loopback(lowered);
+}
+
+bool validate_oauth_url(const std::string& raw, std::string& out) {
+  const auto value = trim_ascii(raw);
+  if (value.empty() || value.size() > 2048 || has_control_characters(value)) return false;
+  if (value.find('?') != std::string::npos || value.find('#') != std::string::npos) return false;
+  std::size_t authority_start = 0;
+  bool secure = false;
+  if (value.rfind("https://", 0) == 0) {
+    authority_start = 8;
+    secure = true;
+  } else if (value.rfind("http://", 0) == 0) {
+    authority_start = 7;
+  } else {
+    return false;
+  }
+  if (authority_start >= value.size()) return false;
+  const auto path = value.find('/', authority_start);
+  const auto authority = value.substr(
+      authority_start, path == std::string::npos ? std::string::npos : path - authority_start);
+  if (authority.empty() || authority.find('@') != std::string::npos) return false;
+  std::string host = authority;
+  if (!host.empty() && host.front() == '[') {
+    const auto close = host.find(']');
+    if (close == std::string::npos) return false;
+    host = host.substr(0, close + 1);
+  } else {
+    const auto colon = host.find(':');
+    if (colon != std::string::npos) host = host.substr(0, colon);
+  }
+  if (host.empty()) return false;
+  if (!secure && !is_loopback_host(host)) return false;
+  out = value;
+  return true;
+}
+
+// Mirrors `resolve_oauth_config`: turns the write-only settings form into the stored
+// OAuth shape, staging any new client secret in the credential store. The flow,
+// client auth and DPoP flag are part of the stored identity, so switching any of them
+// (or the issuer or client id) drops the stored token, secret and key.
+bool resolve_oauth_config(const std::string& server_id, bool is_http,
+                          const nlohmann::json& requested,
+                          const std::optional<nlohmann::json>& existing,
+                          const nlohmann::json& http_auth_headers,
+                          const CredentialStore& credentials,
+                          std::optional<nlohmann::json>& resolved,
+                          std::vector<std::string>& staged, std::string& reason) {
+  if (requested.is_null()) {
+    resolved = std::nullopt;
+    return true;
+  }
+  if (!is_http) {
+    reason = "OAuth settings require the HTTP transport";
+    return false;
+  }
+  if (requested.is_object() && http_auth_headers.is_array()) {
+    for (const auto& header : http_auth_headers) {
+      if (header.is_object() &&
+          ascii_lower(header.value("name", std::string())) == "authorization") {
+        reason = "OAuth and a static Authorization header cannot be configured together";
+        return false;
+      }
+    }
+  }
+  const auto raw_issuer = trim_ascii(requested.value("issuer", std::string()));
+  std::string issuer;
+  if (!raw_issuer.empty()) {
+    if (!validate_oauth_url(raw_issuer, issuer)) {
+      reason = "the OAuth issuer is not a valid endpoint URL";
+      return false;
+    }
+    while (!issuer.empty() && issuer.back() == '/') issuer.pop_back();
+  }
+  const auto client_id = trim_ascii(requested.value("clientId", std::string()));
+  if (client_id.size() > 512 || has_control_characters(client_id)) {
+    reason = "the OAuth client id must be at most 512 printable characters";
+    return false;
+  }
+  const auto flow = requested.contains("flow") ? requested.at("flow").get<std::string>()
+                                               : std::string("authorization_code");
+  const auto client_auth = requested.contains("clientAuth")
+                               ? requested.at("clientAuth").get<std::string>()
+                               : std::string("none");
+  const bool needs_secret = client_auth != "none";
+  if (needs_secret && client_id.empty()) {
+    reason = "client secret authentication needs a hand-filled client id";
+    return false;
+  }
+  if (client_auth == "client_secret_basic" && client_id.find(':') != std::string::npos) {
+    reason = "a client_secret_basic client id must not contain a colon";
+    return false;
+  }
+  if (!requested.contains("scopes") || !requested.at("scopes").is_array() ||
+      requested.at("scopes").size() > 32) {
+    reason = "OAuth may request at most 32 scopes";
+    return false;
+  }
+  std::vector<std::string> scopes;
+  for (const auto& raw : requested.at("scopes")) {
+    if (!raw.is_string()) {
+      reason = "each OAuth scope must be a string";
+      return false;
+    }
+    const auto scope = trim_ascii(raw.get<std::string>());
+    if (scope.empty() || scope.size() > 128 || has_control_characters(scope) ||
+        scope.find_first_of(" \t\r\n") != std::string::npos) {
+      reason = "each OAuth scope must be 1 to 128 non-whitespace characters";
+      return false;
+    }
+    if (std::find(scopes.begin(), scopes.end(), scope) == scopes.end()) scopes.push_back(scope);
+  }
+  const bool dpop = requested.value("dpop", false);
+
+  bool preserve = false;
+  if (existing.has_value() && !issuer.empty()) {
+    std::string existing_issuer = trim_ascii(existing->value("issuer", std::string()));
+    while (!existing_issuer.empty() && existing_issuer.back() == '/') existing_issuer.pop_back();
+    preserve = existing_issuer == issuer &&
+               existing->value("clientId", std::string()) == client_id &&
+               existing->value("flow", std::string("authorization_code")) == flow &&
+               existing->value("clientAuth", std::string("none")) == client_auth &&
+               existing->value("dpop", false) == dpop &&
+               existing->value("scopes", nlohmann::json::array()) == nlohmann::json(scopes);
+  }
+
+  std::optional<std::string> client_secret_ref;
+  if (needs_secret) {
+    if (requested.contains("clientSecret") && requested.at("clientSecret").is_string() &&
+        !requested.at("clientSecret").get<std::string>().empty()) {
+      const auto secret = requested.at("clientSecret").get<std::string>();
+      if (secret.size() > 8192 || has_control_characters(secret)) {
+        reason = "the OAuth client secret must be 1 to 8192 characters without control characters";
+        return false;
+      }
+      try {
+        const auto reference = credentials.set(
+            "mcp", server_id + "-" + next_id("oauth-secret"), Secret(std::string_view(secret)));
+        staged.push_back(reference.to_string());
+        client_secret_ref = reference.to_string();
+      } catch (...) {
+        reason = "The operating system credential store could not save the OAuth client secret";
+        return false;
+      }
+    } else if (existing.has_value() &&
+               existing->value("clientAuth", std::string("none")) == client_auth) {
+      const auto carried = existing->value("clientSecretRef", std::string());
+      if (!carried.empty()) client_secret_ref = carried;
+    }
+    if (!client_secret_ref.has_value()) {
+      reason =
+          "client secret authentication needs a secret; enter one, or switch the client "
+          "authentication method";
+      return false;
+    }
+  }
+
+  nlohmann::json config = {{"issuer", issuer},
+                           {"clientId", client_id},
+                           {"flow", flow},
+                           {"clientAuth", client_auth},
+                           {"dpop", dpop},
+                           {"scopes", scopes}};
+  if (client_secret_ref.has_value()) config["clientSecretRef"] = *client_secret_ref;
+  if (preserve) {
+    for (const auto* key : {"dpopKeyRef", "tokenEndpoint", "credentialRef"}) {
+      if (existing->contains(key) && existing->at(key).is_string()) {
+        config[key] = existing->at(key);
+      }
+    }
+  }
+  resolved = std::move(config);
+  return true;
+}
+
+// Mirrors the OAuth half of `http_auth_config_error`: describes why a stored row
+// cannot be used right now, or nothing when it is fine. A row whose OAuth is
+// configured but never connected is reported here instead of failing at launch.
+std::optional<nlohmann::json> oauth_config_error(const nlohmann::json& config) {
+  if (!config.contains("oauth") || !config.at("oauth").is_object()) return std::nullopt;
+  const auto& oauth = config.at("oauth");
+  const auto invalid = [](const std::string& message) {
+    return nlohmann::json{{"code", "invalid_config"}, {"message", message}};
+  };
+  if (config.value("transport", std::string()) != "http") {
+    return invalid("stdio transport cannot carry OAuth authentication settings");
+  }
+  for (const auto& header : config.value("httpAuthHeaders", nlohmann::json::array())) {
+    if (header.is_object() &&
+        ascii_lower(header.value("name", std::string())) == "authorization") {
+      return invalid("OAuth and a static Authorization header are mutually exclusive");
+    }
+  }
+  const auto issuer = trim_ascii(oauth.value("issuer", std::string()));
+  if (!issuer.empty()) {
+    std::string unused;
+    if (!validate_oauth_url(issuer, unused)) {
+      return invalid("the stored OAuth issuer is not a valid endpoint URL");
+    }
+  }
+  const auto client_id = oauth.value("clientId", std::string());
+  if (client_id.size() > 512 || has_control_characters(client_id)) {
+    return invalid("the stored OAuth client id is too long or contains control characters");
+  }
+  if (oauth.value("clientAuth", std::string("none")) != "none") {
+    if (trim_ascii(client_id).empty()) {
+      return invalid("client secret authentication needs a hand-filled client id");
+    }
+    if (!oauth.contains("clientSecretRef") || !oauth.at("clientSecretRef").is_string() ||
+        oauth.at("clientSecretRef").get<std::string>().empty()) {
+      return invalid("OAuth uses client secret authentication but no secret is stored");
+    }
+  }
+  const bool has_endpoint =
+      oauth.contains("tokenEndpoint") && oauth.at("tokenEndpoint").is_string() &&
+      !oauth.at("tokenEndpoint").get<std::string>().empty();
+  const bool has_token =
+      oauth.contains("credentialRef") && oauth.at("credentialRef").is_string() &&
+      !oauth.at("credentialRef").get<std::string>().empty();
+  if (!has_endpoint && !has_token) {
+    return invalid("OAuth is configured but not connected; run Connect OAuth");
+  }
+  if (has_endpoint != has_token) {
+    return invalid("the stored OAuth token endpoint and credential reference must both be present");
+  }
+  if (trim_ascii(client_id).empty()) {
+    return invalid("the connected OAuth configuration has no client id");
+  }
+  std::string unused;
+  if (!validate_oauth_url(oauth.at("tokenEndpoint").get<std::string>(), unused)) {
+    return invalid("the stored OAuth token endpoint is not a valid endpoint URL");
+  }
+  return std::nullopt;
+}
+
 bool proxy_credential_has_control_characters(const std::string& value) {
   for (std::size_t index = 0; index < value.size(); ++index) {
     const auto byte = static_cast<unsigned char>(value[index]);
@@ -7401,6 +7678,8 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
     if (!config.value("enabled", false)) {
       view["unavailable"] = {{"code", "disabled"},
                              {"message", "This MCP server is disabled."}};
+    } else if (const auto reason = oauth_config_error(config); reason.has_value()) {
+      view["unavailable"] = *reason;
     }
     return view;
   };
@@ -7431,10 +7710,6 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
         !input.at("id").is_string() || !input.at("label").is_string() ||
         !input.at("transport").is_string() || !input.at("enabled").is_boolean()) {
       return failure("INVALID_PARAMS", "mcp_server_save input does not match the contract");
-    }
-    if (input.contains("oauth")) {
-      return failure("NOT_IMPLEMENTED",
-                     "OAuth MCP servers are not supported by this host yet");
     }
     const auto server_id = trim_ascii(input.at("id").get<std::string>());
     const auto label = input.at("label").get<std::string>();
@@ -7578,12 +7853,69 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
     }
     config["httpAuthHeaders"] = std::move(headers);
 
+    // OAuth: a write-only client secret is staged in the credential store; the
+    // token, secret and DPoP key of a previous identity are reclaimed below.
+    std::optional<nlohmann::json> existing_oauth;
+    if (existing.has_value() && existing->contains("oauth") && existing->at("oauth").is_object()) {
+      existing_oauth = existing->at("oauth");
+    }
+    std::optional<nlohmann::json> resolved_oauth;
+    {
+      std::string oauth_reason;
+      const auto requested_oauth =
+          input.contains("oauth") ? input.at("oauth") : nlohmann::json(nullptr);
+      if (!resolve_oauth_config(server_id, transport == "http", requested_oauth, existing_oauth,
+                                config.at("httpAuthHeaders"), *credentials_, resolved_oauth,
+                                staged_references, oauth_reason)) {
+        std::string ignored;
+        (void)clean_credential_references(database_, *credentials_, staged_references, ignored);
+        return failure("INVALID_PARAMS", oauth_reason);
+      }
+    }
+    if (resolved_oauth.has_value()) config["oauth"] = *resolved_oauth;
+
     try {
       database_->upsert_mcp_server(config);
     } catch (...) {
       std::string ignored;
       (void)clean_credential_references(database_, *credentials_, staged_references, ignored);
       return failure("STORAGE_ERROR", "The local MCP database could not save the server");
+    }
+    // A credential reference the saved row no longer points at (a replaced header
+    // secret, or the token/secret/key of an OAuth identity that changed) is removed.
+    if (existing.has_value()) {
+      std::set<std::string> live;
+      for (const auto& header : config.value("httpAuthHeaders", nlohmann::json::array())) {
+        if (header.is_object() && header.contains("credentialRef") &&
+            header.at("credentialRef").is_string()) {
+          live.insert(header.at("credentialRef").get<std::string>());
+        }
+      }
+      if (config.contains("oauth") && config.at("oauth").is_object()) {
+        for (const auto* key : {"credentialRef", "clientSecretRef", "dpopKeyRef"}) {
+          if (config.at("oauth").contains(key) && config.at("oauth").at(key).is_string()) {
+            live.insert(config.at("oauth").at(key).get<std::string>());
+          }
+        }
+      }
+      std::vector<std::string> retired;
+      for (const auto& header : existing->value("httpAuthHeaders", nlohmann::json::array())) {
+        if (header.is_object() && header.contains("credentialRef") &&
+            header.at("credentialRef").is_string()) {
+          const auto reference = header.at("credentialRef").get<std::string>();
+          if (!live.count(reference)) retired.push_back(reference);
+        }
+      }
+      if (existing->contains("oauth") && existing->at("oauth").is_object()) {
+        for (const auto* key : {"credentialRef", "clientSecretRef", "dpopKeyRef"}) {
+          if (existing->at("oauth").contains(key) && existing->at("oauth").at(key).is_string()) {
+            const auto reference = existing->at("oauth").at(key).get<std::string>();
+            if (!live.count(reference)) retired.push_back(reference);
+          }
+        }
+      }
+      std::string ignored;
+      (void)clean_credential_references(database_, *credentials_, retired, ignored);
     }
     try {
       return {true, view_for(database_->get_mcp_server(server_id).value())};
@@ -7604,8 +7936,17 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
       return failure("MCP_UNAVAILABLE", "The MCP supervisor is unavailable");
     }
     try {
-      return method == "mcp_server_start" ? IpcReply{true, mcp_->start(server_id)}
-                                           : IpcReply{true, mcp_->stop(server_id)};
+      if (method == "mcp_server_start") {
+        const auto row = database_->get_mcp_server(server_id);
+        if (!row.has_value()) return failure("NOT_FOUND", "The MCP server was not found");
+        // An unconnected OAuth server (or any other stored-config problem) is
+        // reported in the view instead of being launched into a certain 401.
+        if (const auto reason = oauth_config_error(*row); reason.has_value()) {
+          return {true, view_for(*row)};
+        }
+        return {true, mcp_->start(server_id)};
+      }
+      return {true, mcp_->stop(server_id)};
     } catch (const std::exception& error) {
       return failure("MCP_ERROR", error.what());
     }
