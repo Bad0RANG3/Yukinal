@@ -963,3 +963,18 @@ startup access violations. The canonical `native/build-nmake` Release build
 passed all twelve CTest targets. `server_snapshot`/`server_services`, MCP
 supervision and catalog, `host.tool.execute`, investigation, the remaining file
 and terminal commands, and installer work remain.
+
+Later on 2026-10-16, the C++ host completed the three read-only overview panes.
+`server_services` runs `service_inventory` through the in-process SSH core and
+applies the Python `server.services.normalize` RPC. `server_snapshot` runs the
+fixed 22-command collector batch with a fresh 16-byte nonce, parses the
+nonce-delimited markers into `{command_id: {exitCode, stdout}}` (rejecting
+missing, ambiguous, or out-of-range sections), applies the Python
+`server.snapshot.normalize` RPC, validates the health/capabilities/collectors,
+and inserts the snapshot row before returning it, so the audit and trend views
+the database carries stay authoritative. `desktop_host_database_tests` and
+`desktop_host_tests` cover the snapshot persistence and the new parameter
+validation. The canonical `native/build-nmake` Release build passed all twelve
+CTest targets. `server_connect`/`disconnect`, remote file and terminal commands,
+MCP supervision and catalog, `host.tool.execute`, investigation, installers, and
+real SSH validation remain.

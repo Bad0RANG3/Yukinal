@@ -674,7 +674,8 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   }
 
   if (method == "server_host_key_probe" || method == "server_host_key_trust" ||
-      method == "server_logs") {
+      method == "server_logs" || method == "server_services" ||
+      method == "server_snapshot") {
     return server_read_command(method, params);
   }
 
@@ -1596,7 +1597,7 @@ IpcReply IpcRouter::server_read_command(const std::string& method,
   if (database_ == nullptr || !database_->is_available()) {
     return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
   }
-  if (method != "server_logs") {
+  if (method == "server_host_key_probe" || method == "server_host_key_trust") {
     const bool trust = method == "server_host_key_trust";
     const std::set<std::string> fields =
         trust ? std::set<std::string>{"serverId", "probeTicket", "fingerprint"}
@@ -1687,39 +1688,71 @@ IpcReply IpcRouter::server_read_command(const std::string& method,
     }
   }
 
-  // server_logs
   if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
-    return failure("INVALID_PARAMS", "server_logs requires exactly serverId");
+    return failure("INVALID_PARAMS", method + " requires exactly serverId");
   }
   const auto server_id = params.at("serverId").get<std::string>();
   if (!valid_server_id(server_id)) {
-    return failure("INVALID_PARAMS", "server_logs serverId is invalid");
+    return failure("INVALID_PARAMS", method + " serverId is invalid");
   }
-  SshCommandResult raw;
+
+  if (method == "server_logs" || method == "server_services") {
+    const bool logs = method == "server_logs";
+    SshCommandResult raw;
+    try {
+      raw = logs ? run_server_logs(*database_, *credentials_, server_id, std::nullopt, "", 20)
+                 : run_service_inventory(*database_, *credentials_, server_id, 20);
+    } catch (const std::exception& error) {
+      return failure("SSH_UNAVAILABLE", error.what());
+    }
+    if (!raw.error_code.empty()) {
+      return failure("SSH_ERROR", raw.error_message.empty() ? raw.error_code : raw.error_message);
+    }
+    try {
+      auto& client = ensure_sidecar();
+      client.ensure_started(std::chrono::milliseconds(60000));
+      const auto normalized = client.request(
+          logs ? "server.logs.normalize" : "server.services.normalize",
+          {{"stdout", raw.stdout_text}, {"arguments", nlohmann::json::object()}},
+          std::chrono::milliseconds(15000));
+      if (!normalized.is_object() || normalized.value("ok", false) != true) {
+        return failure(
+            "NORMALIZE_ERROR",
+            normalized.value("message",
+                             std::string("The Agent could not parse the remote output")));
+      }
+      if (!normalized.contains("output")) {
+        return failure("NORMALIZE_ERROR", "The Agent returned no normalized output");
+      }
+      return {true, normalized.at("output")};
+    } catch (const SidecarRpcError& error) {
+      return failure(sidecar_error_code(error.code()), error.what());
+    } catch (const SidecarError& error) {
+      return failure("AGENT_UNAVAILABLE", error.what());
+    } catch (const std::exception& error) {
+      return failure("NORMALIZE_ERROR", error.what());
+    }
+  }
+
+  // server_snapshot: run the fixed collector batch, normalize it through Python,
+  // then persist and return the UI contract.
+  nlohmann::json outputs;
   try {
-    raw = run_server_logs(*database_, *credentials_, server_id, std::nullopt, "", 20);
+    outputs = run_system_snapshot(*database_, *credentials_, server_id, 25);
   } catch (const std::exception& error) {
     return failure("SSH_UNAVAILABLE", error.what());
   }
-  if (!raw.error_code.empty()) {
-    return failure("SSH_ERROR", raw.error_message.empty() ? raw.error_code : raw.error_message);
-  }
+  nlohmann::json snapshot_data;
   try {
     auto& client = ensure_sidecar();
     client.ensure_started(std::chrono::milliseconds(60000));
-    const auto normalized = client.request(
-        "server.logs.normalize",
-        {{"stdout", raw.stdout_text}, {"arguments", nlohmann::json::object()}},
-        std::chrono::milliseconds(15000));
-    if (!normalized.is_object() || normalized.value("ok", false) != true) {
-      return failure("NORMALIZE_ERROR",
-                     normalized.value("message",
-                                      std::string("The Agent could not parse the log output")));
+    const auto normalized = client.request("server.snapshot.normalize", {{"outputs", outputs}},
+                                           std::chrono::milliseconds(15000));
+    if (!normalized.is_object() || !normalized.contains("snapshotData") ||
+        !normalized.at("snapshotData").is_object()) {
+      return failure("NORMALIZE_ERROR", "The Agent returned invalid snapshot data");
     }
-    if (!normalized.contains("output")) {
-      return failure("NORMALIZE_ERROR", "The Agent returned no normalized logs");
-    }
-    return {true, normalized.at("output")};
+    snapshot_data = normalized.at("snapshotData");
   } catch (const SidecarRpcError& error) {
     return failure(sidecar_error_code(error.code()), error.what());
   } catch (const SidecarError& error) {
@@ -1727,6 +1760,24 @@ IpcReply IpcRouter::server_read_command(const std::string& method,
   } catch (const std::exception& error) {
     return failure("NORMALIZE_ERROR", error.what());
   }
+  const auto health = snapshot_data.value("health", std::string());
+  if (!is_one_of(health, {"healthy", "warning", "critical", "unknown"}) ||
+      !snapshot_data.contains("capabilities") || !snapshot_data.contains("collectors")) {
+    return failure("NORMALIZE_ERROR", "The Agent returned invalid snapshot data");
+  }
+  nlohmann::json snapshot = snapshot_data;
+  const auto epoch_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+  snapshot["id"] = "snap_" + server_id + "_" + std::to_string(epoch_seconds);
+  snapshot["serverId"] = server_id;
+  snapshot["collectedAt"] = iso8601_now();
+  try {
+    database_->insert_snapshot(snapshot);
+  } catch (...) {
+    return failure("STORAGE_ERROR", "The local snapshot database could not save the snapshot");
+  }
+  return {true, {{"snapshot", std::move(snapshot)}}};
 }
 
 void IpcRouter::set_event_sink(

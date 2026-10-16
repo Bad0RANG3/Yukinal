@@ -619,6 +619,35 @@ int main() {
           "deleting an MCP server should reclaim its header secret");
     check(!mcp_router.invoke("mcp_server_delete", {{"serverId", "ops-tools"}}).ok,
           "deleting an unknown MCP server should fail");
+
+    // Snapshot persistence: the overview pane stores its normalized contract.
+    database.insert_snapshot({{"id", "snap_srv_01abc_1"},
+                              {"serverId", "srv_01abc"},
+                              {"collectedAt", "2026-01-01T00:00:00Z"},
+                              {"health", "healthy"},
+                              {"capabilities", {{"linux", true}, {"docker", false}}},
+                              {"collectors", nlohmann::json::array()}});
+    {
+      sqlite3* snapshot_db = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &snapshot_db) ==
+                SQLITE_OK,
+            "could not reopen the database for the snapshot readback");
+      check(query_integer(
+                snapshot_db,
+                "SELECT count(*) FROM snapshots WHERE id = 'snap_srv_01abc_1'") == 1,
+            "insert_snapshot should persist exactly one row");
+      sqlite3_close(snapshot_db);
+    }
+    bool bad_snapshot_rejected = false;
+    try {
+      database.insert_snapshot({{"id", "snap_bad"},
+                                {"serverId", "srv_01abc"},
+                                {"collectedAt", "2026-01-01T00:00:00Z"},
+                                {"health", "not-a-health"}});
+    } catch (const std::exception&) {
+      bad_snapshot_rejected = true;
+    }
+    check(bad_snapshot_rejected, "insert_snapshot should reject an unknown health value");
   }
 
   sqlite3* readback = nullptr;

@@ -66,6 +66,7 @@ class DesktopDatabase {
   void upsert_mcp_server(const nlohmann::json& config) const;
   [[nodiscard]] std::optional<nlohmann::json> delete_mcp_server(
       const std::string& server_id) const;
+  void insert_snapshot(const nlohmann::json& snapshot) const;
   [[nodiscard]] nlohmann::json list_chat_sessions(
       const std::optional<std::string>& query, const std::optional<bool>& archived,
       int limit, int offset) const;

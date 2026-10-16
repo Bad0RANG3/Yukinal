@@ -117,6 +117,16 @@ int main() {
         "server_logs should reject a malformed server id");
   check(!router.invoke("server_logs", {{"serverId", "srv_ok"}}).ok,
         "server_logs should report a missing local database");
+  check(!router.invoke("server_services", nlohmann::json::object()).ok,
+        "server_services should require a server id");
+  check(!router.invoke("server_services", {{"serverId", "srv_ok"}}).ok,
+        "server_services should report a missing local database");
+  check(!router.invoke("server_snapshot", nlohmann::json::object()).ok,
+        "server_snapshot should require a server id");
+  check(!router.invoke("server_snapshot", {{"serverId", "not-a-server"}}).ok,
+        "server_snapshot should reject a malformed server id");
+  check(!router.invoke("server_snapshot", {{"serverId", "srv_ok"}}).ok,
+        "server_snapshot should report a missing local database");
   check(!router.invoke("server_host_key_probe", nlohmann::json::object()).ok,
         "server_host_key_probe should require a server id");
   check(!router.invoke("server_host_key_probe", {{"serverId", "srv_ok"}}).ok,

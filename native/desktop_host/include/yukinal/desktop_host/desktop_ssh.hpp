@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 
@@ -37,5 +38,20 @@ struct SshCommandResult {
                                                   const CredentialStore& credentials,
                                                   const std::string& server_id,
                                                   int timeout_seconds);
+
+// Runs the read-only `service_inventory` operation. The caller applies the Python
+// `server.services.normalize` RPC to the returned output.
+[[nodiscard]] SshCommandResult run_service_inventory(const DesktopDatabase& database,
+                                                     const CredentialStore& credentials,
+                                                     const std::string& server_id,
+                                                     int timeout_seconds);
+
+// Runs the fixed `system_snapshot` command batch with a fresh nonce and parses the
+// nonce-delimited output into `{command_id: {exitCode, stdout}}`. The caller applies
+// the Python `server.snapshot.normalize` RPC to that map.
+[[nodiscard]] nlohmann::json run_system_snapshot(const DesktopDatabase& database,
+                                                 const CredentialStore& credentials,
+                                                 const std::string& server_id,
+                                                 int timeout_seconds);
 
 }  // namespace yukinal::desktop_host

@@ -1697,6 +1697,29 @@ std::optional<nlohmann::json> DesktopDatabase::delete_mcp_server(
   return existing;
 }
 
+void DesktopDatabase::insert_snapshot(const nlohmann::json& snapshot) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) {
+    throw std::runtime_error("The local snapshot database is unavailable");
+  }
+  const auto health = snapshot.at("health").get<std::string>();
+  if (!is_one_of(health, {"healthy", "warning", "critical", "unknown"})) {
+    throw std::runtime_error("The snapshot health is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      INSERT INTO snapshots (id, server_id, collected_at, health, payload)
+      VALUES (?1, ?2, ?3, ?4, ?5)
+    )SQL");
+  bind_text(connection_, statement.get(), 1, snapshot.at("id").get<std::string>());
+  bind_text(connection_, statement.get(), 2, snapshot.at("serverId").get<std::string>());
+  bind_text(connection_, statement.get(), 3, snapshot.at("collectedAt").get<std::string>());
+  bind_text(connection_, statement.get(), 4, health);
+  bind_text(connection_, statement.get(), 5, snapshot.dump());
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
 nlohmann::json DesktopDatabase::list_chat_sessions(
     const std::optional<std::string>& query, const std::optional<bool>& archived,
     int limit, int offset) const {
