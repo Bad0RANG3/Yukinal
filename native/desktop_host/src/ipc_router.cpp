@@ -1731,17 +1731,31 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
     credentials_->erase(CredentialReference::parse(params.at("reference").get<std::string>()));
     return {{"reclaimed", true}};
   }
-  if (method == "host.ssh.service_target") {
+  if (method == "host.ssh.service_target" || method == "host.ssh.filesystem_read_target" ||
+      method == "host.ssh.filesystem_write_target" ||
+      method == "host.ssh.filesystem_edit_target") {
     if (database_ == nullptr || !database_->is_available()) {
       throw SidecarRpcError(-32603, "the local server database is unavailable");
     }
-    const auto server_id =
-        params.is_object() ? params.value("serverId", std::string()) : std::string();
-    if (server_id.empty()) {
-      throw SidecarRpcError(-32602, "host.ssh.service_target requires serverId");
-    }
     try {
-      return resolve_ssh_service_target(*database_, *credentials_, server_id);
+      if (method == "host.ssh.service_target") {
+        const auto server_id =
+            params.is_object() ? params.value("serverId", std::string()) : std::string();
+        if (server_id.empty()) {
+          throw SidecarRpcError(-32602, "host.ssh.service_target requires serverId");
+        }
+        return resolve_ssh_service_target(*database_, *credentials_, server_id);
+      }
+      if (!params.is_object()) {
+        throw SidecarRpcError(-32602, method + " requires an object payload");
+      }
+      if (method == "host.ssh.filesystem_read_target") {
+        return resolve_ssh_service_filesystem_read_target(*database_, *credentials_, params);
+      }
+      if (method == "host.ssh.filesystem_write_target") {
+        return resolve_ssh_service_filesystem_write_target(*database_, *credentials_, params);
+      }
+      return resolve_ssh_service_filesystem_edit_target(*database_, *credentials_, params);
     } catch (const SidecarRpcError&) {
       throw;
     } catch (const std::exception& error) {

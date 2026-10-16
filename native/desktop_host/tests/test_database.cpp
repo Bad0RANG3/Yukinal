@@ -481,6 +481,68 @@ int main() {
               probe_payload.at("target").at("auth").at("type") == "probe" &&
               !probe_payload.at("target").contains("host_key_fingerprint"),
           "the probe target must carry no identity and no trust source");
+
+    const auto read_target = yukinal::desktop_host::resolve_ssh_service_filesystem_read_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/etc/hosts"}});
+    check(read_target.at("filesystemRead").at("path") == "/etc/hosts" &&
+              read_target.at("filesystemRead").at("maxBytes") == 131072,
+          "a filesystem read target should default to the bounded read size");
+    const auto bounded_read = yukinal::desktop_host::resolve_ssh_service_filesystem_read_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/etc/hosts"}, {"maxBytes", 1024}});
+    check(bounded_read.at("filesystemRead").at("maxBytes") == 1024,
+          "a filesystem read target should honor an explicit maxBytes");
+
+    auto expect_rejected = [&database, &target_credentials](const char* label,
+                                                            const nlohmann::json& request) {
+      bool rejected = false;
+      try {
+        (void)yukinal::desktop_host::resolve_ssh_service_filesystem_read_target(
+            database, target_credentials, request);
+      } catch (const std::exception&) {
+        rejected = true;
+      }
+      check(rejected, label);
+    };
+    expect_rejected("a relative read path must be refused",
+                    {{"serverId", "srv_target"}, {"path", "etc/hosts"}});
+    expect_rejected("a credential path must be refused by the blocklist",
+                    {{"serverId", "srv_target"}, {"path", "/home/deploy/.ssh/id_rsa"}});
+    expect_rejected("an over-limit maxBytes must be refused",
+                    {{"serverId", "srv_target"},
+                     {"path", "/etc/hosts"},
+                     {"maxBytes", 2 * 1024 * 1024}});
+
+    const auto write_target = yukinal::desktop_host::resolve_ssh_service_filesystem_write_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/srv/app.conf"}, {"content", "PORT=8080\n"}});
+    check(write_target.at("filesystemWrite").at("bytesWritten") == 10,
+          "a filesystem write target should report the validated byte count");
+
+    const auto revision = std::string(64, 'a');
+    const auto edit_target = yukinal::desktop_host::resolve_ssh_service_filesystem_edit_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"},
+         {"path", "/srv/app.conf"},
+         {"expectedRevision", revision},
+         {"oldString", "PORT=8080"},
+         {"newString", "PORT=9090"}});
+    check(edit_target.at("filesystemEdit").at("expectedRevision") == revision,
+          "a filesystem edit target should carry the validated revision");
+    bool bad_revision_rejected = false;
+    try {
+      (void)yukinal::desktop_host::resolve_ssh_service_filesystem_edit_target(
+          database, target_credentials,
+          {{"serverId", "srv_target"},
+           {"path", "/srv/app.conf"},
+           {"expectedRevision", "short"},
+           {"oldString", "a"},
+           {"newString", "b"}});
+    } catch (const std::exception&) {
+      bad_revision_rejected = true;
+    }
+    check(bad_revision_rejected, "a malformed edit revision must be refused");
   }
 
   sqlite3* readback = nullptr;

@@ -174,6 +174,89 @@ nlohmann::json build_trust_source(const nlohmann::json& server, const std::strin
   return target;
 }
 
+// Path policy for the Agent file tools. This mirrors the retired Rust
+// `yukinal_filesystem::policy`; the rules live here so the host tools have one
+// place to change and the credentials/process-secret blocklist is enforced
+// before any SFTP session is opened.
+constexpr std::size_t kMaxRemotePathChars = 4096;
+constexpr std::size_t kDefaultAgentReadBytes = 128 * 1024;
+constexpr std::size_t kMaxAgentReadBytes = 1024 * 1024;
+constexpr std::size_t kMaxAgentWriteBytes = 512 * 1024;
+constexpr std::size_t kMaxAgentEditBytes = 512 * 1024;
+
+std::size_t utf8_length(const std::string& value) {
+  return static_cast<std::size_t>(std::count_if(value.begin(), value.end(), [](unsigned char byte) {
+    return (byte & 0xC0) != 0x80;
+  }));
+}
+
+std::string lower_ascii(const std::string& value) {
+  std::string result = value;
+  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char byte) {
+    return static_cast<char>(std::tolower(byte));
+  });
+  return result;
+}
+
+bool validate_remote_path(const std::string& value) {
+  if (value.empty() || utf8_length(value) > kMaxRemotePathChars) return false;
+  if (value.front() != '/') return false;
+  return value.find('\0') == std::string::npos && value.find('\r') == std::string::npos &&
+         value.find('\n') == std::string::npos;
+}
+
+bool is_agent_blocked_path(const std::string& value) {
+  const auto normalized = lower_ascii(value);
+  for (const auto* fragment : {"/.aws/", "/.azure/", "/.config/gcloud/", "/.kube/",
+                               "/.ssh/", "/proc/", "/run/secrets/", "/var/run/secrets/"}) {
+    if (normalized.find(fragment) != std::string::npos) return true;
+  }
+  const auto slash = normalized.rfind('/');
+  const auto name = slash == std::string::npos ? normalized : normalized.substr(slash + 1);
+  for (const auto* blocked : {"shadow", "gshadow", "sudoers", "id_rsa", "id_dsa", "id_ecdsa",
+                              "id_ed25519", "credentials", "credentials.json", "secrets",
+                              "secrets.json"}) {
+    if (name == blocked) return true;
+  }
+  for (const auto* extension : {".pem", ".key", ".p12", ".pfx", ".jks"}) {
+    const auto length = std::strlen(extension);
+    if (name.size() >= length && name.compare(name.size() - length, length, extension) == 0) {
+      return true;
+    }
+  }
+  if (name == ".env" || name.rfind(".env.", 0) == 0) {
+    return name != ".env.example" && name != ".env.sample" && name != ".env.template";
+  }
+  return false;
+}
+
+bool is_content_revision(const std::string& value) {
+  return value.size() == 64 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char byte) {
+           return std::isxdigit(byte) != 0;
+         });
+}
+
+std::string required_param(const nlohmann::json& request, const char* key) {
+  const auto found = request.find(key);
+  if (found == request.end() || !found->is_string()) {
+    throw std::runtime_error("the SSH filesystem target request is invalid");
+  }
+  return found->get<std::string>();
+}
+
+void require_checked_remote_path(const std::string& path) {
+  if (!validate_remote_path(path)) {
+    throw std::runtime_error(
+        "remote path must be 1-4096 characters, absolute, and free of control characters");
+  }
+  if (is_agent_blocked_path(path)) {
+    throw std::runtime_error(
+        "Agent file tools cannot access paths that commonly contain credentials or process "
+        "secrets");
+  }
+}
+
 }  // namespace
 
 nlohmann::json resolve_ssh_service_target(const DesktopDatabase& database,
@@ -310,6 +393,67 @@ nlohmann::json resolve_ssh_service_probe_target(const DesktopDatabase& database,
     target["proxy"] = std::move(proxy_json);
   }
   return {{"target", std::move(target)}, {"credentials", std::move(credentials_out)}};
+}
+
+nlohmann::json resolve_ssh_service_filesystem_read_target(const DesktopDatabase& database,
+                                                          const CredentialStore& credentials,
+                                                          const nlohmann::json& request) {
+  const auto path = required_param(request, "path");
+  require_checked_remote_path(path);
+  std::size_t max_bytes = kDefaultAgentReadBytes;
+  if (const auto found = request.find("maxBytes"); found != request.end() && !found->is_null()) {
+    if (!found->is_number_integer()) {
+      throw std::runtime_error("the SSH filesystem target request is invalid");
+    }
+    const auto requested = found->get<std::int64_t>();
+    if (requested < 1 || requested > static_cast<std::int64_t>(kMaxAgentReadBytes)) {
+      throw std::runtime_error("maxBytes must be between 1 and 1048576");
+    }
+    max_bytes = static_cast<std::size_t>(requested);
+  }
+  auto payload =
+      resolve_ssh_service_target(database, credentials, required_param(request, "serverId"));
+  payload["filesystemRead"] = {{"path", path}, {"maxBytes", max_bytes}};
+  return payload;
+}
+
+nlohmann::json resolve_ssh_service_filesystem_write_target(const DesktopDatabase& database,
+                                                           const CredentialStore& credentials,
+                                                           const nlohmann::json& request) {
+  const auto path = required_param(request, "path");
+  require_checked_remote_path(path);
+  const auto content = required_param(request, "content");
+  if (content.size() > kMaxAgentWriteBytes) {
+    throw std::runtime_error("content must be at most 524288 bytes");
+  }
+  auto payload =
+      resolve_ssh_service_target(database, credentials, required_param(request, "serverId"));
+  payload["filesystemWrite"] = {{"path", path}, {"bytesWritten", content.size()}};
+  return payload;
+}
+
+nlohmann::json resolve_ssh_service_filesystem_edit_target(const DesktopDatabase& database,
+                                                          const CredentialStore& credentials,
+                                                          const nlohmann::json& request) {
+  const auto path = required_param(request, "path");
+  require_checked_remote_path(path);
+  const auto expected_revision = required_param(request, "expectedRevision");
+  if (!is_content_revision(expected_revision)) {
+    throw std::runtime_error(
+        "expectedRevision must be the 64-character hex revision returned by filesystem.read");
+  }
+  const auto old_string = required_param(request, "oldString");
+  const auto new_string = required_param(request, "newString");
+  if (old_string.empty()) {
+    throw std::runtime_error("oldString must not be empty: it must occur exactly once");
+  }
+  if (old_string.size() > kMaxAgentEditBytes || new_string.size() > kMaxAgentEditBytes) {
+    throw std::runtime_error("oldString and newString must be at most 524288 bytes");
+  }
+  auto payload =
+      resolve_ssh_service_target(database, credentials, required_param(request, "serverId"));
+  payload["filesystemEdit"] = {{"path", path}, {"expectedRevision", expected_revision}};
+  return payload;
 }
 
 }  // namespace yukinal::desktop_host
