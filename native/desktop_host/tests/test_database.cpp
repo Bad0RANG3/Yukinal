@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_mcp.hpp"
+#include "yukinal/desktop_host/desktop_oauth.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
@@ -26,6 +27,44 @@ void check(bool condition, const char* message) {
   if (condition) return;
   std::cerr << message << '\n';
   std::exit(1);
+}
+
+// Percent-decodes an OAuth query value. Only the characters the engine encodes
+// (RFC 3986 unreserved plus `%XX`) appear in the URLs the tests read.
+std::string url_decode(const std::string& value) {
+  std::string out;
+  out.reserve(value.size());
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    if (value[index] == '%' && index + 2 < value.size()) {
+      const auto hex = value.substr(index + 1, 2);
+      out.push_back(static_cast<char>(std::stoi(hex, nullptr, 16)));
+      index += 2;
+    } else if (value[index] == '+') {
+      out.push_back(' ');
+    } else {
+      out.push_back(value[index]);
+    }
+  }
+  return out;
+}
+
+std::string query_value(const std::string& url, const std::string& key) {
+  const auto question = url.find('?');
+  if (question == std::string::npos) return {};
+  const auto query = url.substr(question + 1);
+  std::size_t from = 0;
+  while (from <= query.size()) {
+    const auto amp = query.find('&', from);
+    const auto pair =
+        query.substr(from, amp == std::string::npos ? std::string::npos : amp - from);
+    const auto equals = pair.find('=');
+    if (equals != std::string::npos && pair.substr(0, equals) == key) {
+      return url_decode(pair.substr(equals + 1));
+    }
+    if (amp == std::string::npos) break;
+    from = amp + 1;
+  }
+  return {};
 }
 
 // A hermetic credential store so the network proxy and server commands can be
@@ -1049,6 +1088,299 @@ int main(int argc, char** argv) {
       check(saw_delete.load(), "stopping an HTTP MCP server should terminate its session");
       http_mcp.stop();
       http_mock_thread.join();
+    }
+
+    // ── MCP OAuth (authorization code, device code, cancellation) ────────────
+    // One loopback server plays both the authorization server and the MCP
+    // endpoint, so the engine's discovery, dynamic registration, PKCE exchange,
+    // device polling and credential persistence can all be exercised, and the
+    // supervisor can then prove the stored token reaches the wire.
+    {
+      httplib::Server oauth_server;
+      std::string base;
+      const std::string kAccessToken = "oauth-access-1";
+      std::atomic<bool> saw_pkce{false};
+      std::atomic<bool> saw_device_grant{false};
+      std::atomic<bool> saw_bearer{false};
+      std::atomic<int> device_polls{0};
+      std::atomic<int> device_variant{1};
+      const std::string kDeviceGrant = "urn:ietf:params:oauth:grant-type:device_code";
+
+      oauth_server.Get("/.well-known/oauth-protected-resource/mcp",
+                       [&](const httplib::Request&, httplib::Response& response) {
+                         response.set_content(
+                             nlohmann::json{{"resource", base + "/mcp"},
+                                            {"authorization_servers",
+                                             nlohmann::json::array({base})}}
+                                 .dump(),
+                             "application/json");
+                       });
+      oauth_server.Get("/.well-known/oauth-authorization-server",
+                       [&](const httplib::Request&, httplib::Response& response) {
+                         response.set_content(
+                             nlohmann::json{
+                                 {"issuer", base},
+                                 {"authorization_endpoint", base + "/authorize"},
+                                 {"token_endpoint", base + "/token"},
+                                 {"registration_endpoint", base + "/register"},
+                                 {"device_authorization_endpoint", base + "/device"},
+                                 {"response_types_supported", nlohmann::json::array({"code"})},
+                                 {"code_challenge_methods_supported",
+                                  nlohmann::json::array({"S256"})}}
+                                 .dump(),
+                             "application/json");
+                       });
+      oauth_server.Post("/register", [&](const httplib::Request&, httplib::Response& response) {
+        response.set_content(nlohmann::json{{"client_id", "dyn-client-1"},
+                                            {"token_endpoint_auth_method", "none"}}
+                                 .dump(),
+                             "application/json");
+      });
+      oauth_server.Post("/device", [&](const httplib::Request&, httplib::Response& response) {
+        const bool pending = device_variant.load() == 2;
+        response.set_content(nlohmann::json{{"device_code", pending ? "dev-code-2" : "dev-code-1"},
+                                            {"user_code", "ABCD-1234"},
+                                            {"verification_uri", base + "/verify"},
+                                            {"verification_uri_complete", base + "/verify?code=ABCD-1234"},
+                                            {"expires_in", 900},
+                                            {"interval", 1}}
+                                 .dump(),
+                             "application/json");
+      });
+      oauth_server.Post("/token", [&](const httplib::Request& request, httplib::Response& response) {
+        const auto grant = request.get_param_value("grant_type");
+        if (grant == kDeviceGrant) {
+          // The second variant never releases the device code so a cancellation
+          // can be observed mid-poll.
+          if (request.get_param_value("device_code") == "dev-code-2") {
+            response.set_content(nlohmann::json{{"error", "authorization_pending"}}.dump(),
+                                 "application/json");
+            return;
+          }
+          if (device_polls.fetch_add(1) == 0) {
+            response.set_content(nlohmann::json{{"error", "authorization_pending"}}.dump(),
+                                 "application/json");
+            return;
+          }
+          saw_device_grant = true;
+        } else if (!request.get_param_value("code").empty() &&
+                   !request.get_param_value("code_verifier").empty()) {
+          saw_pkce = true;
+        }
+        response.set_content(nlohmann::json{{"access_token", kAccessToken},
+                                            {"token_type", "Bearer"},
+                                            {"expires_in", 3600},
+                                            {"refresh_token", "oauth-refresh-1"}}
+                                 .dump(),
+                             "application/json");
+      });
+      oauth_server.Get("/mcp", [](const httplib::Request&, httplib::Response& response) {
+        response.status = 405;
+      });
+      oauth_server.Post("/mcp", [&](const httplib::Request& request, httplib::Response& response) {
+        if (request.get_header_value("Authorization") != "Bearer " + kAccessToken) {
+          response.status = 401;
+          return;
+        }
+        saw_bearer = true;
+        auto frame = nlohmann::json::parse(request.body, nullptr, false);
+        if (frame.is_discarded() || !frame.is_object()) {
+          response.status = 400;
+          return;
+        }
+        const auto method = frame.value("method", std::string());
+        response.set_header("Mcp-Session-Id", "sess-oauth-1");
+        if (method == "initialize") {
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"protocolVersion", "2024-11-05"},
+                               {"capabilities", nlohmann::json::object()},
+                               {"serverInfo", {{"name", "oauth-mock"}, {"version", "1.0"}}}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        if (method == "notifications/initialized") {
+          response.status = 202;
+          return;
+        }
+        if (method == "tools/list") {
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"tools", nlohmann::json::array({nlohmann::json{
+                                             {"name", "echo"},
+                                             {"description", "Echo a value"},
+                                             {"inputSchema", {{"type", "object"}}},
+                                             {"annotations", {{"readOnlyHint", true}}}}})}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        if (method == "tools/call") {
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"content", nlohmann::json::array({nlohmann::json{
+                                                 {"type", "text"}, {"text", "oauth:echo"}}})},
+                               {"isError", false}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        response.status = 400;
+      });
+      const int oauth_port = oauth_server.bind_to_any_port("127.0.0.1");
+      check(oauth_port > 0, "the OAuth mock could not bind a loopback port");
+      base = "http://127.0.0.1:" + std::to_string(oauth_port);
+      std::thread oauth_thread([&oauth_server] { oauth_server.listen_after_bind(); });
+      oauth_server.wait_until_ready();
+
+      const auto oauth_row = [&](const std::string& id, const std::string& flow,
+                                 const std::string& client_id) {
+        return nlohmann::json{
+            {"id", id},
+            {"label", id},
+            {"transport", "http"},
+            {"url", base + "/mcp"},
+            {"enabled", true},
+            {"allowedTools", nlohmann::json::array({"echo"})},
+            {"trustLevel", "reviewed"},
+            {"annotationTrust", "trusted"},
+            {"oauth",
+             {{"issuer", base},
+              {"clientId", client_id},
+              {"flow", flow},
+              {"clientAuth", "none"},
+              {"dpop", false},
+              {"scopes", nlohmann::json::array({"read"})}}}};
+      };
+
+      // Authorization code: discovery → dynamic registration → the browser
+      // redirect (completed by the injected opener) → the PKCE token exchange.
+      database.upsert_mcp_server(oauth_row("oauth_ac", "authorization_code", ""));
+      {
+        yukinal::desktop_host::OAuthConnectCallbacks callbacks;
+        callbacks.cancel = std::make_shared<std::atomic<bool>>(false);
+        callbacks.open_browser = [](const std::string& url) {
+          const auto redirect = query_value(url, "redirect_uri");
+          const auto state = query_value(url, "state");
+          if (redirect.empty() || state.empty()) return false;
+          const auto path_start = redirect.find('/', 7);
+          const auto origin = redirect.substr(0, path_start);
+          httplib::Client client(origin);
+          const auto response = client.Get("/callback?code=auth-code-1&state=" + state);
+          return response && response->status == 200;
+        };
+        const auto connected =
+            yukinal::desktop_host::oauth_connect(database, mcp_credentials, "oauth_ac", callbacks);
+        check(connected.at("serverId") == "oauth_ac" &&
+                  connected.at("issuer") == base &&
+                  connected.at("tokenEndpoint") == base + "/token" &&
+                  connected.at("scopes").size() == 1 && connected.at("scopes").at(0) == "read",
+              "the authorization-code connect should report the resolved endpoints and scopes");
+        check(saw_pkce.load(), "the token exchange must carry the PKCE code and verifier");
+      }
+      {
+        const auto row = database.get_mcp_server("oauth_ac").value();
+        const auto& oauth = row.at("oauth");
+        check(oauth.at("clientId") == "dyn-client-1" &&
+                  oauth.at("credentialRef").is_string() &&
+                  oauth.at("tokenEndpoint") == base + "/token",
+              "a completed connect should persist the registered client and token reference");
+        const auto reference =
+            yukinal::desktop_host::CredentialReference::parse(oauth.at("credentialRef").get<std::string>());
+        const auto secret = mcp_credentials.get(reference);
+        const auto bundle = nlohmann::json::parse(
+            std::string(reinterpret_cast<const char*>(secret.data()), secret.size()));
+        check(bundle.at("access_token") == kAccessToken &&
+                  bundle.at("refresh_token") == "oauth-refresh-1" &&
+                  bundle.at("token_type") == "Bearer",
+              "the token bundle should be stored by reference, never in the row");
+      }
+
+      // Device code: the prompt event data, a pending poll, then a grant.
+      database.upsert_mcp_server(oauth_row("oauth_device", "device_code", ""));
+      nlohmann::json device_prompt;
+      {
+        yukinal::desktop_host::OAuthConnectCallbacks callbacks;
+        callbacks.cancel = std::make_shared<std::atomic<bool>>(false);
+        callbacks.open_browser = [](const std::string&) { return true; };
+        callbacks.device_code_prompt = [&](const nlohmann::json& prompt) {
+          device_prompt = prompt;
+        };
+        const auto connected = yukinal::desktop_host::oauth_connect(
+            database, mcp_credentials, "oauth_device", callbacks);
+        check(connected.at("serverId") == "oauth_device" && saw_device_grant.load(),
+              "the device-code connect should poll until the grant arrives");
+      }
+      check(device_prompt.at("serverId") == "oauth_device" &&
+                device_prompt.at("userCode") == "ABCD-1234" &&
+                device_prompt.at("verificationUri") == base + "/verify" &&
+                device_prompt.at("verificationUriComplete") == base + "/verify?code=ABCD-1234" &&
+                device_prompt.at("expiresAt").is_string(),
+            "the device-code prompt should carry the user code, URLs and expiry");
+
+      // Cancellation: a device code that never releases, stopped mid-poll.
+      database.upsert_mcp_server(oauth_row("oauth_cancel", "device_code", "dyn-client-1"));
+      device_variant = 2;
+      {
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        yukinal::desktop_host::OAuthConnectCallbacks callbacks;
+        callbacks.cancel = cancel;
+        callbacks.open_browser = [](const std::string&) { return true; };
+        std::thread stopper([&cancel] {
+          std::this_thread::sleep_for(std::chrono::milliseconds(300));
+          cancel->store(true);
+        });
+        bool cancelled = false;
+        try {
+          (void)yukinal::desktop_host::oauth_connect(database, mcp_credentials, "oauth_cancel",
+                                                     callbacks);
+        } catch (const std::exception& error) {
+          cancelled = std::string(error.what()).find("cancelled") != std::string::npos;
+        }
+        stopper.join();
+        check(cancelled, "cancelling an OAuth flow should abandon it with a cancellation error");
+      }
+      device_variant = 1;
+
+      // Supervisor: the connected authorization-code row now drives a real MCP
+      // session, and the stored access token reaches the endpoint's 401 gate.
+      {
+        yukinal::desktop_host::McpSupervisor oauth_supervisor(&database, &mcp_credentials);
+        const auto catalog = oauth_supervisor.catalog();
+        bool found = false;
+        for (const auto& server : catalog.at("servers")) {
+          if (server.at("serverId") == "oauth_ac" && server.at("tools").size() == 1) found = true;
+        }
+        check(found && saw_bearer.load(),
+              "an OAuth-connected HTTP MCP server should authenticate with its stored token");
+        const auto output = oauth_supervisor.call("mcp.oauth_ac.echo", nlohmann::json::object());
+        check(output.at("serverId") == "oauth_ac" && output.at("text") == "oauth:echo",
+              "the OAuth-authenticated MCP tool call should return its content");
+        oauth_supervisor.stop("oauth_ac");
+      }
+
+      // Router wiring: validation and the honest cancel answer.
+      const auto cancel_idle = mcp_router.invoke("mcp_oauth_cancel", {{"serverId", "oauth_ac"}});
+      check(cancel_idle.ok && cancel_idle.value.at("accepted") == false,
+            "cancelling with nothing in flight should answer accepted=false");
+      check(!mcp_router.invoke("mcp_oauth_connect", {{"serverId", ""}}).ok,
+            "mcp_oauth_connect should reject an empty server id");
+      const auto missing_flow =
+          mcp_router.invoke("mcp_oauth_connect", {{"serverId", "mcp_missing"}});
+      check(!missing_flow.ok &&
+                missing_flow.value.at("message").get<std::string>().find("could not load") !=
+                    std::string::npos,
+            "mcp_oauth_connect should report an unknown MCP server before any network work");
+
+      oauth_server.stop();
+      oauth_thread.join();
     }
 
     // Investigation task list: host-owned rows decode into the shared contract.

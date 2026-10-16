@@ -2,6 +2,7 @@
 
 #include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/desktop_mcp.hpp"
+#include "yukinal/desktop_host/desktop_oauth.hpp"
 #include "yukinal/desktop_host/desktop_ssh.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/desktop_terminal.hpp"
@@ -6594,7 +6595,8 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "mcp_server_list" || method == "mcp_server_save" ||
       method == "mcp_server_delete" || method == "mcp_server_review" ||
-      method == "mcp_server_start" || method == "mcp_server_stop") {
+      method == "mcp_server_start" || method == "mcp_server_stop" ||
+      method == "mcp_oauth_connect" || method == "mcp_oauth_cancel") {
     return mcp_command(method, params);
   }
 
@@ -8012,6 +8014,79 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
     } catch (...) {
       return failure("STORAGE_ERROR", "The reviewed MCP server could not be read back");
     }
+  }
+
+  if (method == "mcp_oauth_connect") {
+    if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
+      return failure("INVALID_PARAMS", "mcp_oauth_connect requires exactly serverId");
+    }
+    const auto server_id = trim_ascii(params.at("serverId").get<std::string>());
+    if (server_id.empty() || server_id.size() > 160 || has_control_characters(server_id)) {
+      return failure("INVALID_PARAMS", "mcp_oauth_connect serverId is invalid");
+    }
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    {
+      std::lock_guard lock(oauth_flows_mutex_);
+      if (oauth_flows_.count(server_id) != 0) {
+        return failure("MCP_OAUTH_IN_PROGRESS",
+                       "An OAuth authorization is already waiting for this MCP server");
+      }
+      oauth_flows_[server_id] = cancel;
+    }
+    // Removes the registry entry however the flow ends: success, failure, or a
+    // cancellation that unwound an exception.
+    struct FlowGuard {
+      IpcRouter* router;
+      std::string server_id;
+      ~FlowGuard() {
+        std::lock_guard lock(router->oauth_flows_mutex_);
+        router->oauth_flows_.erase(server_id);
+      }
+    } guard{this, server_id};
+
+    OAuthConnectCallbacks callbacks;
+    callbacks.cancel = cancel;
+    callbacks.open_browser = [](const std::string& url) { return open_external_url(url); };
+    callbacks.device_code_prompt = [this](const nlohmann::json& prompt) {
+      // The prompt is an event, not a return value: this call is still blocked
+      // waiting for the user, and the UI needs the code while it waits. No token
+      // is in this payload.
+      std::function<void(const std::string&, const nlohmann::json&)> sink;
+      {
+        std::lock_guard lock(mutex_);
+        sink = event_sink_;
+      }
+      if (sink) sink("mcp.oauth_device_code", prompt);
+    };
+    try {
+      const auto result = oauth_connect(*database_, *credentials_, server_id, callbacks);
+      // A running session still holds the old token. Stop it after the new token
+      // is durably stored; the next start creates a fresh authenticated session.
+      if (mcp_ != nullptr) mcp_->stop(server_id);
+      return {true, result};
+    } catch (const std::exception& error) {
+      return failure("MCP_OAUTH_ERROR", error.what());
+    }
+  }
+
+  if (method == "mcp_oauth_cancel") {
+    if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
+      return failure("INVALID_PARAMS", "mcp_oauth_cancel requires exactly serverId");
+    }
+    const auto server_id = trim_ascii(params.at("serverId").get<std::string>());
+    if (server_id.empty() || server_id.size() > 160 || has_control_characters(server_id)) {
+      return failure("INVALID_PARAMS", "mcp_oauth_cancel serverId is invalid");
+    }
+    std::shared_ptr<std::atomic<bool>> cancel;
+    {
+      std::lock_guard lock(oauth_flows_mutex_);
+      const auto found = oauth_flows_.find(server_id);
+      if (found != oauth_flows_.end()) cancel = found->second;
+    }
+    if (cancel != nullptr) cancel->store(true);
+    // `false` is a real answer, not an error: the flow may have already finished,
+    // timed out, or never started.
+    return {true, {{"accepted", cancel != nullptr}}};
   }
 
   // mcp_server_delete

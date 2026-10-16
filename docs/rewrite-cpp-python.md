@@ -1174,3 +1174,31 @@ accept path, the defaulted fields, the unconnected report, secret preservation,
 method-switch reclamation and the mutual-exclusion/stdio refusals. The canonical
 `native/build-nmake` Release build passed all twelve CTest targets and
 `pnpm check` was green.
+
+The second half of the OAuth block completed the connect engine in
+`native/desktop_host/src/desktop_oauth.cpp` and wired `mcp_oauth_connect`/
+`mcp_oauth_cancel` into `native/desktop_host/src/ipc_router.cpp`. `oauth_connect`
+performs RFC 8414/OIDC discovery, RFC 7591 dynamic client registration when no
+client id is configured, a PKCE S256 authorization-code flow with a loopback
+callback server, and an RFC 8628 device-code flow; the device-code prompt is
+emitted as `mcp.oauth_device_code` through the host event sink. When `dpop` is set,
+a freshly generated Ed25519 key is stored in the OS credential store, the
+authorization and token requests carry a `DPoP` proof, and a `DPoP-Nonce` challenge
+is honoured on retry. The token bundle is written only to the credential store,
+never to JSON or logs. `OAuthTokenSource` gives `McpSupervisor` a bearer token
+(plus a per-request `DPoP` proof when enabled) and refreshes it before expiry;
+`http_send`/`delete_http_session` retry once on an auth challenge, and the
+3-attempt retry mirrors the retired Rust `AUTH_ATTEMPTS`. `mcp_oauth_cancel`
+answers `{accepted}` (a live flow is asked to stop; otherwise `false`). One
+limitation is documented rather than hidden: WebView `invoke` is handled
+synchronously on the UI thread, so in the real app `mcp_oauth_connect` blocks the
+router until the flow finishes and a concurrent `mcp_oauth_cancel` or the
+device-code prompt event cannot be delivered during that window; the engine,
+registry and commands are implemented and unit-tested directly, and the loopback
+callback still completes the flow. `desktop_host_database_tests` drives a mock that
+plays both OAuth issuer and MCP endpoint to cover authorization-code (discovery,
+dynamic registration, PKCE, token exchange), device-code (prompt capture, pending
+to granted), mid-poll cancellation and the supervisor's bearer-token integration,
+plus router validation and the idle-cancel answer. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets and
+`pnpm check` was green. The optional long-lived GET event stream remains.

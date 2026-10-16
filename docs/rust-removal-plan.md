@@ -86,10 +86,10 @@
 - ✅ `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`（Python sidecar 生命周期）
 - ✅ `mcp_server_list`、`mcp_server_save`、`mcp_server_delete`（`mcp_servers` 表 CRUD + 静态 HTTP 认证头 secret 进 OS 凭据库；OAuth 配置可保存：issuer/clientId/flow/clientAuth/dpop/scopes 与写-only client secret 进 OS 凭据库，身份变更时回收旧 token/secret/key 引用；OAuth 与静态 Authorization 头互斥）
 - ✅ `mcp_server_review`（写回 `allowedTools`/`trustLevel`/`annotationTrust`；只暴露已审核的工具）
-- ✅ `mcp_server_start`、`mcp_server_stop`（`native/desktop_host/src/desktop_mcp.cpp`：stdio 按需派生 MCP 子进程；Streamable HTTP 用 `httplib` POST JSON-RPC、识别 `Mcp-Session-Id`/`Mcp-Protocol-Version`、解析 JSON 或 SSE 响应、shutdown 时 DELETE 会话；两条传输都走 `initialize` 握手 + `notifications/initialized` + `tools/list`，静态认证头 secret 从 OS 凭据库解析；OAuth/DPoP 的 token 源与 GET 长连事件流待做）
+- ✅ `mcp_server_start`、`mcp_server_stop`（`native/desktop_host/src/desktop_mcp.cpp`：stdio 按需派生 MCP 子进程；Streamable HTTP 用 `httplib` POST JSON-RPC、识别 `Mcp-Session-Id`/`Mcp-Protocol-Version`、解析 JSON 或 SSE 响应、shutdown 时 DELETE 会话；两条传输都走 `initialize` 握手 + `notifications/initialized` + `tools/list`，静态认证头 secret 或 OAuth token 从 OS 凭据库解析；`OAuthTokenSource` 供 Bearer/DPoP 授权并到期前刷新，认证挑战重试一次；GET 长连事件流待做）
 - ✅ `host.mcp.catalog`（对启用且已审核的服务器起进程、按 `allowedTools` 过滤、按 `annotationTrust`+注解算风险；`host.tool.execute` 的 `mcp.*` 分支已接 `tools/call`）
 - ✅ `host.tool.cancel`（sidecar 侧 per-request 取消令牌注册表，best-effort 取消在飞请求；host 请求改由小型线程池分发，避免阻塞的 `host.tool.execute` 挡住 cancel；stdio MCP 调用按 100ms 轮询令牌并放弃，HTTP 调用前后检查；观察到取消时 `host.tool.execute` 返回 `code: "cancelled"`）
-- `mcp_oauth_connect`、`mcp_oauth_cancel`（OAuth 授权流与 DPoP 待做；HTTP 传输与 OAuth 配置已实现，未连接的 OAuth 行在视图与 `mcp_server_start` 中报告 `invalid_config` 而非启动）
+- ✅ `mcp_oauth_connect`、`mcp_oauth_cancel`（`native/desktop_host/src/desktop_oauth.cpp`：RFC 8414/OIDC 发现、RFC 7591 动态注册、PKCE S256 授权码 + loopback 回调、RFC 8628 device code（prompt 经 `mcp.oauth_device_code` 事件）、Ed25519 DPoP 证明与 `DPoP-Nonce` 重试；token bundle 仅入 OS 凭据库；`mcp_oauth_cancel` 返回 `{accepted}`。已知限制：WebView `invoke` 在 UI 线程同步执行，真实应用中 `mcp_oauth_connect` 阻塞期间无法投递取消或 device-code prompt 事件，引擎/注册表/命令已实现并直测）
 
 ---
 

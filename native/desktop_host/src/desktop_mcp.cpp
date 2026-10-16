@@ -2,6 +2,7 @@
 
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#include "yukinal/desktop_host/desktop_oauth.hpp"
 
 #include <httplib.h>
 
@@ -151,6 +152,67 @@ std::string truncate_text(std::string value, std::size_t limit) {
   return value;
 }
 
+// How many times one request may be sent while authenticating: as-is, with the
+// DPoP nonce the server just challenged with, then with a forcibly refreshed
+// token (RFC 9449 §8). Mirrors the retired Rust transport.
+constexpr int kAuthAttempts = 3;
+
+std::string trim_ascii(std::string value) {
+  std::size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+    ++start;
+  }
+  std::size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return value.substr(start, end - start);
+}
+
+// Mirrors Rust's `char::is_control`: C0, DEL and the C1 range.
+bool has_control_characters(const std::string& value) {
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const auto byte = static_cast<unsigned char>(value[index]);
+    if (byte < 0x20 || byte == 0x7f) return true;
+    if (byte == 0xc2 && index + 1 < value.size()) {
+      const auto next = static_cast<unsigned char>(value[index + 1]);
+      if (next >= 0x80 && next <= 0x9f) return true;
+    }
+  }
+  return false;
+}
+
+// One `auth-param` out of a `WWW-Authenticate` value (RFC 7235 §2.1).
+std::string challenge_parameter(const std::string& header, const char* name) {
+  std::string lowered = header;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char byte) {
+    return static_cast<char>(std::tolower(byte));
+  });
+  const std::string needle = std::string(name) + "=";
+  std::size_t from = 0;
+  while (true) {
+    const auto offset = lowered.find(needle, from);
+    if (offset == std::string::npos) return std::string();
+    from = offset + needle.size();
+    // A parameter name must start at a boundary: `xnonce=` is not `nonce=`.
+    if (offset > 0) {
+      const auto previous = static_cast<unsigned char>(header[offset - 1]);
+      if (std::isalnum(previous) != 0 || previous == '-' || previous == '_') continue;
+    }
+    auto rest = header.substr(from);
+    const auto first = rest.find_first_not_of(" \t");
+    if (first == std::string::npos) return std::string();
+    rest.erase(0, first);
+    if (!rest.empty() && rest.front() == '"') {
+      const auto end = rest.find('"', 1);
+      if (end == std::string::npos) continue;
+      return rest.substr(1, end - 1);
+    }
+    const auto end = rest.find_first_of(", \t");
+    return rest.substr(0, end == std::string::npos ? rest.size() : end);
+  }
+}
+
 // Decodes the `data:` payloads of one SSE body the way the Rust transport's
 // decoder did: comments ignored, `\r` stripped, multi-line data joined with
 // newlines, oversized events dropped.
@@ -263,6 +325,10 @@ struct McpSupervisor::Impl {
     std::vector<std::pair<std::string, std::string>> http_headers;
     std::string http_session_id;
     std::vector<std::string> diagnostics;
+    // Present when the server row carries a connected OAuth configuration. It
+    // resolves the stored token (refreshing when needed) and signs a per-request
+    // DPoP proof; the plaintext token never leaves this object.
+    std::unique_ptr<OAuthTokenSource> oauth;
 #ifdef _WIN32
     HANDLE process = nullptr;
     HANDLE stdin_write = nullptr;
@@ -460,6 +526,106 @@ struct McpSupervisor::Impl {
 #endif
   }
 
+  // Applies the static auth headers plus the negotiated session and protocol
+  // headers to one HTTP request.
+  httplib::Headers http_headers_for(const std::shared_ptr<Session>& session) const {
+    httplib::Headers headers = {{"Accept", "application/json, text/event-stream"}};
+    for (const auto& [name, value] : session->http_headers) headers.emplace(name, value);
+    std::string session_id;
+    std::string protocol_version;
+    {
+      std::lock_guard lock(session->mutex);
+      session_id = session->http_session_id;
+      protocol_version = session->protocol_version;
+    }
+    if (!session_id.empty()) headers.emplace("Mcp-Session-Id", session_id);
+    if (!protocol_version.empty()) headers.emplace("Mcp-Protocol-Version", protocol_version);
+    return headers;
+  }
+
+  // The nonce a server challenged this request with, or an empty string. Two
+  // spellings mean the same thing: the `DPoP-Nonce` header (RFC 9449 §8) and a
+  // `nonce="..."` parameter on a `WWW-Authenticate: DPoP` challenge. The value
+  // comes straight off the network, so it is length- and control-character-
+  // checked here; anything that fails counts as "no challenge".
+  static std::string dpop_nonce_from_response(const httplib::Response& response) {
+    std::string value = response.get_header_value("DPoP-Nonce");
+    if (value.empty()) {
+      const auto challenge = response.get_header_value("WWW-Authenticate");
+      auto lowered = challenge;
+      std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char byte) {
+        return static_cast<char>(std::tolower(byte));
+      });
+      const auto first = lowered.find_first_not_of(" \t");
+      if (first != std::string::npos) lowered.erase(0, first);
+      if (lowered.rfind("dpop", 0) != 0) return std::string();
+      value = challenge_parameter(challenge, "nonce");
+    }
+    value = trim_ascii(std::move(value));
+    if (value.empty() || value.size() > 1024 || has_control_characters(value)) return std::string();
+    return value;
+  }
+
+  // The static headers plus, when the server is OAuth-connected, the resolved
+  // `Authorization` (and per-request `DPoP` proof). The token and proof come
+  // from the credential store, so they never leave this function.
+  httplib::Headers http_auth_headers(const std::shared_ptr<Session>& session,
+                                     const std::string& method, const std::string& url,
+                                     bool force_refresh, const std::string& nonce) const {
+    httplib::Headers headers = http_headers_for(session);
+    if (session->oauth == nullptr) return headers;
+    const auto authorization = session->oauth->authorize(method, url, nonce, force_refresh);
+    const auto safe = [](const std::string& value) {
+      return !value.empty() && value.size() <= 8 * 1024 &&
+             value.find_first_of("\r\n") == std::string::npos &&
+             value.find('\0') == std::string::npos;
+    };
+    if (!safe(authorization.token)) {
+      throw std::runtime_error(
+          "the OAuth token source returned an empty, oversized, or unsafe token");
+    }
+    if (authorization.scheme == "DPoP") {
+      if (!safe(authorization.proof)) {
+        throw std::runtime_error("the OAuth token source returned an unsafe DPoP proof");
+      }
+      headers.emplace("Authorization", "DPoP " + authorization.token);
+      headers.emplace("DPoP", authorization.proof);
+    } else {
+      headers.emplace("Authorization", "Bearer " + authorization.token);
+    }
+    return headers;
+  }
+
+  // Sends one request, retrying a `401` a bounded number of times: as-is, then
+  // with the DPoP nonce the server just challenged with, then with a forcibly
+  // refreshed token. The last response is handed back when none of them worked,
+  // so the caller still reports the server's own status.
+  template <typename Send>
+  httplib::Result send_with_auth(const std::shared_ptr<Session>& session,
+                                 const std::string& method, const std::string& url,
+                                 Send&& send) const {
+    httplib::Result response;
+    bool force_refresh = false;
+    std::string nonce;
+    for (int attempt = 0; attempt < kAuthAttempts; ++attempt) {
+      auto headers = http_auth_headers(session, method, url, force_refresh, nonce);
+      response = send(headers);
+      if (!response || response->status != 401 || session->oauth == nullptr) break;
+      if (attempt + 1 >= kAuthAttempts) break;
+      const auto challenge = dpop_nonce_from_response(*response);
+      if (!challenge.empty() && challenge != nonce) {
+        nonce = challenge;
+        continue;
+      }
+      if (!force_refresh) {
+        force_refresh = true;
+        continue;
+      }
+      break;
+    }
+    return response;
+  }
+
   nlohmann::json http_send(const std::shared_ptr<Session>& session, const nlohmann::json& frame,
                            std::optional<long long> wait_for, int timeout_seconds) {
     httplib::Client client(session->http_origin);
@@ -471,8 +637,11 @@ struct McpSupervisor::Impl {
     if (body.size() > kMaxFrameBytes) {
       throw std::runtime_error("the MCP HTTP frame exceeds the size limit");
     }
+    const auto absolute_url = session->http_origin + session->http_path;
     auto response =
-        client.Post(session->http_path, http_headers_for(session), body, "application/json");
+        send_with_auth(session, "POST", absolute_url, [&](const httplib::Headers& headers) {
+          return client.Post(session->http_path, headers, body, "application/json");
+        });
     if (!response) {
       throw std::runtime_error("the MCP HTTP request failed: " +
                                httplib::to_string(response.error()));
@@ -533,23 +702,6 @@ struct McpSupervisor::Impl {
                              "\"");
   }
 
-  // Applies the static auth headers plus the negotiated session and protocol
-  // headers to one HTTP request.
-  httplib::Headers http_headers_for(const std::shared_ptr<Session>& session) const {
-    httplib::Headers headers = {{"Accept", "application/json, text/event-stream"}};
-    for (const auto& [name, value] : session->http_headers) headers.emplace(name, value);
-    std::string session_id;
-    std::string protocol_version;
-    {
-      std::lock_guard lock(session->mutex);
-      session_id = session->http_session_id;
-      protocol_version = session->protocol_version;
-    }
-    if (!session_id.empty()) headers.emplace("Mcp-Session-Id", session_id);
-    if (!protocol_version.empty()) headers.emplace("Mcp-Protocol-Version", protocol_version);
-    return headers;
-  }
-
   nlohmann::json http_request(const std::shared_ptr<Session>& session, const std::string& method,
                               const nlohmann::json& params, int timeout_seconds,
                               const std::shared_ptr<std::atomic<bool>>& cancel = nullptr) {
@@ -581,7 +733,11 @@ struct McpSupervisor::Impl {
     client.set_read_timeout(2, 0);
     client.set_write_timeout(2, 0);
     client.set_follow_location(false);
-    auto response = client.Delete(session->http_path, http_headers_for(session));
+    const auto absolute_url = session->http_origin + session->http_path;
+    auto response =
+        send_with_auth(session, "DELETE", absolute_url, [&](const httplib::Headers& headers) {
+          return client.Delete(session->http_path, headers);
+        });
     if (!response) return;
     const auto status = response->status;
     if ((status >= 200 && status < 300) || status == 405 || status == 404) {
@@ -900,6 +1056,15 @@ struct McpSupervisor::Impl {
       } catch (const std::exception&) {
         continue;
       }
+    }
+    // A connected OAuth configuration adds a dynamic token source: the access
+    // token is refreshed on demand and, when the server asked for
+    // sender-constrained tokens, a per-request DPoP proof is signed. Building it
+    // fails loudly so a broken token endpoint surfaces at start, not on the
+    // first tool call.
+    if (row.contains("oauth") && row.at("oauth").is_object() &&
+        !row.at("oauth").value("credentialRef", std::string()).empty()) {
+      session->oauth = std::make_unique<OAuthTokenSource>(credentials, row.at("oauth"), url);
     }
     try {
       handshake_and_list(session);

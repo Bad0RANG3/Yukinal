@@ -97,6 +97,11 @@ class IpcRouter {
   // while this process still holds it (matching the retired Rust host).
   std::mutex host_tool_replay_mutex_;
   std::map<std::pair<std::string, std::string>, nlohmann::json> host_tool_replays_;
+  // In-flight OAuth authorizations, keyed by server id. `mcp_oauth_connect`
+  // blocks while the browser redirect or device-code poll runs, so a token lets
+  // `mcp_oauth_cancel` (on another thread) stop it.
+  std::mutex oauth_flows_mutex_;
+  std::map<std::string, std::shared_ptr<std::atomic<bool>>> oauth_flows_;
   std::function<void(const std::string&, const nlohmann::json&)> event_sink_;
 };
 
