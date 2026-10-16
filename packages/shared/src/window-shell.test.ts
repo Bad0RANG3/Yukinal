@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { WindowShellContextSchema } from "./window-shell.js";
+import { WindowShellContextSchema, WindowShellSidebarSchema, WindowShellActionSchema } from "./window-shell.js";
 
 const context = { section: "servers", serverName: null, serverStatus: null, agentBusy: false };
 
@@ -11,6 +11,34 @@ test("window context covers workspace sections and server lifecycle states", () 
   for (const serverStatus of ["connecting", "connected", "disconnected", "error"]) {
     assert.equal(WindowShellContextSchema.safeParse({ ...context, serverName: "测试服务器", serverStatus, agentBusy: true }).success, true);
   }
+});
+
+const server = { id: "srv_preview1", name: "测试", detail: "test.invalid:22", status: "disconnected" };
+const sidebar = { selectedServerId: server.id, servers: [server], loading: false, failed: false, blocked: false };
+
+test("native sidebar bounds text and identities without carrying execution parameters", () => {
+  assert.equal(WindowShellSidebarSchema.safeParse(sidebar).success, true);
+  for (const invalid of [
+    { ...sidebar, servers: [server, server] },
+    { ...sidebar, selectedServerId: "missing" },
+    { ...sidebar, servers: [{ ...server, name: "🛰".repeat(81) }] },
+    { ...sidebar, servers: [{ ...server, detail: "a\nb" }] },
+    { ...sidebar, servers: [{ ...server, detail: "a".repeat(257) }] },
+    { ...sidebar, servers: [{ ...server, status: "unknown" }] },
+    { ...sidebar, servers: [{ ...server, apiKey: "test-only" }] },
+    { ...sidebar, blocked: "true" }, { ...sidebar, approved: true },
+  ]) assert.equal(WindowShellSidebarSchema.safeParse(invalid).success, false);
+});
+
+test("native actions are exact UI intents with validated server IDs", () => {
+  for (const type of ["select-server", "edit-server", "connect-server", "disconnect-server", "delete-server"])
+    assert.equal(WindowShellActionSchema.safeParse({ type, serverId: server.id }).success, true);
+  for (const value of [{ type: "navigate", section: "settings" }, { type: "add-server" }, { type: "refresh-servers" }])
+    assert.equal(WindowShellActionSchema.safeParse(value).success, true);
+  for (const value of [{ type: "execute", command: "server_connect" }, { type: "connect-server", serverId: "bad" },
+    { type: "navigate", section: "unknown" }, { type: "add-server", approved: true },
+    { type: "connect-server", serverId: server.id, host: "test.invalid" }])
+    assert.equal(WindowShellActionSchema.safeParse(value).success, false);
 });
 
 test("window context excludes credentials, commands and approval state", () => {

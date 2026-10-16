@@ -31,17 +31,19 @@ Product decisions and implementation boundaries are defined in the
 ### Windows window geometry
 
 The Windows host owns the two rounded boundaries. DWM supplies the outer
-top-level window corners and system caption buttons. A native title/status strip
-occupies the top of the client area; the embedded WebView child is inset by
-8 logical pixels from the side/bottom edges and clipped with a 14-pixel corner radius.
-The strip is 40 logical pixels high. These are initial product values, scaled
-by the window DPI, rather than HIG requirements.
+top-level window corners. The native title/status strip and its window controls
+share a 40-logical-pixel height. A fixed 240-DIP native sidebar joins that strip;
+the embedded WebView uses the remaining width, with 8-DIP right/bottom insets
+and a 14-DIP corner radius. The minimum window size is 1100 × 680. These product
+values scale with the window DPI; they are not HIG requirements.
 
 React fills that child window and owns only content layout. It does not draw an
 outer window, caption buttons, or a second title bar. Browser development mode
 previews content only. Maximizing lets Windows square the outer boundary while
 retaining the inset content surface. Window movement, resizing, system menus,
-caption actions, and Snap hit testing stay with Win32 and DWM.
+caption actions, and Snap hit testing stay with Win32 and DWM. Native-painted
+caption controls use system window commands and `HTMAXBUTTON` hit testing;
+they are not HTML controls.
 
 Native acceptance must check drag, edge/corner resize, caption-button hover,
 Snap Layouts, minimize/restore, maximize/restore, inactive appearance, and moving
@@ -60,14 +62,17 @@ The title/status strip and the OS window title reflect that same context.
 validates its bounded fields. Credentials, prompts, and approval grants do not
 belong in that context.
 
-As functions move into the frame, native controls must dispatch explicit actions
-to the existing application services. Navigation, selected server, task state,
+The native sidebar projects the same server cache and dispatches validated UI
+intents for navigation, selection, add/refresh and server context-menu actions.
+React re-resolves IDs and calls existing dialogs and application services.
+Busy/modal state blocks those intents; deletion retains its confirmation.
+Navigation, selected server, task state,
 and approvals keep one source of truth. The shell must not acquire a separate
 Agent loop or a parallel server-action path. Visual tokens, typography, spacing,
 focus, and active/inactive states should evolve with the content design as one
 system, while Win32 continues to own native geometry and window management.
-The current increment synchronizes context; shell business-action controls and
-shared theme-token transport remain future work.
+The capability is optional: older hosts and browser previews retain the React
+sidebar. Shared theme-token transport and native task controls remain future work.
 
 The C++ window uses the pinned `webview/webview` C++ library over the operating
 system WebView: WebView2 on Windows, WebKit on macOS, and WebKitGTK on Linux. The

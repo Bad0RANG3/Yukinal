@@ -1,3 +1,4 @@
+import { NativeSidebar } from "./NativeSidebar.js";
 import { AgentPanel } from "../features/agent/AgentPanel.js";
 import { GettingStarted } from "../features/onboarding/GettingStarted.js";
 import { useOnboardingStore } from "../features/onboarding/onboarding-store.js";
@@ -17,7 +18,7 @@ import {
 } from "../stores/workspace-store.js";
 import { usePreferencesStore } from "../stores/preferences-store.js";
 import { useServers } from "../lib/servers.js";
-import { isDesktopShell } from "../lib/ipc.js";
+import { isDesktopShell, hasNativeWindowSidebar } from "../lib/ipc.js";
 import { SERVER_STATUS_LABEL } from "../lib/labels.js";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 
@@ -51,6 +52,7 @@ function PageLoadingFallback() {
 }
 
 export function AppShell() {
+  const nativeSidebar = hasNativeWindowSidebar();
   const primary = useWorkspaceStore((state) => state.primary);
   const serverPage = useWorkspaceStore((state) => state.serverPage);
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
@@ -63,7 +65,7 @@ export function AppShell() {
   const selectedServer = servers.data?.find((server) => server.id === selectedServerId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(() => !useOnboardingStore.getState().dismissed);
-  const closeGuide = () => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); };
+  const closeGuide = useCallback(() => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); }, []);
   const [agentLayoutOpen, setAgentLayoutOpen] = useState(agentOpen);
   const [agentToggleVisible, setAgentToggleVisible] = useState(!agentOpen);
   const agentToggleRef = useRef<HTMLButtonElement>(null);
@@ -103,8 +105,8 @@ export function AppShell() {
   useEffect(() => {
     if (responsiveAgentDefaultApplied.current) return;
     responsiveAgentDefaultApplied.current = true;
-    if (window.matchMedia?.("(max-width: 1150px)").matches) setAgentOpen(false);
-  }, [setAgentOpen]);
+    if (window.matchMedia?.(nativeSidebar ? "(max-width: 960px)" : "(max-width: 1150px)").matches) setAgentOpen(false);
+  }, [setAgentOpen, nativeSidebar]);
 
   useEffect(() => {
     if (agentOpen || !agentToggleVisible || !focusAgentToggleOnRender.current) return;
@@ -130,12 +132,13 @@ export function AppShell() {
   return (
     <div
       className={`app-shell ${layoutAgentOpen ? "" : "agent-collapsed"} ${sidebarOpen ? "sidebar-open" : ""}`}
+      data-native-sidebar={nativeSidebar ? "true" : undefined}
       data-primary={primary}
       data-density={preferences.density}
       data-reduce-motion={preferences.reduceMotion ? "true" : "false"}
       style={shellStyle}
     >
-      <nav className="app-rail" aria-label="主导航">
+      {!nativeSidebar ? <nav className="app-rail" aria-label="主导航">
         <div className="brand-mark" aria-label="Yukinal">
           <img src={brandMark} alt="" />
         </div>
@@ -160,9 +163,9 @@ export function AppShell() {
             );
           })}
         </div>
-      </nav>
+      </nav> : null}
 
-      {primary === "servers" ? <ServerList onClose={() => setSidebarOpen(false)} /> : null}
+      {!nativeSidebar && primary === "servers" ? <ServerList onClose={() => setSidebarOpen(false)} /> : null}
       {sidebarOpen ? <button type="button" className="sidebar-scrim" aria-label="关闭服务器列表" onClick={() => setSidebarOpen(false)} /> : null}
 
       <main className="workspace-main">
@@ -177,7 +180,7 @@ export function AppShell() {
           </div>
           <div className="workspace-header-meta">
             <button type="button" className="button-secondary" aria-expanded={guideOpen} onClick={() => guideOpen ? closeGuide() : setGuideOpen(true)}>使用引导</button>
-            {primary === "servers" ? <button type="button" className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "关闭服务器列表" : "打开服务器列表"} aria-controls="server-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><Icon name="servers" size="md" /></button> : null}
+            {!nativeSidebar && primary === "servers" ? <button type="button" className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "关闭服务器列表" : "打开服务器列表"} aria-controls="server-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><Icon name="servers" size="md" /></button> : null}
             {!isDesktopShell() ? <span className="preview-chip">预览模式</span> : selectedServer && primary === "servers" ? <span className={`context-chip server-status-${selectedServer.status}`}>{SERVER_STATUS_LABEL[selectedServer.status]}</span> : null}
             {!agentOpen && agentToggleVisible ? (
               <button
@@ -243,6 +246,7 @@ export function AppShell() {
 
       {agentOpen ? <button type="button" className="agent-scrim" aria-label="关闭 Agent 面板" onClick={() => setAgentOpen(false)} /> : null}
       <AgentPanel onCloseStart={onAgentCloseStart} onCloseEnd={onAgentCloseEnd} />
+      {nativeSidebar ? <NativeSidebar onNavigate={closeGuide} /> : null}
       <ServerAuthChallengeModal />
     </div>
   );
