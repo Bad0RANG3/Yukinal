@@ -2915,6 +2915,108 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     }
   }
 
+  if (method == "investigation_brief_select") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_brief_select requires an input object");
+    }
+    const auto& input = params.at("input");
+    if (!only_fields(input, {"taskId", "briefId", "optionId"},
+                     {"taskId", "briefId", "optionId"}) ||
+        !input.at("taskId").is_string() || !input.at("briefId").is_string() ||
+        !input.at("optionId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_brief_select input is invalid");
+    }
+    auto task_id = normalized_opaque_id(input.at("taskId").get<std::string>());
+    auto brief_id = normalized_opaque_id(input.at("briefId").get<std::string>());
+    auto option_id = normalized_opaque_id(input.at("optionId").get<std::string>());
+    if (!task_id.has_value() || !brief_id.has_value() || !option_id.has_value()) {
+      return failure("INVALID_PARAMS", "investigation_brief_select identifiers are invalid");
+    }
+    std::optional<nlohmann::json> task;
+    try {
+      task = load_investigation_task(*database_, *task_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local investigation database could not read the task");
+    }
+    if (!task.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    if (is_one_of(task->value("status", std::string()),
+                  {"completed", "failed", "stopped", "expired"})) {
+      return failure("INVALID_STATE",
+                     "terminal investigation tasks cannot select a decision option");
+    }
+    std::optional<nlohmann::json> brief;
+    try {
+      brief = database_->select_investigation_brief_option(*task_id, *brief_id, *option_id);
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not select the decision option");
+    }
+    if (!brief.has_value()) return failure("NOT_FOUND", "The decision brief was not found");
+    std::string continuation = "wait_user";
+    const auto options = brief->value("options", nlohmann::json::array());
+    if (options.is_array()) {
+      for (const auto& option : options) {
+        if (json_text_field(option, "id") == *option_id) {
+          continuation = json_text_field(option, "continuation", "wait_user");
+          break;
+        }
+      }
+    }
+    // Only an explicit `start_plan` continuation approves the linked dry-run plan;
+    // read-only and wait-user continuations leave it pending.
+    if (continuation == "start_plan") {
+      const auto plan_id = brief->contains("planId") && brief->at("planId").is_string()
+                               ? std::optional<std::string>(brief->at("planId").get<std::string>())
+                               : std::nullopt;
+      if (plan_id.has_value()) {
+        try {
+          auto plan = database_->latest_investigation_plan(*task_id);
+          if (plan.has_value() && json_text_field(*plan, "id") == *plan_id) {
+            const auto now = iso8601_now();
+            (*plan)["approval"] = {
+                {"status", "approved"},
+                {"source", "user"},
+                {"optionId", *option_id},
+                {"approvedAt", now},
+                {"note", "用户选择了该决策摘要方案；行动步骤仍受逐项权限审批约束"}};
+            (*plan)["updatedAt"] = now;
+            database_->save_investigation_plan(*plan);
+          }
+        } catch (...) {
+          return failure("STORAGE_ERROR",
+                         "The local investigation database could not approve the selected plan");
+        }
+      }
+    } else if (continuation == "stop") {
+      // Best-effort cancel of the durable Agent run, then the terminal stop; a
+      // missing or already-finished run is not an error.
+      try {
+        if (const auto run_id = database_->active_investigation_run_id(*task_id);
+            run_id.has_value() && sidecar_ != nullptr && sidecar_->status().running) {
+          (void)ensure_sidecar().request("agent.run.stop", {{"runId", *run_id}},
+                                         std::chrono::seconds(15));
+        }
+      } catch (...) {
+      }
+      const auto now = iso8601_now();
+      try {
+        auto updated = database_->set_investigation_task_status(*task_id, "stopped", now, now);
+        if (!updated.has_value()) {
+          return failure("NOT_FOUND", "The investigation task was not found");
+        }
+      } catch (...) {
+        return failure("STORAGE_ERROR",
+                       "The local investigation database could not stop the task");
+      }
+    }
+    return {true, {{"brief", std::move(*brief)}, {"continuation", continuation}}};
+  }
+
   if (method == "core_ping") {
     if (!params.empty()) {
       return failure("INVALID_PARAMS", "core_ping does not accept parameters");

@@ -1346,6 +1346,119 @@ int main(int argc, char** argv) {
       check(unknown_rejected,
             "the host RPC entry point should reject an unknown investigation method");
     }
+
+    // ── investigation_brief_select ───────────────────────────────────────────
+    // Selecting a decision option returns its continuation, and only an explicit
+    // start_plan continuation approves the linked dry-run plan.
+    {
+      const nlohmann::json select_brief = {
+          {"id", "ibrief_select"},
+          {"taskId", "itask_write"},
+          {"planId", "iplan_write_2"},
+          {"generatedAt", "2026-01-01T00:06:00Z"},
+          {"status", "draft"},
+          {"findingIds", nlohmann::json::array({"ifind_write"})},
+          {"options",
+           nlohmann::json::array(
+               {{{"id", "opt_start"},
+                 {"title", "Start"},
+                 {"summary", "run the plan"},
+                 {"impact", "writes files"},
+                 {"riskLevel", "medium"},
+                 {"evidenceIds", nlohmann::json::array()},
+                 {"findingIds", nlohmann::json::array()},
+                 {"verification", "check the service"},
+                 {"requiresApproval", true},
+                 {"status", "proposed"},
+                 {"continuation", "start_plan"}},
+                {{"id", "opt_readonly"},
+                 {"title", "Keep reading"},
+                 {"summary", "read only"},
+                 {"impact", "none"},
+                 {"riskLevel", "low"},
+                 {"evidenceIds", nlohmann::json::array()},
+                 {"findingIds", nlohmann::json::array()},
+                 {"verification", "check the service"},
+                 {"requiresApproval", false},
+                 {"status", "proposed"},
+                 {"continuation", "continue_readonly"}},
+                {{"id", "opt_stop"},
+                 {"title", "Stop"},
+                 {"summary", "stop the task"},
+                 {"impact", "none"},
+                 {"riskLevel", "low"},
+                 {"evidenceIds", nlohmann::json::array()},
+                 {"findingIds", nlohmann::json::array()},
+                 {"verification", "check the service"},
+                 {"requiresApproval", false},
+                 {"status", "proposed"},
+                 {"continuation", "stop"}}})},
+      };
+      database.record_investigation_brief(select_brief);
+
+      auto select_option = [&router](const char* option_id) {
+        return router.invoke(
+            "investigation_brief_select",
+            {{"input",
+              {{"taskId", "itask_write"}, {"briefId", "ibrief_select"}, {"optionId", option_id}}}});
+      };
+      const auto start_plan = select_option("opt_start");
+      check(start_plan.ok && start_plan.value.at("continuation") == "start_plan" &&
+                start_plan.value.at("brief").at("status") == "selected" &&
+                start_plan.value.at("brief").at("selectedOptionId") == "opt_start",
+            "investigation_brief_select should return the start_plan continuation");
+      const auto approved_plan = database.get_investigation_plan("iplan_write_2");
+      check(approved_plan.has_value() &&
+                approved_plan->at("approval").at("status") == "approved" &&
+                approved_plan->at("approval").at("source") == "user" &&
+                approved_plan->at("approval").at("optionId") == "opt_start",
+            "a start_plan continuation should approve the linked plan for the selecting user");
+
+      // A read-only continuation must not approve the plan that produced the brief.
+      auto reset_plan = database.get_investigation_plan("iplan_write_2");
+      (*reset_plan)["approval"] = {{"status", "pending"}};
+      database.save_investigation_plan(*reset_plan);
+      const auto readonly_choice = select_option("opt_readonly");
+      check(readonly_choice.ok &&
+                readonly_choice.value.at("continuation") == "continue_readonly" &&
+                database.get_investigation_plan("iplan_write_2")->at("approval").at("status") ==
+                    "pending",
+            "a read-only continuation must leave the linked plan unapproved");
+
+      check(!router
+                 .invoke("investigation_brief_select",
+                         {{"input",
+                           {{"taskId", "itask_write"},
+                            {"briefId", "ibrief_select"},
+                            {"optionId", "opt_missing"}}}})
+                 .ok,
+            "investigation_brief_select should reject an unknown option");
+      check(!router
+                 .invoke("investigation_brief_select",
+                         {{"input",
+                           {{"taskId", "itask_write"},
+                            {"briefId", "ibrief_missing"},
+                            {"optionId", "opt_start"}}}})
+                 .ok,
+            "investigation_brief_select should report an unknown brief");
+      check(!router
+                 .invoke("investigation_brief_select",
+                         {{"input",
+                           {{"taskId", "itask_1"},
+                            {"briefId", "ibrief_select"},
+                            {"optionId", "opt_stop"}}}})
+                 .ok,
+            "investigation_brief_select should refuse a terminal task");
+      check(!router.invoke("investigation_brief_select", nlohmann::json::object()).ok,
+            "investigation_brief_select requires an input object");
+
+      // A stop continuation terminates the task.
+      const auto stop_choice = select_option("opt_stop");
+      check(stop_choice.ok && stop_choice.value.at("continuation") == "stop" &&
+                database.get_investigation_task("itask_write")->at("task").at("status") ==
+                    "stopped",
+            "a stop continuation should terminate the task");
+    }
   }
 
   sqlite3* readback = nullptr;
