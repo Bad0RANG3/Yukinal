@@ -54,4 +54,23 @@ struct SshCommandResult {
                                                  const std::string& server_id,
                                                  int timeout_seconds);
 
+// UI file browser: one bounded SFTP directory listing, one bounded read, and one
+// metadata-plus-read preview. The browser path policy is deliberately not the Agent
+// credential blocklist; it only normalizes entry names into absolute paths.
+[[nodiscard]] nlohmann::json run_remote_file_list(const DesktopDatabase& database,
+                                                  const CredentialStore& credentials,
+                                                  const std::string& server_id,
+                                                  const std::string& path,
+                                                  int timeout_seconds);
+[[nodiscard]] nlohmann::json run_remote_file_read(const DesktopDatabase& database,
+                                                  const CredentialStore& credentials,
+                                                  const std::string& server_id,
+                                                  const std::string& path,
+                                                  int timeout_seconds);
+[[nodiscard]] nlohmann::json run_remote_file_preview(const DesktopDatabase& database,
+                                                     const CredentialStore& credentials,
+                                                     const std::string& server_id,
+                                                     const std::string& path,
+                                                     int timeout_seconds);
+
 }  // namespace yukinal::desktop_host

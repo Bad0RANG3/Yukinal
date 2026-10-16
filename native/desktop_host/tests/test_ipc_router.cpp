@@ -127,6 +127,14 @@ int main() {
         "server_snapshot should reject a malformed server id");
   check(!router.invoke("server_snapshot", {{"serverId", "srv_ok"}}).ok,
         "server_snapshot should report a missing local database");
+  check(!router.invoke("remote_file_list", {{"serverId", "srv_ok"}}).ok,
+        "remote_file_list should require a path");
+  check(!router.invoke("remote_file_read", nlohmann::json::object()).ok,
+        "remote_file_read should require serverId and path");
+  check(!router.invoke("remote_file_preview",
+                       {{"serverId", "srv_ok"}, {"path", "/etc/hosts"}})
+               .ok,
+        "remote_file_preview should report a missing local database");
   check(!router.invoke("server_host_key_probe", nlohmann::json::object()).ok,
         "server_host_key_probe should require a server id");
   check(!router.invoke("server_host_key_probe", {{"serverId", "srv_ok"}}).ok,

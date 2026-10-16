@@ -675,7 +675,8 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "server_host_key_probe" || method == "server_host_key_trust" ||
       method == "server_logs" || method == "server_services" ||
-      method == "server_snapshot") {
+      method == "server_snapshot" || method == "remote_file_list" ||
+      method == "remote_file_read" || method == "remote_file_preview") {
     return server_read_command(method, params);
   }
 
@@ -1596,6 +1597,29 @@ IpcReply IpcRouter::server_read_command(const std::string& method,
                                         const nlohmann::json& params) {
   if (database_ == nullptr || !database_->is_available()) {
     return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+  if (method.rfind("remote_file_", 0) == 0) {
+    const std::set<std::string> fields = {"serverId", "path"};
+    if (!only_fields(params, fields, fields) || !params.at("serverId").is_string() ||
+        !params.at("path").is_string()) {
+      return failure("INVALID_PARAMS", method + " requires serverId and path");
+    }
+    const auto server_id = params.at("serverId").get<std::string>();
+    const auto path = params.at("path").get<std::string>();
+    if (!valid_server_id(server_id)) {
+      return failure("INVALID_PARAMS", method + " serverId is invalid");
+    }
+    try {
+      if (method == "remote_file_list") {
+        return {true, run_remote_file_list(*database_, *credentials_, server_id, path, 20)};
+      }
+      if (method == "remote_file_read") {
+        return {true, run_remote_file_read(*database_, *credentials_, server_id, path, 20)};
+      }
+      return {true, run_remote_file_preview(*database_, *credentials_, server_id, path, 20)};
+    } catch (const std::exception& error) {
+      return failure("SSH_ERROR", error.what());
+    }
   }
   if (method == "server_host_key_probe" || method == "server_host_key_trust") {
     const bool trust = method == "server_host_key_trust";

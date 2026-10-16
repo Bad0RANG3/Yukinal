@@ -978,3 +978,16 @@ validation. The canonical `native/build-nmake` Release build passed all twelve
 CTest targets. `server_connect`/`disconnect`, remote file and terminal commands,
 MCP supervision and catalog, `host.tool.execute`, investigation, installers, and
 real SSH validation remain.
+
+The same day, the C++ host added the remote file browser's read path.
+`remote_file_list`, `remote_file_read`, and `remote_file_preview` run the
+in-process SFTP core through the same resolver and scoped credential environment
+as the other SSH commands: the listing is bounded to 4096 entries whose names are
+normalized into absolute paths, the read is capped at 1 MiB with a lossy UTF-8
+decode, and the preview confirms a regular file with `sftp_stat` before reading
+and reusing the shared `make_file_preview` builder. The browser path policy is
+deliberately not the Agent credential blocklist. `desktop_host_tests` covers the
+new parameter validation. The canonical `native/build-nmake` Release build passed
+all twelve CTest targets. `server_connect`/`disconnect` and the terminal commands,
+MCP supervision and catalog, `host.tool.execute`, investigation, the file
+transfer actions, installers, and real SSH validation remain.

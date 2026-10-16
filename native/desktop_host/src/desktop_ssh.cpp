@@ -3,6 +3,7 @@
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "yukinal/desktop_host/local_paths.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -11,6 +12,7 @@
 
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
 #include <array>
+#include <cctype>
 #include <cstdlib>
 #include <random>
 
@@ -157,6 +159,120 @@ nlohmann::json parse_system_snapshot_outputs(const std::string& output,
   }
   return results;
 }
+
+int base64_value(char character) {
+  if (character >= 'A' && character <= 'Z') return character - 'A';
+  if (character >= 'a' && character <= 'z') return character - 'a' + 26;
+  if (character >= '0' && character <= '9') return character - '0' + 52;
+  if (character == '+') return 62;
+  if (character == '/') return 63;
+  return -1;
+}
+
+std::vector<std::uint8_t> base64_decode(const std::string& text) {
+  std::vector<std::uint8_t> bytes;
+  int buffer = 0;
+  int bits = 0;
+  for (const char character : text) {
+    if (character == '=') break;
+    if (std::isspace(static_cast<unsigned char>(character)) != 0) continue;
+    const int value = base64_value(character);
+    if (value < 0) throw std::runtime_error("the SSH service returned invalid SFTP data");
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push_back(static_cast<std::uint8_t>((buffer >> bits) & 0xFF));
+    }
+  }
+  return bytes;
+}
+
+// Lossy UTF-8 decode for the browser's text view; invalid sequences become U+FFFD
+// instead of failing the read.
+std::string utf8_lossy(const std::vector<std::uint8_t>& bytes) {
+  static constexpr char kReplacement[] = "\xEF\xBF\xBD";
+  std::string out;
+  out.reserve(bytes.size());
+  std::size_t index = 0;
+  while (index < bytes.size()) {
+    const auto byte = bytes[index];
+    if (byte < 0x80) {
+      out.push_back(static_cast<char>(byte));
+      ++index;
+      continue;
+    }
+    int length = 0;
+    std::uint32_t code_point = 0;
+    std::uint32_t minimum = 0;
+    if ((byte & 0xE0) == 0xC0) {
+      length = 2;
+      code_point = byte & 0x1Fu;
+      minimum = 0x80;
+    } else if ((byte & 0xF0) == 0xE0) {
+      length = 3;
+      code_point = byte & 0x0Fu;
+      minimum = 0x800;
+    } else if ((byte & 0xF8) == 0xF0) {
+      length = 4;
+      code_point = byte & 0x07u;
+      minimum = 0x10000;
+    } else {
+      out += kReplacement;
+      ++index;
+      continue;
+    }
+    if (index + static_cast<std::size_t>(length) > bytes.size()) {
+      out += kReplacement;
+      break;
+    }
+    bool valid = true;
+    for (int offset = 1; offset < length; ++offset) {
+      const auto continuation = bytes[index + static_cast<std::size_t>(offset)];
+      if ((continuation & 0xC0) != 0x80) {
+        valid = false;
+        break;
+      }
+      code_point = (code_point << 6) | (continuation & 0x3Fu);
+    }
+    if (!valid || code_point < minimum || code_point > 0x10FFFF ||
+        (code_point >= 0xD800 && code_point <= 0xDFFF)) {
+      out += kReplacement;
+      ++index;
+      continue;
+    }
+    out.append(reinterpret_cast<const char*>(bytes.data() + index),
+               static_cast<std::size_t>(length));
+    index += static_cast<std::size_t>(length);
+  }
+  return out;
+}
+
+std::string join_remote_path(const std::string& parent, const std::string& name) {
+  if (parent == "/") return "/" + name;
+  if (!parent.empty() && parent.back() == '/') return parent + name;
+  return parent + "/" + name;
+}
+
+bool valid_browser_path(const std::string& path) {
+  return !path.empty() && path.size() <= 4096 && path.find('\0') == std::string::npos &&
+         path.find('\r') == std::string::npos && path.find('\n') == std::string::npos;
+}
+
+bool valid_browser_preview_path(const std::string& path) {
+  if (!valid_browser_path(path) || path.front() != '/') return false;
+  if (path.find('\\') != std::string::npos) return false;
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    const auto slash = path.find('/', start);
+    const auto segment =
+        path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+    if (segment == "." || segment == "..") return false;
+    if (slash == std::string::npos) break;
+    start = slash + 1;
+  }
+  return true;
+}
 #endif
 
 }  // namespace
@@ -248,6 +364,138 @@ nlohmann::json run_system_snapshot(const DesktopDatabase& database,
   (void)database;
   (void)credentials;
   (void)server_id;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+nlohmann::json run_remote_file_list(const DesktopDatabase& database,
+                                    const CredentialStore& credentials,
+                                    const std::string& server_id, const std::string& path,
+                                    int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (!valid_browser_path(path)) throw std::runtime_error("the remote path is invalid");
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the remote listing timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  const auto result = yukinal::ssh_service::sftp_list(target, path, timeout_seconds);
+  if (!result.error_code.empty() || !result.completed) {
+    throw std::runtime_error(result.error_message.empty() ? result.error_code
+                                                          : result.error_message);
+  }
+  nlohmann::json entries;
+  try {
+    entries = nlohmann::json::parse(result.stdout_text);
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("the SSH service returned an invalid directory listing");
+  }
+  if (!entries.is_array() || entries.size() > 4096) {
+    throw std::runtime_error("the SSH service returned an invalid directory listing");
+  }
+  nlohmann::json converted = nlohmann::json::array();
+  for (const auto& entry : entries) {
+    if (!entry.is_object() || !entry.contains("name") || !entry.contains("file_type") ||
+        !entry.contains("size") || !entry.at("name").is_string() ||
+        !entry.at("file_type").is_string() || !entry.at("size").is_number_unsigned()) {
+      throw std::runtime_error("the SSH service returned an invalid directory entry");
+    }
+    const auto name = entry.at("name").get<std::string>();
+    const auto type = entry.at("file_type").get<std::string>();
+    const bool known_type = type == "directory" || type == "file" || type == "symlink" ||
+                            type == "other";
+    if (name.empty() || name.size() > 4096 || !known_type) {
+      throw std::runtime_error("the SSH service returned an invalid directory entry");
+    }
+    converted.push_back({{"name", name},
+                         {"path", join_remote_path(path, name)},
+                         {"type", type},
+                         {"size", entry.at("size")}});
+  }
+  return {{"path", path}, {"entries", std::move(converted)}};
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)path;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+nlohmann::json run_remote_file_read(const DesktopDatabase& database,
+                                    const CredentialStore& credentials,
+                                    const std::string& server_id, const std::string& path,
+                                    int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (!valid_browser_path(path)) throw std::runtime_error("the remote path is invalid");
+  constexpr std::uint32_t kBrowserReadBytes = 1024 * 1024;
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  const auto result = yukinal::ssh_service::sftp_read(target, path, kBrowserReadBytes, timeout_seconds);
+  if (!result.error_code.empty() || !result.completed) {
+    throw std::runtime_error(result.error_message.empty() ? result.error_code
+                                                          : result.error_message);
+  }
+  auto bytes = base64_decode(result.stdout_text);
+  const bool truncated = bytes.size() > kBrowserReadBytes;
+  if (truncated) bytes.resize(kBrowserReadBytes);
+  nlohmann::json response = {{"path", path},
+                             {"content", utf8_lossy(bytes)},
+                             {"truncated", truncated}};
+  return response;
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)path;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+nlohmann::json run_remote_file_preview(const DesktopDatabase& database,
+                                       const CredentialStore& credentials,
+                                       const std::string& server_id, const std::string& path,
+                                       int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (!valid_browser_preview_path(path)) throw std::runtime_error("the remote path is invalid");
+  constexpr std::uint32_t kBrowserReadBytes = 1024 * 1024;
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  const auto stat = yukinal::ssh_service::sftp_stat(target, path, timeout_seconds);
+  if (!stat.error_code.empty() || !stat.completed) {
+    throw std::runtime_error(stat.error_message.empty() ? stat.error_code : stat.error_message);
+  }
+  nlohmann::json metadata;
+  try {
+    metadata = nlohmann::json::parse(stat.stdout_text);
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("the SSH service returned invalid file metadata");
+  }
+  if (!metadata.is_object() || metadata.value("kind", std::string()) != "file") {
+    throw std::runtime_error("only regular remote files can be previewed");
+  }
+  const auto read = yukinal::ssh_service::sftp_read(target, path, kBrowserReadBytes, timeout_seconds);
+  if (!read.error_code.empty() || !read.completed) {
+    throw std::runtime_error(read.error_message.empty() ? read.error_code : read.error_message);
+  }
+  auto bytes = base64_decode(read.stdout_text);
+  const auto slash = path.rfind('/');
+  const auto name = slash == std::string::npos || slash + 1 >= path.size()
+                        ? std::string("远端文件")
+                        : path.substr(slash + 1);
+  return make_file_preview(name, metadata.value("size", std::uint64_t{0}), std::move(bytes),
+                           kBrowserReadBytes);
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)path;
   (void)timeout_seconds;
   throw std::runtime_error("the C++ SSH core is not available in this build");
 #endif
