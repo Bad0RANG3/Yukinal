@@ -1327,6 +1327,100 @@ int main(int argc, char** argv) {
                 out_of_scope.at("error").at("code") == "denied_by_policy",
             "host.investigation.evidence.record should deny an out-of-scope target");
 
+      // Body-free comparison of two persisted observations, with host freshness.
+      const nlohmann::json cmp_scope = {
+          {"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}};
+      const auto make_cmp_evidence = [&](const std::string& id, const nlohmann::json& body) {
+        return nlohmann::json{
+            {"id", id},
+            {"taskId", "itask_write"},
+            {"scope", cmp_scope},
+            {"kind", "tool_result"},
+            {"sourceTool", "filesystem.read"},
+            {"collectedAt", "2026-01-01T00:08:00Z"},
+            {"inputSummary", "compare fixture"},
+            {"contentType", "json"},
+            {"content", body},
+            {"contentHash", DesktopDatabase::content_hash(body)},
+            {"truncated", false},
+            {"redactionStatus", "redacted"}};
+      };
+      database.record_investigation_evidence(
+          make_cmp_evidence("iev_cmp_left", {{"value", 1}, {"note", "same"}}));
+      database.record_investigation_evidence(
+          make_cmp_evidence("iev_cmp_right", {{"value", 2}, {"note", "same"}}));
+      const auto comparison = router.handle_host_request(
+          "host.investigation.evidence.compare",
+          {{"taskId", "itask_write"},
+           {"leftEvidenceId", "iev_cmp_left"},
+           {"rightEvidenceId", "iev_cmp_right"}});
+      check(comparison.value("status", std::string()) == "success" &&
+                comparison.at("comparison").at("status") == "changed" &&
+                comparison.at("comparison").at("shape") == "json" &&
+                comparison.at("comparison").at("diffTruncated") == false &&
+                comparison.at("comparison").at("changedPathCount").get<int>() >= 1 &&
+                comparison.at("comparison").at("changedPaths").size() >= 1 &&
+                comparison.at("comparison").at("left").at("freshness").at("policy") ==
+                    "default-v1" &&
+                !comparison.at("comparison").at("left").contains("content"),
+            "host.investigation.evidence.compare should report changed JSON paths without bodies");
+      const auto identical = router.handle_host_request(
+          "host.investigation.evidence.compare",
+          {{"taskId", "itask_write"},
+           {"leftEvidenceId", "iev_cmp_left"},
+           {"rightEvidenceId", "iev_cmp_left"}});
+      check(identical.at("comparison").at("status") == "identical" &&
+                identical.at("comparison").at("changedPaths").empty(),
+            "compare should report two identical observations as identical");
+      const auto compare_unknown_task = router.handle_host_request(
+          "host.investigation.evidence.compare",
+          {{"taskId", "itask_missing"},
+           {"leftEvidenceId", "iev_cmp_left"},
+           {"rightEvidenceId", "iev_cmp_right"}});
+      check(compare_unknown_task.at("error").at("code") == "not_found",
+            "compare should report an unknown task");
+      const auto compare_foreign = router.handle_host_request(
+          "host.investigation.evidence.compare",
+          {{"taskId", "itask_created"},
+           {"leftEvidenceId", "iev_cmp_left"},
+           {"rightEvidenceId", "iev_cmp_right"}});
+      check(compare_foreign.at("error").at("code") == "denied_by_policy",
+            "compare should deny evidence from another task scope");
+
+      const auto correlation = router.handle_host_request(
+          "host.investigation.evidence.correlate",
+          {{"taskId", "itask_write"}, {"anchorEvidenceId", "iev_cmp_left"}});
+      check(correlation.value("status", std::string()) == "success" &&
+                correlation.at("correlation").at("matchedBy") == "time_window" &&
+                correlation.at("correlation").at("windowSeconds") == 300 &&
+                correlation.at("correlation").at("anchor").at("id") == "iev_cmp_left" &&
+                !correlation.at("correlation").at("evidence").empty() &&
+                correlation.at("correlation").at("sourceTools").at(0) == "filesystem.read",
+            "host.investigation.evidence.correlate should group by the time window");
+      const auto same_run_correlation = router.handle_host_request(
+          "host.investigation.evidence.correlate",
+          {{"taskId", "itask_write"}, {"anchorEvidenceId", "iev_run"}});
+      check(same_run_correlation.at("correlation").at("matchedBy") == "same_run" &&
+                same_run_correlation.at("correlation").at("anchor").at("runId") == "run_1",
+            "correlate should prefer the host-owned run relation");
+      const auto bad_window = router.handle_host_request(
+          "host.investigation.evidence.correlate",
+          {{"taskId", "itask_write"},
+           {"anchorEvidenceId", "iev_cmp_left"},
+           {"windowSeconds", 0}});
+      check(bad_window.at("error").at("code") == "invalid_input",
+            "correlate should bound the correlation window");
+
+      const auto retention_missing = router.handle_host_request(
+          "host.investigation.retention.preview", {{"taskId", "itask_missing"}});
+      check(retention_missing.value("status", std::string()) == "failed" &&
+                retention_missing.at("error").at("code") == "not_found",
+            "the host retention preview should report an unknown task");
+      const auto retention_bad_limit = router.handle_host_request(
+          "host.investigation.retention.preview", {{"taskId", "itask_write"}, {"limit", 0}});
+      check(retention_bad_limit.at("error").at("code") == "invalid_input",
+            "the host retention preview should reject an out-of-range limit");
+
       const auto deviation = router.handle_host_request(
           "host.investigation.plan.check",
           {{"taskId", "itask_write"},
@@ -1598,6 +1692,17 @@ int main(int argc, char** argv) {
             "retention preview should reject an out-of-range limit");
       check(router.invoke("investigation_retention_preview", {{"taskId", "itask_write"}}).ok,
             "retention preview should default its cutoff and limit");
+
+      // The Agent-facing host RPC reuses the same durable preview without a
+      // delete capability.
+      const auto host_preview = router.handle_host_request(
+          "host.investigation.retention.preview",
+          {{"taskId", "itask_write"}, {"cutoffAt", cutoff}});
+      check(host_preview.value("status", std::string()) == "success" &&
+                host_preview.at("preview").at("taskId") == "itask_write" &&
+                host_preview.at("preview").at("candidates").is_array() &&
+                !contains_id(host_preview.at("preview").at("candidates"), "iart_ret_live"),
+            "host.investigation.retention.preview should expose host retention candidates");
     }
 
     // ── investigation_schedule_* ─────────────────────────────────────────────

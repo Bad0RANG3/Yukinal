@@ -3033,6 +3033,35 @@ nlohmann::json DesktopDatabase::search_investigation_evidence(
   return items;
 }
 
+nlohmann::json DesktopDatabase::list_investigation_evidence_for_run(
+    const std::string& run_id, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 64) {
+    throw std::invalid_argument("evidence run listing limit must be between 1 and 64");
+  }
+  nlohmann::json items = nlohmann::json::array();
+  if (connection_ == nullptr) return items;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary, content_type,
+             content, content_hash, truncated, redaction_status, run_id
+        FROM investigation_evidence
+       WHERE run_id = ?1
+       ORDER BY collected_at DESC, id DESC
+       LIMIT ?2
+    )SQL");
+  bind_text(connection_, rows.get(), 1, run_id);
+  if (sqlite3_bind_int(rows.get(), 2, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    items.push_back(decode_investigation_evidence(rows.get()));
+  }
+  return items;
+}
+
 std::optional<nlohmann::json> DesktopDatabase::get_investigation_finding(
     const std::string& finding_id) const {
   std::lock_guard lock(mutex_);

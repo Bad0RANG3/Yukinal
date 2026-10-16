@@ -108,6 +108,8 @@ class DesktopDatabase {
       const std::string& evidence_id) const;
   [[nodiscard]] nlohmann::json search_investigation_evidence(
       const std::string& task_id, const nlohmann::json& query) const;
+  [[nodiscard]] nlohmann::json list_investigation_evidence_for_run(
+      const std::string& run_id, int limit) const;
   [[nodiscard]] std::optional<nlohmann::json> get_investigation_finding(
       const std::string& finding_id) const;
   void record_investigation_finding(const nlohmann::json& finding) const;

@@ -24,9 +24,11 @@
 #include <map>
 #include <random>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1903,6 +1905,49 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
   return {{"recorded", true}, {"plan", *plan}};
 }
 
+constexpr int kMaxEvidenceSearchLimit = 64;
+constexpr std::int64_t kDefaultEvidenceCorrelationWindowSeconds = 300;
+constexpr std::int64_t kMaxEvidenceCorrelationWindowSeconds = 3600;
+constexpr std::int64_t kDefaultRetentionDays = 30;
+constexpr int kDefaultRetentionLimit = 64;
+constexpr int kMaxRetentionLimit = 128;
+// Evidence is a point-in-time observation. The host exposes this conservative,
+// versioned policy as metadata; it never mutates or deletes old rows here.
+constexpr std::int64_t kEvidenceFreshnessStaleAfterSeconds = 15 * 60;
+constexpr std::int64_t kEvidenceFreshnessExpiresAfterSeconds = 24 * 60 * 60;
+constexpr std::size_t kMaxComparePaths = 64;
+constexpr std::int64_t kMaxComparePathCount = 10000;
+constexpr std::size_t kMaxCompareNodes = 4096;
+constexpr std::size_t kMaxCompareDepth = 8;
+constexpr std::int64_t kMaxCompareLines = 100000;
+
+/** Host-derived, versioned freshness for one observation timestamp. */
+nlohmann::json evidence_freshness_json(const std::string& collected_at,
+                                       std::int64_t evaluated_at_epoch) {
+  nlohmann::json freshness = {{"policy", "default-v1"},
+                              {"evaluatedAt", iso8601_from_epoch(evaluated_at_epoch)},
+                              {"staleAfterSeconds", kEvidenceFreshnessStaleAfterSeconds},
+                              {"expiresAfterSeconds", kEvidenceFreshnessExpiresAfterSeconds}};
+  const auto collected = parse_iso8601_utc_seconds(collected_at);
+  if (!collected.has_value()) {
+    freshness["status"] = "unknown";
+    freshness["reason"] = "collection timestamp is not a valid UTC ISO-8601 value";
+    return freshness;
+  }
+  if (*collected > evaluated_at_epoch) {
+    freshness["status"] = "unknown";
+    freshness["reason"] = "collection timestamp is in the future relative to the host clock";
+    return freshness;
+  }
+  const auto age_seconds = evaluated_at_epoch - *collected;
+  freshness["ageSeconds"] = age_seconds;
+  freshness["status"] = age_seconds <= kEvidenceFreshnessStaleAfterSeconds
+                            ? "fresh"
+                            : age_seconds <= kEvidenceFreshnessExpiresAfterSeconds ? "stale"
+                                                                                  : "expired";
+  return freshness;
+}
+
 nlohmann::json handle_evidence_record(DesktopDatabase& database, const nlohmann::json& params) {
   if (!params.is_object() || !params.contains("evidence") ||
       !params.at("evidence").is_object()) {
@@ -1973,12 +2018,20 @@ nlohmann::json handle_evidence_fetch(DesktopDatabase& database, const nlohmann::
     return evidence_failed("denied_by_policy",
                            "evidence does not belong to the current investigation task");
   }
-  return {{"status", "success"}, {"evidence", *evidence}};
+  // Freshness is host-derived and recalculated on presentation; ignore any
+  // value a caller may have supplied with the stored row.
+  nlohmann::json enriched = *evidence;
+  enriched["freshness"] = evidence_freshness_json(json_text_field(*evidence, "collectedAt"),
+                                                 now_epoch_seconds());
+  return {{"status", "success"}, {"evidence", enriched}};
 }
 
+/** Metadata-only projection: content is dropped, host freshness is added. */
 nlohmann::json evidence_summary(const nlohmann::json& evidence) {
   nlohmann::json summary = evidence;
   summary.erase("content");
+  summary["freshness"] =
+      evidence_freshness_json(json_text_field(evidence, "collectedAt"), now_epoch_seconds());
   return summary;
 }
 
@@ -2018,6 +2071,387 @@ nlohmann::json handle_evidence_search(DesktopDatabase& database, const nlohmann:
   nlohmann::json summaries = nlohmann::json::array();
   for (const auto& item : results) summaries.push_back(evidence_summary(item));
   return {{"status", "success"}, {"evidence", summaries}};
+}
+
+struct JsonDiffAccumulator {
+  nlohmann::json paths = nlohmann::json::array();
+  std::int64_t count = 0;
+  std::size_t nodes = 0;
+  bool truncated = false;
+};
+
+void record_json_diff_path(const std::string& path, JsonDiffAccumulator& diff) {
+  diff.count = std::min(diff.count + 1, kMaxComparePathCount);
+  if (diff.paths.size() < kMaxComparePaths) {
+    diff.paths.push_back(path.size() > 512 ? path.substr(0, 512) : path);
+  } else {
+    diff.truncated = true;
+  }
+}
+
+/** Record the difference paths between two JSON values without returning raw values. */
+void collect_json_diff(const nlohmann::json& left, const nlohmann::json& right,
+                       const std::string& path, std::size_t depth, JsonDiffAccumulator& diff) {
+  if (left == right) return;
+  if (diff.nodes >= kMaxCompareNodes) {
+    diff.truncated = true;
+    return;
+  }
+  ++diff.nodes;
+  if (depth >= kMaxCompareDepth || diff.count >= kMaxComparePathCount) {
+    record_json_diff_path(path, diff);
+    diff.truncated = true;
+    return;
+  }
+  if (left.is_object() && right.is_object()) {
+    std::set<std::string> keys;
+    for (auto iterator = left.begin(); iterator != left.end(); ++iterator) keys.insert(iterator.key());
+    for (auto iterator = right.begin(); iterator != right.end(); ++iterator) keys.insert(iterator.key());
+    for (const auto& key : keys) {
+      std::string child_path;
+      const bool simple_key = !key.empty() &&
+                              std::all_of(key.begin(), key.end(), [](unsigned char character) {
+                                return std::isalnum(character) != 0 || character == '_' ||
+                                       character == '-';
+                              });
+      if (simple_key) {
+        child_path = path + "." + key;
+      } else {
+        child_path = path + "[\"" + key + "\"]";
+      }
+      const auto left_child = left.find(key);
+      const auto right_child = right.find(key);
+      if (left_child != left.end() && right_child != right.end()) {
+        collect_json_diff(*left_child, *right_child, child_path, depth + 1, diff);
+      } else {
+        record_json_diff_path(child_path, diff);
+      }
+      if (diff.truncated && diff.nodes >= kMaxCompareNodes) break;
+    }
+    return;
+  }
+  if (left.is_array() && right.is_array()) {
+    const auto length = std::max(left.size(), right.size());
+    for (std::size_t index = 0; index < length; ++index) {
+      const auto child_path = path + "[" + std::to_string(index) + "]";
+      if (index < left.size() && index < right.size()) {
+        collect_json_diff(left.at(index), right.at(index), child_path, depth + 1, diff);
+      } else {
+        record_json_diff_path(child_path, diff);
+      }
+      if (diff.truncated && diff.nodes >= kMaxCompareNodes) break;
+    }
+    return;
+  }
+  record_json_diff_path(path, diff);
+}
+
+std::vector<std::string> split_compare_lines(const std::string& text) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (lines.size() <= static_cast<std::size_t>(kMaxCompareLines)) {
+    const auto newline = text.find('\n', start);
+    if (newline == std::string::npos) {
+      lines.push_back(text.substr(start));
+      break;
+    }
+    lines.push_back(text.substr(start, newline - start));
+    start = newline + 1;
+  }
+  return lines;
+}
+
+/** Bounded line-count comparison for two text bodies. */
+std::pair<nlohmann::json, bool> compare_text_content(const nlohmann::json& left,
+                                                     const nlohmann::json& right) {
+  if (!left.is_string() || !right.is_string()) return {nlohmann::json(), false};
+  const auto left_lines = split_compare_lines(left.get<std::string>());
+  const auto right_lines = split_compare_lines(right.get<std::string>());
+  const bool truncated = left_lines.size() > static_cast<std::size_t>(kMaxCompareLines) ||
+                         right_lines.size() > static_cast<std::size_t>(kMaxCompareLines);
+  const auto left_count = std::min<std::int64_t>(static_cast<std::int64_t>(left_lines.size()),
+                                                 kMaxCompareLines);
+  const auto right_count = std::min<std::int64_t>(static_cast<std::int64_t>(right_lines.size()),
+                                                  kMaxCompareLines);
+  const auto paired_limit = std::min(
+      {static_cast<std::int64_t>(left_lines.size()),
+       static_cast<std::int64_t>(right_lines.size()), kMaxCompareLines});
+  std::int64_t paired_changes = 0;
+  for (std::int64_t index = 0; index < paired_limit; ++index) {
+    if (left_lines[static_cast<std::size_t>(index)] != right_lines[static_cast<std::size_t>(index)]) {
+      ++paired_changes;
+    }
+  }
+  const auto difference = left_count > right_count ? left_count - right_count : right_count - left_count;
+  nlohmann::json text = {{"leftLineCount", left_count},
+                         {"rightLineCount", right_count},
+                         {"changedLineCount", paired_changes + difference},
+                         {"addedLineCount", std::max<std::int64_t>(0, right_count - left_count)},
+                         {"removedLineCount", std::max<std::int64_t>(0, left_count - right_count)}};
+  return {text, truncated};
+}
+
+/** Compare two persisted observations without returning either body. */
+nlohmann::json handle_evidence_compare(DesktopDatabase& database, const nlohmann::json& params) {
+  const auto task_id = params.is_object() ? json_text_field(params, "taskId") : std::string();
+  const auto left_id =
+      params.is_object() ? json_text_field(params, "leftEvidenceId") : std::string();
+  const auto right_id =
+      params.is_object() ? json_text_field(params, "rightEvidenceId") : std::string();
+  if (task_id.empty() || task_id.size() > 256 || left_id.empty() || left_id.size() > 256 ||
+      right_id.empty() || right_id.size() > 256) {
+    return evidence_failed(
+        "invalid_input", "taskId and both evidence ids must be between 1 and 256 characters");
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) return evidence_failed("not_found", "investigation task was not found");
+  const auto scope = task->value("scope", nlohmann::json::object());
+  nlohmann::json load_error;
+  const auto load = [&](const std::string& id, const char* side) -> std::optional<nlohmann::json> {
+    auto evidence = database.get_investigation_evidence(id);
+    if (!evidence.has_value()) {
+      load_error = evidence_failed("not_found",
+                                   std::string(side) + " evidence was not found in the current task");
+      return std::nullopt;
+    }
+    if (json_text_field(*evidence, "taskId") != task_id ||
+        !same_investigation_target(scope, evidence->value("scope", nlohmann::json::object()))) {
+      load_error = evidence_failed(
+          "denied_by_policy",
+          std::string(side) + " evidence does not belong to the current investigation scope");
+      return std::nullopt;
+    }
+    return evidence;
+  };
+  auto left = load(left_id, "left");
+  if (!left.has_value()) return load_error;
+  auto right = load(right_id, "right");
+  if (!right.has_value()) return load_error;
+
+  const auto left_summary = evidence_summary(*left);
+  const auto right_summary = evidence_summary(*right);
+  const auto status = json_text_field(*left, "contentHash") == json_text_field(*right, "contentHash")
+                          ? std::string("identical")
+                          : std::string("changed");
+  const auto left_type = json_text_field(*left, "contentType");
+  const auto right_type = json_text_field(*right, "contentType");
+  const std::string shape = left_type == "json" && right_type == "json"   ? "json"
+                            : left_type == "text" && right_type == "text" ? "text"
+                                                                          : "mixed";
+
+  nlohmann::json warnings = nlohmann::json::array();
+  if (json_bool_field(*left, "truncated") || json_bool_field(*right, "truncated")) {
+    warnings.push_back("one or both evidence bodies were truncated at collection");
+  }
+  if (json_text_field(*left, "sourceTool") != json_text_field(*right, "sourceTool") ||
+      json_text_field(*left, "kind") != json_text_field(*right, "kind")) {
+    warnings.push_back("source or evidence kind differs; interpret correlation cautiously");
+  }
+  const std::pair<const char*, const nlohmann::json*> sides[] = {{"left", &left_summary},
+                                                                 {"right", &right_summary}};
+  for (const auto& side : sides) {
+    const auto freshness_status =
+        side.second->value("freshness", nlohmann::json::object()).value("status", std::string());
+    if (freshness_status != "fresh") {
+      warnings.push_back(std::string(side.first) + " evidence is " + freshness_status +
+                         " under default-v1 freshness");
+    }
+  }
+
+  JsonDiffAccumulator diff;
+  nlohmann::json text_comparison;
+  if (status != "identical") {
+    if (shape == "json") {
+      collect_json_diff(left->at("content"), right->at("content"), "$", 0, diff);
+    } else if (shape == "text") {
+      auto compared = compare_text_content(left->at("content"), right->at("content"));
+      text_comparison = compared.first;
+      diff.truncated = compared.second;
+    } else {
+      record_json_diff_path("$", diff);
+    }
+  }
+  if (diff.truncated) {
+    warnings.push_back(
+        "comparison details were bounded; inspect individual evidence ids for more context");
+  }
+  if (warnings.size() > 8) {
+    nlohmann::json bounded = nlohmann::json::array();
+    for (std::size_t index = 0; index < 8; ++index) bounded.push_back(warnings.at(index));
+    warnings = std::move(bounded);
+  }
+  nlohmann::json comparison = {{"status", status},
+                               {"shape", shape},
+                               {"left", left_summary},
+                               {"right", right_summary},
+                               {"changedPaths", diff.paths},
+                               {"changedPathCount", diff.count},
+                               {"diffTruncated", diff.truncated},
+                               {"warnings", warnings}};
+  if (!text_comparison.is_null()) comparison["text"] = text_comparison;
+  return {{"status", "success"}, {"comparison", comparison}};
+}
+
+/** Deterministic host-side grouping used to inspect one observation across sources. */
+nlohmann::json handle_evidence_correlation(DesktopDatabase& database, const nlohmann::json& params) {
+  const auto task_id = params.is_object() ? json_text_field(params, "taskId") : std::string();
+  const auto anchor_id =
+      params.is_object() ? json_text_field(params, "anchorEvidenceId") : std::string();
+  if (task_id.empty() || task_id.size() > 256 || anchor_id.empty() || anchor_id.size() > 256) {
+    return evidence_failed("invalid_input",
+                           "taskId and anchorEvidenceId must be between 1 and 256 characters");
+  }
+  std::int64_t window_seconds = kDefaultEvidenceCorrelationWindowSeconds;
+  if (params.contains("windowSeconds")) {
+    if (!params.at("windowSeconds").is_number_integer()) {
+      return evidence_failed("invalid_input", "windowSeconds must be between 1 and 3600");
+    }
+    window_seconds = params.at("windowSeconds").get<std::int64_t>();
+    if (window_seconds < 1 || window_seconds > kMaxEvidenceCorrelationWindowSeconds) {
+      return evidence_failed("invalid_input", "windowSeconds must be between 1 and 3600");
+    }
+  }
+  int limit = 32;
+  if (params.contains("limit")) {
+    if (!params.at("limit").is_number_integer()) {
+      return evidence_failed("invalid_input", "limit must be between 1 and 64");
+    }
+    const auto requested = params.at("limit").get<std::int64_t>();
+    if (requested < 1 || requested > kMaxEvidenceSearchLimit) {
+      return evidence_failed("invalid_input", "limit must be between 1 and 64");
+    }
+    limit = static_cast<int>(requested);
+  }
+  auto task = load_investigation_task(database, task_id);
+  if (!task.has_value()) return evidence_failed("not_found", "investigation task was not found");
+  const auto scope = task->value("scope", nlohmann::json::object());
+  auto anchor = database.get_investigation_evidence(anchor_id);
+  if (!anchor.has_value()) {
+    return evidence_failed("not_found", "anchor evidence was not found in the current task");
+  }
+  if (json_text_field(*anchor, "taskId") != task_id ||
+      !same_investigation_target(scope, anchor->value("scope", nlohmann::json::object()))) {
+    return evidence_failed("denied_by_policy",
+                           "anchor evidence does not belong to the current investigation scope");
+  }
+
+  nlohmann::json related;
+  std::string matched_by;
+  const auto anchor_run = json_text_field(*anchor, "runId");
+  if (!anchor_run.empty()) {
+    related = database.list_investigation_evidence_for_run(anchor_run, limit);
+    matched_by = "same_run";
+  } else {
+    const auto anchor_epoch = parse_iso8601_utc_seconds(json_text_field(*anchor, "collectedAt"));
+    if (!anchor_epoch.has_value()) {
+      return evidence_failed(
+          "invalid_input",
+          "anchor evidence has no valid UTC collection timestamp for time-window correlation");
+    }
+    const auto from = iso8601_from_epoch(*anchor_epoch - window_seconds);
+    const auto to = iso8601_from_epoch(*anchor_epoch + window_seconds);
+    nlohmann::json query = {{"from", from}, {"to", to}, {"scope", scope}, {"limit", limit}};
+    related = database.search_investigation_evidence(task_id, query);
+    matched_by = "time_window";
+  }
+
+  nlohmann::json warnings = nlohmann::json::array();
+  const auto anchor_summary = evidence_summary(*anchor);
+  const auto anchor_freshness =
+      anchor_summary.value("freshness", nlohmann::json::object()).value("status", std::string());
+  if (anchor_freshness != "fresh") {
+    warnings.push_back("anchor evidence is " + anchor_freshness + " under default-v1 freshness");
+  }
+  if (json_bool_field(*anchor, "truncated")) {
+    warnings.push_back("anchor evidence was truncated at collection");
+  }
+  std::set<std::string> source_tools;
+  nlohmann::json summaries = nlohmann::json::array();
+  for (const auto& item : related) {
+    if (!item.is_object()) continue;
+    if (static_cast<std::int64_t>(summaries.size()) >= limit) break;
+    if (json_text_field(item, "taskId") != task_id) continue;
+    if (!same_investigation_target(scope, item.value("scope", nlohmann::json::object()))) continue;
+    const auto source_tool = json_text_field(item, "sourceTool");
+    source_tools.insert(source_tool);
+    const auto summary = evidence_summary(item);
+    const auto freshness_status =
+        summary.value("freshness", nlohmann::json::object()).value("status", std::string());
+    if (freshness_status != "fresh" && warnings.size() < 8) {
+      warnings.push_back(source_tool + " evidence is " + freshness_status +
+                         " under default-v1 freshness");
+    }
+    if (json_bool_field(item, "truncated") && warnings.size() < 8) {
+      warnings.push_back(source_tool + " evidence was truncated at collection");
+    }
+    summaries.push_back(summary);
+  }
+  source_tools.insert(json_text_field(*anchor, "sourceTool"));
+  if (summaries.empty()) {
+    warnings.push_back("no other evidence matched the host-owned run or time window");
+  }
+  if (warnings.size() > 8) {
+    nlohmann::json bounded = nlohmann::json::array();
+    for (std::size_t index = 0; index < 8; ++index) bounded.push_back(warnings.at(index));
+    warnings = std::move(bounded);
+  }
+  nlohmann::json source_list = nlohmann::json::array();
+  for (const auto& tool : source_tools) {
+    if (source_list.size() >= 32) break;
+    source_list.push_back(tool);
+  }
+  nlohmann::json correlation = {{"anchor", anchor_summary},
+                                {"evidence", summaries},
+                                {"matchedBy", matched_by},
+                                {"windowSeconds", window_seconds},
+                                {"sourceTools", source_list},
+                                {"warnings", warnings}};
+  return {{"status", "success"}, {"correlation", correlation}};
+}
+
+/** Report local retention candidates to the Agent without a delete capability. */
+nlohmann::json handle_retention_preview(DesktopDatabase& database, const nlohmann::json& params) {
+  const auto task_id = params.is_object() ? json_text_field(params, "taskId") : std::string();
+  if (task_id.empty() || task_id.size() > 256 ||
+      task_id.find_first_of("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
+                            "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f") !=
+          std::string::npos) {
+    return evidence_failed("invalid_input", "taskId must be between 1 and 256 visible characters");
+  }
+  std::string cutoff_at;
+  if (params.contains("cutoffAt")) {
+    if (!params.at("cutoffAt").is_string()) {
+      return evidence_failed("invalid_input", "cutoffAt must be a bounded UTC ISO-8601 timestamp");
+    }
+    cutoff_at = params.at("cutoffAt").get<std::string>();
+    if (cutoff_at.empty() || cutoff_at.size() > 80 ||
+        !parse_iso8601_utc_seconds(cutoff_at).has_value()) {
+      return evidence_failed("invalid_input", "cutoffAt must be a UTC ISO-8601 timestamp");
+    }
+  } else {
+    cutoff_at = iso8601_from_epoch(now_epoch_seconds() - kDefaultRetentionDays * 86400);
+  }
+  int limit = kDefaultRetentionLimit;
+  if (params.contains("limit")) {
+    if (!params.at("limit").is_number_integer()) {
+      return evidence_failed("invalid_input", "limit must be between 1 and 128");
+    }
+    const auto requested = params.at("limit").get<std::int64_t>();
+    if (requested < 1 || requested > kMaxRetentionLimit) {
+      return evidence_failed("invalid_input", "limit must be between 1 and 128");
+    }
+    limit = static_cast<int>(requested);
+  }
+  std::optional<nlohmann::json> preview;
+  try {
+    preview = database.investigation_retention_preview(task_id, cutoff_at, limit);
+  } catch (const std::invalid_argument& error) {
+    return evidence_failed("invalid_input", error.what());
+  }
+  if (!preview.has_value()) {
+    return evidence_failed("not_found", "investigation task was not found");
+  }
+  return {{"status", "success"}, {"preview", *preview}};
 }
 
 nlohmann::json handle_finding_record(DesktopDatabase& database, const nlohmann::json& params) {
@@ -6028,6 +6462,9 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
       method == "host.investigation.evidence.record" ||
       method == "host.investigation.evidence.fetch" ||
       method == "host.investigation.evidence.search" ||
+      method == "host.investigation.evidence.compare" ||
+      method == "host.investigation.evidence.correlate" ||
+      method == "host.investigation.retention.preview" ||
       method == "host.investigation.finding.record" ||
       method == "host.investigation.brief.record" ||
       method == "host.investigation.artifact.record") {
@@ -6052,6 +6489,15 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
       }
       if (method == "host.investigation.evidence.search") {
         return handle_evidence_search(*database_, params);
+      }
+      if (method == "host.investigation.evidence.compare") {
+        return handle_evidence_compare(*database_, params);
+      }
+      if (method == "host.investigation.evidence.correlate") {
+        return handle_evidence_correlation(*database_, params);
+      }
+      if (method == "host.investigation.retention.preview") {
+        return handle_retention_preview(*database_, params);
       }
       if (method == "host.investigation.finding.record") {
         return handle_finding_record(*database_, params);
