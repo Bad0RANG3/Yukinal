@@ -342,6 +342,26 @@ SshCommandResult run_service_inventory(const DesktopDatabase& database,
 #endif
 }
 
+SshCommandResult run_connection_check(const DesktopDatabase& database,
+                                      const CredentialStore& credentials,
+                                      const std::string& server_id, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the connection check timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  return to_result(yukinal::ssh_service::connection_check(target, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
 nlohmann::json run_system_snapshot(const DesktopDatabase& database,
                                    const CredentialStore& credentials,
                                    const std::string& server_id, int timeout_seconds) {

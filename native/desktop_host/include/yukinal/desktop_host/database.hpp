@@ -27,6 +27,13 @@ class DesktopDatabase {
       const std::string& server_id) const;
   [[nodiscard]] std::optional<nlohmann::json> get_server_connection(
       const std::string& server_id) const;
+  void set_server_status(const std::string& server_id, const std::string& status,
+                         const std::string& timestamp) const;
+  void record_connection_activity(const std::string& id, const std::string& server_id,
+                                  const std::string& title,
+                                  const std::optional<std::string>& description,
+                                  const std::string& outcome,
+                                  const std::string& timestamp) const;
   [[nodiscard]] std::filesystem::path data_directory() const;
   [[nodiscard]] bool is_available() const;
   [[nodiscard]] std::optional<nlohmann::json> get_identity(

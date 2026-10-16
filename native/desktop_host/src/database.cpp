@@ -978,6 +978,51 @@ std::optional<nlohmann::json> DesktopDatabase::get_server_connection(
   return record;
 }
 
+void DesktopDatabase::set_server_status(const std::string& server_id,
+                                        const std::string& status,
+                                        const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!is_one_of(status, {"connecting", "connected", "disconnected", "error"})) {
+    throw std::runtime_error("The server status is invalid");
+  }
+  Statement statement(connection_,
+                      "UPDATE servers SET status = ?2, updated_at = ?3 WHERE id = ?1");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, status);
+  bind_text(connection_, statement.get(), 3, timestamp);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Server was not found");
+}
+
+void DesktopDatabase::record_connection_activity(
+    const std::string& id, const std::string& server_id, const std::string& title,
+    const std::optional<std::string>& description, const std::string& outcome,
+    const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!is_one_of(outcome, {"success", "failure", "cancelled", "denied"})) {
+    throw std::runtime_error("The connection activity outcome is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      INSERT INTO activities (
+        id, server_id, workspace_id, type, title, description, source, actor,
+        reason, outcome, trace_id, created_at
+      ) VALUES (?1, ?2, NULL, 'connection', ?3, ?4, 'user', 'user', NULL, ?5, NULL, ?6)
+    )SQL");
+  bind_text(connection_, statement.get(), 1, id);
+  bind_text(connection_, statement.get(), 2, server_id);
+  bind_text(connection_, statement.get(), 3, title);
+  bind_optional_text(connection_, statement.get(), 4, description);
+  bind_text(connection_, statement.get(), 5, outcome);
+  bind_text(connection_, statement.get(), 6, timestamp);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
 nlohmann::json DesktopDatabase::list_servers() const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};

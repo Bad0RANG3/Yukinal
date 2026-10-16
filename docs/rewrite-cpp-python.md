@@ -991,3 +991,17 @@ new parameter validation. The canonical `native/build-nmake` Release build passe
 all twelve CTest targets. `server_connect`/`disconnect` and the terminal commands,
 MCP supervision and catalog, `host.tool.execute`, investigation, the file
 transfer actions, installers, and real SSH validation remain.
+
+Later on 2026-10-16, the C++ host added the connection lifecycle commands.
+`server_connect` runs the in-process `connection_check`; on success it stores the
+`connected` server status and a success activity, and on a transport failure it
+stores `error` plus a failure activity before returning the error. `server_disconnect`
+is idempotent, marks the server `disconnected` and records the activity. The
+keyboard-interactive `server_auth_respond`/`server_auth_cancel` validate their
+bounded shapes and answer `accepted: false` while no PTY has registered a
+challenge; the PTY worker will own that challenge store when the terminal
+commands land. `desktop_host_tests` and `desktop_host_database_tests` cover the
+new validation. The canonical `native/build-nmake` Release build passed all twelve
+CTest targets. The terminal commands, file transfer actions, MCP supervision and
+catalog, `host.tool.execute`, investigation, installers, and real SSH validation
+remain.

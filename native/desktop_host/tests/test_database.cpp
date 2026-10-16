@@ -648,6 +648,25 @@ int main() {
       bad_snapshot_rejected = true;
     }
     check(bad_snapshot_rejected, "insert_snapshot should reject an unknown health value");
+
+    // Connection lifecycle: disconnect is idempotent, and the keyboard-interactive
+    // commands answer an idle desktop with accepted:false.
+    const auto disconnected = router.invoke("server_disconnect", {{"serverId", "srv_01abc"}});
+    check(disconnected.ok, "server_disconnect should succeed");
+    const auto idle_respond = router.invoke(
+        "server_auth_respond",
+        {{"authId", "auth_probe"}, {"responses", nlohmann::json::array({"otp"})}});
+    check(idle_respond.ok && idle_respond.value.at("accepted") == false,
+          "server_auth_respond should answer an idle desktop with accepted:false");
+    const auto idle_cancel = router.invoke("server_auth_cancel", {{"authId", "auth_probe"}});
+    check(idle_cancel.ok && idle_cancel.value.at("accepted") == false,
+          "server_auth_cancel should answer an idle desktop with accepted:false");
+    check(!router.invoke("server_auth_respond", {{"authId", "auth_probe"}}).ok,
+          "server_auth_respond should require responses");
+    check(!router.invoke("server_auth_cancel", {{"authId", ""}}).ok,
+          "server_auth_cancel should reject an empty challenge id");
+    check(!router.invoke("server_disconnect", {{"serverId", "srv_missing"}}).ok,
+          "server_disconnect should reject an unknown server");
   }
 
   sqlite3* readback = nullptr;

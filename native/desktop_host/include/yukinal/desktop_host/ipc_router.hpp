@@ -46,6 +46,8 @@ class IpcRouter {
                             const nlohmann::json& params);
   IpcReply server_read_command(const std::string& method,
                                const nlohmann::json& params);
+  IpcReply connection_command(const std::string& method,
+                              const nlohmann::json& params);
   [[nodiscard]] std::string issue_probe_ticket(const std::string& server_id,
                                                const std::string& host, int port,
                                                const std::string& fingerprint);

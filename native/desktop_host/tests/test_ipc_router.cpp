@@ -135,6 +135,14 @@ int main() {
                        {{"serverId", "srv_ok"}, {"path", "/etc/hosts"}})
                .ok,
         "remote_file_preview should report a missing local database");
+  check(!router.invoke("server_connect", {{"serverId", "srv_ok"}}).ok,
+        "server_connect should report a missing local database");
+  check(!router.invoke("server_disconnect", {{"serverId", "srv_ok"}}).ok,
+        "server_disconnect should report a missing local database");
+  check(!router.invoke("server_auth_respond",
+                       {{"authId", "auth_x"}, {"responses", nlohmann::json::array({"otp"})}})
+               .ok,
+        "server_auth_respond should report a missing local database");
   check(!router.invoke("server_host_key_probe", nlohmann::json::object()).ok,
         "server_host_key_probe should require a server id");
   check(!router.invoke("server_host_key_probe", {{"serverId", "srv_ok"}}).ok,

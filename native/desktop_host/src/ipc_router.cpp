@@ -680,6 +680,11 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return server_read_command(method, params);
   }
 
+  if (method == "server_connect" || method == "server_disconnect" ||
+      method == "server_auth_respond" || method == "server_auth_cancel") {
+    return connection_command(method, params);
+  }
+
   if (method == "core_ping") {
     if (!params.empty()) {
       return failure("INVALID_PARAMS", "core_ping does not accept parameters");
@@ -1802,6 +1807,93 @@ IpcReply IpcRouter::server_read_command(const std::string& method,
     return failure("STORAGE_ERROR", "The local snapshot database could not save the snapshot");
   }
   return {true, {{"snapshot", std::move(snapshot)}}};
+}
+
+IpcReply IpcRouter::connection_command(const std::string& method,
+                                       const nlohmann::json& params) {
+  if (database_ == nullptr || !database_->is_available()) {
+    return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+  }
+
+  if (method == "server_auth_respond" || method == "server_auth_cancel") {
+    // Keyboard-interactive prompts are owned by the C++ PTY worker. Until a PTY
+    // registers a challenge there is nothing to accept, which is the correct
+    // answer for an idle desktop.
+    const bool respond = method == "server_auth_respond";
+    const std::set<std::string> fields =
+        respond ? std::set<std::string>{"authId", "responses"}
+                : std::set<std::string>{"authId"};
+    if (!only_fields(params, fields, fields) || !params.at("authId").is_string()) {
+      return failure("INVALID_PARAMS", method + " parameters are invalid");
+    }
+    const auto auth_id = trim_ascii(params.at("authId").get<std::string>());
+    if (auth_id.empty() || utf8_character_count(auth_id) > 256) {
+      return failure("INVALID_PARAMS", "authentication challenge id is invalid");
+    }
+    if (respond) {
+      const auto& responses = params.at("responses");
+      if (!responses.is_array() || responses.size() > 16) {
+        return failure("INVALID_PARAMS", "authentication responses are invalid");
+      }
+      for (const auto& response : responses) {
+        if (!response.is_string() || response.get<std::string>().size() > 4096) {
+          return failure("INVALID_PARAMS", "authentication responses are invalid");
+        }
+      }
+    }
+    return {true, {{"accepted", false}}};
+  }
+
+  if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
+    return failure("INVALID_PARAMS", method + " requires exactly serverId");
+  }
+  const auto server_id = params.at("serverId").get<std::string>();
+  if (!valid_server_id(server_id)) {
+    return failure("INVALID_PARAMS", method + " serverId is invalid");
+  }
+
+  if (method == "server_disconnect") {
+    // Idempotent: a stale UI may ask to disconnect twice.
+    try {
+      const auto now = iso8601_now();
+      database_->set_server_status(server_id, "disconnected", now);
+      database_->record_connection_activity(next_id("act"), server_id, "已断开服务器",
+                                            std::nullopt, "success", now);
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local server database could not update the connection state");
+    }
+    return {true, nlohmann::json::object()};
+  }
+
+  SshCommandResult result;
+  try {
+    result = run_connection_check(*database_, *credentials_, server_id, 20);
+  } catch (const std::exception& error) {
+    return failure("SSH_UNAVAILABLE", error.what());
+  }
+  const auto now = iso8601_now();
+  if (!result.error_code.empty()) {
+    const auto message = result.error_message.empty() ? result.error_code : result.error_message;
+    try {
+      database_->set_server_status(server_id, "error", now);
+      database_->record_connection_activity(next_id("act"), server_id, "连接服务器失败",
+                                            message, "failure", now);
+    } catch (...) {
+      // The connection error is the answer the user needs; a failed status write
+      // must not replace it.
+    }
+    return failure("SSH_ERROR", message);
+  }
+  try {
+    database_->set_server_status(server_id, "connected", now);
+    database_->record_connection_activity(next_id("act"), server_id, "已连接服务器", std::nullopt,
+                                          "success", now);
+  } catch (...) {
+    return failure("STORAGE_ERROR",
+                   "The local server database could not update the connection state");
+  }
+  return {true, {{"status", "connected"}}};
 }
 
 void IpcRouter::set_event_sink(

@@ -46,6 +46,12 @@ struct SshCommandResult {
                                                      const std::string& server_id,
                                                      int timeout_seconds);
 
+// Validates SSH authentication and host trust for the resolved target.
+[[nodiscard]] SshCommandResult run_connection_check(const DesktopDatabase& database,
+                                                    const CredentialStore& credentials,
+                                                    const std::string& server_id,
+                                                    int timeout_seconds);
+
 // Runs the fixed `system_snapshot` command batch with a fresh nonce and parses the
 // nonce-delimited output into `{command_id: {exitCode, stdout}}`. The caller applies
 // the Python `server.snapshot.normalize` RPC to that map.
