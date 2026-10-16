@@ -2155,6 +2155,524 @@ nlohmann::json handle_artifact_record(DesktopDatabase& database, const nlohmann:
   return {{"recorded", true}, {"artifact", artifact}};
 }
 
+// ── Investigation task creation ────────────────────────────────────────────
+// Mirrors the Rust `validate_create_input` policy seam: bounded normalization,
+// scope/server/workspace reconciliation and host-issued command delegation.
+constexpr size_t kMaxObjectiveChars = 8192;
+constexpr size_t kMaxSuccessCriteria = 16;
+constexpr size_t kMaxSuccessCriterionChars = 1024;
+constexpr std::int64_t kMaxBudgetSteps = 10000;
+constexpr std::int64_t kMaxBudgetRunMs = 86400000;
+constexpr std::int64_t kMaxBudgetAttempts = 32;
+constexpr std::int64_t kDefaultBudgetSteps = 25;
+constexpr std::int64_t kDefaultBudgetRunMs = 900000;
+constexpr std::int64_t kDefaultBudgetAttempts = 3;
+constexpr size_t kMaxGuardrailTools = 128;
+constexpr size_t kMaxGuardrailPathPrefixes = 128;
+constexpr size_t kMaxGuardrailNameChars = 256;
+constexpr size_t kMaxGuardrailPathChars = 4096;
+constexpr std::int64_t kMaxGuardrailWindowSeconds = 1095LL * 86400;
+
+std::optional<std::string> normalized_opaque_id(const std::string& raw) {
+  const auto value = trim_ascii(raw);
+  if (value.empty() || utf8_character_count(value) > 256 || has_control_characters(value)) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+// Reconciles an optional explicit id with the id carried by the task scope.
+bool reconcile_investigation_reference(const nlohmann::json& input, const char* explicit_key,
+                                       const nlohmann::json& scope, const char* scoped_key,
+                                       const char* label, std::optional<std::string>& out,
+                                       std::string& error) {
+  std::optional<std::string> explicit_value;
+  if (input.contains(explicit_key)) {
+    if (!input.at(explicit_key).is_string()) {
+      error = std::string(label) + " id must be a string";
+      return false;
+    }
+    explicit_value = normalized_opaque_id(input.at(explicit_key).get<std::string>());
+    if (!explicit_value.has_value()) {
+      error = std::string(label) + " id must be between 1 and 256 visible characters";
+      return false;
+    }
+  }
+  std::optional<std::string> scoped_value;
+  if (scope.contains(scoped_key)) {
+    if (!scope.at(scoped_key).is_string()) {
+      error = std::string("task scope ") + scoped_key + " must be a string";
+      return false;
+    }
+    scoped_value = normalized_opaque_id(scope.at(scoped_key).get<std::string>());
+    if (!scoped_value.has_value()) {
+      error = std::string(label) + " id must be between 1 and 256 visible characters";
+      return false;
+    }
+  }
+  if (explicit_value.has_value() && scoped_value.has_value() &&
+      *explicit_value != *scoped_value) {
+    error = std::string(label) + " id disagrees with the task scope";
+    return false;
+  }
+  out = explicit_value.has_value() ? explicit_value : scoped_value;
+  return true;
+}
+
+// Collapses a forbidden path prefix and rejects anything the Rust policy rejects.
+std::optional<std::string> strict_guardrail_path_prefix(const std::string& raw) {
+  const auto value = trim_ascii(raw);
+  if (value.empty() || utf8_character_count(value) > kMaxGuardrailPathChars) return std::nullopt;
+  if (value[0] != '/') return std::nullopt;
+  if (value.find('\0') != std::string::npos || value.find('\r') != std::string::npos ||
+      value.find('\n') != std::string::npos) {
+    return std::nullopt;
+  }
+  std::vector<std::string> parts;
+  std::stringstream stream(value);
+  std::string part;
+  while (std::getline(stream, part, '/')) {
+    if (part.empty() || part == ".") continue;
+    if (part == "..") return std::nullopt;
+    parts.push_back(part);
+  }
+  if (parts.empty()) return std::string("/");
+  std::string result;
+  for (const auto& item : parts) {
+    result += "/";
+    result += item;
+  }
+  return result;
+}
+
+std::optional<std::string> normalized_guardrail_timestamp(const nlohmann::json& raw,
+                                                          const char* field, std::string& error) {
+  if (!raw.is_string()) {
+    error = std::string("guardrails.") + field + " must be a string";
+    return std::nullopt;
+  }
+  const auto value = trim_ascii(raw.get<std::string>());
+  if (value.empty()) {
+    error = std::string("guardrails.") + field + " cannot be empty";
+    return std::nullopt;
+  }
+  if (!parse_iso8601_utc_seconds(value).has_value()) {
+    error = std::string("guardrails.") + field + " must be a UTC ISO-8601 timestamp";
+    return std::nullopt;
+  }
+  return value;
+}
+
+// Normalizes guardrails exactly as the Rust policy does. A renderer-supplied
+// `commandGrant` is dropped here; `build_investigation_task` installs one only
+// after the explicit top-level user choice and registered server checks pass.
+std::optional<nlohmann::json> validate_investigation_guardrails(const nlohmann::json* raw,
+                                                                std::string& error) {
+  nlohmann::json guardrails = {{"forbiddenTools", nlohmann::json::array()},
+                               {"forbiddenPathPrefixes", nlohmann::json::array()}};
+  std::optional<std::string> not_before;
+  std::optional<std::string> expires;
+  if (raw != nullptr) {
+    if (!raw->is_object()) {
+      error = "guardrails must be an object";
+      return std::nullopt;
+    }
+    if (!only_fields(*raw, {"notBeforeAt", "expiresAt", "forbiddenTools",
+                            "forbiddenPathPrefixes", "commandGrant"},
+                     {})) {
+      error = "guardrails contains an unexpected field";
+      return std::nullopt;
+    }
+    if (raw->contains("notBeforeAt")) {
+      auto value = normalized_guardrail_timestamp(raw->at("notBeforeAt"), "notBeforeAt", error);
+      if (!value.has_value()) return std::nullopt;
+      not_before = *value;
+    }
+    if (raw->contains("expiresAt")) {
+      auto value = normalized_guardrail_timestamp(raw->at("expiresAt"), "expiresAt", error);
+      if (!value.has_value()) return std::nullopt;
+      expires = *value;
+    }
+    if (raw->contains("forbiddenTools")) {
+      const auto& tools = raw->at("forbiddenTools");
+      if (!tools.is_array() || tools.size() > kMaxGuardrailTools) {
+        error = "guardrails.forbiddenTools must contain at most 128 items";
+        return std::nullopt;
+      }
+      nlohmann::json normalized = nlohmann::json::array();
+      std::vector<std::string> seen;
+      for (const auto& entry : tools) {
+        if (!entry.is_string()) {
+          error = "each guardrails.forbiddenTools item must be a tool name string";
+          return std::nullopt;
+        }
+        const auto tool = trim_ascii(entry.get<std::string>());
+        if (tool.empty() || utf8_character_count(tool) > kMaxGuardrailNameChars ||
+            std::any_of(tool.begin(), tool.end(),
+                        [](unsigned char byte) { return std::isspace(byte) != 0; })) {
+          error =
+              "each guardrails.forbiddenTools item must be a non-empty internal tool name of at "
+              "most 256 characters";
+          return std::nullopt;
+        }
+        if (std::find(seen.begin(), seen.end(), tool) == seen.end()) {
+          seen.push_back(tool);
+          normalized.push_back(tool);
+        }
+      }
+      guardrails["forbiddenTools"] = std::move(normalized);
+    }
+    if (raw->contains("forbiddenPathPrefixes")) {
+      const auto& prefixes = raw->at("forbiddenPathPrefixes");
+      if (!prefixes.is_array() || prefixes.size() > kMaxGuardrailPathPrefixes) {
+        error = "guardrails.forbiddenPathPrefixes must contain at most 128 items";
+        return std::nullopt;
+      }
+      nlohmann::json normalized = nlohmann::json::array();
+      std::vector<std::string> seen;
+      for (const auto& entry : prefixes) {
+        if (!entry.is_string()) {
+          error = "each guardrails.forbiddenPathPrefixes item must be a string";
+          return std::nullopt;
+        }
+        auto prefix = strict_guardrail_path_prefix(entry.get<std::string>());
+        if (!prefix.has_value()) {
+          error =
+              "each guardrails.forbiddenPathPrefixes item must be an absolute path of at most "
+              "4096 characters without `..`";
+          return std::nullopt;
+        }
+        if (std::find(seen.begin(), seen.end(), *prefix) == seen.end()) {
+          seen.push_back(*prefix);
+          normalized.push_back(*prefix);
+        }
+      }
+      guardrails["forbiddenPathPrefixes"] = std::move(normalized);
+    }
+  }
+  if (not_before.has_value()) guardrails["notBeforeAt"] = *not_before;
+  if (expires.has_value()) guardrails["expiresAt"] = *expires;
+  if (not_before.has_value() && expires.has_value()) {
+    const auto start = parse_iso8601_utc_seconds(*not_before);
+    const auto end = parse_iso8601_utc_seconds(*expires);
+    if (!start.has_value() || !end.has_value()) {
+      error = "guardrails timestamps must be UTC ISO-8601 timestamps";
+      return std::nullopt;
+    }
+    if (*end <= *start) {
+      error = "guardrails.expiresAt must be later than guardrails.notBeforeAt";
+      return std::nullopt;
+    }
+    if (*end - *start > kMaxGuardrailWindowSeconds) {
+      error = "guardrails time window cannot exceed 1095 days";
+      return std::nullopt;
+    }
+  }
+  return guardrails;
+}
+
+// Host-issued command delegation ticket. The counters are persisted with the
+// task and enforced by the SSH capability once remote execution lands.
+std::optional<nlohmann::json> issue_command_grant(
+    const std::string& task_id, const std::string& server_id, const std::string& environment,
+    const std::optional<std::string>& task_expires, std::string& error) {
+  const auto granted_at = iso8601_now();
+  const auto granted_epoch = parse_iso8601_utc_seconds(granted_at);
+  if (!granted_epoch.has_value()) {
+    error = "host clock could not issue a valid command delegation timestamp";
+    return std::nullopt;
+  }
+  std::int64_t expires_epoch = *granted_epoch + 4 * 3600;
+  if (task_expires.has_value()) {
+    const auto parsed = parse_iso8601_utc_seconds(*task_expires);
+    if (!parsed.has_value()) {
+      error = "guardrails.expiresAt must be a valid UTC timestamp";
+      return std::nullopt;
+    }
+    if (*parsed < expires_epoch) expires_epoch = *parsed;
+  }
+  if (expires_epoch <= *granted_epoch) {
+    error = "task command delegation would already be expired";
+    return std::nullopt;
+  }
+  return nlohmann::json{
+      {"grantId", next_id("cmdgrant")},
+      {"taskId", task_id},
+      {"serverId", server_id},
+      {"environment", environment},
+      {"grantedBy", "user"},
+      {"grantedAt", granted_at},
+      {"expiresAt", iso8601_from_epoch(expires_epoch)},
+      {"maxCalls", 12},
+      {"callsUsed", 0},
+      {"maxTotalDurationMs", 900000},
+      {"totalDurationMs", 0},
+      {"maxTotalOutputBytes", 1048576},
+      {"totalOutputBytes", 0},
+  };
+}
+
+// Builds a validated `InvestigationTask` row from a create input. Returns
+// `std::nullopt` and fills `error` when the input is rejected.
+std::optional<nlohmann::json> build_investigation_task(const nlohmann::json& input,
+                                                       DesktopDatabase& database,
+                                                       std::string& error) {
+  if (!input.is_object() ||
+      !only_fields(input,
+                   {"id", "workspaceId", "serverId", "objective", "successCriteria", "scope",
+                    "guardrails", "mode", "permissionMode", "automationLevel", "budget",
+                    "grantTaskCommands"},
+                   {"objective", "successCriteria", "scope", "mode", "permissionMode",
+                    "automationLevel"})) {
+    error = "investigation task input is missing required fields or has unexpected fields";
+    return std::nullopt;
+  }
+  if (!input.at("objective").is_string()) {
+    error = "objective must be a string";
+    return std::nullopt;
+  }
+  const auto objective = trim_ascii(input.at("objective").get<std::string>());
+  if (objective.empty() || utf8_character_count(objective) > kMaxObjectiveChars) {
+    error = "objective must be between 1 and 8192 characters";
+    return std::nullopt;
+  }
+  const auto& raw_criteria = input.at("successCriteria");
+  if (!raw_criteria.is_array() || raw_criteria.empty() ||
+      raw_criteria.size() > kMaxSuccessCriteria) {
+    error = "successCriteria must contain 1 to 16 items";
+    return std::nullopt;
+  }
+  nlohmann::json success_criteria = nlohmann::json::array();
+  for (const auto& criterion : raw_criteria) {
+    if (!criterion.is_string()) {
+      error = "each success criterion must be a string";
+      return std::nullopt;
+    }
+    const auto normalized = trim_ascii(criterion.get<std::string>());
+    if (normalized.empty() || utf8_character_count(normalized) > kMaxSuccessCriterionChars) {
+      error = "each success criterion must be between 1 and 1024 characters";
+      return std::nullopt;
+    }
+    success_criteria.push_back(normalized);
+  }
+  const auto& scope = input.at("scope");
+  if (!scope.is_object() ||
+      !only_fields(scope, {"host", "serverId", "workspaceId", "environment"},
+                   {"host", "environment"}) ||
+      !scope.at("host").is_string() || !scope.at("environment").is_string() ||
+      !is_one_of(scope.at("host").get<std::string>(), {"local", "remote"}) ||
+      !is_one_of(scope.at("environment").get<std::string>(),
+                 {"local", "development", "staging", "production", "unknown"})) {
+    error = "task scope is invalid";
+    return std::nullopt;
+  }
+  std::optional<std::string> task_id;
+  if (input.contains("id")) {
+    if (!input.at("id").is_string()) {
+      error = "task id must be a string";
+      return std::nullopt;
+    }
+    task_id = normalized_opaque_id(input.at("id").get<std::string>());
+    if (!task_id.has_value()) {
+      error = "task id must be between 1 and 256 visible characters";
+      return std::nullopt;
+    }
+  } else {
+    task_id = next_id("task");
+  }
+  std::optional<std::string> workspace_id;
+  if (!reconcile_investigation_reference(input, "workspaceId", scope, "workspaceId", "workspace",
+                                         workspace_id, error)) {
+    return std::nullopt;
+  }
+  std::optional<std::string> server_id;
+  if (!reconcile_investigation_reference(input, "serverId", scope, "serverId", "server", server_id,
+                                         error)) {
+    return std::nullopt;
+  }
+  const auto host = scope.at("host").get<std::string>();
+  const auto environment = scope.at("environment").get<std::string>();
+  if (host == "remote" && !server_id.has_value()) {
+    error = "remote investigation tasks require a server scope";
+    return std::nullopt;
+  }
+  if (host == "local" && server_id.has_value()) {
+    error = "local investigation tasks cannot carry a server scope";
+    return std::nullopt;
+  }
+  std::optional<nlohmann::json> server_record;
+  if (server_id.has_value()) {
+    if (!valid_server_id(*server_id)) {
+      error = "server scope must be an opaque srv_ id";
+      return std::nullopt;
+    }
+    nlohmann::json servers;
+    try {
+      servers = database.list_servers();
+    } catch (...) {
+      error = "server scope is not available";
+      return std::nullopt;
+    }
+    const auto list = servers.value("servers", nlohmann::json::array());
+    if (list.is_array()) {
+      for (const auto& candidate : list) {
+        if (json_text_field(candidate, "id") == *server_id) {
+          server_record = candidate;
+          break;
+        }
+      }
+    }
+    if (!server_record.has_value()) {
+      error = "server scope is not available";
+      return std::nullopt;
+    }
+  }
+  if (workspace_id.has_value()) {
+    nlohmann::json workspaces;
+    try {
+      workspaces = database.list_workspaces();
+    } catch (...) {
+      error = "workspace scope is not available";
+      return std::nullopt;
+    }
+    bool found = false;
+    const auto list = workspaces.value("workspaces", nlohmann::json::array());
+    if (list.is_array()) {
+      for (const auto& candidate : list) {
+        if (json_text_field(candidate, "id") == *workspace_id) {
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      error = "workspace scope is not available";
+      return std::nullopt;
+    }
+  }
+  if (!input.at("mode").is_string() || !input.at("permissionMode").is_string() ||
+      !input.at("automationLevel").is_string()) {
+    error = "task mode, permission mode and automation level must be strings";
+    return std::nullopt;
+  }
+  const auto mode = input.at("mode").get<std::string>();
+  const auto permission_mode = input.at("permissionMode").get<std::string>();
+  const auto automation = input.at("automationLevel").get<std::string>();
+  if (!is_one_of(mode, {"goal", "plan", "readonly"})) {
+    error = "task mode is invalid";
+    return std::nullopt;
+  }
+  if (!is_one_of(permission_mode, {"ask", "auto"})) {
+    error = "task permission mode is invalid";
+    return std::nullopt;
+  }
+  if (!is_one_of(automation, {"readonly", "propose", "execute"})) {
+    error = "task automation level is invalid";
+    return std::nullopt;
+  }
+  const nlohmann::json* raw_guardrails =
+      input.contains("guardrails") && !input.at("guardrails").is_null() ? &input.at("guardrails")
+                                                                       : nullptr;
+  auto guardrails = validate_investigation_guardrails(raw_guardrails, error);
+  if (!guardrails.has_value()) return std::nullopt;
+  if (mode == "readonly" && automation != "readonly") {
+    error = "readonly run mode cannot create an executable task";
+    return std::nullopt;
+  }
+  if (mode == "plan" && automation == "execute") {
+    error = "plan mode can propose a change but cannot authorize execution";
+    return std::nullopt;
+  }
+  if (json_bool_field(input, "grantTaskCommands")) {
+    const bool grantable = mode == "goal" && permission_mode == "auto" && automation == "execute" &&
+                           host == "remote" &&
+                           (environment == "development" || environment == "staging");
+    if (!grantable) {
+      error =
+          "task command delegation is available only for remote development/staging goal tasks "
+          "configured to execute";
+      return std::nullopt;
+    }
+    if (!server_id.has_value()) {
+      error = "task command delegation requires a resolved server";
+      return std::nullopt;
+    }
+    const auto server_environment =
+        server_record->value("metadata", nlohmann::json::object()).value("environment",
+                                                                          std::string());
+    if (server_environment != environment) {
+      error = "task command delegation environment does not match the registered server";
+      return std::nullopt;
+    }
+    const auto task_expires = guardrails->contains("expiresAt") &&
+                                      guardrails->at("expiresAt").is_string()
+                                  ? std::optional<std::string>(
+                                        guardrails->at("expiresAt").get<std::string>())
+                                  : std::nullopt;
+    std::string grant_error;
+    auto grant = issue_command_grant(*task_id, *server_id, environment, task_expires, grant_error);
+    if (!grant.has_value()) {
+      error = grant_error;
+      return std::nullopt;
+    }
+    (*guardrails)["commandGrant"] = std::move(*grant);
+  }
+  std::int64_t max_steps = kDefaultBudgetSteps;
+  std::int64_t max_run_ms = kDefaultBudgetRunMs;
+  std::int64_t max_attempts = kDefaultBudgetAttempts;
+  if (input.contains("budget") && !input.at("budget").is_null()) {
+    const auto& budget = input.at("budget");
+    if (!budget.is_object() ||
+        !only_fields(budget, {"maxSteps", "maxRunMs", "maxAttempts"},
+                     {"maxSteps", "maxRunMs", "maxAttempts"}) ||
+        !budget.at("maxSteps").is_number_integer() ||
+        !budget.at("maxRunMs").is_number_integer() ||
+        !budget.at("maxAttempts").is_number_integer()) {
+      error = "budget is invalid";
+      return std::nullopt;
+    }
+    max_steps = budget.at("maxSteps").get<std::int64_t>();
+    max_run_ms = budget.at("maxRunMs").get<std::int64_t>();
+    max_attempts = budget.at("maxAttempts").get<std::int64_t>();
+  }
+  if (max_steps < 1 || max_steps > kMaxBudgetSteps) {
+    error = "budget.maxSteps must be between 1 and 10000";
+    return std::nullopt;
+  }
+  if (max_run_ms < 1 || max_run_ms > kMaxBudgetRunMs) {
+    error = "budget.maxRunMs must be between 1 and 86400000";
+    return std::nullopt;
+  }
+  if (max_attempts < 1 || max_attempts > kMaxBudgetAttempts) {
+    error = "budget.maxAttempts must be between 1 and 32";
+    return std::nullopt;
+  }
+  nlohmann::json scope_out = {{"host", host}, {"environment", environment}};
+  if (server_id.has_value()) scope_out["serverId"] = *server_id;
+  if (workspace_id.has_value()) scope_out["workspaceId"] = *workspace_id;
+  const auto now = iso8601_now();
+  nlohmann::json task = {
+      {"id", *task_id},
+      {"objective", objective},
+      {"successCriteria", std::move(success_criteria)},
+      {"scope", std::move(scope_out)},
+      {"guardrails", std::move(*guardrails)},
+      {"mode", mode},
+      {"permissionMode", permission_mode},
+      {"automationLevel", automation},
+      {"createdBy", "user"},
+      {"phase", "investigating"},
+      {"status", "pending"},
+      {"budget",
+       {{"maxSteps", max_steps}, {"maxRunMs", max_run_ms}, {"maxAttempts", max_attempts}}},
+      {"createdAt", now},
+      {"updatedAt", now},
+  };
+  if (workspace_id.has_value()) task["workspaceId"] = *workspace_id;
+  if (server_id.has_value()) task["serverId"] = *server_id;
+  return task;
+}
+
 }  // namespace
 
 IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
@@ -2275,6 +2793,35 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     } catch (...) {
       return failure("STORAGE_ERROR",
                      "The local investigation database could not read the task");
+    }
+  }
+
+  if (method == "investigation_task_create") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_task_create requires an input object");
+    }
+    std::string validation_error;
+    auto task = build_investigation_task(params.at("input"), *database_, validation_error);
+    if (!task.has_value()) {
+      return failure("INVALID_PARAMS",
+                     validation_error.empty() ? "investigation_task_create input is invalid"
+                                              : validation_error);
+    }
+    try {
+      auto created = database_->create_investigation_task(*task);
+      if (!created.has_value()) {
+        return failure("STORAGE_UNAVAILABLE",
+                       "The local investigation database is unavailable");
+      }
+      return {true, {{"task", std::move(*created)}}};
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not create the task");
     }
   }
 

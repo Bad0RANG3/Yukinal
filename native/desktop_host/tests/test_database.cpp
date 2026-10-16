@@ -860,6 +860,151 @@ int main(int argc, char** argv) {
     check(!router.invoke("investigation_task_stop", {{"taskId", "itask_missing"}}).ok,
           "investigation_task_stop should report an unknown task");
 
+    // ── investigation_task_create ────────────────────────────────────────────
+    // The create command normalizes the bounded input, reconciles the scope ids
+    // and installs host-issued command delegation only for eligible targets.
+    {
+      const nlohmann::json remote_scope = {
+          {"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}};
+      const nlohmann::json base_input = {
+          {"objective", "  Verify nginx  "},
+          {"successCriteria", nlohmann::json::array({"  nginx active  ", "port 80 open"})},
+          {"scope", remote_scope},
+          {"mode", "goal"},
+          {"permissionMode", "ask"},
+          {"automationLevel", "propose"},
+      };
+      nlohmann::json create_input = base_input;
+      create_input["id"] = "itask_created";
+      const auto created =
+          router.invoke("investigation_task_create", {{"input", create_input}});
+      check(created.ok && created.value.at("task").at("id") == "itask_created" &&
+                created.value.at("task").at("objective") == "Verify nginx" &&
+                created.value.at("task").at("successCriteria").at(0) == "nginx active" &&
+                created.value.at("task").at("scope").at("serverId") == "srv_01abc" &&
+                created.value.at("task").at("status") == "pending" &&
+                created.value.at("task").at("phase") == "investigating" &&
+                created.value.at("task").at("createdBy") == "user" &&
+                created.value.at("task").at("budget").at("maxSteps") == 25 &&
+                created.value.at("task").at("budget").at("maxRunMs") == 900000 &&
+                created.value.at("task").at("budget").at("maxAttempts") == 3 &&
+                created.value.at("task").at("guardrails").at("forbiddenTools").is_array() &&
+                !created.value.at("task").at("guardrails").contains("commandGrant"),
+            "investigation_task_create should normalize and persist a bounded task");
+      const auto reloaded = router.invoke("investigation_task_get", {{"taskId", "itask_created"}});
+      check(reloaded.ok && reloaded.value.at("task").at("objective") == "Verify nginx",
+            "a created task should be readable through investigation_task_get");
+
+      // A command delegation ticket is issued only for an eligible remote target.
+      nlohmann::json grant_input = base_input;
+      grant_input["permissionMode"] = "auto";
+      grant_input["automationLevel"] = "execute";
+      grant_input["grantTaskCommands"] = true;
+      const auto granted = router.invoke("investigation_task_create", {{"input", grant_input}});
+      check(granted.ok &&
+                granted.value.at("task").at("guardrails").at("commandGrant").at("environment") ==
+                    "staging" &&
+                granted.value.at("task").at("guardrails").at("commandGrant").at("maxCalls") == 12 &&
+                granted.value.at("task").at("guardrails").at("commandGrant").at("serverId") ==
+                    "srv_01abc",
+            "investigation_task_create should issue a command grant for a remote staging goal task");
+
+      // A renderer-supplied command grant is dropped rather than trusted.
+      nlohmann::json forged_input = base_input;
+      forged_input["guardrails"] = {
+          {"forbiddenTools", nlohmann::json::array()},
+          {"forbiddenPathPrefixes", nlohmann::json::array()},
+          {"commandGrant",
+           {{"grantId", "cmdgrant_forged"},
+            {"taskId", "itask_forged"},
+            {"serverId", "srv_01abc"},
+            {"environment", "staging"},
+            {"grantedBy", "user"},
+            {"grantedAt", "2026-01-01T00:00:00Z"},
+            {"expiresAt", "2027-01-01T00:00:00Z"},
+            {"maxCalls", 999},
+            {"callsUsed", 0},
+            {"maxTotalDurationMs", 1},
+            {"totalDurationMs", 0},
+            {"maxTotalOutputBytes", 1},
+            {"totalOutputBytes", 0}}}};
+      const auto forged = router.invoke("investigation_task_create", {{"input", forged_input}});
+      check(forged.ok && !forged.value.at("task").at("guardrails").contains("commandGrant"),
+            "investigation_task_create should not trust a renderer-supplied command grant");
+
+      // Rejected inputs.
+      auto expect_rejected = [&router](const nlohmann::json& input) {
+        return !router.invoke("investigation_task_create", {{"input", input}}).ok;
+      };
+      nlohmann::json readonly_input = base_input;
+      readonly_input["mode"] = "readonly";
+      check(expect_rejected(readonly_input),
+            "a readonly task cannot be created with a non-readonly automation level");
+      nlohmann::json no_server = base_input;
+      no_server["scope"] = {{"host", "remote"}, {"environment", "staging"}};
+      check(expect_rejected(no_server), "a remote task requires a server scope");
+      nlohmann::json local_with_server = base_input;
+      local_with_server["scope"] = {
+          {"host", "local"}, {"serverId", "srv_01abc"}, {"environment", "local"}};
+      check(expect_rejected(local_with_server), "a local task cannot carry a server scope");
+      nlohmann::json unknown_server = base_input;
+      unknown_server["scope"] = {
+          {"host", "remote"}, {"serverId", "srv_missing"}, {"environment", "staging"}};
+      check(expect_rejected(unknown_server), "a task cannot target an unknown server");
+      nlohmann::json empty_objective = base_input;
+      empty_objective["objective"] = "   ";
+      check(expect_rejected(empty_objective), "an empty objective must be rejected");
+      nlohmann::json no_criteria = base_input;
+      no_criteria["successCriteria"] = nlohmann::json::array();
+      check(expect_rejected(no_criteria), "a task needs at least one success criterion");
+      nlohmann::json mismatch_workspace = base_input;
+      mismatch_workspace["workspaceId"] = "ws_01";
+      mismatch_workspace["scope"] = {
+          {"host", "remote"}, {"serverId", "srv_01abc"}, {"workspaceId", "ws_other"},
+          {"environment", "staging"}};
+      check(expect_rejected(mismatch_workspace),
+            "an explicit workspace id must agree with the task scope");
+      nlohmann::json bad_grant = base_input;
+      bad_grant["grantTaskCommands"] = true;
+      check(expect_rejected(bad_grant),
+            "command delegation is unavailable for a non-executable task");
+      nlohmann::json wrong_environment = base_input;
+      wrong_environment["permissionMode"] = "auto";
+      wrong_environment["automationLevel"] = "execute";
+      wrong_environment["grantTaskCommands"] = true;
+      wrong_environment["scope"] = {
+          {"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "development"}};
+      check(expect_rejected(wrong_environment),
+            "command delegation must match the registered server environment");
+      nlohmann::json unknown_field = base_input;
+      unknown_field["surprise"] = true;
+      check(expect_rejected(unknown_field), "an unknown create field must be rejected");
+      check(!router.invoke("investigation_task_create", nlohmann::json::object()).ok,
+            "investigation_task_create requires an input object");
+      check(!router.invoke("investigation_task_create", {{"input", "nope"}}).ok,
+            "investigation_task_create input must be an object");
+
+      // A workspace-scoped task reconciles against a registered workspace.
+      nlohmann::json workspace_input = base_input;
+      workspace_input["scope"] = {{"host", "remote"},
+                                  {"serverId", "srv_01abc"},
+                                  {"workspaceId", "ws_01"},
+                                  {"environment", "staging"}};
+      const auto workspace_task =
+          router.invoke("investigation_task_create", {{"input", workspace_input}});
+      check(workspace_task.ok &&
+                workspace_task.value.at("task").at("workspaceId") == "ws_01" &&
+                workspace_task.value.at("task").at("scope").at("workspaceId") == "ws_01",
+            "investigation_task_create should accept a registered workspace scope");
+      nlohmann::json unknown_workspace = workspace_input;
+      unknown_workspace["scope"] = {{"host", "remote"},
+                                    {"serverId", "srv_01abc"},
+                                    {"workspaceId", "ws_missing"},
+                                    {"environment", "staging"}};
+      check(expect_rejected(unknown_workspace),
+            "a task cannot target an unknown workspace");
+    }
+
     // ── Investigation write foundation ───────────────────────────────────────
     // Durable tasks, plans, evidence, findings and briefs round-trip through the
     // shared JSON contract and enforce the hash and redaction guards.
