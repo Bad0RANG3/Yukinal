@@ -2700,6 +2700,273 @@ int main(int argc, char** argv) {
       std::cerr << "filesystem backup ledger block failed: " << error.what() << '\n';
       std::exit(3);
     }
+
+    // ── SSH filesystem action targets ────────────────────────────────────────
+    // `host.ssh.filesystem_backup_target` derives the host-owned path,
+    // `..._restore_target` re-reads the ledger binding, and
+    // `..._cleanup_target` reports each item's readiness before the Agent
+    // touches the remote server.
+    try {
+      const std::string bt_path = "/srv/app.conf";
+      const std::string bt_revision(64, 'c');
+      const nlohmann::json bt_target = {
+          {"host", "remote"}, {"serverId", "srv_target"}, {"environment", "staging"}};
+      const nlohmann::json bt_task = {
+          {"id", "itask_backup_target"},
+          {"serverId", "srv_target"},
+          {"objective", "Exercise the SSH filesystem action targets"},
+          {"successCriteria", nlohmann::json::array({"targets resolved"})},
+          {"scope", bt_target},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "goal"},
+          {"permissionMode", "auto"},
+          {"automationLevel", "execute"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+          {"createdBy", "user"},
+          {"createdAt", "2026-01-06T00:00:00Z"},
+          {"updatedAt", "2026-01-06T00:00:00Z"},
+      };
+      (void)database.create_investigation_task(bt_task);
+
+      const auto bt_plan = [&](const std::string& plan_id, int revision_number,
+                               const std::string& step_id, const std::string& tool_name,
+                               const nlohmann::json& input_bindings) {
+        return nlohmann::json{
+            {"id", plan_id},
+            {"taskId", "itask_backup_target"},
+            {"revision", revision_number},
+            {"status", "active"},
+            {"createdAt", "2026-01-06T00:00:00Z"},
+            {"updatedAt", "2026-01-06T00:00:00Z"},
+            {"currentStepId", step_id},
+            {"approval", {{"status", "approved"}}},
+            {"steps",
+             nlohmann::json::array({{{"id", step_id},
+                                     {"ordinal", 0},
+                                     {"kind", "action"},
+                                     {"title", "Mutate the remote config"},
+                                     {"status", "pending"},
+                                     {"attempts", 0},
+                                     {"maxAttempts", 1},
+                                     {"allowedTools", nlohmann::json::array({tool_name})},
+                                     {"evidenceIds", nlohmann::json::array()},
+                                     {"inputBindings", input_bindings}}})}};
+      };
+      yukinal::desktop_host::IpcRouter target_router(&database, &target_credentials);
+
+      database.save_investigation_plan(
+          bt_plan("iplan_bt_1", 1, "step_bt_backup", "filesystem.backup", {{"path", bt_path}}));
+      const auto backup_target_payload = target_router.handle_host_request(
+          "host.ssh.filesystem_backup_target",
+          {{"serverId", "srv_target"},
+           {"path", bt_path},
+           {"taskId", "itask_backup_target"},
+           {"planId", "iplan_bt_1"},
+           {"planStepId", "step_bt_backup"},
+           {"evidenceIds", nlohmann::json::array()},
+           {"target", bt_target}});
+      const auto derived_backup =
+          backup_target_payload.at("filesystemBackup").at("backupPath").get<std::string>();
+      check(backup_target_payload.at("target").at("target_id") == "srv_target" &&
+                backup_target_payload.at("credentials").at("YK_SSH_PASSWORD") == "s3cret-pass" &&
+                backup_target_payload.at("filesystemBackup").at("path") == bt_path &&
+                yukinal::desktop_host::is_backup_path_for(bt_path, derived_backup),
+            "the backup target should derive a host-owned path and resolve the SSH service");
+
+      bool unbound_backup_rejected = false;
+      try {
+        (void)target_router.handle_host_request(
+            "host.ssh.filesystem_backup_target",
+            {{"serverId", "srv_target"},
+             {"path", bt_path},
+             {"taskId", "itask_backup_target"},
+             {"planId", "iplan_bt_1"},
+             {"planStepId", "step_bt_backup"},
+             {"evidenceIds", nlohmann::json::array()},
+             {"target", {{"host", "remote"}, {"serverId", "srv_target"}, {"environment", "production"}}}});
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        unbound_backup_rejected = true;
+      }
+      check(unbound_backup_rejected,
+            "the backup target should refuse a target that does not match the server");
+
+      const auto bt_registered = target_router.handle_host_request(
+          "host.investigation.filesystem_backup.register",
+          {{"serverId", "srv_target"},
+           {"path", bt_path},
+           {"backupPath", derived_backup},
+           {"revision", bt_revision},
+           {"bytesBackedUp", 2048},
+           {"taskId", "itask_backup_target"},
+           {"planId", "iplan_bt_1"},
+           {"planStepId", "step_bt_backup"},
+           {"traceId", "trace_bt"},
+           {"callId", "call_bt"},
+           {"evidenceIds", nlohmann::json::array()},
+           {"target", bt_target}});
+      check(bt_registered.value("registered", false) == true,
+            "the derived backup should register in the ledger");
+
+      database.save_investigation_plan(bt_plan(
+          "iplan_bt_2", 2, "step_bt_restore", "filesystem.restore",
+          {{"path", bt_path},
+           {"backupPath", derived_backup},
+           {"expectedRevision", bt_revision}}));
+      const auto restore_target_payload = target_router.handle_host_request(
+          "host.ssh.filesystem_restore_target",
+          {{"serverId", "srv_target"},
+           {"path", bt_path},
+           {"backupPath", derived_backup},
+           {"expectedRevision", bt_revision},
+           {"taskId", "itask_backup_target"},
+           {"planId", "iplan_bt_2"},
+           {"planStepId", "step_bt_restore"},
+           {"evidenceIds", nlohmann::json::array()},
+           {"target", bt_target}});
+      check(restore_target_payload.at("filesystemRestore").at("backupPath") == derived_backup &&
+                restore_target_payload.at("filesystemRestore").at("revision") == bt_revision &&
+                restore_target_payload.at("filesystemRestore").at("bytesBackedUp") == 2048 &&
+                restore_target_payload.at("target").at("target_id") == "srv_target",
+            "the restore target should carry the ledger revision and byte count");
+      bool forged_restore_rejected = false;
+      try {
+        (void)target_router.handle_host_request(
+            "host.ssh.filesystem_restore_target",
+            {{"serverId", "srv_target"},
+             {"path", bt_path},
+             {"backupPath", "/srv/not-a-host-backup"},
+             {"expectedRevision", bt_revision},
+             {"taskId", "itask_backup_target"},
+             {"planId", "iplan_bt_2"},
+             {"planStepId", "step_bt_restore"},
+             {"evidenceIds", nlohmann::json::array()},
+             {"target", bt_target}});
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        forged_restore_rejected = true;
+      }
+      check(forged_restore_rejected,
+            "the restore target should refuse a backup path the host did not derive");
+
+      database.save_investigation_plan(bt_plan(
+          "iplan_bt_3", 3, "step_bt_cleanup", "filesystem.backup.cleanup",
+          {{"path", bt_path},
+           {"backupPath", derived_backup},
+           {"expectedRevision", bt_revision}}));
+      const auto cleanup_target_payload = target_router.handle_host_request(
+          "host.ssh.filesystem_cleanup_target",
+          {{"serverId", "srv_target"},
+           {"input",
+            {{"path", bt_path},
+             {"backupPath", derived_backup},
+             {"expectedRevision", bt_revision}}},
+           {"taskId", "itask_backup_target"},
+           {"planId", "iplan_bt_3"},
+           {"planStepId", "step_bt_cleanup"},
+           {"runId", "run_bt"},
+           {"traceId", "trace_bt"},
+           {"callId", "call_bt"},
+           {"evidenceIds", nlohmann::json::array()},
+           {"target", bt_target}});
+      const auto& cleanup_items =
+          cleanup_target_payload.at("filesystemCleanup").at("items");
+      check(cleanup_items.size() == 1 && cleanup_items.at(0).at("status") == "ready" &&
+                cleanup_items.at(0).at("revision") == bt_revision &&
+                cleanup_items.at(0).at("bytesBackedUp") == 2048 &&
+                cleanup_items.at(0).at("ownerTaskId") == "itask_backup_target" &&
+                cleanup_target_payload.at("target").at("target_id") == "srv_target",
+            "the cleanup target should report a ready host-owned item and resolve the service");
+
+      const std::string unknown_path = "/srv/other.conf";
+      const auto unknown_backup = yukinal::desktop_host::backup_path_for(
+          unknown_path, std::string(32, 'd'));
+      const nlohmann::json bt_batch_items = nlohmann::json::array(
+          {{{"path", unknown_path},
+            {"backupPath", unknown_backup},
+            {"expectedRevision", bt_revision}},
+           {{"path", bt_path},
+            {"backupPath", derived_backup},
+            {"expectedRevision", bt_revision}}});
+      database.save_investigation_plan(bt_plan(
+          "iplan_bt_4", 4, "step_bt_cleanup_batch", "filesystem.backup.cleanup",
+          {{"items", bt_batch_items.dump()}}));
+      const auto batch_cleanup_payload = target_router.handle_host_request(
+          "host.ssh.filesystem_cleanup_target",
+          {{"serverId", "srv_target"},
+           {"input", {{"items", bt_batch_items}}},
+           {"taskId", "itask_backup_target"},
+           {"planId", "iplan_bt_4"},
+           {"planStepId", "step_bt_cleanup_batch"},
+           {"runId", "run_bt"},
+           {"traceId", "trace_bt"},
+           {"callId", "call_bt"},
+           {"evidenceIds", nlohmann::json::array()},
+           {"target", bt_target}});
+      const auto& batch_items = batch_cleanup_payload.at("filesystemCleanup").at("items");
+      check(batch_items.size() == 2 && batch_items.at(0).at("status") == "skipped" &&
+                batch_items.at(0).at("reason") ==
+                    "no available host ledger record for this server and backup path" &&
+                batch_items.at(1).at("status") == "ready" &&
+                batch_cleanup_payload.contains("target"),
+            "the batch cleanup target should skip an unknown item and keep the ready one");
+
+      database.save_investigation_plan(bt_plan(
+          "iplan_bt_5", 5, "step_bt_cleanup_missing", "filesystem.backup.cleanup",
+          {{"path", unknown_path},
+           {"backupPath", unknown_backup},
+           {"expectedRevision", bt_revision}}));
+      bool missing_cleanup_rejected = false;
+      try {
+        (void)target_router.handle_host_request(
+            "host.ssh.filesystem_cleanup_target",
+            {{"serverId", "srv_target"},
+             {"input",
+              {{"path", unknown_path},
+               {"backupPath", unknown_backup},
+               {"expectedRevision", bt_revision}}},
+             {"taskId", "itask_backup_target"},
+             {"planId", "iplan_bt_5"},
+             {"planStepId", "step_bt_cleanup_missing"},
+             {"runId", "run_bt"},
+             {"traceId", "trace_bt"},
+             {"callId", "call_bt"},
+             {"evidenceIds", nlohmann::json::array()},
+             {"target", bt_target}});
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        missing_cleanup_rejected = true;
+      }
+      check(missing_cleanup_rejected,
+            "a single cleanup target for an unregistered backup must be refused");
+
+      bool bad_identity_rejected = false;
+      try {
+        (void)target_router.handle_host_request(
+            "host.ssh.filesystem_cleanup_target",
+            {{"serverId", "srv_target"},
+             {"input",
+              {{"path", bt_path},
+               {"backupPath", derived_backup},
+               {"expectedRevision", bt_revision}}},
+             {"taskId", "itask_backup_target"},
+             {"planId", "iplan_bt_3"},
+             {"planStepId", "step_bt_cleanup"},
+             {"runId", ""},
+             {"traceId", "trace_bt"},
+             {"callId", "call_bt"},
+             {"evidenceIds", nlohmann::json::array()},
+             {"target", bt_target}});
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        bad_identity_rejected = true;
+      }
+      check(bad_identity_rejected,
+            "the cleanup target should require a durable call identity");
+    } catch (const std::exception& error) {
+      std::cerr << "SSH filesystem action target block failed: " << error.what() << '\n';
+      std::exit(4);
+    }
   }
 
   sqlite3* readback = nullptr;

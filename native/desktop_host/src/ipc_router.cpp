@@ -2977,6 +2977,200 @@ nlohmann::json handle_filesystem_backup_deleted(DesktopDatabase& database,
           {"bytesDeleted", bytes_deleted}};
 }
 
+// ── SSH filesystem action targets ────────────────────────────────────────────
+// Resolve a runnable C++ service target only after the durable plan, the owned
+// backup path and (for cleanup) every requested item have been checked.
+nlohmann::json handle_ssh_filesystem_backup_target(DesktopDatabase& database,
+                                                   const CredentialStore& credentials,
+                                                   const nlohmann::json& params) {
+  if (!params.is_object()) {
+    throw std::runtime_error("the SSH filesystem backup target request is invalid");
+  }
+  const auto server_id = required_host_text(params, "serverId");
+  const auto path = required_host_text(params, "path");
+  const auto task_id = required_host_text(params, "taskId");
+  const auto plan_id = required_host_text(params, "planId");
+  const auto plan_step_id = required_host_text(params, "planStepId");
+  const nlohmann::json input = {{"path", path}};
+  validate_ssh_filesystem_action_binding(
+      database,
+      FilesystemActionBinding{
+          server_id, task_id, "filesystem.backup", input,
+          json_field_or(params, "target", nlohmann::json::object()), plan_id, plan_step_id,
+          json_field_or(params, "evidenceIds", nlohmann::json::array())});
+  const auto token = backup_token();
+  require_agent_backup_request(path, token);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  payload["filesystemBackup"] = {{"path", path},
+                                 {"backupPath", backup_path_for(path, token)}};
+  return payload;
+}
+
+nlohmann::json handle_ssh_filesystem_restore_target(DesktopDatabase& database,
+                                                    const CredentialStore& credentials,
+                                                    const nlohmann::json& params) {
+  if (!params.is_object()) {
+    throw std::runtime_error("the SSH filesystem restore target request is invalid");
+  }
+  const auto server_id = required_host_text(params, "serverId");
+  const auto path = required_host_text(params, "path");
+  const auto backup_path = required_host_text(params, "backupPath");
+  const auto expected_revision = required_host_text(params, "expectedRevision");
+  const auto task_id = required_host_text(params, "taskId");
+  const auto plan_id = required_host_text(params, "planId");
+  const auto plan_step_id = required_host_text(params, "planStepId");
+  require_agent_restore_request(path, backup_path, expected_revision);
+  const nlohmann::json input = {{"path", path},
+                                {"backupPath", backup_path},
+                                {"expectedRevision", expected_revision}};
+  validate_ssh_filesystem_action_binding(
+      database,
+      FilesystemActionBinding{
+          server_id, task_id, "filesystem.restore", input,
+          json_field_or(params, "target", nlohmann::json::object()), plan_id, plan_step_id,
+          json_field_or(params, "evidenceIds", nlohmann::json::array())});
+  const auto backup = database.find_available_filesystem_backup(server_id, path, backup_path);
+  if (!backup.has_value()) {
+    throw std::runtime_error("filesystem.restore requires an available host-owned backup");
+  }
+  if (json_text_field(*backup, "taskId") != task_id) {
+    throw std::runtime_error(
+        "filesystem.restore cannot use a backup owned by another investigation task");
+  }
+  const auto bytes_backed_up = backup->value("bytesBackedUp", std::int64_t{-1});
+  if (bytes_backed_up < 0 ||
+      static_cast<std::uint64_t>(bytes_backed_up) > kMaxAgentBackupBytes) {
+    throw std::runtime_error("filesystem backup exceeds the host restore limit");
+  }
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  payload["filesystemRestore"] = {{"path", path},
+                                  {"backupPath", backup_path},
+                                  {"expectedRevision", expected_revision},
+                                  {"revision", json_text_field(*backup, "revision")},
+                                  {"bytesBackedUp", bytes_backed_up}};
+  return payload;
+}
+
+nlohmann::json handle_ssh_filesystem_cleanup_target(DesktopDatabase& database,
+                                                    const CredentialStore& credentials,
+                                                    const nlohmann::json& params) {
+  if (!params.is_object()) {
+    throw std::runtime_error("the SSH filesystem cleanup target request is invalid");
+  }
+  const auto server_id = required_host_text(params, "serverId");
+  const auto task_id = required_host_text(params, "taskId");
+  const auto plan_id = required_host_text(params, "planId");
+  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto run_id = required_host_text(params, "runId");
+  const auto trace_id = required_host_text(params, "traceId");
+  const auto call_id = required_host_text(params, "callId");
+  if (!is_call_identity(run_id) || !is_call_identity(trace_id) || !is_call_identity(call_id)) {
+    throw std::runtime_error("filesystem cleanup durable call identity is invalid");
+  }
+  const auto input_field = params.find("input");
+  if (input_field == params.end() || !input_field->is_object()) {
+    throw std::runtime_error("filesystem.backup.cleanup input is invalid");
+  }
+  const auto input = *input_field;
+  const auto request = resolve_backup_cleanup_input(input);
+  validate_ssh_filesystem_action_binding(
+      database,
+      FilesystemActionBinding{
+          server_id, task_id, "filesystem.backup.cleanup", input,
+          json_field_or(params, "target", nlohmann::json::object()), plan_id, plan_step_id,
+          json_field_or(params, "evidenceIds", nlohmann::json::array())});
+  // Reject any malformed path for the whole request before reporting any item
+  // as executable.
+  for (const auto& item : request.items) {
+    require_agent_cleanup_request(item.path, item.backup_path, item.expected_revision);
+  }
+  nlohmann::json bindings = nlohmann::json::array();
+  bool has_ready_item = false;
+  for (const auto& item : request.items) {
+    nlohmann::json binding = {{"path", item.path},
+                              {"backupPath", item.backup_path},
+                              {"expectedRevision", item.expected_revision}};
+    std::optional<nlohmann::json> backup;
+    try {
+      backup = database.find_available_filesystem_backup(server_id, item.path, item.backup_path);
+    } catch (const std::exception& error) {
+      if (!request.batch) {
+        throw std::runtime_error("could not read the filesystem backup ledger: " +
+                                 std::string(error.what()));
+      }
+      auto reason = "could not read the filesystem backup ledger: " + std::string(error.what());
+      if (reason.size() > 1024) reason.resize(1024);
+      binding["status"] = "failed";
+      binding["reason"] = reason;
+      bindings.push_back(std::move(binding));
+      continue;
+    }
+    if (!backup.has_value()) {
+      if (!request.batch) {
+        throw std::runtime_error(
+            "filesystem.backup.cleanup requires an available host-owned backup for this server and "
+            "target path");
+      }
+      binding["status"] = "skipped";
+      binding["reason"] = "no available host ledger record for this server and backup path";
+      bindings.push_back(std::move(binding));
+      continue;
+    }
+    const auto same_task = json_text_field(*backup, "taskId") == task_id;
+    const bool cross_task_allowed =
+        request.batch && !same_task &&
+        cross_task_cleanup_is_plan_bound(database, task_id, plan_id, plan_step_id, item);
+    if (!same_task && !cross_task_allowed) {
+      if (!request.batch) {
+        throw std::runtime_error(
+            "filesystem.backup.cleanup cannot use a backup owned by another investigation task");
+      }
+      binding["status"] = "skipped";
+      binding["reason"] =
+          "owned by another investigation task and not bound by the approved rotation step";
+      bindings.push_back(std::move(binding));
+      continue;
+    }
+    if (!ascii_lower_equal(json_text_field(*backup, "revision"), item.expected_revision)) {
+      if (!request.batch) {
+        throw std::runtime_error(
+            "expectedRevision does not match the revision recorded for this backup; preserve it "
+            "and re-read the ledger");
+      }
+      binding["status"] = "failed";
+      binding["reason"] = "expectedRevision does not match the revision recorded for this backup";
+      bindings.push_back(std::move(binding));
+      continue;
+    }
+    const auto ledger_bytes = backup->value("bytesBackedUp", std::int64_t{-1});
+    if (ledger_bytes < 0 || static_cast<std::uint64_t>(ledger_bytes) > kMaxAgentBackupBytes) {
+      if (!request.batch) {
+        throw std::runtime_error("the host backup ledger has an invalid byte count");
+      }
+      binding["status"] = "failed";
+      binding["reason"] = "the host backup ledger has an invalid byte count";
+      bindings.push_back(std::move(binding));
+      continue;
+    }
+    binding["status"] = "ready";
+    binding["revision"] = json_text_field(*backup, "revision");
+    binding["bytesBackedUp"] = ledger_bytes;
+    if (const auto owner = backup->find("taskId"); owner != backup->end()) {
+      binding["ownerTaskId"] = *owner;
+    } else {
+      binding["ownerTaskId"] = nullptr;
+    }
+    has_ready_item = true;
+    bindings.push_back(std::move(binding));
+  }
+  nlohmann::json payload = nlohmann::json::object();
+  if (has_ready_item) {
+    payload = resolve_ssh_service_target(database, credentials, server_id);
+  }
+  payload["filesystemCleanup"] = {{"items", std::move(bindings)}};
+  return payload;
+}
+
 nlohmann::json handle_finding_record(DesktopDatabase& database, const nlohmann::json& params) {
   if (!params.is_object() || !params.contains("finding") || !params.at("finding").is_object()) {
     return record_failure_json("invalid_input", "invalid finding", false);
@@ -7114,7 +7308,10 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
   }
   if (method == "host.ssh.service_target" || method == "host.ssh.filesystem_read_target" ||
       method == "host.ssh.filesystem_write_target" ||
-      method == "host.ssh.filesystem_edit_target") {
+      method == "host.ssh.filesystem_edit_target" ||
+      method == "host.ssh.filesystem_backup_target" ||
+      method == "host.ssh.filesystem_restore_target" ||
+      method == "host.ssh.filesystem_cleanup_target") {
     if (database_ == nullptr || !database_->is_available()) {
       throw SidecarRpcError(-32603, "the local server database is unavailable");
     }
@@ -7135,6 +7332,15 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
       }
       if (method == "host.ssh.filesystem_write_target") {
         return resolve_ssh_service_filesystem_write_target(*database_, *credentials_, params);
+      }
+      if (method == "host.ssh.filesystem_backup_target") {
+        return handle_ssh_filesystem_backup_target(*database_, *credentials_, params);
+      }
+      if (method == "host.ssh.filesystem_restore_target") {
+        return handle_ssh_filesystem_restore_target(*database_, *credentials_, params);
+      }
+      if (method == "host.ssh.filesystem_cleanup_target") {
+        return handle_ssh_filesystem_cleanup_target(*database_, *credentials_, params);
       }
       return resolve_ssh_service_filesystem_edit_target(*database_, *credentials_, params);
     } catch (const SidecarRpcError&) {
