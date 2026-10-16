@@ -132,6 +132,8 @@
 
 .form-input {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
   outline: 0;
@@ -312,7 +314,9 @@ select.form-input {
   position: relative;
   width: min(100%, 620px);
   max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
   overflow: auto;
+  overscroll-behavior: contain;
   margin: auto;
   color: var(--text);
   font: inherit;
@@ -321,6 +325,33 @@ select.form-input {
   background: var(--surface-2);
   box-shadow: var(--shadow-floating);
   padding: 20px;
+}
+
+/* Connection forms can grow well beyond a short desktop window. Keep their
+   close control outside the scroller and their actions inside its sticky edge. */
+.server-modal[open]:has(> .modal-header) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.server-modal > .modal-header { flex: 0 0 auto; }
+.server-modal > .server-form {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 12px 84px;
+  scrollbar-gutter: stable;
+}
+.server-modal > .server-form > * { flex-shrink: 0; }
+.server-modal > .server-form > .modal-actions {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  padding-block: 12px 4px;
 }
 
 .modal-header {
@@ -334,7 +365,10 @@ select.form-input {
 .modal-header h2 {
   margin: 0;
   font-size: var(--text-heading);
+  overflow-wrap: anywhere;
 }
+
+.modal-header > div { min-width: 0; }
 
 .auth-challenge-modal {
   width: min(100%, 520px);
@@ -349,6 +383,7 @@ select.form-input {
    而且不换行、不被截断、字母间距不被「排版美化」动过 —— 中间多一个空格就是一个无效的代码。 */
 .mcp-device-code-value {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -360,12 +395,17 @@ select.form-input {
 }
 
 .mcp-device-code-value code {
-  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 180px;
   overflow-x: auto;
   font-family: var(--font-terminal);
   font-size: var(--text-title);
   white-space: nowrap;
 }
+
+.mcp-device-code-value > button { flex: 0 0 auto; max-width: 100%; }
+.mcp-device-code :is(.form-hint, .form-error, .form-success) { overflow-wrap: anywhere; }
 
 .auth-challenge-target {
   display: inline-flex;
@@ -453,6 +493,7 @@ select.form-input {
 
 .modal-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 2px;
@@ -460,6 +501,7 @@ select.form-input {
 
 .terminal-page {
   display: flex;
+  min-width: 0;
   height: 100%;
   flex-direction: column;
   gap: 12px;
@@ -473,6 +515,12 @@ select.form-input {
   gap: 12px;
 }
 
+.terminal-toolbar { min-width: 0; flex-wrap: wrap; }
+.terminal-toolbar > * { min-width: 0; }
+.terminal-page .terminal-io-error { min-width: 0; flex-wrap: wrap; align-items: flex-start; }
+.terminal-page .terminal-io-error > span { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
+.terminal-page .terminal-io-error > button { max-width: 100%; margin-left: auto; white-space: normal; }
+
 .section-heading-inline {
   justify-content: flex-start;
 }
@@ -483,8 +531,10 @@ select.form-input {
 }
 
 .terminal-toolbar-note {
+  min-width: 0;
   color: var(--faint);
   font-size: var(--text-caption);
+  overflow-wrap: anywhere;
 }
 
 .terminal-shell {
@@ -531,4 +581,9 @@ select.form-input {
 .terminal-empty span {
   color: var(--faint);
   font-size: var(--text-caption);
+}
+
+@container reference (max-width: 399px) {
+  .terminal-shell { padding: 8px; }
+  .terminal-toolbar { gap: 6px 12px; }
 }

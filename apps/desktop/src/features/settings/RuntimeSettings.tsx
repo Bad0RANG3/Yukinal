@@ -331,7 +331,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
               {provider ? <Field label="连接 ID" className="field-wide"><input className="form-input" value={providerId} readOnly spellCheck={false} /></Field> : null}
               {providerKindUsesWireApi(kind) ? <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
               {providerKindUsesApiVersion(kind) ? <Field label="Anthropic Version"><input className="form-input" value={apiVersion} onChange={(event) => setApiVersion(event.target.value)} placeholder="2023-06-01（留空使用适配器默认值）" spellCheck={false} /></Field> : null}
-              <Field label="自定义请求头" className="field-wide"><textarea className="form-input" rows={3} value={customHeadersText} onChange={(event) => setCustomHeadersText(event.target.value)} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
+              <Field label="自定义请求头" className="field-wide"><textarea className="form-input form-textarea" rows={3} value={customHeadersText} onChange={(event) => setCustomHeadersText(event.target.value)} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
             </div>
           </details>
         </fieldset>

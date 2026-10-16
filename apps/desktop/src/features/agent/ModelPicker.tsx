@@ -56,6 +56,7 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
   const listboxId = useId();
   // 逻辑上的 open 驱动全部行为；presence 只决定「还在不在 DOM 里」，
   // 好让 popover-exit 有机会播完。两者绝不能混用。
@@ -73,6 +74,11 @@ export function ModelPicker({
   useEffect(() => {
     if (open && selectedIndex >= 0) setActive(selectedIndex);
   }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (!open || !presence.mounted) return;
+    listRef.current?.children[activeIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [open, presence.mounted, activeIndex]);
 
   // 点到组件之外就收起。`pointerdown` 而非 `click` 的理由写在
   // `hooks/useDismissOnOutsidePointer.ts` —— 那一处同时服务两个弹层。
@@ -155,6 +161,7 @@ export function ModelPicker({
 
       {presence.mounted ? (
         <ul
+          ref={listRef}
           className={`agent-model-menu ${presence.closing ? "is-closing" : ""}`}
           role="listbox"
           id={listboxId}
@@ -167,6 +174,7 @@ export function ModelPicker({
               id={`${listboxId}-${index}`}
               role="option"
               aria-selected={choice.key === selected.key}
+              title={choice.providerLabel ? `${choice.providerLabel} · ${choice.label}` : choice.label}
               className={`agent-model-option ${index === activeIndex ? "is-active" : ""}`}
               onMouseEnter={() => setActive(index)}
               // 不阻止 mousedown 的话，浏览器会先把焦点从触发器挪走，

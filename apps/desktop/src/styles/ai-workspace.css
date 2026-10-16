@@ -66,7 +66,7 @@
 .ai-first .server-list-empty small { max-width: 26ch; margin-top: 8px; }
 .ai-first .server-list-empty .button-secondary { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; margin-top: 0; padding: 6px 12px; font-size: var(--text-label); box-shadow: none; }
 
-.ai-first .ai-workspace-column { position: relative; z-index: 1; display: flex; justify-content: center; min-width: 0; min-height: 0; padding-block: 12px; overflow: visible; }
+.ai-first .ai-workspace-column { position: relative; z-index: 1; display: flex; justify-content: center; min-width: 0; min-height: 0; padding-block: 12px; overflow: visible; container: agent-workspace / inline-size; }
 .ai-first .agent-panel.agent-workspace { position: static; display: flex; flex: 0 0 var(--ai-frame-width); width: var(--ai-frame-width); min-width: 0; min-height: 0; margin: 0; border: 1px solid var(--edge-subtle); border-top-color: var(--edge-normal); border-bottom-color: var(--material-inset); border-radius: var(--ai-frame-radius); background: var(--workspace-content-surface); box-shadow: var(--shadow-frame); animation: none; }
 /* Native chrome paints the rounded cap; these two vertical edges join it. */
 @media (min-width: 1181px) {
@@ -226,8 +226,15 @@
 .ai-first .dashboard-empty h2 { margin: 0 0 12px; color: var(--text); font-size: var(--text-subheading); line-height: 1.5; }
 .ai-first .dashboard-empty p { margin: 0; font-size: var(--text-small); line-height: 1.75; }
 
+@container agent-workspace (max-width: 600px) {
+  .ai-first .agent-token-usage, .ai-first .live-preview-label { display: none; }
+  .ai-first .agent-header-actions { gap: 4px; }
+}
+
 @media (max-width: 1180px) {
   .app-shell.ai-first, .native-workspace .app-shell.ai-first { grid-template-columns: 200px minmax(0, 1fr); }
+  .ai-first .server-row-actions { display: grid; grid-template-columns: repeat(3, 26px); gap: 4px; }
+  .ai-first .server-status-pill { grid-column: 1 / -1; flex-wrap: wrap; white-space: normal; }
   .ai-first .workspace-inspector { display: none; }
   .ai-first .context-toggle { display: grid; }
   .ai-first.context-open .workspace-inspector { display: flex; }

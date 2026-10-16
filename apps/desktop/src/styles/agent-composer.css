@@ -534,7 +534,7 @@
    两种都答不出「我现在用的是哪个模型」。自绘之后关闭态只显示模型短名，
    完整名称留在 title 与列表项里。 */
 .agent-model-picker {
-  position: relative;
+  position: static;
   min-width: 0;
 }
 
@@ -591,11 +591,12 @@
 .agent-model-menu {
   position: absolute;
   z-index: 22;
-  right: 0;
+  left: 12px;
+  right: 12px;
   bottom: calc(100% + 6px);
-  min-width: 100%;
-  max-width: min(300px, 84vw);
-  max-height: 264px;
+  min-width: 0;
+  max-width: 320px;
+  max-height: min(264px, 38vh);
   margin: 0;
   padding: 4px;
   overflow-y: auto;
@@ -608,14 +609,16 @@
 
 .agent-model-option {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
   border-radius: var(--radius-control);
   color: var(--muted);
   padding: 6px 8px;
   font-size: var(--text-caption);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
@@ -632,12 +635,10 @@
 
 .agent-model-option-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .agent-model-option-from {
-  flex: 0 0 auto;
+  min-width: 0;
   color: var(--faint);
   font-size: var(--text-caption);
 }

@@ -338,7 +338,7 @@ export function McpSettingsPanel({
                 <div className="provider-copy">
                   <div className="provider-name">
                     <span className={`provider-status-dot ${status.running ? "provider-status-on" : "provider-status-off"}`} />
-                    <span>{view.config.label}</span>
+                    <span className="provider-label">{view.config.label}</span>
                     <span className="settings-status">{status.text}</span>
                     {view.config.enabled ? null : <span className="settings-status">已禁用</span>}
                   </div>
@@ -475,7 +475,7 @@ export function McpSettingsPanel({
 
       {isEditing ? (
         <form
-          className="settings-form-grid settings-form-grid-provider"
+          className="settings-form-grid settings-form-grid-provider mcp-settings-form"
           onSubmit={(event) => {
             event.preventDefault();
             onSubmit();
@@ -542,7 +542,7 @@ export function McpSettingsPanel({
                 </label>
                 <textarea
                   id={field("args")}
-                  className="form-textarea"
+                  className="form-input form-textarea"
                   rows={3}
                   value={draft.args}
                   onChange={(event) => onDraftChange({ ...draft, args: event.target.value })}
@@ -593,7 +593,7 @@ export function McpSettingsPanel({
                   </label>
                   <textarea
                     id={field("httpAuthHeaders")}
-                    className="form-textarea form-input-mono"
+                    className="form-input form-textarea form-input-mono"
                     rows={4}
                     value={draft.httpAuthHeaders}
                     onChange={(event) =>
@@ -721,7 +721,7 @@ export function McpSettingsPanel({
                     </label>
                     <textarea
                       id={field("oauthScopes")}
-                      className="form-textarea form-input-mono"
+                      className="form-input form-textarea form-input-mono"
                       rows={3}
                       value={draft.oauthScopes}
                       onChange={(event) =>
@@ -750,7 +750,7 @@ export function McpSettingsPanel({
             </label>
           </div>
 
-          <div className="settings-actions">
+          <div className="settings-actions field-wide">
             <button type="submit" className="button-primary" disabled={busy}>
               保存
             </button>

@@ -8,6 +8,7 @@
 .host-key-gate {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 16px;
   max-width: 880px;
   margin: 0 auto;
@@ -48,6 +49,7 @@
 
 .host-key-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
@@ -59,13 +61,15 @@
 }
 
 .host-key-endpoint {
-  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: var(--surface-2);
   color: var(--muted);
   padding: 3px 7px;
   font-size: var(--text-caption);
+  overflow-wrap: anywhere;
 }
 
 .host-key-policy-note {
@@ -77,6 +81,9 @@
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   padding: 10px;
 }
+
+.host-key-policy-note > div { min-width: 0; }
+.host-key-policy-note > svg, .host-key-warning > svg { flex-shrink: 0; }
 
 .host-key-policy-note strong {
   display: block;
@@ -161,6 +168,8 @@
   gap: 8px;
 }
 
+.host-key-actions button { max-width: 100%; white-space: normal; }
+
 .host-key-forget {
   margin-left: auto;
 }
@@ -188,6 +197,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  flex-wrap: wrap;
   margin-bottom: 1rem;
   padding: 0.8rem 1rem;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
@@ -197,6 +207,8 @@
 
 .investigation-notification div {
   display: grid;
+  min-width: 0;
+  flex: 1 1 180px;
   gap: 0.2rem;
 }
 
@@ -280,6 +292,7 @@
 
 .investigation-task-delegation span {
   display: grid;
+  min-width: 0;
   gap: 4px;
 }
 
@@ -491,15 +504,15 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
 .investigation-execution-heading strong {
-  overflow: hidden;
+  min-width: 0;
   color: var(--text);
   font-size: var(--text-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .investigation-execution-heading span,
@@ -563,6 +576,7 @@
 
 .investigation-run-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
   margin-top: 6px;
@@ -602,7 +616,7 @@
 
 .investigation-schedule-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 3px 8px;
   align-items: center;
   border: 1px solid var(--line);
@@ -621,6 +635,7 @@
 
 .investigation-schedule-baseline {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -633,27 +648,32 @@
 
 .investigation-schedule-actions {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: 5px;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .investigation-schedule-settings {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   grid-column: 1 / -1;
   gap: 7px;
-  flex-wrap: wrap;
 }
 
 .investigation-schedule-settings label {
   display: grid;
+  min-width: 0;
   gap: 3px;
   color: var(--muted);
   font-size: var(--text-caption);
 }
 
 .investigation-schedule-settings .text-input {
-  min-width: 124px;
+  width: 100%;
+  min-width: 0;
   padding: 4px 6px;
   font-size: var(--text-caption);
 }
@@ -666,6 +686,7 @@
 
 .investigation-schedule-run-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
   color: var(--text);
@@ -674,6 +695,8 @@
 
 .investigation-schedule-run-meta {
   display: inline-flex;
+  flex-wrap: wrap;
+  min-width: 0;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
@@ -713,6 +736,7 @@
 
 .investigation-finding-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -741,6 +765,7 @@
 
 .investigation-evidence-card summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -794,6 +819,7 @@
 
 .investigation-artifact-card summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -843,11 +869,13 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .investigation-retention-heading > div,
 .investigation-retention-confirm {
   display: grid;
+  min-width: 0;
   gap: 4px;
 }
 
@@ -868,6 +896,7 @@
 
 .investigation-retention-list li {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -886,6 +915,7 @@
 
 .investigation-retention-confirm > div {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
 }
@@ -926,6 +956,7 @@
 
 .investigation-option-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -962,3 +993,12 @@
 .investigation-section > summary { min-height: var(--height-control); padding-block: 6px; color: var(--muted); font-size: var(--text-label); cursor: pointer; }
 .investigation-section[open] > summary { margin-bottom: 8px; color: var(--text); }
 .investigation-guardrails-view > small { display: block; margin-top: 6px; }
+.investigation-detail :is(button, select), .investigation-create-card button, .investigation-notification button { max-width: 100%; white-space: normal; }
+.investigation-create-footer > span { min-width: 0; flex: 1 1 160px; }
+.investigation-create-card :is(.investigation-create-options > div, label, .investigation-guardrails-editor > div) { min-width: 0; }
+.investigation-advanced > summary { min-height: var(--height-control); padding-block: 6px; }
+@container reference (min-width: 600px) {
+  .investigation-schedule-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .investigation-schedule-actions { justify-content: flex-end; }
+  .investigation-schedule-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

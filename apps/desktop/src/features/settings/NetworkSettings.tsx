@@ -74,8 +74,8 @@ export function NetworkSettings() {
           </p>
           <fieldset className="settings-form-fields" disabled={mutation.isPending}>
           <div className="settings-form-grid">
-            <label className="field-label" htmlFor={field("mode")}>
-              出站方式
+            <label className="settings-field" htmlFor={field("mode")}>
+              <span className="field-label">出站方式</span>
               <select
                 id={field("mode")}
                 className="form-input"
@@ -91,8 +91,8 @@ export function NetworkSettings() {
                 <option value="system">系统代理</option>
               </select>
             </label>
-            <label className="field-label" htmlFor={field("credential")}>
-              代理凭据（user:password）
+            <label className="settings-field" htmlFor={field("credential")}>
+              <span className="field-label">代理凭据（user:password）</span>
               <input
                 id={field("credential")}
                 className="form-input form-input-mono"

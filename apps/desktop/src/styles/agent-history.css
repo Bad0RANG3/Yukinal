@@ -32,6 +32,7 @@
 
 .agent-history-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
@@ -53,6 +54,7 @@
 
 .agent-history-heading-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
@@ -126,7 +128,8 @@
    一个轮廓：一条浅色轨道，选中的那一段是浮起来的小片，切换时读起来是「这块片动了
    一下」，而不是「两条线交叉换位」。计数字号更小、跟着一起明暗。 */
 .agent-history-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
   gap: 2px;
   border: 1px solid var(--line);
@@ -138,6 +141,8 @@
 .agent-history-tabs button {
   display: flex;
   flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 5px;
@@ -162,6 +167,7 @@
 
 /* 计数回答的是「有多少」，不是「我在哪」，所以它比标签暗一档。 */
 .agent-history-tab-count {
+  overflow-wrap: anywhere;
   color: inherit;
   font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
@@ -325,6 +331,7 @@
 .agent-history-row-meta {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   color: var(--faint);
@@ -333,6 +340,7 @@
 
 /* 目标是服务器**名字**，不是 srv_ 开头的 id：列表要回答「这是冲着哪台机器去的」。 */
 .agent-history-chip {
+  min-width: 0;
   max-width: 132px;
   overflow: hidden;
   border: 1px solid var(--line);

@@ -72,10 +72,13 @@ function formatTimestamp(timestamp: string): string {
   }).format(value);
 }
 
-function formatAge(timestamp: string, now: number): { kind: "fresh" | "stale" | "unknown"; label: string } {
+export function snapshotAge(timestamp: string, displayClock: number, receivedAt: number): { kind: "fresh" | "stale" | "unknown"; label: string } {
   const collectedAt = Date.parse(timestamp);
   if (!Number.isFinite(collectedAt)) return { kind: "unknown", label: "采集时间无效" };
-  const age = now - collectedAt;
+  // Polling and the 10-second display clock have separate schedules. A newly
+  // received sample must be judged at least at its local receipt time; otherwise
+  // it can appear to be in the future until the next display-clock tick.
+  const age = Math.max(displayClock, receivedAt) - collectedAt;
   if (age < 0) return { kind: "unknown", label: "采集时间晚于本机时钟" };
   if (age > SNAPSHOT_STALE_AFTER_MS) {
     const minutes = Math.floor(age / 60_000);
@@ -230,6 +233,7 @@ export function ServerOverview() {
     <OverviewContent
       server={server}
       snapshot={snapshot}
+      receivedAt={snapshotQuery.dataUpdatedAt}
       refreshing={snapshotQuery.isFetching}
       onRefresh={() => void snapshotQuery.refetch()}
       onConnect={() => action.mutate({ type: "connect", serverId: server.id })}
@@ -242,6 +246,7 @@ export function ServerOverview() {
 function OverviewContent({
   server,
   snapshot,
+  receivedAt,
   refreshing,
   onRefresh,
   onConnect,
@@ -250,6 +255,7 @@ function OverviewContent({
 }: {
   server: Server;
   snapshot: ServerSnapshot;
+  receivedAt: number;
   refreshing: boolean;
   onRefresh: () => void;
   onConnect: () => void;
@@ -277,7 +283,7 @@ function OverviewContent({
   const docker = sampleFor(snapshot, "docker")?.ok === false ? undefined : snapshot.docker;
   const diskUsage = disks.length > 0 ? Math.max(...disks.map((disk) => disk.usagePercent)) : undefined;
   const collection = collectorSummary(snapshot);
-  const age = formatAge(snapshot.collectedAt, now);
+  const age = snapshotAge(snapshot.collectedAt, now, receivedAt);
   const connected = server.status === "connected";
   const freshnessKind = connected ? age.kind : "offline";
   const freshnessLabel = connected

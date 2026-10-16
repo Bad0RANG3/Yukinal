@@ -1,5 +1,5 @@
-/* Reference pages share alignment and density. Reflow follows the reference
-   pane's usable width, so expanding it doesn't depend on the window breakpoint. */
+/* Reference pages reflow at the pane's usable width, including when a compact
+   window gives the reference page the full content column. */
 .workspace-inspector { container-name: reference; }
 :is(.overview-page, .activity-page, .services-page, .logs-page, .projects-page, .investigations-page, .remote-files-page, .settings-page) {
   min-width: 0; width: 100%; max-width: 1040px; margin: 0 auto;
@@ -8,7 +8,9 @@
 }
 .page-toolbar { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: var(--space-card); border-bottom: 1px solid var(--edge-subtle); }
 .page-toolbar-context { display: flex; flex: 1 1 100px; min-height: var(--height-control); align-items: center; flex-wrap: wrap; gap: 8px 12px; color: var(--muted); font-size: var(--text-label); }
-.page-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.page-toolbar-actions { display: flex; min-width: 0; max-width: 100%; flex-wrap: wrap; align-items: center; gap: 8px; }
+.page-toolbar :is(button, .service-source, .log-source) { max-width: 100%; white-space: normal; }
+.page-toolbar-context > span { min-width: 0; }
 .workspace-inspector .section-heading { flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
 .workspace-inspector .section-heading h2 { margin: 0; }
 .overview-page :is(.section-block, .overview-observation, .overview-connection-notice, .overview-shortcuts) { margin-block: 0; }
@@ -18,15 +20,24 @@
 .overview-page .server-facts { margin: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .overview-page .server-facts > div { padding: var(--space-card); }
 .overview-page .server-facts dd { overflow-wrap: anywhere; }
+.overview-page .overview-collector-details ul { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.overview-page :is(.overview-connection-notice, .overview-observation, .attention-panel) > div { min-width: 0; }
+.overview-page :is(.overview-shortcuts button, .refresh-button) { max-width: 100%; white-space: normal; }
 .overview-page .split-sections { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-group); }
 .overview-page .metric-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .overview-page .metric-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-width: 0; gap: 8px; padding: var(--space-card); }
 .overview-page .metric-card strong { margin: 0; font-size: var(--text-heading); }
+.overview-page .metric-card-topline { min-width: 0; flex-wrap: wrap; justify-content: flex-start; gap: 4px 8px; }
+.overview-page .metric-hint { white-space: normal; overflow-wrap: anywhere; }
 .overview-page .metric-track, .overview-page .metric-hint { grid-column: 1 / -1; margin: 0; }
 .overview-page .container-list li { flex-wrap: wrap; gap: 6px; }
 .overview-page .container-meta { flex-basis: 100%; margin-left: 12px; white-space: normal; overflow-wrap: anywhere; }
 .overview-page .overview-collector-details li { flex-wrap: wrap; }
 .overview-page .overview-collector-details time { flex-basis: 100%; }
+.overview-page .container-name { min-width: 0; overflow-wrap: anywhere; }
+.ai-first .dashboard-summary, .ai-first .dashboard-summary > div { flex-wrap: wrap; }
+.ai-first .infrastructure-card-identity strong { white-space: normal; overflow-wrap: anywhere; }
+.ai-first .infrastructure-resource-group summary > span { min-width: 0; }
 .activity-list { display: flex; flex-direction: column; border: 1px solid var(--line); overflow: hidden; }
 .activity-row { display: flex; gap: 12px; padding: var(--space-card); border-bottom: 1px solid var(--line); }
 .activity-row:last-child { border-bottom: 0; }
@@ -46,13 +57,13 @@
 .activity-row-body p { margin: 7px 0 0; color: var(--muted); font-size: var(--text-label); line-height: 1.5; }
 .activity-detail-toggle { border: 0; min-height: 28px; padding: 4px 0; color: var(--accent); background: transparent; font: inherit; font-size: var(--text-caption); cursor: pointer; }
 .activity-detail-toggle:hover { color: var(--text); }
-.activity-trace-detail { display: flex; flex-direction: column; gap: 8px; margin-top: 11px; padding: 10px; border: 1px solid var(--ok-line); }
+.activity-trace-detail { display: flex; min-width: 0; flex-direction: column; gap: 8px; margin-top: 11px; padding: 10px; border: 1px solid var(--ok-line); }
 .activity-trace-step { display: flex; flex-direction: column; gap: 5px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .activity-trace-step:last-child { padding-bottom: 0; border-bottom: 0; }
 .activity-trace-step-top, .activity-trace-step-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .activity-trace-step-top strong { color: var(--text); font-size: var(--text-label); }
 .activity-trace-step-top code, .activity-trace-step-meta { color: var(--muted); font-size: var(--text-caption); }
-.activity-trace-step-top code { margin-left: auto; }
+.activity-trace-step-top code { min-width: 0; margin-left: auto; overflow-wrap: anywhere; }
 .activity-execution-status { padding: 2px 5px; border-radius: var(--radius-badge); color: var(--text); background: var(--ok-surface); font-size: var(--text-caption); }
 .activity-execution-status-failed, .activity-execution-status-cancelled { color: var(--text); background: var(--danger-surface); }
 .activity-execution-status-waiting_approval { color: var(--text); background: var(--warn-surface); }
@@ -71,8 +82,8 @@
 .service-state-dot-stopped, .service-state-dot-unknown { background: var(--faint); }
 .service-state-dot-failed { background: var(--danger); box-shadow: var(--shadow-status); }
 .service-row-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
-.service-row-copy strong { overflow: hidden; color: var(--text); font-size: var(--text-label); text-overflow: ellipsis; white-space: nowrap; }
-.service-row-copy span { overflow: hidden; color: var(--muted); font-size: var(--text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.service-row-copy strong { color: var(--text); font-size: var(--text-label); overflow-wrap: anywhere; }
+.service-row-copy span { color: var(--muted); font-size: var(--text-caption); overflow-wrap: anywhere; }
 .service-row code { grid-column: 2 / -1; grid-row: 2; min-width: 0; overflow-wrap: anywhere; color: var(--faint); font: var(--text-caption) var(--font-terminal); white-space: pre-wrap; }
 .service-state { grid-column: 3; grid-row: 1; color: var(--muted); font-size: var(--text-caption); text-align: right; }
 .service-state-running { color: var(--success); }
@@ -132,6 +143,10 @@
   .activity-row { display: grid; grid-template-columns: 24px minmax(0, 1fr); }
   .activity-row-body { display: contents; }
   .activity-row-meta, .activity-row-body > p, .activity-trace-detail { grid-column: 1 / -1; }
+  .activity-trace-step-top code { flex-basis: 100%; margin-left: 0; }
+  .ai-first .infrastructure-resource-group li { display: grid; grid-template-columns: 5px minmax(0, 1fr); gap: 4px 8px; }
+  .ai-first .infrastructure-resource-group .resource-state { grid-column: 2; }
+  .ai-first .resource-identity strong { white-space: normal; overflow-wrap: anywhere; }
   .service-row-copy :is(strong, span), .project-repository-list strong { white-space: normal; overflow-wrap: anywhere; }
 }
 @container reference (min-width: 600px) {
