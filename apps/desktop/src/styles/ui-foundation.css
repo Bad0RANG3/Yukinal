@@ -1,5 +1,5 @@
-/* Yukinal UI foundation: near-black surfaces, rounded cards and one readable
-   monospace system. The legacy selectors above remain as page primitives; this
+/* Yukinal UI foundation: dark surfaces, rounded cards and readable system type.
+   Monospace remains available for terminal/code. Legacy selectors are page primitives; this
    layer is the single visual contract consumed by the current React views. */
 
 * {

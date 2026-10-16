@@ -8,6 +8,7 @@ Yukinal 的目标是让 AI 借助已配置的工具与受控 SSH 能力完成服
 | --- | --- |
 | 了解目标用户、核心场景和功能取舍 | [产品定义](./product.md) |
 | 交给 agent 施工或逐项验收 | [目标架构与施工交接](./architecture-and-build-plan.md) |
+| 统一 Windows 窗体、主体与状态功能的方向 | [桌面窗口方向](./desktop-window-direction.md) |
 | 规划 C++ 接管与删除 Rust/Tauri | [C++ 接管与 Rust 移除计划](./rust-removal-plan.md) |
 | 复现构建测试并接手真实环境验收 | [SSH + Agent 验收交接手册](./acceptance-handoff.md) |
 | 查看 C++/Python 重写当前阶段与接口 | [重写方案](./rewrite-cpp-python.md) |

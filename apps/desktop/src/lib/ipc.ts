@@ -14,6 +14,12 @@
 import {
   EVENT_SCHEMAS,
   IPC_SCHEMAS,
+  WindowShellContextSchema,
+  WindowShellSidebarSchema,
+  WindowShellActionSchema,
+  type WindowShellSidebar,
+  type WindowShellAction,
+  type WindowShellContext,
   type IpcCommandMap,
   type IpcCommandName,
 } from "@yukinal/shared";
@@ -25,6 +31,11 @@ import { isPreviewFixture, previewResponse } from "./preview-fixtures.js";
 type UnlistenFn = () => void;
 
 type NativeDesktopHost = {
+  windowShell?: {
+    updateContext: (context: WindowShellContext) => Promise<void>;
+    updateSidebar?: (sidebar: WindowShellSidebar) => Promise<void>;
+    onAction?: (handler: (action: unknown) => void) => UnlistenFn;
+  };
   invoke: (command: string, params: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, handler: (payload: unknown) => void) => Promise<UnlistenFn>;
   openUrl: (url: string) => Promise<unknown>;
@@ -39,6 +50,32 @@ declare global {
 /** True only when the native C++ Yukinal desktop host is present. */
 export function isNativeDesktopShell(): boolean {
   return typeof window !== "undefined" && window.__YUKINAL_HOST__ !== undefined;
+}
+
+/** A narrow native-shell presentation channel, separate from business tools. */
+export async function updateNativeWindowContext(context: WindowShellContext): Promise<void> {
+  if (!isNativeDesktopShell()) return;
+  const shell = window.__YUKINAL_HOST__?.windowShell;
+  if (shell) await shell.updateContext(WindowShellContextSchema.parse(context));
+}
+
+/** Capability detection keeps older hosts and browser previews on the React sidebar. */
+export function hasNativeWindowSidebar(): boolean {
+  return isNativeDesktopShell() && typeof window.__YUKINAL_HOST__?.windowShell?.updateSidebar === "function"
+    && typeof window.__YUKINAL_HOST__?.windowShell?.onAction === "function";
+}
+
+export async function updateNativeWindowSidebar(sidebar: WindowShellSidebar): Promise<void> {
+  if (!hasNativeWindowSidebar()) return;
+  await window.__YUKINAL_HOST__!.windowShell!.updateSidebar!(WindowShellSidebarSchema.parse(sidebar));
+}
+
+export function onNativeWindowAction(handler: (action: WindowShellAction) => void): UnlistenFn {
+  if (!hasNativeWindowSidebar()) return () => {};
+  return window.__YUKINAL_HOST__!.windowShell!.onAction!((raw) => {
+    const parsed = WindowShellActionSchema.safeParse(raw);
+    if (parsed.success) handler(parsed.data);
+  });
 }
 
 /**
