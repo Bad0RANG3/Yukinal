@@ -257,6 +257,38 @@ int run_tests(int argc, char** argv) {
   check(approval.ok && approval.value.value("accepted", true) == false,
         "agent_approval_respond should forward and report an unknown approval as stale");
 
+  // Durable investigation start: the host binds a run to the task before it
+  // forwards `agent.run.start`, so a rejected start must fail the bound run and
+  // the task rather than leaving an active run behind.
+  {
+    const json probe_task = {
+        {"id", "itask_sidecar"},
+        {"objective", "Probe the local host"},
+        {"successCriteria", json::array({"record a sample"})},
+        {"scope", {{"host", "local"}, {"environment", "local"}}},
+        {"guardrails",
+         {{"forbiddenTools", json::array()}, {"forbiddenPathPrefixes", json::array()}}},
+        {"mode", "readonly"},
+        {"permissionMode", "ask"},
+        {"automationLevel", "readonly"},
+        {"phase", "investigating"},
+        {"status", "pending"},
+        {"budget", {{"maxSteps", 4}, {"maxRunMs", 30000}, {"maxAttempts", 2}}},
+        {"createdBy", "user"},
+        {"createdAt", "2026-01-05T00:00:00Z"},
+        {"updatedAt", "2026-01-05T00:00:00Z"},
+    };
+    (void)database.create_investigation_task(probe_task);
+    const auto start = router.invoke("investigation_task_start", {{"taskId", "itask_sidecar"}});
+    check(!start.ok, "investigation_task_start should fail closed when the Agent has no provider");
+    const auto detail = database.get_investigation_task("itask_sidecar");
+    check(detail.has_value() && detail->at("task").at("status") == "failed" &&
+              detail->at("runs").size() == 1 &&
+              detail->at("runs").at(0).at("status") == "failed" &&
+              detail->at("runs").at(0).at("failure").at("code") == "transport",
+          "a rejected Agent start should fail the bound run and the task");
+  }
+
   const auto killed = router.invoke("agent_kill", json::object());
   check(killed.ok && killed.value.value("killed", false),
         "agent_kill should stop the running sidecar");

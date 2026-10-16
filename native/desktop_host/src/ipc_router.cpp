@@ -2733,6 +2733,343 @@ std::optional<nlohmann::json> build_investigation_task(const nlohmann::json& inp
   return task;
 }
 
+// ── Investigation task start / recover ─────────────────────────────────────
+// Mirrors `commands/investigation/policy.rs`, `commands/agent_run.rs` and
+// `commands/investigation.rs`: the durable task owns its Agent prompt and
+// safety envelope, and the host alone binds a run id to it.
+constexpr size_t kMaxPromptTextChars = 100000;
+constexpr size_t kMaxFailureMessageChars = 4096;
+
+std::int64_t current_epoch_seconds() {
+  return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count());
+}
+
+// The single host-owned retryability rule; failure options, the recovery
+// predicate and the UI retry affordance must all agree with it.
+bool task_failure_retryable(const std::string& code) {
+  return code == "timeout" || code == "transport" || code == "authentication";
+}
+
+nlohmann::json failure_option_json(const char* id, const char* action, const char* title,
+                                   const char* description, bool requires_approval) {
+  return {{"id", id},
+          {"action", action},
+          {"title", title},
+          {"description", description},
+          {"requiresApproval", requires_approval}};
+}
+
+// Mirrors the Rust `failure_options` taxonomy so the UI offers the same choices.
+nlohmann::json investigation_failure_options(const std::string& code) {
+  nlohmann::json options = nlohmann::json::array();
+  if (task_failure_retryable(code)) {
+    options.push_back(failure_option_json(
+        "retry", "retry", "重试当前阶段",
+        "重新校验目标后再尝试一次；不会自动重放不可安全重试的写入。", false));
+  }
+  if (code == "plan_deviation" || code == "evidence_missing") {
+    options.push_back(failure_option_json("replan", "replan", "要求 Agent 重新规划",
+                                          "保留现有证据与失败现场，要求生成新的计划修订。",
+                                          false));
+  } else if (code == "approval_required" || code == "approval_rejected" ||
+             code == "permission_denied") {
+    options.push_back(failure_option_json("wait_user", "wait_user", "等待我重新决定",
+                                          "不自动重试；由用户补充批准、缩小范围或终止任务。",
+                                          true));
+  } else if (code == "cancelled") {
+    options.push_back(failure_option_json("resume", "resume", "从检查点恢复",
+                                          "重新检查连接、计划和目标后从未完成阶段继续。", false));
+  } else if (code == "outcome_unknown") {
+    options.push_back(failure_option_json(
+        "wait_user", "wait_user", "先核对远端状态",
+        "命令或变更可能已经生效。先查看执行摘要并重新采集只读证据；确认现场后再手动继续任务。",
+        false));
+  } else if (code == "budget_exhausted") {
+    options.push_back(failure_option_json("replan", "replan", "缩小范围后重新规划",
+                                          "预算已耗尽，必须由用户确认新的范围或预算。", true));
+  }
+  options.push_back(failure_option_json("inspect", "inspect", "查看现场证据",
+                                        "保持任务停止，先查看已保存的证据、执行结果和失败工件。",
+                                        false));
+  options.push_back(failure_option_json("stop", "stop", "结束任务",
+                                        "保留审计与现场证据，不再继续自动化。", false));
+  return options;
+}
+
+std::string truncate_utf8(const std::string& value, size_t max_characters) {
+  if (utf8_character_count(value) <= max_characters) return value;
+  size_t bytes = 0;
+  size_t count = 0;
+  while (bytes < value.size() && count < max_characters) {
+    const unsigned char lead = static_cast<unsigned char>(value[bytes]);
+    size_t width = 1;
+    if ((lead & 0x80) == 0) width = 1;
+    else if ((lead & 0xE0) == 0xC0) width = 2;
+    else if ((lead & 0xF0) == 0xE0) width = 3;
+    else if ((lead & 0xF8) == 0xF0) width = 4;
+    if (bytes + width > value.size()) break;
+    bytes += width;
+    ++count;
+  }
+  return value.substr(0, bytes);
+}
+
+nlohmann::json build_task_failure(const std::string& code, const std::string& message,
+                                  std::int64_t attempt, const std::string& at,
+                                  const std::optional<nlohmann::json>& detail) {
+  nlohmann::json failure = {{"code", code},
+                            {"message", truncate_utf8(message, kMaxFailureMessageChars)},
+                            {"retryable", task_failure_retryable(code)},
+                            {"attempt", attempt},
+                            {"at", at},
+                            {"options", investigation_failure_options(code)}};
+  if (detail.has_value() && !detail->is_null()) failure["detail"] = *detail;
+  return failure;
+}
+
+std::optional<std::string> task_time_window_error(const nlohmann::json& task) {
+  if (!task.contains("guardrails") || !task.at("guardrails").is_object()) return std::nullopt;
+  const auto& guardrails = task.at("guardrails");
+  const auto now = current_epoch_seconds();
+  if (guardrails.contains("notBeforeAt") && guardrails.at("notBeforeAt").is_string()) {
+    const auto raw = guardrails.at("notBeforeAt").get<std::string>();
+    const auto parsed = parse_iso8601_utc_seconds(raw);
+    if (!parsed.has_value()) {
+      return std::string(
+          "task guardrail notBeforeAt is invalid; task is blocked until it is repaired");
+    }
+    if (now < *parsed) return "task execution is not allowed before " + raw;
+  }
+  if (guardrails.contains("expiresAt") && guardrails.at("expiresAt").is_string()) {
+    const auto raw = guardrails.at("expiresAt").get<std::string>();
+    const auto parsed = parse_iso8601_utc_seconds(raw);
+    if (!parsed.has_value()) {
+      return std::string(
+          "task guardrail expiresAt is invalid; task is blocked until it is repaired");
+    }
+    if (now >= *parsed) return "task execution time window expired at " + raw;
+  }
+  return std::nullopt;
+}
+
+bool task_failure_detail_flag(const nlohmann::json& task, const char* key) {
+  if (!task.contains("lastFailure") || !task.at("lastFailure").is_object()) return false;
+  const auto& failure = task.at("lastFailure");
+  if (!failure.contains("detail") || !failure.at("detail").is_object()) return false;
+  const auto found = failure.at("detail").find(key);
+  return found != failure.at("detail").end() && found->is_boolean() && found->get<bool>();
+}
+
+std::string format_guardrails_for_prompt(const nlohmann::json& guardrails) {
+  const auto join = [](const nlohmann::json& array) {
+    std::string out;
+    if (!array.is_array()) return out;
+    for (const auto& item : array) {
+      if (!item.is_string()) continue;
+      if (!out.empty()) out += ", ";
+      out += item.get<std::string>();
+    }
+    return out;
+  };
+  std::vector<std::string> lines;
+  if (guardrails.contains("notBeforeAt") && guardrails.at("notBeforeAt").is_string()) {
+    lines.push_back("不得早于 " + guardrails.at("notBeforeAt").get<std::string>());
+  }
+  if (guardrails.contains("expiresAt") && guardrails.at("expiresAt").is_string()) {
+    lines.push_back("不得晚于 " + guardrails.at("expiresAt").get<std::string>());
+  }
+  if (guardrails.contains("forbiddenTools") && guardrails.at("forbiddenTools").is_array() &&
+      !guardrails.at("forbiddenTools").empty()) {
+    lines.push_back("禁止工具：" + join(guardrails.at("forbiddenTools")));
+  }
+  if (guardrails.contains("forbiddenPathPrefixes") &&
+      guardrails.at("forbiddenPathPrefixes").is_array() &&
+      !guardrails.at("forbiddenPathPrefixes").empty()) {
+    lines.push_back("禁止路径前缀：" + join(guardrails.at("forbiddenPathPrefixes")));
+  }
+  if (lines.empty()) return std::string();
+  std::string joined;
+  for (const auto& line : lines) {
+    if (!joined.empty()) joined += "；";
+    joined += line;
+  }
+  return "\n\n宿主硬边界（不能通过提示词或重试绕过）：" + joined + "。";
+}
+
+std::string autonomous_task_prompt(const nlohmann::json& task) {
+  std::string criteria;
+  const auto criteria_list = task.value("successCriteria", nlohmann::json::array());
+  if (criteria_list.is_array()) {
+    int index = 1;
+    for (const auto& criterion : criteria_list) {
+      if (criterion.is_string()) {
+        if (!criteria.empty()) criteria += "\n";
+        criteria += std::to_string(index) + ". " + criterion.get<std::string>();
+      }
+      ++index;
+    }
+  }
+  const auto mode = json_text_field(task, "mode");
+  const auto permission = json_text_field(task, "permissionMode");
+  const auto automation = json_text_field(task, "automationLevel");
+  const auto scope = task.value("scope", nlohmann::json::object());
+  const auto scope_host = json_text_field(scope, "host");
+  const auto environment = json_text_field(scope, "environment");
+  std::string mode_instruction;
+  if (mode == "readonly") {
+    mode_instruction = "只调用任务范围内已允许的只读工具；不要写入、重启、删除或改变目标状态。";
+  } else if (mode == "plan") {
+    mode_instruction =
+        "先调查并生成宿主可验证的 dry-run 计划；没有用户选择和审批时不要执行行动步骤。";
+  } else if (mode == "goal" && permission == "auto" && automation == "execute" &&
+             scope_host == "remote" && (environment == "development" || environment == "staging")) {
+    mode_instruction =
+        "按宿主保存的计划逐步推进；本任务已明确启用受限 auto 委托，medium 风险的配置备份、编辑与整文件写入（可先备份再写）可在宿主复核后自动推进；备份清理、恢复、重启、包安装及其他高风险或未明确授权的动作必须停下等待用户审批。";
+  } else {
+    mode_instruction = "按宿主保存的计划逐步推进；高风险或未明确授权的动作必须停下等待用户审批。";
+  }
+  std::string command_grant_instruction;
+  if (task.contains("guardrails") && task.at("guardrails").is_object() &&
+      task.at("guardrails").contains("commandGrant") &&
+      task.at("guardrails").at("commandGrant").is_object()) {
+    const auto& grant = task.at("guardrails").at("commandGrant");
+    const auto calls_used = grant.value("callsUsed", std::int64_t{0});
+    const auto max_calls = grant.value("maxCalls", std::int64_t{0});
+    const auto remaining_ms =
+        std::max<std::int64_t>(0, grant.value("maxTotalDurationMs", std::int64_t{0}) -
+                                      grant.value("totalDurationMs", std::int64_t{0}));
+    const auto remaining_bytes =
+        std::max<std::int64_t>(0, grant.value("maxTotalOutputBytes", std::int64_t{0}) -
+                                      grant.value("totalOutputBytes", std::int64_t{0}));
+    command_grant_instruction =
+        "\n\n用户已为本任务授权 server.exec 在这台开发/预发布服务器执行非关键危险命令；命令预算为已用 " +
+        std::to_string(calls_used) + "/" + std::to_string(max_calls) + " 次、剩余总时长 " +
+        std::to_string(remaining_ms) + "ms、剩余输出 " + std::to_string(remaining_bytes) +
+        " 字节，授权截止 " + json_text_field(grant, "expiresAt") +
+        "。仍须先建立 ChangePlan 并按步骤调用工具。关键危险命令仍需逐次批准。";
+  }
+  std::string recovery_instruction;
+  const auto failure_code = task.contains("lastFailure") && task.at("lastFailure").is_object()
+                                ? json_text_field(task.at("lastFailure"), "code")
+                                : std::string();
+  if (failure_code == "outcome_unknown") {
+    recovery_instruction =
+        "\n\n上一轮远端命令或变更的结果未知，可能已经生效。旧命令授权已撤销。先只调用只读工具重新采样目标状态，结合实际执行记录判断变更是否发生；证据明确前禁止重放、补发或改写同一行动。需要继续时，先生成新的计划并让用户逐项批准高风险命令。";
+  } else if (task_failure_detail_flag(task, "rollbackRequested")) {
+    recovery_instruction =
+        "\n\n用户选择了“先规划回退”。这不是对旧回退文本或旧工具调用的授权：请只生成一份新的、独立的回退 dry-run 计划，重新校验当前基线、目标范围和精确参数绑定；涉及写入时仍须取得本轮审批，禁止直接重放旧动作。";
+  } else if (task_failure_detail_flag(task, "requiresFreshBaseline")) {
+    recovery_instruction =
+        "\n\n这是一次中断后的恢复运行：旧计划审批、旧变更前基线和正在进行的观察窗口已经失效。请先重新校验目标身份、收集新的只读证据并生成/确认新的计划；在新基线和本轮审批完成前不要重放旧行动。";
+  }
+  const auto guardrails = task.value("guardrails", nlohmann::json::object());
+  const auto guardrail_instruction =
+      guardrails.is_object() ? format_guardrails_for_prompt(guardrails) : std::string();
+  return "你正在自主推进一项由用户创建的可恢复运维任务。\n\n目标：\n" +
+         json_text_field(task, "objective") + "\n\n完成标准：\n" + criteria + "\n\n边界：\n" +
+         mode_instruction + command_grant_instruction + recovery_instruction +
+         guardrail_instruction +
+         "\n\n先调用 investigation.plan 声明有序步骤；如果目标属于只读健康检查、受保护配置编辑、容器重启、systemd 服务重启、明确的 apt/dnf 包安装或受限 deploy_sequence，可以调用 investigation.playbook 生成宿主拥有的 dry-run 计划。playbook 只记录计划，不直接执行写入。之后按计划收集证据、记录 Finding 和决策摘要。每个事实都要引用证据；证据不足时明确停在等待用户，而不是猜测已经完成。";
+}
+
+// The task's current attempt number is one past the highest persisted attempt.
+std::int64_t next_investigation_attempt(DesktopDatabase& database, const std::string& task_id) {
+  const auto runs = database.list_investigation_runs(task_id, 64);
+  std::int64_t highest = 0;
+  if (runs.is_array()) {
+    for (const auto& run : runs) {
+      const auto attempt = run.value("attempt", std::int64_t{0});
+      if (attempt > highest) highest = attempt;
+    }
+  }
+  return highest + 1;
+}
+
+// Marks a persisted run failed when `agent.run.start` cannot be honoured.
+void fail_admitted_investigation_run(DesktopDatabase& database, const std::string& task_id,
+                                     const std::string& run_id, const std::string& message,
+                                     const char* code) {
+  try {
+    auto run = database.get_investigation_run(run_id);
+    if (!run.has_value() || json_text_field(*run, "taskId") != task_id) return;
+    const auto now = iso8601_now();
+    const auto attempt = run->value("attempt", std::int64_t{1});
+    (*run)["status"] = "failed";
+    (*run)["updatedAt"] = now;
+    (*run)["endedAt"] = now;
+    (*run)["failure"] = build_task_failure(code, message, attempt, now, std::nullopt);
+    (void)database.update_investigation_run(*run);
+    (void)database.update_investigation_task_progress(
+        task_id, "failed", "recovery", std::nullopt, run->at("failure"), now, now);
+  } catch (...) {
+  }
+}
+
+// Interrupts a stale active run before a new attempt replaces it.
+bool interrupt_stale_investigation_run(DesktopDatabase& database, const std::string& task_id,
+                                       const std::string& run_id, std::string& error) {
+  std::optional<nlohmann::json> run;
+  try {
+    run = database.get_investigation_run(run_id);
+  } catch (...) {
+    error = "failed to read active investigation run";
+    return false;
+  }
+  if (!run.has_value()) return true;
+  if (json_text_field(*run, "taskId") != task_id) {
+    error = "active investigation run belongs to another task";
+    return false;
+  }
+  const auto status = json_text_field(*run, "status");
+  if (!is_one_of(status, {"admitted", "running", "waiting_user"})) return true;
+  const auto now = iso8601_now();
+  const auto attempt = run->value("attempt", std::int64_t{1});
+  (*run)["status"] = "interrupted";
+  (*run)["updatedAt"] = now;
+  (*run)["endedAt"] = now;
+  (*run)["failure"] = build_task_failure("transport",
+                                         "上一轮 sidecar 运行未完成，本次恢复前已标记为中断",
+                                         attempt, now, std::nullopt);
+  try {
+    (void)database.update_investigation_run(*run);
+  } catch (...) {
+    error = "failed to interrupt stale investigation run";
+    return false;
+  }
+  return true;
+}
+
+// Recovery cannot trust an old approval or a baseline captured before a
+// disconnected run. Keep the declarative plan visible for the next Agent turn,
+// but force it to re-establish the target state and obtain a fresh decision.
+void invalidate_plan_after_recovery(nlohmann::json& plan, nlohmann::json& artifacts,
+                                    const std::string& now) {
+  plan["approval"] = {{"status", "pending"},
+                      {"note", "恢复后需要重新核对目标、基线和用户选择"}};
+  if (plan.contains("observationWindow") && plan.at("observationWindow").is_object()) {
+    auto& window = plan["observationWindow"];
+    if (json_text_field(window, "status") == "running") {
+      window["status"] = "cancelled";
+      window["lastFailure"] = "运行中断，观察窗口必须在重新规划后重启";
+    }
+  }
+  plan["updatedAt"] = now;
+  const auto plan_id = json_text_field(plan, "id");
+  if (!artifacts.is_array()) return;
+  for (auto& artifact : artifacts) {
+    if (!artifact.is_object()) continue;
+    if (json_text_field(artifact, "kind") != "baseline") continue;
+    const auto status = json_text_field(artifact, "status");
+    if (status != "ready" && status != "succeeded") continue;
+    if (json_text_field(artifact, "planId") != plan_id) continue;
+    artifact["status"] = "superseded";
+    artifact["summary"] = "恢复后旧基线失效，必须重新采集并核对目标状态";
+    artifact["updatedAt"] = now;
+  }
+}
+
 }  // namespace
 
 IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
@@ -2883,6 +3220,377 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       return failure("STORAGE_ERROR",
                      "The local investigation database could not create the task");
     }
+  }
+
+  if (method == "investigation_task_start") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"taskId"}, {"taskId"}) || !params.at("taskId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_task_start requires exactly taskId");
+    }
+    auto task_id = normalized_opaque_id(params.at("taskId").get<std::string>());
+    if (!task_id.has_value()) {
+      return failure("INVALID_PARAMS", "investigation_task_start taskId is invalid");
+    }
+    std::optional<nlohmann::json> task;
+    try {
+      task = load_investigation_task(*database_, *task_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local investigation database could not read the task");
+    }
+    if (!task.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    if (is_one_of(json_text_field(*task, "status"),
+                  {"completed", "failed", "stopped", "expired"})) {
+      return failure("INVALID_STATE",
+                     "terminal investigation tasks cannot start a new Agent run");
+    }
+    if (const auto window_error = task_time_window_error(*task); window_error.has_value()) {
+      return failure("INVALID_STATE", *window_error);
+    }
+    std::optional<std::string> active_run_id;
+    if (task->contains("activeRunId") && task->at("activeRunId").is_string()) {
+      active_run_id = task->at("activeRunId").get<std::string>();
+    }
+    if (active_run_id.has_value()) {
+      std::optional<nlohmann::json> active_run;
+      try {
+        active_run = database_->get_investigation_run(*active_run_id);
+      } catch (...) {
+        return failure("STORAGE_ERROR",
+                       "The local investigation database could not inspect the active Agent run");
+      }
+      if (active_run.has_value() &&
+          is_one_of(json_text_field(*active_run, "status"),
+                    {"admitted", "running", "waiting_user"})) {
+        return failure("INVALID_STATE", "investigation task already has an active Agent run");
+      }
+    }
+    const auto run_id = next_id("run");
+    const auto session_id = "session_task_" + *task_id;
+    const auto message_id = "message_" + run_id;
+    const auto prompt = autonomous_task_prompt(*task);
+    if (utf8_character_count(prompt) > kMaxPromptTextChars) {
+      return failure("INVALID_STATE", "the investigation prompt exceeds the Agent text limit");
+    }
+    bool require_checkpoint = false;
+    try {
+      auto existing = database_->get_investigation_run(run_id);
+      if (!existing.has_value()) {
+        if (active_run_id.has_value() && *active_run_id != run_id) {
+          std::string interrupt_error;
+          if (!interrupt_stale_investigation_run(*database_, *task_id, *active_run_id,
+                                                 interrupt_error)) {
+            return failure("STORAGE_ERROR", interrupt_error);
+          }
+        }
+        const auto attempt = next_investigation_attempt(*database_, *task_id);
+        const auto budget = task->value("budget", nlohmann::json::object());
+        const auto max_attempts = budget.value("maxAttempts", std::int64_t{3});
+        if (attempt > max_attempts) {
+          return failure("INVALID_STATE",
+                         "investigation attempt budget exhausted (" +
+                             std::to_string(attempt - 1) + "/" + std::to_string(max_attempts) +
+                             ")");
+        }
+        const auto now = iso8601_now();
+        nlohmann::json run = {{"id", run_id},
+                              {"taskId", *task_id},
+                              {"sessionId", session_id},
+                              {"messageId", message_id},
+                              {"attempt", attempt},
+                              {"phase", "investigating"},
+                              {"status", "admitted"},
+                              {"startedAt", now},
+                              {"updatedAt", now}};
+        database_->create_investigation_run(run);
+      } else if (json_text_field(*existing, "taskId") == *task_id) {
+        require_checkpoint = json_text_field(*existing, "status") == "waiting_user";
+      } else {
+        return failure("INVALID_STATE",
+                       "run id is already bound to another investigation task");
+      }
+      const auto now = iso8601_now();
+      auto started = database_->update_investigation_task_progress(
+          *task_id, "investigating", "investigating", run_id, std::nullopt, now, std::nullopt);
+      if (!started.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    } catch (const std::invalid_argument& invalid) {
+      return failure("INVALID_PARAMS", invalid.what());
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not start the task");
+    }
+    nlohmann::json run_params = {
+        {"runId", run_id},
+        {"sessionId", session_id},
+        {"prompt", prompt},
+        {"messageId", message_id},
+        {"parts", nlohmann::json::array({{{"type", "text"}, {"text", prompt}}})},
+        {"delivery", "async"},
+        {"resume", true},
+        {"providerId", nullptr},
+        {"model", nullptr},
+        {"taskId", *task_id},
+    };
+    const auto budget = task->value("budget", nlohmann::json::object());
+    run_params["taskBudget"] = {{"maxSteps", budget.value("maxSteps", std::int64_t{25})},
+                                {"maxRunMs", budget.value("maxRunMs", std::int64_t{900000})},
+                                {"maxAttempts", budget.value("maxAttempts", std::int64_t{3})}};
+    const auto workspace_id = task->contains("workspaceId") && task->at("workspaceId").is_string()
+                                  ? std::optional<std::string>(
+                                        task->at("workspaceId").get<std::string>())
+                                  : std::nullopt;
+    const auto server_id = task->contains("serverId") && task->at("serverId").is_string()
+                               ? std::optional<std::string>(task->at("serverId").get<std::string>())
+                               : std::nullopt;
+    const auto scope = task->value("scope", nlohmann::json::object());
+    const auto scope_host = json_text_field(scope, "host");
+    if (scope_host == "remote" && server_id.has_value()) {
+      // A remote action step still in flight bounds the sidecar's allowed tools
+      // to the declarative plan; the host alone reads it back from the plan row.
+      try {
+        auto plan = database_->latest_investigation_plan(*task_id);
+        if (plan.has_value() && json_text_field(*plan, "status") == "active" &&
+            plan->contains("currentStepId") && plan->at("currentStepId").is_string()) {
+          const auto current_step_id = plan->at("currentStepId").get<std::string>();
+          if (plan->contains("steps") && plan->at("steps").is_array()) {
+            for (const auto& step : plan->at("steps")) {
+              if (json_text_field(step, "id") != current_step_id) continue;
+              if (json_text_field(step, "kind") != "action") break;
+              bool bound_tool = false;
+              const auto tools = step.value("allowedTools", nlohmann::json::array());
+              if (tools.is_array()) {
+                for (const auto& tool : tools) {
+                  if (!tool.is_string()) continue;
+                  if (is_one_of(tool.get<std::string>(),
+                                {"server.exec", "docker.restart", "systemd.restart",
+                                 "package.install"})) {
+                    bound_tool = true;
+                    break;
+                  }
+                }
+              }
+              if (bound_tool) {
+                run_params["planBinding"] = {
+                    {"planId", json_text_field(*plan, "id")},
+                    {"planStepId", current_step_id},
+                    {"evidenceIds", step.value("evidenceIds", nlohmann::json::array())}};
+              }
+              break;
+            }
+          }
+        }
+      } catch (...) {
+        return failure("STORAGE_ERROR",
+                       "The local investigation database could not read the current plan");
+      }
+    }
+    if (workspace_id.has_value()) run_params["workspaceId"] = *workspace_id;
+    if (scope_host == "local") {
+      nlohmann::json target = {{"host", "local"},
+                               {"environment", json_text_field(scope, "environment")}};
+      if (workspace_id.has_value()) target["workspaceId"] = *workspace_id;
+      run_params["target"] = std::move(target);
+    }
+    if (server_id.has_value()) {
+      std::optional<nlohmann::json> server_record;
+      try {
+        const auto servers = database_->list_servers();
+        const auto list = servers.value("servers", nlohmann::json::array());
+        if (list.is_array()) {
+          for (const auto& candidate : list) {
+            if (json_text_field(candidate, "id") == *server_id) {
+              server_record = candidate;
+              break;
+            }
+          }
+        }
+      } catch (...) {
+        return failure("STORAGE_ERROR", "The local Yukinal database could not read the server");
+      }
+      if (!server_record.has_value()) {
+        return failure("NOT_FOUND", "The investigation task server is not available");
+      }
+      const auto environment =
+          server_record->value("metadata", nlohmann::json::object()).value("environment",
+                                                                            std::string("unknown"));
+      nlohmann::json target = {
+          {"host", "remote"}, {"serverId", *server_id}, {"environment", environment}};
+      if (workspace_id.has_value()) target["workspaceId"] = *workspace_id;
+      run_params["focusServerId"] = *server_id;
+      run_params["target"] = std::move(target);
+    }
+    run_params["permissionMode"] = json_text_field(*task, "permissionMode", "ask");
+    run_params["mode"] = json_text_field(*task, "mode", "goal");
+    if (require_checkpoint) run_params["requireCheckpoint"] = true;
+    nlohmann::json response;
+    try {
+      auto& client = ensure_sidecar();
+      response = client.request("agent.run.start", run_params, std::chrono::seconds(60));
+    } catch (const SidecarRpcError& error) {
+      fail_admitted_investigation_run(*database_, *task_id, run_id, error.what(), "transport");
+      return failure(sidecar_error_code(error.code()), error.what());
+    } catch (const SidecarError& error) {
+      fail_admitted_investigation_run(*database_, *task_id, run_id, error.what(), "transport");
+      return failure("AGENT_UNAVAILABLE", error.what());
+    } catch (...) {
+      fail_admitted_investigation_run(*database_, *task_id, run_id,
+                                      "the Agent run could not be started", "internal");
+      return failure("AGENT_UNAVAILABLE", "The Agent run could not be started");
+    }
+    const auto returned_run_id = json_text_field(response, "runId");
+    if (returned_run_id.empty() || !response.contains("started") ||
+        !response.at("started").is_boolean()) {
+      fail_admitted_investigation_run(*database_, *task_id, run_id,
+                                      "agent sidecar returned an invalid run.start response",
+                                      "internal");
+      return failure("AGENT_ERROR", "agent sidecar returned an invalid run.start response");
+    }
+    if (returned_run_id != run_id) {
+      fail_admitted_investigation_run(*database_, *task_id, run_id,
+                                      "agent sidecar returned a different run id", "internal");
+      return failure("AGENT_ERROR", "agent sidecar returned a different run id");
+    }
+    return {true, {{"runId", run_id}, {"started", response.at("started").get<bool>()}}};
+  }
+
+  if (method == "investigation_task_recover") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
+    }
+    if (!only_fields(params, {"input"}, {"input"}) || !params.at("input").is_object()) {
+      return failure("INVALID_PARAMS", "investigation_task_recover requires an input object");
+    }
+    const auto& input = params.at("input");
+    if (!only_fields(input, {"taskId", "optionId"}, {"taskId"}) ||
+        !input.at("taskId").is_string()) {
+      return failure("INVALID_PARAMS", "investigation_task_recover input is invalid");
+    }
+    auto task_id = normalized_opaque_id(input.at("taskId").get<std::string>());
+    if (!task_id.has_value()) {
+      return failure("INVALID_PARAMS", "investigation_task_recover taskId is invalid");
+    }
+    std::optional<std::string> option_id;
+    if (input.contains("optionId") && !input.at("optionId").is_null()) {
+      if (!input.at("optionId").is_string()) {
+        return failure("INVALID_PARAMS", "investigation_task_recover optionId is invalid");
+      }
+      option_id = normalized_opaque_id(input.at("optionId").get<std::string>());
+      if (!option_id.has_value()) {
+        return failure("INVALID_PARAMS", "investigation_task_recover optionId is invalid");
+      }
+    }
+    std::optional<nlohmann::json> task;
+    try {
+      task = load_investigation_task(*database_, *task_id);
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local investigation database could not read the task");
+    }
+    if (!task.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    if (is_one_of(json_text_field(*task, "status"), {"completed", "expired"})) {
+      return failure("INVALID_STATE",
+                     "completed or expired investigation tasks cannot be recovered");
+    }
+    std::optional<std::string> selected_action;
+    if (option_id.has_value()) {
+      const auto options = task->value("lastFailure", nlohmann::json::object())
+                               .value("options", nlohmann::json::array());
+      if (options.is_array()) {
+        for (const auto& option : options) {
+          if (json_text_field(option, "id") == *option_id) {
+            selected_action = json_text_field(option, "action");
+            break;
+          }
+        }
+      }
+      if (!selected_action.has_value()) {
+        return failure("INVALID_STATE", "the selected failure option is no longer available");
+      }
+    }
+    if (selected_action.has_value() && *selected_action == "inspect") {
+      return {true, {{"task", *task}}};
+    }
+    const auto last_failure_code =
+        task->contains("lastFailure") && task->at("lastFailure").is_object()
+            ? json_text_field(task->at("lastFailure"), "code")
+            : std::string();
+    if (last_failure_code == "outcome_unknown" && !option_id.has_value()) {
+      return failure("INVALID_STATE",
+                     "the previous remote action may have taken effect; inspect the target and "
+                     "choose an explicit recovery action");
+    }
+    const auto now = iso8601_now();
+    nlohmann::json failure_record;
+    if (task->contains("lastFailure") && task->at("lastFailure").is_object()) {
+      failure_record = task->at("lastFailure");
+    } else {
+      failure_record = build_task_failure("unknown", "任务由用户请求恢复，上一轮运行被标记为中断", 1,
+                                          now, std::nullopt);
+    }
+    const auto attempt = failure_record.value("attempt", std::int64_t{1});
+    failure_record["attempt"] = attempt + 1;
+    failure_record["at"] = now;
+    nlohmann::json recovery_detail = {
+        {"rollbackRequested",
+         selected_action.has_value() && *selected_action == "rollback"},
+        {"requiresFreshBaseline", true}};
+    if (option_id.has_value()) recovery_detail["selectedOption"] = *option_id;
+    failure_record["detail"] = std::move(recovery_detail);
+    try {
+      auto plan = database_->latest_investigation_plan(*task_id);
+      if (plan.has_value()) {
+        auto artifact_list = database_->list_investigation_artifacts(*task_id, 128);
+        nlohmann::json artifacts =
+            artifact_list.value("artifacts", nlohmann::json::array());
+        invalidate_plan_after_recovery(*plan, artifacts, now);
+        if (artifacts.is_array()) {
+          for (const auto& artifact : artifacts) {
+            if (json_text_field(artifact, "kind") != "baseline" ||
+                json_text_field(artifact, "status") != "superseded" ||
+                artifact.value("updatedAt", std::string()) != now) {
+              continue;
+            }
+            database_->upsert_investigation_artifact(artifact);
+          }
+        }
+        database_->save_investigation_plan(*plan);
+      }
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not invalidate the recovered plan");
+    }
+    std::optional<nlohmann::json> recovered;
+    try {
+      recovered = database_->recover_investigation_task(*task_id, now, failure_record);
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local investigation database could not recover the task");
+    }
+    if (!recovered.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+    if (selected_action.has_value() &&
+        (*selected_action == "stop" || *selected_action == "rollback")) {
+      try {
+        auto updated = database_->set_investigation_task_status(
+            *task_id, *selected_action == "stop" ? "stopped" : "waiting_user",
+            *selected_action == "stop" ? std::optional<std::string>(now) : std::nullopt, now);
+        if (!updated.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+        recovered = std::move(updated);
+      } catch (...) {
+        return failure("STORAGE_ERROR",
+                       "The local investigation database could not update the recovered task");
+      }
+    } else if (selected_action.has_value() && *selected_action == "wait_user") {
+      try {
+        auto updated = database_->set_investigation_task_status(*task_id, "waiting_user",
+                                                                std::nullopt, now);
+        if (!updated.has_value()) return failure("NOT_FOUND", "The investigation task was not found");
+        recovered = std::move(updated);
+      } catch (...) {
+        return failure("STORAGE_ERROR",
+                       "The local investigation database could not update the recovered task");
+      }
+    }
+    return {true, {{"task", std::move(*recovered)}}};
   }
 
   if (method == "investigation_task_status_update") {

@@ -1782,6 +1782,206 @@ int main(int argc, char** argv) {
       check(!router.invoke("investigation_schedule_tick", {{"input", {{"limit", 0}}}}).ok,
             "a schedule tick limit must be between 1 and 100");
     }
+
+    // ── investigation run binding + task recover ─────────────────────────────
+    // The durable run row and the recovery path are the DB-only half of
+    // `investigation_task_start` / `investigation_task_recover`; the sidecar
+    // binding itself is covered by the sidecar test binary.
+    {
+      const std::string rec_now = "2026-01-04T00:00:00Z";
+      const nlohmann::json recover_task = {
+          {"id", "itask_recover"},
+          {"objective", "Recover the interrupted service check"},
+          {"successCriteria", nlohmann::json::array({"record the recovered state"})},
+          {"scope", {{"host", "local"}, {"environment", "local"}}},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "goal"},
+          {"permissionMode", "ask"},
+          {"automationLevel", "propose"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 5}, {"maxRunMs", 60000}, {"maxAttempts", 4}}},
+          {"createdBy", "user"},
+          {"createdAt", rec_now},
+          {"updatedAt", rec_now},
+      };
+      (void)database.create_investigation_task(recover_task);
+
+      const nlohmann::json run = {
+          {"id", "run_itask_recover_1"},
+          {"taskId", "itask_recover"},
+          {"sessionId", "session_task_itask_recover"},
+          {"messageId", "message_run_itask_recover_1"},
+          {"attempt", 1},
+          {"phase", "investigating"},
+          {"status", "admitted"},
+          {"startedAt", rec_now},
+          {"updatedAt", rec_now}};
+      database.create_investigation_run(run);
+      const auto fetched_run = database.get_investigation_run("run_itask_recover_1");
+      check(fetched_run.has_value() && fetched_run->at("taskId") == "itask_recover" &&
+                fetched_run->at("status") == "admitted" && fetched_run->at("attempt") == 1 &&
+                fetched_run->at("messageId") == "message_run_itask_recover_1",
+            "a durable investigation run should round-trip through the database");
+      check(!database.get_investigation_run("run_missing").has_value(),
+            "get_investigation_run should report an unknown run");
+      const auto runs = database.list_investigation_runs("itask_recover", 8);
+      check(runs.is_array() && runs.size() == 1 &&
+                runs.at(0).at("id") == "run_itask_recover_1",
+            "list_investigation_runs should return the task's attempts");
+
+      auto advanced_run = run;
+      advanced_run["status"] = "running";
+      advanced_run["updatedAt"] = "2026-01-04T00:00:03Z";
+      const auto updated_run = database.update_investigation_run(advanced_run);
+      check(updated_run.has_value() && updated_run->at("status") == "running" &&
+                updated_run->at("updatedAt") == "2026-01-04T00:00:03Z",
+            "update_investigation_run should persist the run progress");
+      check(!database
+                 .update_investigation_run(nlohmann::json{{"id", "run_missing"},
+                                                          {"taskId", "itask_recover"},
+                                                          {"attempt", 1},
+                                                          {"phase", "investigating"},
+                                                          {"status", "failed"},
+                                                          {"startedAt", rec_now},
+                                                          {"updatedAt", rec_now}})
+                 .has_value(),
+            "update_investigation_run should report an unknown run");
+
+      const auto failure_options = nlohmann::json::array(
+          {{{"id", "retry"},
+            {"action", "retry"},
+            {"title", "重试当前阶段"},
+            {"description", "retry"},
+            {"requiresApproval", false}},
+           {{"id", "inspect"},
+            {"action", "inspect"},
+            {"title", "查看现场证据"},
+            {"description", "inspect"},
+            {"requiresApproval", false}},
+           {{"id", "stop"},
+            {"action", "stop"},
+            {"title", "结束任务"},
+            {"description", "stop"},
+            {"requiresApproval", false}}});
+      nlohmann::json failure_record = {{"code", "transport"},
+                                       {"message", "sidecar run failed"},
+                                       {"retryable", true},
+                                       {"attempt", 1},
+                                       {"at", "2026-01-04T00:00:05Z"},
+                                       {"options", failure_options}};
+      (void)database.update_investigation_task_progress("itask_recover", "failed", "recovery",
+                                                        std::nullopt, failure_record,
+                                                        "2026-01-04T00:00:05Z",
+                                                        "2026-01-04T00:00:05Z");
+
+      const nlohmann::json plan = {
+          {"id", "iplan_recover"},
+          {"taskId", "itask_recover"},
+          {"revision", 1},
+          {"status", "active"},
+          {"createdAt", rec_now},
+          {"updatedAt", rec_now},
+          {"currentStepId", "step_recover"},
+          {"approval", {{"status", "approved"}, {"source", "user"}, {"approvedAt", rec_now}}},
+          {"observationWindow",
+           {{"durationSeconds", 60},
+            {"intervalSeconds", 10},
+            {"allowedTools", nlohmann::json::array({"filesystem.read"})},
+            {"successCriteria", nlohmann::json::array({"stable"})},
+            {"status", "running"},
+            {"sampleCount", 1}}},
+          {"steps",
+           nlohmann::json::array({{{"id", "step_recover"},
+                                    {"ordinal", 0},
+                                    {"kind", "evidence"},
+                                    {"title", "Collect"},
+                                    {"status", "running"},
+                                    {"attempts", 1},
+                                    {"allowedTools", nlohmann::json::array({"filesystem.read"})}}})},
+      };
+      database.save_investigation_plan(plan);
+      const nlohmann::json baseline = {
+          {"id", "iart_recover_baseline"},
+          {"taskId", "itask_recover"},
+          {"planId", "iplan_recover"},
+          {"phase", "verification"},
+          {"kind", "baseline"},
+          {"status", "ready"},
+          {"title", "Pre-change baseline"},
+          {"summary", "Captured before the change"},
+          {"content", {{"note", "baseline"}}},
+          {"evidenceIds", nlohmann::json::array()},
+          {"createdAt", rec_now},
+          {"updatedAt", rec_now}};
+      database.upsert_investigation_artifact(baseline);
+
+      const auto recovered = router.invoke("investigation_task_recover",
+                                           {{"input", {{"taskId", "itask_recover"}}}});
+      check(recovered.ok && recovered.value.at("task").at("status") == "investigating" &&
+                recovered.value.at("task").at("phase") == "recovery" &&
+                !recovered.value.at("task").contains("activeRunId") &&
+                recovered.value.at("task").at("lastFailure").at("code") == "transport" &&
+                recovered.value.at("task").at("lastFailure").at("attempt") == 2 &&
+                recovered.value.at("task").at("lastFailure").at("detail").at(
+                    "requiresFreshBaseline") == true,
+            "recover should resume the task into recovery with a fresh failure record");
+      const auto invalidated_plan = database.latest_investigation_plan("itask_recover");
+      check(invalidated_plan.has_value() &&
+                invalidated_plan->at("approval").at("status") == "pending" &&
+                invalidated_plan->at("observationWindow").at("status") == "cancelled",
+            "recover should void the old plan approval and cancel the running observation window");
+      const auto invalidated_artifacts =
+          database.list_investigation_artifacts("itask_recover", 8);
+      check(invalidated_artifacts.at("artifacts").size() == 1 &&
+                invalidated_artifacts.at("artifacts").at(0).at("status") == "superseded",
+            "recover should supersede the pre-change baseline artifact");
+      const auto interrupted_run = database.get_investigation_run("run_itask_recover_1");
+      check(interrupted_run.has_value() &&
+                interrupted_run->at("status") == "interrupted" &&
+                interrupted_run->at("failure").at("code") == "transport",
+            "recover should interrupt the open run with the recovery failure");
+
+      const auto inspected = router.invoke(
+          "investigation_task_recover",
+          {{"input", {{"taskId", "itask_recover"}, {"optionId", "inspect"}}}});
+      check(inspected.ok && inspected.value.at("task").at("status") == "investigating",
+            "the inspect recovery option should leave the task untouched");
+      check(!router
+                 .invoke("investigation_task_recover",
+                         {{"input", {{"taskId", "itask_recover"}, {"optionId", "missing"}}}})
+                 .ok,
+            "recover should reject a failure option that is no longer offered");
+
+      auto unknown_failure = failure_record;
+      unknown_failure["code"] = "outcome_unknown";
+      unknown_failure["retryable"] = false;
+      (void)database.update_investigation_task_progress("itask_recover", "waiting_user", "recovery",
+                                                        std::nullopt, unknown_failure,
+                                                        "2026-01-04T00:00:06Z", std::nullopt);
+      check(!router.invoke("investigation_task_recover", {{"input", {{"taskId", "itask_recover"}}}})
+                 .ok,
+            "an outcome-unknown failure requires an explicit recovery action");
+
+      const auto stopped = router.invoke(
+          "investigation_task_recover",
+          {{"input", {{"taskId", "itask_recover"}, {"optionId", "stop"}}}});
+      check(stopped.ok && stopped.value.at("task").at("status") == "stopped",
+            "the stop recovery option should end the task");
+      check(!router.invoke("investigation_task_start", {{"taskId", "itask_recover"}}).ok,
+            "a stopped investigation task cannot start a new Agent run");
+      check(!router.invoke("investigation_task_start", {{"taskId", "itask_missing"}}).ok,
+            "starting an unknown investigation task should fail");
+      check(!router.invoke("investigation_task_start", nlohmann::json::object()).ok,
+            "investigation_task_start requires a taskId");
+      check(!router
+                 .invoke("investigation_task_recover",
+                         {{"input", {{"taskId", "itask_recover"}, {"unexpected", 1}}}})
+                 .ok,
+            "investigation_task_recover rejects unexpected input fields");
+    }
   }
 
   sqlite3* readback = nullptr;

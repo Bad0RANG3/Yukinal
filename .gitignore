@@ -67,3 +67,7 @@ native/build/
 native/build-*/
 build/
 agent/*.egg-info/
+
+# local build/scratch logs
+build_out.txt
+*.buildlog.txt
