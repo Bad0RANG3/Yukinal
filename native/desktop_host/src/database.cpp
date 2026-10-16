@@ -2356,6 +2356,24 @@ void DesktopDatabase::insert_snapshot(const nlohmann::json& snapshot) const {
   }
 }
 
+std::optional<nlohmann::json> DesktopDatabase::latest_snapshot(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT payload
+        FROM snapshots
+       WHERE server_id = ?1
+       ORDER BY collected_at DESC, id DESC
+       LIMIT 1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, server_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return parse_json_text(column_text(rows.get(), 0), "snapshot payload");
+}
+
 nlohmann::json DesktopDatabase::list_investigation_tasks(
     const std::optional<std::string>& status, int limit) const {
   std::lock_guard lock(mutex_);

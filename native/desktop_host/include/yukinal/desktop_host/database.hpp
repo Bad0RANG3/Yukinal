@@ -74,6 +74,8 @@ class DesktopDatabase {
   [[nodiscard]] std::optional<nlohmann::json> delete_mcp_server(
       const std::string& server_id) const;
   void insert_snapshot(const nlohmann::json& snapshot) const;
+  [[nodiscard]] std::optional<nlohmann::json> latest_snapshot(
+      const std::string& server_id) const;
   [[nodiscard]] nlohmann::json list_investigation_tasks(
       const std::optional<std::string>& status, int limit) const;
   [[nodiscard]] std::optional<nlohmann::json> get_investigation_task(

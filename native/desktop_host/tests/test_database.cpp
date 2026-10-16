@@ -1705,6 +1705,78 @@ int main(int argc, char** argv) {
             "host.investigation.retention.preview should expose host retention candidates");
     }
 
+    // ── host.context.fetch ───────────────────────────────────────────────────
+    // Read-only metadata projection for sidecar context assembly: bodies never
+    // travel, and unknown kinds or malformed ids are refused before any lookup.
+    {
+      const auto carries_body = [](const nlohmann::json& array) {
+        for (const auto& entry : array) {
+          if (entry.contains("content")) return true;
+        }
+        return false;
+      };
+      const auto context = router.handle_host_request(
+          "host.context.fetch", {{"kind", "investigation"}, {"id", "itask_write"}});
+      check(context.value("status", std::string()) == "success" &&
+                context.at("data").at("task").at("id") == "itask_write" &&
+                context.at("data").at("evidence").is_array() &&
+                !context.at("data").at("evidence").empty() &&
+                !carries_body(context.at("data").at("evidence")) &&
+                !carries_body(context.at("data").at("artifacts")) &&
+                context.at("data").at("findings").is_array() &&
+                context.at("data").at("runs").is_array() &&
+                context.at("data").at("steps").is_array() &&
+                context.at("data").at("evidence").at(0).at("freshness").at("policy") ==
+                    "default-v1",
+            "host.context.fetch should project a body-free investigation context");
+
+      const auto server_context = router.handle_host_request(
+          "host.context.fetch", {{"kind", "server"}, {"id", "srv_01abc"}});
+      check(server_context.value("status", std::string()) == "success" &&
+                server_context.at("data").at("id") == "srv_01abc",
+            "host.context.fetch should return one server by id");
+
+      const auto snapshot_context = router.handle_host_request(
+          "host.context.fetch", {{"kind", "snapshot"}, {"id", "srv_01abc"}});
+      check(snapshot_context.value("status", std::string()) == "success" &&
+                snapshot_context.at("data").at("id") == "snap_srv_01abc_1",
+            "host.context.fetch should return the latest server snapshot");
+
+      const auto workspace_context = router.handle_host_request(
+          "host.context.fetch", {{"kind", "workspace"}, {"id", "ws_01"}});
+      check(workspace_context.value("status", std::string()) == "success" &&
+                workspace_context.at("data").at("id") == "ws_01",
+            "host.context.fetch should return one workspace by id");
+
+      const auto unknown_kind = router.handle_host_request(
+          "host.context.fetch", {{"kind", "galaxy"}, {"id", "srv_01abc"}});
+      check(unknown_kind.value("status", std::string()) == "failed" &&
+                unknown_kind.at("error").at("code") == "invalid_input",
+            "host.context.fetch should refuse an unknown context kind");
+
+      const auto non_opaque_server = router.handle_host_request(
+          "host.context.fetch", {{"kind", "server"}, {"id", "01abc"}});
+      check(non_opaque_server.value("status", std::string()) == "failed" &&
+                non_opaque_server.at("error").at("code") == "invalid_input",
+            "host.context.fetch should require an opaque srv_ id for servers");
+
+      const auto empty_id = router.handle_host_request(
+          "host.context.fetch", {{"kind", "investigation"}, {"id", ""}});
+      check(empty_id.value("status", std::string()) == "failed" &&
+                empty_id.at("error").at("code") == "invalid_input",
+            "host.context.fetch should require a non-empty context id");
+
+      const auto missing_task = router.handle_host_request(
+          "host.context.fetch", {{"kind", "investigation"}, {"id", "itask_missing"}});
+      check(missing_task.value("status", std::string()) == "not_found",
+            "host.context.fetch should report an unknown investigation as not found");
+
+      const auto missing_snapshot = router.handle_host_request(
+          "host.context.fetch", {{"kind", "snapshot"}, {"id", "srv_none"}});
+      check(missing_snapshot.value("status", std::string()) == "not_found",
+            "host.context.fetch should report a server without snapshots as not found");
+    }
+
     // ── investigation_schedule_* ─────────────────────────────────────────────
     // Durable read-only triggers: create, list, update, runs, and the due-claiming
     // tick that funnels every trigger through one dedupe bucket.

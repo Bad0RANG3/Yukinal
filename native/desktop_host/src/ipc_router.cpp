@@ -2454,6 +2454,82 @@ nlohmann::json handle_retention_preview(DesktopDatabase& database, const nlohman
   return {{"status", "success"}, {"preview", *preview}};
 }
 
+/** Read-only context projection for the sidecar: never executes remote tools. */
+nlohmann::json handle_context_request(DesktopDatabase& database, const nlohmann::json& params) {
+  const auto context_failure = [](const std::string& code, const std::string& message,
+                                  bool retryable) {
+    return nlohmann::json{
+        {"status", "failed"},
+        {"error", investigation_error(code, message, retryable)}};
+  };
+  if (!params.is_object()) {
+    return context_failure("invalid_input", "invalid host context request", false);
+  }
+  const auto kind = json_text_field(params, "kind");
+  const auto id = json_text_field(params, "id");
+  if (id.empty() || id.size() > 160) {
+    return context_failure("invalid_input", "context id must be between 1 and 160 characters",
+                           true);
+  }
+  if (kind != "server" && kind != "snapshot" && kind != "workspace" &&
+      kind != "investigation") {
+    return context_failure("invalid_input", "invalid host context request", false);
+  }
+  if ((kind == "server" || kind == "snapshot") && id.rfind("srv_", 0) != 0) {
+    return context_failure("invalid_input", "server context requires an opaque srv_ id", false);
+  }
+  const auto context_success = [](nlohmann::json data) {
+    return nlohmann::json{{"status", "success"}, {"data", std::move(data)}};
+  };
+  try {
+    if (kind == "server") {
+      const auto servers = database.list_servers().at("servers");
+      for (const auto& server : servers) {
+        if (json_text_field(server, "id") == id) return context_success(server);
+      }
+      return nlohmann::json{{"status", "not_found"}};
+    }
+    if (kind == "workspace") {
+      const auto workspaces = database.list_workspaces().at("workspaces");
+      for (const auto& workspace : workspaces) {
+        if (json_text_field(workspace, "id") == id) return context_success(workspace);
+      }
+      return nlohmann::json{{"status", "not_found"}};
+    }
+    if (kind == "snapshot") {
+      auto snapshot = database.latest_snapshot(id);
+      if (!snapshot.has_value()) return nlohmann::json{{"status", "not_found"}};
+      return context_success(std::move(*snapshot));
+    }
+    auto detail = database.get_investigation_task(id);
+    if (!detail.has_value()) return nlohmann::json{{"status", "not_found"}};
+    nlohmann::json context = nlohmann::json::object();
+    context["task"] = detail->at("task");
+    nlohmann::json evidence = nlohmann::json::array();
+    for (const auto& item : detail->at("evidence")) {
+      evidence.push_back(evidence_summary(item));
+    }
+    context["evidence"] = std::move(evidence);
+    context["findings"] = detail->at("findings");
+    context["runs"] = detail->at("runs");
+    context["steps"] = detail->at("steps");
+    nlohmann::json artifacts = nlohmann::json::array();
+    for (const auto& item : detail->at("artifacts")) {
+      nlohmann::json summary = item;
+      summary.erase("content");
+      artifacts.push_back(std::move(summary));
+    }
+    context["artifacts"] = std::move(artifacts);
+    if (detail->contains("plan")) context["plan"] = detail->at("plan");
+    if (detail->contains("decisionBrief")) context["decisionBrief"] = detail->at("decisionBrief");
+    return context_success(std::move(context));
+  } catch (const nlohmann::json::exception& error) {
+    return context_failure("internal", error.what(), false);
+  } catch (const std::exception& error) {
+    return context_failure("internal", error.what(), false);
+  }
+}
+
 nlohmann::json handle_finding_record(DesktopDatabase& database, const nlohmann::json& params) {
   if (!params.is_object() || !params.contains("finding") || !params.at("finding").is_object()) {
     return record_failure_json("invalid_input", "invalid finding", false);
@@ -6455,6 +6531,15 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
                                                  {"code", "request_failed"},
                                                  {"message", "The MCP catalog could not be built"}}})}};
     }
+  }
+  if (method == "host.context.fetch") {
+    if (database_ == nullptr || !database_->is_available()) {
+      return nlohmann::json{
+          {"status", "failed"},
+          {"error", investigation_error("internal", "the local server database is unavailable",
+                                        false)}};
+    }
+    return handle_context_request(*database_, params);
   }
   if (method == "host.investigation.plan.record" ||
       method == "host.investigation.plan.check" ||
