@@ -13,6 +13,8 @@
 
 namespace yukinal::desktop_host {
 constexpr COLORREF kOuterColor = RGB(0x14, 0x15, 0x18);
+constexpr COLORREF kTitleColor = RGB(0x11, 0x12, 0x15);
+constexpr COLORREF kSidebarColor = RGB(0x19, 0x1b, 0x20);
 constexpr wchar_t kFrameProperty[] = L"YukinalFrame";
 constexpr int kChromeHeight = 40;
 constexpr int kSidebarWidth = 240;
@@ -41,6 +43,7 @@ struct FrameState {
   std::vector<HWND> controls;
   HFONT font = nullptr, detail_font = nullptr;
   HBRUSH outer_brush = CreateSolidBrush(kOuterColor);
+  HBRUSH sidebar_brush = CreateSolidBrush(kSidebarColor);
   HBRUSH entry_brush = CreateSolidBrush(RGB(0x1d, 0x1e, 0x23));
 
   ~FrameState() {
@@ -51,6 +54,7 @@ struct FrameState {
     if (font) DeleteObject(font);
     if (detail_font) DeleteObject(detail_font);
     DeleteObject(outer_brush);
+    DeleteObject(sidebar_brush);
     DeleteObject(entry_brush);
   }
 };
@@ -234,7 +238,7 @@ void draw_sidebar_item(HWND window, FrameState& state, const DRAWITEMSTRUCT& ite
   const bool selected = item.CtlID == kListId ? (item.itemState & ODS_SELECTED) != 0 :
       item.CtlID >= kNavigationId && item.CtlID < kNavigationId + 5 && state.section == kSections[item.CtlID - kNavigationId];
   const bool highlight = selected || (item.itemState & ODS_SELECTED) || state.hovered == item.hwndItem;
-  FillRect(dc, &bounds, state.outer_brush);
+  FillRect(dc, &bounds, state.sidebar_brush);
   if (highlight) {
     const auto brush = CreateSolidBrush(selected ? RGB(0x2b, 0x2d, 0x34) : RGB(0x21, 0x23, 0x29));
     const auto old_brush = SelectObject(dc, brush);
@@ -327,8 +331,12 @@ void layout_native_content(HWND window, FrameState& state) {
       layout.content_y + frame_scale(window, 30) + i * (row + gap), width, row, TRUE);
   MoveWindow(state.navigation[4], pad, client.bottom - pad - row, width, row, TRUE);
   const int tools_y = layout.content_y + frame_scale(window, 222);
-  MoveWindow(state.add, layout.sidebar_width - pad - frame_scale(window, 76), tools_y, frame_scale(window, 76), frame_scale(window, 30), TRUE);
-  MoveWindow(state.refresh, layout.sidebar_width - pad - frame_scale(window, 122), tools_y, frame_scale(window, 44), frame_scale(window, 30), TRUE);
+  const int add_width = frame_scale(window, 108);
+  const int refresh_width = frame_scale(window, 54);
+  const int tools_gap = frame_scale(window, 8);
+  const int add_x = layout.sidebar_width - pad - add_width;
+  MoveWindow(state.add, add_x, tools_y, add_width, frame_scale(window, 30), TRUE);
+  MoveWindow(state.refresh, add_x - tools_gap - refresh_width, tools_y, refresh_width, frame_scale(window, 30), TRUE);
   MoveWindow(state.search, pad + frame_scale(window, 12), tools_y + frame_scale(window, 50), (std::max)(1, width - frame_scale(window, 24)), frame_scale(window, 24), TRUE);
   const int list_top = tools_y + frame_scale(window, 104);
   MoveWindow(state.list, pad, list_top, width, (std::max)(1, static_cast<int>(client.bottom) - pad - row - frame_scale(window, 18) - list_top), TRUE);
@@ -346,6 +354,16 @@ void paint_native_chrome(HWND window) {
   // The inset border belongs to the native child window, like its clipping.
   const int inset = frame_scale(window, kContentInset);
   const int top = chrome_height(window);
+  // Give the caption and the sidebar their own shades so the functional zones
+  // read as separate surfaces instead of one continuous L-shaped frame.
+  const HBRUSH title_fill = CreateSolidBrush(kTitleColor);
+  const RECT title_band{0, 0, client.right, top};
+  FillRect(window_dc, &title_band, title_fill);
+  DeleteObject(title_fill);
+  const HBRUSH sidebar_fill = CreateSolidBrush(kSidebarColor);
+  const RECT sidebar_band{0, top, frame_scale(window, kSidebarWidth), client.bottom};
+  FillRect(window_dc, &sidebar_band, sidebar_fill);
+  DeleteObject(sidebar_fill);
   const HPEN border = CreatePen(PS_SOLID, 1, RGB(54, 54, 56));
   const HGDIOBJ previous_pen = SelectObject(window_dc, border);
   const HGDIOBJ previous_brush = SelectObject(window_dc, GetStockObject(HOLLOW_BRUSH));
@@ -354,7 +372,14 @@ void paint_native_chrome(HWND window) {
       client.bottom - inset + 1, frame_scale(window, kContentRadius * 2),
       frame_scale(window, kContentRadius * 2));
   SelectObject(window_dc, previous_brush);
+  const HPEN divider = CreatePen(PS_SOLID, 1, RGB(0x2c, 0x2e, 0x35));
+  SelectObject(window_dc, divider);
+  MoveToEx(window_dc, layout.sidebar_width - 1, top, nullptr);
+  LineTo(window_dc, layout.sidebar_width - 1, client.bottom);
+  MoveToEx(window_dc, 0, top - 1, nullptr);
+  LineTo(window_dc, layout.sidebar_width, top - 1);
   SelectObject(window_dc, previous_pen);
+  DeleteObject(divider);
   DeleteObject(border);
   auto* sidebar_state = frame_state(window);
   if (sidebar_state != nullptr && sidebar_state->font != nullptr) {
@@ -397,7 +422,9 @@ void paint_native_chrome(HWND window) {
   }
   const HGDIOBJ previous_bitmap = SelectObject(dc, bitmap);
   const RECT caption{0, 0, client.right, top};
-  FillRect(dc, &caption, background);
+  const HBRUSH caption_fill = CreateSolidBrush(kTitleColor);
+  FillRect(dc, &caption, caption_fill);
+  DeleteObject(caption_fill);
   DeleteObject(background);
   SetBkMode(dc, TRANSPARENT);
   const bool active = GetActiveWindow() == window;
@@ -546,8 +573,8 @@ LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPAR
     const auto dc = reinterpret_cast<HDC>(wparam);
     SetTextColor(dc, RGB(208, 211, 220));
     const bool edit = reinterpret_cast<HWND>(lparam) == state->search;
-    SetBkColor(dc, edit ? RGB(0x1d, 0x1e, 0x23) : kOuterColor);
-    return reinterpret_cast<LRESULT>(edit ? state->entry_brush : state->outer_brush);
+    SetBkColor(dc, edit ? RGB(0x1d, 0x1e, 0x23) : kSidebarColor);
+    return reinterpret_cast<LRESULT>(edit ? state->entry_brush : state->sidebar_brush);
   }
   if (message == WM_CONTEXTMENU && reinterpret_cast<HWND>(wparam) == state->list) {
     server_context_menu(window, *state, lparam);

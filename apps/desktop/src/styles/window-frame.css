@@ -45,7 +45,7 @@
 /* A single content surface, with aligned, compact headers. */
 .native-workspace .workspace-main { background: var(--panel); }
 .native-workspace .workspace-header,
-.native-workspace .agent-header { min-height: 64px; padding: 0 24px; border-bottom: 1px solid var(--line); }
+.native-workspace .agent-header { min-height: 64px; padding: 0 24px; border-bottom: 1px solid var(--line-strong); }
 .native-workspace .workspace-header h1 { font-size: 17px; font-weight: 600; }
 .native-workspace .workspace-header .eyebrow { font-size: 10px; font-weight: 400; margin-bottom: 6px; }
 .native-workspace .workspace-content { padding: 24px; }
@@ -76,7 +76,7 @@
 .native-workspace .getting-started .settings-card-header h2 { font-size: 16px; margin: 0 0 8px; }
 .native-workspace .getting-started .form-error { font-size: 12px; line-height: 1.7; }
 
-.native-workspace .agent-panel { background: #222325; border-left: 1px solid var(--line); }
+.native-workspace .agent-panel { background: #222325; border-left: 1px solid var(--line-strong); }
 .native-workspace .agent-header { padding: 0 16px; gap: 8px; }
 .native-workspace .agent-title { gap: 8px; }
 .native-workspace .agent-title .eyebrow { display: none; }

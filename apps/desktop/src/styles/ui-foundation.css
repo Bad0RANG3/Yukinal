@@ -417,6 +417,9 @@ select:focus-visible {
   padding: 7px 11px;
   /* 操作名称不能被逐字拆成一列；窄屏应由说明文本换行，而不是让“刷新”读成两行。 */
   white-space: nowrap;
+  /* A button in a tight flex row must keep its label width instead of being
+     squeezed below the text and clipped; the surrounding copy wraps instead. */
+  flex: 0 0 auto;
   /* 过渡不写在这里：动效层（文件末尾）是 transition 的唯一出处，
      这里原本那条 `140ms` 因为同权重、后出现而被它整条覆盖，是死声明。 */
 }
