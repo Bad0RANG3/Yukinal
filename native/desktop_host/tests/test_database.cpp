@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -75,6 +76,43 @@ void execute(sqlite3* database, const char* sql) {
   sqlite3_free(error);
   std::cerr << message << '\n';
   std::exit(1);
+}
+
+// Inserts one `file_transfers` row whose snapshot mirrors the row columns, the
+// way the retired Rust transfer manager wrote them.
+void insert_transfer(sqlite3* database, const std::string& id, const std::string& server_id,
+                     const std::string& direction, const std::string& status,
+                     std::int64_t started, std::int64_t updated) {
+  const bool finished = status == "completed";
+  const nlohmann::json snapshot = {
+      {"transferId", id},       {"serverId", server_id},
+      {"direction", direction}, {"status", status},
+      {"startedAtEpochMs", started}, {"updatedAtEpochMs", updated},
+      {"totalFiles", 1},         {"completedFiles", finished ? 1 : 0},
+      {"skippedFiles", 0},       {"totalBytes", 10},
+      {"transferredBytes", finished ? 10 : 4},
+      {"currentItem", nullptr},  {"currentItemBytes", 0},
+      {"currentItemTotalBytes", nullptr}, {"activeConflict", nullptr},
+      {"verifiedFiles", finished ? 1 : 0}, {"unverifiedFiles", 0},
+      {"failures", nlohmann::json::array()}, {"stagingResidue", nlohmann::json::array()},
+  };
+  const auto snapshot_text = snapshot.dump();
+  sqlite3_stmt* statement = nullptr;
+  check(sqlite3_prepare_v2(database,
+                           "INSERT INTO file_transfers (transfer_id, server_id, direction, "
+                           "status, started_at_epoch_ms, updated_at_epoch_ms, snapshot_json, "
+                           "staging_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]')",
+                           -1, &statement, nullptr) == SQLITE_OK,
+        "could not prepare the file transfer fixture insert");
+  sqlite3_bind_text(statement, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 2, server_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 3, direction.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(statement, 4, status.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(statement, 5, started);
+  sqlite3_bind_int64(statement, 6, updated);
+  sqlite3_bind_text(statement, 7, snapshot_text.c_str(), -1, SQLITE_TRANSIENT);
+  check(sqlite3_step(statement) == SQLITE_DONE, "could not insert the file transfer fixture");
+  sqlite3_finalize(statement);
 }
 
 void seed_legacy_database(const std::filesystem::path& path) {
@@ -233,6 +271,48 @@ int main() {
         {{"traceId", "trc_01"}, {"serverId", "srv_other"}, {"limit", 5}});
     check(executions_response.ok && executions_response.value == expected_trace,
           "the C++ IPC router should expose tool execution records");
+
+    // File transfers: the C++ host owns no transfer manager, so a persisted
+    // in-progress row can only be stale and must read back as `interrupted`.
+    {
+      sqlite3* writer = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+            "could not open the database for the file transfer fixture");
+      insert_transfer(writer, "trf_completed", "srv_01abc", "upload", "completed", 1000, 1000);
+      insert_transfer(writer, "trf_running", "srv_01abc", "download", "running", 500, 2000);
+      insert_transfer(writer, "trf_other", "srv_other", "upload", "failed", 400, 400);
+      sqlite3_close(writer);
+    }
+    const auto transfers = database.list_file_transfers(std::nullopt, 100);
+    check(transfers.at("transfers").size() == 3,
+          "list_file_transfers should return every stored row");
+    check(transfers.at("transfers")[0].at("transferId") == "trf_running" &&
+              transfers.at("transfers")[0].at("status") == "interrupted",
+          "a persisted running transfer should reconcile to interrupted");
+    check(transfers.at("transfers")[1].at("transferId") == "trf_completed" &&
+              transfers.at("transfers")[1].at("status") == "completed",
+          "a completed transfer should stay completed");
+    check(database.list_file_transfers(std::string("srv_01abc"), 100).at("transfers").size() == 2,
+          "list_file_transfers should filter by server id");
+    check(database.list_file_transfers(std::nullopt, 1).at("transfers").size() == 1,
+          "list_file_transfers should honor its bounded limit");
+    const auto fetched = database.get_file_transfer("trf_running");
+    check(fetched.has_value() && fetched->at("status") == "interrupted",
+          "get_file_transfer should return the reconciled snapshot");
+    check(!database.get_file_transfer("trf_missing").has_value(),
+          "get_file_transfer should report an unknown transfer");
+    check(database.list_file_transfers(std::nullopt, 1).at("transfers")[0].at("status") ==
+              "interrupted",
+          "the reconciliation must be persisted, not recomputed from a stale row");
+
+    const auto transfer_list = router.invoke("file_transfer_list", {{"serverId", "srv_01abc"}});
+    check(transfer_list.ok && transfer_list.value.at("transfers").size() == 2,
+          "the C++ IPC router should expose the file transfer ledger");
+    const auto transfer_get = router.invoke("file_transfer_get", {{"transferId", "trf_running"}});
+    check(transfer_get.ok && transfer_get.value.at("transfer").at("status") == "interrupted",
+          "the C++ IPC router should return the reconciled transfer");
+    check(!router.invoke("file_transfer_get", {{"transferId", "trf_missing"}}).ok,
+          "the C++ IPC router should report an unknown transfer");
 
     // Network proxy: the setting is non-secret, the credential is write-only, and
     // every rejection must leave both the database and the credential store alone.

@@ -148,5 +148,11 @@ returns the shared bounded `FilePreviewResponse` for text, image, or binary
 content. Absolute local paths never cross the IPC boundary, and `emit_local_drop`
 remains the last piece of this group.
 
+The file-transfer history is now host-owned too: `file_transfer_list` and
+`file_transfer_get` read the bounded `file_transfers` ledger. Because the C++ host
+runs no transfer manager, a persisted row that still claims to be in progress
+(`queued`, `running`, `waitingConflict`) is reconciled to `interrupted` and
+written back on read; terminal rows are returned unchanged.
+
 The upstream WebView library is MIT licensed and its C++ API supports native
 callbacks in both directions: [webview/webview](https://github.com/webview/webview).

@@ -98,6 +98,19 @@ int main() {
   check(!router.invoke("local_path_pick", {{"kind", "everything"}}).ok,
         "local_path_pick should reject an unknown kind");
 
+  check(!router.invoke("file_transfer_list", {{"unexpected", true}}).ok,
+        "file_transfer_list should reject unknown parameters");
+  check(!router.invoke("file_transfer_list", {{"serverId", "not-a-server"}}).ok,
+        "file_transfer_list should reject malformed server ids");
+  check(!router.invoke("file_transfer_list", nlohmann::json::object()).ok,
+        "file_transfer_list should report a missing local database");
+  check(!router.invoke("file_transfer_get", nlohmann::json::object()).ok,
+        "file_transfer_get should require a transfer id");
+  check(!router.invoke("file_transfer_get", {{"transferId", ""}}).ok,
+        "file_transfer_get should reject an empty transfer id");
+  check(!router.invoke("file_transfer_get", {{"transferId", "trf_01"}}).ok,
+        "file_transfer_get should report a missing local database");
+
   using yukinal::desktop_host::kLocalHandleTtlMillis;
   using yukinal::desktop_host::kMaxFilePreviewBytes;
   using yukinal::desktop_host::LocalPathHandles;

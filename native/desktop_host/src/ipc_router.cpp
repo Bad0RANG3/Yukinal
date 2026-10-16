@@ -1069,6 +1069,55 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return {true, {{"handles", std::move(handles)}}};
   }
 
+  if (method == "file_transfer_list") {
+    if (!only_fields(params, {"serverId"}, {})) {
+      return failure("INVALID_PARAMS", "file_transfer_list received an unexpected parameter");
+    }
+    std::optional<std::string> server_id;
+    if (params.contains("serverId")) {
+      if (!params.at("serverId").is_string()) {
+        return failure("INVALID_PARAMS", "file_transfer_list serverId must be a string");
+      }
+      const auto value = params.at("serverId").get<std::string>();
+      if (!valid_server_id(value)) {
+        return failure("INVALID_PARAMS", "file_transfer_list serverId is invalid");
+      }
+      server_id = value;
+    }
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
+    }
+    try {
+      return {true, database_->list_file_transfers(server_id, 100)};
+    } catch (...) {
+      return failure("STORAGE_ERROR", "The local file transfer database could not read transfers");
+    }
+  }
+
+  if (method == "file_transfer_get") {
+    if (!exact_string_fields(params, {"transferId"})) {
+      return failure("INVALID_PARAMS", "file_transfer_get requires exactly transferId");
+    }
+    const auto transfer_id = params.at("transferId").get<std::string>();
+    if (transfer_id.empty() || transfer_id.size() > 128 ||
+        has_control_characters(transfer_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_get transferId is invalid");
+    }
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
+    }
+    try {
+      auto transfer = database_->get_file_transfer(transfer_id);
+      if (!transfer.has_value()) {
+        return failure("NOT_FOUND", "The file transfer was not found");
+      }
+      return {true, {{"transfer", std::move(*transfer)}}};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local file transfer database could not read the transfer");
+    }
+  }
+
   if (method == "__events.subscribe") return subscribe(params, true);
   if (method == "__events.unsubscribe") return subscribe(params, false);
 

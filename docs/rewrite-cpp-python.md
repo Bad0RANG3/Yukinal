@@ -912,3 +912,18 @@ ABI-mismatch crashes. The canonical `native/build-nmake` Release build and all
 eleven CTest targets passed, and `pnpm check` was green. `emit_local_drop`,
 transfer-history queries, the remaining host RPCs, and MCP/investigation
 forwarding remain.
+
+On 2026-10-16, after merging the Windows desktop shell PR, the C++ desktop host
+took over the file-transfer history reads. `DesktopDatabase::list_file_transfers`
+and `get_file_transfer` decode the bounded `file_transfers` ledger, verify that
+each stored row matches its snapshot (transfer id, server id, direction and
+status), and surface the result through `file_transfer_list` and
+`file_transfer_get`. Because this host owns no transfer manager, a persisted row
+that still claims to be in progress is reconciled to `interrupted` and written
+back once the read statement is closed; terminal rows are unchanged.
+`desktop_host_database_tests` covers ordering, server filtering, the bounded
+limit, both transports, reconciliation and persistence, and the unknown-transfer
+case, while `desktop_host_tests` covers the parameter validation. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets (including the
+merged `window_context_tests`), and `pnpm check` was green. `emit_local_drop`, the
+remaining host RPCs, and MCP/investigation forwarding remain.

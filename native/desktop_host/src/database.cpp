@@ -136,6 +136,72 @@ void bind_optional_text(sqlite3* connection, sqlite3_stmt* statement, int index,
   bind_text(connection, statement, index, *value);
 }
 
+bool is_active_transfer_status(const std::string& status) {
+  return is_one_of(status, {"queued", "running", "waitingConflict"});
+}
+
+bool is_known_transfer_status(const std::string& status) {
+  return is_one_of(status, {"queued", "running", "waitingConflict", "completed", "partial",
+                            "failed", "cancelled", "interrupted"});
+}
+
+std::string json_string_field(const nlohmann::json& value, const char* key) {
+  if (!value.is_object()) return {};
+  const auto found = value.find(key);
+  if (found == value.end() || !found->is_string()) return {};
+  return found->get<std::string>();
+}
+
+// Decodes one `file_transfers` row. A snapshot that still claims to be in
+// progress cannot be live in this host (the C++ host owns no transfer manager),
+// so the caller reconciles it to `interrupted` once the read statement is closed.
+nlohmann::json decode_file_transfer(sqlite3_stmt* row) {
+  const std::string transfer_id = column_text(row, 0);
+  const std::string server_id = column_text(row, 1);
+  const std::string direction = column_text(row, 2);
+  const std::string status = column_text(row, 3);
+  if (!is_one_of(direction, {"upload", "download"})) {
+    throw std::runtime_error("Stored file transfer has an unknown direction");
+  }
+  if (!is_known_transfer_status(status)) {
+    throw std::runtime_error("Stored file transfer has an unknown status");
+  }
+  nlohmann::json snapshot;
+  try {
+    snapshot = nlohmann::json::parse(column_text(row, 6));
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("Stored file transfer snapshot is invalid JSON");
+  }
+  if (!snapshot.is_object() || json_string_field(snapshot, "transferId") != transfer_id ||
+      json_string_field(snapshot, "serverId") != server_id ||
+      json_string_field(snapshot, "direction") != direction ||
+      json_string_field(snapshot, "status") != status) {
+    throw std::runtime_error("Stored file transfer row does not match its snapshot");
+  }
+  return snapshot;
+}
+
+void persist_transfer_status(sqlite3* connection, const std::string& transfer_id,
+                             const nlohmann::json& snapshot) {
+  Statement update(connection,
+                   "UPDATE file_transfers SET status = ?2, snapshot_json = ?3 "
+                   "WHERE transfer_id = ?1");
+  bind_text(connection, update.get(), 1, transfer_id);
+  bind_text(connection, update.get(), 2, json_string_field(snapshot, "status"));
+  bind_text(connection, update.get(), 3, snapshot.dump());
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
+// Rewrites a still-active snapshot to `interrupted` and persists it, because no
+// transfer can outlive the host process that owned it.
+void reconcile_transfer(sqlite3* connection, nlohmann::json& snapshot) {
+  if (!is_active_transfer_status(json_string_field(snapshot, "status"))) return;
+  snapshot["status"] = "interrupted";
+  persist_transfer_status(connection, json_string_field(snapshot, "transferId"), snapshot);
+}
+
 void execute_sql(sqlite3* connection, const char* sql) {
   char* error = nullptr;
   if (sqlite3_exec(connection, sql, nullptr, nullptr, &error) == SQLITE_OK) return;
@@ -1373,6 +1439,76 @@ nlohmann::json DesktopDatabase::list_tool_executions(
     executions.push_back(std::move(execution));
   }
   return {{"executions", std::move(executions)}};
+}
+
+nlohmann::json DesktopDatabase::list_file_transfers(
+    const std::optional<std::string>& server_id, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("File transfer limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"transfers", nlohmann::json::array()}};
+
+  std::vector<nlohmann::json> decoded;
+  {
+    const char* sql = server_id.has_value()
+        ? R"SQL(
+            SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+                   updated_at_epoch_ms, snapshot_json, staging_json
+              FROM file_transfers
+             WHERE server_id = ?1
+             ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+             LIMIT ?2
+          )SQL"
+        : R"SQL(
+            SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+                   updated_at_epoch_ms, snapshot_json, staging_json
+              FROM file_transfers
+             ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+             LIMIT ?1
+          )SQL";
+    Statement rows(connection_, sql);
+    int limit_parameter = 1;
+    if (server_id.has_value()) {
+      bind_text(connection_, rows.get(), 1, *server_id);
+      limit_parameter = 2;
+    }
+    if (sqlite3_bind_int(rows.get(), limit_parameter, limit) != SQLITE_OK) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      decoded.push_back(decode_file_transfer(rows.get()));
+    }
+  }
+  for (auto& snapshot : decoded) reconcile_transfer(connection_, snapshot);
+  nlohmann::json transfers = nlohmann::json::array();
+  for (auto& snapshot : decoded) transfers.push_back(std::move(snapshot));
+  return {{"transfers", std::move(transfers)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_file_transfer(
+    const std::string& transfer_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  std::optional<nlohmann::json> snapshot;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+               updated_at_epoch_ms, snapshot_json, staging_json
+          FROM file_transfers
+         WHERE transfer_id = ?1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, transfer_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    snapshot = decode_file_transfer(rows.get());
+  }
+  if (snapshot.has_value()) reconcile_transfer(connection_, *snapshot);
+  return snapshot;
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(

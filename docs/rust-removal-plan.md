@@ -49,7 +49,7 @@
 
 - ✅ `server_host_key_status`、`server_host_key_forget`（已知主机存储已在 `native/desktop_host/src/host_trust.cpp` 实现；`v1:host:port:SHA256:...` 格式与 `crates/host-trust` 一致）
 - ✅ `local_path_pick`、`local_file_preview`（`native/desktop_host/src/local_paths.cpp` 提供短时句柄表：15 分钟 TTL、2048 句柄上限、256 选取上限、拒绝符号链接与变更类型；预览复用共享的 `FilePreviewResponse`，1 MiB 上限并按文本/图片/二进制分类；Windows 用原生文件/目录对话框，其他平台暂时返回明确错误）
-- `file_transfer_list`、`file_transfer_get`（任务/账本查询）
+- `file_transfer_list`、`file_transfer_get`（`native/desktop_host/src/database.cpp` 读取 `file_transfers` 账本；本宿主没有传输管理器，因此持久化的 `queued`/`running`/`waitingConflict` 行在读取时对账为 `interrupted` 并写回，已完成/失败等终态保持不变）
 - `emit_local_drop`（OS 拖入事件）
 
 ### B. 需要 C++ SSH / SFTP / PTY 核心（`native/src` 已有能力）
@@ -142,7 +142,7 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 ## 8. 完成标准（逐条勾）
 
 - [ ] 81 个 UI 命令在 C++ 宿主全部有实现，或明确标注为“尚未迁移”且 UI 不依赖。
-  - 已实现（30）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
+  - 已实现（32）：`core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`、`chat_session_*`（7）、`local_path_pick`、`local_file_preview`、`file_transfer_list`、`file_transfer_get`、`agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond`、`provider_*`（6）。
 - [ ] C++ ↔ Python sidecar 桥接通，provider/agent/investigation/MCP 走该桥。
   - Provider 六个命令、`agent_spawn/status/kill/logs` 与 `agent_run_*`/`agent_approval_respond` 已经走桥；MCP 与 investigation 仍待转发。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
