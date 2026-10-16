@@ -7252,8 +7252,9 @@ void IpcRouter::configure_sidecar() {
   }
   launch.client_version = YUKINAL_DESKTOP_VERSION;
   sidecar_->configure(std::move(launch));
-  sidecar_->set_host_handler([this](const std::string& method, const nlohmann::json& params) {
-    return handle_host_request(method, params);
+  sidecar_->set_host_handler([this](const std::string& method, const nlohmann::json& params,
+                                    const std::shared_ptr<std::atomic<bool>>& cancel) {
+    return handle_host_request(method, params, cancel);
   });
   sidecar_->set_notification_sink([this](const std::string& method,
                                          const nlohmann::json& params) {
@@ -7729,8 +7730,9 @@ IpcReply IpcRouter::provider_command(const std::string& method, const nlohmann::
   }
 }
 
-nlohmann::json IpcRouter::handle_host_request(const std::string& method,
-                                              const nlohmann::json& params) {
+nlohmann::json IpcRouter::handle_host_request(
+    const std::string& method, const nlohmann::json& params,
+    const std::shared_ptr<std::atomic<bool>>& cancel) {
   if (method == "host.mcp.catalog") {
     if (mcp_ == nullptr) {
       return nlohmann::json{{"servers", nlohmann::json::array()},
@@ -7864,8 +7866,12 @@ nlohmann::json IpcRouter::handle_host_request(const std::string& method,
       return failed("invalid_arguments", "MCP tool arguments must be an object");
     }
     try {
-      return nlohmann::json{{"status", "success"}, {"output", mcp_->call(tool_name, input)}};
+      return nlohmann::json{{"status", "success"},
+                            {"output", mcp_->call(tool_name, input, cancel)}};
     } catch (const std::exception& error) {
+      if (cancel != nullptr && cancel->load()) {
+        return failed("cancelled", "Host operation cancelled");
+      }
       return failed("mcp_call_failed", error.what());
     }
   }

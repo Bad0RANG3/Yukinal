@@ -7,6 +7,7 @@
 #include "yukinal/desktop_host/local_paths.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <map>
@@ -36,9 +37,11 @@ class IpcRouter {
   [[nodiscard]] std::set<std::string> subscribers(const std::string& event) const;
 
   // The Agent→host request entry point the sidecar dispatches through. Exposed so
-  // the host RPC surface can be exercised directly in tests.
-  [[nodiscard]] nlohmann::json handle_host_request(const std::string& method,
-                                                   const nlohmann::json& params);
+  // the host RPC surface can be exercised directly in tests. `cancel`, when set,
+  // lets a long-running tool call observe a `host.tool.cancel` for its request.
+  [[nodiscard]] nlohmann::json handle_host_request(
+      const std::string& method, const nlohmann::json& params,
+      const std::shared_ptr<std::atomic<bool>>& cancel = nullptr);
 
   // Delivers Agent sidecar notifications (for example `agent.started`) to the
   // WebView bridge. Set once at startup; safe to call from the sidecar thread.

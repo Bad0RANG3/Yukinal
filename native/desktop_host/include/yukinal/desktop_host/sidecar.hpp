@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -75,11 +76,15 @@ struct SidecarStatus {
 // host RPC callbacks the Agent issues back to the desktop host.
 class SidecarClient {
  public:
-  // Called for an incoming `method` request from the Agent. Throwing
-  // `SidecarRpcError` answers with that error; any other exception becomes an
-  // internal error. The returned value is the JSON-RPC `result`.
-  using HostHandler = std::function<nlohmann::json(const std::string& method,
-                                                   const nlohmann::json& params)>;
+  // Called for an incoming `method` request from the Agent. `cancel` is set when
+  // the Agent sends `host.tool.cancel` for this request's JSON-RPC id; a
+  // long-running handler may poll it and return early. Throwing `SidecarRpcError`
+  // answers with that error; any other exception becomes an internal error. The
+  // returned value is the JSON-RPC `result`. `host.tool.cancel` itself is handled
+  // by the sidecar and never reaches this handler.
+  using HostHandler = std::function<nlohmann::json(
+      const std::string& method, const nlohmann::json& params,
+      const std::shared_ptr<std::atomic<bool>>& cancel)>;
   // Called for an incoming notification (a `method` frame without an id).
   using NotificationSink = std::function<void(const std::string& method,
                                               const nlohmann::json& params)>;

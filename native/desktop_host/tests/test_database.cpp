@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -223,11 +224,46 @@ int run_mcp_mock() {
   return 0;
 }
 
+// A stdio MCP server whose one reviewed tool blocks for ten seconds before it
+// answers; the host cancellation test needs a call that is still in flight.
+int run_mcp_slow_mock() {
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    auto frame = nlohmann::json::parse(line, nullptr, false);
+    if (frame.is_discarded() || !frame.is_object() || !frame.contains("id")) continue;
+    const auto id = frame.at("id");
+    const auto method = frame.value("method", std::string());
+    nlohmann::json response = {{"jsonrpc", "2.0"}, {"id", id}};
+    if (method == "initialize") {
+      response["result"] = {{"protocolVersion", "2024-11-05"},
+                            {"capabilities", nlohmann::json::object()},
+                            {"serverInfo", {{"name", "slow"}, {"version", "1.0"}}}};
+    } else if (method == "tools/list") {
+      response["result"] = {
+          {"tools",
+           nlohmann::json::array({nlohmann::json{{"name", "slow"},
+                                                  {"description", "Blocks"},
+                                                  {"inputSchema", {{"type", "object"}}}}})}};
+    } else if (method == "tools/call") {
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+      response["result"] = {
+          {"content", nlohmann::json::array({nlohmann::json{{"type", "text"},
+                                                             {"text", "slow-done"}}})},
+          {"isError", false}};
+    } else {
+      response["error"] = {{"code", -32601}, {"message", "not found"}};
+    }
+    std::cout << response.dump() << "\n" << std::flush;
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   using yukinal::desktop_host::DesktopDatabase;
   if (argc >= 2 && std::string(argv[1]) == "--mcp-mock") return run_mcp_mock();
+  if (argc >= 2 && std::string(argv[1]) == "--mcp-slow-mock") return run_mcp_slow_mock();
   const std::filesystem::path test_executable =
       argc > 0 ? std::filesystem::path(argv[0]) : std::filesystem::path();
 
@@ -784,6 +820,48 @@ int main(int argc, char** argv) {
       auto stdio_row = database.get_mcp_server("mcp_mock").value();
       stdio_row["enabled"] = false;
       database.upsert_mcp_server(stdio_row);
+    }
+
+    // MCP call cancellation: a reviewed tool that blocks for ten seconds is
+    // abandoned as soon as its cancellation token is set, and the call returns
+    // promptly instead of waiting out the ten seconds.
+    if (!test_executable.empty()) {
+      database.upsert_mcp_server({{"id", "mcp_slow"},
+                                  {"label", "Slow"},
+                                  {"transport", "stdio"},
+                                  {"command", test_executable.string()},
+                                  {"args", nlohmann::json::array({"--mcp-slow-mock"})},
+                                  {"enabled", true},
+                                  {"allowedTools", nlohmann::json::array({"slow"})},
+                                  {"trustLevel", "reviewed"},
+                                  {"annotationTrust", "trusted"}});
+      yukinal::desktop_host::McpSupervisor slow_supervisor(&database, &mcp_credentials);
+      const auto slow_catalog = slow_supervisor.catalog();
+      check(slow_catalog.at("servers").size() == 1 &&
+                slow_catalog.at("servers").at(0).at("serverId") == "mcp_slow",
+            "the slow MCP server should be the only one in its catalog");
+      auto cancel = std::make_shared<std::atomic<bool>>(false);
+      std::thread canceler([&cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        cancel->store(true);
+      });
+      bool cancelled = false;
+      const auto started = std::chrono::steady_clock::now();
+      try {
+        (void)slow_supervisor.call("mcp.mcp_slow.slow", nlohmann::json::object(), cancel);
+      } catch (const std::exception&) {
+        cancelled = true;
+      }
+      const auto elapsed = std::chrono::steady_clock::now() - started;
+      canceler.join();
+      check(cancelled, "a cancelled MCP tool call should abort the waiting call");
+      check(elapsed < std::chrono::seconds(5),
+            "a cancelled MCP tool call should return without waiting for the server");
+      // Disable the slow row so the HTTP catalog below stays hermetic.
+      auto slow_row = database.get_mcp_server("mcp_slow").value();
+      slow_row["enabled"] = false;
+      database.upsert_mcp_server(slow_row);
+      slow_supervisor.stop("mcp_slow");
     }
 
     // MCP Streamable HTTP transport: one loopback httplib server answers the

@@ -194,6 +194,12 @@ std::vector<std::string> decode_sse(const std::string& body) {
   return events;
 }
 
+// Raised when a tool call observes its cancellation token.
+class McpCallCancelled : public std::runtime_error {
+ public:
+  McpCallCancelled() : std::runtime_error("the MCP tool call was cancelled") {}
+};
+
 // Finds the JSON-RPC response frame for `id` in one payload (or a batch),
 // returning whether it was found and, if so, its result or error text.
 bool take_json_response(const nlohmann::json& payload, long long id,
@@ -545,16 +551,22 @@ struct McpSupervisor::Impl {
   }
 
   nlohmann::json http_request(const std::shared_ptr<Session>& session, const std::string& method,
-                              const nlohmann::json& params, int timeout_seconds) {
+                              const nlohmann::json& params, int timeout_seconds,
+                              const std::shared_ptr<std::atomic<bool>>& cancel = nullptr) {
+    if (cancel != nullptr && cancel->load()) throw McpCallCancelled();
     long long id = 0;
     {
       std::lock_guard lock(session->mutex);
       if (!session->running) throw std::runtime_error("the MCP server is not running");
       id = session->next_id++;
     }
-    return http_send(session,
-                     {{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}},
-                     id, timeout_seconds);
+    const auto result = http_send(
+        session, {{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}}, id,
+        timeout_seconds);
+    // The blocking POST cannot be interrupted mid-flight; a cancellation that
+    // arrives during it is honoured on return.
+    if (cancel != nullptr && cancel->load()) throw McpCallCancelled();
+    return result;
   }
 
   void delete_http_session(const std::shared_ptr<Session>& session) {
@@ -579,9 +591,10 @@ struct McpSupervisor::Impl {
   }
 
   nlohmann::json request(const std::shared_ptr<Session>& session, const std::string& method,
-                         const nlohmann::json& params, int timeout_seconds) {
+                         const nlohmann::json& params, int timeout_seconds,
+                         const std::shared_ptr<std::atomic<bool>>& cancel = nullptr) {
     if (session->transport == "http") {
-      return http_request(session, method, params, timeout_seconds);
+      return http_request(session, method, params, timeout_seconds, cancel);
     }
     auto pending = std::make_shared<Pending>();
     long long id = 0;
@@ -597,11 +610,29 @@ struct McpSupervisor::Impl {
       throw std::runtime_error("could not write to the MCP server");
     }
     std::unique_lock lock(pending->mutex);
-    if (!pending->cv.wait_for(lock, std::chrono::seconds(timeout_seconds),
-                              [&] { return pending->done; })) {
-      std::lock_guard state_lock(session->mutex);
-      session->pending.erase(id);
-      throw std::runtime_error("the MCP server request timed out");
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+    for (;;) {
+      if (cancel != nullptr && cancel->load()) {
+        lock.unlock();
+        {
+          std::lock_guard state_lock(session->mutex);
+          session->pending.erase(id);
+        }
+        throw McpCallCancelled();
+      }
+      if (pending->cv.wait_for(lock, std::chrono::milliseconds(100),
+                               [&] { return pending->done; })) {
+        break;
+      }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        lock.unlock();
+        {
+          std::lock_guard state_lock(session->mutex);
+          session->pending.erase(id);
+        }
+        throw std::runtime_error("the MCP server request timed out");
+      }
     }
     if (pending->has_error) throw std::runtime_error(pending->error_message);
     return pending->result;
@@ -1041,7 +1072,8 @@ nlohmann::json McpSupervisor::catalog() {
 }
 
 nlohmann::json McpSupervisor::call(const std::string& internal_name,
-                                   const nlohmann::json& arguments) {
+                                   const nlohmann::json& arguments,
+                                   const std::shared_ptr<std::atomic<bool>>& cancel) {
   std::string server_segment;
   std::string tool_segment;
   if (!split_internal_name(internal_name, server_segment, tool_segment)) {
@@ -1074,7 +1106,7 @@ nlohmann::json McpSupervisor::call(const std::string& internal_name,
   if (remote.empty()) throw std::runtime_error("the MCP server does not expose that tool");
   if (!reviewed) throw std::runtime_error("that MCP tool has not been reviewed");
   const auto result = impl_->request(
-      session, "tools/call", {{"name", remote}, {"arguments", arguments}}, 60);
+      session, "tools/call", {{"name", remote}, {"arguments", arguments}}, 60, cancel);
   const bool is_error = result.value("isError", false);
   nlohmann::json content = nlohmann::json::array();
   std::string text;

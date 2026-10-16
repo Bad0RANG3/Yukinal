@@ -88,6 +88,7 @@
 - ✅ `mcp_server_review`（写回 `allowedTools`/`trustLevel`/`annotationTrust`；只暴露已审核的工具）
 - ✅ `mcp_server_start`、`mcp_server_stop`（`native/desktop_host/src/desktop_mcp.cpp`：stdio 按需派生 MCP 子进程；Streamable HTTP 用 `httplib` POST JSON-RPC、识别 `Mcp-Session-Id`/`Mcp-Protocol-Version`、解析 JSON 或 SSE 响应、shutdown 时 DELETE 会话；两条传输都走 `initialize` 握手 + `notifications/initialized` + `tools/list`，静态认证头 secret 从 OS 凭据库解析；OAuth/DPoP 与 GET 长连事件流待做）
 - ✅ `host.mcp.catalog`（对启用且已审核的服务器起进程、按 `allowedTools` 过滤、按 `annotationTrust`+注解算风险；`host.tool.execute` 的 `mcp.*` 分支已接 `tools/call`）
+- ✅ `host.tool.cancel`（sidecar 侧 per-request 取消令牌注册表，best-effort 取消在飞请求；host 请求改由小型线程池分发，避免阻塞的 `host.tool.execute` 挡住 cancel；stdio MCP 调用按 100ms 轮询令牌并放弃，HTTP 调用前后检查；观察到取消时 `host.tool.execute` 返回 `code: "cancelled"`）
 - `mcp_oauth_connect`、`mcp_oauth_cancel`（OAuth 与 DPoP 待做；HTTP 传输已实现）
 
 ---

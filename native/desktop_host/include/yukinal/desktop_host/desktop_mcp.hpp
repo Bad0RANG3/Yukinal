@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -26,9 +27,11 @@ class McpSupervisor {
   // Explicit lifecycle for the settings UI.
   [[nodiscard]] nlohmann::json start(const std::string& server_id);
   [[nodiscard]] nlohmann::json stop(const std::string& server_id);
-  // Executes one internal `mcp.<segment>.<tool>` call.
+  // Executes one internal `mcp.<segment>.<tool>` call. When `cancel` is set and
+  // becomes true, the blocking wait is abandoned and a cancellation is raised.
   [[nodiscard]] nlohmann::json call(const std::string& internal_name,
-                                    const nlohmann::json& arguments);
+                                    const nlohmann::json& arguments,
+                                    const std::shared_ptr<std::atomic<bool>>& cancel = nullptr);
 
  private:
   struct Impl;

@@ -1135,3 +1135,21 @@ twelve CTest targets and `pnpm check` was green. OAuth and DPoP, the optional
 long-lived GET event stream, MCP call cancellation, the `host.tool.execute`
 non-MCP branch, the file transfer actions, installers, and real SSH/MCP
 validation remain.
+
+Later on 2026-10-17, the C++ host made MCP tool calls cancellable. The sidecar now
+runs Agent→host requests on a small pool instead of one thread, so a blocking
+`host.tool.execute` no longer also blocks the `host.tool.cancel` meant to
+interrupt it; the sidecar owns a per-request cancellation token registry, answers
+`host.tool.cancel` itself (`{cancelled: bool}`, best-effort like the retired Rust
+host) and threads the token into the handler (`HostHandler` gained a
+`std::shared_ptr<std::atomic<bool>>` argument). `McpSupervisor::call` accepts the
+token: the stdio wait now polls it in 100 ms slices and abandons the request, and
+the HTTP path checks it before and after the request. `host.tool.execute` answers
+`{status: "failed", error: {code: "cancelled", ...}}` when the call observes a
+cancellation. `desktop_host_database_tests` gains a `--mcp-slow-mock` stdio server
+whose one reviewed tool blocks for ten seconds and checks that a set token aborts
+the call promptly; the pool path is exercised by the existing
+`desktop_host_sidecar_tests`. The canonical `native/build-nmake` Release build
+passed all twelve CTest targets and `pnpm check` was green. OAuth and DPoP, the
+optional long-lived GET event stream, the `host.tool.execute` non-MCP branch, the
+file transfer actions, installers, and real SSH/MCP validation remain.

@@ -3,12 +3,14 @@
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -94,7 +96,9 @@ int run_tests(int argc, char** argv) {
   MemoryCredentialStore credentials;
   DesktopDatabase database(directory.path);
 
-  auto handle_host = [&credentials](const std::string& method, const json& params) -> json {
+  auto handle_host = [&credentials](const std::string& method, const json& params,
+                                    const std::shared_ptr<std::atomic<bool>>& cancel) -> json {
+    (void)cancel;
     if (method == "host.mcp.catalog") {
       return {{"servers", json::array()}, {"failures", json::array()}};
     }
