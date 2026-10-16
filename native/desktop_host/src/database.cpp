@@ -2237,6 +2237,239 @@ std::optional<nlohmann::json> DesktopDatabase::get_file_transfer(
   return snapshot;
 }
 
+namespace {
+
+// The snapshot is the public progress contract; the staging inventory is
+// host-private. Both must stay bounded and well-formed. This mirrors the retired
+// Rust `validate_record` (identifiers/direction/status and size caps) without
+// porting the full Zod snapshot schema.
+void validate_file_transfer_metadata(const nlohmann::json& snapshot,
+                                     const nlohmann::json& staging) {
+  if (!snapshot.is_object()) {
+    throw std::invalid_argument("The file transfer snapshot must be an object");
+  }
+  for (const char* key : {"transferId", "serverId"}) {
+    const auto value = json_string_field(snapshot, key);
+    if (value.find_first_not_of(" \t\r\n") == std::string::npos) {
+      throw std::invalid_argument("The file transfer snapshot is missing an identifier");
+    }
+  }
+  if (!is_one_of(json_string_field(snapshot, "direction"), {"upload", "download"})) {
+    throw std::invalid_argument("The file transfer direction is invalid");
+  }
+  if (!is_known_transfer_status(json_string_field(snapshot, "status"))) {
+    throw std::invalid_argument("The file transfer status is invalid");
+  }
+  if (!staging.is_array()) {
+    throw std::invalid_argument("The file transfer staging inventory must be an array");
+  }
+  if (snapshot.dump().size() > 524288 || staging.dump().size() > 65536) {
+    throw std::invalid_argument("The file transfer metadata exceeds its storage limit");
+  }
+}
+
+std::int64_t file_transfer_epoch_ms(const nlohmann::json& snapshot, const char* key) {
+  const auto found = snapshot.find(key);
+  if (found == snapshot.end() ||
+      !(found->is_number_integer() || found->is_number_unsigned())) {
+    throw std::invalid_argument("The file transfer snapshot timestamps are invalid");
+  }
+  const auto value = found->get<std::int64_t>();
+  if (value < 0) {
+    throw std::invalid_argument("The file transfer snapshot timestamps are invalid");
+  }
+  return value;
+}
+
+nlohmann::json parse_file_transfer_staging(const std::string& text) {
+  nlohmann::json staging;
+  try {
+    staging = nlohmann::json::parse(text);
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("Stored file transfer staging inventory is invalid JSON");
+  }
+  if (!staging.is_array()) {
+    throw std::runtime_error("Stored file transfer staging inventory is invalid");
+  }
+  return staging;
+}
+
+// Keeps only the newest 500 terminal transfers, matching the retired Rust
+// `prune_terminal_history`. Active rows are never pruned.
+void prune_terminal_file_transfers(sqlite3* connection) {
+  execute_sql(connection, R"SQL(
+      DELETE FROM file_transfers
+       WHERE status IN ('completed','partial','failed','cancelled','interrupted')
+         AND transfer_id NOT IN (
+             SELECT transfer_id FROM file_transfers
+              WHERE status IN ('completed','partial','failed','cancelled','interrupted')
+              ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+              LIMIT 500
+         )
+  )SQL");
+}
+
+}  // namespace
+
+void DesktopDatabase::insert_file_transfer(const nlohmann::json& snapshot,
+                                           const nlohmann::json& staging) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  validate_file_transfer_metadata(snapshot, staging);
+  const auto snapshot_text = snapshot.dump();
+  const auto staging_text = staging.dump();
+  Transaction transaction(connection_);
+  {
+    Statement statement(connection_, R"SQL(
+        INSERT INTO file_transfers (
+          transfer_id, server_id, direction, status, started_at_epoch_ms,
+          updated_at_epoch_ms, snapshot_json, staging_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+      )SQL");
+    bind_text(connection_, statement.get(), 1, json_string_field(snapshot, "transferId"));
+    bind_text(connection_, statement.get(), 2, json_string_field(snapshot, "serverId"));
+    bind_text(connection_, statement.get(), 3, json_string_field(snapshot, "direction"));
+    bind_text(connection_, statement.get(), 4, json_string_field(snapshot, "status"));
+    bind_int64(connection_, statement.get(), 5,
+               file_transfer_epoch_ms(snapshot, "startedAtEpochMs"));
+    bind_int64(connection_, statement.get(), 6,
+               file_transfer_epoch_ms(snapshot, "updatedAtEpochMs"));
+    bind_text(connection_, statement.get(), 7, snapshot_text);
+    bind_text(connection_, statement.get(), 8, staging_text);
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+      if (sqlite3_extended_errcode(connection_) == SQLITE_CONSTRAINT_PRIMARYKEY) {
+        throw std::invalid_argument("A file transfer with this id already exists");
+      }
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  prune_terminal_file_transfers(connection_);
+  transaction.commit();
+}
+
+void DesktopDatabase::update_file_transfer(const nlohmann::json& snapshot,
+                                           const nlohmann::json& staging) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  validate_file_transfer_metadata(snapshot, staging);
+  {
+    Statement statement(connection_, R"SQL(
+        UPDATE file_transfers SET
+          server_id = ?2, direction = ?3, status = ?4,
+          started_at_epoch_ms = ?5, updated_at_epoch_ms = ?6,
+          snapshot_json = ?7, staging_json = ?8
+         WHERE transfer_id = ?1
+      )SQL");
+    bind_text(connection_, statement.get(), 1, json_string_field(snapshot, "transferId"));
+    bind_text(connection_, statement.get(), 2, json_string_field(snapshot, "serverId"));
+    bind_text(connection_, statement.get(), 3, json_string_field(snapshot, "direction"));
+    bind_text(connection_, statement.get(), 4, json_string_field(snapshot, "status"));
+    bind_int64(connection_, statement.get(), 5,
+               file_transfer_epoch_ms(snapshot, "startedAtEpochMs"));
+    bind_int64(connection_, statement.get(), 6,
+               file_transfer_epoch_ms(snapshot, "updatedAtEpochMs"));
+    bind_text(connection_, statement.get(), 7, snapshot.dump());
+    bind_text(connection_, statement.get(), 8, staging.dump());
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  if (sqlite3_changes(connection_) == 0) {
+    throw std::invalid_argument("The file transfer to update does not exist");
+  }
+  prune_terminal_file_transfers(connection_);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::file_transfer_staging(
+    const std::string& transfer_id) const {
+  std::lock_guard lock(mutex_);
+  if (transfer_id.find_first_not_of(" \t\r\n") == std::string::npos) {
+    throw std::invalid_argument("A file transfer id is required");
+  }
+  if (connection_ == nullptr) return std::nullopt;
+  std::optional<std::string> staging_text;
+  {
+    Statement statement(connection_,
+                        "SELECT staging_json FROM file_transfers WHERE transfer_id = ?1");
+    bind_text(connection_, statement.get(), 1, transfer_id);
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    staging_text = column_text(statement.get(), 0);
+  }
+  return parse_file_transfer_staging(*staging_text);
+}
+
+nlohmann::json DesktopDatabase::recover_file_transfers(std::int64_t now_epoch_ms) const {
+  std::lock_guard lock(mutex_);
+  if (now_epoch_ms < 0) {
+    throw std::invalid_argument("The file transfer recovery timestamp is invalid");
+  }
+  nlohmann::json records = nlohmann::json::array();
+  if (connection_ == nullptr) return {{"records", std::move(records)}};
+
+  struct Recovered {
+    std::string transfer_id;
+    bool nonterminal = false;
+    nlohmann::json snapshot;
+    nlohmann::json staging;
+  };
+  std::vector<Recovered> recovered;
+  Transaction transaction(connection_);
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+               updated_at_epoch_ms, snapshot_json, staging_json
+          FROM file_transfers
+         WHERE status IN ('queued','running','waitingConflict')
+            OR staging_json != '[]'
+         ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+      )SQL");
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      auto snapshot = decode_file_transfer(rows.get());
+      const bool nonterminal = is_active_transfer_status(column_text(rows.get(), 3));
+      const auto staging_text = column_text(rows.get(), 7);
+      if (!nonterminal && staging_text == "[]") continue;
+      Recovered entry;
+      entry.transfer_id = json_string_field(snapshot, "transferId");
+      entry.nonterminal = nonterminal;
+      if (nonterminal) {
+        snapshot["status"] = "interrupted";
+        snapshot["updatedAtEpochMs"] = now_epoch_ms;
+        snapshot["activeConflict"] = nullptr;
+        snapshot["currentItem"] = nullptr;
+        snapshot["currentItemBytes"] = 0;
+        snapshot["currentItemTotalBytes"] = nullptr;
+      }
+      entry.snapshot = std::move(snapshot);
+      entry.staging = parse_file_transfer_staging(staging_text);
+      recovered.push_back(std::move(entry));
+    }
+  }
+  for (const auto& entry : recovered) {
+    if (entry.nonterminal) {
+      Statement update(connection_, R"SQL(
+          UPDATE file_transfers SET status = 'interrupted', updated_at_epoch_ms = ?2,
+                                    snapshot_json = ?3
+           WHERE transfer_id = ?1
+             AND status IN ('queued','running','waitingConflict')
+        )SQL");
+      bind_text(connection_, update.get(), 1, entry.transfer_id);
+      bind_int64(connection_, update.get(), 2, now_epoch_ms);
+      bind_text(connection_, update.get(), 3, entry.snapshot.dump());
+      if (sqlite3_step(update.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+    }
+    records.push_back({{"snapshot", entry.snapshot}, {"staging", entry.staging}});
+  }
+  transaction.commit();
+  return {{"records", std::move(records)}};
+}
+
 nlohmann::json DesktopDatabase::list_mcp_servers() const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};

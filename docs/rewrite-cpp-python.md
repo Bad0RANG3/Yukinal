@@ -1245,3 +1245,18 @@ output shape and finishes the same ledger row, so a success, a deterministic
 failure or a retryable unknown outcome all close the call. `desktop_host_database_tests`
 covers every gate in order, the malformed-envelope parameter errors, the missing
 ledger-row RPC error and the success/failure/unknown completion paths.
+
+The file-transfer work (§3.3) opened with its durable metadata store.
+`DesktopDatabase::{insert,update}_file_transfer`, `file_transfer_staging` and
+`recover_file_transfers` (`native/desktop_host/src/database.cpp`) persist the
+bounded `TransferSnapshot` next to the host-private staging inventory, mirroring
+the retired Rust `FileTransfersRepository`. An insert is strict — a duplicate id
+is rejected rather than upserted — and both writes prune terminal history to the
+newest 500 rows; `staging_json` never leaves the repository. `recover_file_transfers`
+atomically rewrites every non-terminal row to `interrupted`, clearing the live
+`currentItem`/`activeConflict` fields, and returns each snapshot with its staging
+inventory so a restart can clean up host-owned staging files; terminal rows that
+still carry staging residue keep being returned until the manager clears them.
+`desktop_host_database_tests` covers the insert/update/duplicate/missing paths, the
+private staging read, the recovery rewrite and its idempotence, the 500-row terminal
+prune, and the metadata validation failures.

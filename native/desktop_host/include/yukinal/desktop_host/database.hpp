@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -67,6 +68,21 @@ class DesktopDatabase {
       const std::optional<std::string>& server_id, int limit) const;
   [[nodiscard]] std::optional<nlohmann::json> get_file_transfer(
       const std::string& transfer_id) const;
+  // ── File transfer history (snapshot + host-private staging inventory) ──────
+  // The transfer manager persists a bounded `TransferSnapshot` next to its
+  // host-private staging inventory. The snapshot never carries bytes or absolute
+  // local paths, and `staging_json` is never part of an IPC response. `insert`
+  // rejects a duplicate transfer id; `update` requires an existing row.
+  void insert_file_transfer(const nlohmann::json& snapshot,
+                            const nlohmann::json& staging) const;
+  void update_file_transfer(const nlohmann::json& snapshot,
+                            const nlohmann::json& staging) const;
+  [[nodiscard]] std::optional<nlohmann::json> file_transfer_staging(
+      const std::string& transfer_id) const;
+  // Atomically marks every non-terminal stored row `interrupted` and returns its
+  // snapshot with the private staging inventory, so a restart can reconcile and
+  // clean up host-owned staging files. Mirrors the retired Rust `recover`.
+  [[nodiscard]] nlohmann::json recover_file_transfers(std::int64_t now_epoch_ms) const;
   [[nodiscard]] nlohmann::json list_mcp_servers() const;
   [[nodiscard]] std::optional<nlohmann::json> get_mcp_server(
       const std::string& server_id) const;

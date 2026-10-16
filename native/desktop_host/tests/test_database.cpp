@@ -126,13 +126,12 @@ void execute(sqlite3* database, const char* sql) {
   std::exit(1);
 }
 
-// Inserts one `file_transfers` row whose snapshot mirrors the row columns, the
-// way the retired Rust transfer manager wrote them.
-void insert_transfer(sqlite3* database, const std::string& id, const std::string& server_id,
-                     const std::string& direction, const std::string& status,
-                     std::int64_t started, std::int64_t updated) {
+// One complete `TransferSnapshot` as the retired Rust transfer manager wrote it.
+nlohmann::json transfer_snapshot(const std::string& id, const std::string& server_id,
+                                 const std::string& direction, const std::string& status,
+                                 std::int64_t started, std::int64_t updated) {
   const bool finished = status == "completed";
-  const nlohmann::json snapshot = {
+  return nlohmann::json{
       {"transferId", id},       {"serverId", server_id},
       {"direction", direction}, {"status", status},
       {"startedAtEpochMs", started}, {"updatedAtEpochMs", updated},
@@ -144,7 +143,15 @@ void insert_transfer(sqlite3* database, const std::string& id, const std::string
       {"verifiedFiles", finished ? 1 : 0}, {"unverifiedFiles", 0},
       {"failures", nlohmann::json::array()}, {"stagingResidue", nlohmann::json::array()},
   };
-  const auto snapshot_text = snapshot.dump();
+}
+
+// Inserts one `file_transfers` row whose snapshot mirrors the row columns, the
+// way the retired Rust transfer manager wrote them.
+void insert_transfer(sqlite3* database, const std::string& id, const std::string& server_id,
+                     const std::string& direction, const std::string& status,
+                     std::int64_t started, std::int64_t updated) {
+  const auto snapshot_text =
+      transfer_snapshot(id, server_id, direction, status, started, updated).dump();
   sqlite3_stmt* statement = nullptr;
   check(sqlite3_prepare_v2(database,
                            "INSERT INTO file_transfers (transfer_id, server_id, direction, "
@@ -444,6 +451,158 @@ int main(int argc, char** argv) {
           "the C++ IPC router should return the reconciled transfer");
     check(!router.invoke("file_transfer_get", {{"transferId", "trf_missing"}}).ok,
           "the C++ IPC router should report an unknown transfer");
+
+    // File transfer persistence: the manager-facing write path validates its
+    // metadata, rejects duplicates and missing rows, keeps staging private,
+    // reconciles every non-terminal row on recovery, and prunes terminal history.
+    {
+      const nlohmann::json empty_staging = nlohmann::json::array();
+      const nlohmann::json staging = nlohmann::json::array({
+          {{"location", "local"}, {"path", "/tmp/stage-1"}, {"itemIndex", 0}},
+      });
+
+      database.insert_file_transfer(
+          transfer_snapshot("trf_new", "srv_01abc", "upload", "queued", 100, 100), staging);
+      check(database.file_transfer_staging("trf_new") == staging,
+            "file_transfer_staging should return the private inventory");
+      check(!database.file_transfer_staging("trf_absent").has_value(),
+            "file_transfer_staging should report an unknown transfer");
+      bool blank_id_rejected = false;
+      try {
+        const auto ignored = database.file_transfer_staging("   ");
+        (void)ignored;
+      } catch (const std::invalid_argument&) {
+        blank_id_rejected = true;
+      }
+      check(blank_id_rejected, "file_transfer_staging should reject a blank id");
+
+      bool duplicate_rejected = false;
+      try {
+        database.insert_file_transfer(
+            transfer_snapshot("trf_new", "srv_01abc", "upload", "queued", 100, 100),
+            empty_staging);
+      } catch (const std::invalid_argument&) {
+        duplicate_rejected = true;
+      }
+      check(duplicate_rejected, "insert_file_transfer should reject a duplicate id");
+
+      database.update_file_transfer(
+          transfer_snapshot("trf_new", "srv_01abc", "upload", "running", 100, 200),
+          empty_staging);
+      // `get_file_transfer` lazily reconciles active rows, so the persisted row
+      // is read directly to prove the update landed.
+      {
+        sqlite3* readback = nullptr;
+        check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &readback) ==
+                  SQLITE_OK,
+              "could not reopen the file transfer database");
+        check(query_integer(readback, "SELECT count(*) FROM file_transfers "
+                                      "WHERE transfer_id = 'trf_new' AND status = 'running'") == 1,
+              "update_file_transfer should persist the latest snapshot");
+        sqlite3_close(readback);
+      }
+      check(database.file_transfer_staging("trf_new") == empty_staging,
+            "update_file_transfer should replace the staging inventory");
+
+      bool missing_rejected = false;
+      try {
+        database.update_file_transfer(
+            transfer_snapshot("trf_absent", "srv_01abc", "upload", "running", 100, 200),
+            empty_staging);
+      } catch (const std::invalid_argument&) {
+        missing_rejected = true;
+      }
+      check(missing_rejected, "update_file_transfer should reject an unknown transfer");
+
+      const auto rejects_insert = [&database](const nlohmann::json& snapshot,
+                                              const nlohmann::json& staging_json) {
+        try {
+          database.insert_file_transfer(snapshot, staging_json);
+        } catch (const std::invalid_argument&) {
+          return true;
+        }
+        return false;
+      };
+      check(rejects_insert(transfer_snapshot("  ", "srv_01abc", "upload", "queued", 100, 100),
+                           empty_staging),
+            "insert_file_transfer should reject a blank id");
+      check(rejects_insert(transfer_snapshot("trf_bad", "srv_01abc", "upload", "flying", 100, 100),
+                           empty_staging),
+            "insert_file_transfer should reject an unknown status");
+      check(
+          rejects_insert(transfer_snapshot("trf_bad", "srv_01abc", "sideways", "queued", 100, 100),
+                         empty_staging),
+          "insert_file_transfer should reject an unknown direction");
+      check(rejects_insert(transfer_snapshot("trf_bad", "srv_01abc", "upload", "queued", 100, 100),
+                           nlohmann::json::object()),
+            "insert_file_transfer should reject non-array staging");
+
+      // Recovery: every non-terminal row becomes interrupted with its live
+      // progress fields cleared, and terminal rows with staging residue are
+      // returned so the caller can clean up host-owned staging files.
+      database.insert_file_transfer(
+          transfer_snapshot("trf_active", "srv_01abc", "download", "waitingConflict", 300, 300),
+          staging);
+      const auto recovered = database.recover_file_transfers(9999).at("records");
+      const auto find_record = [](const nlohmann::json& records, const std::string& id) {
+        for (const auto& record : records) {
+          if (record.at("snapshot").at("transferId") == id) return record;
+        }
+        return nlohmann::json();
+      };
+      const auto recovered_new = find_record(recovered, "trf_new");
+      check(recovered_new.at("snapshot").at("status") == "interrupted" &&
+                recovered_new.at("snapshot").at("updatedAtEpochMs") == 9999 &&
+                recovered_new.at("snapshot").at("currentItem").is_null() &&
+                recovered_new.at("snapshot").at("currentItemBytes") == 0 &&
+                recovered_new.at("snapshot").at("currentItemTotalBytes").is_null() &&
+                recovered_new.at("snapshot").at("activeConflict").is_null(),
+            "recovery should interrupt a non-terminal transfer and clear live fields");
+      check(find_record(recovered, "trf_active").at("staging") == staging,
+            "recovery should return the host-private staging inventory");
+      const auto persisted = database.get_file_transfer("trf_new");
+      check(persisted.has_value() && persisted->at("status") == "interrupted" &&
+                persisted->at("updatedAtEpochMs") == 9999,
+            "recovery should persist the interrupted snapshot");
+      check(database.file_transfer_staging("trf_active") == staging,
+            "recovery should leave staging cleanup to its caller");
+      const auto second = database.recover_file_transfers(10000).at("records");
+      check(find_record(second, "trf_new").is_null() &&
+                find_record(second, "trf_active").at("snapshot").at("status") == "interrupted",
+            "recovery should be idempotent and keep returning staging residue");
+    }
+
+    // Terminal history is bounded: retaining 500 keeps the newest and drops the
+    // oldest, while active rows are never pruned.
+    {
+      TemporaryDatabaseDirectory prune_directory;
+      {
+        DesktopDatabase prune(prune_directory.path);
+        sqlite3* seed = nullptr;
+        check(sqlite3_open((prune_directory.path / "yukinal.db").string().c_str(), &seed) ==
+                  SQLITE_OK,
+              "could not open the prune fixture database");
+        for (int index = 0; index < 501; ++index) {
+          insert_transfer(seed, "trf_old_" + std::to_string(index), "srv_prune", "upload",
+                          "completed", index, index);
+        }
+        sqlite3_close(seed);
+        // One more terminal write triggers the prune; 501 retained rows drop to 500.
+        prune.update_file_transfer(
+            transfer_snapshot("trf_old_500", "srv_prune", "upload", "completed", 500, 500),
+            nlohmann::json::array());
+      }
+      sqlite3* recount = nullptr;
+      check(sqlite3_open_v2((prune_directory.path / "yukinal.db").string().c_str(), &recount,
+                            SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,
+            "could not reopen the prune fixture database");
+      check(query_integer(recount, "SELECT count(*) FROM file_transfers") == 500,
+            "terminal file transfer history should be pruned to 500 rows");
+      check(query_integer(recount, "SELECT count(*) FROM file_transfers "
+                                   "WHERE transfer_id = 'trf_old_0'") == 0,
+            "pruning should drop the oldest terminal transfer");
+      sqlite3_close(recount);
+    }
 
     // Network proxy: the setting is non-secret, the credential is write-only, and
     // every rejection must leave both the database and the credential store alone.
