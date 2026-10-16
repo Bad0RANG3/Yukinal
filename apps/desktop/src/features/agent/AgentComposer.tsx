@@ -33,6 +33,7 @@ import {
 } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
+import { AGENT_TEAMS, type AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { ModelPicker } from "./ModelPicker.js";
@@ -92,6 +93,9 @@ export function AgentComposer({
   onSelectModel,
   mentions,
   commandContext,
+  roles = [],
+  selectedRoleId = null,
+  onSelectRole,
 }: {
   prompt: string;
   onPromptChange: (value: string) => void;
@@ -130,6 +134,9 @@ export function AgentComposer({
   /** 可被 @ 提及的服务器。 */
   mentions: readonly MentionCandidate[];
   commandContext: CommandContext;
+  roles?: readonly AgentRole[];
+  selectedRoleId?: string | null;
+  onSelectRole?: (roleId: string | null) => void;
 }) {
   const modeSpec = runModeSpec(runMode);
   const approvalSpec = approvalOptionSpec(permissionMode);
@@ -546,7 +553,7 @@ export function AgentComposer({
           <ul
             className={`composer-suggestions ${suggestionsPresence.closing ? "is-closing" : ""}`}
             role="listbox"
-            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的服务器"}
+            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的队伍与服务器"}
             onAnimationEnd={suggestionsPresence.onAnimationEnd}
           >
             {visibleSuggestions.map((suggestion, index) => {
@@ -736,6 +743,15 @@ export function AgentComposer({
             >
               <Icon name="file" size="md" />
             </button>
+            {roles.length ? <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
+              <span className="sr-only">回复角色</span>
+              <select aria-label="回复角色" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
+                <option value="">自动匹配</option>
+                {AGENT_TEAMS.map((team) => <optgroup key={team.id} label={team.label}>
+                  {roles.filter((role) => role.team === team.id).map((role) => <option key={role.id} value={role.id}>{team.label} · {role.name}</option>)}
+                </optgroup>)}
+              </select>
+            </label> : null}
             {models.length ? (
               <ModelPicker
                 choices={models}

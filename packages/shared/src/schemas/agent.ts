@@ -6,6 +6,7 @@ import { RiskLevelSchema, ToolTargetSchema } from "./server.js";
 import { PermissionApprovalSourceSchema, PermissionModeSchema, ToolOriginSchema } from "./permission.js";
 import { TOOL_RESULT_STATUSES } from "../types/enums.js";
 import { TOOL_ERROR_CODES } from "../types/tool.js";
+import { AgentContextUsageSchema } from "./agent-context.js";
 
 const RunIdSchema = z.string().trim().min(1).max(256);
 const TimestampSchema = z.string().min(1).max(80);
@@ -65,6 +66,7 @@ export const AgentRunResultSchema = z.strictObject({
   // Optional on purpose: the loop always sets it, but an older sidecar build does not,
   // and the UI has to keep parsing the events of whatever sidecar is running.
   traceId: z.string().trim().min(1).max(256).optional(),
+  context: AgentContextUsageSchema.optional(),
 });
 
 /**

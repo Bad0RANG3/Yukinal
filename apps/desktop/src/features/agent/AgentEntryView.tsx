@@ -111,6 +111,11 @@ export const AgentEntryView = memo(function AgentEntryView({
       return (
         <div className={`agent-entry agent-entry-assistant${streaming ? " agent-entry-streaming" : ""}`}>
           <span className="entry-label">回复</span>
+          <div className="agent-reply-meta">
+            <strong>{entry.participant?.label ?? "Agent"}</strong>
+            {entry.participant?.kind === "subagent" ? <span>子 Agent</span> : null}
+            {entry.model ? <span title={entry.model}>{entry.model}</span> : null}
+          </div>
           <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" />
         </div>
       );

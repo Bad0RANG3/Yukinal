@@ -8,6 +8,7 @@
 
 import type {
   AgentPromptPart,
+  AgentParticipant,
   ApprovalRequest,
   ChatMessage,
   PermissionApprovalSource,
@@ -47,7 +48,7 @@ export type ToolOutcome = {
  */
 export type Entry =
   | { kind: "user"; text: string; attachments?: AgentPromptPart[] }
-  | { kind: "assistant"; text: string }
+  | ({ kind: "assistant"; text: string } & ReplyIdentity)
   | { kind: "reasoning"; text: string }
   | { kind: "system"; text: string }
   | (ToolCallFacts & {
@@ -64,6 +65,8 @@ export type Entry =
  */
 export const MAX_TRANSCRIPT_ENTRIES = 500;
 
+export type ReplyIdentity = { participant?: AgentParticipant; model?: string };
+
 export function appendEntries(current: Entry[], additions: Entry[]): Entry[] {
   return [...current, ...additions].slice(-MAX_TRANSCRIPT_ENTRIES);
 }
@@ -72,17 +75,17 @@ export function appendEntries(current: Entry[], additions: Entry[]): Entry[] {
  * 流式文本按 run 累积。事件乱序也没关系：同一 run 的增量永远追加到
  * 末尾那条 assistant 行上，而不是新起一行。
  */
-function appendTextDelta(current: Entry[], kind: "reasoning" | "assistant", delta: string): Entry[] {
+function appendTextDelta(current: Entry[], kind: "reasoning" | "assistant", delta: string, identity: ReplyIdentity = {}): Entry[] {
   if (delta.length === 0) return current;
   const last = current.at(-1);
-  if (last?.kind !== kind) return appendEntries(current, [{ kind, text: delta }]);
+  if (last?.kind !== kind || (kind === "assistant" && last.kind === "assistant" && last.participant?.id !== identity.participant?.id)) return appendEntries(current, [{ kind, text: delta, ...identity }]);
   const next = current.slice(-MAX_TRANSCRIPT_ENTRIES);
-  next[next.length - 1] = { kind, text: last.text + delta };
+  next[next.length - 1] = { ...last, kind, text: last.text + delta };
   return next;
 }
 
 export const appendReasoningDelta = (current: Entry[], delta: string): Entry[] => appendTextDelta(current, "reasoning", delta);
-export const appendAssistantDelta = (current: Entry[], delta: string): Entry[] => appendTextDelta(current, "assistant", delta);
+export const appendAssistantDelta = (current: Entry[], delta: string, identity?: ReplyIdentity): Entry[] => appendTextDelta(current, "assistant", delta, identity);
 
 /**
  * Reconcile the streamed prefix with the terminal snapshot.
@@ -92,14 +95,14 @@ export const appendAssistantDelta = (current: Entry[], delta: string): Entry[] =
  * streamed record and append the final snapshot instead of silently deleting content that
  * the user already saw.
  */
-export function settleAssistantText(current: Entry[], text: string): Entry[] {
+export function settleAssistantText(current: Entry[], text: string, identity: ReplyIdentity = {}): Entry[] {
   const last = current.at(-1);
-  if (last?.kind !== "assistant") return appendEntries(current, [{ kind: "assistant", text }]);
+  if (last?.kind !== "assistant" || last.participant?.id !== identity.participant?.id) return appendEntries(current, [{ kind: "assistant", text, ...identity }]);
   if (last.text === text || text.startsWith(last.text)) {
-    return [...current.slice(0, -1), { kind: "assistant", text }];
+    return [...current.slice(0, -1), { ...last, text, ...identity }];
   }
   if (last.text.startsWith(text)) return current;
-  return appendEntries(current, [{ kind: "assistant", text }]);
+  return appendEntries(current, [{ kind: "assistant", text, ...identity }]);
 }
 
 /**
@@ -141,7 +144,7 @@ export function entriesFromMessages(messages: ChatMessage[]): Entry[] {
           ...(attachments?.length ? { attachments } : {}),
         }];
       }
-      if (message.role === "assistant") return [{ kind: "assistant", text: message.content }];
+      if (message.role === "assistant") return [{ kind: "assistant", text: message.content, ...(message.participant ? { participant: message.participant } : {}), ...(message.model ? { model: message.model } : {}) }];
       return [];
     })
     .slice(-MAX_TRANSCRIPT_ENTRIES);

@@ -14,17 +14,20 @@
  * 规则：不造假 transcript。没有运行中的 run 就没有消息；Stop 立刻掐断在途请求。
  */
 
-import type {
-  AgentPromptPart,
-  ChatMessage,
-  ChatSession,
-  Environment,
-  RestartRecord,
+import {
+  IPC_COMMANDS,
+  type AgentPromptPart,
+  type ChatMessage,
+  type ChatSession,
+  type Environment,
+  type RestartRecord,
 } from "@yukinal/shared";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
-import { isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { errorMessage } from "../../lib/format.js";
+import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useServers } from "../../lib/servers.js";
@@ -45,7 +48,10 @@ import {
   type Submission,
 } from "./composer-triggers.js";
 import { promptPartsWithAttachments } from "./image-attachments.js";
-import { entriesFromMessages, lastUserEntry } from "./transcript.js";
+import { entriesFromMessages, lastUserEntry, type Entry } from "./transcript.js";
+import { AGENT_TEAMS, resolveAgentRole, roleBinding, rolePersona } from "../agent-nist/agent-nist.js";
+import { useAgentRoles } from "../agent-nist/useAgentRoles.js";
+import { recalledDraft, rememberDraft, type SessionDraft } from "./session-drafts.js";
 import { requestPolicyId, type RunPolicyChoice } from "./run-policy.js";
 import { useAgentModels } from "./useAgentModels.js";
 import { useAgentPanelShell } from "./useAgentPanelShell.js";
@@ -64,12 +70,15 @@ function restartId(restart: RestartRecord | undefined): string | null {
   return restart ? `${restart.attempt}:${restart.at}` : null;
 }
 
-export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, onAttentionRequested }: {
+export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested, requestedSessionId, onSessionOpened }: {
   onCloseStart?: () => void;
   onCloseEnd?: () => void;
   workspace?: boolean;
   workspaceControls?: ReactNode;
+  workspaceWorkpages?: ReactNode;
   onAttentionRequested?: () => void;
+  requestedSessionId?: string | null;
+  onSessionOpened?: (sessionId: string) => void;
 }) {
   const agentStatus = useAgentStatus({ poll: true });
   const spawnAgent = useSpawnAgent();
@@ -92,6 +101,10 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const focusServer = servers.data?.find((server) => server.id === selectedServerId);
 
   const models = useAgentModels();
+  const roles = useAgentRoles();
+  const selectedRoleId = useWorkspaceStore((state) => state.agentRoleId);
+  const contextEpoch = useWorkspaceStore((state) => state.agentContextEpoch);
+  const setSelectedRoleId = useWorkspaceStore((state) => state.setAgentRoleId);
   const sessions = useChatSessions();
   // 「收到审批时把面板带到前景」是导航决策，所以由面板注入，而不是让运行模块去读 store。
   const run = useAgentRun({
@@ -99,7 +112,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     // 崩溃与自动重启之间的间隔可能短于一次轮询，所以「进程死过」这件事要由重启记录
     // 提供，而不能只靠 `running === false`。
     sidecarRestart: restartId(agentStatus.data?.restart),
-    onAssistantMessage: (text) => void sessions.recordAssistantMessage(text),
+    onAssistantMessage: (text, identity) => void sessions.recordAssistantMessage(text, identity),
     onApprovalRequested: () => { setAgentOpen(true); onAttentionRequested?.(); },
   });
 
@@ -115,15 +128,20 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     return () => setAgentBusy(false);
   }, [run.running, setAgentBusy]);
   const [runContext, setRunContext] = useState<string | null>(null);
-  // 预览页应当一打开就展示已注入的虚构对话，方便视觉检查与 README 截图；
-  // 正式桌面壳仍保持默认收起，避免遮住工作区。
   const historyOpen = useWorkspaceStore((state) => state.agentHistoryOpen);
   const setHistoryOpen = useWorkspaceStore((state) => state.setAgentHistoryOpen);
-  useEffect(() => {
-    if (!workspace && isPreviewFixture()) setHistoryOpen(true);
-  }, [workspace, setHistoryOpen]);
   /** 记录视图关闭时把焦点还给它 —— 见 AgentHistoryPane 的卸载 effect。 */
   const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const historyPopoverRef = useRef<HTMLDivElement>(null);
+  useDismissOnOutsidePointer(historyOpen, [historyPopoverRef, historyButtonRef], useCallback(() => setHistoryOpen(false), [setHistoryOpen]));
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [resettingContext, setResettingContext] = useState(false);
+  const [openingSession, setOpeningSession] = useState(false);
+  const drafts = useRef(new Map<string, SessionDraft>());
+  const scopeViews = useRef(new Map<string | null, { session: ChatSession | null; entries: Entry[] }>());
+  const scopeRef = useRef(selectedServerId);
+  const liveView = useRef({ prompt, attachments, sessionId: sessions.activeSessionId, session: sessions.activeSession, entries: run.entries, running: run.running });
+  liveView.current = { prompt, attachments, sessionId: sessions.activeSessionId, session: sessions.activeSession, entries: run.entries, running: run.running };
   /**
    * 这次运行按哪套策略判定。**有意不写进偏好设置**：偏好会在重启后自动恢复，而一次
    * 放宽审批的策略选择（比如在本机目标上选「开发策略」）如果留到下次启动、用户又没
@@ -131,6 +149,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
    * 设定，策略覆盖是「这一次」，所以它只活在面板的这一次会话里。
    */
   const [runPolicy, setRunPolicy] = useState<RunPolicyChoice>(null);
+  const [modelOverride, setModelOverride] = useState(false);
+  useEffect(() => setModelOverride(false), [selectedRoleId]);
   const follow = useFeedFollow(agentOpen, run.entries);
   // 必须稳定：焦点陷阱那个 effect 以它为依赖，每次渲染都换新函数会让键盘监听反复重装。
   const closePanel = useCallback(() => setAgentOpen(false), [setAgentOpen]);
@@ -143,7 +163,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     persistent: workspace,
   });
 
-  const canSend = shell && agentRunning && run.listening && models.providerReady && !sessions.archived;
+  const canSend = shell && agentRunning && run.listening && models.providerReady && !sessions.archived && !resettingContext && !openingSession;
   const starterBlockedReason = sessions.archived ? "恢复当前对话后，可以继续准备任务。"
     : run.running ? "当前任务完成后，可以选择新的起点。"
     : prompt.trim() || attachments.length ? "先完成当前草稿，再选择新的起点。" : null;
@@ -159,6 +179,47 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     })),
     [servers.data],
   );
+  const composerMentions: MentionCandidate[] = useMemo(() => [
+    ...AGENT_TEAMS.map((team) => ({ id: `team:${team.id}`, label: team.label, aliases: [team.id, `${team.id}-team`, team.englishName.replaceAll(" ", "")], detail: team.description })),
+    ...mentionCandidates,
+  ], [mentionCandidates]);
+  const currentRole = resolveAgentRole(prompt, roles.roles, selectedRoleId).role;
+  const currentBinding = roleBinding(currentRole, models.providers.data ?? []);
+  const boundModel = !modelOverride ? currentBinding.choice : undefined;
+
+  const rememberCurrentDraft = (): void => rememberDraft(drafts.current, scopeRef.current, liveView.current.sessionId, { prompt: liveView.current.prompt, attachments: liveView.current.attachments });
+  const restoreDraft = (serverId: string | null, sessionId: string | null): void => {
+    const next = recalledDraft(drafts.current, serverId, sessionId);
+    setPrompt(next.prompt);
+    setAttachments(next.attachments);
+  };
+  const switchScope = (serverId: string | null): void => {
+    if (scopeRef.current === serverId || run.running) return;
+    rememberCurrentDraft();
+    scopeViews.current.set(scopeRef.current, { session: sessions.activeSession, entries: run.entries });
+    const next = scopeViews.current.get(serverId);
+    scopeRef.current = serverId;
+    if (next?.session) sessions.openStoredSession(next.session);
+    else sessions.startNewSession();
+    run.loadTranscript(next?.entries ?? []);
+    restoreDraft(serverId, next?.session?.id ?? null);
+    setHistoryOpen(false);
+    setRunContext(null);
+    setContextError(null);
+  };
+  useEffect(() => { switchScope(selectedServerId); }, [selectedServerId, run.running]);
+  const seenContextEpoch = useRef(contextEpoch);
+  useEffect(() => {
+    if (seenContextEpoch.current === contextEpoch) return;
+    seenContextEpoch.current = contextEpoch;
+    scopeViews.current.clear();
+    drafts.current.clear();
+    sessions.startNewSession();
+    run.clearTranscript();
+    setRunContext(null);
+    setContextError(null);
+    setHistoryOpen(false);
+  }, [contextEpoch]);
 
   const policyTarget = useMemo(() => {
     const mentioned = resolveMentionedServer(prompt, mentionCandidates);
@@ -178,20 +239,46 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     // 提示词里的 @服务器 决定这次运行的目标；没提及时才回落到当前选中的服务器。
     const mentioned = resolveMentionedServer(text, mentionCandidates);
     const focusServerId = mentioned?.id ?? selectedServerId;
+    const role = resolveAgentRole(text, roles.roles, selectedRoleId).role;
+    const binding = roleBinding(role, models.providers.data ?? []);
+    if (!modelOverride && role.providerId && binding.reason) {
+      setContextError(`${rolePersona(role).label}：${binding.reason}`);
+      return;
+    }
+    const targetView = scopeViews.current.get(focusServerId);
+    const targetDraft = recalledDraft(drafts.current, focusServerId, targetView?.session?.id ?? null);
+    if (focusServerId !== scopeRef.current && (targetDraft.prompt.length || targetDraft.attachments.length)) {
+      setContextError("目标服务器还有未发送的草稿，请先切换并处理。");
+      return;
+    }
+    if (focusServerId !== scopeRef.current && targetView?.session?.archivedAt) {
+      setContextError("目标服务器的当前对话已归档，请先恢复或新建任务。");
+      return;
+    }
+    const originScope = scopeRef.current;
+    const originSessionId = sessions.activeSessionId;
+    if (focusServerId !== originScope) {
+      switchScope(focusServerId);
+      useWorkspaceStore.getState().selectServer(focusServerId);
+    }
+    setContextError(null);
     setRunContext(mentioned?.label ?? focusServer?.name ?? "全局工作区");
     follow.pinToBottom();
     if (consumeDraft) {
+      if (focusServerId !== originScope) rememberDraft(drafts.current, originScope, originSessionId, { prompt: "", attachments: [] });
       setPrompt("");
       setAttachments([]);
     }
     const outcome = await run.start({
       prompt: text,
+      persona: rolePersona(role),
+      participant: { id: role.id, label: rolePersona(role).label, kind: "agent" },
       taskId: selectedTaskId,
       parts,
       persistUserMessage: (messageId, promptParts) =>
         sessions.recordUserMessage(text, messageId, focusServerId, promptParts),
-      providerId: models.selectedProviderId,
-      model: models.selectedModel,
+      providerId: (!modelOverride ? binding.provider?.id : null) ?? models.selectedProviderId,
+      model: (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model,
       focusServerId,
       permissionMode,
       mode: runMode,
@@ -230,7 +317,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     setPrompt("");
     switch (submission.spec.name) {
       case "new":
-        startNewSession();
+        startNewSession(false);
         return;
       case "clear":
         run.clearTranscript();
@@ -250,24 +337,70 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     }
   };
 
-  const startNewSession = (): void => {
+  const startNewSession = (preserveDraft = true): void => {
     if (run.running) return;
+    if (sessions.activeSessionId && preserveDraft) rememberCurrentDraft();
     sessions.startNewSession();
     setHistoryOpen(false);
     setRunContext(null);
-    setPrompt("");
-    setAttachments([]);
+    if (sessions.activeSessionId) restoreDraft(selectedServerId, null);
     run.clearTranscript();
   };
 
   const openStoredSession = (session: ChatSession, messages: ChatMessage[]): void => {
-    if (run.running) return;
+    if (liveView.current.running) return;
+    const serverId = useWorkspaceStore.getState().selectedServerId;
+    if ((session.serverId ?? null) !== serverId) {
+      setContextError("这段对话属于其他服务器，请先切换目标。");
+      return;
+    }
+    rememberCurrentDraft();
     sessions.openStoredSession(session);
     run.loadTranscript(entriesFromMessages(messages));
     setRunContext(session.serverId ?? "全局工作区");
-    setPrompt("");
-    setAttachments([]);
+    restoreDraft(serverId, session.id);
     setHistoryOpen(false);
+  };
+
+  useEffect(() => {
+    if (!requestedSessionId || run.running) return;
+    if (requestedSessionId === sessions.activeSessionId) {
+      onSessionOpened?.(requestedSessionId);
+      return;
+    }
+    let disposed = false;
+    setOpeningSession(true);
+    setContextError(null);
+    void callDesktop(IPC_COMMANDS.chatSessionGet, { sessionId: requestedSessionId })
+      .then((detail) => {
+        if (!disposed && selectedServerId === useWorkspaceStore.getState().selectedServerId) openStoredSession(detail.session, detail.messages);
+      })
+      .catch((cause) => { if (!disposed) setContextError(`打开任务失败：${errorMessage(cause)}`); })
+      .finally(() => {
+        if (!disposed) { setOpeningSession(false); onSessionOpened?.(requestedSessionId); }
+      });
+    return () => { disposed = true; };
+  }, [requestedSessionId, selectedServerId, run.running]);
+
+  const resetContext = async (): Promise<void> => {
+    if (run.running || resettingContext || !sessions.activeSessionId) return;
+    const resetSession = sessions.activeSessionId;
+    const resetScope = selectedServerId;
+    setResettingContext(true);
+    setContextError(null);
+    try {
+      const result = await callDesktop(IPC_COMMANDS.agentContextReset, { sessionId: resetSession, focusServerId: resetScope ?? undefined });
+      if (!result.reset) throw new Error("上下文未被重置，请重试。");
+      const cached = scopeViews.current.get(resetScope);
+      if (cached?.session?.id === resetSession) scopeViews.current.set(resetScope, { ...cached, entries: [] });
+      if (scopeRef.current !== resetScope || liveView.current.sessionId !== resetSession) return;
+      run.clearTranscript();
+      setHistoryOpen(false);
+    } catch (cause) {
+      setContextError(`重置上下文失败：${errorMessage(cause)}`);
+    } finally {
+      setResettingContext(false);
+    }
   };
 
   return (
@@ -283,6 +416,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         running={run.running}
         runState={run.runState}
         tokenUsage={run.tokenUsage}
+        contextUsage={run.contextUsage}
+        taskTitle={sessions.title}
         agentReady={agentRunning}
         agentOpen={agentOpen}
         shell={shell}
@@ -300,20 +435,25 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
           </span>
         </div>}
       />
+      {workspaceWorkpages}
 
-      {historyOpen ? (
+      {historyOpen ? <div ref={historyPopoverRef} className="agent-task-popover" role="dialog" aria-label="切换任务">
         <AgentHistoryPane
+          compact
+          serverId={selectedServerId}
           activeSessionId={sessions.activeSessionId}
           restoreFocusRef={historyButtonRef}
           onClose={() => setHistoryOpen(false)}
-          onNewSession={startNewSession}
+          onNewSession={() => startNewSession()}
           onOpenSession={openStoredSession}
           onSessionUpdated={sessions.noteSessionUpdated}
           onSessionDeleted={(sessionId) => {
             if (sessions.noteSessionDeleted(sessionId)) startNewSession();
           }}
+          onResetContext={sessions.activeSessionId && shell ? () => void resetContext() : undefined}
+          resetting={resettingContext}
         />
-      ) : (
+      </div> : null}
         <>
           {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
 
@@ -347,6 +487,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                   onOpenSettings={() => setPrimary("settings")}
                 />}
                 {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
+                {contextError ? <div className="agent-history-error agent-history-error-inline" role="alert">{contextError}</div> : null}
+                {roles.notice ? <div className="agent-history-error agent-history-error-inline" role="status">{roles.notice}</div> : null}
               </div>
 
               <AgentComposer
@@ -370,10 +512,13 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 onRunPolicyChange={setRunPolicy}
                 targetEnvironment={targetEnvironment}
                 models={models.modelChoices}
-                selectedModelKey={models.selectedModelKey}
-                selectedModelLabel={models.selectedModelLabel}
-                onSelectModel={models.selectModelKey}
-                mentions={mentionCandidates}
+                selectedModelKey={boundModel?.key ?? models.selectedModelKey}
+                selectedModelLabel={boundModel && currentBinding.provider ? `${currentBinding.provider.label} · ${boundModel.label}` : models.selectedModelLabel}
+                onSelectModel={(key) => { setModelOverride(true); models.selectModelKey(key); }}
+                mentions={composerMentions}
+                roles={roles.roles}
+                selectedRoleId={selectedRoleId}
+                onSelectRole={setSelectedRoleId}
                 commandContext={commandContext}
               />
               {workspace && run.entries.length === 0 ? <AgentStarters
@@ -387,7 +532,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
             </div>
           </div>
         </>
-      )}
     </aside>
   );
 }

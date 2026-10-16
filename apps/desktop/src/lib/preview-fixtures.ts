@@ -18,6 +18,7 @@ import {
   type Server,
   type TransferSnapshot,
 } from "@yukinal/shared";
+import { previewMemoryResponse } from "./preview-memory.js";
 
 const AT = new Date().toISOString();
 const FINGERPRINT = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
@@ -258,6 +259,8 @@ const PREVIEW_CHAT_MESSAGES = [
     id: "msg_preview_assistant_1",
     sessionId: PREVIEW_CHAT_SESSION.id,
     role: "assistant",
+    participant: { id: "blue-logs", label: "蓝队 · 日志分析", kind: "agent" },
+    model: "preview-code-reasoning-128k",
     content: "我会先读取服务状态和最近日志；不会重启容器、修改配置或写入文件。",
     createdAt: "2026-09-21T07:53:14.000Z",
   },
@@ -272,6 +275,8 @@ const PREVIEW_CHAT_MESSAGES = [
     id: "msg_preview_assistant_2",
     sessionId: PREVIEW_CHAT_SESSION.id,
     role: "assistant",
+    participant: { id: "green-observability", label: "绿队 · 可观测性共建", kind: "agent" },
+    model: "preview-code-reasoning-128k",
     content: [
       "下面是模拟排查结果，仅供界面评估。连接池等待与 p95 1840ms 同时出现，迁移工作进程在 9 分钟前失败。",
       "",
@@ -389,6 +394,8 @@ export function isPreviewFixture(): boolean {
 
 /** A parsed IPC response for the local visual-audit adapter. */
 export function previewResponse(command: IpcCommandName, params: unknown): unknown {
+  const memoryResponse = previewMemoryResponse(command, params);
+  if (memoryResponse !== undefined) return memoryResponse;
   switch (command) {
     case IPC_COMMANDS.corePing:
       return { version: "1.0.0-preview", os: "browser-fixture" };
@@ -513,9 +520,17 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
       return { running: true, pid: 1, protocolVersion: "1.0", agentVersion: "1.0.0-preview", toolCount: 12, entry: "browser-fixture", startedAt: AT, lastExit: null };
     case IPC_COMMANDS.agentLogs:
       return { lines: ["[preview] Agent fixture is ready; no process or network connection was opened.", "[preview] Provider catalog: 2 enabled gateways, 1 disabled fallback.", "[preview] Long diagnostic entry: staging-checkout-api-with-background-migration.service / connection-pool-observation / readonly collection completed.", "[preview] MCP catalog and investigation history are in-memory examples only."], capacity: 256 };
-    case IPC_COMMANDS.chatSessionList:
-      return { sessions: [PREVIEW_CHAT_SESSION], counts: { active: 1, archived: 0 } };
+    case IPC_COMMANDS.chatSessionList: {
+      const request = typeof params === "object" && params !== null ? params as Record<string, unknown> : {};
+      const query = typeof request.query === "string" ? request.query.trim().toLocaleLowerCase() : "";
+      const inScope = !("serverId" in request) || request.serverId === PREVIEW_CHAT_SESSION.serverId;
+      const matches = inScope && (!query || [PREVIEW_CHAT_SESSION.title, ...PREVIEW_CHAT_MESSAGES.map((message) => message.content)].some((content) => content.toLocaleLowerCase().includes(query)));
+      const offset = typeof request.offset === "number" ? request.offset : 0;
+      const limit = typeof request.limit === "number" ? request.limit : 50;
+      return { sessions: matches && request.archived !== true ? [PREVIEW_CHAT_SESSION].slice(offset, offset + limit) : [], counts: { active: matches ? 1 : 0, archived: 0 } };
+    }
     case IPC_COMMANDS.chatSessionGet:
+      if (paramString(params, "sessionId", PREVIEW_CHAT_SESSION.id) !== PREVIEW_CHAT_SESSION.id) throw new Error("找不到这段模拟对话。");
       return { session: PREVIEW_CHAT_SESSION, messages: PREVIEW_CHAT_MESSAGES };
     case IPC_COMMANDS.investigationTaskList:
       return { tasks: [TASK] };

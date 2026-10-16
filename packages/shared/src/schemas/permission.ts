@@ -3,6 +3,7 @@
  */
 
 import { z } from "zod";
+import { AgentParticipantSchema, AgentPersonaSchema } from "./agent-context.js";
 
 import {
   AGENT_AUDIO_MEDIA_TYPES,
@@ -379,6 +380,8 @@ export const AgentRunRequestSchema = z
     taskId: z.string().trim().min(1).max(256).optional(),
     taskBudget: TaskBudgetSchema.optional(),
     prompt: z.string().max(100_000),
+    persona: AgentPersonaSchema.optional(),
+    participant: AgentParticipantSchema.optional(),
     messageId: z.string().trim().min(1).max(256).optional(),
     parts: AgentPromptPartsSchema.optional(),
     delivery: z.enum(["async", "sync"]).optional(),

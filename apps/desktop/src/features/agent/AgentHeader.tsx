@@ -7,7 +7,7 @@
 
 import type { ReactNode, RefObject } from "react";
 
-import type { AgentTokenUsage } from "@yukinal/shared";
+import type { AgentContextUsage, AgentTokenUsage } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { runStateLabel } from "./transcript.js";
@@ -27,6 +27,8 @@ export function AgentHeader({
   workspace = false,
   workspaceControls,
   context,
+  taskTitle = "新任务",
+  contextUsage,
 }: {
   running: boolean;
   runState: string | null;
@@ -43,41 +45,49 @@ export function AgentHeader({
   workspace?: boolean;
   workspaceControls?: ReactNode;
   context?: ReactNode;
+  taskTitle?: string;
+  contextUsage?: AgentContextUsage | null;
 }) {
   const label = runStateLabel(runState);
 
   return (
     <header className="agent-header">
-      {context}
+      <div className="agent-task-heading">
+        <button
+          ref={historyButtonRef}
+          type="button"
+          className={`agent-task-trigger ${historyOpen ? "is-active" : ""}`}
+          aria-label={`切换任务：${taskTitle}`}
+          title="切换或搜索任务"
+          disabled={running}
+          aria-expanded={historyOpen}
+          aria-haspopup="dialog"
+          onClick={onToggleHistory}
+        >
+          <span>{taskTitle}</span><Icon name="chevronDown" size="sm" />
+        </button>
+        {context}
+      </div>
       <div className="agent-header-actions">
-        {tokenUsage ? (
+        {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
+          <span className="agent-context-caption">上下文 </span><span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
+        </span> : null}
+        {tokenUsage && !contextUsage ? (
           <span
             className="agent-token-usage"
             title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens`}
           >
-            输入 {tokenUsage.inputTokens.toLocaleString()} · 输出 {tokenUsage.outputTokens.toLocaleString()}
+            {(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens
           </span>
         ) : null}
         {running && label ? (
           <span className="agent-status agent-status-active"><span className="status-pulse" />{label}</span>
         ) : (
-          <span className={`agent-status ${agentReady ? "agent-status-ready" : "agent-status-idle"}`}>
+          <span className={`agent-status ${agentReady ? "agent-status-ready" : "agent-status-idle"}`} data-idle={!runState || undefined}>
             {label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动")}
           </span>
         )}
-        <button
-          ref={historyButtonRef}
-          type="button"
-          className={`icon-button agent-history-toggle ${historyOpen ? "is-active" : ""}`}
-          aria-label="打开对话记录"
-          title={shell ? "打开对话记录" : "桌面应用中可查询对话记录"}
-          disabled={!shell || running}
-          aria-pressed={historyOpen}
-          onClick={onToggleHistory}
-        >
-          <Icon name="logs" size="md" />
-        </button>
-        {workspaceControls}
+        {workspaceControls ? <div className="agent-workspace-controls">{workspaceControls}</div> : null}
         {!workspace ? <button
           ref={closeButtonRef}
           type="button"

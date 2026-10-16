@@ -18,6 +18,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
+from .conversation_store import ConversationStore, message_bytes
 from .host_rpc import HostRpcClient
 from .host_tools import (
     HOST_APPROVAL_TOOLS,
@@ -69,6 +70,12 @@ METHODS = {
     "agent.run.start": True,
     "agent.run.stop": True,
     "agent.approval.respond": True,
+    "agent.context.reset": True,
+    "agent.context.resetAll": True,
+    "agent.context.delete": True,
+    "agent.memory.list": True,
+    "agent.memory.save": True,
+    "agent.memory.delete": True,
     "provider.models": True,
     "provider.test": True,
     "provider.list": True,
@@ -107,6 +114,7 @@ class PythonSidecar:
         checkpointer: Any | None = None,
         managed_ssh_service_binary: Path | None = None,
         provider_store: ProviderStore | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         if isinstance(approval_ttl_seconds, bool) or not isinstance(approval_ttl_seconds, int) or not 1 <= approval_ttl_seconds <= 3600:
             raise ValueError("approval_ttl_seconds must be between 1 and 3600")
@@ -128,6 +136,11 @@ class PythonSidecar:
         self._managed_ssh_service_binary = managed_ssh_service_binary
         self._managed_ssh_tools_registered = False
         self._provider_store = provider_store
+        self._conversations = conversation_store or ConversationStore()
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._run_sessions: dict[str, str] = {}
+        self._resetting_sessions: set[str] = set()
+        self._resetting_all = False
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -152,7 +165,7 @@ class PythonSidecar:
             self._host_tools_registered = True
 
     def set_checkpointer(self, checkpointer: Any | None) -> None:
-        if self._active_runs:
+        if self._run_sessions or self._resetting_sessions or self._resetting_all:
             raise RuntimeError("cannot replace the Agent checkpointer while runs are active")
         self._checkpointer = checkpointer
 
@@ -205,6 +218,12 @@ class PythonSidecar:
                 }
             elif method == "agent.approval.respond":
                 result = self._approval_respond(params)
+            elif method == "agent.memory.list":
+                result = self._memory_list(params)
+            elif method == "agent.memory.save":
+                result = self._memory_save(params)
+            elif method == "agent.memory.delete":
+                result = self._memory_delete(params)
             elif method in METHODS:
                 raise _RpcFault(RPC_NOT_IMPLEMENTED, f"Method {method} is not implemented by this Agent Node")
             else:
@@ -228,6 +247,7 @@ class PythonSidecar:
                 "initialize", "provider.models", "provider.test", "provider.list", "provider.save",
                 "provider.delete", "provider.activate", "agent.run.start", "agent.run.stop",
                 "agent.approval.respond",
+                "agent.context.reset", "agent.context.resetAll", "agent.context.delete", "agent.memory.list", "agent.memory.save", "agent.memory.delete",
             )
             or not isinstance(request.get("id"), int)
             or isinstance(request.get("id"), bool)
@@ -268,6 +288,18 @@ class PythonSidecar:
                 result = self._run_stop(request.get("params", {}))
             elif method == "agent.approval.respond":
                 result = self._approval_respond(request.get("params", {}))
+            elif method == "agent.context.reset":
+                result = await self._context_reset(request.get("params", {}))
+            elif method == "agent.context.resetAll":
+                result = await self._context_reset_all(request.get("params", {}))
+            elif method == "agent.context.delete":
+                result = await self._context_reset(request.get("params", {}), delete=True)
+            elif method == "agent.memory.list":
+                result = self._memory_list(request.get("params", {}))
+            elif method == "agent.memory.save":
+                result = self._memory_save(request.get("params", {}))
+            elif method == "agent.memory.delete":
+                result = self._memory_delete(request.get("params", {}))
             else:
                 return self.handle(request)
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -560,6 +592,12 @@ class PythonSidecar:
 
     async def _run_start(self, params: object) -> dict[str, Any]:
         request = _parse_run_request(params)
+        if self._resetting_all or request["sessionId"] in self._resetting_sessions:
+            raise _RpcFault(RPC_INVALID_PARAMS, "Wait for the context reset to finish before starting a run")
+        try:
+            self._conversations.bind_session(request["sessionId"], request.get("targetId"))
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         run_id = request["runId"]
         message_id = request.get("messageId")
         fingerprint = _run_fingerprint(request)
@@ -588,13 +626,35 @@ class PythonSidecar:
             self._prune_admissions()
             return {"runId": run_id, "started": False}
 
-        if run_id in self._active_runs:
+        if run_id in self._run_sessions:
             raise _RpcFault(RPC_INVALID_PARAMS, "runId is already running")
         if run_id in self._completed_runs:
             if self._completed_runs[run_id] != fingerprint:
                 raise _RpcFault(RPC_INVALID_PARAMS, "runId was already used with different content")
             return {"runId": run_id, "started": False, "duplicate": True}
 
+        # Reserve before the first host/provider await: a reset or delete must
+        # not replace the context while a run is still being admitted.
+        self._run_sessions[run_id] = request["sessionId"]
+        try:
+            return await self._admit_run(request, run_id, admission, resumed)
+        finally:
+            if run_id not in self._active_runs:
+                self._run_sessions.pop(run_id, None)
+                if request["sessionId"] not in self._run_sessions.values():
+                    self._session_locks.pop(request["sessionId"], None)
+
+    async def _admit_run(
+        self, request: dict[str, Any], run_id: str,
+        admission: dict[str, Any] | None, resumed: bool,
+    ) -> dict[str, Any]:
+        message_id = request.get("messageId")
+        fingerprint = _run_fingerprint(request)
+        await self._hydrate_conversation(request)
+        try:
+            self._conversations.validate_participant(request["sessionId"], request.get("targetId"), request.get("participant"))
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         model, _timeout_ms = await self._run_provider_model(
             request.get("providerId"), request.get("model")
         )
@@ -605,6 +665,7 @@ class PythonSidecar:
                 request["agentBudget"],
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
+                transcript_sink=lambda messages: self._conversations.update_messages(run_id, messages),
             )
         except Exception:
             raise _RpcFault(RPC_INVALID_PARAMS, "configured model cannot run the registered tools") from None
@@ -622,8 +683,13 @@ class PythonSidecar:
             self._prune_admissions()
 
         request["runId"] = run_id
+        try:
+            self._conversations.begin(request, _run_fingerprint(request))
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         task = asyncio.create_task(self._execute_run(request, run_id, agent))
         self._active_runs[run_id] = task
+        self._run_sessions[run_id] = request["sessionId"]
         if request["delivery"] == "sync":
             result = await task
             response: dict[str, Any] = {"runId": run_id, "started": True, "result": result}
@@ -632,6 +698,61 @@ class PythonSidecar:
         if resumed:
             response["resumed"] = True
         return response
+
+    async def _hydrate_conversation(self, request: dict[str, Any]) -> None:
+        # Concurrent first turns must share one native snapshot, even while its
+        # host request is pending. Use the same ordering as conversation runs.
+        lock = self._session_locks.setdefault(request["sessionId"], asyncio.Lock())
+        async with lock:
+            await self._hydrate_session_history(request)
+
+    async def _hydrate_session_history(self, request: dict[str, Any]) -> None:
+        session_id = request["sessionId"]
+        server_id = request.get("targetId")
+        if not self._conversations.needs_hydration(session_id, server_id):
+            return
+        if self._host_rpc is None:
+            self._conversations.import_legacy(session_id, server_id, [])
+            return
+        params = {"sessionId": session_id, "limit": 1000,
+                  **({"serverId": server_id} if server_id is not None else {}),
+                  **({"excludeMessageId": request["messageId"]} if request.get("messageId") else {})}
+        try:
+            response = await self._host_rpc.request("host.chat.context", params, timeout_seconds=8.0)
+        except Exception:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Could not load this conversation's saved context; retry the run") from None
+        if not isinstance(response, dict) or not isinstance(response.get("session"), dict) or not isinstance(response.get("messages"), list):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Saved conversation context is malformed")
+        session = response["session"]
+        if session.get("id") != session_id or session.get("serverId") != server_id:
+            raise _RpcFault(RPC_INVALID_PARAMS, "Saved conversation belongs to a different session or server")
+        messages = response["messages"]
+        if len(messages) > 1000 or len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 512 * 1024:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Saved conversation context exceeds its hydration limit")
+        history: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                raise _RpcFault(RPC_INTERNAL_ERROR, "Saved conversation message is malformed")
+            if message.get("id") == request.get("messageId") and request.get("messageId") is not None:
+                break
+            if message.get("role") not in ("user", "assistant"):
+                continue
+            if (not isinstance(message.get("id"), str) or not message["id"] or len(message["id"]) > 256
+                or not isinstance(message.get("content"), str) or len(message["content"]) > 100_000
+                or message.get("sessionId", session_id) != session_id):
+                raise _RpcFault(RPC_INTERNAL_ERROR, "Saved conversation message is malformed")
+            clean = {key: message[key] for key in ("id", "role", "content", "createdAt", "model") if key in message}
+            for field, limit in (("createdAt", 80), ("model", 256)):
+                if field in clean and (not isinstance(clean[field], str) or not clean[field].strip() or len(clean[field]) > limit):
+                    raise _RpcFault(RPC_INTERNAL_ERROR, "Saved conversation metadata is malformed")
+            participant = message.get("participant")
+            if participant is not None:
+                # Reuse the run boundary's structural checks, without granting a
+                # legacy subagent new authority or replaying old system prompts.
+                checked = _parse_run_request({"runId": "hydrate", "sessionId": session_id, "prompt": "hydrate", "participant": participant})
+                clean["participant"] = checked["participant"]
+            history.append(clean)
+        self._conversations.import_legacy(session_id, server_id, history)
 
     def _run_stop(self, params: object) -> dict[str, bool]:
         parsed = _strict_object(params, {"runId"})
@@ -660,8 +781,82 @@ class PythonSidecar:
         pending = self._pending_approvals.get(approval_id)
         if pending is None or pending.run_id != run_id or pending.future.done():
             return {"accepted": False}
+        self._conversations.record_event(run_id, {"type": "approval.decision", **parsed})
         pending.future.set_result(decision)
         return {"accepted": True}
+
+    async def _delete_context_checkpoints(self, session_id: str | None = None) -> None:
+        if self._checkpointer is None:
+            return
+        delete = getattr(self._checkpointer, "adelete_thread", None)
+        if delete is None:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "The checkpoint store cannot reset model context")
+        for binding in self._conversations.checkpoint_bindings(session_id):
+            material = "\x1f".join(("local", _safe_context_id("session", binding["sessionId"]),
+                                      _safe_context_id("task", binding["taskId"]), binding["runId"]))
+            await delete("agent-" + hashlib.sha256(material.encode("utf-8")).hexdigest())
+
+    async def _context_reset(self, params: object, *, delete: bool = False) -> dict[str, bool]:
+        parsed = _strict_object(params, {"sessionId", "focusServerId"})
+        session_id = parsed.get("sessionId")
+        server_id = parsed.get("focusServerId")
+        if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256 or server_id is not None and not _valid_server_id(server_id):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid context reset scope")
+        if session_id in self._run_sessions.values():
+            raise _RpcFault(RPC_INVALID_PARAMS, "Stop the active session run before resetting its context")
+        try:
+            self._conversations.bind_session(session_id, server_id)
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        if self._resetting_all or session_id in self._resetting_sessions:
+            raise _RpcFault(RPC_INVALID_PARAMS, "A context reset is already in progress")
+        self._resetting_sessions.add(session_id)
+        try:
+            await self._delete_context_checkpoints(session_id)
+            if delete:
+                self._conversations.delete_session(session_id, server_id)
+                # Removing the visible conversation and starting a new one must
+                # not inherit this process's duplicate admission receipts either.
+                for message_id, admission in list(self._admissions.items()):
+                    if admission["sessionId"] == session_id:
+                        self._admissions.pop(message_id, None)
+                return {"deleted": True}
+            self._conversations.reset(session_id, server_id)
+            return {"reset": True}
+        finally:
+            self._resetting_sessions.discard(session_id)
+
+    async def _context_reset_all(self, params: object) -> dict[str, Any]:
+        _strict_object(params, set())
+        if self._run_sessions:
+            raise _RpcFault(RPC_INVALID_PARAMS, "Stop all active runs before resetting model context")
+        if self._resetting_all or self._resetting_sessions:
+            raise _RpcFault(RPC_INVALID_PARAMS, "A context reset is already in progress")
+        self._resetting_all = True
+        try:
+            await self._delete_context_checkpoints()
+            return {"reset": True, "count": self._conversations.reset_all()}
+        finally:
+            self._resetting_all = False
+
+    def _memory_list(self, params: object) -> dict[str, Any]:
+        parsed = _parse_memory_params(params, "list")
+        return {"memories": self._conversations.list_memories(
+            server_id=parsed.get("serverId"), scope=parsed.get("scope"), query=parsed.get("query", ""), limit=parsed.get("limit", 100),
+        )}
+
+    def _memory_save(self, params: object) -> dict[str, Any]:
+        parsed = _parse_memory_params(params, "save")
+        try:
+            memory = self._conversations.save_memory(scope=parsed["scope"], server_id=parsed.get("serverId"),
+                                                      title=parsed["title"], content=parsed["content"], memory_id=parsed.get("id"))
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        return {"memory": memory}
+
+    def _memory_delete(self, params: object) -> dict[str, bool]:
+        parsed = _parse_memory_params(params, "delete")
+        return {"deleted": self._conversations.delete_memory(parsed["id"], scope=parsed["scope"], server_id=parsed.get("serverId"))}
 
     async def _execute_run(
         self,
@@ -669,7 +864,36 @@ class PythonSidecar:
         run_id: str,
         agent: ModelDrivenAgent,
     ) -> dict[str, Any]:
+        lock = self._session_locks.setdefault(request["sessionId"], asyncio.Lock())
+        try:
+            async with lock:
+                return await self._execute_session_run(request, run_id, agent)
+        except asyncio.CancelledError:
+            # A queued turn can be stopped before it acquires the session lock.
+            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
+            self._conversations.finish(run_id, "cancelled")
+            self._emit({"type": "agent.completed", "runId": run_id, "result": result, "at": _timestamp()})
+            return result
+        finally:
+            self._run_sessions.pop(run_id, None)
+            self._active_runs.pop(run_id, None)
+            if not any(session == request["sessionId"] for session in self._run_sessions.values()):
+                self._session_locks.pop(request["sessionId"], None)
+
+    async def _execute_session_run(
+        self, request: dict[str, Any], run_id: str, agent: ModelDrivenAgent,
+    ) -> dict[str, Any]:
         task_id = request.get("taskId")
+        final_status = "failed"
+        available_bytes = agent.conversation_budget_bytes(request["promptText"], request.get("persona"))
+        memory_budget = min(16 * 1024, available_bytes // 8)
+        context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
+                                              max_bytes=available_bytes - memory_budget)
+        memories, sources = self._conversations.memory_context(request.get("targetId"), request["promptText"], max_bytes=memory_budget)
+        context_usage = {**context.usage, "memorySources": sources}
+        context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
+        context_usage["maxInputBytes"] = max(1, available_bytes)
+        self._conversations.record_event(run_id, {"type": "context.loaded", "context": context_usage})
         now = _timestamp
         self._emit({
             "type": "agent.started",
@@ -697,6 +921,8 @@ class PythonSidecar:
                 trace_id=_safe_context_id("trace", run_id),
                 checkpoint_binding=_run_checkpoint_binding(request),
                 require_checkpoint=request["requireCheckpoint"],
+                persona=request.get("persona"),
+                conversation_messages=[*memories, *context.messages],
             )
             while result.status == "awaiting_approval":
                 result = await self._await_approval(request, run_id, agent, result)
@@ -707,7 +933,9 @@ class PythonSidecar:
                 "text": text,
                 "steps": result.tool_calls + (1 if result.status == "succeeded" else 0),
                 "toolCalls": result.tool_calls,
+                "context": context_usage,
             }
+            final_status = result.status
             if result.status == "succeeded":
                 for offset in range(0, len(text), 20_000):
                     self._emit({"type": "agent.text", "runId": run_id, "textDelta": text[offset:offset + 20_000], "at": now()})
@@ -730,7 +958,8 @@ class PythonSidecar:
                 })
             return base_result
         except asyncio.CancelledError:
-            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
+            final_status = "cancelled"
+            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0, "context": context_usage}
             self._emit({
                 "type": "agent.completed",
                 "runId": run_id,
@@ -741,7 +970,7 @@ class PythonSidecar:
             return result
         except Exception:
             message = "agent_run_failed"
-            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message}
+            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message, "context": context_usage}
             self._emit({
                 "type": "agent.failed",
                 "runId": run_id,
@@ -751,6 +980,7 @@ class PythonSidecar:
             })
             return result
         finally:
+            self._conversations.finish(run_id, final_status)
             for approval_id, pending in list(self._pending_approvals.items()):
                 if pending.run_id == run_id:
                     self._pending_approvals.pop(approval_id, None)
@@ -777,6 +1007,8 @@ class PythonSidecar:
                 return
 
     def _emit(self, event: dict[str, Any]) -> None:
+        if isinstance(event.get("runId"), str):
+            self._conversations.record_event(event["runId"], event)
         if self._notification_sink is not None:
             self._notification_sink("agent.stream", event)
 
@@ -1312,8 +1544,27 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
         "providerId", "model", "requireCheckpoint", "planBinding",
+        "persona", "participant",
     }
     parsed = _strict_object(value, fields)
+    if "persona" in parsed:
+        persona = _strict_object(parsed["persona"], {"id", "label", "systemPrompt"})
+        for field, limit in (("id", 256), ("label", 200), ("systemPrompt", 20_000)):
+            item = persona.get(field)
+            if not isinstance(item, str) or not item.strip() or len(item) > limit:
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid persona")
+        parsed["persona"] = {field: item.strip() for field, item in persona.items()}
+    if "participant" in parsed:
+        participant = _strict_object(parsed["participant"], {"id", "label", "kind", "parentId"})
+        if participant.get("kind") not in ("agent", "subagent"):
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid participant")
+        for field, limit in (("id", 256), ("label", 200), ("parentId", 256)):
+            if field == "parentId" and field not in participant:
+                continue
+            item = participant.get(field)
+            if not isinstance(item, str) or not item.strip() or len(item) > limit:
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid participant")
+        parsed["participant"] = {field: item.strip() for field, item in participant.items()}
     run_id = parsed.get("runId")
     session_id = parsed.get("sessionId")
     prompt = parsed.get("prompt")
@@ -1541,6 +1792,12 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "parts": request.get("parts"),
             "requireCheckpoint": request.get("requireCheckpoint", False),
             "planBinding": request.get("planBinding"),
+            "sessionId": request["sessionId"],
+            "targetId": request.get("targetId"),
+            "persona": request.get("persona"),
+            "participant": request.get("participant"),
+            "providerId": request.get("providerId"),
+            "model": request.get("model"),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -1556,6 +1813,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
+        "persona", "participant",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")
@@ -1563,6 +1821,35 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         binding["agentBudget"] = asdict(budget)
     canonical = json.dumps(binding, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _parse_memory_params(value: object, action: str) -> dict[str, Any]:
+    fields = {"scope", "serverId"} | ({"query", "limit"} if action == "list" else {"id", "title", "content"} if action == "save" else {"id"})
+    parsed = _strict_object(value, fields)
+    scope = parsed.get("scope")
+    server_id = parsed.get("serverId")
+    if scope not in ((None, "global", "server") if action == "list" else ("global", "server")):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory scope")
+    if server_id is not None and not _valid_server_id(server_id):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory server")
+    if scope == "server" and server_id is None or scope == "global" and server_id is not None:
+        raise _RpcFault(RPC_INVALID_PARAMS, "server memory requires serverId; global memory cannot have one")
+    if "id" in parsed or action == "delete":
+        item = parsed.get("id")
+        if not isinstance(item, str) or not item.strip() or len(item) > 256:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory id")
+    for field, limit in (("title", 200), ("content", 12_000)):
+        if action == "save":
+            item = parsed.get(field)
+            if not isinstance(item, str) or not item.strip() or len(item) > limit:
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory " + field)
+            parsed[field] = item.strip()
+    if action == "list":
+        query = parsed.get("query", "")
+        limit = parsed.get("limit", 100)
+        if not isinstance(query, str) or len(query) > 200 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory search")
+    return parsed
 
 
 def _safe_context_id(prefix: str, value: str) -> str:
@@ -1718,6 +2005,7 @@ def main() -> None:
         registry,
         managed_ssh_service_binary=managed_ssh_service_binary,
         provider_store=provider_store,
+        conversation_store=ConversationStore(Path(data_dir) / "agent-state" / "conversations.sqlite") if data_dir else None,
     )
     try:
         asyncio.run(_serve_runtime(sidecar, data_dir, len(registry.list())))

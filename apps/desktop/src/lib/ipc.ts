@@ -33,7 +33,9 @@ type NativeDesktopHost = {
     titlebarOverlay?: boolean;
     updateContext: (context: WindowShellContext) => Promise<void>;
     updateSurface?: (surface: WindowShellSurface) => Promise<void>;
+    openWorkpage?: (page: { kind: "terminal" | "files" | "logs" | "services"; serverId: string }) => Promise<unknown>;
   };
+  workpageWindow?: { setPinned: (pinned: boolean) => Promise<{ pinned: boolean }>; hide: () => Promise<unknown> };
   invoke: (command: string, params: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, handler: (payload: unknown) => void) => Promise<UnlistenFn>;
   openUrl: (url: string) => Promise<unknown>;
@@ -62,6 +64,22 @@ export function supportsNativeCaptionSurface(): boolean {
 
 export function supportsNativeTitlebarControls(): boolean {
   return window.__YUKINAL_HOST__?.windowShell?.titlebarOverlay === true;
+}
+
+export async function openNativeWorkpage(page: { kind: "terminal" | "files" | "logs" | "services"; serverId: string }): Promise<void> {
+  const open = window.__YUKINAL_HOST__?.windowShell?.openWorkpage;
+  if (!open) throw new Error("独立窗口需要新版桌面应用");
+  await open(page);
+}
+
+export async function pinNativeWorkpage(pinned: boolean): Promise<boolean> {
+  const host = window.__YUKINAL_HOST__?.workpageWindow;
+  if (!host) throw new Error("当前窗口不支持桌面置顶");
+  return (await host.setPinned(pinned)).pinned;
+}
+
+export async function hideNativeWorkpage(): Promise<void> {
+  await window.__YUKINAL_HOST__?.workpageWindow?.hide();
 }
 
 export async function updateNativeCaptionSurface(surface: WindowShellSurface): Promise<void> {

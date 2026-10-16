@@ -1,4 +1,4 @@
-import type { AiProviderConfig } from "@yukinal/shared";
+import type { AgentPersona, AiProviderConfig } from "@yukinal/shared";
 
 import { resolveAgentModels } from "../agent/useAgentModels.js";
 import { useWorkspaceStore, type WorkspaceState } from "../../stores/workspace-store.js";
@@ -106,6 +106,7 @@ export function loadAgentRoles(storage: Pick<AgentRoleStorage, "getItem">, key =
 export function saveAgentRoles(storage: Pick<AgentRoleStorage, "setItem">, roles: readonly AgentRole[], key = AGENT_NIST_STORAGE_KEY): AgentRole[] {
   const clean = parseAgentRoles({ version: 1, catalogVersion: ROLE_CATALOG_VERSION, roles });
   storage.setItem(key, JSON.stringify({ version: 1, catalogVersion: ROLE_CATALOG_VERSION, roles: clean }));
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("agent-role-config-changed"));
   return clean;
 }
 
@@ -130,18 +131,16 @@ export function roleBinding(role: AgentRole, providers: readonly AiProviderConfi
 export function draftProtection(state: Pick<WorkspaceState, "agentDraft" | "agentAttachments" | "agentBusy" | "agentSessionArchived">): string | null {
   if (state.agentBusy) return "对话正在运行，结束后再使用角色。";
   if (state.agentSessionArchived) return "当前对话已归档，请先新建或恢复对话，再使用角色。";
-  if (state.agentDraft.length > 0 && state.agentAttachments.length > 0) return "对话中已有草稿和附件，请先处理，角色不会覆盖它们。";
-  if (state.agentDraft.length > 0) return "对话中已有草稿，请先发送或清空，角色不会覆盖它。";
-  if (state.agentAttachments.length > 0) return "对话中已有附件，请先处理，角色不会覆盖它们。";
   return null;
 }
 
-export function rolePrompt(role: AgentRole): string {
+export function rolePersona(role: AgentRole): AgentPersona {
   const team = AGENT_TEAMS.find((candidate) => candidate.id === role.team)?.label ?? "运维队伍";
-  return `请以「${team} · ${role.name.trim()}」的角色协助本次运维。\n\n角色职责：\n${role.responsibility.trim()}\n\n先确认目标服务器与任务，基于证据开展工作。角色职责不改变当前运行模式、工具权限或批准要求。\n\n本次任务：\n`;
+  const label = `${team} · ${role.name.trim()}`;
+  return { id: role.id, label, systemPrompt: `你是「${label}」。\n${role.responsibility.trim()}\n基于当前任务和共享对话中的证据协作。区分事实、假设和待验证项；没有基线、时间窗或阈值时，不凭单次读数判断系统整体正常或异常。展示简短依据、下一步行动与工具结果。角色职责不改变当前运行模式、工具权限或批准要求。` };
 }
 
-export type AgentRoleHandoff = { ok: true; draft: string; providerId: string; model: string } | { ok: false; reason: string };
+export type AgentRoleHandoff = { ok: true; roleId: string } | { ok: false; reason: string };
 
 /** One synchronous guard and store update prevent a role from replacing live composition. */
 export function handoffAgentRole(role: AgentRole, providers: readonly AiProviderConfig[]): AgentRoleHandoff {
@@ -149,9 +148,43 @@ export function handoffAgentRole(role: AgentRole, providers: readonly AiProvider
   const protection = draftProtection(state);
   if (protection) return { ok: false, reason: protection };
   const binding = roleBinding(role, providers);
-  if (binding.reason || !binding.provider || !binding.choice) return { ok: false, reason: binding.reason ?? "请先绑定 AI 连接与模型。" };
+  if (role.providerId && binding.reason) return { ok: false, reason: binding.reason };
   if (!role.name.trim() || !role.responsibility.trim()) return { ok: false, reason: "角色名称与职责不能为空。" };
-  const draft = rolePrompt(role);
-  useWorkspaceStore.setState({ agentDraft: draft, selectedProviderId: binding.provider.id, selectedModel: binding.choice.model, agentOpen: true, agentHistoryOpen: false });
-  return { ok: true, draft, providerId: binding.provider.id, model: binding.choice.model };
+  useWorkspaceStore.setState({
+    agentRoleId: role.id,
+    ...(binding.provider && binding.choice ? { selectedProviderId: binding.provider.id, selectedModel: binding.choice.model } : {}),
+    agentOpen: true,
+    agentHistoryOpen: false,
+  });
+  return { ok: true, roleId: role.id };
+}
+
+const TEAM_ROUTES: ReadonlyArray<{ team: AgentTeam; pattern: RegExp }> = [
+  { team: "white", pattern: /授权范围|演习规则|停止条件|评分|裁判|scope|rules of engagement/gi },
+  { team: "purple", pattern: /红蓝|防护复测|检测覆盖|purple|retest/gi },
+  { team: "orange", pattern: /漏洞修复|安全编码|攻击成因|安全开发|orange/gi },
+  { team: "green", pattern: /可观测|日志设计|指标设计|审计设计|取证设计|告警设计|observability/gi },
+  { team: "red", pattern: /渗透|攻击|漏洞|暴露面|利用链|pentest|exploit|red team/gi },
+  { team: "yellow", pattern: /实现|开发|编码|架构|修复|接口|设计|implement|code|architecture/gi },
+  { team: "blue", pattern: /日志|故障|异常|排查|防守|加固|入侵|服务|响应|运维|logs|incident|defen/gi },
+];
+
+/** Explicit @ mentions win, then manual selection, then a deterministic task match. */
+export function resolveAgentRole(prompt: string, roles: readonly AgentRole[], selectedRoleId: string | null = null): { role: AgentRole; source: "mention" | "selected" | "auto" } {
+  const mentions = [...prompt.matchAll(/(?:^|\s)@([^\s，。,:：]+)/g)].map((match) => match[1]!.toLocaleLowerCase());
+  for (const mention of mentions) {
+    const role = roles.find((candidate) => [candidate.id, candidate.name].some((value) => value.toLocaleLowerCase() === mention));
+    if (role) return { role, source: "mention" };
+    const team = AGENT_TEAMS.find((candidate) => [candidate.id, candidate.label, `${candidate.id}-team`, candidate.englishName.replaceAll(" ", "")].some((value) => value.toLocaleLowerCase() === mention));
+    const teamRole = team && roles.find((candidate) => candidate.team === team.id);
+    if (teamRole) return { role: teamRole, source: "mention" };
+  }
+  const selected = roles.find((role) => role.id === selectedRoleId);
+  if (selected) return { role: selected, source: "selected" };
+  const ranked = TEAM_ROUTES.map((route) => ({ ...route, score: [...prompt.matchAll(route.pattern)].length })).sort((left, right) => right.score - left.score);
+  const team = ranked[0]?.score ? ranked[0].team : "blue";
+  const preferred = team === "blue" && /日志|logs/i.test(prompt) ? "blue-logs"
+    : team === "yellow" && /实现|开发|编码|修复|implement|code/i.test(prompt) ? "yellow-engineering"
+      : team === "white" && /评分|裁判/i.test(prompt) ? "white-control" : null;
+  return { role: roles.find((role) => role.id === preferred) ?? roles.find((role) => role.team === team) ?? roles[0] ?? defaultAgentRoles()[0]!, source: "auto" };
 }

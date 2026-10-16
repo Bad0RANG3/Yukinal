@@ -15,6 +15,66 @@ export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
 /** Derived from the tuple so `schemas/agent.ts` and this type cannot disagree. */
 export type ToolResultStatus = (typeof TOOL_RESULT_STATUSES)[number];
 
+/** A speaker in a shared conversation; this metadata does not grant tool authority. */
+export interface AgentParticipant {
+  id: string;
+  label: string;
+  kind: "agent" | "subagent";
+  /** Required for subagents; the parent must belong to this shared session. */
+  parentId?: string;
+}
+
+/** The active role's instruction, carried separately from the user's message. */
+export interface AgentPersona {
+  id: string;
+  label: string;
+  systemPrompt: string;
+}
+
+/** Historical turns selected for the model; the complete transcript remains on disk. */
+export interface AgentContextUsage {
+  totalTurns: number;
+  includedTurns: number;
+  compactedTurns: number;
+  inputBytes: number;
+  maxInputBytes: number;
+  memorySources?: AgentMemorySource[];
+}
+
+export interface AgentMemorySource {
+  id: string;
+  scope: "global" | "server";
+  serverId?: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface AgentMemory extends AgentMemorySource {
+  content: string;
+  createdAt: string;
+}
+
+export interface AgentMemoryListInput {
+  scope?: "global" | "server";
+  serverId?: string;
+  query?: string;
+  limit?: number;
+}
+
+export interface AgentMemorySaveInput {
+  id?: string;
+  scope: "global" | "server";
+  serverId?: string;
+  title: string;
+  content: string;
+}
+
+export interface AgentMemoryDeleteInput {
+  id: string;
+  scope: "global" | "server";
+  serverId?: string;
+}
+
 export interface ChatSession {
   id: string;
   workspaceId?: string;
@@ -36,6 +96,8 @@ export interface ChatMessage {
   parts?: AgentPromptPart[];
   /** Set for role === "tool": links the bubble to its trace card. */
   traceId?: string;
+  participant?: AgentParticipant;
+  model?: string;
   createdAt: string;
 }
 
@@ -53,6 +115,8 @@ export interface ChatSessionCounts {
 
 export interface ChatSessionListInput {
   query?: string;
+  /** Omitted searches all scopes; null selects global conversations only. */
+  serverId?: string | null;
   /** Omitted returns both states; false returns active sessions, true archived sessions. */
   archived?: boolean;
   /**
@@ -90,6 +154,8 @@ export interface ChatMessageAppendInput {
   content: string;
   parts?: AgentPromptPart[];
   traceId?: string;
+  participant?: AgentParticipant;
+  model?: string;
   createdAt?: string;
 }
 
@@ -231,6 +297,8 @@ export interface AgentRunRequest {
   /** Host-owned budget copied from the durable task; the sidecar cannot widen it. */
   taskBudget?: TaskBudget;
   prompt: string;
+  persona?: AgentPersona;
+  participant?: AgentParticipant;
   /** Stable message identity for admission/retry semantics. */
   messageId?: string;
   /** OpenCode-compatible message parts; `prompt` remains the compatibility fallback. */
@@ -298,6 +366,7 @@ export interface AgentRunResult {
    * can be looked up without replaying the event stream.
    */
   traceId?: string;
+  context?: AgentContextUsage;
 }
 
 /** Approval round-trip between the desktop and the sidecar. */

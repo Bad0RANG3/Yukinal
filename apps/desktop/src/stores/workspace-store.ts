@@ -29,6 +29,9 @@ export interface WorkspaceState {
   /** Kept for run/approval integration; the central AI workspace stays visible. */
   agentOpen: boolean;
   agentDraft: string;
+  /** null routes each message automatically; an explicit role is a system persona. */
+  agentRoleId: string | null;
+  agentContextEpoch: number;
   agentAttachments: AgentPromptPart[];
   agentBusy: boolean;
   /** Shared composition view, so preparing a role can reveal the existing editor. */
@@ -36,6 +39,8 @@ export interface WorkspaceState {
   /** The active chat's editability comes from useChatSessions, never from a role. */
   agentSessionArchived: boolean;
   setAgentDraft(draft: string): void;
+  setAgentRoleId(roleId: string | null): void;
+  resetAgentContextView(): void;
   setAgentAttachments(attachments: AgentPromptPart[]): void;
   setAgentBusy(busy: boolean): void;
   setAgentHistoryOpen(open: boolean): void;
@@ -61,18 +66,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedTaskId: null,
   agentOpen: true,
   agentDraft: "",
+  agentRoleId: null,
+  agentContextEpoch: 0,
   agentAttachments: [],
   agentBusy: false,
   agentHistoryOpen: false,
   agentSessionArchived: false,
   setAgentDraft: (agentDraft) => set({ agentDraft }),
+  setAgentRoleId: (agentRoleId) => set({ agentRoleId }),
+  resetAgentContextView: () => set((state) => ({ agentContextEpoch: state.agentContextEpoch + 1 })),
   setAgentAttachments: (agentAttachments) => set({ agentAttachments }),
   setAgentBusy: (agentBusy) => set({ agentBusy }),
   setAgentHistoryOpen: (agentHistoryOpen) => set({ agentHistoryOpen }),
   setAgentSessionArchived: (agentSessionArchived) => set({ agentSessionArchived }),
   setPrimary: (primary) => set(primary === "servers" ? { primary, serverDetailOpen: false } : { primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers", serverDetailOpen: true }),
-  selectServer: (selectedServerId) => set((state) => ({
+  selectServer: (selectedServerId) => set((state) => state.agentBusy && selectedServerId !== state.selectedServerId ? state : ({
     selectedServerId,
     primary: selectedServerId ? "servers" : state.primary,
     serverDetailOpen: Boolean(selectedServerId),
@@ -81,6 +90,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   // Background refreshes can reconcile a deleted selection without taking the
   // user away from Settings or resetting a still-valid server tab.
   syncServerSelection: (serverIds) => set((state) => {
+    if (state.selectedServerId === null || state.agentBusy) return state;
     if (state.selectedServerId && serverIds.includes(state.selectedServerId)) return state;
     const selectedServerId = serverIds[0] ?? null;
     return selectedServerId === state.selectedServerId ? state : { selectedServerId, serverPage: "overview" };

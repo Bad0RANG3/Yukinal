@@ -233,9 +233,9 @@
 }
 
 @media (max-width: 1180px) {
-  .app-shell.ai-first, .native-workspace .app-shell.ai-first { grid-template-columns: 200px minmax(0, 1fr); }
+  .app-shell.ai-first, .native-workspace .app-shell.ai-first { grid-template-columns: 240px minmax(0, 1fr); }
   .ai-first .server-row-actions { padding-left: 6px; }
-  .ai-first .server-status-pill { flex: 1 1 0; flex-wrap: wrap; gap: 2px 4px; white-space: normal; }
+  .ai-first .server-status-pill { flex: 1 1 0; gap: 4px; white-space: nowrap; }
   .ai-first .workspace-inspector { display: none; }
   .ai-first .context-toggle { display: grid; }
   .ai-first.context-open .workspace-inspector { display: flex; }

@@ -1,0 +1,18 @@
+.memory-library::backdrop { background: #0008; }
+.memory-library { width: min(620px, calc(100% - 40px)); max-height: min(740px, 90vh); flex-direction: column; gap: 12px; padding: 20px; background: #282828; color: var(--text); border: 1px solid var(--line); border-radius: 8px; min-height: 0; }
+.memory-library[open] { display: flex; }
+.memory-library header, .memory-library footer, .memory-toolbar, .memory-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.memory-library h2 { margin: 0; font-size: 16px; }
+.memory-toolbar [role="group"] { display: flex; gap: 4px; }
+.memory-toolbar [aria-pressed] { padding: 5px 8px; border: 0; background: transparent; color: var(--muted); }
+.memory-toolbar [aria-pressed="true"] { background: var(--material-active); color: var(--text); }
+.memory-content { min-height: 140px; overflow: auto; }
+.memory-content ul { list-style: none; padding: 0; margin: 0; }
+.memory-content li { display: flex; gap: 8px; align-items: start; border-bottom: 1px solid var(--line); }
+.memory-record { flex: 1; min-width: 0; display: grid; gap: 5px; padding: 12px 0; text-align: left; background: transparent; border: 0; color: var(--text); }
+.memory-record span { color: var(--muted); font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.memory-content form, .memory-content label { display: grid; gap: 8px; }
+.memory-content form { gap: 14px; }
+.memory-library input, .memory-library textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); color: var(--text); background: #1d1d1d; border-radius: 5px; box-sizing: border-box; }
+.memory-actions { justify-content: flex-end; }
+.memory-library footer { padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); flex-wrap: wrap; }

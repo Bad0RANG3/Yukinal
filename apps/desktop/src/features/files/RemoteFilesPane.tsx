@@ -18,8 +18,9 @@ import { LOCAL_PATH_HANDLE_MIME, localHandleForDrop, REMOTE_FILE_PATH_MIME, remo
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "waitingConflict"]);
 
-export function RemoteFilesPane() {
-  const serverId = useWorkspaceStore((state) => state.selectedServerId);
+export function RemoteFilesPane({ serverId: explicitServerId }: { serverId?: string | null } = {}) {
+  const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const serverId = explicitServerId === undefined ? workspaceServerId : explicitServerId;
   const shell = isDesktopShell();
   const queryClient = useQueryClient();
   const [path, setPath] = useState("/");

@@ -51,7 +51,6 @@ export function RuntimeSettings() {
     </div>
     {SETTINGS_SECTIONS.map((item) => <div key={item.id} id={`${id}-panel-${item.id}`}
       role="tabpanel" aria-labelledby={`${id}-tab-${item.id}`} hidden={section !== item.id} tabIndex={0}>
-      <p className="settings-section-description">{item.description}</p>
       {item.id === "general" ? <PreferenceSettings /> : item.id === "models" ? <ProviderSettings />
         : item.id === "tools" ? <McpSettings /> : item.id === "network" ? <NetworkSettings /> : <RuntimeStatus />}
     </div>)}

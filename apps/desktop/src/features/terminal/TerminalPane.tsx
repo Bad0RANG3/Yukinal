@@ -45,8 +45,9 @@ const TERMINAL_THEME = {
   brightWhite: "#f1f1f1",
 };
 
-export function TerminalPane({ active }: { active: boolean }) {
-  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+export function TerminalPane({ active, serverId }: { active: boolean; serverId?: string | null }) {
+  const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const selectedServerId = serverId === undefined ? workspaceServerId : serverId;
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);

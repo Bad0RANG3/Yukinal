@@ -92,14 +92,13 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
       setNotice({ text: result.reason, error: true });
       return;
     }
-    setNotice({ text: `已将「${role.name}」与绑定模型放入对话草稿，补充本次任务后即可发送。`, error: false });
+    setNotice({ text: `已选择「${role.name}」。`, error: false });
     onUseAgent?.();
   }
 
   return <section className="agent-nist-page" aria-labelledby={`${instanceId}-title`}>
     <header className="agent-nist-heading">
       <div><h2 id={`${instanceId}-title`}>Agent NIST</h2><span>本机配置</span></div>
-      <p>选择职责与模型，把运维角色带入当前对话。</p>
     </header>
 
     <div className="agent-nist-teams" role="group" aria-label="运维 Agent 队伍">
@@ -120,8 +119,9 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
         const draft = drafts[role.id] ?? role;
         const editorId = `${instanceId}-${role.id}-editor`;
         const reasonId = `${instanceId}-${role.id}-reason`;
-        const reason = protection ?? queryBlock ?? binding.reason;
-        const localReason = protection || queryBlock ? null : binding.reason;
+        const bindingReason = role.providerId ? binding.reason : null;
+        const reason = protection ?? queryBlock ?? bindingReason;
+        const localReason = protection || queryBlock ? null : bindingReason;
         const describedBy = protection ? protectionId : queryBlock ? queryStateId : localReason ? reasonId : undefined;
         const draftProvider = availableProviders.find((candidate) => candidate.id === draft.providerId);
         const choices = roleModelChoices(draftProvider);
@@ -131,11 +131,11 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
           <p className="agent-nist-responsibility">{role.responsibility}</p>
           <dl className="agent-nist-binding">
             <div><dt>连接</dt><dd>{binding.provider?.label ?? (role.providerId ? "原连接不可用" : "未绑定")}</dd></div>
-            <div><dt>模型</dt><dd title={role.model ?? undefined}>{binding.choice?.label ?? role.model ?? "未选择"}</dd></div>
+            <div><dt>模型</dt><dd title={role.model ?? undefined}>{binding.choice?.label ?? role.model ?? "跟随对话"}</dd></div>
           </dl>
           {localReason ? <p className="agent-nist-role-reason" id={reasonId}>{localReason}</p> : null}
           <div className="agent-nist-role-actions">
-            <button type="button" className="button-secondary" disabled={Boolean(reason) || editing} aria-describedby={describedBy} onClick={() => useRole(role)}><Icon name="agent" size="sm" />使用此 Agent</button>
+            <button type="button" className="button-secondary" disabled={Boolean(reason) || editing} aria-describedby={describedBy} onClick={() => useRole(role)}><Icon name="agent" size="sm" />在对话中使用</button>
             {!providers.isLoading && !providers.isError && binding.reason ? <button type="button" className="agent-nist-text-action" onClick={() => setPrimary("settings")}>AI 连接设置<Icon name="chevronRight" size="xs" /></button> : null}
           </div>
 
@@ -164,6 +164,5 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
         </article>;
       })}
     </div>
-    <p className="agent-nist-footnote">角色指令会成为可编辑草稿，补充任务后由你发送。</p>
   </section>;
 }

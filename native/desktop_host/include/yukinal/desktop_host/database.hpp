@@ -68,7 +68,8 @@ class DesktopDatabase {
       const std::string& server_id) const;
   [[nodiscard]] nlohmann::json list_chat_sessions(
       const std::optional<std::string>& query, const std::optional<bool>& archived,
-      int limit, int offset) const;
+      int limit, int offset, const std::optional<std::string>& server_id = std::nullopt,
+      bool filter_server = false) const;
   [[nodiscard]] nlohmann::json get_chat_session(const std::string& session_id) const;
   [[nodiscard]] nlohmann::json create_chat_session(
       const std::string& id, const std::optional<std::string>& workspace_id,
@@ -77,7 +78,9 @@ class DesktopDatabase {
   [[nodiscard]] nlohmann::json append_chat_message(
       const std::string& id, const std::string& session_id, const std::string& role,
       const std::string& content, const std::optional<nlohmann::json>& parts,
-      const std::optional<std::string>& trace_id, const std::string& timestamp) const;
+      const std::optional<std::string>& trace_id, const std::string& timestamp,
+      const std::optional<nlohmann::json>& participant = std::nullopt,
+      const std::optional<std::string>& model = std::nullopt) const;
   [[nodiscard]] nlohmann::json set_chat_session_archived(
       const std::string& session_id,
       const std::optional<std::string>& archived_at) const;

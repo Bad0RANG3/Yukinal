@@ -469,7 +469,7 @@ constexpr const char* kChatSessionSelect = R"SQL(
          (SELECT substr(last_message.content, 1, 240)
             FROM chat_messages last_message
            WHERE last_message.session_id = s.id
-           ORDER BY last_message.created_at DESC, last_message.id DESC
+           ORDER BY last_message.rowid DESC
            LIMIT 1)
     FROM chat_sessions s
     LEFT JOIN chat_messages m ON m.session_id = s.id
@@ -536,6 +536,10 @@ nlohmann::json chat_message_from_row(sqlite3* connection, sqlite3_stmt* row) {
     }
   }
   add_optional_text(message, "traceId", row, 5);
+  if (sqlite3_column_type(row, 7) != SQLITE_NULL) {
+    message["participant"] = nlohmann::json::parse(column_text(row, 7));
+  }
+  add_optional_text(message, "model", row, 8);
   (void)connection;
   return message;
 }
@@ -550,11 +554,13 @@ nlohmann::json query_chat_session(sqlite3* connection, const std::string& sessio
   if (session_result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
   auto session = chat_session_from_row(connection, session_query.get());
 
+  // Appends define conversation order. Display timestamps may share a second
+  // or move backwards, and random message IDs provide no chronological order.
   Statement message_query(connection, R"SQL(
-    SELECT id, session_id, role, content, parts_json, trace_id, created_at
+    SELECT id, session_id, role, content, parts_json, trace_id, created_at, participant_json, model
       FROM chat_messages
      WHERE session_id = ?1
-     ORDER BY created_at ASC, id ASC
+     ORDER BY rowid ASC
   )SQL");
   bind_text(connection, message_query.get(), 1, session_id);
   nlohmann::json messages = nlohmann::json::array();
@@ -1699,7 +1705,8 @@ std::optional<nlohmann::json> DesktopDatabase::delete_mcp_server(
 
 nlohmann::json DesktopDatabase::list_chat_sessions(
     const std::optional<std::string>& query, const std::optional<bool>& archived,
-    int limit, int offset) const {
+    int limit, int offset, const std::optional<std::string>& server_id,
+    bool filter_server) const {
   std::lock_guard lock(mutex_);
   if (limit < 1 || limit > 100 || offset < 0 || offset > 10'000) {
     throw std::invalid_argument("Chat session paging is out of range");
@@ -1716,6 +1723,7 @@ nlohmann::json DesktopDatabase::list_chat_sessions(
   if (archived == true) archive_clause = "AND s.archived_at IS NOT NULL";
   else if (archived == false) archive_clause = "AND s.archived_at IS NULL";
 
+  const std::string server_clause = filter_server ? " AND s.server_id IS ?4 " : "";
   const std::string list_sql = std::string(kChatSessionSelect) + R"SQL(
      WHERE (s.title LIKE ?1 ESCAPE '\'
         OR EXISTS (
@@ -1723,13 +1731,14 @@ nlohmann::json DesktopDatabase::list_chat_sessions(
            WHERE search_messages.session_id = s.id
              AND search_messages.content LIKE ?1 ESCAPE '\'
         ))
-  )SQL" + archive_clause + R"SQL(
+  )SQL" + archive_clause + server_clause + R"SQL(
      GROUP BY s.id
      ORDER BY s.updated_at DESC, s.id DESC
      LIMIT ?2 OFFSET ?3
   )SQL";
   Statement rows(connection_, list_sql.c_str());
   bind_text(connection_, rows.get(), 1, pattern);
+  if (filter_server) bind_optional_text(connection_, rows.get(), 4, server_id);
   if (sqlite3_bind_int(rows.get(), 2, limit) != SQLITE_OK ||
       sqlite3_bind_int(rows.get(), 3, offset) != SQLITE_OK) {
     throw std::runtime_error(sqlite3_errmsg(connection_));
@@ -1742,7 +1751,7 @@ nlohmann::json DesktopDatabase::list_chat_sessions(
     sessions.push_back(chat_session_from_row(connection_, rows.get()));
   }
 
-  Statement count_query(connection_, R"SQL(
+  const std::string count_sql = std::string(R"SQL(
     SELECT COALESCE(SUM(CASE WHEN s.archived_at IS NULL THEN 1 ELSE 0 END), 0),
            COALESCE(SUM(CASE WHEN s.archived_at IS NOT NULL THEN 1 ELSE 0 END), 0)
       FROM chat_sessions s
@@ -1752,8 +1761,10 @@ nlohmann::json DesktopDatabase::list_chat_sessions(
            WHERE search_messages.session_id = s.id
              AND search_messages.content LIKE ?1 ESCAPE '\'
         ))
-  )SQL");
+  )SQL") + server_clause;
+  Statement count_query(connection_, count_sql.c_str());
   bind_text(connection_, count_query.get(), 1, pattern);
+  if (filter_server) bind_optional_text(connection_, count_query.get(), 4, server_id);
   if (sqlite3_step(count_query.get()) != SQLITE_ROW) {
     throw std::runtime_error(sqlite3_errmsg(connection_));
   }
@@ -1801,7 +1812,9 @@ nlohmann::json DesktopDatabase::create_chat_session(
 nlohmann::json DesktopDatabase::append_chat_message(
     const std::string& id, const std::string& session_id, const std::string& role,
     const std::string& content, const std::optional<nlohmann::json>& parts,
-    const std::optional<std::string>& trace_id, const std::string& timestamp) const {
+    const std::optional<std::string>& trace_id, const std::string& timestamp,
+    const std::optional<nlohmann::json>& participant,
+    const std::optional<std::string>& model) const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
   if (!is_one_of(role, {"user", "assistant", "tool", "system"})) {
@@ -1821,8 +1834,8 @@ nlohmann::json DesktopDatabase::append_chat_message(
   Transaction transaction(connection_);
   Statement insert(connection_, R"SQL(
     INSERT INTO chat_messages (
-      id, session_id, role, content, parts_json, trace_id, created_at
-    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      id, session_id, role, content, parts_json, trace_id, created_at, participant_json, model
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
   )SQL");
   bind_text(connection_, insert.get(), 1, id);
   bind_text(connection_, insert.get(), 2, session_id);
@@ -1831,6 +1844,8 @@ nlohmann::json DesktopDatabase::append_chat_message(
   bind_optional_text(connection_, insert.get(), 5, encoded_parts);
   bind_optional_text(connection_, insert.get(), 6, trace_id);
   bind_text(connection_, insert.get(), 7, timestamp);
+  bind_optional_text(connection_, insert.get(), 8, participant ? std::optional<std::string>(participant->dump()) : std::nullopt);
+  bind_optional_text(connection_, insert.get(), 9, model);
   if (sqlite3_step(insert.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
 
   Statement update(connection_, "UPDATE chat_sessions SET updated_at = ?2 WHERE id = ?1");
@@ -1846,6 +1861,8 @@ nlohmann::json DesktopDatabase::append_chat_message(
   };
   if (parts.has_value()) message["parts"] = *parts;
   if (trace_id.has_value()) message["traceId"] = *trace_id;
+  if (participant.has_value()) message["participant"] = *participant;
+  if (model.has_value()) message["model"] = *model;
   return {{"message", std::move(message)}};
 }
 

@@ -11,6 +11,10 @@ import { PRIMARY_NAV, SERVER_PAGES, useWorkspaceStore, type PrimaryNav, type Ser
 import { LivePreviewControl } from "./LivePreviewControl.js";
 import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
+import { WorkpagesDock, WorkpagesLauncher } from "../features/workpages/WorkpagesDock.js";
+import { openNativeWorkpage } from "../lib/ipc.js";
+import { MemoryLibrary } from "../features/agent/MemoryLibrary.js";
+import { useRecentAgentSessions } from "../features/agent/useRecentAgentSessions.js";
 
 const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
 const GettingStarted = lazy(async () => ({ default: (await import("../features/onboarding/GettingStarted.js")).GettingStarted }));
@@ -42,6 +46,10 @@ export function AppShell() {
   const setServerPage = useWorkspaceStore((state) => state.setServerPage);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [requestedSessionId, setRequestedSessionId] = useState<string | null>(null);
+  const agentBusy = useWorkspaceStore((state) => state.agentBusy);
+  const recent = useRecentAgentSessions(selectedServerId, 3);
   const [guideOpen, setGuideOpen] = useState(() => !isPreviewFixture() && !useOnboardingStore.getState().dismissed);
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
@@ -105,13 +113,20 @@ export function AppShell() {
         <div className="workspace-brand"><img src={brandMark} alt="" /><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
         <nav className="workspace-navigation" aria-label="主导航">{PRIMARY_NAV.map((item) => <button type="button" key={item} className={`workspace-nav-item ${primary === item && (item !== "servers" || !serverDetailOpen) ? "is-active" : ""}`} aria-current={primary === item && (item !== "servers" || !serverDetailOpen) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span></button>)}</nav>
         <ServerList embedded onClose={() => setSidebarOpen(false)} onSelect={() => { setSidebarOpen(false); closeGuide(); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); }} />
+        {recent.data?.sessions.length ? <section className="sidebar-recent" aria-label="最近任务"><span>最近任务</span>{recent.data.sessions.map((session) => <button type="button" key={session.id} disabled={agentBusy} title={session.title} onClick={() => { setRequestedSessionId(session.id); returnToAI(); }}>{session.title}</button>)}</section> : null}
+        <div className="sidebar-context-actions"><button type="button" className="text-button" disabled={agentBusy} onClick={() => { useWorkspaceStore.getState().selectServer(null); setPrimary("servers"); }}>全局对话</button><button type="button" className="text-button" onClick={() => setMemoryOpen(true)}>记忆库</button></div>
       </aside>
       {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
-        <AgentPanel workspace onAttentionRequested={returnToAI} workspaceControls={<>
+        <AgentPanel workspace requestedSessionId={requestedSessionId} onSessionOpened={() => setRequestedSessionId(null)} onAttentionRequested={returnToAI}
+          workspaceWorkpages={<WorkpagesDock onPopOut={async (page) => {
+            if (!page.serverId || page.kind === "evidence" || page.kind === "artifact") throw new Error("该内容可在工作页中展开");
+            await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });
+          }} />} workspaceControls={<>
+          <WorkpagesLauncher />
           {import.meta.env.DEV ? <LivePreviewControl /> : null}
           <button type="button" ref={sidebarToggleRef} className="icon-button navigation-toggle" aria-label="打开导航" aria-controls="workspace-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><Icon name="projects" /></button>
-          <button type="button" className="text-button workspace-guide-toggle" onClick={() => { setGuideOpen((open) => !open); openContext(); }}>连接设置</button>
+          <button type="button" className="text-button workspace-guide-toggle" aria-label="连接设置" title="连接设置" onClick={() => { setGuideOpen((open) => !open); openContext(); }}><Icon name="settings" size="sm" /><span>连接设置</span></button>
           <button type="button" ref={contextToggleRef} className="icon-button context-toggle" aria-label="打开仪表台" aria-controls="workspace-inspector" aria-expanded={contextOpen} onClick={openContext}><Icon name="servers" /></button>
         </>} />
       </div>
@@ -142,6 +157,7 @@ export function AppShell() {
         </div>
       </main>
       <ServerAuthChallengeModal />
+      {memoryOpen ? <MemoryLibrary key={selectedServerId ?? "global"} onClose={() => setMemoryOpen(false)} /> : null}
     </div>
   );
 }

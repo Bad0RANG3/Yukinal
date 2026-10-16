@@ -10,6 +10,8 @@ import {
   loadAgentRoles,
   roleBinding,
   roleModelChoices,
+  resolveAgentRole,
+  rolePersona,
   saveAgentRoles,
 } from "../src/features/agent-nist/agent-nist.js";
 import { useWorkspaceStore } from "../src/stores/workspace-store.js";
@@ -127,7 +129,7 @@ test("unreadable role storage falls back without overwriting stored data or call
   assert.ok(loadAgentRoles({ getItem: () => { throw new Error("blocked"); } }).notice);
 });
 
-test("role handoff atomically prepares the chosen model and editable duties without changing saved providers", () => {
+test("role handoff selects a system persona and model without inserting duties into the visible draft", () => {
   const providers = [provider(), provider("provider-b")];
   const originals = structuredClone(providers);
   const role = configuredRole("provider-b");
@@ -146,9 +148,9 @@ test("role handoff atomically prepares the chosen model and editable duties with
   assert.equal(state.agentHistoryOpen, false);
   assert.equal(observations[0]?.historyOpen, false);
   assert.equal(state.agentBusy, false);
-  assert.match(state.agentDraft, /蓝队 · 自定义守护/);
-  assert.ok(state.agentDraft.includes(role.responsibility));
-  assert.ok(state.agentDraft.endsWith("本次任务：\n"));
+  assert.equal(state.agentDraft, "");
+  assert.equal(state.agentRoleId, role.id);
+  assert.ok(rolePersona(role).systemPrompt.includes(role.responsibility));
   assert.deepEqual(providers, originals);
 });
 
@@ -169,31 +171,43 @@ test("archived chats reject role handoff until the user opens a new or restored 
   assert.equal(handoffAgentRole(configuredRole(), [provider()]).ok, true);
   assert.equal(useWorkspaceStore.getState().agentSessionArchived, false);
   assert.equal(useWorkspaceStore.getState().agentHistoryOpen, false);
-  assert.ok(useWorkspaceStore.getState().agentDraft.includes("自定义守护"));
+  assert.equal(useWorkspaceStore.getState().agentDraft, "");
+  assert.equal(useWorkspaceStore.getState().agentRoleId, configuredRole().id);
 });
 
-test("existing text, whitespace drafts, attachments and running work cannot be overwritten by a role", () => {
+test("role changes preserve existing text, whitespace and attachments exactly", () => {
   const attachments: AgentPromptPart[] = [{ type: "text", text: "attached context" }];
   for (const composition of [
     { agentDraft: "unfinished task", agentAttachments: [], agentBusy: false },
     { agentDraft: " \n", agentAttachments: [], agentBusy: false },
     { agentDraft: "", agentAttachments: attachments, agentBusy: false },
     { agentDraft: "unfinished task", agentAttachments: attachments, agentBusy: false },
-    { agentDraft: "", agentAttachments: [], agentBusy: true },
   ]) {
     useWorkspaceStore.setState({ ...composition, selectedProviderId: "keep-provider", selectedModel: "keep-model" });
     const before = useWorkspaceStore.getState();
     const result = handoffAgentRole(configuredRole(), [provider()]);
-    assert.equal(result.ok, false);
-    assert.strictEqual(useWorkspaceStore.getState(), before);
+    assert.equal(result.ok, true);
+    assert.equal(useWorkspaceStore.getState().agentDraft, before.agentDraft);
+    assert.strictEqual(useWorkspaceStore.getState().agentAttachments, before.agentAttachments);
   }
+});
+
+test("running work rejects role changes and an unbound role follows the current model", () => {
+  useWorkspaceStore.setState({ agentDraft: "draft", agentAttachments: [], agentBusy: true, agentSessionArchived: false });
+  const before = useWorkspaceStore.getState();
+  assert.equal(handoffAgentRole(configuredRole(), [provider()]).ok, false);
+  assert.strictEqual(useWorkspaceStore.getState(), before);
+  useWorkspaceStore.setState({ agentBusy: false, selectedProviderId: "keep-provider", selectedModel: "keep-model" });
+  assert.equal(handoffAgentRole(defaultAgentRoles()[0]!, []).ok, true);
+  assert.equal(useWorkspaceStore.getState().selectedModel, "keep-model");
+  assert.equal(useWorkspaceStore.getState().selectedProviderId, "keep-provider");
+  assert.equal(useWorkspaceStore.getState().agentDraft, "draft");
 });
 
 test("missing, inactive and missing-model bindings refuse handoff without selecting a fallback", () => {
   const active = provider();
   const inactive = provider("inactive", false);
   for (const role of [
-    { ...configuredRole(), providerId: null, model: null },
     configuredRole("deleted"),
     configuredRole("inactive"),
     { ...configuredRole(), model: "removed-model" },
@@ -203,6 +217,24 @@ test("missing, inactive and missing-model bindings refuse handoff without select
     assert.equal(handoffAgentRole(role, [active, inactive]).ok, false);
     assert.strictEqual(useWorkspaceStore.getState(), before);
   }
+});
+
+test("explicit team mentions override a selected persona and automatic routing preserves the user's wording", () => {
+  const roles = defaultAgentRoles();
+  const prompt = "@红队 检查授权目标的攻击路径";
+  assert.equal(resolveAgentRole(prompt, roles, "blue-guardian").role.team, "red");
+  assert.equal(resolveAgentRole(prompt, roles, "blue-guardian").source, "mention");
+  assert.equal(resolveAgentRole("@yellow 实现接口", roles).role.team, "yellow");
+  assert.equal(resolveAgentRole("@PurpleTeam 检查检测覆盖", roles).role.team, "purple");
+  assert.equal(resolveAgentRole("@red-team 检查授权目标", roles).source, "mention");
+  assert.equal(resolveAgentRole("查看服务日志", roles).role.id, "blue-logs");
+  assert.equal(resolveAgentRole("开发代码实现接口", roles).role.id, "yellow-engineering");
+  assert.equal(resolveAgentRole("制定授权范围与停止条件", roles).role.team, "white");
+  assert.equal(resolveAgentRole("完善日志设计和可观测性", roles).role.team, "green");
+  assert.equal(resolveAgentRole("复测红蓝检测覆盖", roles).role.team, "purple");
+  assert.equal(resolveAgentRole("制定安全编码与漏洞修复方案", roles).role.team, "orange");
+  assert.equal(resolveAgentRole("任意任务", roles, "green-response").source, "selected");
+  assert.equal(prompt, "@红队 检查授权目标的攻击路径");
 });
 
 test("inactive providers can be assigned from their catalog but stay inactive and cannot hand off", () => {

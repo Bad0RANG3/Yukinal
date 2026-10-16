@@ -109,7 +109,7 @@ test("a row is never disabled while a write is in flight, so focus stays in the 
   // 「新建任务」是唯一可以真的被禁用的东西：它不在列表的焦点流程里，而且它整块换掉
   // 面板的内容。列表里的每一个按钮都只能走 `aria-disabled`。
   const hardDisabled = source.match(/[^-\w]disabled=\{/g)?.length ?? 0;
-  assert.equal(hardDisabled, 2, "only 新建任务 and an empty rename title may use disabled");
+  assert.equal(hardDisabled, 3, "new task, context reset and an empty rename title may use disabled");
   assert.ok(
     /className="button-secondary agent-history-new"[^>]*disabled=\{busy\}/.test(source),
     "the new-task button is the one that may be disabled while busy",

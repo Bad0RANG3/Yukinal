@@ -26,8 +26,9 @@ const SOURCE_LABEL: Record<LogSource, string> = {
   unavailable: "未发现日志源",
 };
 
-export function LogsPane() {
-  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+export function LogsPane({ serverId }: { serverId?: string | null } = {}) {
+  const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const selectedServerId = serverId === undefined ? workspaceServerId : serverId;
   const shell = isDesktopShell();
   const logsQuery = useQuery({
     queryKey: ["serverLogs", selectedServerId],

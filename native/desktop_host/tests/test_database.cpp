@@ -240,6 +240,46 @@ int main() {
     check(!router.invoke("activity_list", {{"serverId", "srv_01abc"}, {"extra", true}}).ok,
           "activity_list should reject unknown parameters");
 
+    database.create_chat_session("chat_global", std::nullopt, std::nullopt, "Global", "2026-10-17T01:00:00Z");
+    database.create_chat_session("chat_server", std::nullopt, std::string("srv_01abc"), "Server", "2026-10-17T01:00:00Z");
+    const nlohmann::json participant = {{"id", "blue-logs"}, {"label", "Blue"}, {"kind", "agent"}};
+    const auto appended = router.invoke("chat_message_append", {
+      {"sessionId", "chat_server"}, {"role", "assistant"}, {"content", "Evidence"},
+      {"participant", participant}, {"model", "test-model"}});
+    check(appended.ok && appended.value.at("message").at("participant") == participant,
+          "assistant actor metadata should be returned");
+    const auto reopened = database.get_chat_session("chat_server");
+    check(reopened.at("messages").at(0).at("model") == "test-model" &&
+          reopened.at("messages").at(0).at("participant") == participant,
+          "assistant model and actor must survive reopening");
+    check(router.invoke("chat_session_list", {{"serverId", nullptr}}).value.at("sessions").size() == 1,
+          "explicit global history must exclude server conversations");
+    const auto scoped_history = router.invoke("chat_session_list", {{"serverId", "srv_01abc"}});
+    check(scoped_history.ok && scoped_history.value.at("sessions").size() == 1 &&
+          scoped_history.value.at("counts").at("active") == 1,
+          "history and counts must use the same server scope");
+    check(!router.invoke("chat_message_append", {{"sessionId", "chat_server"}, {"role", "assistant"},
+          {"content", "Bad"}, {"participant", {{"id", "x"}, {"label", "x"}, {"kind", "root"}}}}).ok,
+          "invalid actors must be rejected at the host boundary");
+
+    (void)database.create_chat_session("chat_order", std::nullopt, std::nullopt,
+        "Append order", "2026-10-17T01:00:00Z");
+    for (const auto* id : {"z_prior", "m_current", "a_reply"}) {
+      (void)database.append_chat_message(id, "chat_order", "user", id,
+          std::nullopt, std::nullopt, "2026-10-17T01:00:01Z");
+    }
+    // A display clock adjustment must not move a later append ahead of a turn.
+    (void)database.append_chat_message("0_clock_adjusted", "chat_order", "assistant",
+        "Latest append", std::nullopt, std::nullopt, "2026-10-17T00:59:59Z");
+    const auto ordered = database.get_chat_session("chat_order");
+    check(ordered.at("messages").at(0).at("id") == "z_prior" &&
+          ordered.at("messages").at(1).at("id") == "m_current" &&
+          ordered.at("messages").at(2).at("id") == "a_reply" &&
+          ordered.at("messages").at(3).at("id") == "0_clock_adjusted",
+          "chat order must follow appends despite same-second IDs or clock changes");
+    check(ordered.at("session").at("lastMessagePreview") == "Latest append",
+          "the latest message preview must use the same append order as history");
+
     const nlohmann::json expected_executions = {{"executions", nlohmann::json::array({
       {{"traceId", "trc_02"}, {"stepId", "step_02"}, {"callId", "call_02"},
        {"toolName", "service.status"}, {"environment", "unknown"}, {"riskLevel", "low"},
@@ -625,7 +665,7 @@ int main() {
   const auto file = (temporary.path / "yukinal.db").string();
   check(sqlite3_open_v2(file.c_str(), &readback, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,
         "could not reopen the temporary database read-only");
-  check(query_integer(readback, "PRAGMA user_version") == 36,
+  check(query_integer(readback, "PRAGMA user_version") == 37,
         "opening a legacy database must migrate it to the supported schema version");
   check(query_integer(readback, "SELECT count(*) FROM pragma_table_info('servers')") == 22,
         "the legacy servers table should gain exactly the migrated host-trust columns");
@@ -645,7 +685,7 @@ int main() {
   check(sqlite3_open_v2((absent.path / "yukinal.db").string().c_str(), &fresh,
                         SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,
         "a new database should be initialized on disk");
-  check(query_integer(fresh, "PRAGMA user_version") == 36,
+  check(query_integer(fresh, "PRAGMA user_version") == 37,
         "a new database should be migrated to the supported schema version");
   sqlite3_close(fresh);
   return 0;

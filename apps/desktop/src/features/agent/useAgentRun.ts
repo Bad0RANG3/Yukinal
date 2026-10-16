@@ -18,6 +18,9 @@ import {
   type AgentPermissionMode,
   type AgentRunMode,
   type AgentTokenUsage,
+  type AgentContextUsage,
+  type AgentParticipant,
+  type AgentPersona,
   type ApprovalDecision,
   type ApprovalRequest,
   type IpcCommandMap,
@@ -36,6 +39,7 @@ import {
   targetLabel,
   toolResultSummary,
   type Entry,
+  type ReplyIdentity,
 } from "./transcript.js";
 
 const SIDECAR_EXIT_NOTICE = "Agent sidecar 已退出，本次运行已中断。";
@@ -56,6 +60,8 @@ export type StartOutcome =
 
 export type StartRunInput = {
   prompt: string;
+  persona?: AgentPersona;
+  participant?: AgentParticipant;
   /** Optional durable investigation objective receiving read-only evidence. */
   taskId?: string | null;
   /** Exact prompt parts, including bounded images, PDFs and text files. Omitted means text-only fallback. */
@@ -91,6 +97,7 @@ export type AgentRun = {
   pendingApprovalIds: string[];
   approvalStatuses: Record<string, string>;
   tokenUsage: AgentTokenUsage | null;
+  contextUsage: AgentContextUsage | null;
   start(input: StartRunInput): Promise<StartOutcome>;
   stop(): Promise<void>;
   respondApproval(approval: ApprovalRequest, decision: ApprovalDecision): Promise<void>;
@@ -110,7 +117,7 @@ export function useAgentRun(options: {
    * 运行以终态回复结束时的回调 —— 落库的唯一入口。
    * 通过 ref 读取，因此订阅只建立一次也不会拿到过期的闭包。
    */
-  onAssistantMessage?: (text: string) => void;
+  onAssistantMessage?: (text: string, identity: ReplyIdentity) => void;
   /** 运行开始等待审批；面板据此把 Agent 面板带到前景。 */
   onApprovalRequested?: () => void;
   /** sidecar 存活信号；false 表示进程已经不在了。 */
@@ -134,6 +141,7 @@ export function useAgentRun(options: {
   // 流式文本按 run 累积（事件乱序也没关系，同 run 追加）。
   const lifecycle = useRef(new RunLifecycle());
   const approvalLocks = useRef(new Set<string>());
+  const replyIdentity = useRef<ReplyIdentity>({});
   /**
    * A message admitted with `resume: false` but not yet executed.
    *
@@ -147,6 +155,7 @@ export function useAgentRun(options: {
     prompt: string;
     parts: AgentPromptPart[];
     taskId?: string | null;
+    routingKey: string;
   } | null>(null);
 
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -158,6 +167,7 @@ export function useAgentRun(options: {
   const [pendingApprovalIds, setPendingApprovalIds] = useState<string[]>([]);
   const [approvalStatuses, setApprovalStatuses] = useState<Record<string, string>>({});
   const [tokenUsage, setTokenUsage] = useState<AgentTokenUsage | null>(null);
+  const [contextUsage, setContextUsage] = useState<AgentContextUsage | null>(null);
 
   useEffect(() => {
     if (!isDesktopShell()) return;
@@ -196,7 +206,7 @@ export function useAgentRun(options: {
     });
     on("agent.text", (event) => {
       if (!isActive(event)) return;
-      setEntries((current) => appendAssistantDelta(current, event.textDelta));
+      setEntries((current) => appendAssistantDelta(current, event.textDelta, replyIdentity.current));
     });
     on("agent.usage", (event) => {
       if (!isActive(event)) return;
@@ -253,9 +263,10 @@ export function useAgentRun(options: {
       if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState(event.result.state);
+      setContextUsage(event.result.context ?? null);
       if (!event.result.text) return;
-      onAssistantMessage.current?.(event.result.text);
-      setEntries((current) => settleAssistantText(current, event.result.text));
+      onAssistantMessage.current?.(event.result.text, replyIdentity.current);
+      setEntries((current) => settleAssistantText(current, event.result.text, replyIdentity.current));
     });
     on("agent.failed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
@@ -333,9 +344,10 @@ export function useAgentRun(options: {
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
+    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId });
     const previous = pendingAdmission.current;
     const reusable =
-      previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null)
+      previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
         ? previous
         : null;
     const expectedRunId = reusable?.runId ?? newId("run");
@@ -346,6 +358,7 @@ export function useAgentRun(options: {
     setApprovalStatuses({});
     setPendingApprovalIds([]);
     setTokenUsage(null);
+    replyIdentity.current = { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) };
     approvalLocks.current.clear();
 
     const attachments = parts.filter((part) => part.type === "image" || part.type === "file" || part.type === "document");
@@ -355,14 +368,14 @@ export function useAgentRun(options: {
       ...(attachments.length ? { attachments } : {}),
     };
     try {
-      setEntries([userEntry]);
+      if (!reusable) setEntries((current) => appendEntries(current, [userEntry]));
       // The first call records the message without executing it. The second call is
       // the resume; keeping these separate is what makes retrying the second call
       // idempotent rather than producing a second user message or run.
       if (!reusable) {
         const messageId = newId("msg");
         const sessionId = await input.persistUserMessage(messageId, parts);
-        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null };
+        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey };
       }
       const admitted = pendingAdmission.current;
       if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
@@ -375,6 +388,8 @@ export function useAgentRun(options: {
         parts,
         providerId: input.providerId ?? undefined,
         model: input.model ?? undefined,
+        persona: input.persona,
+        participant: input.participant,
         focusServerId: input.focusServerId ?? undefined,
         permissionMode: input.permissionMode,
         mode: input.mode,
@@ -404,7 +419,7 @@ export function useAgentRun(options: {
       lifecycle.current.fail();
       setRunning(false);
       setRunState("failed");
-      setEntries([userEntry, { kind: "error", text: String(error) }]);
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
       return "failed";
     }
   }, []);
@@ -472,6 +487,7 @@ export function useAgentRun(options: {
     setPendingApprovalIds([]);
     setApprovalStatuses({});
     setTokenUsage(null);
+    setContextUsage(null);
     approvalLocks.current.clear();
   }, []);
 
@@ -494,6 +510,7 @@ export function useAgentRun(options: {
     pendingApprovalIds,
     approvalStatuses,
     tokenUsage,
+    contextUsage,
     start,
     stop,
     respondApproval,

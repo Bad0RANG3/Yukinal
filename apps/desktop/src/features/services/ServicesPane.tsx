@@ -26,8 +26,9 @@ const SOURCE_LABEL: Record<ServiceSource, string> = {
   unavailable: "未发现服务管理器",
 };
 
-export function ServicesPane() {
-  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+export function ServicesPane({ serverId }: { serverId?: string | null } = {}) {
+  const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const selectedServerId = serverId === undefined ? workspaceServerId : serverId;
   const shell = isDesktopShell();
   const servicesQuery = useQuery({
     queryKey: ["serverServices", selectedServerId],

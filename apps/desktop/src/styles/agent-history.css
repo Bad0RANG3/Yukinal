@@ -567,3 +567,71 @@
     opacity: 1;
   }
 }
+
+.agent-task-heading { display: flex; min-width: 0; flex: 1; align-items: center; gap: 12px; }
+.agent-task-trigger { display: inline-flex; min-width: 0; max-width: 280px; align-items: center; gap: 6px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text); padding: 5px 6px; font: inherit; font-size: var(--text-label); text-align: left; }
+.agent-task-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-task-trigger > svg { flex-shrink: 0; color: var(--faint); }
+.agent-task-trigger:hover:not(:disabled), .agent-task-trigger.is-active { background: var(--material-hover); }
+.agent-task-heading > .agent-context { flex: 0 1 auto; font-size: var(--text-caption); }
+.agent-context-usage { color: var(--faint); font-size: var(--text-caption); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ai-first .agent-panel.agent-workspace:has(.agent-task-popover) { position: relative; }
+.agent-task-popover { position: absolute; top: 50px; left: 12px; z-index: 30; display: flex; width: min(440px, calc(100% - 24px)); max-height: min(620px, calc(100% - 72px)); border: 1px solid var(--line-strong); border-radius: var(--radius-panel); background: var(--surface-2); box-shadow: var(--shadow-popover, var(--shadow-frame)); overflow: hidden; }
+.agent-history-pane.is-compact { width: 100%; gap: 8px; padding: 10px; }
+.is-compact .agent-history-heading { align-items: center; }
+.is-compact .agent-history-heading h3 { font-size: var(--text-label); font-weight: 500; }
+.is-compact .agent-history-summary { display: none; }
+.is-compact .agent-history-heading-actions { gap: 8px; }
+.is-compact .agent-history-heading-actions .icon-button { width: 24px; height: 24px; }
+.agent-context-reset { font-size: var(--text-caption); }
+.is-compact .agent-history-panel { min-height: 140px; max-height: 440px; }
+.is-compact .agent-history-list { gap: 8px; }
+.is-compact .agent-history-group { gap: 2px; }
+.is-compact .agent-history-group-label { background: var(--surface-2); }
+.is-compact .agent-history-row { border-color: transparent; background: transparent; }
+.is-compact .agent-history-row:hover { background: var(--material-hover); }
+.is-compact .agent-history-row.is-active { background: var(--material-active); }
+.is-compact .agent-history-row-open { gap: 3px; padding: 7px 8px; }
+.is-compact .agent-history-row-preview { -webkit-line-clamp: 1; }
+.is-compact .agent-history-row-meta { display: none; }
+.is-compact .agent-history-empty { gap: 6px; padding: 24px 8px; }
+.is-compact .agent-history-empty > svg { display: none; }
+.is-compact .agent-history-empty > p:not(:has(button)) { max-width: 34ch; }
+@container agent-workspace (max-width: 680px) {
+  .agent-task-heading > .agent-context, .agent-token-usage { display: none; }
+  .agent-task-heading { gap: 4px; }
+  .agent-task-trigger { max-width: 210px; }
+  .agent-context-usage { font-size: 10px; }
+}
+
+/* The title keeps its place while secondary launcher labels fold to icons.
+   Text stays in the accessibility tree and every control remains in Tab order. */
+.ai-first .agent-header .agent-task-heading { flex: 1 1 0; }
+.ai-first .agent-header .agent-header-actions { flex: 0 1 auto; }
+.agent-workspace-controls { display: inline-flex; min-width: 0; flex: 0 1 auto; align-items: center; gap: 5px; }
+.agent-workspace-controls > .workpages-launcher { flex-shrink: 0; }
+.agent-workspace-controls .workspace-guide-toggle { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; min-height: 28px; padding: 4px 6px; white-space: nowrap; font-size: var(--text-caption); }
+.agent-workspace-controls > :is(button, .live-preview-control) { flex-shrink: 0; }
+@container agent-workspace (max-width: 1000px) {
+  .ai-first .agent-header .agent-task-heading > .agent-context { display: none; }
+  .ai-first .agent-header .agent-header-actions { gap: 6px; }
+  .ai-first .agent-header .agent-status[data-idle="true"] { display: none; }
+  .agent-workspace-controls { gap: 3px; }
+  .ai-first .agent-header .workpages-launcher-button { width: 28px; min-width: 28px; min-height: 28px; padding: 5px; }
+  .ai-first .agent-header .workpages-launcher-button > span,
+  .ai-first .agent-header .live-preview-label { position: absolute; display: block; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .ai-first .agent-header .live-preview-control { min-height: 28px; gap: 4px; padding: 4px 6px; }
+  .ai-first .agent-header .agent-token-usage { display: none; }
+}
+@container agent-workspace (max-width: 780px) {
+  .ai-first .agent-header .agent-workspace-controls .workspace-guide-toggle { display: inline-flex; justify-content: center; width: 28px; min-width: 28px; height: 28px; padding: 4px; }
+  .ai-first .agent-header .workspace-guide-toggle > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .agent-task-trigger { max-width: 220px; }
+}
+@container agent-workspace (max-width: 560px) {
+  .ai-first .agent-header { gap: 6px; padding-inline: 12px; }
+  .ai-first .agent-header .agent-header-actions { gap: 4px; }
+  .agent-task-trigger { max-width: 150px; padding-inline: 3px; }
+  .agent-context-caption, .agent-context-compacted { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .agent-workspace-controls { gap: 1px; }
+}

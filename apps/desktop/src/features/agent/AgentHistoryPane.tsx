@@ -26,7 +26,7 @@
  */
 
 import { IPC_COMMANDS, type ChatMessage, type ChatSession } from "@yukinal/shared";
-import { keepPreviousData, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 
 import { Icon } from "../../components/Icon.js";
@@ -59,6 +59,10 @@ export function AgentHistoryPane({
   onOpenSession,
   onSessionUpdated,
   onSessionDeleted,
+  serverId = null,
+  compact = false,
+  onResetContext,
+  resetting = false,
 }: {
   activeSessionId: string | null;
   /** 面板头部那个「对话记录」按钮。关闭时把焦点还回去，键盘用户不会掉到 body 上。 */
@@ -68,6 +72,10 @@ export function AgentHistoryPane({
   onOpenSession: (session: ChatSession, messages: ChatMessage[]) => void;
   onSessionUpdated: (session: ChatSession) => void;
   onSessionDeleted: (sessionId: string) => void;
+  serverId?: string | null;
+  compact?: boolean;
+  onResetContext?: () => void;
+  resetting?: boolean;
 }) {
   const shell = isDesktopShell();
   const queryClient = useQueryClient();
@@ -119,13 +127,15 @@ export function AgentHistoryPane({
    * 出来时若不管，焦点就掉到 `body`，键盘用户要重新 Tab 整个面板才能回到原处。
    */
   useEffect(() => () => restoreFocusRef?.current?.focus({ preventScroll: true }), [restoreFocusRef]);
+  useEffect(() => { if (compact) searchRef.current?.focus(); }, [compact]);
 
   const sessions = useInfiniteQuery({
-    queryKey: ["agent-chat-sessions", query, filter],
+    queryKey: ["agent-chat-sessions", serverId, query, filter],
     enabled: shell,
     initialPageParam: 0,
     queryFn: async ({ pageParam }) =>
       callDesktop(IPC_COMMANDS.chatSessionList, {
+        serverId,
         query: query.trim() || undefined,
         archived: historyFilterParam(filter),
         offset: pageParam,
@@ -137,7 +147,7 @@ export function AgentHistoryPane({
     },
     // 打字时保留上一份结果，列表不会每敲一个字就清空重画。`isPlaceholderData` 为真时
     // 计数与「还有多少段」一律不显示 —— 那是**上一个关键字**的数字，不能拿来充数。
-    placeholderData: keepPreviousData,
+    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === serverId ? previous : undefined,
   });
 
   const refresh = useCallback(
@@ -352,13 +362,14 @@ export function AgentHistoryPane({
   const hasMore = counts !== null && total !== null && rows.length < total;
 
   return (
-    <section className="agent-history-pane" aria-label="对话记录" onKeyDown={onPaneKeyDown}>
+    <section className={`agent-history-pane${compact ? " is-compact" : ""}`} aria-label="对话记录" onKeyDown={onPaneKeyDown}>
       <div className="agent-history-heading">
         <div>
-          <h3>对话记录</h3>
+          <h3>{compact ? "切换任务" : "对话记录"}</h3>
           <p className="agent-history-summary">{summary}</p>
         </div>
         <div className="agent-history-heading-actions">
+          {onResetContext ? <button type="button" className="text-button agent-context-reset" disabled={resetting || busy} title="清空当前模型上下文，保留对话记录与已保存记忆" onClick={onResetContext}>{resetting ? "重置中…" : "重置上下文"}</button> : null}
           <button type="button" className="button-secondary agent-history-new" onClick={onNewSession} disabled={busy}>
             <Icon name="plus" size="sm" />新建任务
           </button>

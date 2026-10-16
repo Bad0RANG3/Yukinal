@@ -22,6 +22,7 @@ export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: 
   const shell = isDesktopShell();
   const preview = isPreviewFixture();
   const protectedInput = useWorkspaceStore((state) => state.agentBusy || Boolean(state.agentDraft.trim()) || state.agentAttachments.length > 0);
+  const agentBusy = useWorkspaceStore((state) => state.agentBusy);
   const servers = useServers({ poll: true });
   const { action, busy } = useServerAction();
   const serverRows = servers.data ?? [];
@@ -43,7 +44,7 @@ export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: 
         </div>
       </div>
 
-      {import.meta.env.DEV ? <div className="server-preview-control"><span>{preview ? "模拟数据 · 仅供界面评估" : "界面评估"}</span><button type="button" className="text-button" disabled={protectedInput} title={protectedInput ? "先完成或清空当前草稿，再切换数据" : preview ? "退出模拟，恢复真实数据" : "加载 6 台模拟服务器"} onClick={() => {
+      {import.meta.env.DEV ? <div className="server-preview-control"><span>{preview ? "模拟数据" : ""}</span><button type="button" className="text-button" disabled={protectedInput} title={protectedInput ? "先完成或清空当前草稿，再切换数据" : preview ? "退出模拟，恢复真实数据" : "加载 6 台模拟服务器"} onClick={() => {
         if (protectedInput) return;
         const url = new URL(window.location.href);
         if (preview) url.searchParams.delete("fixture");
@@ -83,10 +84,10 @@ export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: 
                     title 也是必需的：名称在 218px 宽的侧栏里会被省略号截断
                     （「Staging Database Cluster」实测溢出 40px），而这是列表里
                     唯一能看全它的地方。 */}
-                <button type="button" onClick={() => { selectServer(server.id); onSelect?.(); }} className="server-row-main" aria-current={selectedServerId === server.id ? "true" : undefined} aria-label={`${server.name}，${server.connection.host}:${server.connection.port}，${ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}，${SERVER_STATUS_LABEL[server.status]}`} title={server.name}>
+                <button type="button" disabled={agentBusy && selectedServerId !== server.id} onClick={() => { selectServer(server.id); onSelect?.(); }} className="server-row-main" aria-current={selectedServerId === server.id ? "true" : undefined} aria-label={`${server.name}，${server.connection.host}:${server.connection.port}，${ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}，${SERVER_STATUS_LABEL[server.status]}`} title={server.name}>
                   <span className={`server-dot ${ENV_DOT[server.metadata.environment]}`} aria-hidden="true" />
                   <span className="server-row-copy">
-                    <span className="server-row-name">{server.name}</span>
+                    <span className="server-row-name-line"><span className="server-row-name">{server.name}</span>{server.capabilities.docker ? <span className="server-capability" title="已检测到 Docker">Docker</span> : server.capabilities.kubernetes ? <span className="server-capability" title="已检测到 Kubernetes">K8s</span> : null}</span>
                     <span className="server-row-detail">
                       <span className="server-row-host">{server.connection.host}</span>
                       <span className="server-row-port">:{server.connection.port}</span>

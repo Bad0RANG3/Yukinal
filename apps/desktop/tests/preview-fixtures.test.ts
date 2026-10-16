@@ -132,6 +132,16 @@ test("saved chat covers long diagnostic tables and code without starting a run",
   assert.match(summary?.content ?? "", /仅供界面评估/);
 });
 
+test("fixture history follows explicit global/server scope and search without leaking a different target", () => {
+  const history = (params: Record<string, unknown>) => response(IPC_COMMANDS.chatSessionList, params) as ReturnType<typeof IPC_SCHEMAS.chat_session_list.response.parse>;
+  assert.equal(history({ serverId: "srv_previewdb" }).sessions.length, 1);
+  assert.equal(history({ serverId: null }).sessions.length, 0);
+  assert.equal(history({ serverId: "srv_previewapi" }).counts.active, 0);
+  assert.equal(history({ serverId: "srv_previewdb", query: "连接池" }).sessions.length, 1);
+  assert.equal(history({ serverId: "srv_previewdb", query: "no matching message" }).sessions.length, 0);
+  assert.equal(history({ serverId: "srv_previewdb", archived: true }).sessions.length, 0);
+});
+
 test("fixture mutations are explicit unsupported operations and do not alter the read examples", () => {
   const before = structuredClone(previewResponse(IPC_COMMANDS.fileTransferList, {}));
   for (const command of [

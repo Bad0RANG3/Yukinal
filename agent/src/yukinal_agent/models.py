@@ -133,7 +133,12 @@ class ModelFactory:
                 raise ModelFactoryError("invalid_base_url", "Configured model endpoint is invalid") from None
         builder = self._builders.get(provider)
         if builder is None:
-            builder = self._load_builder(provider)
+            if provider == "openai" and base_url is not None and urlsplit(base_url).hostname == "api.deepseek.com" and config.wire_api != "responses":
+                from .deepseek_model import DeepSeekChatModel
+
+                builder = DeepSeekChatModel
+            else:
+                builder = self._load_builder(provider)
         if provider == "gemini":
             kwargs: dict[str, Any] = {
                 "model": model_name,

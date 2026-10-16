@@ -1,0 +1,16 @@
+.sidebar-context-actions { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; border-top: 1px solid var(--line); padding: 8px; gap: 8px; font-size: 12px; }
+.sidebar-recent { flex-shrink: 0; display: grid; gap: 2px; border-top: 1px solid var(--line); padding: 8px; }
+.sidebar-recent > span { color: var(--faint); font-size: 11px; margin-bottom: 4px; }
+.sidebar-recent button { border: 0; background: transparent; color: var(--muted); text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 4px 0; font-size: 12px; }
+.sidebar-recent button:hover { color: var(--text); }
+.server-row-name-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.server-row-name-line .server-row-name { min-width: 0; flex: 1; }
+.server-capability { flex-shrink: 0; color: var(--faint); font-size: 10px; padding-left: 4px; border-left: 1px solid var(--line); }
+.server-status-pill { overflow: hidden; }
+.ai-first .server-row-actions > .server-status-pill { flex: 1; }
+.standalone-workpage { display: flex; flex-direction: column; height: 100dvh; min-height: 0; background: #282828; color: var(--text); }
+.standalone-workpage > header { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.standalone-workpage > header span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.standalone-workpage-content { flex: 1; min-height: 0; overflow: auto; container: reference / inline-size; }
+.standalone-workpage-content > .terminal-pane { height: 100%; }
+@media (max-height: 700px) { .sidebar-recent button:nth-of-type(n+3) { display: none; } }
