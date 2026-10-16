@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/database.hpp"
 
+#include "yukinal/desktop_host/content_revision.hpp"
 #include "schema_migrations.hpp"
 
 #include <algorithm>
@@ -1444,6 +1445,8 @@ void insert_investigation_schedule_run(sqlite3* connection, const nlohmann::json
 
 }  // namespace
 
+std::string content_revision_hex(const std::string& input) { return sha256_hex(input); }
+
 DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
   if (!data_directory.is_absolute()) {
     throw std::runtime_error("The Yukinal data directory must be an absolute path");
@@ -2372,6 +2375,287 @@ std::optional<nlohmann::json> DesktopDatabase::latest_snapshot(
   if (result == SQLITE_DONE) return std::nullopt;
   if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
   return parse_json_text(column_text(rows.get(), 0), "snapshot payload");
+}
+
+namespace {
+
+bool has_control_characters(const std::string& value) {
+  return std::any_of(value.begin(), value.end(), [](unsigned char byte) {
+    return byte < 0x20 || byte == 0x7f;
+  });
+}
+
+// One `filesystem_backups` row as the metadata-only record the Agent host RPC
+// exposes. It is deliberately narrower than the table: the durable call identity
+// (plan/step/trace/call) is stored for audit but never handed to the model.
+nlohmann::json decode_filesystem_backup(sqlite3_stmt* statement) {
+  nlohmann::json record = {
+      {"id", column_text(statement, 0)},
+      {"serverId", column_text(statement, 1)},
+      {"path", column_text(statement, 7)},
+      {"backupPath", column_text(statement, 8)},
+      {"revision", column_text(statement, 9)},
+      {"bytesBackedUp", sqlite3_column_int64(statement, 10)},
+      {"status", column_text(statement, 11)},
+      {"createdAt", column_text(statement, 12)},
+      {"updatedAt", column_text(statement, 13)},
+  };
+  add_optional_text(record, "taskId", statement, 2);
+  add_optional_text(record, "restoredAt", statement, 14);
+  add_optional_text(record, "deletedAt", statement, 15);
+  return record;
+}
+
+std::optional<std::string> optional_record_text(const nlohmann::json& record, const char* key) {
+  const auto found = record.find(key);
+  if (found == record.end() || found->is_null()) return std::nullopt;
+  if (!found->is_string()) {
+    throw std::invalid_argument("The filesystem backup record is invalid");
+  }
+  auto value = found->get<std::string>();
+  if (value.empty()) return std::nullopt;
+  return value;
+}
+
+}  // namespace
+
+void DesktopDatabase::insert_filesystem_backup(const nlohmann::json& record) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!record.is_object()) {
+    throw std::invalid_argument("The filesystem backup record is invalid");
+  }
+  const auto required = [&record](const char* key) {
+    const auto found = record.find(key);
+    if (found == record.end() || !found->is_string()) {
+      throw std::invalid_argument("The filesystem backup record is invalid");
+    }
+    return found->get<std::string>();
+  };
+  const auto id = required("id");
+  const auto server_id = required("serverId");
+  const auto path = required("path");
+  const auto backup_path = required("backupPath");
+  const auto revision = required("revision");
+  const auto status = required("status");
+  const auto created_at = required("createdAt");
+  const auto updated_at = required("updatedAt");
+  for (const auto* value : {&id, &server_id, &path, &backup_path, &revision, &created_at,
+                            &updated_at}) {
+    if (value->empty() || has_control_characters(*value)) {
+      throw std::invalid_argument("The filesystem backup record is invalid");
+    }
+  }
+  if (revision.size() != 64 ||
+      !std::all_of(revision.begin(), revision.end(), [](unsigned char byte) {
+        return std::isxdigit(byte) != 0;
+      })) {
+    throw std::invalid_argument("The filesystem backup revision is invalid");
+  }
+  if (!is_one_of(status, {"available", "restored", "deleted"})) {
+    throw std::invalid_argument("The filesystem backup status is invalid");
+  }
+  std::int64_t bytes = -1;
+  const auto bytes_field = record.find("bytesBackedUp");
+  if (bytes_field != record.end() && bytes_field->is_number_integer()) {
+    bytes = bytes_field->get<std::int64_t>();
+  }
+  if (bytes < 0) {
+    throw std::invalid_argument("The filesystem backup byte count is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      INSERT INTO filesystem_backups (
+        id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+        path, backup_path, revision, bytes_backed_up, status, created_at,
+        updated_at, restored_at, deleted_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    )SQL");
+  bind_text(connection_, statement.get(), 1, id);
+  bind_text(connection_, statement.get(), 2, server_id);
+  bind_optional_text(connection_, statement.get(), 3, optional_record_text(record, "taskId"));
+  bind_optional_text(connection_, statement.get(), 4, optional_record_text(record, "planId"));
+  bind_optional_text(connection_, statement.get(), 5, optional_record_text(record, "planStepId"));
+  bind_optional_text(connection_, statement.get(), 6, optional_record_text(record, "traceId"));
+  bind_optional_text(connection_, statement.get(), 7, optional_record_text(record, "callId"));
+  bind_text(connection_, statement.get(), 8, path);
+  bind_text(connection_, statement.get(), 9, backup_path);
+  bind_text(connection_, statement.get(), 10, revision);
+  bind_int64(connection_, statement.get(), 11, bytes);
+  bind_text(connection_, statement.get(), 12, status);
+  bind_text(connection_, statement.get(), 13, created_at);
+  bind_text(connection_, statement.get(), 14, updated_at);
+  bind_optional_text(connection_, statement.get(), 15, optional_record_text(record, "restoredAt"));
+  bind_optional_text(connection_, statement.get(), 16, optional_record_text(record, "deletedAt"));
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::find_available_filesystem_backup(
+    const std::string& server_id, const std::string& path,
+    const std::string& backup_path) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement statement(connection_, R"SQL(
+      SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+             path, backup_path, revision, bytes_backed_up, status, created_at,
+             updated_at, restored_at, deleted_at
+        FROM filesystem_backups
+       WHERE server_id = ?1 AND path = ?2 AND backup_path = ?3
+         AND status = 'available'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, path);
+  bind_text(connection_, statement.get(), 3, backup_path);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_filesystem_backup(statement.get());
+}
+
+nlohmann::json DesktopDatabase::list_filesystem_backups_for_task(
+    const std::string& server_id, const std::string& task_id,
+    const std::optional<std::string>& status, const std::optional<std::string>& path,
+    int limit) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (server_id.empty() || task_id.empty()) {
+    throw std::invalid_argument("Filesystem backup listing requires a server and task");
+  }
+  if (limit < 1 || limit > 128) {
+    throw std::invalid_argument("Filesystem backup listing limit must be between 1 and 128");
+  }
+  if (status.has_value() && !is_one_of(*status, {"available", "restored", "deleted"})) {
+    throw std::invalid_argument("Filesystem backup status is invalid");
+  }
+  if (path.has_value() && (path->empty() || has_control_characters(*path))) {
+    throw std::invalid_argument("Filesystem backup listing path is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+             path, backup_path, revision, bytes_backed_up, status, created_at,
+             updated_at, restored_at, deleted_at
+        FROM filesystem_backups
+       WHERE server_id = ?1 AND task_id = ?2
+         AND (?3 IS NULL OR status = ?3)
+         AND (?4 IS NULL OR path = ?4)
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?5
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, task_id);
+  bind_optional_text(connection_, statement.get(), 3, status);
+  bind_optional_text(connection_, statement.get(), 4, path);
+  bind_int64(connection_, statement.get(), 5, static_cast<std::int64_t>(limit) + 1);
+  nlohmann::json records = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    records.push_back(decode_filesystem_backup(statement.get()));
+  }
+  const bool truncated = static_cast<int>(records.size()) > limit;
+  while (static_cast<int>(records.size()) > limit) records.erase(records.end() - 1);
+  return {{"records", std::move(records)}, {"truncated", truncated}};
+}
+
+nlohmann::json DesktopDatabase::list_available_filesystem_backups_for_server(
+    const std::string& server_id, const std::optional<std::string>& path_prefix,
+    int limit) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (server_id.empty()) {
+    throw std::invalid_argument("Filesystem backup listing requires a server");
+  }
+  if (limit < 1 || limit > 512) {
+    throw std::invalid_argument(
+        "Filesystem backup retention scan limit must be between 1 and 512");
+  }
+  if (path_prefix.has_value() && (path_prefix->empty() || has_control_characters(*path_prefix))) {
+    throw std::invalid_argument("Filesystem backup retention path prefix is invalid");
+  }
+  std::optional<std::string> like_prefix;
+  if (path_prefix.has_value()) {
+    std::string escaped;
+    escaped.reserve(path_prefix->size() + 1);
+    for (const char character : *path_prefix) {
+      if (character == '\\' || character == '%' || character == '_') escaped.push_back('\\');
+      escaped.push_back(character);
+    }
+    escaped.push_back('%');
+    like_prefix = std::move(escaped);
+  }
+  Statement statement(connection_, R"SQL(
+      SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+             path, backup_path, revision, bytes_backed_up, status, created_at,
+             updated_at, restored_at, deleted_at
+        FROM filesystem_backups
+       WHERE server_id = ?1 AND status = 'available'
+         AND (?2 IS NULL OR path LIKE ?2 ESCAPE '\')
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?3
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_optional_text(connection_, statement.get(), 2, like_prefix);
+  bind_int64(connection_, statement.get(), 3, static_cast<std::int64_t>(limit) + 1);
+  nlohmann::json records = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    records.push_back(decode_filesystem_backup(statement.get()));
+  }
+  const bool truncated = static_cast<int>(records.size()) > limit;
+  while (static_cast<int>(records.size()) > limit) records.erase(records.end() - 1);
+  return {{"records", std::move(records)}, {"truncated", truncated}};
+}
+
+void DesktopDatabase::mark_filesystem_backup_restored(const std::string& server_id,
+                                                      const std::string& path,
+                                                      const std::string& backup_path,
+                                                      const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Statement statement(connection_, R"SQL(
+      UPDATE filesystem_backups
+         SET status = 'restored', restored_at = ?4, updated_at = ?4
+       WHERE server_id = ?1 AND path = ?2 AND backup_path = ?3
+         AND status = 'available'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, path);
+  bind_text(connection_, statement.get(), 3, backup_path);
+  bind_text(connection_, statement.get(), 4, now);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) != 1) {
+    throw std::runtime_error("Filesystem backup is no longer available");
+  }
+}
+
+void DesktopDatabase::mark_filesystem_backup_deleted(const std::string& server_id,
+                                                     const std::string& path,
+                                                     const std::string& backup_path,
+                                                     const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Statement statement(connection_, R"SQL(
+      UPDATE filesystem_backups
+         SET status = 'deleted', deleted_at = ?4, updated_at = ?4
+       WHERE server_id = ?1 AND path = ?2 AND backup_path = ?3
+         AND status = 'available'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, path);
+  bind_text(connection_, statement.get(), 3, backup_path);
+  bind_text(connection_, statement.get(), 4, now);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) != 1) {
+    throw std::runtime_error("Filesystem backup is no longer available");
+  }
 }
 
 nlohmann::json DesktopDatabase::list_investigation_tasks(

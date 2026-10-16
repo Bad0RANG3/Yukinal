@@ -2159,6 +2159,547 @@ int main(int argc, char** argv) {
                  .ok,
             "investigation_task_recover rejects unexpected input fields");
     }
+
+    // ── Host-owned filesystem backup ledger ──────────────────────────────────
+    // The backup bytes stay on the remote server; the host keeps only bounded
+    // metadata. A model never supplies the backup path or a byte count the
+    // ledger has not already seen, and every mutation must still be bound to
+    // the durable task, plan step and exact inputs.
+    try {
+      const std::string source_path = "/etc/nginx/nginx.conf";
+      const std::string second_path = "/etc/nginx/conf.d/site.conf";
+      const std::string third_path = "/etc/nginx/conf.d/extra.conf";
+      const std::string token(32, 'a');
+      const std::string revision(64, 'a');
+      const std::string other_revision(64, 'b');
+      const auto backup_path = yukinal::desktop_host::backup_path_for(source_path, token);
+      const auto second_backup = yukinal::desktop_host::backup_path_for(second_path, token);
+      const auto third_backup = yukinal::desktop_host::backup_path_for(third_path, token);
+
+      check(yukinal::desktop_host::is_safe_backup_token(token) &&
+                !yukinal::desktop_host::is_safe_backup_token(std::string(32, 'A')) &&
+                !yukinal::desktop_host::is_safe_backup_token(std::string(31, 'a')),
+            "a backup token must be exactly 32 lowercase hexadecimal characters");
+      check(yukinal::desktop_host::is_backup_path_for(source_path, backup_path) &&
+                !yukinal::desktop_host::is_backup_path_for(second_path, backup_path) &&
+                !yukinal::desktop_host::is_backup_path_for(source_path, second_backup),
+            "a derived backup path must belong only to its own source path");
+      check(yukinal::desktop_host::backup_record_id("srv_01abc", backup_path) ==
+                    yukinal::desktop_host::backup_record_id("srv_01abc", backup_path) &&
+                yukinal::desktop_host::backup_record_id("srv_01abc", backup_path) !=
+                    yukinal::desktop_host::backup_record_id("srv_other", backup_path) &&
+                yukinal::desktop_host::backup_record_id("srv_01abc", backup_path)
+                        .rfind("backup_", 0) == 0,
+            "a backup record id must be a stable sha256 over the server and backup path");
+      bool bad_token_rejected = false;
+      try {
+        (void)yukinal::desktop_host::backup_path_for(source_path, "xyz");
+      } catch (const std::exception&) {
+        bad_token_rejected = true;
+      }
+      check(bad_token_rejected, "an unsafe backup token must be refused");
+
+      const nlohmann::json backup_target = {
+          {"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "staging"}};
+      const auto backup_plan = [&](const std::string& plan_id, int revision_number,
+                                   const std::string& step_id, const std::string& tool_name,
+                                   bool requires_approval, const nlohmann::json& input_bindings) {
+        return nlohmann::json{
+            {"id", plan_id},
+            {"taskId", "itask_backup"},
+            {"revision", revision_number},
+            {"status", "active"},
+            {"createdAt", "2026-01-05T00:00:00Z"},
+            {"updatedAt", "2026-01-05T00:00:00Z"},
+            {"currentStepId", step_id},
+            {"approval", {{"status", "approved"}}},
+            {"steps",
+             nlohmann::json::array({{{"id", step_id},
+                                     {"ordinal", 0},
+                                     {"kind", "action"},
+                                     {"title", "Mutate the nginx config"},
+                                     {"status", "pending"},
+                                     {"attempts", 0},
+                                     {"maxAttempts", 1},
+                                     {"requiresApproval", requires_approval},
+                                     {"allowedTools", nlohmann::json::array({tool_name})},
+                                     {"evidenceIds", nlohmann::json::array()},
+                                     {"inputBindings", input_bindings}}})}};
+      };
+
+      // A durable execute-mode task is the prerequisite for every filesystem
+      // mutation; the plan step must name the tool and bind the exact inputs.
+      const nlohmann::json backup_task = {
+          {"id", "itask_backup"},
+          {"serverId", "srv_01abc"},
+          {"objective", "Back up and restore the nginx config"},
+          {"successCriteria", nlohmann::json::array({"nginx.conf restored"})},
+          {"scope", backup_target},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "goal"},
+          {"permissionMode", "auto"},
+          {"automationLevel", "execute"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+          {"createdBy", "user"},
+          {"createdAt", "2026-01-05T00:00:00Z"},
+          {"updatedAt", "2026-01-05T00:00:00Z"},
+      };
+      (void)database.create_investigation_task(backup_task);
+
+      const auto register_params = [&](const std::string& path, const std::string& backup,
+                                       const std::string& plan_id, const std::string& step_id,
+                                       std::int64_t bytes) {
+        return nlohmann::json{
+            {"serverId", "srv_01abc"},
+            {"path", path},
+            {"backupPath", backup},
+            {"revision", revision},
+            {"taskId", "itask_backup"},
+            {"planId", plan_id},
+            {"planStepId", step_id},
+            {"traceId", "trace_backup"},
+            {"callId", "call_backup"},
+            {"bytesBackedUp", bytes},
+            {"target", backup_target},
+            {"evidenceIds", nlohmann::json::array()}};
+      };
+
+      database.save_investigation_plan(backup_plan(
+          "iplan_backup_1", 1, "step_backup_1", "filesystem.backup", false,
+          {{"path", source_path}}));
+      const auto registered = router.handle_host_request(
+          "host.investigation.filesystem_backup.register",
+          register_params(source_path, backup_path, "iplan_backup_1", "step_backup_1", 1234));
+      check(registered.value("registered", false) == true && registered.size() == 2 &&
+                registered.value("backupPath", std::string()) == backup_path,
+            "the register RPC should echo the host-owned backup path and nothing else");
+
+      const auto ledger =
+          database.find_available_filesystem_backup("srv_01abc", source_path, backup_path);
+      check(ledger.has_value() && ledger->at("revision") == revision &&
+                ledger->at("bytesBackedUp") == 1234 && ledger->at("status") == "available" &&
+                ledger->at("taskId") == "itask_backup" && !ledger->contains("traceId") &&
+                !ledger->contains("callId") && !ledger->contains("planId"),
+            "the ledger should keep the durable call identity out of the model-visible record");
+
+      bool duplicate_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.register",
+            register_params(source_path, backup_path, "iplan_backup_1", "step_backup_1", 1234));
+      } catch (const yukinal::desktop_host::SidecarRpcError& error) {
+        duplicate_rejected = error.code() == -32000;
+      }
+      check(duplicate_rejected,
+            "registering the same host backup twice should be refused by the ledger");
+
+      bool oversize_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.register",
+            register_params(source_path, backup_path, "iplan_backup_1", "step_backup_1",
+                            1048577));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        oversize_rejected = true;
+      }
+      check(oversize_rejected, "a backup above the host size limit must be refused");
+
+      bool bad_identity_rejected = false;
+      try {
+        auto missing_identity = register_params(source_path, backup_path, "iplan_backup_1",
+                                                 "step_backup_1", 1);
+        missing_identity["traceId"] = "";
+        (void)router.handle_host_request("host.investigation.filesystem_backup.register",
+                                        missing_identity);
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        bad_identity_rejected = true;
+      }
+      check(bad_identity_rejected,
+            "a backup registration without a durable call identity must be refused");
+
+      bool wrong_env_rejected = false;
+      try {
+        auto wrong_env = register_params(source_path, backup_path, "iplan_backup_1",
+                                         "step_backup_1", 1);
+        wrong_env["target"] = {
+            {"host", "remote"}, {"serverId", "srv_01abc"}, {"environment", "production"}};
+        (void)router.handle_host_request("host.investigation.filesystem_backup.register",
+                                        wrong_env);
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        wrong_env_rejected = true;
+      }
+      check(wrong_env_rejected,
+            "a backup target whose environment does not match the server must be refused");
+
+      bool unbound_plan_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.register",
+            register_params(source_path, backup_path, "iplan_write_2", "step_collect", 1));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        unbound_plan_rejected = true;
+      }
+      check(unbound_plan_rejected,
+            "a backup request that is not bound to the active plan must be refused");
+
+      database.save_investigation_plan(backup_plan(
+          "iplan_backup_1b", 2, "step_backup_1b", "filesystem.backup", false,
+          {{"path", second_path}}));
+      const auto second_registered = router.handle_host_request(
+          "host.investigation.filesystem_backup.register",
+          register_params(second_path, second_backup, "iplan_backup_1b", "step_backup_1b", 2048));
+      check(second_registered.value("registered", false) == true &&
+                second_registered.value("backupPath", std::string()) == second_backup,
+            "a second source path should register its own host-owned backup");
+
+      // A restore must agree with the ledger on the revision and the byte count,
+      // and can only consume a backup owned by the same task.
+      database.save_investigation_plan(backup_plan(
+          "iplan_backup_2", 3, "step_backup_2", "filesystem.restore", false,
+          {{"path", source_path},
+           {"backupPath", backup_path},
+           {"expectedRevision", revision}}));
+      const auto restore_params = [&](const std::string& path, const std::string& backup,
+                                       const std::string& plan_id, const std::string& step_id,
+                                       const std::string& returned_revision,
+                                       std::int64_t bytes_after) {
+        return nlohmann::json{
+            {"serverId", "srv_01abc"},
+            {"path", path},
+            {"backupPath", backup},
+            {"expectedRevision", revision},
+            {"revision", returned_revision},
+            {"taskId", "itask_backup"},
+            {"planId", plan_id},
+            {"planStepId", step_id},
+            {"traceId", "trace_backup"},
+            {"callId", "call_backup"},
+            {"bytesBefore", 999},
+            {"bytesAfter", bytes_after},
+            {"target", backup_target},
+            {"evidenceIds", nlohmann::json::array()}};
+      };
+      bool bytes_mismatch_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.restored",
+            restore_params(source_path, backup_path, "iplan_backup_2", "step_backup_2", revision,
+                           4321));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        bytes_mismatch_rejected = true;
+      }
+      check(bytes_mismatch_rejected,
+            "a restore whose byte count disagrees with the ledger must be refused");
+      bool revision_mismatch_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.restored",
+            restore_params(source_path, backup_path, "iplan_backup_2", "step_backup_2",
+                           other_revision, 1234));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        revision_mismatch_rejected = true;
+      }
+      check(revision_mismatch_rejected,
+            "a restore whose revision disagrees with the ledger must be refused");
+      bool forged_backup_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.restored",
+            restore_params(source_path, "/etc/nginx/not-a-host-backup", "iplan_backup_2",
+                           "step_backup_2", revision, 1234));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        forged_backup_rejected = true;
+      }
+      check(forged_backup_rejected,
+            "a restore must only consume a host-derived backup path for the same source");
+
+      const auto restored = router.handle_host_request(
+          "host.investigation.filesystem_backup.restored",
+          restore_params(source_path, backup_path, "iplan_backup_2", "step_backup_2", revision,
+                         1234));
+      check(restored.value("restored", false) == true &&
+                restored.value("path", std::string()) == source_path &&
+                restored.value("backupPath", std::string()) == backup_path &&
+                restored.value("revision", std::string()) == revision &&
+                restored.at("bytesBefore") == 999 && restored.at("bytesAfter") == 1234,
+            "the restored RPC should echo the consumed backup and both byte counts");
+      check(!database.find_available_filesystem_backup("srv_01abc", source_path, backup_path)
+                 .has_value(),
+            "a restored backup must leave the available ledger");
+      bool consumed_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.restored",
+            restore_params(source_path, backup_path, "iplan_backup_2", "step_backup_2", revision,
+                           1234));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        consumed_rejected = true;
+      }
+      check(consumed_rejected, "a consumed backup cannot be restored twice");
+
+      const auto restored_list = database.list_filesystem_backups_for_task(
+          "srv_01abc", "itask_backup", std::string("restored"), std::nullopt, 10);
+      check(restored_list.at("records").size() == 1 &&
+                restored_list.at("records").at(0).at("backupPath") == backup_path &&
+                restored_list.at("truncated") == false &&
+                restored_list.at("records").at(0).contains("restoredAt"),
+            "the ledger listing should expose the restored backup and its timestamp");
+
+      // Cleanup consumes an available backup through the exact approved input.
+      database.save_investigation_plan(backup_plan(
+          "iplan_backup_3", 4, "step_backup_3", "filesystem.backup.cleanup", false,
+          {{"path", second_path},
+           {"backupPath", second_backup},
+           {"expectedRevision", revision}}));
+      const auto cleanup_input = nlohmann::json{{"path", second_path},
+                                                {"backupPath", second_backup},
+                                                {"expectedRevision", revision}};
+      const auto deleted_params = [&](const nlohmann::json& input, const nlohmann::json& item,
+                                      std::int64_t bytes) {
+        return nlohmann::json{
+            {"serverId", "srv_01abc"},
+            {"revision", revision},
+            {"taskId", "itask_backup"},
+            {"planId", "iplan_backup_3"},
+            {"planStepId", "step_backup_3"},
+            {"traceId", "trace_backup"},
+            {"callId", "call_backup"},
+            {"bytesDeleted", bytes},
+            {"input", input},
+            {"item", item},
+            {"target", backup_target},
+            {"evidenceIds", nlohmann::json::array()}};
+      };
+      bool wrong_item_rejected = false;
+      try {
+        const auto wrong_item = nlohmann::json{{"path", source_path},
+                                               {"backupPath", backup_path},
+                                               {"expectedRevision", revision}};
+        (void)router.handle_host_request("host.investigation.filesystem_backup.deleted",
+                                        deleted_params(cleanup_input, wrong_item, 2048));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        wrong_item_rejected = true;
+      }
+      check(wrong_item_rejected,
+            "cleanup must refuse an item that is not part of the approved input");
+      bool cleanup_bytes_rejected = false;
+      try {
+        (void)router.handle_host_request("host.investigation.filesystem_backup.deleted",
+                                        deleted_params(cleanup_input, cleanup_input, 999));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        cleanup_bytes_rejected = true;
+      }
+      check(cleanup_bytes_rejected,
+            "cleanup whose byte count disagrees with the ledger must be refused");
+      const auto deleted = router.handle_host_request(
+          "host.investigation.filesystem_backup.deleted",
+          deleted_params(cleanup_input, cleanup_input, 2048));
+      check(deleted.value("deleted", false) == true &&
+                deleted.value("path", std::string()) == second_path &&
+                deleted.value("backupPath", std::string()) == second_backup &&
+                deleted.value("revision", std::string()) == revision &&
+                deleted.at("bytesDeleted") == 2048,
+            "the deleted RPC should echo the consumed backup");
+      check(!database.find_available_filesystem_backup("srv_01abc", second_path, second_backup)
+                 .has_value(),
+            "a cleaned backup must leave the available ledger");
+
+      // A backup owned by another task can only be cleaned through an approved
+      // batch step; a bare single-item restore is always refused.
+      const nlohmann::json other_task = {
+          {"id", "itask_backup_other"},
+          {"serverId", "srv_01abc"},
+          {"objective", "Own a backup for another task"},
+          {"successCriteria", nlohmann::json::array({"backup owned"})},
+          {"scope", backup_target},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "goal"},
+          {"permissionMode", "auto"},
+          {"automationLevel", "execute"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+          {"createdBy", "user"},
+          {"createdAt", "2026-01-05T00:00:00Z"},
+          {"updatedAt", "2026-01-05T00:00:00Z"},
+      };
+      (void)database.create_investigation_task(other_task);
+      auto other_plan = backup_plan("iplan_other_backup", 1, "step_other_backup",
+                                    "filesystem.backup", false, {{"path", third_path}});
+      other_plan["taskId"] = "itask_backup_other";
+      database.save_investigation_plan(other_plan);
+      auto other_register = register_params(third_path, third_backup, "iplan_other_backup",
+                                            "step_other_backup", 4096);
+      other_register["taskId"] = "itask_backup_other";
+      const auto third_registered = router.handle_host_request(
+          "host.investigation.filesystem_backup.register", other_register);
+      check(third_registered.value("registered", false) == true,
+            "a second task should be able to register its own backup");
+
+      database.save_investigation_plan(backup_plan(
+          "iplan_backup_2b", 5, "step_backup_2b", "filesystem.restore", false,
+          {{"path", third_path},
+           {"backupPath", third_backup},
+           {"expectedRevision", revision}}));
+      bool cross_task_restore_rejected = false;
+      try {
+        (void)router.handle_host_request(
+            "host.investigation.filesystem_backup.restored",
+            restore_params(third_path, third_backup, "iplan_backup_2b", "step_backup_2b",
+                           revision, 4096));
+      } catch (const yukinal::desktop_host::SidecarRpcError&) {
+        cross_task_restore_rejected = true;
+      }
+      check(cross_task_restore_rejected,
+            "a restore cannot consume a backup owned by another investigation task");
+
+      const nlohmann::json batch_items = nlohmann::json::array(
+          {{{"path", third_path},
+            {"backupPath", third_backup},
+            {"expectedRevision", revision}}});
+      database.save_investigation_plan(backup_plan(
+          "iplan_backup_batch", 6, "step_backup_batch", "filesystem.backup.cleanup", true,
+          {{"items", batch_items.dump()}}));
+      const auto batch_input = nlohmann::json{{"items", batch_items}};
+      const auto batch_deleted = router.handle_host_request(
+          "host.investigation.filesystem_backup.deleted",
+          {{"serverId", "srv_01abc"},
+           {"revision", revision},
+           {"taskId", "itask_backup"},
+           {"planId", "iplan_backup_batch"},
+           {"planStepId", "step_backup_batch"},
+           {"traceId", "trace_backup"},
+           {"callId", "call_backup"},
+           {"bytesDeleted", 4096},
+           {"input", batch_input},
+           {"item", batch_items.at(0)},
+           {"target", backup_target},
+           {"evidenceIds", nlohmann::json::array()}});
+      check(batch_deleted.value("deleted", false) == true &&
+                batch_deleted.value("backupPath", std::string()) == third_backup,
+            "an approved batch step may clean a backup that another task registered");
+      check(!database
+                 .find_available_filesystem_backup("srv_01abc", third_path, third_backup)
+                 .has_value(),
+            "the cross-task cleanup must leave the available ledger");
+
+      // The ledger itself is the last line of defence for the record shape.
+      const auto backup_record = [&](const std::string& id, const std::string& path,
+                                     const std::string& backup, const std::string& record_revision,
+                                     const std::string& status, std::int64_t bytes) {
+        return nlohmann::json{
+            {"id", id},
+            {"serverId", "srv_01abc"},
+            {"taskId", "itask_backup"},
+            {"path", path},
+            {"backupPath", backup},
+            {"revision", record_revision},
+            {"bytesBackedUp", bytes},
+            {"status", status},
+            {"createdAt", "2026-01-05T00:00:00Z"},
+            {"updatedAt", "2026-01-05T00:00:00Z"}};
+      };
+      bool bad_revision_rejected = false;
+      try {
+        database.insert_filesystem_backup(backup_record(
+            "backup_bad", "/etc/nginx/bad.conf", "/etc/nginx/bad.bak", "not-hex", "available",
+            1));
+      } catch (const std::invalid_argument&) {
+        bad_revision_rejected = true;
+      }
+      check(bad_revision_rejected, "the ledger should reject a malformed content revision");
+      bool bad_status_rejected = false;
+      try {
+        database.insert_filesystem_backup(backup_record(
+            "backup_bad2", "/etc/nginx/bad2.conf", "/etc/nginx/bad2.bak", revision, "consumed",
+            1));
+      } catch (const std::invalid_argument&) {
+        bad_status_rejected = true;
+      }
+      check(bad_status_rejected, "the ledger should reject an unknown backup status");
+      bool control_rejected = false;
+      try {
+        database.insert_filesystem_backup(backup_record(
+            "backup_bad3", std::string("/etc/nginx/bad\n.conf"), "/etc/nginx/bad3.bak",
+            revision, "available", 1));
+      } catch (const std::invalid_argument&) {
+        control_rejected = true;
+      }
+      check(control_rejected, "the ledger should reject control characters in paths");
+      bool negative_bytes_rejected = false;
+      try {
+        database.insert_filesystem_backup(backup_record(
+            "backup_bad4", "/etc/nginx/bad4.conf", "/etc/nginx/bad4.bak", revision, "available",
+            -1));
+      } catch (const std::invalid_argument&) {
+        negative_bytes_rejected = true;
+      }
+      check(negative_bytes_rejected, "the ledger should reject a negative byte count");
+      bool bad_limit_rejected = false;
+      try {
+        (void)database.list_filesystem_backups_for_task("srv_01abc", "itask_backup", std::nullopt,
+                                                        std::nullopt, 0);
+      } catch (const std::invalid_argument&) {
+        bad_limit_rejected = true;
+      }
+      check(bad_limit_rejected, "the ledger listing should bound its limit");
+      bool bad_status_filter_rejected = false;
+      try {
+        (void)database.list_filesystem_backups_for_task("srv_01abc", "itask_backup",
+                                                        std::string("consumed"), std::nullopt, 10);
+      } catch (const std::invalid_argument&) {
+        bad_status_filter_rejected = true;
+      }
+      check(bad_status_filter_rejected, "the ledger listing should reject an unknown status");
+      bool bad_scan_limit_rejected = false;
+      try {
+        (void)database.list_available_filesystem_backups_for_server("srv_01abc", std::nullopt,
+                                                                    513);
+      } catch (const std::invalid_argument&) {
+        bad_scan_limit_rejected = true;
+      }
+      check(bad_scan_limit_rejected, "the retention scan should bound its limit");
+      bool missing_mark_rejected = false;
+      try {
+        database.mark_filesystem_backup_restored("srv_01abc", "/etc/nginx/missing.conf",
+                                                 "/etc/nginx/missing.bak",
+                                                 "2026-01-05T00:00:01Z");
+      } catch (const std::runtime_error&) {
+        missing_mark_rejected = true;
+      }
+      check(missing_mark_rejected,
+            "marking a backup that is not available should report it as unavailable");
+
+      database.insert_filesystem_backup(backup_record("backup_scan_a", "/etc/nginx/scan_a.conf",
+                                                      "/etc/nginx/scan_a.bak", revision,
+                                                      "available", 64));
+      database.insert_filesystem_backup(backup_record("backup_scan_b", "/etc/nginx/scan_b.conf",
+                                                      "/etc/nginx/scan_b.bak", revision,
+                                                      "available", 64));
+      const auto truncated_scan = database.list_available_filesystem_backups_for_server(
+          "srv_01abc", std::string("/etc/nginx/"), 1);
+      check(truncated_scan.at("records").size() == 1 && truncated_scan.at("truncated") == true,
+            "the retention scan should cap its page and flag truncation");
+      const auto full_scan = database.list_available_filesystem_backups_for_server(
+          "srv_01abc", std::string("/etc/nginx/scan"), 10);
+      check(full_scan.at("records").size() == 2 && full_scan.at("truncated") == false,
+            "the retention scan should return every available backup under a prefix");
+      check(database
+                .list_available_filesystem_backups_for_server("srv_01abc",
+                                                               std::string("/etc/nginx/scan/"), 10)
+                .at("records")
+                .empty(),
+            "the retention scan should not match a longer path with the same prefix");
+    } catch (const std::exception& error) {
+      std::cerr << "filesystem backup ledger block failed: " << error.what() << '\n';
+      std::exit(3);
+    }
   }
 
   sqlite3* readback = nullptr;

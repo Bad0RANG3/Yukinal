@@ -152,6 +152,27 @@ class DesktopDatabase {
   [[nodiscard]] std::optional<nlohmann::json> recover_investigation_task(
       const std::string& task_id, const std::string& updated_at,
       const nlohmann::json& failure) const;
+  // ── Filesystem backup ledger (host-owned remote recovery copies) ─────────────
+  // The backup bytes stay on the remote server; only bounded metadata lives here.
+  // Not-found is reported with `std::nullopt`; validation failures throw
+  // `std::invalid_argument`; any other failure throws `std::runtime_error`.
+  void insert_filesystem_backup(const nlohmann::json& record) const;
+  [[nodiscard]] std::optional<nlohmann::json> find_available_filesystem_backup(
+      const std::string& server_id, const std::string& path,
+      const std::string& backup_path) const;
+  [[nodiscard]] nlohmann::json list_filesystem_backups_for_task(
+      const std::string& server_id, const std::string& task_id,
+      const std::optional<std::string>& status, const std::optional<std::string>& path,
+      int limit) const;
+  [[nodiscard]] nlohmann::json list_available_filesystem_backups_for_server(
+      const std::string& server_id, const std::optional<std::string>& path_prefix,
+      int limit) const;
+  void mark_filesystem_backup_restored(const std::string& server_id, const std::string& path,
+                                       const std::string& backup_path,
+                                       const std::string& now) const;
+  void mark_filesystem_backup_deleted(const std::string& server_id, const std::string& path,
+                                      const std::string& backup_path,
+                                      const std::string& now) const;
   /** SHA-256 (lowercase hex) of the canonical JSON serialization used for evidence. */
   [[nodiscard]] static std::string content_hash(const nlohmann::json& content);
   [[nodiscard]] nlohmann::json list_chat_sessions(
