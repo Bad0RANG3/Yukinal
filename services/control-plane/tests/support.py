@@ -247,6 +247,45 @@ class ControlPlaneTestCase(unittest.TestCase):
         self.assertIsNotNone(row, f"approval `{approval_id}` was not found")
         return row[0]
 
+    def get_policy(self, tenant_id: str) -> dict:
+        response = self.client.get(f"/v1/tenants/{tenant_id}/policy", headers=AUTH)
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def put_policy(self, tenant_id: str, **body):
+        body.setdefault("updatedBy", "ada")
+        return self.client.put(
+            f"/v1/tenants/{tenant_id}/policy", json=body, headers=AUTH
+        )
+
+    def delete_policy(self, tenant_id: str):
+        return self.client.delete(f"/v1/tenants/{tenant_id}/policy", headers=AUTH)
+
+    def list_tool_policies(self, tenant_id: str) -> list:
+        response = self.client.get(
+            f"/v1/tenants/{tenant_id}/tool-policies", headers=AUTH
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def tool_policy(self, tenant_id: str, kind: str) -> dict | None:
+        for entry in self.list_tool_policies(tenant_id):
+            if entry["kind"] == kind:
+                return entry
+        return None
+
+    def put_tool_policy(self, tenant_id: str, kind: str, risk: str):
+        return self.client.put(
+            f"/v1/tenants/{tenant_id}/tool-policies/{kind}",
+            json={"risk": risk, "updatedBy": "ada"},
+            headers=AUTH,
+        )
+
+    def delete_tool_policy(self, tenant_id: str, kind: str):
+        return self.client.delete(
+            f"/v1/tenants/{tenant_id}/tool-policies/{kind}", headers=AUTH
+        )
+
     def wait_for_task_status(
         self, tenant_id: str, task_id: str, status: str, timeout: float = 5.0
     ) -> dict:

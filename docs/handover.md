@@ -306,6 +306,19 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
   扣减**不在派发时重复检查**（否则一次性审批会卡住它自己授权的那一个任务），派发只检查该决定仍是
   `approved` 且未过期；任务用 `approval_id` 记住是谁授权的。所有时间戳统一序列化为显式 UTC（`...Z`），
   因为 SQLite 无时区类型、会返回裸 wall clock，否则同一字段读库与回显会不一致。
+  **按租户策略**：审批要求与有效期不再是全服务单值。控制平面把"kind 是什么"（风险）与"发生什么"
+  （该权限档的模式）分开，用共享风险层的词汇（`packages/shared/src/types/risk.ts`）：风险来源按优先级
+  是宿主对自己内建工具的自己声明、本租户的声明、闭集默认 `high`；宿主两组内建工具被逐一镜像（计划绑定
+  的只读观察为 `read`，按名点名的状态变更工具恒为 `high`）。风险收敛为权限档，租户的档位模式决定结果：
+  `auto` 无需决定即运行、`ask` 需已批准的决定、`deny` 直接拒绝。`GET/PUT/DELETE
+  /v1/tenants/{id}/policy` 读写清除策略（未存时回显 `stored:false` 与 production 默认），`PUT` 带
+  `approvalTtlSeconds`（60–86400）即该租户决定的窗宽；给 `environment` 按内建表推导档位（未知环境等同
+  production，绝不更宽），显式 `tierModes` 则偏离该表而保持环境语义。`GET /v1/tenants/{id}/tool-policies`
+  列出每个 kind 的风险/档位/模式/来源（`host`/`declared`/`default`），`PUT .../tool-policies/{kind}`
+  声明、`DELETE` 清除。两件事不可被声明掉：宿主点名的不变量在**决定函数本身**先于任何声明生效（不只是
+  在拒绝入库的端点里），`dangerous` 档永不为 `auto`。档位模式按解析后的值存储，日后改动内建默认不会静默
+  放开已做选择的租户。策略变更作用于**已排队的任务**：收紧为 `ask` 挡住此前豁免且未记录授权的排队任务，
+  `deny` 停住已授权并已入队的任务（`403 action_denied`），通道以 `waiting.reason=policy_denied` 上报。
 - **节点面**（Ed25519 请求签名）`/v1/node/...`：节点注册时提供公钥（接受 base64/hex/`ssh-ed25519`
   行，统一存规范 base64），之后每个请求对
   `timestamp\nnonce\nMETHOD\npath[?query]\nsha256(body)` 签名；时间窗 300 秒，nonce 落库
@@ -315,24 +328,28 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
   置为 `unknown`（`node_disconnected`，优雅 `close` 为 `node_closed`），**不自动重放**，重连后可
   回报真实结果；断连标记在取消屏蔽（cancellation-shielded）作用域内执行，服务关闭时不会被静默跳过。
 
-91 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
+129 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
 审批绑定（指纹规范化、载荷/节点/租户/动作精确匹配、待批与驳回不放行、未知 kind 需审批、派发前复议）
-与原子领取（条件 UPDATE 只能领一次、陈旧对象无法抢占、重复派发不重复记账），以及审批生命周期（批准
-写入窗口与预算、到期不放行且清扫幂等并限本租户、撤销 pending/approved、用尽后拒绝新任务但已授权任务
-仍可启动、决定方只能收紧 `maxUses`、时间戳恒带 UTC 偏移），并**实际启动 uvicorn** 用真 WebSocket
-客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签名 heartbeat、握手→下发→`succeeded`→ack、
-中断→`unknown`/`node_disconnected`→`recoverable`，以及 409 `approval_required`（报文含指纹）→批准→
-派发完成→换载荷被拒→审批撤销后以 `waiting` 上报且任务留在 `queued`，再加一整轮生命周期：单次授权
-建一单后即用尽、回填过期的决定被扫为 `expired` 并以 `waiting.reason=approval_expired` 挡住队列、
-撤销以 `approval_revoked` 挡、`maxUses` 由 3 收到 1 只放一单。
+与原子领取（条件 UPDATE 只能领一次、陈旧对象无法抢占、重复派发不重复记账），审批生命周期（批准写入
+窗口与预算、到期不放行且清扫幂等并限本租户、撤销 pending/approved、用尽后拒绝新任务但已授权任务仍可
+启动、决定方只能收紧 `maxUses`、时间戳恒带 UTC 偏移），以及按租户策略（风险表与共享词汇一致、内建两组
+工具、声明收紧与放宽、环境默认、`deny` 的绝对性与分层、声明边界与 `dangerous:auto` 被拒、策略变更触及
+已排队工作），并**实际启动 uvicorn** 用真 WebSocket 客户端 + 真 Ed25519 签名跑通：healthz、无 token
+401、签名 heartbeat、握手→下发→`succeeded`→ack、中断→`unknown`/`node_disconnected`→`recoverable`，
+以及 409 `approval_required`（报文含指纹）→批准→派发完成→换载荷被拒→审批撤销后以 `waiting` 上报且任务
+留在 `queued`，再加一整轮生命周期：单次授权建一单后即用尽、回填过期的决定被扫为 `expired` 并以
+`waiting.reason=approval_expired` 挡住队列、撤销以 `approval_revoked` 挡、`maxUses` 由 3 收到 1 只放
+一单，再加一整轮策略：未声明的 `mcp.*` 被闭集默认拒绝、声明 `read` 后无需决定即运行、重声明
+`server.exec` 为 409、租户 TTL 给下一次决定 120 秒窗、`dangerous:auto` 为 422、`deny` 既拒不新建的
+`server.exec` 又停住已授权的那一单并以 `policy_denied` 上报。
 `pnpm check` 已纳入该步骤（`services/control-plane/.venv` 存在才跑，否则打印明确 skip 原因）。
 
 **仍待做**：PostgreSQL 本身（本机无 PG，迁移与查询只在 SQLite 验证；JSON 非 JSONB、连接池/重启行为
 未测）、TLS/`wss://` 终结与 mTLS（当前是请求签名 + 明文绑定）、真正跑第二个 worker 进程验证任务分配
 （条件 UPDATE、扣减与重放表均按跨进程正确性设计，未实测）、每租户角色授权（单一共享 token，且同一
-调用方可既申请又批准、也可既批准又撤销）、**审批要求与 TTL 仍是全局单值**（`approval_ttl_seconds` 是
-常量、只读 kind 名单是固定表，尚不能按租户/环境配置谁必须审批；`expired` 已是真状态但"什么才该被
-审批"不可配）、服务端 ping 定时器、Prometheus 指标。安装器与真机验收同 3.5。
+调用方可既申请又批准、也可既批准又撤销，还可重写这些决定所依据的策略——策略变更本身不是受审动作）、
+按 MCP 目录解析 `mcp.*` 的风险（当前只能靠租户声明，没有宿主 supervisor 那样的目录）、服务端 ping
+定时器、Prometheus 指标。安装器与真机验收同 3.5。
 
 ### 3.7 真机验收
 
@@ -376,9 +393,9 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
 5. **host.tool.execute 收尾**（3.4 的最后一块）：非 MCP 只读分支与 `mcp.*` 门禁对齐均已完成。
 6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
 7. **控制平面**（3.6，独立阶段）：可复核切片已落地（`services/control-plane/`，运维面 + 节点
-   Ed25519 签名面 + `WS /v1/node/channel` + 审批强制绑定、生命周期与原子派发，本地 SQLite 与真
-   uvicorn/真 WebSocket 验证，已纳入 `pnpm check`）；PostgreSQL 部署、TLS/mTLS、多 worker 并发与
-   按租户策略待相应实现/环境。
+   Ed25519 签名面 + `WS /v1/node/channel` + 审批强制绑定、生命周期、按租户策略与原子派发，本地
+   SQLite 与真 uvicorn/真 WebSocket 验证，已纳入 `pnpm check`）；PostgreSQL 部署、TLS/mTLS 与多
+   worker 并发待相应环境。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
 
 ---

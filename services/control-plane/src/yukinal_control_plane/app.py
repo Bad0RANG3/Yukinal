@@ -312,6 +312,87 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
             api_key_ref=body.api_key_ref,
         )
 
+    # ── the tenant's action policy ───────────────────────────────────────────
+
+    @app.get("/v1/tenants/{tenant_id}/policy", response_model=schemas.TenantPolicyView)
+    async def get_tenant_policy(
+        tenant_id: str,
+        session: AsyncSession = Depends(get_session),
+        _actor: str = Depends(current_actor),
+    ) -> dict:
+        return await service.get_tenant_policy(session, tenant_id)
+
+    @app.put("/v1/tenants/{tenant_id}/policy", response_model=schemas.TenantPolicyView)
+    async def put_tenant_policy(
+        tenant_id: str,
+        body: schemas.TenantPolicyUpdate,
+        session: AsyncSession = Depends(get_session),
+        _actor: str = Depends(current_actor),
+    ) -> dict:
+        """Set it, or change one field of it.
+
+        Omitting ``tierModes`` derives them from the environment; sending them is
+        how a tenant departs from the built-in table without changing what the
+        environment means.
+        """
+        return await service.upsert_tenant_policy(
+            session,
+            tenant_id=tenant_id,
+            environment=body.environment,
+            tier_modes=body.tier_modes.model_dump() if body.tier_modes else None,
+            approval_ttl_seconds=body.approval_ttl_seconds,
+            updated_by=body.updated_by,
+        )
+
+    @app.delete("/v1/tenants/{tenant_id}/policy", status_code=204)
+    async def delete_tenant_policy(
+        tenant_id: str,
+        session: AsyncSession = Depends(get_session),
+        actor: str = Depends(current_actor),
+    ) -> None:
+        await service.delete_tenant_policy(session, tenant_id=tenant_id, actor=actor)
+
+    @app.get(
+        "/v1/tenants/{tenant_id}/tool-policies",
+        response_model=list[schemas.ToolPolicyView],
+    )
+    async def list_tool_policies(
+        tenant_id: str,
+        session: AsyncSession = Depends(get_session),
+        _actor: str = Depends(current_actor),
+    ) -> list:
+        return await service.list_tool_policies(session, tenant_id)
+
+    @app.put(
+        "/v1/tenants/{tenant_id}/tool-policies/{kind}",
+        response_model=schemas.ToolPolicyView,
+    )
+    async def put_tool_policy(
+        tenant_id: str,
+        kind: str,
+        body: schemas.ToolPolicyUpdate,
+        session: AsyncSession = Depends(get_session),
+        _actor: str = Depends(current_actor),
+    ) -> dict:
+        return await service.upsert_tool_policy(
+            session,
+            tenant_id=tenant_id,
+            kind=kind,
+            risk=body.risk,
+            updated_by=body.updated_by,
+        )
+
+    @app.delete("/v1/tenants/{tenant_id}/tool-policies/{kind}", status_code=204)
+    async def delete_tool_policy(
+        tenant_id: str,
+        kind: str,
+        session: AsyncSession = Depends(get_session),
+        actor: str = Depends(current_actor),
+    ) -> None:
+        await service.delete_tool_policy(
+            session, tenant_id=tenant_id, kind=kind, actor=actor
+        )
+
     # ── approvals ────────────────────────────────────────────────────────────
 
     @app.get("/v1/tenants/{tenant_id}/approvals", response_model=list[schemas.ApprovalView])

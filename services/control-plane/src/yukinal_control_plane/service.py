@@ -9,6 +9,7 @@ row exists elsewhere.
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select, update
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import actions, models, nodeauth
 from .errors import (
+    ActionDenied,
     ApprovalRequired,
     Conflict,
     InvalidTransition,
@@ -344,6 +346,282 @@ async def node_tasks(session: AsyncSession, node: models.Node) -> list[models.Ta
     )
 
 
+# ── the tenant's action policy ───────────────────────────────────────────────
+#
+# What a kind *is* (its risk) and what happens to it (its tier's mode) are two
+# separate questions, and the answer to the second is per tenant. Resolving it
+# once per request keeps a single HTTP call from answering the two questions
+# differently halfway through, which is what would happen if the policy were read
+# again inside the dispatch loop.
+
+
+@dataclass(frozen=True)
+class TenantActionPolicy:
+    """A tenant's policy, resolved: declared risks plus the per-tier modes."""
+
+    declared: dict[str, str]
+    tier_modes: dict[str, str]
+
+    def risk(self, kind: str) -> str:
+        return actions.effective_risk(kind, self.declared)
+
+    def mode(self, kind: str) -> str:
+        return actions.action_mode(kind, declared=self.declared, tier_modes=self.tier_modes)
+
+    def needs_approval(self, kind: str) -> bool:
+        return self.mode(kind) == "ask"
+
+
+async def load_action_policy(session: AsyncSession, tenant_id: str) -> TenantActionPolicy:
+    """Read a tenant's policy, falling back to the closed default."""
+    stored = await session.get(models.TenantPolicy, tenant_id)
+    rows = await session.execute(
+        select(models.ToolPolicy.kind, models.ToolPolicy.risk).where(
+            models.ToolPolicy.tenant_id == tenant_id
+        )
+    )
+    declared = {kind: risk for kind, risk in rows.all()}
+    tier_modes = (
+        dict(stored.tier_modes)
+        if stored is not None
+        else actions.default_tier_modes(actions.DEFAULT_ENVIRONMENT)
+    )
+    return TenantActionPolicy(declared=declared, tier_modes=tier_modes)
+
+
+def effective_policy_view(
+    declared: dict[str, str], tier_modes: dict[str, str]
+) -> list[dict]:
+    """Every kind the control plane can name, with what it resolves to.
+
+    Built-in kinds come first in a stable order so the listing can be diffed
+    between two calls; declared kinds the control plane does not ship follow.
+    """
+    builtin = sorted(actions.READ_ONLY_TASK_KINDS | actions.ALWAYS_EFFECTFUL_TASK_KINDS)
+    extra = sorted(kind for kind in declared if kind not in actions.READ_ONLY_TASK_KINDS
+                   and kind not in actions.ALWAYS_EFFECTFUL_TASK_KINDS)
+    entries: list[dict] = []
+    for kind in builtin + extra:
+        risk = actions.effective_risk(kind, declared)
+        if kind in actions.ALWAYS_EFFECTFUL_TASK_KINDS:
+            # The host's set cannot be redeclared (the API refuses it), so even a
+            # row written another way is reported as the host's, not the tenant's.
+            source = "host"
+        elif kind in declared:
+            source = "declared"
+        elif actions.builtin_risk(kind) is not None:
+            source = "host"
+        else:
+            source = "default"
+        entries.append(
+            {
+                "kind": kind,
+                "risk": risk,
+                "tier": actions.tier_of(risk),
+                "mode": actions.action_mode(
+                    kind, declared=declared, tier_modes=tier_modes
+                ),
+                "source": source,
+            }
+        )
+    return entries
+
+
+async def get_tenant_policy(session: AsyncSession, tenant_id: str) -> dict:
+    """The tenant's policy, or the defaults it would get with no row."""
+    await require_tenant(session, tenant_id)
+    row = await session.get(models.TenantPolicy, tenant_id)
+    if row is None:
+        return {
+            "tenant_id": tenant_id,
+            "environment": actions.DEFAULT_ENVIRONMENT,
+            "tier_modes": actions.default_tier_modes(actions.DEFAULT_ENVIRONMENT),
+            "approval_ttl_seconds": actions.DEFAULT_APPROVAL_TTL_SECONDS,
+            "stored": False,
+            "updated_by": None,
+            "updated_at": None,
+        }
+    return {
+        "tenant_id": tenant_id,
+        "environment": row.environment,
+        "tier_modes": dict(row.tier_modes),
+        "approval_ttl_seconds": row.approval_ttl_seconds,
+        "stored": True,
+        "updated_by": row.updated_by,
+        "updated_at": row.updated_at,
+    }
+
+
+async def upsert_tenant_policy(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    updated_by: str,
+    environment: str | None = None,
+    tier_modes: dict[str, str] | None = None,
+    approval_ttl_seconds: int | None = None,
+) -> dict:
+    """Set the tenant's policy, validating it before anything is stored.
+
+    Modes are stored resolved rather than derived on read, so changing a built-in
+    default later cannot silently re-open a tenant that had already chosen.
+    """
+    await require_tenant(session, tenant_id)
+    row = await session.get(models.TenantPolicy, tenant_id)
+
+    next_environment = environment or (row.environment if row else actions.DEFAULT_ENVIRONMENT)
+    if next_environment not in actions.ENVIRONMENTS:
+        raise Conflict(f"unknown environment `{next_environment}`")
+    if tier_modes is not None:
+        next_modes = dict(tier_modes)
+    elif environment is not None:
+        next_modes = actions.default_tier_modes(next_environment)
+    elif row is not None:
+        next_modes = dict(row.tier_modes)
+    else:
+        next_modes = actions.default_tier_modes(next_environment)
+    try:
+        actions.validate_tier_modes(next_modes)
+    except ValueError as error:
+        raise Conflict(str(error)) from error
+
+    next_ttl = (
+        approval_ttl_seconds
+        if approval_ttl_seconds is not None
+        else (row.approval_ttl_seconds if row else actions.DEFAULT_APPROVAL_TTL_SECONDS)
+    )
+    if not (
+        actions.MIN_APPROVAL_TTL_SECONDS <= next_ttl <= actions.MAX_APPROVAL_TTL_SECONDS
+    ):
+        raise Conflict(
+            f"approval TTL must be between {actions.MIN_APPROVAL_TTL_SECONDS} and "
+            f"{actions.MAX_APPROVAL_TTL_SECONDS} seconds"
+        )
+
+    if row is None:
+        row = models.TenantPolicy(tenant_id=tenant_id)
+        session.add(row)
+    row.environment = next_environment
+    row.tier_modes = next_modes
+    row.approval_ttl_seconds = next_ttl
+    row.updated_by = updated_by
+    row.updated_at = utc_now()
+    await session.flush()
+    await record_audit(
+        session,
+        tenant_id=tenant_id,
+        actor=updated_by,
+        action="tenant_policy.set",
+        subject_type="tenant_policy",
+        subject_id=tenant_id,
+        detail={
+            "environment": next_environment,
+            "tierModes": next_modes,
+            "approvalTtlSeconds": next_ttl,
+        },
+    )
+    return await get_tenant_policy(session, tenant_id)
+
+
+async def delete_tenant_policy(
+    session: AsyncSession, *, tenant_id: str, actor: str
+) -> None:
+    """Drop the stored policy, so the tenant falls back to the defaults."""
+    await require_tenant(session, tenant_id)
+    row = await session.get(models.TenantPolicy, tenant_id)
+    if row is None:
+        raise NotFound(f"tenant `{tenant_id}` has no stored policy")
+    await session.delete(row)
+    await session.flush()
+    await record_audit(
+        session,
+        tenant_id=tenant_id,
+        actor=actor,
+        action="tenant_policy.clear",
+        subject_type="tenant_policy",
+        subject_id=tenant_id,
+        detail={},
+    )
+
+
+async def list_tool_policies(session: AsyncSession, tenant_id: str) -> list[dict]:
+    await require_tenant(session, tenant_id)
+    policy = await load_action_policy(session, tenant_id)
+    return effective_policy_view(policy.declared, policy.tier_modes)
+
+
+async def upsert_tool_policy(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    kind: str,
+    risk: str,
+    updated_by: str,
+) -> dict:
+    """Declare what one kind is for this tenant."""
+    await require_tenant(session, tenant_id)
+    if risk not in actions.RISK_LEVELS:
+        raise Conflict(f"unknown risk level `{risk}`")
+    if kind in actions.ALWAYS_EFFECTFUL_TASK_KINDS:
+        # Declaring a risk for a tool the host decides would imply the
+        # declaration changes the outcome. It cannot, so it is refused instead
+        # of being stored and quietly ignored.
+        raise Conflict(
+            f"the host always treats `{kind}` as effectful; it cannot be redeclared"
+        )
+    row = await session.scalar(
+        select(models.ToolPolicy).where(
+            models.ToolPolicy.tenant_id == tenant_id, models.ToolPolicy.kind == kind
+        )
+    )
+    if row is None:
+        row = models.ToolPolicy(
+            id=new_id("tpl"), tenant_id=tenant_id, kind=kind, risk=risk
+        )
+        session.add(row)
+    else:
+        row.risk = risk
+    row.updated_by = updated_by
+    row.updated_at = utc_now()
+    await session.flush()
+    await record_audit(
+        session,
+        tenant_id=tenant_id,
+        actor=updated_by,
+        action="tool_policy.set",
+        subject_type="tool_policy",
+        subject_id=row.id,
+        detail={"kind": kind, "risk": risk},
+    )
+    policy = await load_action_policy(session, tenant_id)
+    entries = effective_policy_view(policy.declared, policy.tier_modes)
+    return next(entry for entry in entries if entry["kind"] == kind)
+
+
+async def delete_tool_policy(
+    session: AsyncSession, *, tenant_id: str, kind: str, actor: str
+) -> None:
+    await require_tenant(session, tenant_id)
+    row = await session.scalar(
+        select(models.ToolPolicy).where(
+            models.ToolPolicy.tenant_id == tenant_id, models.ToolPolicy.kind == kind
+        )
+    )
+    if row is None:
+        raise NotFound(f"no declared risk for `{kind}` in this tenant")
+    await session.delete(row)
+    await session.flush()
+    await record_audit(
+        session,
+        tenant_id=tenant_id,
+        actor=actor,
+        action="tool_policy.clear",
+        subject_type="tool_policy",
+        subject_id=row.id,
+        detail={"kind": kind},
+    )
+
+
 # ── action approval binding ──────────────────────────────────────────────────
 #
 # An effectful task is only created, and only leaves the queue, when an approved
@@ -360,11 +638,11 @@ def task_action_fingerprint(*, kind: str, node_id: str, payload: dict) -> str:
 
 
 async def approval_ttl_seconds(session: AsyncSession, tenant_id: str) -> int:
-    """How long an approval stays usable in this tenant.
-
-    One default for now; this is the seam where a tenant-level policy lands.
-    """
-    return actions.DEFAULT_APPROVAL_TTL_SECONDS
+    """How long an approval stays usable in this tenant."""
+    policy = await session.get(models.TenantPolicy, tenant_id)
+    if policy is None:
+        return actions.DEFAULT_APPROVAL_TTL_SECONDS
+    return policy.approval_ttl_seconds
 
 
 def as_utc(value: datetime) -> datetime:
@@ -492,15 +770,30 @@ async def consume_approval(session: AsyncSession, approval_id: str) -> bool:
 
 
 async def require_action_approval(
-    session: AsyncSession, *, tenant_id: str, kind: str, node_id: str, payload: dict
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    kind: str,
+    node_id: str,
+    payload: dict,
+    policy: TenantActionPolicy | None = None,
 ) -> models.Approval | None:
     """The decision that authorises this action, or ``None`` if none is needed.
 
-    Raises ``ApprovalRequired`` when the kind is effectful and nothing usable
-    matches, so no caller has to reimplement the check.
+    Raises ``ApprovalRequired`` when the policy asks for a decision and nothing
+    usable matches, and ``ActionDenied`` when the policy refuses the tier
+    outright, so no caller has to reimplement either rule.
     """
-    if not actions.requires_approval(kind):
+    policy = policy or await load_action_policy(session, tenant_id)
+    mode = policy.mode(kind)
+    if mode == "auto":
         return None
+    if mode == "deny":
+        raise ActionDenied(
+            f"task kind `{kind}` is refused by this tenant's policy "
+            f"(risk `{policy.risk(kind)}`, tier `{actions.tier_of(policy.risk(kind))}`, "
+            f"mode `deny`)"
+        )
     await expire_stale_approvals(session, tenant_id=tenant_id)
     approval = await available_approval(
         session, tenant_id=tenant_id, kind=kind, node_id=node_id, payload=payload
@@ -515,16 +808,25 @@ async def require_action_approval(
 
 
 async def task_authorisation_problem(
-    session: AsyncSession, task: models.Task
+    session: AsyncSession,
+    task: models.Task,
+    policy: TenantActionPolicy | None = None,
 ) -> str | None:
     """Why this task may not start, or ``None`` if it may.
 
     Dispatch re-checks the decision the task recorded, so a decision that lapsed
     or was withdrawn between creation and dispatch stops the task instead of being
-    honoured on a stale reading.
+    honoured on a stale reading. The policy is re-read for the same reason: a tier
+    the tenant has since denied is denied now, even for work it authorised then,
+    because a denial is absolute and a tightening must take effect on the queue
+    rather than only on new work.
     """
-    if not actions.requires_approval(task.kind):
+    policy = policy or await load_action_policy(session, task.tenant_id)
+    mode = policy.mode(task.kind)
+    if mode == "auto":
         return None
+    if mode == "deny":
+        return "policy_denied"
     if task.approval_id is None:
         return "approval_required"
     approval = await session.get(models.Approval, task.approval_id)
@@ -537,8 +839,16 @@ async def task_authorisation_problem(
     return None
 
 
-async def require_task_authorisation(session: AsyncSession, task: models.Task) -> None:
-    problem = await task_authorisation_problem(session, task)
+async def require_task_authorisation(
+    session: AsyncSession,
+    task: models.Task,
+    policy: TenantActionPolicy | None = None,
+) -> None:
+    problem = await task_authorisation_problem(session, task, policy)
+    if problem == "policy_denied":
+        raise ActionDenied(
+            f"task `{task.id}` of kind `{task.kind}` is refused by this tenant's policy"
+        )
     if problem is not None:
         raise ApprovalRequired(
             f"task `{task.id}` may not start: its authorising approval is not usable ({problem})"
@@ -575,10 +885,12 @@ async def assign_queued_tasks(
 
     Assignment is a conditional update, so a second worker that saw the same
     queued row loses the race instead of handing one task to two connections. A
-    task whose authorising decision is missing, lapsed or withdrawn is reported in
-    ``waiting`` with the reason rather than silently dropped, so a stalled queue is
-    visible instead of looking idle.
+    task the tenant's policy no longer lets through — its decision is missing,
+    lapsed or withdrawn, or the tier is now denied — is reported in ``waiting``
+    with the reason rather than silently dropped, so a stalled queue is visible
+    instead of looking idle.
     """
+    policy = await load_action_policy(session, node.tenant_id)
     candidates = (
         await session.scalars(
             select(models.Task)
@@ -589,7 +901,7 @@ async def assign_queued_tasks(
     assigned: list[models.Task] = []
     waiting: list[dict] = []
     for task in candidates:
-        problem = await task_authorisation_problem(session, task)
+        problem = await task_authorisation_problem(session, task, policy)
         if problem is not None:
             waiting.append(
                 {
@@ -1034,6 +1346,7 @@ __all__ = [
     "APPROVAL_DECISIONS",
     "APPROVAL_STATES",
     "TASK_STATUSES",
+    "TenantActionPolicy",
     "approval_ttl_seconds",
     "assign_queued_tasks",
     "authenticate_node",
@@ -1046,7 +1359,11 @@ __all__ = [
     "create_task",
     "create_tenant",
     "decide_approval",
+    "delete_tenant_policy",
+    "delete_tool_policy",
+    "effective_policy_view",
     "expire_stale_approvals",
+    "get_tenant_policy",
     "heartbeat",
     "list_approvals",
     "list_audit",
@@ -1054,6 +1371,8 @@ __all__ = [
     "list_nodes",
     "list_tasks",
     "list_tenants",
+    "list_tool_policies",
+    "load_action_policy",
     "mark_node_disconnected",
     "metrics",
     "new_id",
@@ -1075,5 +1394,7 @@ __all__ = [
     "touch_node",
     "transition_node_task",
     "transition_task",
+    "upsert_tenant_policy",
+    "upsert_tool_policy",
     "utc_now",
 ]

@@ -105,7 +105,7 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业尚未实现。
 
-`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，91 项，跑在 SQLite 上，覆盖 API、租户隔离、节点 Ed25519 签名与重放拒绝、节点通道与断连 `unknown`、任务状态机、偏唯一索引并发控制、审批指纹绑定与派发前复议、审批有效期/撤销/使用预算、条件 UPDATE 原子领取、凭据边界与 Alembic 迁移一致性）。该步骤只在 `services/control-plane/.venv` 存在时执行，缺失时会打印明确的 skip 原因而不是静默通过。控制平面自身的 PostgreSQL 部署、TLS/`wss://` 终结、真正第二个 worker 进程的分配竞态与按租户/环境策略仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
+`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，129 项，跑在 SQLite 上，覆盖 API、租户隔离、节点 Ed25519 签名与重放拒绝、节点通道与断连 `unknown`、任务状态机、偏唯一索引并发控制、审批指纹绑定与派发前复议、审批有效期/撤销/使用预算、按租户策略（风险表、档位模式、环境默认、`deny` 的绝对性、声明边界）、条件 UPDATE 原子领取、凭据边界与 Alembic 迁移一致性）。该步骤只在 `services/control-plane/.venv` 存在时执行，缺失时会打印明确的 skip 原因而不是静默通过。控制平面自身的 PostgreSQL 部署、TLS/`wss://` 终结、真正第二个 worker 进程的分配竞态与按 MCP 目录解析风险仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
 
 ## 发布验收
 

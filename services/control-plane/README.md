@@ -27,10 +27,10 @@ migrations/                    Alembic environment and revisions
 src/yukinal_control_plane/
   config.py                    environment settings, fail-closed token check
   db.py                        async engine/session and the declarative base
-  models.py                    tenants, nodes, tasks, model configs, approvals, audit
+  models.py                    tenants, nodes, tasks, model configs, approvals, policies, audit
   schemas.py                   request/response models (unknown fields forbidden)
   security.py                  the credential boundary (secret-shaped fields rejected)
-  actions.py                   which task kinds need approval, and the fingerprint
+  actions.py                   what a kind is (risk), what its tier does, and the fingerprint
   nodeauth.py                  Ed25519 key parsing, canonical request, signatures
   service.py                   domain operations, one audit event per mutation
   channel.py                   the node WebSocket protocol and disconnect recovery
@@ -41,6 +41,7 @@ tests/test_node_auth.py        registration and signature/replay boundaries
 tests/test_node_channel.py     assignment, status and disconnect recovery
 tests/test_approvals.py        approval binding and atomic task assignment
 tests/test_approval_lifecycle.py  expiry, withdrawal, use counts
+tests/test_policy.py           the risk table, per-tenant policy and what it reaches
 ```
 
 ## Run
@@ -124,13 +125,15 @@ the unresolved tasks for a human decision.
 
 ## Approvals gate effectful work
 
-A task kind is dispatched only if it is a known read-only observation, or if an
-*approved* decision matches its exact action. The kinds tracked as observations
-are the host's own plan-bound reads (`server.info`, `server.logs`, `docker.ps`,
-`docker.inspect`, `filesystem.read`, `systemd.inspect`, `package.inspect`,
-`filesystem.backup.list`, `filesystem.backup.retention`, …); everything else —
-including an unrecognised kind, and every `mcp.*` tool, whose risk the control
-plane cannot resolve — needs an approval. That is the closed default.
+A task kind is dispatched only if the tenant's policy lets its tier through
+without a decision, or if an *approved* decision matches its exact action. By
+default the kinds that run without one are the host's own plan-bound reads
+(`server.info`, `server.logs`, `docker.ps`, `docker.inspect`, `filesystem.read`,
+`systemd.inspect`, `package.inspect`, `filesystem.backup.list`,
+`filesystem.backup.retention`, …); everything else — including an unrecognised
+kind, and every `mcp.*` tool, whose risk the control plane cannot resolve — needs
+an approval. That is the closed default, and a tenant may change it (see *the
+tenant's policy* below).
 
 An approval is requested with the action, the node and the payload; the server
 computes the fingerprint from them (`sha256` of the canonical
@@ -143,11 +146,13 @@ fingerprint, so approving `systemctl restart nginx` on node A does not authorise
 The gate is checked twice: when the task is created (the queue means "ready to
 dispatch", so a task that can never run would otherwise hold the node's single
 active slot) and again on the `queued → running` edge, which catches a decision
-that lapsed or was withdrawn in between. A refusal is `409 approval_required` and
-names the reason (`approval_expired`, `approval_revoked`, …) and the fingerprint
-to approve. On the channel the same rule holds: a task that is not cleared is not
-handed over, and `ready`/`synced` report it under `waiting` with its reason and
-fingerprint instead of looking like an idle node.
+that lapsed or was withdrawn in between, or a policy that changed under the task.
+A refusal is `409 approval_required` and names the reason (`approval_expired`,
+`approval_revoked`, …) and the fingerprint to approve; a task the policy refuses
+outright is `403 action_denied`, because no decision could clear it. On the
+channel the same rule holds: a task that is not cleared is not handed over, and
+`ready`/`synced` report it under `waiting` with its reason and fingerprint instead
+of looking like an idle node.
 
 Assignment itself is a conditional update (`... WHERE id = ? AND status =
 'queued'`), so two workers that both selected the same queued task cannot both
@@ -187,6 +192,55 @@ timezone type and returns the naive wall clock it stored even for a
 back different depending on whether it had been read from the database or echoed
 from memory.
 
+## The tenant's policy
+
+The code above answers two questions that are deliberately separate. What a kind
+*is* is a fact; what happens to it is a decision. The control plane writes the
+decision down per tenant, in the same vocabulary as the shared risk layer
+(`packages/shared/src/types/risk.ts`), so the two cannot drift into two languages.
+
+A kind's **risk** comes from, in order: the host's own declaration for its own
+built-in tools, this tenant's declaration, or the closed default (`high`). The
+host declares two sets and both are mirrored exactly — its plan-bound
+observations read, and its named state-changing tools (`server.exec`,
+`docker.restart`, `systemd.restart`, `package.install`, `filesystem.write`,
+`filesystem.edit`, `filesystem.backup`, `filesystem.backup.cleanup`,
+`filesystem.restore`) always change the target. Everything else, every `mcp.*`
+kind included, is something the control plane cannot resolve the way the host's
+MCP supervisor can, so it is `high` until a tenant says otherwise.
+
+That risk collapses into a permission tier (`read`/`write`/`dangerous`) and the
+tenant's **tier modes** decide the outcome:
+
+| mode | meaning |
+| ---- | ------- |
+| `auto` | runs without a decision |
+| `ask`  | needs an approved decision |
+| `deny` | refused outright, at creation and at dispatch |
+
+`GET /v1/tenants/{id}/policy` reports the effective policy (with `stored: false`
+and the production defaults when the tenant has none); `PUT` sets it. Naming an
+`environment` derives its tier table — `local` and `production` ask for a write,
+`development` and `staging` let it through, and an unknown environment is treated
+as production so it can never be *more* permissive — while sending `tierModes`
+explicitly is how a tenant departs from that table without changing what the
+environment means. `DELETE` drops the row so the tenant falls back to the
+defaults. The same `PUT` carries `approvalTtlSeconds` (60–86400), which is the
+window a decision gets in that tenant.
+
+`GET /v1/tenants/{id}/tool-policies` lists every kind the control plane can name
+with its risk, tier, mode and where the risk came from (`host`, `declared` or
+`default`); `PUT .../tool-policies/{kind}` declares one and `DELETE` clears it.
+Declaring a kind is how a tenant says it trusts a `mcp.*` tool the control plane
+does not ship. Two things cannot be declared away: the host's named effectful
+tools, whose requirement is checked *before* any declaration in the decision
+itself (not only in the endpoint that refuses to store one), and the `dangerous`
+tier, which is never `auto`. So there is no configuration, however written, that
+lets `server.exec` run without a decision.
+
+Tier modes are stored resolved rather than derived on read: changing a built-in
+default later cannot silently re-open a tenant that had already chosen.
+
 ## What the API enforces
 
 - **Tenant isolation.** Every node, task, approval and model config is scoped to
@@ -195,6 +249,11 @@ from memory.
 - **Approval before an effectful action.** See above: the approval is bound to
   the exact action by fingerprint, it has a window and a use budget, and both
   creation and dispatch check it.
+- **A tenant's policy decides, and a denial is absolute.** Which tier needs a
+  decision and for how long are per tenant, and a tier set to `deny` refuses work
+  at creation and stops a task already authorised, because no decision can clear a
+  denial. Stored modes are the authority; the API refuses a declaration that would
+  lower the host's own effectful set, and refuses `dangerous: auto`.
 - **One active task per node.** A partial unique index (`status IN ('queued',
   'running')`) makes the database, not just the handler, the concurrency
   control, and assignment claims the row with a conditional update. Terminal
@@ -215,7 +274,7 @@ approval counts.
 ## Verified and unverified
 
 Verified locally against SQLite, with the real FastAPI app, the real SQLAlchemy
-models and the real Alembic migrations (91 tests):
+models and the real Alembic migrations (129 tests):
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
@@ -237,7 +296,13 @@ refused while the task that was already authorised still started, a backdated
 decision was swept to `expired` (idempotently) and stopped its queued task with
 `waiting.reason = approval_expired`, a withdrawal did the same with
 `approval_revoked`, and a decider narrowing `maxUses` from 3 to 1 left exactly one
-task authorisable.
+task authorisable. The tenant policy was driven the same way too: an undeclared
+`mcp.*` kind was refused under the closed default, a declaration of `read` was
+accepted and let it run with no approval recorded, redeclaring the host's
+`server.exec` was `409`, the tenant's own TTL put a 120-second window on the next
+decision, `dangerous: auto` was `422`, and setting `dangerous: deny` refused a new
+`server.exec` with `403 action_denied` *and* stopped the one already authorised,
+which the channel then reported as `waiting.reason = policy_denied`.
 
 Not yet verified, and not implemented:
 
@@ -254,12 +319,13 @@ Not yet verified, and not implemented:
   construction, but no second worker process has been run against one database.
 - **Authorization roles.** One shared operator token can act on any tenant; there
   are no per-tenant roles or scopes. In particular the same caller can request an
-  approval and decide it, and the same caller can decide and revoke it.
-- **Where the requirement comes from.** TTL and the set of kinds that need an
-  approval are still single defaults for the whole service, not per-tenant or
-  per-environment policy: `approval_ttl_seconds` is a constant and the
-  observation list is a fixed table. `expired` is real, but what *should* need
-  approval cannot be configured yet.
+  approval and decide it, the same caller can decide and revoke it, and the same
+  caller can rewrite the policy those decisions are made under — a policy change
+  is not itself an approved action.
+- **Per-kind risk the control plane does not ship.** A `mcp.*` kind runs without a
+  decision only because a tenant declared it safe; there is no catalogue that
+  resolves it from the MCP server the way the host's supervisor does, so the
+  declaration is the whole answer.
 - **Liveness.** There is no server-initiated ping timer; a node's `last_seen_at`
   is refreshed by its own messages, and a quiet node is noticed when its socket
   drops.

@@ -25,7 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .actions import action_fingerprint
+from . import actions
 from .db import Base
 from .nodeauth import key_fingerprint
 
@@ -156,7 +156,7 @@ class Task(Base):
         an approval stores the same value, and a mismatch between the two never
         clears the task.
         """
-        return action_fingerprint(
+        return actions.action_fingerprint(
             kind=self.kind, node_id=self.node_id, payload=self.payload or {}
         )
 
@@ -236,3 +236,53 @@ class AuditEvent(Base):
     subject_id: Mapped[str] = mapped_column(String(64), nullable=False)
     detail: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TenantPolicy(Base):
+    """The tenant's answer to "what happens to each permission tier".
+
+    One row per tenant, absent when the tenant has not asked for anything — an
+    absent row means the production defaults, so creating a tenant never has to
+    create a policy. The environment is kept as the label it was derived from;
+    the modes are stored resolved, so what the API reads is what it enforces and
+    a later change to a built-in default cannot silently re-open a tenant.
+    """
+
+    __tablename__ = "tenant_policies"
+
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    environment: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=actions.DEFAULT_ENVIRONMENT
+    )
+    tier_modes: Mapped[dict] = mapped_column(JSON, nullable=False)
+    approval_ttl_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=actions.DEFAULT_APPROVAL_TTL_SECONDS
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(200))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ToolPolicy(Base):
+    """A tenant's declaration of what one task kind is.
+
+    This is the delegation ADR 0005 talks about: the control plane cannot resolve
+    the risk of a kind it does not ship, so a tenant that trusts one says so
+    explicitly and the declaration is auditable, rather than the default having
+    to be open for everything.
+    """
+
+    __tablename__ = "tool_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "kind", name="uq_tool_policies_tenant_kind"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    risk: Mapped[str] = mapped_column(String(16), nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(String(200))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

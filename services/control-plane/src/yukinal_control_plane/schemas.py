@@ -232,6 +232,74 @@ class AuditView(_View):
     at: datetime
 
 
+# The policy models mirror the shared risk layer: a level collapses into a tier,
+# and the tier's mode decides `auto` / `ask` / `deny` (see `actions`).
+
+
+class TierModes(BaseModel):
+    """What happens to each permission tier in this tenant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    read: str = Field(pattern=r"^(auto|ask|deny)$")
+    write: str = Field(pattern=r"^(auto|ask|deny)$")
+    dangerous: str = Field(pattern=r"^(auto|ask|deny)$")
+
+    @field_validator("dangerous")
+    @classmethod
+    def _dangerous_is_never_auto(cls, value: str) -> str:
+        # No built-in policy auto-approves the dangerous tier, and every kind the
+        # host always treats as effectful is `high`, so allowing it would be a way
+        # to configure the approval requirement away for exactly those actions.
+        if value == "auto":
+            raise ValueError("the dangerous tier cannot be set to `auto`")
+        return value
+
+
+class TenantPolicyView(_View):
+    tenant_id: str
+    environment: str
+    tier_modes: dict[str, str]
+    approval_ttl_seconds: int
+    # False when the tenant has no stored row and this is what it would get.
+    stored: bool
+    updated_by: str | None
+    updated_at: datetime | None
+
+
+class TenantPolicyUpdate(_Request):
+    environment: str | None = Field(
+        default=None, pattern="^(" + "|".join(actions.ENVIRONMENTS) + ")$"
+    )
+    tier_modes: TierModes | None = Field(default=None, alias="tierModes")
+    approval_ttl_seconds: int | None = Field(
+        default=None,
+        alias="approvalTtlSeconds",
+        ge=actions.MIN_APPROVAL_TTL_SECONDS,
+        le=actions.MAX_APPROVAL_TTL_SECONDS,
+    )
+    updated_by: str = Field(alias="updatedBy", min_length=1, max_length=200)
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class ToolPolicyView(_View):
+    kind: str
+    risk: str
+    tier: str
+    mode: str
+    # Where the risk came from: `host` for a tool the host declares, `declared`
+    # for this tenant's own statement, `default` for the closed fallback.
+    source: str
+
+
+class ToolPolicyUpdate(_Request):
+    risk: str = Field(pattern="^(" + "|".join(actions.RISK_LEVELS) + ")$")
+    updated_by: str = Field(alias="updatedBy", min_length=1, max_length=200)
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
 class HealthView(BaseModel):
     status: str
     database: str

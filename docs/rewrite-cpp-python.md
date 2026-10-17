@@ -1643,26 +1643,54 @@ The API enforces the same rules the desktop host enforces locally:
   that both selected the same queued task cannot both hand it to a node — the
   loser's update matches no row. `desktop`'s one-call-per-step fence is the local
   analogue.
-- **Approval before an effectful action.** A task kind needs an approval unless it
-  is one of the host's known plan-bound observations (`server.info`, `docker.ps`,
-  `filesystem.read`, `systemd.inspect`, …); an unrecognised kind, and every
-  `mcp.*` tool whose risk the control plane cannot resolve, is treated as
-  effectful, which is the closed default. The approval request carries the action,
-  the node and the payload, and the *server* computes the fingerprint (`sha256` of
-  the canonical `{kind, nodeId, payload}`: sorted keys, no whitespace) — a caller
-  cannot name a fingerprint that does not match what it asked for. A decision
-  applies only to the matching fingerprint, so approving a command on node A does
-  not authorise it on node B, nor a different command anywhere. The gate is
-  checked when the task is created (the queue means "ready to dispatch", so a task
-  that could never run would hold the node's single active slot) and again on the
-  `queued → running` edge, which catches a decision that lapsed or was withdrawn in
-  between; a refusal is `409 approval_required` and names the reason
-  (`approval_expired`, `approval_revoked`) and the fingerprint to approve.
+- **Approval before an effectful action, as the tenant's policy decides.** What a
+  kind *is* (its risk) and what happens to it (its permission tier's mode) are two
+  separate questions, and the second is answered per tenant in the same vocabulary
+  as the shared risk layer (`packages/shared/src/types/risk.ts`). A risk comes
+  from, in order, the host's own declaration for its built-in tools, the tenant's
+  declaration, or the closed default `high`; the host's two built-in sets are
+  mirrored exactly (its plan-bound observations — `server.info`, `docker.ps`,
+  `filesystem.read`, `systemd.inspect`, … — read, and its named state-changing
+  tools are always effectful). The risk collapses into `read`/`write`/`dangerous`
+  and the tenant's tier modes decide: `auto` runs without a decision, `ask` needs
+  one, `deny` refuses outright. By default that is the production table, so an
+  unrecognised kind and every `mcp.*` tool whose risk the control plane cannot
+  resolve still needs an approval — the closed default — while a tenant may
+  declare a `mcp.*` kind it trusts, or tighten a host observation. The approval
+  request carries the action, the node and the payload, and the *server* computes
+  the fingerprint (`sha256` of the canonical `{kind, nodeId, payload}`: sorted
+  keys, no whitespace) — a caller cannot name a fingerprint that does not match
+  what it asked for. A decision applies only to the matching fingerprint, so
+  approving a command on node A does not authorise it on node B, nor a different
+  command anywhere. The gate is checked when the task is created (the queue means
+  "ready to dispatch", so a task that could never run would hold the node's single
+  active slot) and again on the `queued → running` edge, which catches a decision
+  that lapsed or was withdrawn in between — or a policy that changed under it, so a
+  denomination or a tightening reaches the queue rather than only new work. A
+  refusal that a decision could clear is `409 approval_required` and names the
+  reason (`approval_expired`, `approval_revoked`) and the fingerprint to approve; a
+  task its own policy refuses is `403 action_denied`, because no decision can.
+- **A policy a tenant can write, and a floor it cannot.** `GET/PUT/DELETE
+  /v1/tenants/{id}/policy` reads, sets and clears the policy (naming an
+  `environment` derives its tier table — an unknown one is treated as production so
+  it is never more permissive — sending `tierModes` departs from that table, and
+  `approvalTtlSeconds`, 60–86400, is the window a decision gets in that tenant);
+  `GET /v1/tenants/{id}/tool-policies` lists every kind the control plane can name
+  with its risk, tier, mode and where the risk came from (`host`/`declared`/
+  `default`), and `PUT`/`DELETE .../tool-policies/{kind}` declares or clears one.
+  Two things cannot be declared away: the host's named effectful tools are pinned
+  to `high` *in the decision function itself*, before any declaration is consulted
+  (not only in the endpoint that refuses to store such a row), and the `dangerous`
+  tier is never `auto`. So no configuration, however written, lets `server.exec`
+  run without a decision. Modes are stored resolved rather than derived on read, so
+  changing a built-in default later cannot silently re-open a tenant that had
+  already chosen.
 - **A decision's life.** An approved decision carries a window and a use budget,
   because a grant that never lapses and can be spent any number of times is not a
-  decision about an action. Approving sets `expires_at` (decision time + 900s) and
-  a use budget (the request's `maxUses`, default 1, ceiling 100; a decider may
-  narrow it but never widen it). It stops authorising work three ways: it lapses
+  decision about an action. Approving sets `expires_at` (decision time plus the
+  tenant's TTL, 900 seconds by default) and a use budget (the request's `maxUses`,
+  default 1, ceiling 100; a decider may narrow it but never widen it). It stops
+  authorising work three ways: it lapses
   (every check compares the clock, so an unswept row is already refused, and the
   sweep — the approval listing, or `POST .../approvals/expire` — exists so the
   stored state tells the truth), it is withdrawn (`POST .../approvals/{id}/revoke`,
@@ -1711,7 +1739,8 @@ same signature at the upgrade. On connect the control plane assigns every queued
 task for that node — the move to `running` is the moment work leaves the queue —
 and the node reports outcomes back. A task the node may not run yet is not handed
 over silently: `ready` and `synced` list it under `waiting` with a reason
-(`approval_required`, `approval_expired`, `approval_revoked`, …) and the
+(`approval_required`, `approval_expired`, `approval_revoked`, `policy_denied`, …)
+and the
 fingerprint to approve, so a stalled queue is reported instead of looking like an
 idle node. If the socket drops while a task is
 running, the task becomes `unknown` with reason `node_disconnected` (a graceful
@@ -1732,10 +1761,16 @@ window is set at the decision and the round-trip timestamp keeps its UTC offset,
 a lapsed decision authorises nothing and the sweep is per-tenant and idempotent, a
 withdrawal stops a task that was already authorised, a spent decision still covers
 the task it paid for but no new one, and a decider narrowing `maxUses` cannot be
-widened past the request) and atomic assignment (a conditional update claims once,
-a stale object cannot steal a claimed task, and a repeat pass neither reassigns nor
-re-audits), and a drift test that runs the real Alembic migrations and compares the
-migrated tables, indexes and foreign keys with the models (91 tests). Beyond the
+widened past the request), the tenant policy (the risk table agrees with the shared
+vocabulary and both of the host's built-in sets, a declaration loosens a kind it
+covers and tightens one it does not, an environment selects its tier table and an
+unknown environment is never more permissive, `deny` is absolute and per tier, the
+host's effectful set and `dangerous: auto` cannot be declared away, and a policy
+change reaches a task that is already queued) and atomic assignment (a conditional
+update claims once, a stale object cannot steal a claimed task, and a repeat pass
+neither reassigns nor re-audits), and a drift test that runs the real Alembic
+migrations and compares the migrated tables, indexes and foreign keys with the
+models (129 tests). Beyond the
 test transport, a real `python -m yukinal_control_plane` process was exercised with
 a real WebSocket client and real Ed25519 signatures: `/healthz` returned `ok`, an
 unauthenticated request returned `401`, a signed heartbeat was accepted, the
@@ -1751,8 +1786,14 @@ refused while the task already authorised still started, a backdated decision wa
 swept to `expired` idempotently and stopped its queued task with
 `waiting.reason = approval_expired`, a withdrawal did the same with
 `approval_revoked`, and a decider narrowing `maxUses` from 3 to 1 left exactly one
-task authorisable. `pnpm check` runs the suite as a step that is skipped with an
-explicit reason when the service virtualenv is absent.
+task authorisable. The policy was driven the same way: an undeclared `mcp.*` kind
+was refused under the closed default and a `read` declaration then let it run with
+no approval recorded, redeclaring the host's `server.exec` was `409`, the tenant's
+own TTL put a 120-second window on the next decision, `dangerous: auto` was `422`,
+and setting `dangerous: deny` refused a new `server.exec` with `403 action_denied`
+*and* stopped the one already authorised, which the channel reported as
+`waiting.reason = policy_denied`. `pnpm check` runs the suite as a step that is
+skipped with an explicit reason when the service virtualenv is absent.
 
 Honest gaps: no PostgreSQL server exists in this environment, so the migrations
 and the queries have been exercised only on SQLite (`JSON` rather than `JSONB`,
@@ -1762,10 +1803,10 @@ and `wss://` are a deployment concern that has not been exercised; assignment,
 use spending and replay protection are all conditional updates or database-backed,
 so they are correct across processes by construction, but no second worker process
 has been run against one database; there are no per-tenant operator roles (one
-shared token, and the same caller can both request and decide an approval, or
-decide and revoke it); a decision now expires, can be revoked and has a use budget,
-but *what* needs an approval and for how long are still single defaults for the
-whole service — `approval_ttl_seconds` is a constant and the read-only kind list is
-a fixed table, not per-tenant or per-environment policy; there is no
-server-initiated ping timer, and `/v1/metrics` is a small JSON summary rather than
-a Prometheus exporter.
+shared token, and the same caller can both request and decide an approval, decide
+and revoke it, and rewrite the policy those decisions are made under — a policy
+change is not itself an approved action); a `mcp.*` kind runs without a decision
+only because a tenant declared it safe, because there is no catalogue that resolves
+it from the MCP server the way the host's supervisor does, so the declaration is
+the whole answer; there is no server-initiated ping timer, and `/v1/metrics` is a
+small JSON summary rather than a Prometheus exporter.

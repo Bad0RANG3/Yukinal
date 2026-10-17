@@ -351,12 +351,24 @@ class ControlPlaneTests(ControlPlaneTestCase):
             inspector = inspect(sync_engine)
             indexes = {
                 index["name"]
-                for table in ("tasks", "node_nonces", "approvals")
+                for table in ("tasks", "node_nonces", "approvals", "tool_policies")
                 for index in inspector.get_indexes(table)
             }
             approvals_fks = {
                 (fk["referred_table"], tuple(fk["constrained_columns"]))
                 for fk in inspector.get_foreign_keys("approvals")
+            }
+            tool_policy_fks = {
+                (fk["referred_table"], tuple(fk["constrained_columns"]))
+                for fk in inspector.get_foreign_keys("tool_policies")
+            }
+            tenant_policy_fks = {
+                (fk["referred_table"], tuple(fk["constrained_columns"]))
+                for fk in inspector.get_foreign_keys("tenant_policies")
+            }
+            tool_policy_uniques = {
+                tuple(constraint["column_names"])
+                for constraint in inspector.get_unique_constraints("tool_policies")
             }
         finally:
             sync_engine.dispose()
@@ -364,7 +376,11 @@ class ControlPlaneTests(ControlPlaneTestCase):
         self.assertIn("uq_tasks_active_per_node", indexes)
         self.assertIn("ix_node_nonces_at", indexes)
         self.assertIn("ix_approvals_node_id", indexes)
+        self.assertIn("ix_tool_policies_tenant_id", indexes)
         self.assertIn(("nodes", ("node_id",)), approvals_fks)
+        self.assertIn(("tenants", ("tenant_id",)), tool_policy_fks)
+        self.assertIn(("tenants", ("tenant_id",)), tenant_policy_fks)
+        self.assertIn(("tenant_id", "kind"), tool_policy_uniques)
 
         command.downgrade(config, "base")
         sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
