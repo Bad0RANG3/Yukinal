@@ -7,11 +7,11 @@ dropped or stored.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
-from . import nodeauth
+from . import actions, nodeauth
 
 
 class _Request(BaseModel):
@@ -22,6 +22,20 @@ class _View(BaseModel):
     """Response model that reads straight off a SQLAlchemy row."""
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("*")
+    def _utc(self, value: object, _info: object) -> object:
+        """Emit every timestamp as an explicit UTC instant.
+
+        SQLite has no timezone type, so it returns the naive UTC wall clock it
+        stored even for a ``timezone=True`` column, while PostgreSQL returns an
+        aware value. Without this, the same field would come back as
+        ``...T05:42:17`` when read from the database and ``...T05:42:17Z`` when
+        echoed from memory, and a client could not compare it with a clock.
+        """
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class TenantCreate(_Request):
@@ -103,6 +117,9 @@ class TaskView(_View):
     tenant_id: str
     node_id: str
     kind: str
+    # The approval that authorised this task, if its kind needed one, so the
+    # authorisation is auditable from the task rather than only from the ledger.
+    approval_id: str | None
     payload: dict
     # Computed from (kind, nodeId, payload): the exact action an approval must
     # match before the task may leave the queue.
@@ -148,6 +165,14 @@ class ApprovalCreate(_Request):
     payload: dict = Field(default_factory=dict)
     task_id: str | None = Field(default=None, alias="taskId", max_length=64)
     requested_by: str = Field(alias="requestedBy", min_length=1, max_length=200)
+    # How many tasks the decision may authorise. Defaults to one: an approval is
+    # a decision about an action, not a standing grant.
+    max_uses: int = Field(
+        default=actions.DEFAULT_APPROVAL_USES,
+        alias="maxUses",
+        ge=1,
+        le=actions.MAX_APPROVAL_USES,
+    )
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -155,8 +180,23 @@ class ApprovalCreate(_Request):
 class ApprovalDecision(_Request):
     decision: str = Field(pattern=r"^(approved|rejected)$")
     decided_by: str = Field(alias="decidedBy", min_length=1, max_length=200)
+    # A decider may narrow what was asked for but never widen it. `None` keeps
+    # the requested count.
+    max_uses: int | None = Field(
+        default=None, alias="maxUses", ge=1, le=actions.MAX_APPROVAL_USES
+    )
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class ApprovalRevoke(_Request):
+    revoked_by: str = Field(alias="revokedBy", min_length=1, max_length=200)
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class ExpiredApprovals(_View):
+    expired: int
 
 
 class ApprovalView(_View):
@@ -172,6 +212,13 @@ class ApprovalView(_View):
     decided_by: str | None
     requested_at: datetime
     decided_at: datetime | None
+    # Usable until this moment, and up to `max_uses` tasks. Both are visible so
+    # a decider can see exactly what a grant would mean before making it.
+    expires_at: datetime | None
+    uses: int
+    max_uses: int
+    revoked_by: str | None
+    revoked_at: datetime | None
 
 
 class AuditView(_View):
@@ -194,4 +241,5 @@ class MetricsView(BaseModel):
     tenants: int
     nodes: int
     tasks_by_status: dict[str, int]
+    approvals_by_state: dict[str, int]
     pending_approvals: int

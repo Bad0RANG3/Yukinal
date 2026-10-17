@@ -35,7 +35,10 @@ from .nodeauth import key_fingerprint
 TASK_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled", "unknown")
 ACTIVE_TASK_STATUSES = ("queued", "running")
 
-APPROVAL_STATES = ("pending", "approved", "rejected", "expired")
+APPROVAL_STATES = ("pending", "approved", "rejected", "expired", "revoked")
+# Only these two are decisions an operator may make; `expired` and `revoked` are
+# lifecycle outcomes, not choices.
+APPROVAL_DECISIONS = ("approved", "rejected")
 
 
 def utc_now() -> datetime:
@@ -127,6 +130,12 @@ class Task(Base):
         ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False, index=True
     )
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The approval that authorised this task, if its kind needed one. A soft
+    # reference rather than a foreign key: `approvals.task_id` already points the
+    # other way, and a second constraint would be a cycle that SQLite cannot
+    # express. The task is the record of what it was authorised by; the approval
+    # stays the record of what was authorised.
+    approval_id: Mapped[str | None] = mapped_column(String(64), index=True)
     # Structured request for the node. Must already be free of secrets: the
     # caller resolves credential references on the node, not here.
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
@@ -178,6 +187,17 @@ class Approval(Base):
     decided_by: Mapped[str | None] = mapped_column(String(200))
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # An approved decision is usable until this moment. A decision with no expiry
+    # would be a standing grant, so `approved` rows always carry one; `expired`
+    # is what a sweep writes when it passes.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    # How many tasks this decision has authorised, and how many it may. The unit
+    # of authorisation is one task: an approval for "restart nginx" that could be
+    # spent without limit is not a decision about an action.
+    uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    revoked_by: Mapped[str | None] = mapped_column(String(200))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ModelConfig(Base):

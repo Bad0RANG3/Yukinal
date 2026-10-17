@@ -10,6 +10,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlalchemy
@@ -140,34 +141,111 @@ class ControlPlaneTestCase(unittest.TestCase):
         action: str,
         payload: dict | None = None,
         requested_by: str = "agent",
+        max_uses: int | None = None,
     ):
+        body = {
+            "action": action,
+            "nodeId": node_id,
+            "payload": payload if payload is not None else {},
+            "requestedBy": requested_by,
+        }
+        if max_uses is not None:
+            body["maxUses"] = max_uses
         return self.client.post(
-            f"/v1/tenants/{tenant_id}/approvals",
-            json={
-                "action": action,
-                "nodeId": node_id,
-                "payload": payload if payload is not None else {},
-                "requestedBy": requested_by,
-            },
-            headers=AUTH,
+            f"/v1/tenants/{tenant_id}/approvals", json=body, headers=AUTH
         )
 
-    def decide(self, tenant_id: str, approval_id: str, decision: str = "approved", decided_by: str = "ada"):
+    def decide(
+        self,
+        tenant_id: str,
+        approval_id: str,
+        decision: str = "approved",
+        decided_by: str = "ada",
+        max_uses: int | None = None,
+    ):
+        body = {"decision": decision, "decidedBy": decided_by}
+        if max_uses is not None:
+            body["maxUses"] = max_uses
         return self.client.post(
             f"/v1/tenants/{tenant_id}/approvals/{approval_id}/decide",
-            json={"decision": decision, "decidedBy": decided_by},
+            json=body,
             headers=AUTH,
         )
 
     def approve(
-        self, tenant_id: str, node_id: str, action: str, payload: dict | None = None
+        self,
+        tenant_id: str,
+        node_id: str,
+        action: str,
+        payload: dict | None = None,
+        max_uses: int | None = None,
     ) -> str:
         """Request and approve one action, returning the approval id."""
-        created = self.create_approval(tenant_id, node_id, action, payload)
+        created = self.create_approval(tenant_id, node_id, action, payload, max_uses=max_uses)
         self.assertEqual(created.status_code, 201, created.text)
-        decided = self.decide(tenant_id, created.json()["id"])
+        decided = self.decide(tenant_id, created.json()["id"], max_uses=max_uses)
         self.assertEqual(decided.status_code, 200, decided.text)
         return created.json()["id"]
+
+    def get_approval(self, tenant_id: str, approval_id: str) -> dict:
+        listed = self.list_approvals(tenant_id)
+        for approval in listed:
+            if approval["id"] == approval_id:
+                return approval
+        raise AssertionError(f"approval `{approval_id}` not in {listed!r}")
+
+    def list_approvals(self, tenant_id: str) -> list:
+        response = self.client.get(f"/v1/tenants/{tenant_id}/approvals", headers=AUTH)
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def revoke(self, tenant_id: str, approval_id: str, revoked_by: str = "ada"):
+        return self.client.post(
+            f"/v1/tenants/{tenant_id}/approvals/{approval_id}/revoke",
+            json={"revokedBy": revoked_by},
+            headers=AUTH,
+        )
+
+    def expire_approvals(self, tenant_id: str):
+        return self.client.post(f"/v1/tenants/{tenant_id}/approvals/expire", headers=AUTH)
+
+    def backdate_approval(self, approval_id: str, *, seconds: int = 1) -> None:
+        """Push an approval's expiry into the past, the way time would.
+
+        The API has no way to set an expiry in the past, and waiting for a real
+        TTL is not a test. This writes the same column SQLAlchemy writes.
+        """
+        import sqlite3
+
+        moment = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        stored = moment.strftime("%Y-%m-%d %H:%M:%S.%f")
+        connection = sqlite3.connect(self.db_path)
+        try:
+            changed = connection.execute(
+                "UPDATE approvals SET expires_at = ? WHERE id = ?", (stored, approval_id)
+            ).rowcount
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertEqual(changed, 1, f"approval `{approval_id}` was not updated")
+
+    def stored_approval_state(self, approval_id: str) -> str:
+        """Read an approval's stored state without going through a listing.
+
+        Listing sweeps that tenant's lapsed decisions, so a test about the sweep
+        itself has to look at the row directly.
+        """
+        import sqlite3
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            row = connection.execute(
+                "SELECT state FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row, f"approval `{approval_id}` was not found")
+        return row[0]
 
     def wait_for_task_status(
         self, tenant_id: str, task_id: str, status: str, timeout: float = 5.0

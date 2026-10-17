@@ -23,6 +23,13 @@ from __future__ import annotations
 import hashlib
 import json
 
+# How long an approved decision stays usable, and how many tasks one decision
+# may authorise. A decision that never lapses and can be spent any number of
+# times is not an approval of an action, it is a standing grant.
+DEFAULT_APPROVAL_TTL_SECONDS = 900
+DEFAULT_APPROVAL_USES = 1
+MAX_APPROVAL_USES = 100
+
 # The host's plan-bound observations (`host_tool_is_plan_bound_observation`).
 # These read and never change the target, so they run without an approval.
 READ_ONLY_TASK_KINDS = frozenset(

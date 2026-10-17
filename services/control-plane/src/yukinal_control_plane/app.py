@@ -339,6 +339,7 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
             payload=body.payload,
             requested_by=body.requested_by,
             task_id=body.task_id,
+            max_uses=body.max_uses,
         )
 
     @app.post(
@@ -358,7 +359,43 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
             approval_id=approval_id,
             decision=body.decision,
             decided_by=body.decided_by,
+            max_uses=body.max_uses,
         )
+
+    @app.post(
+        "/v1/tenants/{tenant_id}/approvals/{approval_id}/revoke",
+        response_model=schemas.ApprovalView,
+    )
+    async def revoke_approval(
+        tenant_id: str,
+        approval_id: str,
+        body: schemas.ApprovalRevoke,
+        session: AsyncSession = Depends(get_session),
+        _actor: str = Depends(current_actor),
+    ) -> object:
+        return await service.revoke_approval(
+            session,
+            tenant_id=tenant_id,
+            approval_id=approval_id,
+            revoked_by=body.revoked_by,
+        )
+
+    @app.post(
+        "/v1/tenants/{tenant_id}/approvals/expire",
+        response_model=schemas.ExpiredApprovals,
+    )
+    async def expire_approvals(
+        tenant_id: str,
+        session: AsyncSession = Depends(get_session),
+        _actor: str = Depends(current_actor),
+    ) -> dict:
+        """Sweep lapsed decisions, so an operator (or a cron) can drive it.
+
+        Every gate check is time-aware on its own, so this only makes the stored
+        state match reality sooner.
+        """
+        expired = await service.expire_stale_approvals(session, tenant_id=tenant_id)
+        return {"expired": expired}
 
     # ── audit ────────────────────────────────────────────────────────────────
 

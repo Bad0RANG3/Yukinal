@@ -298,6 +298,14 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
   （fail closed）。门禁查两次：建任务时（队列即"可派发"，否则会占住节点唯一的 active 槽）与
   `queued → running` 边（覆盖审批中途失效）。派发用**条件 UPDATE**（`WHERE status='queued'`）领取，
   两个 worker 不会把同一任务派两次；未获批的任务在通道上以 `waiting`（含原因与指纹）上报而非静默滞留。
+  **审批生命周期**：批准即写入有效期（决定时刻 + TTL 900 秒）与使用预算（请求 `maxUses` 默认 1、上限
+  100，决定方只能收紧不能放宽）。三种方式失效：**到期**（每个检查都比时钟，未清扫的行照样拒绝；清扫
+  只让存储状态说真话，列表会清扫本租户，`POST .../approvals/expire` 供运维/cron 显式驱动且幂等）、
+  **撤销**（`POST .../approvals/{id}/revoke`，pending 或 approved 均可，撤销不重写历史——任务保留其
+  授权记录、只是拒绝启动）、**用尽**（建任务时以 `WHERE uses < max_uses ... RETURNING` 原子扣减）。
+  扣减**不在派发时重复检查**（否则一次性审批会卡住它自己授权的那一个任务），派发只检查该决定仍是
+  `approved` 且未过期；任务用 `approval_id` 记住是谁授权的。所有时间戳统一序列化为显式 UTC（`...Z`），
+  因为 SQLite 无时区类型、会返回裸 wall clock，否则同一字段读库与回显会不一致。
 - **节点面**（Ed25519 请求签名）`/v1/node/...`：节点注册时提供公钥（接受 base64/hex/`ssh-ed25519`
   行，统一存规范 base64），之后每个请求对
   `timestamp\nnonce\nMETHOD\npath[?query]\nsha256(body)` 签名；时间窗 300 秒，nonce 落库
@@ -307,19 +315,24 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
   置为 `unknown`（`node_disconnected`，优雅 `close` 为 `node_closed`），**不自动重放**，重连后可
   回报真实结果；断连标记在取消屏蔽（cancellation-shielded）作用域内执行，服务关闭时不会被静默跳过。
 
-68 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
-以及审批绑定（指纹规范化、载荷/节点/租户/动作精确匹配、待批与驳回不放行、未知 kind 需审批、派发前复议）
-与原子领取（条件 UPDATE 只能领一次、陈旧对象无法抢占、重复派发不重复记账），并**实际启动 uvicorn** 用真
-WebSocket 客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签名 heartbeat、握手→下发→`succeeded`
-→ack、中断→`unknown`/`node_disconnected`→`recoverable`，以及 409 `approval_required`（报文含指纹）→
-批准→派发完成→换载荷被拒→审批撤销后以 `waiting` 上报且任务留在 `queued`。
+91 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
+审批绑定（指纹规范化、载荷/节点/租户/动作精确匹配、待批与驳回不放行、未知 kind 需审批、派发前复议）
+与原子领取（条件 UPDATE 只能领一次、陈旧对象无法抢占、重复派发不重复记账），以及审批生命周期（批准
+写入窗口与预算、到期不放行且清扫幂等并限本租户、撤销 pending/approved、用尽后拒绝新任务但已授权任务
+仍可启动、决定方只能收紧 `maxUses`、时间戳恒带 UTC 偏移），并**实际启动 uvicorn** 用真 WebSocket
+客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签名 heartbeat、握手→下发→`succeeded`→ack、
+中断→`unknown`/`node_disconnected`→`recoverable`，以及 409 `approval_required`（报文含指纹）→批准→
+派发完成→换载荷被拒→审批撤销后以 `waiting` 上报且任务留在 `queued`，再加一整轮生命周期：单次授权
+建一单后即用尽、回填过期的决定被扫为 `expired` 并以 `waiting.reason=approval_expired` 挡住队列、
+撤销以 `approval_revoked` 挡、`maxUses` 由 3 收到 1 只放一单。
 `pnpm check` 已纳入该步骤（`services/control-plane/.venv` 存在才跑，否则打印明确 skip 原因）。
 
 **仍待做**：PostgreSQL 本身（本机无 PG，迁移与查询只在 SQLite 验证；JSON 非 JSONB、连接池/重启行为
 未测）、TLS/`wss://` 终结与 mTLS（当前是请求签名 + 明文绑定）、真正跑第二个 worker 进程验证任务分配
-（条件 UPDATE 与重放表均按跨进程正确性设计，未实测）、每租户角色授权（单一共享 token，且同一调用方
-可既申请又批准）、审批生命周期（不会自动过期、不可撤销，`expired` 状态无人写入；审批要求是固定表而
-非按租户/环境策略）、服务端 ping 定时器、Prometheus 指标。安装器与真机验收同 3.5。
+（条件 UPDATE、扣减与重放表均按跨进程正确性设计，未实测）、每租户角色授权（单一共享 token，且同一
+调用方可既申请又批准、也可既批准又撤销）、**审批要求与 TTL 仍是全局单值**（`approval_ttl_seconds` 是
+常量、只读 kind 名单是固定表，尚不能按租户/环境配置谁必须审批；`expired` 已是真状态但"什么才该被
+审批"不可配）、服务端 ping 定时器、Prometheus 指标。安装器与真机验收同 3.5。
 
 ### 3.7 真机验收
 
@@ -363,8 +376,9 @@ WebSocket 客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签�
 5. **host.tool.execute 收尾**（3.4 的最后一块）：非 MCP 只读分支与 `mcp.*` 门禁对齐均已完成。
 6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
 7. **控制平面**（3.6，独立阶段）：可复核切片已落地（`services/control-plane/`，运维面 + 节点
-   Ed25519 签名面 + `WS /v1/node/channel` + 审批强制绑定执行与原子派发，本地 SQLite 与真
-   uvicorn/真 WebSocket 验证，已纳入 `pnpm check`）；PostgreSQL 部署、TLS/mTLS 与多 worker 并发待相应环境。
+   Ed25519 签名面 + `WS /v1/node/channel` + 审批强制绑定、生命周期与原子派发，本地 SQLite 与真
+   uvicorn/真 WebSocket 验证，已纳入 `pnpm check`）；PostgreSQL 部署、TLS/mTLS、多 worker 并发与
+   按租户策略待相应实现/环境。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
 
 ---

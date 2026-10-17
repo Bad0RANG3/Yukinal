@@ -11,7 +11,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,12 @@ from .errors import (
     NotFound,
     Unauthorized,
 )
-from .models import ACTIVE_TASK_STATUSES, APPROVAL_STATES, TASK_STATUSES
+from .models import (
+    ACTIVE_TASK_STATUSES,
+    APPROVAL_DECISIONS,
+    APPROVAL_STATES,
+    TASK_STATUSES,
+)
 
 # Allowed task transitions. A terminal state has no outgoing edges, so a
 # completed task is never silently moved back to a live state. ``unknown`` can
@@ -344,7 +349,9 @@ async def node_tasks(session: AsyncSession, node: models.Node) -> list[models.Ta
 # An effectful task is only created, and only leaves the queue, when an approved
 # decision matches its exact action: same tenant, same kind, same node, same
 # payload. The fingerprint is what makes "same" exact, so an approval for one
-# input can never dispatch another.
+# input can never dispatch another. A decision also has a life: it lapses after a
+# while and can be withdrawn, so the task records which decision authorised it and
+# the authorisation is rechecked at dispatch rather than trusted from creation.
 
 
 def task_action_fingerprint(*, kind: str, node_id: str, payload: dict) -> str:
@@ -352,46 +359,190 @@ def task_action_fingerprint(*, kind: str, node_id: str, payload: dict) -> str:
     return actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
 
 
-async def approved_action_id(
+async def approval_ttl_seconds(session: AsyncSession, tenant_id: str) -> int:
+    """How long an approval stays usable in this tenant.
+
+    One default for now; this is the seam where a tenant-level policy lands.
+    """
+    return actions.DEFAULT_APPROVAL_TTL_SECONDS
+
+
+def as_utc(value: datetime) -> datetime:
+    """Treat a naive timestamp as UTC.
+
+    SQLite has no timezone type, so the dialect returns the naive UTC wall clock
+    it stored even for a ``timezone=True`` column, while PostgreSQL returns an
+    aware value. Every writer here stores UTC, so the missing offset means UTC and
+    normalizing is what makes a comparison between the two backends behave the
+    same.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _decision_is_live(approval: models.Approval, now: datetime) -> bool:
+    """Whether a decision may still authorise work.
+
+    Note what is *not* checked: the use count. Creating a task spends a use, so a
+    one-shot approval would fail its own dispatch check if this tested
+    ``uses < max_uses``. Availability at creation is the separate test in
+    ``available_approval``.
+    """
+    if approval.state != "approved":
+        return False
+    if approval.expires_at is None:
+        return True
+    return as_utc(approval.expires_at) > as_utc(now)
+
+
+async def expire_stale_approvals(
+    session: AsyncSession, *, tenant_id: str | None = None, now: datetime | None = None
+) -> int:
+    """Turn lapsed decisions into ``expired`` and return how many moved.
+
+    Correctness never depends on this sweep: every check compares ``expires_at``
+    with the clock itself, so an unswept row is still refused. The sweep exists so
+    the stored state tells the truth, and it is idempotent, which is why it can be
+    called on each gate check without cost once nothing is due.
+    """
+    now = now or utc_now()
+    query = select(models.Approval.id).where(
+        models.Approval.state == "approved",
+        models.Approval.expires_at.is_not(None),
+        models.Approval.expires_at <= now,
+    )
+    if tenant_id is not None:
+        query = query.where(models.Approval.tenant_id == tenant_id)
+    due = list((await session.scalars(query)).all())
+    if not due:
+        return 0
+    rows = (
+        await session.execute(
+            update(models.Approval)
+            .where(models.Approval.id.in_(due))
+            .values(state="expired")
+            .returning(models.Approval.id, models.Approval.tenant_id)
+            .execution_options(synchronize_session=False)
+        )
+    ).all()
+    for approval_id, row_tenant_id in rows:
+        await record_audit(
+            session,
+            tenant_id=row_tenant_id,
+            actor="control-plane",
+            action="approval.expired",
+            subject_type="approval",
+            subject_id=approval_id,
+            detail={},
+        )
+    return len(rows)
+
+
+async def available_approval(
     session: AsyncSession, *, tenant_id: str, kind: str, node_id: str, payload: dict
-) -> str | None:
-    """The id of an approved decision for exactly this action, if one exists."""
+) -> models.Approval | None:
+    """The newest decision that may still authorise exactly this action.
+
+    Availability includes the use count, unlike the dispatch check: a decision
+    that has spent its uses cannot authorise a *new* task, while a task it already
+    authorised may still run under it.
+    """
     fingerprint = actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
+    now = utc_now()
     return await session.scalar(
-        select(models.Approval.id)
+        select(models.Approval)
         .where(
             models.Approval.tenant_id == tenant_id,
             models.Approval.action == kind,
             models.Approval.fingerprint == fingerprint,
             models.Approval.state == "approved",
+            models.Approval.uses < models.Approval.max_uses,
+            or_(
+                models.Approval.expires_at.is_(None),
+                models.Approval.expires_at > now,
+            ),
         )
         .order_by(models.Approval.decided_at.desc())
         .limit(1)
     )
 
 
+async def consume_approval(session: AsyncSession, approval_id: str) -> bool:
+    """Spend one use of a decision, if it still has one left.
+
+    The condition is in the ``WHERE`` clause for the same reason the task claim
+    is: two requests that both saw a use available must not both spend it.
+    """
+    now = utc_now()
+    spent = await session.scalar(
+        update(models.Approval)
+        .where(
+            models.Approval.id == approval_id,
+            models.Approval.state == "approved",
+            models.Approval.uses < models.Approval.max_uses,
+            or_(
+                models.Approval.expires_at.is_(None),
+                models.Approval.expires_at > now,
+            ),
+        )
+        .values(uses=models.Approval.uses + 1)
+        .returning(models.Approval.uses)
+        .execution_options(synchronize_session=False)
+    )
+    return spent is not None
+
+
 async def require_action_approval(
     session: AsyncSession, *, tenant_id: str, kind: str, node_id: str, payload: dict
-) -> str:
-    """Return the action fingerprint, refusing an effectful action with no approval.
+) -> models.Approval | None:
+    """The decision that authorises this action, or ``None`` if none is needed.
 
-    A read-only kind is always allowed; its fingerprint is still returned so the
-    caller can record it.
+    Raises ``ApprovalRequired`` when the kind is effectful and nothing usable
+    matches, so no caller has to reimplement the check.
     """
-    fingerprint = actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
     if not actions.requires_approval(kind):
-        return fingerprint
-    if (
-        await approved_action_id(
-            session, tenant_id=tenant_id, kind=kind, node_id=node_id, payload=payload
-        )
-        is None
-    ):
+        return None
+    await expire_stale_approvals(session, tenant_id=tenant_id)
+    approval = await available_approval(
+        session, tenant_id=tenant_id, kind=kind, node_id=node_id, payload=payload
+    )
+    if approval is None:
+        fingerprint = actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
         raise ApprovalRequired(
             f"task kind `{kind}` changes its target and needs an approved action; "
             f"request approval for fingerprint {fingerprint}"
         )
-    return fingerprint
+    return approval
+
+
+async def task_authorisation_problem(
+    session: AsyncSession, task: models.Task
+) -> str | None:
+    """Why this task may not start, or ``None`` if it may.
+
+    Dispatch re-checks the decision the task recorded, so a decision that lapsed
+    or was withdrawn between creation and dispatch stops the task instead of being
+    honoured on a stale reading.
+    """
+    if not actions.requires_approval(task.kind):
+        return None
+    if task.approval_id is None:
+        return "approval_required"
+    approval = await session.get(models.Approval, task.approval_id)
+    if approval is None:
+        return "approval_missing"
+    if approval.state != "approved":
+        return f"approval_{approval.state}"
+    if not _decision_is_live(approval, utc_now()):
+        return "approval_expired"
+    return None
+
+
+async def require_task_authorisation(session: AsyncSession, task: models.Task) -> None:
+    problem = await task_authorisation_problem(session, task)
+    if problem is not None:
+        raise ApprovalRequired(
+            f"task `{task.id}` may not start: its authorising approval is not usable ({problem})"
+        )
 
 
 async def claim_queued_task(session: AsyncSession, task_id: str) -> bool:
@@ -424,50 +575,43 @@ async def assign_queued_tasks(
 
     Assignment is a conditional update, so a second worker that saw the same
     queued row loses the race instead of handing one task to two connections. A
-    task whose kind needs an approval that is missing or was never decided is
-    reported in ``waiting`` rather than silently dropped, so the operator can see
-    why nothing was dispatched.
+    task whose authorising decision is missing, lapsed or withdrawn is reported in
+    ``waiting`` with the reason rather than silently dropped, so a stalled queue is
+    visible instead of looking idle.
     """
     candidates = (
-        await session.execute(
-            select(
-                models.Task.id, models.Task.tenant_id, models.Task.kind, models.Task.payload
-            )
+        await session.scalars(
+            select(models.Task)
             .where(models.Task.node_id == node.id, models.Task.status == "queued")
             .order_by(models.Task.created_at)
         )
     ).all()
     assigned: list[models.Task] = []
     waiting: list[dict] = []
-    for task_id, tenant_id, kind, payload in candidates:
-        payload = payload or {}
-        if actions.requires_approval(kind) and (
-            await approved_action_id(
-                session, tenant_id=tenant_id, kind=kind, node_id=node.id, payload=payload
-            )
-            is None
-        ):
+    for task in candidates:
+        problem = await task_authorisation_problem(session, task)
+        if problem is not None:
             waiting.append(
                 {
-                    "taskId": task_id,
-                    "reason": "approval_required",
+                    "taskId": task.id,
+                    "reason": problem,
                     "fingerprint": actions.action_fingerprint(
-                        kind=kind, node_id=node.id, payload=payload
+                        kind=task.kind, node_id=node.id, payload=task.payload or {}
                     ),
                 }
             )
             continue
-        if not await claim_queued_task(session, task_id):
+        if not await claim_queued_task(session, task.id):
             # Another worker claimed it between our select and our update.
             continue
-        assigned.append(await session.get(models.Task, task_id, populate_existing=True))
+        assigned.append(await session.get(models.Task, task.id, populate_existing=True))
         await record_audit(
             session,
-            tenant_id=tenant_id,
+            tenant_id=task.tenant_id,
             actor=actor,
             action="task.transition",
             subject_type="task",
-            subject_id=task_id,
+            subject_id=task.id,
             detail={"from": "queued", "to": "running", "outcome": None},
         )
     await session.flush()
@@ -489,14 +633,21 @@ async def create_task(
     # An effectful task may not even be queued without its approval. The queue
     # means "ready to dispatch": a task that can never run would otherwise hold
     # the node's single active slot and stall it.
-    fingerprint = await require_action_approval(
+    approval = await require_action_approval(
         session, tenant_id=tenant_id, kind=kind, node_id=node_id, payload=payload
     )
+    if approval is not None and not await consume_approval(session, approval.id):
+        # The decision lapsed or ran out between the lookup and the claim. The
+        # conditional update, not the lookup, is what decides.
+        raise ApprovalRequired(
+            f"approval `{approval.id}` has no use left for this action"
+        )
     task = models.Task(
         id=new_id("tsk"),
         tenant_id=tenant_id,
         node_id=node_id,
         kind=kind,
+        approval_id=approval.id if approval is not None else None,
         payload=payload,
     )
     session.add(task)
@@ -511,7 +662,12 @@ async def create_task(
         action="task.create",
         subject_type="task",
         subject_id=task.id,
-        detail={"kind": kind, "nodeId": node_id, "fingerprint": fingerprint},
+        detail={
+            "kind": kind,
+            "nodeId": node_id,
+            "fingerprint": task.fingerprint,
+            "approvalId": approval.id if approval is not None else None,
+        },
     )
     return task
 
@@ -559,16 +715,10 @@ async def _apply_transition(
     previous = task.status
     if status == "running" and previous == "queued":
         # Re-checked here as well as at creation: dispatch is the moment the node
-        # is told to act, so the gate belongs on this edge too. If the approval
-        # was never decided, or its fingerprint does not match this payload, the
-        # task does not move.
-        await require_action_approval(
-            session,
-            tenant_id=task.tenant_id,
-            kind=task.kind,
-            node_id=task.node_id,
-            payload=task.payload or {},
-        )
+        # is told to act, so the gate belongs on this edge too. The check follows
+        # the decision the task recorded, which catches one that lapsed or was
+        # withdrawn in between.
+        await require_task_authorisation(session, task)
     task.status = status
     task.updated_at = utc_now()
     if status == "running":
@@ -690,12 +840,14 @@ async def create_approval(
     payload: dict,
     requested_by: str,
     task_id: str | None = None,
+    max_uses: int = actions.DEFAULT_APPROVAL_USES,
 ) -> models.Approval:
     """Record a request to approve exactly one action.
 
     The fingerprint is computed here from the action, node and payload, so the
     approval can only ever authorise the input it names; a caller cannot name a
-    fingerprint that does not match what they asked for.
+    fingerprint that does not match what they asked for. The requested use count
+    is visible on the approval, so the decider sees what a grant would mean.
     """
     await require_node(session, tenant_id, node_id)
     if task_id is not None:
@@ -710,6 +862,7 @@ async def create_approval(
         action=action,
         fingerprint=fingerprint,
         requested_by=requested_by,
+        max_uses=max_uses,
     )
     session.add(approval)
     await session.flush()
@@ -725,6 +878,7 @@ async def create_approval(
             "nodeId": node_id,
             "taskId": task_id,
             "fingerprint": fingerprint,
+            "maxUses": max_uses,
         },
     )
     return approval
@@ -737,17 +891,33 @@ async def decide_approval(
     approval_id: str,
     decision: str,
     decided_by: str,
+    max_uses: int | None = None,
 ) -> models.Approval:
-    if decision not in APPROVAL_STATES:
+    if decision not in APPROVAL_DECISIONS:
         raise Conflict(f"unknown approval decision `{decision}`")
     approval = await session.get(models.Approval, approval_id)
     if approval is None or approval.tenant_id != tenant_id:
         raise NotFound(f"approval `{approval_id}` was not found")
     if approval.state != "pending":
         raise Conflict(f"approval `{approval_id}` is already {approval.state}")
+    if max_uses is not None:
+        # A decider may narrow a request but never widen it: the request is what
+        # the requester is on the hook for, and only the decider can reduce it.
+        if max_uses > approval.max_uses:
+            raise Conflict(
+                f"a decision cannot raise the use count from {approval.max_uses} to {max_uses}"
+            )
+        approval.max_uses = max_uses
+    now = utc_now()
     approval.state = decision
     approval.decided_by = decided_by
-    approval.decided_at = utc_now()
+    approval.decided_at = now
+    if decision == "approved":
+        # A decision without an end is a standing grant, so approving always sets
+        # one. The clock starts when the decision is made, not when it was asked.
+        approval.expires_at = now + timedelta(
+            seconds=await approval_ttl_seconds(session, tenant_id)
+        )
     await session.flush()
     await record_audit(
         session,
@@ -756,13 +926,54 @@ async def decide_approval(
         action=f"approval.{decision}",
         subject_type="approval",
         subject_id=approval.id,
-        detail={"action": approval.action},
+        detail={
+            "action": approval.action,
+            "maxUses": approval.max_uses,
+            "expiresAt": approval.expires_at.isoformat() if approval.expires_at else None,
+        },
+    )
+    return approval
+
+
+async def revoke_approval(
+    session: AsyncSession, *, tenant_id: str, approval_id: str, revoked_by: str
+) -> models.Approval:
+    """Withdraw a decision, whether it is still pending or already approved.
+
+    Withdrawing an approved decision does not touch the task it authorised: the
+    task keeps its record and the dispatch check refuses it, which is the honest
+    outcome — the control plane never claims work was un-authorised. Both cases
+    end in ``revoked``; they differ only in the audit detail, because a decision
+    that was never made cannot be un-made.
+    """
+    approval = await session.get(models.Approval, approval_id)
+    if approval is None or approval.tenant_id != tenant_id:
+        raise NotFound(f"approval `{approval_id}` was not found")
+    if approval.state not in ("pending", "approved"):
+        raise Conflict(f"approval `{approval_id}` is already {approval.state}")
+    previous = approval.state
+    approval.state = "revoked"
+    approval.revoked_by = revoked_by
+    approval.revoked_at = utc_now()
+    await session.flush()
+    await record_audit(
+        session,
+        tenant_id=tenant_id,
+        actor=revoked_by,
+        action="approval.revoke",
+        subject_type="approval",
+        subject_id=approval.id,
+        detail={"from": previous, "action": approval.action},
     )
     return approval
 
 
 async def list_approvals(session: AsyncSession, tenant_id: str) -> list[models.Approval]:
     await require_tenant(session, tenant_id)
+    # Sweep first, so the list shows `expired` rather than a stale `approved` for
+    # a decision that lapsed some time ago.
+    await expire_stale_approvals(session, tenant_id=tenant_id)
+    await session.flush()
     return list(
         (
             await session.scalars(
@@ -803,10 +1014,16 @@ async def metrics(session: AsyncSession) -> dict:
         .select_from(models.Approval)
         .where(models.Approval.state == "pending")
     )
+    approval_rows = await session.execute(
+        select(models.Approval.state, func.count()).group_by(models.Approval.state)
+    )
     return {
         "tenants": int(tenants or 0),
         "nodes": int(nodes or 0),
         "tasks_by_status": tasks_by_status,
+        # Stored state only. A decision that has lapsed is reported as expired once
+        # a sweep reaches it, which the approval listing does.
+        "approvals_by_state": {state: count for state, count in approval_rows.all()},
         "pending_approvals": int(pending or 0),
     }
 
@@ -814,18 +1031,22 @@ async def metrics(session: AsyncSession) -> dict:
 # Re-exported so callers do not import the model module for constants.
 __all__ = [
     "ACTIVE_TASK_STATUSES",
+    "APPROVAL_DECISIONS",
     "APPROVAL_STATES",
     "TASK_STATUSES",
-    "approved_action_id",
+    "approval_ttl_seconds",
     "assign_queued_tasks",
     "authenticate_node",
+    "available_approval",
     "claim_nonce",
     "claim_queued_task",
+    "consume_approval",
     "create_approval",
     "create_model_config",
     "create_task",
     "create_tenant",
     "decide_approval",
+    "expire_stale_approvals",
     "heartbeat",
     "list_approvals",
     "list_audit",
@@ -846,8 +1067,11 @@ __all__ = [
     "require_node_by_id",
     "require_node_task",
     "require_task",
+    "require_task_authorisation",
     "require_tenant",
+    "revoke_approval",
     "task_action_fingerprint",
+    "task_authorisation_problem",
     "touch_node",
     "transition_node_task",
     "transition_task",

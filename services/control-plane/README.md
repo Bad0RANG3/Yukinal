@@ -40,6 +40,7 @@ tests/test_control_plane.py    API, schema, migration and boundary tests
 tests/test_node_auth.py        registration and signature/replay boundaries
 tests/test_node_channel.py     assignment, status and disconnect recovery
 tests/test_approvals.py        approval binding and atomic task assignment
+tests/test_approval_lifecycle.py  expiry, withdrawal, use counts
 ```
 
 ## Run
@@ -141,11 +142,12 @@ fingerprint, so approving `systemctl restart nginx` on node A does not authorise
 
 The gate is checked twice: when the task is created (the queue means "ready to
 dispatch", so a task that can never run would otherwise hold the node's single
-active slot) and again on the `queued → running` edge, which catches an approval
-that lapsed in between. A refusal is `409 approval_required` and names the
-fingerprint to approve. On the channel the same rule holds: a task that is not
-cleared is not handed over, and `ready`/`synced` report it under `waiting` with
-its reason and fingerprint instead of looking like an idle node.
+active slot) and again on the `queued → running` edge, which catches a decision
+that lapsed or was withdrawn in between. A refusal is `409 approval_required` and
+names the reason (`approval_expired`, `approval_revoked`, …) and the fingerprint
+to approve. On the channel the same rule holds: a task that is not cleared is not
+handed over, and `ready`/`synced` report it under `waiting` with its reason and
+fingerprint instead of looking like an idle node.
 
 Assignment itself is a conditional update (`... WHERE id = ? AND status =
 'queued'`), so two workers that both selected the same queued task cannot both
@@ -153,13 +155,46 @@ hand it to a node: the loser's update matches no row. Reading the status into
 Python and writing it back would let both through, which is the multi-worker
 race.
 
+## The life of an approval
+
+A decision that never lapses and can be spent any number of times is not an
+approval of an action, it is a standing grant. So an approved decision carries a
+window and a budget, and stops authorising work three ways:
+
+- **It lapses.** Approving sets `expires_at` to the decision time plus the TTL
+  (900 seconds). Every check compares the clock itself, so an unswept row is
+  already refused; the sweep exists so the *stored* state tells the truth, and it
+  is what makes `expired` a real state rather than a label. The approval listing
+  sweeps its tenant, and `POST .../approvals/expire` lets an operator or a cron
+  drive it explicitly (idempotent, returns how many moved).
+- **It is withdrawn.** `POST .../approvals/{id}/revoke` moves a `pending` or
+  `approved` decision to `revoked`. Withdrawal does not rewrite history: the task
+  keeps its record of what authorised it and simply refuses to start.
+- **It runs out.** A request asks for `maxUses` (default 1, ceiling 100) and a
+  decider may narrow that but never widen it. Creating a task spends one use
+  atomically (`... WHERE uses < max_uses ... RETURNING`), so the spend is a
+  conditional update for the same reason the task claim is.
+
+Spending is deliberately *not* re-checked at dispatch: a one-shot decision would
+otherwise fail the dispatch of the one task it authorised. What dispatch checks
+is that the decision is still `approved` and unexpired. The task records
+`approval_id`, so that check follows the authorisation rather than re-deriving
+it, and the ledger says which decision paid for which task.
+
+Timestamps are always serialised as explicit UTC instants (`...Z`). SQLite has no
+timezone type and returns the naive wall clock it stored even for a
+`timezone=True` column, so without that normalisation the same field would come
+back different depending on whether it had been read from the database or echoed
+from memory.
+
 ## What the API enforces
 
 - **Tenant isolation.** Every node, task, approval and model config is scoped to
   a tenant. A cross-tenant identifier is `404`, never `403`, so the API never
   confirms that a row exists in another tenant.
 - **Approval before an effectful action.** See above: the approval is bound to
-  the exact action by fingerprint, and both creation and dispatch check it.
+  the exact action by fingerprint, it has a window and a use budget, and both
+  creation and dispatch check it.
 - **One active task per node.** A partial unique index (`status IN ('queued',
   'running')`) makes the database, not just the handler, the concurrency
   control, and assignment claims the row with a conditional update. Terminal
@@ -180,7 +215,7 @@ approval counts.
 ## Verified and unverified
 
 Verified locally against SQLite, with the real FastAPI app, the real SQLAlchemy
-models and the real Alembic migrations (68 tests):
+models and the real Alembic migrations (91 tests):
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
@@ -196,7 +231,13 @@ was driven the same way: an effectful task was refused with the fingerprint to
 approve, a pending approval still did not clear it, the matching approved action
 was then dispatched and completed, a different payload was refused, and a task
 whose approval was withdrawn before dispatch was reported under `waiting` and
-left `queued`.
+left `queued`. A decision's window and its use budget were driven the same way:
+approving set a window, a task spent the single use, a second task was then
+refused while the task that was already authorised still started, a backdated
+decision was swept to `expired` (idempotently) and stopped its queued task with
+`waiting.reason = approval_expired`, a withdrawal did the same with
+`approval_revoked`, and a decider narrowing `maxUses` from 3 to 1 left exactly one
+task authorisable.
 
 Not yet verified, and not implemented:
 
@@ -208,16 +249,17 @@ Not yet verified, and not implemented:
 - **Transport security.** Nodes authenticate with request signatures, not mutual
   TLS, and the server binds plain HTTP/WS. TLS termination and `wss://` are a
   deployment concern that has not been exercised.
-- **Two live workers.** Assignment is a conditional update and replay protection
-  is database-backed, so both are correct across processes by construction, but
-  no second worker process has been run against one database.
+- **Two live workers.** Assignment, use spending and replay protection are all
+  conditional updates or database-backed, so they are correct across processes by
+  construction, but no second worker process has been run against one database.
 - **Authorization roles.** One shared operator token can act on any tenant; there
   are no per-tenant roles or scopes. In particular the same caller can request an
-  approval and decide it.
-- **Approval lifecycle.** A decision is bound to its fingerprint and is one-shot,
-  but approvals never expire on their own, cannot be revoked, and the *requirement*
-  is a fixed table rather than a per-tenant or per-environment policy. The
-  `expired` state exists but nothing moves an approval into it.
+  approval and decide it, and the same caller can decide and revoke it.
+- **Where the requirement comes from.** TTL and the set of kinds that need an
+  approval are still single defaults for the whole service, not per-tenant or
+  per-environment policy: `approval_ttl_seconds` is a constant and the
+  observation list is a fixed table. `expired` is real, but what *should* need
+  approval cannot be configured yet.
 - **Liveness.** There is no server-initiated ping timer; a node's `last_seen_at`
   is refreshed by its own messages, and a quiet node is noticed when its socket
   drops.

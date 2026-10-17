@@ -12,11 +12,9 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-import sqlalchemy
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
-
 from support import AUTH, ControlPlaneTestCase
 
 from yukinal_control_plane import actions, models, service
@@ -177,15 +175,7 @@ class ApprovalBindingTests(ControlPlaneTestCase):
         task_id = self.create_task(self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD)["body"]["id"]
 
         # The approval lapses between creation and dispatch.
-        engine = sqlalchemy.create_engine(f"sqlite:///{self.db_path.as_posix()}")
-        try:
-            with engine.begin() as connection:
-                connection.execute(
-                    text("UPDATE approvals SET state = 'expired' WHERE id = :id"),
-                    {"id": approval_id},
-                )
-        finally:
-            engine.dispose()
+        self.backdate_approval(approval_id)
 
         refused = self.client.post(
             f"/v1/tenants/{self.tenant_id}/tasks/{task_id}/status",
@@ -194,6 +184,7 @@ class ApprovalBindingTests(ControlPlaneTestCase):
         )
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(refused.json()["code"], "approval_required")
+        self.assertIn("approval_expired", refused.json()["message"])
         self.assertEqual(self.get_task(self.tenant_id, task_id)["status"], "queued")
 
 
@@ -204,15 +195,8 @@ class ApprovalChannelTests(ControlPlaneTestCase):
         approval_id = self.approve(tenant_id, node_id, EXEC, EXEC_PAYLOAD)
         task_id = self.create_task(tenant_id, node_id, EXEC, EXEC_PAYLOAD)["body"]["id"]
 
-        engine = sqlalchemy.create_engine(f"sqlite:///{self.db_path.as_posix()}")
-        try:
-            with engine.begin() as connection:
-                connection.execute(
-                    text("UPDATE approvals SET state = 'expired' WHERE id = :id"),
-                    {"id": approval_id},
-                )
-        finally:
-            engine.dispose()
+        # The decision lapses after the task was authorised by it.
+        self.backdate_approval(approval_id)
 
         with self.node_socket(key, node_id) as socket:
             ready = socket.receive_json()
@@ -223,7 +207,7 @@ class ApprovalChannelTests(ControlPlaneTestCase):
                 [
                     {
                         "taskId": task_id,
-                        "reason": "approval_required",
+                        "reason": "approval_expired",
                         "fingerprint": actions.action_fingerprint(
                             kind=EXEC, node_id=node_id, payload=EXEC_PAYLOAD
                         ),

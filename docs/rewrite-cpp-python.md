@@ -1655,8 +1655,24 @@ The API enforces the same rules the desktop host enforces locally:
   not authorise it on node B, nor a different command anywhere. The gate is
   checked when the task is created (the queue means "ready to dispatch", so a task
   that could never run would hold the node's single active slot) and again on the
-  `queued → running` edge, which catches an approval that lapsed in between; a
-  refusal is `409 approval_required` and names the fingerprint to approve.
+  `queued → running` edge, which catches a decision that lapsed or was withdrawn in
+  between; a refusal is `409 approval_required` and names the reason
+  (`approval_expired`, `approval_revoked`) and the fingerprint to approve.
+- **A decision's life.** An approved decision carries a window and a use budget,
+  because a grant that never lapses and can be spent any number of times is not a
+  decision about an action. Approving sets `expires_at` (decision time + 900s) and
+  a use budget (the request's `maxUses`, default 1, ceiling 100; a decider may
+  narrow it but never widen it). It stops authorising work three ways: it lapses
+  (every check compares the clock, so an unswept row is already refused, and the
+  sweep — the approval listing, or `POST .../approvals/expire` — exists so the
+  stored state tells the truth), it is withdrawn (`POST .../approvals/{id}/revoke`,
+  from `pending` or `approved`), or it runs out (creating a task spends a use
+  atomically, `... WHERE uses < max_uses ... RETURNING`). Spending is deliberately
+  not re-checked at dispatch: a one-shot decision would otherwise fail the dispatch
+  of the one task it authorised, so dispatch instead checks that the decision is
+  still `approved` and unexpired. The task records `approval_id`, so that check
+  follows the authorisation rather than re-deriving it, and the ledger says which
+  decision paid for which task.
 - **A task state machine.** `queued → running → succeeded/failed/cancelled`, with
   `running → unknown` when a node restarts. An invalid transition is `409`.
 - **Outcome-unknown on disconnect.** A heartbeat with `restarted: true` moves
@@ -1695,8 +1711,9 @@ same signature at the upgrade. On connect the control plane assigns every queued
 task for that node — the move to `running` is the moment work leaves the queue —
 and the node reports outcomes back. A task the node may not run yet is not handed
 over silently: `ready` and `synced` list it under `waiting` with a reason
-(`approval_required`) and the fingerprint to approve, so a stalled queue is
-reported instead of looking like an idle node. If the socket drops while a task is
+(`approval_required`, `approval_expired`, `approval_revoked`, …) and the
+fingerprint to approve, so a stalled queue is reported instead of looking like an
+idle node. If the socket drops while a task is
 running, the task becomes `unknown` with reason `node_disconnected` (a graceful
 `close` gives `node_closed`); it is never marked failed and never replayed, and a
 reconnecting node may still report what actually happened. That is the same
@@ -1710,33 +1727,45 @@ and per-node scoping, the state machine, the partial index, disconnect recovery,
 the credential boundary, key parsing and signature/replay refusals, the startup
 checks, approval binding (canonical fingerprints, exact match on payload, node,
 tenant and action, pending and rejected decisions not clearing a task, unknown
-kinds requiring approval, and the dispatch re-check) and atomic assignment (a
-conditional update claims once, a stale object cannot steal a claimed task, and a
-repeat pass neither reassigns nor re-audits), and a drift test that runs the real
-Alembic migrations and compares the migrated tables, indexes and foreign keys with
-the models (68 tests). Beyond the test transport, a real `python -m
-yukinal_control_plane` process was exercised with a real WebSocket client and real
-Ed25519 signatures: `/healthz` returned `ok`, an unauthenticated request returned
-`401`, a signed heartbeat was accepted, the channel handed over a task that was
-reported `succeeded` and acked, and a client that dropped its socket mid-task left
-the task `unknown`/`node_disconnected` and visible in `/v1/node/recoverable`. The
-approval gate was driven the same way: an effectful task was refused with the
-fingerprint to approve, a pending approval still did not clear it, the matching
-approved action was dispatched and completed, a different payload was refused, and
-a task whose approval was withdrawn before dispatch was reported under `waiting`
-and left `queued`. `pnpm check` runs the suite as a step that is skipped with an
+kinds requiring approval, and the dispatch re-check), the approval lifetime (the
+window is set at the decision and the round-trip timestamp keeps its UTC offset,
+a lapsed decision authorises nothing and the sweep is per-tenant and idempotent, a
+withdrawal stops a task that was already authorised, a spent decision still covers
+the task it paid for but no new one, and a decider narrowing `maxUses` cannot be
+widened past the request) and atomic assignment (a conditional update claims once,
+a stale object cannot steal a claimed task, and a repeat pass neither reassigns nor
+re-audits), and a drift test that runs the real Alembic migrations and compares the
+migrated tables, indexes and foreign keys with the models (91 tests). Beyond the
+test transport, a real `python -m yukinal_control_plane` process was exercised with
+a real WebSocket client and real Ed25519 signatures: `/healthz` returned `ok`, an
+unauthenticated request returned `401`, a signed heartbeat was accepted, the
+channel handed over a task that was reported `succeeded` and acked, and a client
+that dropped its socket mid-task left the task `unknown`/`node_disconnected` and
+visible in `/v1/node/recoverable`. The approval gate was driven the same way: an
+effectful task was refused with the fingerprint to approve, a pending approval
+still did not clear it, the matching approved action was dispatched and completed,
+a different payload was refused, and a task whose approval was withdrawn before
+dispatch was reported under `waiting` and left `queued`. The lifetime was driven
+the same way too: the single use was spent by the first task and a second task was
+refused while the task already authorised still started, a backdated decision was
+swept to `expired` idempotently and stopped its queued task with
+`waiting.reason = approval_expired`, a withdrawal did the same with
+`approval_revoked`, and a decider narrowing `maxUses` from 3 to 1 left exactly one
+task authorisable. `pnpm check` runs the suite as a step that is skipped with an
 explicit reason when the service virtualenv is absent.
 
 Honest gaps: no PostgreSQL server exists in this environment, so the migrations
 and the queries have been exercised only on SQLite (`JSON` rather than `JSONB`,
 and PostgreSQL connection-pool/restart behaviour is untested); node transport is
 request signatures over plain HTTP/WS rather than mutual TLS, so TLS termination
-and `wss://` are a deployment concern that has not been exercised; assignment is a
-conditional update and replay protection is database-backed, so both are correct
-across processes by construction, but no second worker process has been run
-against one database; there are no per-tenant operator roles (one shared token,
-and the same caller can both request and decide an approval); an approval never
-expires on its own, cannot be revoked, and the *requirement* is a fixed table
-rather than a per-tenant or per-environment policy, so nothing ever writes the
-`expired` state; there is no server-initiated ping timer, and `/v1/metrics` is a
-small JSON summary rather than a Prometheus exporter.
+and `wss://` are a deployment concern that has not been exercised; assignment,
+use spending and replay protection are all conditional updates or database-backed,
+so they are correct across processes by construction, but no second worker process
+has been run against one database; there are no per-tenant operator roles (one
+shared token, and the same caller can both request and decide an approval, or
+decide and revoke it); a decision now expires, can be revoked and has a use budget,
+but *what* needs an approval and for how long are still single defaults for the
+whole service — `approval_ttl_seconds` is a constant and the read-only kind list is
+a fixed table, not per-tenant or per-environment policy; there is no
+server-initiated ping timer, and `/v1/metrics` is a small JSON summary rather than
+a Prometheus exporter.
