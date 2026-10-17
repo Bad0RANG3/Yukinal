@@ -1376,6 +1376,7 @@ int main(int argc, char** argv) {
       http_mock_thread.join();
     }
 
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     // ── MCP OAuth (authorization code, device code, cancellation) ────────────
     // One loopback server plays both the authorization server and the MCP
     // endpoint, so the engine's discovery, dynamic registration, PKCE exchange,
@@ -1668,6 +1669,20 @@ int main(int argc, char** argv) {
       oauth_server.stop();
       oauth_thread.join();
     }
+
+#else
+    // Host-only preview builds intentionally have no OpenSSL. Verify the
+    // unavailable capability instead of running the OAuth exchange fixtures.
+    bool oauth_unavailable = false;
+    try {
+      (void)yukinal::desktop_host::oauth_connect(
+          database, mcp_credentials, "oauth_unavailable", {});
+    } catch (const std::runtime_error& error) {
+      oauth_unavailable = std::string(error.what()).find("OpenSSL-enabled") != std::string::npos;
+    }
+    check(oauth_unavailable, "OAuth should report its unavailable OpenSSL dependency");
+    std::cout << "OAuth exchange fixtures skipped: OpenSSL-disabled host build\n";
+#endif
 
     // Investigation task list: host-owned rows decode into the shared contract.
     {
