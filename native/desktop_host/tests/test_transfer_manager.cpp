@@ -1571,9 +1571,13 @@ void run_ipc_router_remote_drag_start_checks() {
 
   // emit_local_drop registers the dropped paths and publishes the event, and the
   // returned handle is usable by `file_transfer_upload`.
+  std::fprintf(stderr, "[diag] before emit_local_drop\n");
+  std::fflush(stderr);
   const auto dropped = temporary.path / "dropped.txt";
   write_file(dropped, "dropped");
   router.emit_local_drop({dropped});
+  std::fprintf(stderr, "[diag] after emit_local_drop\n");
+  std::fflush(stderr);
   std::optional<json> drop_event;
   {
     std::lock_guard<std::mutex> lock(events_mutex);
@@ -1588,9 +1592,13 @@ void run_ipc_router_remote_drag_start_checks() {
             drop_event->at("handles").front().value("kind", std::string()) == "file",
         "the drop event should carry the registered handle");
   const auto drop_handle = drop_event->at("handles").front().at("handleId").get<std::string>();
+  std::fprintf(stderr, "[diag] before upload_after_drop\n");
+  std::fflush(stderr);
   const auto upload_after_drop = router.invoke("file_transfer_upload",
       {{"serverId", "srv_1"}, {"remoteDirectory", "/srv"}, {"sourceHandleIds", {drop_handle}}});
   check(upload_after_drop.ok, "a dropped handle should be usable by file_transfer_upload");
+  std::fprintf(stderr, "[diag] end run_ipc_router_remote_drag_start_checks\n");
+  std::fflush(stderr);
 }
 
 }  // namespace
@@ -1626,6 +1634,8 @@ int main() {
   YUKINAL_DIAG_STEP("run_ipc_router_remote_drag_start_checks");
   run_ipc_router_remote_drag_start_checks();
 #undef YUKINAL_DIAG_STEP
+  std::fprintf(stderr, "[diag] all run_* returned\n");
+  std::fflush(stderr);
 
   std::cout << "transfer manager tests: green\n";
   return 0;
