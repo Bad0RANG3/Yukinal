@@ -127,7 +127,7 @@ cmake --build native/build-nmake --config Release
   所有 SSH/SFTP/PTY 命令都只有本地 + Paramiko mock 验证，没有真机 OpenSSH 验证。
   需要放行出口 IP、或提供可达地址/跳板/VPN。
 - **MCP 只有 stdio**：HTTP 传输、OAuth、取消未实现。
-- **安装包未实现**：NSIS/MSI/DMG/deb、三平台升级与数据保留均未做。
+- **安装器未实现**：`scripts/package.mjs` 已能产出 C++ 宿主分发布局（宿主 + 冻结 Agent + SSH 服务 + 许可证）与 `SHA256SUMS.txt`、`release-manifest.json`，并可用 `pnpm package -- --verify` 复核；NSIS/MSI/DMG/deb 安装器、三平台升级与数据保留仍未做。
 
 ---
 
@@ -261,10 +261,17 @@ plan.record/plan.check/evidence.record（它们是 investigation 写入的地基
 
 ### 3.5 安装包与三平台验收（大，需真机）
 
-- `scripts/package.mjs` 目前仍引用旧的 Tauri 打包路径；C++ 宿主没有安装包产物。
+- **已完成（分发布局与完整性清单）**：`scripts/package.mjs` 取代旧的 Tauri 打包路径，把 C++ 桌面宿主、
+  冻结 Python Agent（PyInstaller onedir）与 C++ SSH 服务暂存成
+  `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与
+  `release-manifest.json`（记录版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的
+  SHA-256/字节数与启动所需的 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。
+  `pnpm release:manifest` 可重建清单，`pnpm package -- --verify` 会逐字节复核并在不一致时非零退出。
+  缺失宿主/Agent/SSH 服务产物时 fail-closed，不会产出部分载荷。
+- **未完成**：无安装器产物（NSIS/MSI/DMG/deb）、无升级与用户数据保留验收、无真实 UI 冒烟、无代码签名。
 - 需要 Windows/macOS/Linux 的安装器（NSIS/MSI/DMG/deb）、升级、用户数据保留、真实 UI 冒烟。
 - 参考 `docs/rust-removal-plan.md` 第 7 节删除清理清单与第 8 节完成标准，以及
-  `docs/release.md`、`.github/workflows/package.yml`。
+  `docs/release.md`、`.github/workflows/package.yml`（该 workflow 目前仍不存在，仓库只有 `check.yml`）。
 
 ### 3.6 控制平面 / PostgreSQL / 多租户（第四阶段，尚未开工）
 
@@ -312,7 +319,7 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。当�
 3. **MCP HTTP + OAuth + 取消**（3.1），让远程 MCP 与审批取消可用。
 4. **文件传输动作 + 拖拽**（3.3）。
 5. **host.tool.execute 非 MCP 分支**（3.4 的最后一块）。
-6. **安装包与三平台验收**（3.5）。
+6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
 7. **控制平面**（3.6，独立阶段）。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
 

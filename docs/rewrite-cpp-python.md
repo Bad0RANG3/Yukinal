@@ -1530,3 +1530,47 @@ filtered), and the `mcp.*` branch keeps its pre-existing behavior of running
 before the durable-plan and task guardrail gates, which differs from the retired
 Rust host (only low-risk MCP tools reach the Agent today); the non-MCP branch
 itself matches the retired host.
+
+## C++ host packaging: staged distributable and integrity manifest
+
+The last item in the build order before the control plane is packaging. The retired
+Tauri pipeline left `scripts/package.mjs`, the installer smoke scripts and
+`.github/workflows/package.yml` behind when Rust/Tauri was deleted, so the repository
+had no C++-host packaging path at all. This commit adds the part that can be produced
+and verified on one machine, and records the part that cannot.
+
+`scripts/package.mjs` stages the three artifacts the repository already builds — the
+Release C++ desktop host, the frozen Python Agent (the PyInstaller onedir under
+`agent/runtime/yukinal-agent`) and the C++ SSH service — into
+`target/release/bundle/yukinal-<version>-<platform>-<arch>/`, copying `NOTICE`,
+`LICENSE`, the OpenSSL licence next to the SSH service and the Agent's
+`THIRD_PARTY_LICENSES.txt` into the Agent directory. It then writes `SHA256SUMS.txt`
+(GNU `sha256sum` format) and `release-manifest.json` at the bundle root. The manifest
+records the application version (read from `packages/shared/src/version.ts`), the
+Agent version (`agent/pyproject.toml`), platform and architecture, the source
+revision, whether the worktree was dirty (untracked-but-not-ignored files included),
+every payload file's size and SHA-256, and the launch contract the C++ host already
+expects: `YUKINAL_AGENT_ENTRY` for the frozen entrypoint and
+`YUKINAL_SSH_SERVICE_BINARY` for the SSH service. Missing host, Agent or SSH-service
+artifacts fail the run instead of producing a partial payload.
+
+The integrity contract lives in `scripts/lib/release-artifacts.mjs` and is covered by
+`scripts/lib/release-artifacts.test.mjs` (now a `pnpm check` step): hashing, the
+recursive payload listing, checksum rendering and parsing, manifest validation
+(duplicate paths, paths that escape the payload directory, invalid digests) and
+`verifyReleaseManifest`, which re-reads every payload and reports *all* mismatches —
+missing files, size or digest drift, checksum lines that disagree with the manifest,
+and entries present in one file but absent from the other. `pnpm release:manifest`
+refreshes the manifest for an already-staged payload; `pnpm package -- --verify` runs
+the verification and exits non-zero on any disagreement. Verified on Windows against
+the `native/build-nmake` Release host and SSH service plus the existing frozen Agent:
+662 files and 89,339,080 bytes staged and re-verified, and a tampered `NOTICE` was
+rejected with both a size and a digest mismatch. `pnpm check` was green and
+publication hygiene was green.
+
+Honest gaps, recorded in the manifest's `notes` and in `docs/release.md`: no installer
+is produced (NSIS/MSI/DMG/deb, upgrade and data retention are not implemented),
+artifacts are unsigned, `.github/workflows/package.yml` does not exist, and the
+three-platform install and UI acceptance still needs real machines. `target/` is now
+ignored so the payload is never committed; the checksums prove the payload was not
+modified, not who produced it.

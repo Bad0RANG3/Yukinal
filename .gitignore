@@ -9,6 +9,8 @@ package-lock.json
 dist/
 build/
 out/
+# packaging output (scripts/package.mjs: staged payload, checksums, manifest)
+target/
 apps/desktop/resources/ssh-service/yukinal-ssh-service
 apps/desktop/resources/ssh-service/yukinal-ssh-service.exe
 apps/desktop/resources/ssh-service/OPENSSL-LICENSE.txt

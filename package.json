@@ -10,6 +10,8 @@
   },
   "scripts": {
     "check": "node scripts/check.mjs",
+    "package": "node scripts/package.mjs",
+    "release:manifest": "node scripts/package.mjs --manifest",
     "typecheck": "pnpm -r --if-present typecheck",
     "build:libs": "pnpm --filter \"./packages/**\" --if-present build",
     "build:python-agent": "node scripts/build-python-agent.mjs",

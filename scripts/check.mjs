@@ -27,6 +27,9 @@ const steps = [
   { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
   { name: "secret scan", command: process.execPath, args: ["scripts/check-secrets.mjs"], required: true },
   { name: "cross-platform command runner tests", command: process.execPath, args: ["--test", "scripts/lib/commands.test.mjs"], required: true },
+  // The packaging integrity contract: a staged payload either matches its
+  // manifest and checksum listing, or verification fails loudly.
+  { name: "release artifact tests", command: process.execPath, args: ["--test", "scripts/lib/release-artifacts.test.mjs"], required: true },
   // Documentation links are load-bearing now that the rules live in a tree: a
   // section that moves takes its anchors with it, and only the renderer notices.
   { name: "docs links", command: process.execPath, args: ["scripts/check-docs-links.mjs"], required: true },

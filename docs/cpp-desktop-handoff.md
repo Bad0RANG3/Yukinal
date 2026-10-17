@@ -12,6 +12,8 @@ C++ 桌面宿主核心、Windows 可执行文件及桌面宿主测试（IPC rout
 
 Rust/Tauri 宿主与 legacy Node agent 已按 `rust-removal-plan.md` 从仓库删除；C++ WebView 宿主是唯一桌面宿主，`pnpm check` 不再依赖 cargo。因此 C++ 宿主目前是**唯一载体**：尚未迁移的命令返回 `NOT_IMPLEMENTED`，前端也不再回退 Tauri。新功能实现应落在 C++ 桌面宿主或 Python Agent 中，跨层命令和数据形状以 `packages/shared` 为准。命令级缺口、依赖顺序和实现指导见 `docs/rust-removal-plan.md`。
 
+打包已改为 C++ 宿主的分发布局与完整性清单（见下文“打包（C++ 宿主）”）；安装器（NSIS/MSI/DMG/deb）、签名与三平台真机验收仍未实现，所以分发布局还不是可发布的安装包。
+
 ## 架构与代码位置
 
 ```text
@@ -62,6 +64,24 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 
 开发宿主接受 `--dev-url http://127.0.0.1:1420`；发布模式接受包含 `index.html` 的 `--ui-dir <目录>`。`--data-dir <绝对路径>` 可为开发实例隔离数据库。也可以设置 `YUKINAL_DATA_DIR`；默认数据位置为 Windows `%APPDATA%/dev.yukinal.workspace`、macOS `~/Library/Application Support/dev.yukinal.workspace`、Linux `$XDG_DATA_HOME/dev.yukinal.workspace`（未设置时使用 `~/.local/share/dev.yukinal.workspace`）。
 
+## 打包（C++ 宿主）
+
+`pnpm package`（`scripts/package.mjs`）不再走 `tauri build`，而是把仓库已经产出的三件套暂存成可分发布局：
+
+- `pnpm build:python-agent` 产出冻结 Python Agent onedir（需要 `agent[package]` 与 PyInstaller）；
+- `pnpm build:ssh-service` 产出 C++ SSH 服务；
+- 用 CMake 构建 C++ 桌面宿主（`native/build-nmake` 等 Release 目录）。
+
+三者就绪后 `pnpm package` 把它们（连同 `NOTICE`、`LICENSE`、`OPENSSL-LICENSE.txt`、`THIRD_PARTY_LICENSES.txt`）复制到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`。清单记录应用版本（`packages/shared/src/version.ts` 的 `APP_VERSION`）、Agent 版本（`agent/pyproject.toml`）、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256/字节数，以及启动约定。`target/` 已被忽略，不纳入版本控制。
+
+- `pnpm release:manifest` 在已暂存的载荷上重建清单与校验和；
+- `pnpm package -- --verify` 逐字节复核载荷、校验和与清单，任何不一致都非零退出；
+- 缺少宿主、Agent 或 SSH 服务产物时脚本 fail-closed，不会产出部分载荷。
+
+启动器需要用 `YUKINAL_AGENT_ENTRY` 指向 `python-agent/yukinal-agent[.exe]`（冻结 onedir，目标机无需安装 Python），用 `YUKINAL_SSH_SERVICE_BINARY` 指向 `ssh-service/yukinal-ssh-service[.exe]`；这两个环境变量名是 C++ 宿主 `configure_sidecar()` 与终端/SFTP 后端已经在读取的名字。
+
+**未实现**：安装器（NSIS/MSI/DMG/deb）、升级与用户数据保留、代码签名与公证、三平台真实 UI 冒烟。清单的 `notes` 会如实记录“这是分发布局而非已安装发布”；完整性校验只证明载荷未被改动，不证明发布者身份。
+
 ## 数据和凭据边界
 
 数据库位于数据目录的 `yukinal.db`。C++ 迁移与 Rust 数据库 crate 的 36 段 SQL 完全一致，每个版本单独事务提交，并通过 `PRAGMA user_version` 记录版本。新数据库从空库初始化；较旧的非空库升级前会产生一致性备份和 JSON 清单，备份名为 `yukinal.db.pre-migration.bak` 和 `yukinal.db.pre-migration.json`。迁移失败时会关闭 SQLite 连接、恢复备份并移除 `-wal`/`-shm` 文件。更高版本的数据库会被拒绝打开。
@@ -74,7 +94,7 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 2. 迁移 MCP 配置、风险注解信任、服务器生命周期、OAuth 与进程监督；区分“设置已保存”和“服务已运行”。
 3. 将服务器连接、Host Key 确认、终端、文件浏览、传输和审批流程接入 C++ 桌面宿主；复用现有 C++ SSH/SFTP/PTY 服务，不保留 Rust SSH 回退。
 4. 迁移剩余任务、审计、计划、恢复与事件命令，并逐项对照 shared schema 和 UI 使用点。
-5. 完成 Windows、macOS、Linux 桌面构建和安装后验收。
+5. 在分发布局（`pnpm package`）之上补齐安装器与签名，完成 Windows、macOS、Linux 桌面构建和安装后验收。
 
 每一轮只纳入已完成且可复核的文件，更新相应文档，构建受影响的 C++ 目标，再按用户要求推送。不要把 `ssh_agent_development_brief.md` 加入提交；它是工作区中的任务输入。Git author 和 committer 必须设为 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 

@@ -7,7 +7,7 @@
 ## 0. 已删除的内容（本文件原本的前置条件）
 
 - 桌面 UI 原有 **81 个 Tauri 命令**（`crates/core` + `apps/desktop/src-tauri`），其中 C++ 宿主**已实现约 20 个**，其余仍返回 `NOT_IMPLEMENTED`。
-- `pnpm package` 曾走 `tauri build`；现在 **打包/安装器尚未实现**。
+- `pnpm package` 曾走 `tauri build`；现在由 `scripts/package.mjs` 暂存 C++ 宿主的**分发布局 + `SHA256SUMS.txt` + `release-manifest.json`**，并用 `pnpm package -- --verify` 复核完整性；**安装器（NSIS/MSI/DMG/deb）尚未实现**。
 - `pnpm check` 曾跑 `cargo fmt/clippy/check/test`；现在已移除。
 - 原本由 Rust 承载的共享能力（36 段 SQLite 迁移权威副本、OS 凭据边界、出站代理、host-trust、MCP、Python Agent sidecar 启动与监管）需要按下面顺序在 C++/Python 中重新提供。
 - Python Agent 到 C++ 宿主 RPC 的桥接仍未接入。
@@ -141,11 +141,11 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
 删除前确认“完成标准”全勾，然后：
 
 1. 删除：`crates/`、`apps/desktop/src-tauri/`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`.cargo/`。
-2. `package.json`：移除 `test` 里的 tauri 测试引用；`package` 改为 C++ 宿主打包。
+2. ✅ `package.json`：`package`/`release:manifest` 已改为 `scripts/package.mjs`（C++ 宿主分发布局 + 完整性清单）；`test` 里的 Tauri 引用已随 Rust 删除一并移除。
 3. `scripts/check.mjs`：移除 cargo fmt/clippy/check/test 步骤；CTest 仍需保留。
-4. `scripts/package.mjs`、`scripts/build-*`、NSIS/MSI/DMG/deb 相关脚本与 smoke：改为 C++ 宿主。
+4. 部分完成：`scripts/package.mjs`（连同 `scripts/lib/release-artifacts.mjs` 及其单测）已改为 C++ 宿主分发布局与完整性清单；`scripts/build-python-agent.mjs`/`build-ssh-service.mjs` 是打包的前置构建；NSIS/MSI/DMG/deb 相关脚本与安装 smoke 仍待实现。
 5. `scripts/lib/tauri-agent-command.mjs` 及其测试：删除或替换。
-6. `.github/workflows/check.yml`、`package.yml`：移除 Rust 工具链、cargo 缓存、`cargo audit`。
+6. `.github/workflows/check.yml` 已不再引用 Rust 工具链/cargo；`package.yml` 仍不存在（仓库目前只有 `check.yml`），安装包 workflow 待建。
 7. `docs/`：更新 `native-desktop-host.md`、`rewrite-cpp-python.md`、`cpp-desktop-handoff.md`、`acceptance-handoff.md`、`release.md`、`changelog.md`、`README.md`。
 8. 跑 `pnpm check` 与三平台安装验收，确认没有对 `cargo`/`src-tauri` 的悬挂引用。
 
@@ -159,6 +159,6 @@ C++ 侧需要一个等价物：进程启动 + 双向 NDJSON + 请求关联 + hos
   - Provider 六个命令、`agent_spawn/status/kill/logs`、`agent_run_*`/`agent_approval_respond` 与 MCP 设置 CRUD 已经走 C++；`host.ssh.service_target`、文件读/写/编辑目标与四个变更动作的 `effectful_action_target`/`_finished` 已实现，MCP 进程目录、investigation 转发与 `host.tool.execute` 的 MCP 分支 durable-plan 门禁仍待补（非 MCP 只读分支已完成）；文件传输历史存储（`TransferSnapshot` + 宿主私有 staging 清单、终态裁剪到最新 500 行、重启恢复改写为 `interrupted`）、传输契约模块（`transfer_types`）、本地文件系统 seam（`transfer_local`）与传输管理器（`transfer_manager` + `transfer_backend`：64 KiB 流式复制与增量 SHA-256、三路并行许可、冲突 skip/overwrite/rename、取消与关闭、重启恢复与远端 staging 对账、终态历史写入失败即降级为 `failed`）、数据库历史 seam（`transfer_history` 的 `DatabaseTransferHistoryStore` 与 `TransferSnapshot` 反序列化）与本地路径 take 方法已在 C++ 落库，SFTP 后端适配器（`SftpTransferBackend` 与可注入的 `SftpRemoteOps` seam、无原子替换即 fail-closed、流式 worker 的 JSON-lines 帧协议）已成，`file_transfer_upload`/`download`/`cancel`/`resolve_conflict` 的 IPC 接线已完成（`IpcRouter` 惰性持有 `TransferManager::with_history`、经 `take_upload_sources`/`take_download_directory` 起传、`file_transfer_list` 先对账远端 staging 再返回合并视图、`file.transfer_updated` 经事件 sink 转发、`~IpcRouter` 退订并 `shutdown`），远端拖拽的 `file_prepare_remote_drag` 也已完成（`remote_drag` 的宿主私有 staging store 与只读 `lstat` 探针 seam、5 分钟一次性 ticket、8 GiB 单文件与 16 GiB 总量上限、下载到私有目录后校验「恰好一个普通文件 + 尺寸一致 + 规范化路径不越界」，30 分钟下载上限与取消兜底），`file_drag_out_start` 的 IPC 与本地 drop 上报也已接线（一次性消费 ticket、经 `NativeFileDrag` seam 交付已暂存文件并在拖拽结束时清理、`emit_local_drop` 注册句柄并发出 `file.local_dropped`），仅剩平台原生拖拽（Windows `IDropSource`/`DoDragDrop`，`make_native_file_drag` 目前返回 `nullptr` 即 fail-closed）与 WebView 子窗口的 OS drop 落点（`IDropTarget`/`WM_DROPFILES`）待补。
 - [ ] 36 段迁移与新安装/旧库升级在 C++ 侧通过，凭据仍只进 OS 库。
 - [ ] SSH/SFTP/PTY/审批在 C++ 侧覆盖现有 UI 业务路径，无 Rust SSH 回退。
-- [ ] `pnpm check` 不再依赖 cargo；`pnpm package` 用 C++ 宿主产出安装包。
+- [ ] `pnpm check` 不再依赖 cargo（已满足）；`pnpm package` 已用 C++ 宿主产出分发布局 + `SHA256SUMS.txt` + `release-manifest.json` 并可用 `pnpm package -- --verify` 复核，但**尚未产出安装包（NSIS/MSI/DMG/deb）**，因此本条整条仍未完成。
 - [ ] Windows/macOS/Linux 安装、升级、用户数据保留、真实 UI 冒烟通过。
 - [ ] 删除清单（第 7 节）全部执行并复验。
