@@ -5785,11 +5785,24 @@ IpcReply transfer_error_reply(const TransferError& error) {
   return failure("TRANSFER_FAILED", error.what());
 }
 
+// The shared `LocalPathHandle` wire shape, used by `local_path_pick`,
+// `file.local_dropped` and `file_transfer_upload`.
+nlohmann::json local_handles_json(const std::vector<LocalPathHandle>& handles) {
+  nlohmann::json array = nlohmann::json::array();
+  for (const auto& handle : handles) {
+    nlohmann::json entry = {{"handleId", handle.handle_id},
+                            {"name", handle.name},
+                            {"kind", handle.kind}};
+    if (handle.size.has_value()) entry["size"] = *handle.size;
+    array.push_back(std::move(entry));
+  }
+  return array;
+}
+
 // True when every component of `root` is also a leading component of `candidate`.
 // Used with canonical paths, so a staged file cannot escape its private stage.
 bool path_is_within(const std::filesystem::path& candidate,
-                    const std::filesystem::path& root) {
-  auto candidate_it = candidate.begin();
+                    const std::filesystem::path& root) {  auto candidate_it = candidate.begin();
   for (auto root_it = root.begin(); root_it != root.end(); ++root_it, ++candidate_it) {
     if (candidate_it == candidate.end() || *candidate_it != *root_it) return false;
   }
@@ -5949,6 +5962,29 @@ void IpcRouter::set_remote_drag_wait_bounds(std::chrono::milliseconds download_t
   std::lock_guard lock(drag_mutex_);
   remote_drag_timeout_ = download_timeout;
   remote_drag_cancel_grace_ = cancel_grace;
+}
+
+void IpcRouter::set_native_file_drag(std::shared_ptr<NativeFileDrag> drag) {
+  std::lock_guard lock(drag_mutex_);
+  native_drag_ = std::move(drag);
+}
+
+void IpcRouter::set_native_window(void* window) {
+  std::lock_guard lock(drag_mutex_);
+  native_window_ = window;
+}
+
+void IpcRouter::emit_local_drop(std::vector<std::filesystem::path> paths) {
+  const auto registration = local_paths_.register_paths(paths);
+  std::function<void(const std::string&, const nlohmann::json&)> sink;
+  {
+    std::lock_guard lock(mutex_);
+    sink = event_sink_;
+  }
+  if (!sink) return;
+  sink("file.local_dropped",
+       {{"handles", local_handles_json(registration.handles)},
+        {"rejectedCount", registration.rejected}});
 }
 
 std::shared_ptr<RemoteDragProbe> IpcRouter::ensure_remote_drag_probe() {
@@ -7507,14 +7543,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       return failure("LOCAL_PATH_REJECTED",
                      "the selected paths could not be opened; select regular files or folders");
     }
-    nlohmann::json handles = nlohmann::json::array();
-    for (const auto& handle : registration.handles) {
-      nlohmann::json entry = {{"handleId", handle.handle_id},
-                              {"name", handle.name},
-                              {"kind", handle.kind}};
-      if (handle.size.has_value()) entry["size"] = *handle.size;
-      handles.push_back(std::move(entry));
-    }
+    nlohmann::json handles = local_handles_json(registration.handles);
     return {true, {{"handles", std::move(handles)}}};
   }
 
@@ -7526,6 +7555,10 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "file_prepare_remote_drag") {
     return remote_drag_prepare_command(params);
+  }
+
+  if (method == "file_drag_out_start") {
+    return remote_drag_start_command(params);
   }
 
   if (method == "__events.subscribe") return subscribe(params, true);
@@ -7977,6 +8010,56 @@ IpcReply IpcRouter::remote_drag_prepare_command(const nlohmann::json& params) {
           {{"dragId", std::move(prepared.drag_id)},
            {"name", std::move(prepared.name)},
            {"size", prepared.size}}};
+}
+
+IpcReply IpcRouter::remote_drag_start_command(const nlohmann::json& params) {
+  if (!exact_string_fields(params, {"dragId"})) {
+    return failure("INVALID_PARAMS", "file_drag_out_start requires exactly dragId");
+  }
+  const auto drag_id = params.at("dragId").get<std::string>();
+  if (!is_remote_drag_id(drag_id)) {
+    return failure("INVALID_PARAMS", "invalid remote drag ticket");
+  }
+  std::shared_ptr<NativeFileDrag> drag;
+  void* window = nullptr;
+  {
+    std::lock_guard lock(drag_mutex_);
+    drag = native_drag_;
+    window = native_window_;
+  }
+  if (!drag) {
+    return failure("UNSUPPORTED", "native drag-out is not available on this build");
+  }
+  if (window == nullptr) {
+    return failure("UNAVAILABLE", "the main application window is not available");
+  }
+  RemoteDragStore* store = nullptr;
+  try {
+    store = ensure_remote_drag_store();
+  } catch (const std::exception& error) {
+    return failure("STORAGE_ERROR", error.what());
+  }
+  if (store == nullptr) {
+    return failure("STORAGE_UNAVAILABLE", "The native drag staging location is unavailable");
+  }
+  StagedRemoteDrag staged;
+  try {
+    staged = store->take(drag_id);
+  } catch (const std::exception& error) {
+    return failure("NOT_FOUND", error.what());
+  }
+  auto handle = std::make_shared<StagedRemoteDrag>(std::move(staged));
+  const std::vector<std::filesystem::path> files = handle->files();
+  // The private directory must stay alive until the OS reports the drag ended; the
+  // seam releases this callback exactly then, dropping the last reference. If the
+  // drag cannot start, the local handle still owns the directory and removes it.
+  std::shared_ptr<StagedRemoteDrag> keep_alive = handle;
+  const bool started =
+      drag->start(window, files, [keep_alive]() mutable { keep_alive.reset(); });
+  if (!started) {
+    return failure("DRAG_FAILED", "the native drag could not be started");
+  }
+  return {true, nlohmann::json::object()};
 }
 
 IpcReply IpcRouter::server_command(const std::string& method,

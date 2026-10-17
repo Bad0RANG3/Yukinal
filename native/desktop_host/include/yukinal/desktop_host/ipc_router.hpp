@@ -71,6 +71,15 @@ class IpcRouter {
   void set_remote_drag_store(std::unique_ptr<RemoteDragStore> store);
   void set_remote_drag_wait_bounds(std::chrono::milliseconds download_timeout,
                                    std::chrono::milliseconds cancel_grace);
+  // Test seams for the native drag start: the OS drag seam and the main window
+  // handle it drags from. Both default to null so `file_drag_out_start` fails
+  // closed until the host wires them.
+  void set_native_file_drag(std::shared_ptr<NativeFileDrag> drag);
+  void set_native_window(void* window);
+
+  // Registers OS-dropped local paths and publishes `file.local_dropped` to the
+  // WebView. Called from the native window's drop handler on the UI thread.
+  void emit_local_drop(std::vector<std::filesystem::path> paths);
 
  private:
   IpcReply subscribe(const nlohmann::json& params, bool add);
@@ -86,6 +95,7 @@ class IpcRouter {
                               const nlohmann::json& params);
   IpcReply transfer_command(const std::string& method, const nlohmann::json& params);
   IpcReply remote_drag_prepare_command(const nlohmann::json& params);
+  IpcReply remote_drag_start_command(const nlohmann::json& params);
   IpcReply terminal_command(const std::string& method,
                             const nlohmann::json& params);
   [[nodiscard]] std::string issue_probe_ticket(const std::string& server_id,
@@ -139,6 +149,8 @@ class IpcRouter {
   std::mutex drag_mutex_;
   std::shared_ptr<RemoteDragProbe> drag_probe_;
   std::unique_ptr<RemoteDragStore> drag_store_;
+  std::shared_ptr<NativeFileDrag> native_drag_;
+  void* native_window_ = nullptr;
   std::mutex prepare_mutex_;
   std::chrono::milliseconds remote_drag_timeout_{std::chrono::minutes(30)};
   std::chrono::milliseconds remote_drag_cancel_grace_{std::chrono::seconds(60)};

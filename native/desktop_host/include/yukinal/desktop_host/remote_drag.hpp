@@ -163,4 +163,26 @@ class RemoteDragStore {
 // A fresh `remote_drag_<64 hex>` ticket id.
 [[nodiscard]] std::string new_remote_drag_id();
 
+// The OS-native drag seam. `start` begins a platform drag of the already-staged
+// `files` from `window` and calls `on_ended` exactly once when the operating
+// system reports the drag finished (dropped or cancelled); it must then release
+// the callback so the staged directory is cleaned up. It returns false when the
+// drag cannot be started. Keeping this behind a seam lets the IPC command be
+// exercised without a desktop.
+class NativeFileDrag {
+ public:
+  virtual ~NativeFileDrag() = default;
+  virtual bool start(void* window, const std::vector<std::filesystem::path>& files,
+                     std::function<void()> on_ended) = 0;
+};
+
+// The platform drag for this build, or nullptr when native drag-out is not
+// available (the command then fails closed with a clear error). The Windows
+// `IDropSource`/`DoDragDrop` implementation is still to come, so this is nullptr
+// today.
+[[nodiscard]] std::shared_ptr<NativeFileDrag> make_native_file_drag();
+
+// Whether `id` is a well-formed `remote_drag_<64 lowercase hex>` ticket. Pure.
+[[nodiscard]] bool is_remote_drag_id(const std::string& id);
+
 }  // namespace yukinal::desktop_host

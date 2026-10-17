@@ -1433,6 +1433,27 @@ without a server. The `native/build-nmake` Release build passed all fourteen CTe
 targets, `pnpm check` was green and publication hygiene was green. The native drag
 start (`file_drag_out_start`) and the local-drop emit path are the next commit.
 
+The drag-start IPC and the local-drop emit path landed next. `file_drag_out_start`
+validates the `remote_drag_<64 hex>` ticket, consumes it from the store, and hands
+the single staged file to the platform through a `NativeFileDrag` seam together
+with the main window handle; the private directory is held by a shared handle that
+is released only when the seam reports the drag ended, and a start the platform
+refuses removes the directory immediately. The command fails closed with
+`UNSUPPORTED`/`UNAVAILABLE` when no seam or no window is wired, and never consumes
+the ticket before that check. `emit_local_drop` registers OS-dropped local paths
+into the existing `LocalPathHandles` table and publishes `file.local_dropped`
+(`{handles, rejectedCount}`) through the event sink, so a dropped file is
+immediately usable by `file_transfer_upload`. `transfer_manager_tests` now drives
+both through injected seams: the ticket-format and unknown-ticket errors, the
+window and seam requirements that do not consume a ticket, a successful hand-off
+whose stage survives until the drag ends, the immediate cleanup of a refused
+drag, and the drop event whose handle starts an upload. The `native/build-nmake`
+Release build passed all fourteen CTest targets, `pnpm check` was green and
+publication hygiene was green. The platform-native drag itself (Windows
+`IDropSource`/`DoDragDrop`, where `make_native_file_drag` still returns null) and
+the WebView child window's OS drop target (`IDropTarget`/`WM_DROPFILES`) are the
+remaining pieces before remote drag-out works end to end on a real desktop.
+
 The transfer IPC wiring landed next. `IpcRouter` now owns the transfer manager: it
 creates `TransferManager::with_history` lazily on the first transfer command, backed
 by a `SftpTransferBackend` over `make_ssh_service_sftp_remote_ops` and a

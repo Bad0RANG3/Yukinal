@@ -482,6 +482,55 @@ class FakeRemoteDragProbe : public RemoteDragProbe {
   std::string error_message_;
 };
 
+// The OS-native drag seam the start command drives. It records the window and the
+// files it was handed and holds the completion callback until the test fires it,
+// so the staged-directory lifetime is observable.
+class FakeNativeFileDrag : public NativeFileDrag {
+ public:
+  bool start(void* window, const std::vector<std::filesystem::path>& files,
+             std::function<void()> on_ended) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fail_) return false;
+    ++starts_;
+    window_ = window;
+    files_ = files;
+    on_ended_ = std::move(on_ended);
+    return true;
+  }
+  void set_fail(bool fail) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fail_ = fail;
+  }
+  void finish() {
+    std::function<void()> callback;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      callback = std::move(on_ended_);
+    }
+    if (callback) callback();
+  }
+  [[nodiscard]] std::size_t starts() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return starts_;
+  }
+  [[nodiscard]] void* window() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return window_;
+  }
+  [[nodiscard]] std::vector<std::filesystem::path> files() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return files_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  bool fail_ = false;
+  std::size_t starts_ = 0;
+  void* window_ = nullptr;
+  std::vector<std::filesystem::path> files_;
+  std::function<void()> on_ended_;
+};
+
 // ── Checks ───────────────────────────────────────────────────────────────────
 
 void run_upload_and_download_checks() {
@@ -1178,6 +1227,12 @@ void run_remote_drag_path_checks() {
       });
   check(id.size() == 76 && id.rfind("remote_drag_", 0) == 0 && hex,
         "a fresh drag id should be remote_drag_ plus 64 lowercase hex digits");
+  check(is_remote_drag_id(id), "a fresh drag id should validate");
+  check(!is_remote_drag_id("remote_drag_short") &&
+            !is_remote_drag_id(std::string("remote_drag_") + std::string(64, 'G')) &&
+            !is_remote_drag_id(std::string("REMOTE_DRAG_") + std::string(64, 'a')) &&
+            !is_remote_drag_id(std::string("remote_drag_") + std::string(63, 'a')),
+        "a malformed drag id should be rejected");
 }
 
 void run_remote_drag_store_checks() {
@@ -1398,6 +1453,125 @@ void run_ipc_router_remote_drag_checks() {
   check(leftover == 0, "a timed-out preparation should remove its staging directory");
 }
 
+void run_ipc_router_remote_drag_start_checks() {
+  using nlohmann::json;
+
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+  const std::string body = "drag body";
+  backend->add_file("/srv/drag.txt", body);
+
+  auto history = std::make_shared<FakeHistoryStore>();
+  TransferManager manager = TransferManager::with_history(backend, history);
+
+  auto probe = std::make_shared<FakeRemoteDragProbe>();
+  probe->set("/srv/drag.txt", RemoteStat{RemoteEntryKind::File, body.size(), std::nullopt});
+  auto store = RemoteDragStore::open(temporary.path / "native-remote-drag");
+  RemoteDragStore* store_handle = store.get();
+
+  auto drag = std::make_shared<FakeNativeFileDrag>();
+  int window_token = 0;  // A non-null dummy window handle.
+
+  IpcRouter router;
+  router.set_transfer_manager(std::make_unique<TransferManager>(manager));
+  router.set_remote_drag_probe(probe);
+  router.set_remote_drag_store(std::move(store));
+  router.set_native_window(&window_token);
+
+  std::mutex events_mutex;
+  std::vector<std::pair<std::string, json>> events;
+  router.set_event_sink([&](const std::string& name, const json& payload) {
+    std::lock_guard<std::mutex> lock(events_mutex);
+    events.emplace_back(name, payload);
+  });
+
+  const auto prepared = router.invoke("file_prepare_remote_drag",
+      {{"serverId", "srv_1"}, {"path", "/srv/drag.txt"}});
+  check(prepared.ok, "the start test should prepare a drag ticket");
+  const auto drag_id = prepared.value.at("dragId").get<std::string>();
+
+  // Without a native drag seam the command fails closed, and the ticket survives.
+  check(router.invoke("file_drag_out_start", {{"dragId", drag_id}}).value.at("code") ==
+            "UNSUPPORTED",
+        "file_drag_out_start should fail closed without a native drag seam");
+  check(store_handle->size() == 1, "a rejected start must not consume the ticket");
+
+  // An unwired window also fails closed, before the ticket is consumed.
+  router.set_native_file_drag(drag);
+  router.set_native_window(nullptr);
+  check(router.invoke("file_drag_out_start", {{"dragId", drag_id}}).value.at("code") ==
+            "UNAVAILABLE",
+        "file_drag_out_start should require the main window");
+  check(store_handle->size() == 1, "a missing window must not consume the ticket");
+  router.set_native_window(&window_token);
+
+  check(router.invoke("file_drag_out_start", {{"dragId", "remote_drag_short"}})
+                .value.at("code") == "INVALID_PARAMS",
+        "file_drag_out_start should reject a malformed ticket");
+  check(router.invoke("file_drag_out_start",
+                      {{"dragId", "remote_drag_" + std::string(64, '0')}})
+                .value.at("code") == "NOT_FOUND",
+        "file_drag_out_start should report an unknown ticket");
+
+  const auto started = router.invoke("file_drag_out_start", {{"dragId", drag_id}});
+  check(started.ok && started.value.is_object() && started.value.empty(),
+        "file_drag_out_start should start the native drag and return an empty payload");
+  check(drag->starts() == 1 && drag->window() == &window_token,
+        "the native drag should receive the window and start once");
+  check(drag->files().size() == 1 && std::filesystem::exists(drag->files().front()) &&
+            read_file(drag->files().front()) == body,
+        "the native drag should receive the staged file");
+  check(store_handle->size() == 0, "starting the drag should consume the ticket");
+  const auto staged_directory = drag->files().front().parent_path();
+  check(std::filesystem::exists(staged_directory),
+        "the staged directory should survive until the drag ends");
+  drag->finish();
+  check(!std::filesystem::exists(staged_directory),
+        "the staged directory should be removed when the drag ends");
+
+  // A failed OS drag cleans up its stage immediately.
+  const auto second = router.invoke("file_prepare_remote_drag",
+      {{"serverId", "srv_1"}, {"path", "/srv/drag.txt"}});
+  check(second.ok, "the second ticket should prepare");
+  drag->set_fail(true);
+  const auto failed = router.invoke("file_drag_out_start",
+      {{"dragId", second.value.at("dragId").get<std::string>()}});
+  check(failed.value.at("code") == "DRAG_FAILED",
+        "a failed native drag should be reported");
+  drag->set_fail(false);
+  std::size_t leftover = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(store_handle->root())) {
+    if (entry.path().filename().string().rfind(RemoteDragStore::kStagePrefix, 0) == 0) {
+      ++leftover;
+    }
+  }
+  check(leftover == 0, "a failed native drag should remove its staging directory");
+
+  // emit_local_drop registers the dropped paths and publishes the event, and the
+  // returned handle is usable by `file_transfer_upload`.
+  const auto dropped = temporary.path / "dropped.txt";
+  write_file(dropped, "dropped");
+  router.emit_local_drop({dropped});
+  std::optional<json> drop_event;
+  {
+    std::lock_guard<std::mutex> lock(events_mutex);
+    for (const auto& entry : events) {
+      if (entry.first == "file.local_dropped") drop_event = entry.second;
+    }
+  }
+  check(drop_event.has_value(), "emit_local_drop should publish file.local_dropped");
+  check(drop_event->value("rejectedCount", -1) == 0 &&
+            drop_event->at("handles").size() == 1 &&
+            drop_event->at("handles").front().value("name", std::string()) == "dropped.txt" &&
+            drop_event->at("handles").front().value("kind", std::string()) == "file",
+        "the drop event should carry the registered handle");
+  const auto drop_handle = drop_event->at("handles").front().at("handleId").get<std::string>();
+  const auto upload_after_drop = router.invoke("file_transfer_upload",
+      {{"serverId", "srv_1"}, {"remoteDirectory", "/srv"}, {"sourceHandleIds", {drop_handle}}});
+  check(upload_after_drop.ok, "a dropped handle should be usable by file_transfer_upload");
+}
+
 }  // namespace
 
 int main() {
@@ -1412,6 +1586,7 @@ int main() {
   run_remote_drag_path_checks();
   run_remote_drag_store_checks();
   run_ipc_router_remote_drag_checks();
+  run_ipc_router_remote_drag_start_checks();
 
   std::cout << "transfer manager tests: green\n";
   return 0;

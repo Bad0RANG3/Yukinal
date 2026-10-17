@@ -83,6 +83,24 @@ std::string new_remote_drag_id() {
   return id;
 }
 
+bool is_remote_drag_id(const std::string& id) {
+  constexpr std::size_t kPrefixLength = 12;  // "remote_drag_"
+  if (id.size() != kPrefixLength + 64) return false;
+  if (id.compare(0, kPrefixLength, "remote_drag_") != 0) return false;
+  for (std::size_t index = kPrefixLength; index < id.size(); ++index) {
+    const char value = id[index];
+    if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))) return false;
+  }
+  return true;
+}
+
+std::shared_ptr<NativeFileDrag> make_native_file_drag() {
+  // The Windows `IDropSource`/`DoDragDrop` drag and the other platforms' drags are
+  // still to come. Until then the command fails closed with a clear error rather
+  // than silently doing nothing.
+  return nullptr;
+}
+
 // ── StagedRemoteDrag ───────────────────────────────────────────────────────────
 
 StagedRemoteDrag::StagedRemoteDrag(std::filesystem::path directory,
