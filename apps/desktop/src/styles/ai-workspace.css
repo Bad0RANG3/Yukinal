@@ -7,6 +7,7 @@
   --workspace-side-inset: var(--space-group);
   --ai-frame-width: 100%;
   --ai-reading-width: 760px;
+  --ai-chat-text: 12px;
   --ai-content-inset: var(--space-group);
   display: grid;
   grid-template-columns: var(--workspace-side-width) minmax(0, 1fr) var(--workspace-side-width);
@@ -95,14 +96,16 @@
 .ai-first .agent-context > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Both scrollbar gutters reserve the same width. Subtract that reservation
    from the padding so the text and composer share the exact same column. */
-.ai-first .agent-feed { padding: 32px max(calc(var(--ai-content-inset) - var(--scrollbar-size)), calc((100% - var(--ai-reading-width)) / 2 - var(--scrollbar-size))); gap: 24px; scrollbar-gutter: stable both-edges; }
-.ai-first .agent-entry { position: relative; flex: 0 0 auto; min-width: 0; font-size: var(--text-small); line-height: 1.75; }
-.ai-first .agent-entry-user { align-self: flex-end; max-width: 85%; padding: 12px 16px; border-color: var(--edge-subtle); border-radius: var(--radius-card); background: var(--material-hover); }
+.ai-first .agent-feed { padding: 32px max(calc(var(--ai-content-inset) - var(--scrollbar-size)), calc((100% - var(--ai-reading-width)) / 2 - var(--scrollbar-size))); gap: 18px; scrollbar-gutter: stable both-edges; }
+.ai-first .agent-entry { position: relative; flex: 0 0 auto; min-width: 0; font-size: var(--ai-chat-text); line-height: 1.6; }
+.ai-first .agent-entry-user { align-self: flex-end; max-width: 85%; padding: 9px 12px; border-color: var(--edge-subtle); border-radius: var(--radius-card); background: var(--material-hover); }
 .ai-first .agent-entry-assistant { border: 0; background: transparent; padding: 0; }
 .ai-first :is(.agent-entry-user, .agent-entry-assistant) > .entry-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.ai-first .agent-entry-body, .ai-first .markdown-body { font-size: var(--text-small); line-height: 1.75; }
+.ai-first .agent-entry-body, .ai-first .markdown-body { font-size: var(--ai-chat-text); line-height: 1.6; }
+.ai-first .agent-reply-meta { margin-bottom: 4px; }
+.ai-first .agent-markdown > :is(.md-paragraph, .md-list, .md-quote):not(:last-child) { margin-bottom: 6px; }
 .ai-first .entry-label, .ai-first .agent-reasoning-summary { font-size: var(--text-caption); }
-.ai-first .agent-reasoning-text, .ai-first .agent-notice { font-size: var(--text-small); line-height: 1.7; }
+.ai-first .agent-reasoning-text, .ai-first .agent-notice { font-size: var(--ai-chat-text); line-height: 1.6; }
 .ai-first .agent-conversation.is-empty { justify-content: center; padding-block: 32px clamp(64px, 10vh, 112px); }
 .ai-first .agent-conversation.is-empty .agent-feed { flex: 0 0 auto; overflow: visible; padding-block: 0 24px; }
 .ai-first .agent-empty { flex: 0 0 auto; justify-content: center; align-items: center; min-height: 0; margin: 0; padding: 0; text-align: center; }
@@ -128,7 +131,7 @@
 .ai-first .agent-composer-input { min-height: 40px; max-height: 180px; }
 .ai-first .agent-send-button { display: grid; place-items: center; width: var(--composer-action-size); min-width: var(--composer-action-size); height: var(--composer-action-size); padding: 0; border-radius: var(--radius-circle); }
 .ai-first .agent-conversation.is-empty .agent-settings-panel { max-height: min(480px, 55vh); }
-.ai-first .agent-composer textarea { font-size: var(--text-small); line-height: 1.6; }
+.ai-first .agent-composer textarea { font-size: var(--ai-chat-text); line-height: 1.5; }
 .ai-first .agent-composer :is(.agent-composer-select, .agent-model-trigger, .agent-composer-tool, .agent-run-mode, .agent-policy-trigger) { font-size: var(--text-label); }
 
 .ai-first .workspace-main.workspace-inspector { min-width: 0; min-height: 0; margin: 0; border: 0; border-radius: 0; background: transparent; font-size: var(--text-small); }
