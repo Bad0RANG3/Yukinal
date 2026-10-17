@@ -449,6 +449,39 @@ class Observation {
   std::map<std::string, TransferSnapshot> latest_;
 };
 
+// The read-only remote seam the drag preparation drives. A test configures the
+// `lstat` result per path (or a thrown `TransferError`) without a server.
+class FakeRemoteDragProbe : public RemoteDragProbe {
+ public:
+  void set(const std::string& path, std::optional<RemoteStat> stat) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_[path] = std::move(stat);
+  }
+  void set_error(TransferErrorCode code, std::string message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    error_code_ = code;
+    error_message_ = std::move(message);
+  }
+  void clear_error() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    error_code_.reset();
+  }
+
+  std::optional<RemoteStat> lstat(const std::string&, const std::string& path) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (error_code_.has_value()) throw TransferError(*error_code_, error_message_);
+    const auto found = stats_.find(path);
+    if (found == stats_.end()) return std::nullopt;
+    return found->second;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::map<std::string, std::optional<RemoteStat>> stats_;
+  std::optional<TransferErrorCode> error_code_;
+  std::string error_message_;
+};
+
 // ── Checks ───────────────────────────────────────────────────────────────────
 
 void run_upload_and_download_checks() {
@@ -1125,6 +1158,246 @@ void run_ipc_router_transfer_checks() {
         "file_transfer_cancel should report an unknown transfer");
 }
 
+void run_remote_drag_path_checks() {
+  for (const char* path : {"relative.txt", "/srv/../secret", "/srv/./file",
+                           "/srv\\secret", "/srv/", "", "/a/b/.."}) {
+    check(!valid_remote_drag_path(path), "an unsafe remote drag path should be rejected");
+  }
+  check(valid_remote_drag_path("/srv/app/config.yml"),
+        "a safe absolute remote drag path should be accepted");
+  check(remote_drag_file_name("/srv/app/config.yml") == std::optional<std::string>("config.yml"),
+        "the remote drag name should be the last path segment");
+  check(!remote_drag_file_name("/srv/app/").has_value() &&
+            !remote_drag_file_name("/").has_value(),
+        "a path without a name segment has no file name");
+
+  const auto id = new_remote_drag_id();
+  const bool hex =
+      std::all_of(id.begin() + 12, id.end(), [](char value) {
+        return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+      });
+  check(id.size() == 76 && id.rfind("remote_drag_", 0) == 0 && hex,
+        "a fresh drag id should be remote_drag_ plus 64 lowercase hex digits");
+}
+
+void run_remote_drag_store_checks() {
+  TemporaryDirectory temporary;
+
+  // `open` rejects a non-absolute root.
+  bool relative_rejected = false;
+  try {
+    (void)RemoteDragStore::open(std::filesystem::path("relative-root"));
+  } catch (const std::exception&) {
+    relative_rejected = true;
+  }
+  check(relative_rejected, "the drag store should reject a relative root");
+
+  // `open` sweeps only stale drag directories and stage files.
+  const auto sweep_root = temporary.path / "sweep-root";
+  std::filesystem::create_directories(sweep_root / "yukinal-remote-drag-stale");
+  std::filesystem::create_directories(sweep_root / "keep-me");
+  write_file(sweep_root / "yukinal-remote-drag-orphan.txt", "orphan");
+  auto swept = RemoteDragStore::open(sweep_root);
+  check(!std::filesystem::exists(sweep_root / "yukinal-remote-drag-stale") &&
+            !std::filesystem::exists(sweep_root / "yukinal-remote-drag-orphan.txt") &&
+            std::filesystem::exists(sweep_root / "keep-me"),
+        "the drag store should sweep only stale drag entries on open");
+  check(swept->root() == sweep_root, "the drag store should report its root");
+
+  // A staged drag owns its directory and removes it on destruction.
+  const auto owned = swept->create_stage();
+  check(std::filesystem::is_directory(owned), "create_stage should create a directory");
+  {
+    StagedRemoteDrag drag(owned, {});
+    check(drag.owns_directory(), "a staged drag should own its directory");
+  }
+  check(!std::filesystem::exists(owned),
+        "a staged drag should remove its directory on destruction");
+
+  // `keep()` leaves the directory for the next startup sweep.
+  const auto kept = swept->create_stage();
+  {
+    StagedRemoteDrag drag(kept, {});
+    drag.keep();
+  }
+  check(std::filesystem::exists(kept), "keep() should leave the directory for the next sweep");
+
+  // A ticket round-trips and is consumed exactly once.
+  const auto stage = swept->create_stage();
+  const auto staged = stage / "note.txt";
+  write_file(staged, "drag me");
+  const auto prepared = swept->insert(stage, staged, "note.txt", 7);
+  check(prepared.drag_id.size() == 76 && prepared.drag_id.rfind("remote_drag_", 0) == 0 &&
+            prepared.name == "note.txt" && prepared.size == 7,
+        "insert should return the ticket, name and size");
+  check(swept->size() == 1, "the store should hold one prepared drag");
+  auto taken = swept->take(prepared.drag_id);
+  check(taken.files().size() == 1 && taken.files().front() == staged,
+        "take should hand back the staged file");
+  check(swept->size() == 0, "take should consume the ticket");
+  taken.release();
+  check(std::filesystem::exists(staged), "a released stage should survive");
+  bool reuse_rejected = false;
+  try {
+    (void)swept->take(prepared.drag_id);
+  } catch (const std::exception&) {
+    reuse_rejected = true;
+  }
+  check(reuse_rejected, "taking a consumed ticket should fail");
+
+  // Expiry drops the ticket and its directory.
+  std::int64_t now = 1'000;
+  RemoteDragStore clocked(temporary.path / "clocked-root",
+                          [&now]() { return now; });
+  std::filesystem::create_directories(clocked.root());
+  const auto expiring = clocked.create_stage();
+  write_file(expiring / "f", "x");
+  const auto ticket = clocked.insert(expiring, expiring / "f", "f", 1);
+  now += RemoteDragStore::kTicketTtlMillis + 1;
+  bool expired_rejected = false;
+  try {
+    (void)clocked.take(ticket.drag_id);
+  } catch (const std::exception&) {
+    expired_rejected = true;
+  }
+  check(expired_rejected, "an expired drag ticket should be rejected");
+  check(!std::filesystem::exists(expiring), "an expired drag should drop its directory");
+
+  // The prepared-count cap is enforced.
+  std::int64_t frozen = 5'000;
+  RemoteDragStore capped(temporary.path / "capped-root", [&frozen]() { return frozen; });
+  std::filesystem::create_directories(capped.root());
+  const auto cap_stage = capped.create_stage();
+  write_file(cap_stage / "f", "x");
+  for (std::size_t index = 0; index < RemoteDragStore::kMaxPreparedCount; ++index) {
+    (void)capped.insert(cap_stage, cap_stage / "f", "f", 1);
+  }
+  bool count_rejected = false;
+  try {
+    (void)capped.insert(cap_stage, cap_stage / "f", "f", 1);
+  } catch (const std::exception&) {
+    count_rejected = true;
+  }
+  check(count_rejected, "the store should cap the number of prepared drags");
+
+  // The prepared-byte cap is enforced.
+  RemoteDragStore byte_capped(temporary.path / "byte-capped-root",
+                              [&frozen]() { return frozen; });
+  std::filesystem::create_directories(byte_capped.root());
+  const auto byte_stage = byte_capped.create_stage();
+  write_file(byte_stage / "f", "x");
+  (void)byte_capped.insert(byte_stage, byte_stage / "f", "f",
+                           RemoteDragStore::kMaxPreparedBytes);
+  bool bytes_rejected = false;
+  try {
+    (void)byte_capped.insert(byte_stage, byte_stage / "f", "f", 1);
+  } catch (const std::exception&) {
+    bytes_rejected = true;
+  }
+  check(bytes_rejected, "the store should cap the prepared bytes");
+}
+
+void run_ipc_router_remote_drag_checks() {
+  using nlohmann::json;
+
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+  const std::string body = "report body";
+  backend->add_file("/srv/report.txt", body);
+
+  auto history = std::make_shared<FakeHistoryStore>();
+  TransferManager manager = TransferManager::with_history(backend, history);
+
+  auto probe = std::make_shared<FakeRemoteDragProbe>();
+  probe->set("/srv/report.txt", RemoteStat{RemoteEntryKind::File, body.size(), std::nullopt});
+  probe->set("/srv/folder", RemoteStat{RemoteEntryKind::Directory, 0, std::nullopt});
+  probe->set("/srv/link", RemoteStat{RemoteEntryKind::Symlink, 0, std::nullopt});
+  probe->set("/srv/huge.bin",
+             RemoteStat{RemoteEntryKind::File, RemoteDragStore::kMaxFileBytes + 1, std::nullopt});
+
+  auto store = RemoteDragStore::open(temporary.path / "native-remote-drag");
+  RemoteDragStore* store_handle = store.get();
+
+  IpcRouter router;
+  router.set_transfer_manager(std::make_unique<TransferManager>(manager));
+  router.set_remote_drag_probe(probe);
+  router.set_remote_drag_store(std::move(store));
+
+  const auto invoke = [&router](const char* path) {
+    return router.invoke("file_prepare_remote_drag",
+                         {{"serverId", "srv_1"}, {"path", path}});
+  };
+
+  check(!router.invoke("file_prepare_remote_drag", {{"serverId", "srv_1"}}).ok,
+        "file_prepare_remote_drag should require its full parameter set");
+  check(!router.invoke("file_prepare_remote_drag",
+                       {{"serverId", "srv_1"}, {"path", "/srv/report.txt"}, {"extra", true}})
+             .ok,
+        "file_prepare_remote_drag should reject unknown parameters");
+  check(!router.invoke("file_prepare_remote_drag",
+                       {{"serverId", "not-a-server"}, {"path", "/srv/report.txt"}})
+             .ok,
+        "file_prepare_remote_drag should reject a malformed server id");
+  check(invoke("relative").value.at("code") == "INVALID_PARAMS",
+        "file_prepare_remote_drag should reject an unsafe path");
+
+  check(invoke("/srv/missing.txt").value.at("code") == "NOT_FOUND",
+        "file_prepare_remote_drag should report a missing remote file");
+  check(!invoke("/srv/folder").ok, "file_prepare_remote_drag should reject a directory");
+  check(!invoke("/srv/link").ok, "file_prepare_remote_drag should reject a symlink");
+  check(!invoke("/srv/huge.bin").ok, "file_prepare_remote_drag should reject an oversized file");
+
+  probe->set_error(TransferErrorCode::Unsupported, "target is not supported");
+  check(!invoke("/srv/report.txt").ok,
+        "file_prepare_remote_drag should fail closed on an unsupported target");
+  probe->clear_error();
+
+  const auto prepared = invoke("/srv/report.txt");
+  check(prepared.ok, "file_prepare_remote_drag should prepare a regular remote file");
+  const auto drag_id = prepared.value.at("dragId").get<std::string>();
+  check(drag_id.size() == 76 && drag_id.rfind("remote_drag_", 0) == 0,
+        "file_prepare_remote_drag should return a remote_drag_<64 hex> ticket");
+  check(prepared.value.at("name") == "report.txt" &&
+            prepared.value.at("size").get<std::uint64_t>() == body.size(),
+        "file_prepare_remote_drag should echo the file name and size");
+
+  {
+    auto staged = store_handle->take(drag_id);
+    check(staged.files().size() == 1 && std::filesystem::exists(staged.files().front()),
+          "the prepared drag should stage the downloaded bytes behind the ticket");
+    check(read_file(staged.files().front()) == body,
+          "the staged drag should hold the exact downloaded bytes");
+    const auto canonical_stage = std::filesystem::canonical(staged.files().front());
+    const auto canonical_root = std::filesystem::canonical(store_handle->root());
+    check(canonical_stage.string().rfind(canonical_root.string(), 0) == 0,
+          "the staged file should stay inside the private drag root");
+  }
+  bool reused = false;
+  try {
+    (void)store_handle->take(drag_id);
+  } catch (const std::exception&) {
+    reused = true;
+  }
+  check(reused, "a consumed drag ticket should not be reusable");
+
+  // A hung download is bounded: the preparation cancels it, observes the stop and
+  // cleans up rather than racing the stage.
+  backend->set_read_delay(400);
+  router.set_remote_drag_wait_bounds(std::chrono::milliseconds(30), std::chrono::seconds(5));
+  const auto timed_out = invoke("/srv/report.txt");
+  check(!timed_out.ok, "a drag preparation should bound a hung download");
+  backend->set_read_delay(0);
+  check(store_handle->size() == 0, "a timed-out preparation should not leave a ticket");
+  std::size_t leftover = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(store_handle->root())) {
+    if (entry.path().filename().string().rfind(RemoteDragStore::kStagePrefix, 0) == 0) {
+      ++leftover;
+    }
+  }
+  check(leftover == 0, "a timed-out preparation should remove its staging directory");
+}
+
 }  // namespace
 
 int main() {
@@ -1136,6 +1409,9 @@ int main() {
   run_fail_closed_history_check();
   run_query_checks();
   run_ipc_router_transfer_checks();
+  run_remote_drag_path_checks();
+  run_remote_drag_store_checks();
+  run_ipc_router_remote_drag_checks();
 
   std::cout << "transfer manager tests: green\n";
   return 0;

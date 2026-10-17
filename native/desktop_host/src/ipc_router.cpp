@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -5784,6 +5785,79 @@ IpcReply transfer_error_reply(const TransferError& error) {
   return failure("TRANSFER_FAILED", error.what());
 }
 
+// True when every component of `root` is also a leading component of `candidate`.
+// Used with canonical paths, so a staged file cannot escape its private stage.
+bool path_is_within(const std::filesystem::path& candidate,
+                    const std::filesystem::path& root) {
+  auto candidate_it = candidate.begin();
+  for (auto root_it = root.begin(); root_it != root.end(); ++root_it, ++candidate_it) {
+    if (candidate_it == candidate.end() || *candidate_it != *root_it) return false;
+  }
+  return true;
+}
+
+// The single regular file a completed drag download must have produced. A
+// directory or symbolic link in the stage is a contract violation, matching the
+// retired Rust `collect_staged_regular_files`.
+std::vector<std::filesystem::path> collect_staged_regular_files(
+    const std::filesystem::path& directory) {
+  std::vector<std::filesystem::path> files;
+  std::error_code error;
+  std::filesystem::directory_iterator iterator(
+      directory, std::filesystem::directory_options::skip_permission_denied, error);
+  if (error) throw std::runtime_error(error.message());
+  for (const auto& entry : iterator) {
+    std::error_code status_error;
+    const auto status = entry.symlink_status(status_error);
+    if (status_error) throw std::runtime_error(status_error.message());
+    if (std::filesystem::is_symlink(status) || std::filesystem::is_directory(status)) {
+      throw std::runtime_error("staged download contains a directory or symbolic link");
+    }
+    if (std::filesystem::is_regular_file(status)) files.push_back(entry.path());
+  }
+  return files;
+}
+
+// Waits until `transfer_id` reaches a terminal status or `timeout` elapses. A
+// missed event is recovered by polling the manager's latest snapshot once, so a
+// transfer that completed before the subscription was established is still seen.
+std::optional<TransferSnapshot> wait_for_transfer_terminal(
+    TransferManager& manager, const std::string& transfer_id,
+    std::chrono::milliseconds timeout) {
+  struct State {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::optional<TransferSnapshot> terminal;
+  };
+  auto state = std::make_shared<State>();
+  const auto token = manager.subscribe(
+      [state, transfer_id](const TransferSnapshot& snapshot) {
+        if (snapshot.transfer_id != transfer_id || !is_terminal(snapshot.status)) return;
+        {
+          std::lock_guard lock(state->mutex);
+          if (state->terminal.has_value()) return;
+          state->terminal = snapshot;
+        }
+        state->condition.notify_all();
+      });
+  struct Unsubscriber {
+    TransferManager* manager;
+    std::size_t token;
+    ~Unsubscriber() { manager->unsubscribe(token); }
+  } unsubscriber{&manager, token};
+
+  {
+    std::lock_guard lock(state->mutex);
+    if (const auto current = manager.get(transfer_id);
+        current.has_value() && is_terminal(current->status)) {
+      state->terminal = *current;
+    }
+  }
+  std::unique_lock lock(state->mutex);
+  state->condition.wait_for(lock, timeout, [&] { return state->terminal.has_value(); });
+  return state->terminal;
+}
+
 }  // namespace
 
 IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
@@ -5858,6 +5932,40 @@ TransferManager* IpcRouter::ensure_transfer_manager() {
   transfers_ = std::move(manager);
   subscribe_transfer_events_locked();
   return transfers_.get();
+}
+
+void IpcRouter::set_remote_drag_probe(std::shared_ptr<RemoteDragProbe> probe) {
+  std::lock_guard lock(drag_mutex_);
+  drag_probe_ = std::move(probe);
+}
+
+void IpcRouter::set_remote_drag_store(std::unique_ptr<RemoteDragStore> store) {
+  std::lock_guard lock(drag_mutex_);
+  drag_store_ = std::move(store);
+}
+
+void IpcRouter::set_remote_drag_wait_bounds(std::chrono::milliseconds download_timeout,
+                                            std::chrono::milliseconds cancel_grace) {
+  std::lock_guard lock(drag_mutex_);
+  remote_drag_timeout_ = download_timeout;
+  remote_drag_cancel_grace_ = cancel_grace;
+}
+
+std::shared_ptr<RemoteDragProbe> IpcRouter::ensure_remote_drag_probe() {
+  std::lock_guard lock(drag_mutex_);
+  if (drag_probe_) return drag_probe_;
+  if (database_ == nullptr) return nullptr;
+  drag_probe_ = make_ssh_service_remote_drag_probe(database_, credentials_);
+  return drag_probe_;
+}
+
+RemoteDragStore* IpcRouter::ensure_remote_drag_store() {
+  std::lock_guard lock(drag_mutex_);
+  if (drag_store_) return drag_store_.get();
+  if (database_ == nullptr) return nullptr;
+  drag_store_ = RemoteDragStore::open(database_->data_directory() /
+                                      RemoteDragStore::kDirectoryName);
+  return drag_store_.get();
 }
 
 IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
@@ -7416,6 +7524,10 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return transfer_command(method, params);
   }
 
+  if (method == "file_prepare_remote_drag") {
+    return remote_drag_prepare_command(params);
+  }
+
   if (method == "__events.subscribe") return subscribe(params, true);
   if (method == "__events.unsubscribe") return subscribe(params, false);
 
@@ -7706,6 +7818,165 @@ IpcReply IpcRouter::transfer_command(const std::string& method,
 
   return failure("NOT_IMPLEMENTED",
                  "This desktop command has not yet migrated to the C++ host: " + method);
+}
+
+IpcReply IpcRouter::remote_drag_prepare_command(const nlohmann::json& params) {
+  if (!only_fields(params, {"serverId", "path"}, {"serverId", "path"})) {
+    return failure("INVALID_PARAMS",
+                   "file_prepare_remote_drag received an unexpected parameter");
+  }
+  if (!params.at("serverId").is_string() || !params.at("path").is_string()) {
+    return failure("INVALID_PARAMS", "file_prepare_remote_drag parameters are invalid");
+  }
+  const auto server_id = params.at("serverId").get<std::string>();
+  const auto path = params.at("path").get<std::string>();
+  if (!valid_server_id(server_id)) {
+    return failure("INVALID_PARAMS", "file_prepare_remote_drag serverId is invalid");
+  }
+  if (!valid_remote_drag_path(path)) {
+    return failure("INVALID_PARAMS", "remote drag path must be a safe absolute file path");
+  }
+  const auto name = remote_drag_file_name(path);
+  if (!name.has_value()) {
+    return failure("INVALID_PARAMS", "remote file path has no name");
+  }
+
+  // The host serializes preparation: IPC dispatch runs on the window thread, and a
+  // single download-to-stage at a time keeps the private staging root bounded.
+  std::lock_guard prepare_lock(prepare_mutex_);
+
+  RemoteDragStore* store = nullptr;
+  try {
+    store = ensure_remote_drag_store();
+  } catch (const std::exception& error) {
+    return failure("STORAGE_ERROR", error.what());
+  }
+  if (store == nullptr) {
+    return failure("STORAGE_UNAVAILABLE", "The native drag staging location is unavailable");
+  }
+
+  const auto probe = ensure_remote_drag_probe();
+  if (!probe) {
+    return failure("TRANSFER_UNAVAILABLE",
+                   "the selected target is not supported by the C++ SSH service");
+  }
+  std::optional<RemoteStat> stat;
+  try {
+    stat = probe->lstat(server_id, path);
+  } catch (const TransferError& error) {
+    return transfer_error_reply(error);
+  }
+  if (!stat.has_value()) {
+    return failure("NOT_FOUND", "remote file no longer exists");
+  }
+  if (stat->kind != RemoteEntryKind::File) {
+    return failure("INVALID_PARAMS",
+                   "only regular remote files can be dragged to the desktop");
+  }
+  if (stat->size > RemoteDragStore::kMaxFileBytes) {
+    return failure("INVALID_PARAMS",
+                   "remote files larger than 8 GiB cannot be prepared for native drag-out");
+  }
+
+  TransferManager* manager = nullptr;
+  try {
+    manager = ensure_transfer_manager();
+  } catch (const TransferError& error) {
+    return transfer_error_reply(error);
+  }
+  if (manager == nullptr) {
+    return failure("TRANSFER_UNAVAILABLE",
+                   "File transfer is unavailable because this build has no SSH core");
+  }
+
+  std::chrono::milliseconds download_timeout;
+  std::chrono::milliseconds cancel_grace;
+  {
+    std::lock_guard lock(drag_mutex_);
+    download_timeout = remote_drag_timeout_;
+    cancel_grace = remote_drag_cancel_grace_;
+  }
+
+  std::filesystem::path directory;
+  try {
+    directory = store->create_stage();
+  } catch (const std::exception& error) {
+    return failure("STORAGE_ERROR", error.what());
+  }
+  // Owns the private stage until the ticket is registered (or `keep()` pins it for
+  // the next startup sweep when cancellation cannot be observed).
+  StagedRemoteDrag staging(directory, {});
+
+  std::string transfer_id;
+  try {
+    transfer_id = manager->start_download(server_id, {path}, directory, ConflictPolicy::Ask);
+  } catch (const TransferError& error) {
+    return transfer_error_reply(error);
+  }
+
+  auto terminal = wait_for_transfer_terminal(*manager, transfer_id, download_timeout);
+  if (!terminal.has_value()) {
+    // A hung backend must not race the stage cleanup: cancel and observe the stop,
+    // otherwise leave the directory for the next startup sweep.
+    try {
+      manager->cancel(transfer_id);
+    } catch (const TransferError&) {
+    }
+    if (!wait_for_transfer_terminal(*manager, transfer_id, cancel_grace).has_value()) {
+      staging.keep();
+    }
+    return failure("TRANSFER_FAILED",
+                   "could not prepare remote file for native drag: the download did not finish");
+  }
+  if (terminal->status != TransferStatus::Completed || terminal->completed_files != 1) {
+    std::string detail = "download did not complete successfully";
+    if (!terminal->failures.empty() && !terminal->failures.front().message.empty()) {
+      detail = terminal->failures.front().message;
+    }
+    return failure("TRANSFER_FAILED",
+                   "could not prepare remote file for native drag: " + detail);
+  }
+
+  std::vector<std::filesystem::path> files;
+  try {
+    files = collect_staged_regular_files(directory);
+  } catch (const std::exception& error) {
+    return failure("TRANSFER_FAILED", error.what());
+  }
+  if (files.size() != 1) {
+    return failure("TRANSFER_FAILED",
+                   "remote download did not produce exactly one regular file");
+  }
+  const auto& staged_file = files.front();
+  std::error_code status_error;
+  const auto metadata = std::filesystem::symlink_status(staged_file, status_error);
+  if (status_error || std::filesystem::is_symlink(metadata) ||
+      !std::filesystem::is_regular_file(metadata)) {
+    return failure("TRANSFER_FAILED", "staged remote file failed its local type or size check");
+  }
+  std::error_code size_error;
+  const auto staged_size = std::filesystem::file_size(staged_file, size_error);
+  if (size_error || staged_size != stat->size) {
+    return failure("TRANSFER_FAILED", "staged remote file failed its local type or size check");
+  }
+  std::error_code canonical_error;
+  const auto canonical_root = std::filesystem::canonical(directory, canonical_error);
+  const auto canonical_file = std::filesystem::canonical(staged_file, canonical_error);
+  if (canonical_error || !path_is_within(canonical_file, canonical_root)) {
+    return failure("TRANSFER_FAILED", "staged file escaped the private drag directory");
+  }
+
+  PreparedRemoteDrag prepared;
+  try {
+    prepared = store->insert(directory, canonical_file, *name, staged_size);
+  } catch (const std::exception& error) {
+    return failure("STORAGE_ERROR", error.what());
+  }
+  staging.release();
+  return {true,
+          {{"dragId", std::move(prepared.drag_id)},
+           {"name", std::move(prepared.name)},
+           {"size", prepared.size}}};
 }
 
 IpcReply IpcRouter::server_command(const std::string& method,

@@ -1408,6 +1408,31 @@ all fourteen CTest targets, `pnpm check` was green and publication hygiene was
 green. The `file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring
 and remote drag are the next commit.
 
+The remote drag-out preparation landed next. A new `remote_drag` module ports the
+retired Rust `crate::commands::files::drag_out` staging: a `RemoteDragStore` owns
+the host-private root (`<data dir>/native-remote-drag`), creates one private stage
+directory per preparation, sweeps stale `yukinal-remote-drag-*` entries on startup
+and on expiry, and hands out a one-time `remote_drag_<64 hex>` ticket with a
+five-minute TTL. Registration is bounded (64 prepared drags, 8 GiB per file and
+16 GiB total) and a `StagedRemoteDrag` handle removes its directory on destruction
+unless the native drag consumed it or a `keep()` pins a hung stage for the next
+sweep. `file_prepare_remote_drag` mirrors the retired adapter: it validates the
+safe absolute path and server id, resolves the target through a read-only
+`RemoteDragProbe` `lstat` seam (`make_ssh_service_remote_drag_probe` over the same
+SFTP ops), rejects a missing path, a non-regular file or a file above 8 GiB before
+any download, stages the file into the store's private directory through the
+transfer manager (a 30-minute bound; on timeout it cancels and only leaves the
+directory for the startup sweep when the stop cannot be observed), then requires
+exactly one regular staged file whose size matches the remote stat and whose
+canonical path stays inside the stage before registering the ticket. Two narrow
+test seams (`set_remote_drag_probe`, `set_remote_drag_store`) plus the direct
+store/path helpers let `transfer_manager_tests` cover the pure path and name
+rules, the store open/insert/take/expiry/caps/sweep behaviour, the staged-drag
+cleanup, and the IPC command's validation, probe failures and end-to-end staging
+without a server. The `native/build-nmake` Release build passed all fourteen CTest
+targets, `pnpm check` was green and publication hygiene was green. The native drag
+start (`file_drag_out_start`) and the local-drop emit path are the next commit.
+
 The transfer IPC wiring landed next. `IpcRouter` now owns the transfer manager: it
 creates `TransferManager::with_history` lazily on the first transfer command, backed
 by a `SftpTransferBackend` over `make_ssh_service_sftp_remote_ops` and a

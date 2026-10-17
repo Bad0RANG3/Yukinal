@@ -6,6 +6,7 @@
 #include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/local_paths.hpp"
+#include "yukinal/desktop_host/remote_drag.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 #include "yukinal/desktop_host/transfer_manager.hpp"
 
@@ -61,6 +62,16 @@ class IpcRouter {
   // picker.
   [[nodiscard]] LocalPathHandles& local_paths() { return local_paths_; }
 
+  // Test seams for the native drag-out staging. `set_remote_drag_probe` injects the
+  // read-only remote seam (lstat) and `set_remote_drag_store` injects the private
+  // staging root, so `file_prepare_remote_drag` is exercisable without a server.
+  // `set_remote_drag_wait_bounds` shortens the otherwise 30-minute download bound
+  // and the 60-second cancellation grace so a test can drive a timeout.
+  void set_remote_drag_probe(std::shared_ptr<RemoteDragProbe> probe);
+  void set_remote_drag_store(std::unique_ptr<RemoteDragStore> store);
+  void set_remote_drag_wait_bounds(std::chrono::milliseconds download_timeout,
+                                   std::chrono::milliseconds cancel_grace);
+
  private:
   IpcReply subscribe(const nlohmann::json& params, bool add);
   IpcReply server_command(const std::string& method,
@@ -74,6 +85,7 @@ class IpcRouter {
   IpcReply connection_command(const std::string& method,
                               const nlohmann::json& params);
   IpcReply transfer_command(const std::string& method, const nlohmann::json& params);
+  IpcReply remote_drag_prepare_command(const nlohmann::json& params);
   IpcReply terminal_command(const std::string& method,
                             const nlohmann::json& params);
   [[nodiscard]] std::string issue_probe_ticket(const std::string& server_id,
@@ -95,6 +107,12 @@ class IpcRouter {
   [[nodiscard]] TransferManager* ensure_transfer_manager();
   void subscribe_transfer_events_locked();
 
+  // Lazily creates the remote drag-out read probe and staging store. The probe is
+  // nullptr when the host has no database or this build has no SSH core; the store
+  // is nullptr without a database. Both are guarded by `drag_mutex_`.
+  [[nodiscard]] std::shared_ptr<RemoteDragProbe> ensure_remote_drag_probe();
+  [[nodiscard]] RemoteDragStore* ensure_remote_drag_store();
+
   mutable std::mutex mutex_;
   DesktopDatabase* database_;
   DesktopCredentialStore default_credentials_;
@@ -113,6 +131,17 @@ class IpcRouter {
   std::mutex transfer_mutex_;
   std::unique_ptr<TransferManager> transfers_;
   std::size_t transfers_subscription_ = 0;
+  // Native drag-out staging. `drag_mutex_` guards the probe/store handles and the
+  // wait bounds; `prepare_mutex_` serializes preparation so at most one
+  // download-to-stage runs at once (IPC dispatch already runs on the window
+  // thread). The store owns each prepared directory until the native drag consumes
+  // its one-time ticket.
+  std::mutex drag_mutex_;
+  std::shared_ptr<RemoteDragProbe> drag_probe_;
+  std::unique_ptr<RemoteDragStore> drag_store_;
+  std::mutex prepare_mutex_;
+  std::chrono::milliseconds remote_drag_timeout_{std::chrono::minutes(30)};
+  std::chrono::milliseconds remote_drag_cancel_grace_{std::chrono::seconds(60)};
   struct ProbeTicket {
     std::string server_id;
     std::string host;
