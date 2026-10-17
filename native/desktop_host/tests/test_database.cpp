@@ -4703,6 +4703,268 @@ int main(int argc, char** argv) {
       std::cerr << "SSH effectful action block failed: " << error.what() << '\n';
       std::exit(8);
     }
+
+    // ── host.tool.execute non-MCP gating, dispatch and ledger ────────────────
+    // The non-MCP branch validates the envelope, durable plan, target and call
+    // ledger like the retired Rust host, runs read-only tools through the
+    // desktop-SSH runner (injected here) and fails every unrouted tool closed.
+    try {
+      const nlohmann::json read_target = {
+          {"host", "remote"}, {"serverId", "srv_target"}, {"environment", "staging"}};
+      const auto tool_call = [](const std::string& tool, const nlohmann::json& input,
+                                const nlohmann::json& target) {
+        return nlohmann::json{{"toolName", tool}, {"input", input}, {"target", target}};
+      };
+      const auto code_of = [](const nlohmann::json& payload) {
+        return payload.value("status", std::string()) == "failed"
+                   ? payload.at("error").value("code", std::string())
+                   : std::string();
+      };
+      const auto detail_code = [](const nlohmann::json& payload) {
+        const auto error = payload.value("error", nlohmann::json::object());
+        return error.is_object() && error.contains("detail") && error.at("detail").is_object()
+                   ? error.at("detail").value("code", std::string())
+                   : std::string();
+      };
+      yukinal::desktop_host::IpcRouter tool_router(&database, &target_credentials);
+      const auto run_tool = [&tool_router](const nlohmann::json& params) {
+        return tool_router.handle_host_request("host.tool.execute", params);
+      };
+
+      // The envelope is validated before any target or plan work.
+      check(code_of(run_tool(nlohmann::json::object())) == "invalid_input",
+            "host.tool.execute must require a toolName");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::array(), read_target))) ==
+                "invalid_input",
+            "host tool input must be an object");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       nlohmann::json::array()))) == "invalid_input",
+            "the host tool target must be an object");
+
+      // Every effectful tool needs the durable task, plan and step identifiers.
+      {
+        const auto payload = run_tool(tool_call(
+            "filesystem.write", {{"path", "/srv/app.conf"}, {"content", "x"}}, read_target));
+        check(code_of(payload) == "denied_by_policy" &&
+                  detail_code(payload) == "durable_plan_required",
+              "an effectful host tool without a durable plan must fail closed");
+      }
+
+      // Target resolution: remote, srv_-prefixed, registered and matching.
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       {{"host", "remote"}, {"environment", "staging"}}))) ==
+                "invalid_input",
+            "a remote host tool needs a concrete serverId");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       {{"host", "local"},
+                                        {"serverId", "srv_target"},
+                                        {"environment", "staging"}}))) == "denied_by_policy",
+            "host tools only accept a remote target");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       {{"host", "remote"},
+                                        {"serverId", "prod_target"},
+                                        {"environment", "staging"}}))) == "denied_by_policy",
+            "host tools only accept a srv_-prefixed server");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       {{"host", "remote"},
+                                        {"serverId", "srv_missing"},
+                                        {"environment", "staging"}}))) == "not_found",
+            "an unknown target server must not be found");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       {{"host", "remote"},
+                                        {"serverId", "srv_target"},
+                                        {"environment", "production"}}))) == "denied_by_policy",
+            "a mismatched target environment must be refused");
+      check(code_of(run_tool(tool_call("server.logs", nlohmann::json::object(),
+                                       {{"host", "remote"},
+                                        {"serverId", "srv_target"},
+                                        {"workspaceId", "ws_other"},
+                                        {"environment", "staging"}}))) == "denied_by_policy",
+            "an unattached workspace must be refused");
+
+      // A tool with no host execution route is a routing gap, not a retryable
+      // remote failure.
+      check(code_of(run_tool(
+                tool_call("filesystem.backup.list", nlohmann::json::object(), read_target))) ==
+                "unsupported_route",
+            "an unrouted host tool must fail closed as unsupported_route");
+
+      // A fresh durable read plan exercises the plan-bound observation path.
+      const auto plan_step = [](const std::string& step_id, const std::string& kind,
+                                const nlohmann::json& tools,
+                                const nlohmann::json& input_bindings) {
+        return nlohmann::json{{"id", step_id},
+                              {"ordinal", 0},
+                              {"kind", kind},
+                              {"title", "Host tool step"},
+                              {"status", "running"},
+                              {"attempts", 0},
+                              {"maxAttempts", 1},
+                              {"allowedTools", tools},
+                              {"evidenceIds", nlohmann::json::array()},
+                              {"inputBindings", input_bindings}};
+      };
+      const auto plan_for = [&plan_step](const std::string& plan_id, const std::string& task_id,
+                                         const std::string& step_id, const std::string& kind,
+                                         const nlohmann::json& tools,
+                                         const nlohmann::json& input_bindings) {
+        return nlohmann::json{{"id", plan_id},
+                              {"taskId", task_id},
+                              {"revision", 1},
+                              {"status", "active"},
+                              {"createdAt", "2026-01-06T00:00:00Z"},
+                              {"updatedAt", "2026-01-06T00:00:00Z"},
+                              {"currentStepId", step_id},
+                              {"approval", {{"status", "approved"}}},
+                              {"steps", nlohmann::json::array(
+                                            {plan_step(step_id, kind, tools, input_bindings)})}};
+      };
+      const auto durable_task = [](const std::string& id, const std::string& server_id,
+                                   const nlohmann::json& scope,
+                                   const nlohmann::json& forbidden) {
+        return nlohmann::json{
+            {"id", id},
+            {"serverId", server_id},
+            {"objective", "Exercise host.tool.execute"},
+            {"successCriteria", nlohmann::json::array({"tool gated"})},
+            {"scope", scope},
+            {"guardrails",
+             {{"forbiddenTools", forbidden},
+              {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+            {"mode", "goal"},
+            {"permissionMode", "auto"},
+            {"automationLevel", "execute"},
+            {"phase", "investigating"},
+            {"status", "pending"},
+            {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+            {"createdBy", "user"},
+            {"createdAt", "2026-01-06T00:00:00Z"},
+            {"updatedAt", "2026-01-06T00:00:00Z"}};
+      };
+
+      (void)database.create_investigation_task(
+          durable_task("itask_b5_read", "srv_target", read_target, nlohmann::json::array()));
+      database.save_investigation_plan(plan_for(
+          "iplan_b5_read", "itask_b5_read", "step_b5_read", "evidence",
+          nlohmann::json::array({"server.info"}), nlohmann::json::object()));
+
+      // A missing durable task is not found.
+      {
+        auto params = tool_call("server.info", nlohmann::json::object(), read_target);
+        params["taskId"] = "itask_missing";
+        params["planId"] = "iplan_b5_read";
+        params["planStepId"] = "step_b5_read";
+        check(code_of(run_tool(params)) == "not_found",
+              "a host tool bound to a missing task must not be found");
+      }
+      // A tool the active plan step does not allow is a plan deviation.
+      {
+        auto params = tool_call("server.logs", nlohmann::json::object(), read_target);
+        params["taskId"] = "itask_b5_read";
+        params["planId"] = "iplan_b5_read";
+        params["planStepId"] = "step_b5_read";
+        params["evidenceIds"] = nlohmann::json::array();
+        const auto payload = run_tool(params);
+        check(code_of(payload) == "plan_deviation" &&
+                  detail_code(payload) == "tool_not_allowed",
+              "a tool outside the active plan step must deviate from the plan");
+      }
+
+      // A guardrail-forbidden effectful tool is denied at the host.
+      (void)database.create_investigation_task(durable_task(
+          "itask_b5_guard", "srv_target", read_target,
+          nlohmann::json::array({"server.exec"})));
+      database.save_investigation_plan(plan_for(
+          "iplan_b5_guard", "itask_b5_guard", "step_b5_guard", "action",
+          nlohmann::json::array({"server.exec"}), {{"command", "uptime"}}));
+      // A durable effectful action is refused without a one-shot ticket.
+      (void)database.create_investigation_task(
+          durable_task("itask_b5_action", "srv_target", read_target, nlohmann::json::array()));
+      database.save_investigation_plan(plan_for(
+          "iplan_b5_action", "itask_b5_action", "step_b5_action", "action",
+          nlohmann::json::array({"server.exec"}), {{"command", "uptime"}}));
+      const auto exec_input = [] {
+        return nlohmann::json{{"command", "uptime"},
+                              {"purpose", "gather a probe"},
+                              {"timeoutMs", 5000},
+                              {"maxOutputBytes", 4096}};
+      };
+      {
+        auto params = tool_call("server.exec", exec_input(), read_target);
+        params["taskId"] = "itask_b5_guard";
+        params["planId"] = "iplan_b5_guard";
+        params["planStepId"] = "step_b5_guard";
+        params["traceId"] = "trace_b5_guard";
+        params["callId"] = "call_b5_guard";
+        params["evidenceIds"] = nlohmann::json::array();
+        const auto payload = run_tool(params);
+        check(code_of(payload) == "denied_by_policy" &&
+                  detail_code(payload) == "scope_forbidden",
+              "a guardrail-forbidden tool must be denied at the host");
+      }
+      {
+        auto params = tool_call("server.exec", exec_input(), read_target);
+        params["taskId"] = "itask_b5_action";
+        params["planId"] = "iplan_b5_action";
+        params["planStepId"] = "step_b5_action";
+        params["traceId"] = "trace_b5_ticket";
+        params["callId"] = "call_b5_ticket";
+        params["evidenceIds"] = nlohmann::json::array();
+        const auto payload = run_tool(params);
+        check(code_of(payload) == "denied_by_policy" &&
+                  detail_code(payload) == "approval_ticket",
+              "a durable effectful action without a ticket must fail closed");
+      }
+
+      // The injected runner executes an allowed plan-bound read tool.
+      int runner_calls = 0;
+      std::string seen_tool;
+      std::string seen_server;
+      tool_router.set_host_tool_runner(
+          [&](const std::string& tool_name, const std::string& server_id,
+              const nlohmann::json& input,
+              const std::shared_ptr<std::atomic<bool>>& cancel) -> nlohmann::json {
+            (void)cancel;
+            ++runner_calls;
+            seen_tool = tool_name;
+            seen_server = server_id;
+            check(input.is_object(), "the read runner should receive an object input");
+            check(server_id == "srv_target", "the read runner should receive the resolved server");
+            return nlohmann::json{{"available", true}};
+          });
+      const auto read_request = [&] {
+        auto params = tool_call("server.info", nlohmann::json::object(), read_target);
+        params["traceId"] = "trace_b5_read";
+        params["callId"] = "call_b5_read";
+        params["taskId"] = "itask_b5_read";
+        params["planId"] = "iplan_b5_read";
+        params["planStepId"] = "step_b5_read";
+        params["evidenceIds"] = nlohmann::json::array();
+        return params;
+      };
+      {
+        const auto payload = run_tool(read_request());
+        check(payload.value("status", std::string()) == "success" &&
+                  payload.value("output", nlohmann::json::object()).value("available", false) &&
+                  runner_calls == 1 && seen_tool == "server.info" &&
+                  seen_server == "srv_target",
+              "an allowed read tool should run through the injected runner");
+        check(database.host_tool_call_status("trace_b5_read", "call_b5_read").value_or("") ==
+                  "success",
+              "a hosted read tool should finish its ledger row as success");
+      }
+      // A replay of the same call returns the cache without running twice.
+      {
+        const auto payload = run_tool(read_request());
+        check(payload.value("status", std::string()) == "success" && runner_calls == 1,
+              "a replayed host tool call must not run the tool twice");
+      }
+      // Restore the default desktop-SSH runner for later tests.
+      tool_router.set_host_tool_runner({});
+    } catch (const std::exception& error) {
+      std::cerr << "host.tool.execute block failed: " << error.what() << '\n';
+      std::exit(9);
+    }
   }
 
   sqlite3* readback = nullptr;

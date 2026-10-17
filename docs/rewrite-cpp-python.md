@@ -1486,3 +1486,47 @@ fourteen CTest targets (`transfer_manager_tests` now includes the IPC checks),
 `pnpm check` was green and publication hygiene was green. Remote drag
 (`file_prepare_remote_drag` / `file_drag_out_start`) and the local-drop `emit` path
 are the next commit.
+
+The `host.tool.execute` non-MCP branch landed next, the last item of the host-RPC
+block. `IpcRouter::host_tool_execute_command` in
+`native/desktop_host/src/ipc_router.cpp` mirrors the retired Rust
+`commands/host.rs` gate order: every effectful tool must carry a durable
+`taskId`/`planId`/`planStepId` (else `denied_by_policy` with
+`detail.code: durable_plan_required`); a bound task is re-checked against its
+guardrails and active plan revision/step/evidence binding (`not_found`,
+`denied_by_policy`, `plan_deviation`); the target must be a resolved remote
+`srv_`-prefixed registered server whose metadata environment and attached
+workspaces match the request (`invalid_input`, `denied_by_policy`, `not_found`);
+the `host_tool_calls` idempotency ledger is claimed (and replayed from the bounded
+cache) exactly as the effectful path does; and the nine effectful tools still need
+the one-shot host approval ticket. The `mcp.*` names stay on their existing branch
+and are not touched.
+
+The nine read-only Agent tools (`server.info`, `server.logs`, `server.services`,
+`docker.ps`, `docker.logs`, `docker.inspect`, `systemd.inspect`,
+`package.inspect`, `filesystem.read`) are dispatched through a new
+`HostToolRunner` seam (`set_host_tool_runner`); the default runner resolves the
+target and credentials, runs the bounded operation through the desktop-SSH core
+(`native/desktop_host/src/desktop_ssh.cpp` gained `run_docker_ps`/`run_docker_logs`/
+`run_docker_inspect`/`run_systemd_inspect`/`run_package_inspect`/
+`run_agent_filesystem_read`), and applies the matching Python `*.normalize` RPC in
+reverse so the Agent's own normalizers stay the single source of the output shape.
+`filesystem.read` returns `{path, content, truncated, revision}` with the SHA-256 of
+the kept raw bytes. Failures map to `unsupported_route` (a tool this host does not
+run), `transport` (retryable, uncertain), `cancelled` or `execution_failed`, and the
+ledger records `transport`/`timeout`/`cancelled`/`execution_failed` as `uncertain`
+so they are never replayed. The effectful tools
+(`server.exec`, `docker.restart`, `systemd.restart`, `package.install`,
+`filesystem.write`/`edit`/`backup`/`restore`/`cleanup`) deliberately fail closed
+with `unsupported_route` here: the Agent drives them through
+`host.ssh.effectful_action_target`, so there is one gated execution path rather
+than a second ungated one. `desktop_host_database_tests` covers the envelope
+validation, every gate in order, the `unsupported_route` refusal, an injected
+runner success with its ledger row and its replay, and the guardrail/ticket
+refusals. The `native/build-nmake` Release build passed all fourteen CTest targets,
+`pnpm check` was green and publication hygiene was green. Two honest gaps remain:
+the new SSH helpers cannot be exercised headless (the target `43.240.221.2:22` is
+filtered), and the `mcp.*` branch keeps its pre-existing behavior of running
+before the durable-plan and task guardrail gates, which differs from the retired
+Rust host (only low-risk MCP tools reach the Agent today); the non-MCP branch
+itself matches the retired host.

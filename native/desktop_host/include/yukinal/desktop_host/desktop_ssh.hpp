@@ -46,6 +46,44 @@ struct SshCommandResult {
                                                      const std::string& server_id,
                                                      int timeout_seconds);
 
+// The remaining bounded read-only Agent tool operations. They use the same
+// resolved target and credentials as the Python-driven C++ SSH service; the
+// caller applies the matching Python `*.normalize` RPC to the raw output.
+[[nodiscard]] SshCommandResult run_docker_ps(const DesktopDatabase& database,
+                                             const CredentialStore& credentials,
+                                             const std::string& server_id, bool all,
+                                             int timeout_seconds);
+[[nodiscard]] SshCommandResult run_docker_logs(const DesktopDatabase& database,
+                                               const CredentialStore& credentials,
+                                               const std::string& server_id,
+                                               const std::string& container,
+                                               std::uint32_t tail, int timeout_seconds);
+[[nodiscard]] SshCommandResult run_docker_inspect(const DesktopDatabase& database,
+                                                  const CredentialStore& credentials,
+                                                  const std::string& server_id,
+                                                  const std::string& container,
+                                                  int timeout_seconds);
+[[nodiscard]] SshCommandResult run_systemd_inspect(const DesktopDatabase& database,
+                                                   const CredentialStore& credentials,
+                                                   const std::string& server_id,
+                                                   const std::string& service,
+                                                   int timeout_seconds);
+[[nodiscard]] SshCommandResult run_package_inspect(const DesktopDatabase& database,
+                                                   const CredentialStore& credentials,
+                                                   const std::string& server_id,
+                                                   const std::string& manager,
+                                                   const std::string& package,
+                                                   int timeout_seconds);
+// Reads one remote file for the Agent `filesystem.read` tool: the returned JSON is
+// `{path, content, truncated, revision}` where `revision` is the SHA-256 of the
+// kept raw bytes. Throws on transport or policy failure.
+[[nodiscard]] nlohmann::json run_agent_filesystem_read(const DesktopDatabase& database,
+                                                       const CredentialStore& credentials,
+                                                       const std::string& server_id,
+                                                       const std::string& path,
+                                                       std::uint32_t max_bytes,
+                                                       int timeout_seconds);
+
 // Validates SSH authentication and host trust for the resolved target.
 [[nodiscard]] SshCommandResult run_connection_check(const DesktopDatabase& database,
                                                     const CredentialStore& credentials,

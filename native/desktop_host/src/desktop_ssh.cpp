@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/desktop_ssh.hpp"
 
+#include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
@@ -337,6 +338,162 @@ SshCommandResult run_service_inventory(const DesktopDatabase& database,
   (void)database;
   (void)credentials;
   (void)server_id;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+/**
+ * Resolves the target and runs one bounded read-only SSH operation, mapping the raw
+ * result. The `research` nested callbacks keep each helper's SSH-core reference
+ * inside the build guard so the desktop host still compiles without the SSH core.
+ */
+SshCommandResult run_docker_ps(const DesktopDatabase& database,
+                               const CredentialStore& credentials,
+                               const std::string& server_id, bool all, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the docker.ps timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  return to_result(yukinal::ssh_service::docker_ps(target, all, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)all;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+SshCommandResult run_docker_logs(const DesktopDatabase& database,
+                                 const CredentialStore& credentials,
+                                 const std::string& server_id, const std::string& container,
+                                 std::uint32_t tail, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the docker.logs timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  return to_result(
+      yukinal::ssh_service::docker_logs(target, container, tail, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)container;
+  (void)tail;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+SshCommandResult run_docker_inspect(const DesktopDatabase& database,
+                                    const CredentialStore& credentials,
+                                    const std::string& server_id, const std::string& container,
+                                    int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the docker.inspect timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  return to_result(yukinal::ssh_service::docker_inspect(target, container, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)container;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+SshCommandResult run_systemd_inspect(const DesktopDatabase& database,
+                                     const CredentialStore& credentials,
+                                     const std::string& server_id, const std::string& service,
+                                     int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the systemd.inspect timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  return to_result(yukinal::ssh_service::systemd_inspect(target, service, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)service;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+SshCommandResult run_package_inspect(const DesktopDatabase& database,
+                                     const CredentialStore& credentials,
+                                     const std::string& server_id, const std::string& manager,
+                                     const std::string& package, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the package.inspect timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  return to_result(
+      yukinal::ssh_service::package_inspect(target, manager, package, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)manager;
+  (void)package;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+nlohmann::json run_agent_filesystem_read(const DesktopDatabase& database,
+                                         const CredentialStore& credentials,
+                                         const std::string& server_id, const std::string& path,
+                                         std::uint32_t max_bytes, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the filesystem.read timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_filesystem_read_target(
+      database, credentials,
+      {{"serverId", server_id}, {"path", path}, {"maxBytes", max_bytes}});
+  const auto target = build_target_config(payload);
+  ScopedEnvironment environment(credential_values(payload));
+  const auto bounded = payload.at("filesystemRead").at("maxBytes").get<std::uint32_t>();
+  const auto result = yukinal::ssh_service::sftp_read(target, path, bounded, timeout_seconds);
+  if (!result.error_code.empty() || !result.completed) {
+    throw std::runtime_error(result.error_message.empty() ? result.error_code
+                                                          : result.error_message);
+  }
+  auto bytes = base64_decode(result.stdout_text);
+  const bool truncated = bytes.size() > bounded;
+  if (truncated) bytes.resize(bounded);
+  const std::string raw(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  return {{"path", path},
+          {"content", utf8_lossy(bytes)},
+          {"truncated", truncated},
+          {"revision", content_revision_hex(raw)}};
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)path;
+  (void)max_bytes;
   (void)timeout_seconds;
   throw std::runtime_error("the C++ SSH core is not available in this build");
 #endif

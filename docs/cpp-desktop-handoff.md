@@ -39,9 +39,9 @@ Python Agent ── LangGraph / models / tools / MCP
 
 ## C++ 宿主已有命令
 
-当前 IPC router 已处理 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`，聊天会话的 list/get/create、消息追加、归档、重命名和删除，本机文件选择与预览 `local_path_pick`、`local_file_preview`、文件传输 `file_transfer_list`/`get`/`upload`/`download`/`cancel`/`resolve_conflict` 与远端拖拽 `file_prepare_remote_drag`/`file_drag_out_start`、主机指纹 `server_host_key_probe`、`server_host_key_trust`、日志/服务/快照读取 `server_logs`、`server_services`、`server_snapshot`、远端文件 `remote_file_list`/`read`/`preview`、终端 `terminal_open`/`write`/`resize`/`close`、连接生命周期 `server_connect`/`disconnect`/`auth_respond`/`auth_cancel`、MCP 审核与启停 `mcp_server_review`/`mcp_server_start`/`mcp_server_stop`（server 目录走 `host.mcp.catalog`、工具调用走 `host.tool.execute`）、排查任务列表 `investigation_task_list`，以及经 sidecar 桥的 `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond` 与 Provider 六个命令。事件订阅桥已提供通用 plumbing；未实现的命令返回 `NOT_IMPLEMENTED`，不会回退调用 Tauri。
+当前 IPC router 已处理 `core_ping`、`shell.open_url`、`server_list`、`workspace_list`、`server_add`、`server_update`、`server_delete`、`activity_list`、`tool_execution_list`、`network_proxy_get`、`network_proxy_save`、`server_host_key_status`、`server_host_key_forget`，聊天会话的 list/get/create、消息追加、归档、重命名和删除，本机文件选择与预览 `local_path_pick`、`local_file_preview`、文件传输 `file_transfer_list`/`get`/`upload`/`download`/`cancel`/`resolve_conflict` 与远端拖拽 `file_prepare_remote_drag`/`file_drag_out_start`、主机指纹 `server_host_key_probe`、`server_host_key_trust`、日志/服务/快照读取 `server_logs`、`server_services`、`server_snapshot`、远端文件 `remote_file_list`/`read`/`preview`、终端 `terminal_open`/`write`/`resize`/`close`、连接生命周期 `server_connect`/`disconnect`/`auth_respond`/`auth_cancel`、MCP 审核与启停 `mcp_server_review`/`mcp_server_start`/`mcp_server_stop`（server 目录走 `host.mcp.catalog`，工具调用 `host.tool.execute` 分发 `mcp.*` 与九类非 MCP 只读 SSH 工具）、排查任务列表 `investigation_task_list`，以及经 sidecar 桥的 `agent_spawn`、`agent_status`、`agent_kill`、`agent_logs`、`agent_run_start`、`agent_run_stop`、`agent_approval_respond` 与 Provider 六个命令。事件订阅桥已提供通用 plumbing；未实现的命令返回 `NOT_IMPLEMENTED`，不会回退调用 Tauri。
 
-Provider 的命令转发、凭据边界、Agent 进程监管/运行命令转发，以及本机文件选择/预览已接通；MCP、`host.tool.execute` 与 investigation 转发、服务器连接与主机信任（探针/确认）、终端、桌面任务恢复仍未全部迁入 C++ 桌面宿主。文件传输命令已接入 C++ 传输管理器，但平台原生拖出（`IDropSource`/`DoDragDrop`）与 OS 投放目标（`IDropTarget`/`WM_DROPFILES`）仍待实现，真实目标验证尚未完成。独立 SSH 服务中已有的能力不等于 UI 到 C++ 宿主的命令路径已经完成。
+Provider 的命令转发、凭据边界、Agent 进程监管/运行命令转发、本机文件选择/预览，以及 `host.tool.execute` 的非 MCP 只读工具分发（`server.info`/`logs`/`services`、`docker.ps`/`logs`/`inspect`、`systemd.inspect`、`package.inspect`、`filesystem.read`，带 durable plan、guardrail、目标匹配与调用幂等账本门禁，effectful 工具在此分支 fail-closed 由 Agent 经 `host.ssh.effectful_action_target` 驱动）已接通；MCP（含 OAuth 与进程监督）、investigation 的 UI 转发、服务器连接与主机信任（探针/确认）、终端、桌面任务恢复仍未全部迁入 C++ 桌面宿主。文件传输命令已接入 C++ 传输管理器，但平台原生拖出（`IDropSource`/`DoDragDrop`）与 OS 投放目标（`IDropTarget`/`WM_DROPFILES`）仍待实现，真实目标验证尚未完成；`host.tool.execute` 的只读 SSH 执行同样只能在真实目标上验证（`43.240.221.2:22` 目前被过滤）。独立 SSH 服务中已有的能力不等于 UI 到 C++ 宿主的命令路径已经完成。
 
 ## 构建和本机启动
 
@@ -70,7 +70,7 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 
 ## 下一步施工顺序
 
-1. ✅ Provider 配置读写、模型目录与 Agent 进程监管已迁入 C++ 宿主（经 sidecar 桥）；剩余：`agent_run_start`/`agent_run_stop`/`agent_approval_respond` 转发与 `host.tool.execute`（含 desktop SSH 工具）。
+1. ✅ Provider 配置读写、模型目录、Agent 进程监管与运行转发（经 sidecar 桥），以及 `host.tool.execute` 的非 MCP 只读工具分发都已迁入 C++ 宿主；Agent↔host 的 RPC 块至此完成。
 2. 迁移 MCP 配置、风险注解信任、服务器生命周期、OAuth 与进程监督；区分“设置已保存”和“服务已运行”。
 3. 将服务器连接、Host Key 确认、终端、文件浏览、传输和审批流程接入 C++ 桌面宿主；复用现有 C++ SSH/SFTP/PTY 服务，不保留 Rust SSH 回退。
 4. 迁移剩余任务、审计、计划、恢复与事件命令，并逐项对照 shared schema 和 UI 使用点。

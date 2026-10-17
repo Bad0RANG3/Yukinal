@@ -81,6 +81,22 @@ class IpcRouter {
   // WebView. Called from the native window's drop handler on the UI thread.
   void emit_local_drop(std::vector<std::filesystem::path> paths);
 
+  // Performs one validated non-MCP `host.tool.execute` call against a resolved
+  // remote server (a read tool such as server.info/logs/services, or one that the
+  // host cannot run itself and must refuse). The tool name, server id and input
+  // have already passed the durable-plan, guardrail, target and call-ledger gates.
+  // Returns the tool output on success and throws on failure; the default uses the
+  // in-process C++ SSH core and the Agent normalizer.
+  using HostToolRunner = std::function<nlohmann::json(
+      const std::string& tool_name, const std::string& server_id,
+      const nlohmann::json& input, const std::shared_ptr<std::atomic<bool>>& cancel)>;
+
+  // Test seam: replace the default non-MCP tool runner (for example with a fake
+  // that returns fixed output), so the request gating and dispatch are
+  // exercisable without a live SSH server. Passing an empty function restores the
+  // default desktop-SSH runner.
+  void set_host_tool_runner(HostToolRunner runner);
+
  private:
   IpcReply subscribe(const nlohmann::json& params, bool add);
   IpcReply server_command(const std::string& method,
@@ -110,6 +126,15 @@ class IpcRouter {
   IpcReply provider_command(const std::string& method, const nlohmann::json& params);
   SidecarClient& ensure_sidecar();
   void configure_sidecar();
+
+  // Non-MCP `host.tool.execute`: validates the envelope, durable plan, target and
+  // call ledger, then runs the tool through `host_tool_runner_` (or the default
+  // desktop-SSH runner) and records its terminal outcome.
+  [[nodiscard]] nlohmann::json host_tool_execute_command(
+      const nlohmann::json& params, const std::shared_ptr<std::atomic<bool>>& cancel);
+  [[nodiscard]] nlohmann::json default_host_tool_run(
+      const std::string& tool_name, const std::string& server_id,
+      const nlohmann::json& input, const std::shared_ptr<std::atomic<bool>>& cancel);
 
   // Lazily creates the SFTP-backed transfer manager. Returns nullptr when the
   // host has no local database or this build has no SSH core (so no backend can
@@ -167,6 +192,10 @@ class IpcRouter {
   // while this process still holds it (matching the retired Rust host).
   std::mutex host_tool_replay_mutex_;
   std::map<std::pair<std::string, std::string>, nlohmann::json> host_tool_replays_;
+  // The non-MCP `host.tool.execute` runner. Empty means the default desktop-SSH
+  // runner; a test injects a fake through `set_host_tool_runner`. Guarded by
+  // `host_tool_replay_mutex_` only for the pointer swap.
+  HostToolRunner host_tool_runner_;
   // In-flight OAuth authorizations, keyed by server id. `mcp_oauth_connect`
   // blocks while the browser redirect or device-code poll runs, so a token lets
   // `mcp_oauth_cancel` (on another thread) stop it.

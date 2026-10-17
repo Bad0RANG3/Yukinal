@@ -9564,6 +9564,517 @@ IpcReply IpcRouter::provider_command(const std::string& method, const nlohmann::
   }
 }
 
+namespace {
+
+// Raised by the default non-MCP runner when this desktop host has no execution
+// route for a tool (for example an effectful SSH action the Agent is expected to
+// drive through `host.ssh.effectful_action_target`). Mapped to `unsupported_route`
+// so the Agent treats it as a routing gap, not a retryable remote failure.
+struct UnsupportedHostToolError : std::runtime_error {
+  explicit UnsupportedHostToolError(const std::string& message)
+      : std::runtime_error(message) {}
+};
+
+// Raised when the remote operation could not be reached or completed; mapped to
+// the `transport` code, which the ledger records as uncertain.
+struct HostToolTransportError : std::runtime_error {
+  explicit HostToolTransportError(const std::string& message)
+      : std::runtime_error(message) {}
+};
+
+// Builds the durable snapshot record from Python-normalized snapshot data,
+// mirroring the `server_snapshot` UI command. Throws on invalid data.
+nlohmann::json host_tool_snapshot_record(const std::string& server_id,
+                                         const nlohmann::json& snapshot_data) {
+  if (!snapshot_data.is_object()) {
+    throw std::runtime_error("the Agent returned invalid snapshot data");
+  }
+  const auto health = snapshot_data.value("health", std::string());
+  if (!is_one_of(health, {"healthy", "warning", "critical", "unknown"}) ||
+      !snapshot_data.contains("capabilities") || !snapshot_data.contains("collectors")) {
+    throw std::runtime_error("the Agent returned invalid snapshot data");
+  }
+  nlohmann::json snapshot = snapshot_data;
+  const auto epoch_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+  snapshot["id"] = "snap_" + server_id + "_" + std::to_string(epoch_seconds);
+  snapshot["serverId"] = server_id;
+  snapshot["collectedAt"] = iso8601_now();
+  return snapshot;
+}
+
+}  // namespace
+
+void IpcRouter::set_host_tool_runner(HostToolRunner runner) {
+  std::lock_guard lock(host_tool_replay_mutex_);
+  host_tool_runner_ = std::move(runner);
+}
+
+nlohmann::json IpcRouter::default_host_tool_run(
+    const std::string& tool_name, const std::string& server_id, const nlohmann::json& input,
+    const std::shared_ptr<std::atomic<bool>>& /*cancel*/) {
+  if (database_ == nullptr || !database_->is_available()) {
+    throw HostToolTransportError("the local server database is unavailable");
+  }
+  // One normalize helper: run the Python `*.normalize` RPC over the raw SSH stdout
+  // and return its `output`. A missing sidecar or a rejected parse is a transport
+  // failure the Agent can surface.
+  const auto normalize = [this](const char* method, const std::string& stdout_text,
+                                const nlohmann::json& arguments) -> nlohmann::json {
+    auto& client = ensure_sidecar();
+    client.ensure_started(std::chrono::milliseconds(60000));
+    nlohmann::json params = {{"stdout", stdout_text}, {"arguments", arguments}};
+    const auto normalized =
+        client.request(method, std::move(params), std::chrono::milliseconds(15000));
+    if (!normalized.is_object() || normalized.value("ok", false) != true ||
+        !normalized.contains("output")) {
+      const auto message = normalized.value("message", std::string());
+      throw HostToolTransportError(
+          message.empty() ? std::string("the Agent could not parse the remote output")
+                          : message);
+    }
+    return normalized.at("output");
+  };
+
+  if (tool_name == kToolServerInfo) {
+    if (!input.is_object()) throw std::runtime_error("server.info accepts an empty object");
+    std::optional<nlohmann::json> snapshot_data;
+    if (!input.empty()) {
+      if (input.size() != 1 || !input.contains("snapshotData")) {
+        throw std::runtime_error("server.info accepts an empty object");
+      }
+      snapshot_data = input.at("snapshotData");
+    }
+    if (!snapshot_data.has_value()) {
+      nlohmann::json outputs;
+      try {
+        outputs = run_system_snapshot(*database_, *credentials_, server_id, 25);
+      } catch (const std::exception& error) {
+        throw HostToolTransportError(error.what());
+      }
+      auto& client = ensure_sidecar();
+      client.ensure_started(std::chrono::milliseconds(60000));
+      const auto normalized =
+          client.request("server.snapshot.normalize", {{"outputs", outputs}},
+                         std::chrono::milliseconds(15000));
+      if (!normalized.is_object() || !normalized.contains("snapshotData") ||
+          !normalized.at("snapshotData").is_object()) {
+        throw HostToolTransportError("the Agent returned invalid snapshot data");
+      }
+      snapshot_data = normalized.at("snapshotData");
+    }
+    auto snapshot = host_tool_snapshot_record(server_id, *snapshot_data);
+    try {
+      database_->insert_snapshot(snapshot);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(std::string("the local snapshot database could not save it: ") +
+                               error.what());
+    }
+    return snapshot;
+  }
+
+  if (tool_name == kToolServerLogs || tool_name == kToolServerServices) {
+    const bool logs = tool_name == kToolServerLogs;
+    nlohmann::json arguments = nlohmann::json::object();
+    if (logs) {
+      if (!only_fields(input, {"sinceSeconds", "unit"}, {})) {
+        throw std::runtime_error("server.logs input is invalid");
+      }
+      std::optional<std::uint32_t> since;
+      if (const auto found = input.find("sinceSeconds");
+          found != input.end() && !found->is_null()) {
+        if (!found->is_number_unsigned() || found->get<std::uint64_t>() < 1 ||
+            found->get<std::uint64_t>() > 604800) {
+          throw std::runtime_error("server.logs filters are invalid");
+        }
+        since = static_cast<std::uint32_t>(found->get<std::uint64_t>());
+      }
+      std::string unit;
+      if (const auto found = input.find("unit"); found != input.end() && !found->is_null()) {
+        if (!found->is_string() || !safe_systemd_service_ref(found->get<std::string>())) {
+          throw std::runtime_error("server.logs filters are invalid");
+        }
+        unit = found->get<std::string>();
+      }
+      arguments["sinceSeconds"] = since.has_value() ? nlohmann::json(*since) : nlohmann::json();
+      arguments["unit"] = unit.empty() ? nlohmann::json() : nlohmann::json(unit);
+      SshCommandResult raw;
+      try {
+        raw = run_server_logs(*database_, *credentials_, server_id, since, unit, 20);
+      } catch (const std::exception& error) {
+        throw HostToolTransportError(error.what());
+      }
+      if (!raw.error_code.empty()) {
+        throw HostToolTransportError(raw.error_message.empty() ? raw.error_code
+                                                               : raw.error_message);
+      }
+      return normalize("server.logs.normalize", raw.stdout_text, arguments);
+    }
+    if (!only_fields(input, {"name", "state"}, {})) {
+      throw std::runtime_error("server.services input is invalid");
+    }
+    std::string name;
+    if (const auto found = input.find("name"); found != input.end() && !found->is_null()) {
+      if (!found->is_string() || found->get<std::string>().empty() ||
+          has_control_characters(found->get<std::string>())) {
+        throw std::runtime_error("server.services filters are invalid");
+      }
+      name = found->get<std::string>();
+    }
+    if (const auto found = input.find("state"); found != input.end() && !found->is_null()) {
+      if (!found->is_string() ||
+          !is_one_of(found->get<std::string>(), {"running", "stopped", "failed", "unknown"})) {
+        throw std::runtime_error("server.services filters are invalid");
+      }
+    }
+    arguments["name"] = name.empty() ? nlohmann::json() : nlohmann::json(name);
+    arguments["state"] = input.contains("state") && !input.at("state").is_null()
+                             ? input.at("state")
+                             : nlohmann::json();
+    SshCommandResult raw;
+    try {
+      raw = run_service_inventory(*database_, *credentials_, server_id, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty()) {
+      throw HostToolTransportError(raw.error_message.empty() ? raw.error_code
+                                                             : raw.error_message);
+    }
+    return normalize("server.services.normalize", raw.stdout_text, arguments);
+  }
+
+  if (tool_name == kToolDockerPs) {
+    if (!only_fields(input, {"all"}, {})) {
+      throw std::runtime_error("docker.ps input is invalid");
+    }
+    bool all = false;
+    if (const auto found = input.find("all"); found != input.end() && !found->is_null()) {
+      if (!found->is_boolean()) throw std::runtime_error("docker.ps input is invalid");
+      all = found->get<bool>();
+    }
+    SshCommandResult raw;
+    try {
+      raw = run_docker_ps(*database_, *credentials_, server_id, all, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty()) {
+      throw HostToolTransportError(raw.error_message.empty() ? raw.error_code
+                                                             : raw.error_message);
+    }
+    return normalize("docker.ps.normalize", raw.stdout_text, nlohmann::json::object());
+  }
+
+  if (tool_name == kToolDockerLogs) {
+    if (!only_fields(input, {"container", "tail"}, {"container"}) ||
+        !input.at("container").is_string() ||
+        !safe_container_ref(input.at("container").get<std::string>())) {
+      throw std::runtime_error("docker.logs input is invalid");
+    }
+    std::uint64_t tail = 120;
+    if (const auto found = input.find("tail"); found != input.end() && !found->is_null()) {
+      if (!found->is_number_unsigned() || found->get<std::uint64_t>() < 1 ||
+          found->get<std::uint64_t>() > 500) {
+        throw std::runtime_error("docker.logs input is invalid");
+      }
+      tail = found->get<std::uint64_t>();
+    }
+    const auto container = input.at("container").get<std::string>();
+    SshCommandResult raw;
+    try {
+      raw = run_docker_logs(*database_, *credentials_, server_id, container,
+                            static_cast<std::uint32_t>(tail), 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty() || raw.exit_code != 0) {
+      throw HostToolTransportError(raw.error_message.empty()
+                                       ? "could not read logs for container `" + container + "`"
+                                       : raw.error_message);
+    }
+    return normalize("docker.logs.normalize", raw.stdout_text,
+                     {{"container", container}, {"tail", tail}});
+  }
+
+  if (tool_name == kToolDockerInspect) {
+    if (!only_fields(input, {"container"}, {"container"}) || !input.at("container").is_string() ||
+        !safe_container_ref(input.at("container").get<std::string>())) {
+      throw std::runtime_error("docker.inspect input is invalid");
+    }
+    const auto container = input.at("container").get<std::string>();
+    SshCommandResult raw;
+    try {
+      raw = run_docker_inspect(*database_, *credentials_, server_id, container, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty() || raw.exit_code != 0) {
+      throw HostToolTransportError(raw.error_message.empty()
+                                       ? "container `" + container + "` was not found"
+                                       : raw.error_message);
+    }
+    return normalize("docker.inspect.normalize", raw.stdout_text, {{"container", container}});
+  }
+
+  if (tool_name == kToolSystemdInspect) {
+    if (!only_fields(input, {"service"}, {"service"}) || !input.at("service").is_string() ||
+        !safe_systemd_service_ref(input.at("service").get<std::string>())) {
+      throw std::runtime_error("systemd.inspect input is invalid");
+    }
+    const auto service = input.at("service").get<std::string>();
+    SshCommandResult raw;
+    try {
+      raw = run_systemd_inspect(*database_, *credentials_, server_id, service, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty() || raw.exit_code != 0) {
+      throw HostToolTransportError(
+          raw.error_message.empty()
+              ? "systemd service `" + service + "` was not found or could not be inspected"
+              : raw.error_message);
+    }
+    return normalize("systemd.inspect.normalize", raw.stdout_text, {{"service", service}});
+  }
+
+  if (tool_name == kToolPackageInspect) {
+    if (!only_fields(input, {"manager", "package"}, {"manager", "package"}) ||
+        !input.at("manager").is_string() || !input.at("package").is_string() ||
+        !is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf"}) ||
+        !safe_package_ref(input.at("package").get<std::string>())) {
+      throw std::runtime_error("package.inspect input is invalid");
+    }
+    const auto manager = input.at("manager").get<std::string>();
+    const auto package = input.at("package").get<std::string>();
+    SshCommandResult raw;
+    try {
+      raw = run_package_inspect(*database_, *credentials_, server_id, manager, package, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty() || raw.exit_code != 0) {
+      throw HostToolTransportError(raw.error_message.empty()
+                                       ? "could not inspect package `" + package + "`"
+                                       : raw.error_message);
+    }
+    return normalize("package.inspect.normalize", raw.stdout_text,
+                     {{"manager", manager}, {"package", package}});
+  }
+
+  if (tool_name == kToolFilesystemRead) {
+    if (!only_fields(input, {"path", "maxBytes"}, {"path"}) || !input.at("path").is_string()) {
+      throw std::runtime_error("filesystem.read input is invalid");
+    }
+    std::uint64_t max_bytes = 131072;
+    if (const auto found = input.find("maxBytes"); found != input.end() && !found->is_null()) {
+      if (!found->is_number_unsigned() || found->get<std::uint64_t>() < 1 ||
+          found->get<std::uint64_t>() > 1048576) {
+        throw std::runtime_error("filesystem.read input is invalid");
+      }
+      max_bytes = found->get<std::uint64_t>();
+    }
+    try {
+      return run_agent_filesystem_read(*database_, *credentials_, server_id,
+                                       input.at("path").get<std::string>(),
+                                       static_cast<std::uint32_t>(max_bytes), 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+  }
+
+  // Effectful SSH actions are driven by the Agent through
+  // `host.ssh.effectful_action_target`; this route refuses them rather than
+  // inventing a second, ungated execution path.
+  throw UnsupportedHostToolError("this desktop host does not run `" + tool_name +
+                                 "` through host.tool.execute");
+}
+
+nlohmann::json IpcRouter::host_tool_execute_command(
+    const nlohmann::json& params, const std::shared_ptr<std::atomic<bool>>& cancel) {
+  const auto tool_name = params.is_object() ? json_text_field(params, "toolName")
+                                            : std::string();
+  if (tool_name.empty()) {
+    return host_tool_failed("invalid_input", "host.tool.execute requires a toolName", false,
+                            std::nullopt);
+  }
+  if (tool_name.rfind("mcp.", 0) == 0) {
+    // The MCP supervisor branch lives in `handle_host_request`; it is never
+    // reached here.
+    return host_tool_failed("invalid_input", "MCP tools are dispatched separately", false,
+                            std::nullopt);
+  }
+
+  // Every effectful Agent tool must carry a durable task, plan, and plan step
+  // before the host will consider executing it.
+  if (effectful_action_requires_durable_plan(params)) {
+    return host_tool_failed(
+        "denied_by_policy",
+        "effectful host tools require a durable task, ChangePlan, and plan step before execution",
+        false, nlohmann::json{{"code", "durable_plan_required"}});
+  }
+
+  const auto input = params.value("input", nlohmann::json::object());
+  if (!input.is_object()) {
+    return host_tool_failed("invalid_input", "host tool input must be an object", false,
+                            std::nullopt);
+  }
+  const auto target = params.value("target", nlohmann::json::object());
+  if (!target.is_object()) {
+    return host_tool_failed("invalid_input", "the host tool target must be an object", false,
+                            std::nullopt);
+  }
+
+  // A durable task binding is re-checked against its guardrails and active plan.
+  const auto task_id = json_text_field(params, "taskId");
+  if (!task_id.empty()) {
+    auto task = load_investigation_task(*database_, task_id);
+    if (!task.has_value()) {
+      return host_tool_failed(
+          "not_found", "investigation task `" + task_id + "` was not found", false,
+          std::nullopt);
+    }
+    if (auto violation = task_guardrail_violation(*task, tool_name, input);
+        violation.has_value()) {
+      std::optional<nlohmann::json> detail = std::nullopt;
+      const auto code = json_text_field(*violation, "code");
+      if (!code.empty()) detail = nlohmann::json{{"code", code}};
+      return host_tool_failed("denied_by_policy", json_text_field(*violation, "message"),
+                              false, detail);
+    }
+    const auto binding = [&params](const char* key) -> std::optional<nlohmann::json> {
+      const auto found = params.find(key);
+      if (found == params.end() || found->is_null()) return std::nullopt;
+      return *found;
+    };
+    const auto plan_id = json_text_field(params, "planId");
+    const auto plan_step_id = json_text_field(params, "planStepId");
+    if (auto deviation = check_plan_for_tool(
+            *database_, *task, tool_name, target, input,
+            plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id),
+            plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id),
+            binding("evidenceIds"));
+        deviation.has_value()) {
+      return host_tool_failed("plan_deviation", json_text_field(*deviation, "message"), false,
+                              *deviation);
+    }
+  }
+
+  const auto server_id = json_text_field(target, "serverId");
+  if (server_id.empty()) {
+    return host_tool_failed("invalid_input", "remote host tools require a concrete serverId",
+                            false, std::nullopt);
+  }
+  if (json_text_field(target, "host") != "remote" || server_id.rfind("srv_", 0) != 0) {
+    return host_tool_failed("denied_by_policy",
+                            "host tools only accept a resolved remote srv_ target", false,
+                            std::nullopt);
+  }
+  const nlohmann::json* server = nullptr;
+  const auto servers = database_->list_servers().value("servers", nlohmann::json::array());
+  for (const auto& candidate : servers) {
+    if (json_text_field(candidate, "id") == server_id) {
+      server = &candidate;
+      break;
+    }
+  }
+  if (server == nullptr) {
+    return host_tool_failed("not_found",
+                            "target server `" + server_id + "` was not found", false,
+                            std::nullopt);
+  }
+  const auto metadata = server->value("metadata", nlohmann::json::object());
+  if (json_text_field(metadata, "environment") != json_text_field(target, "environment")) {
+    return host_tool_failed(
+        "denied_by_policy", "tool target environment does not match the registered server",
+        false, std::nullopt);
+  }
+  const auto workspace_id = json_text_field(target, "workspaceId");
+  if (!workspace_id.empty()) {
+    bool attached = false;
+    for (const auto& id : metadata.value("workspaceIds", nlohmann::json::array())) {
+      if (id.is_string() && id.get<std::string>() == workspace_id) attached = true;
+    }
+    if (!attached) {
+      return host_tool_failed("denied_by_policy",
+                              "tool target workspace is not attached to the registered server",
+                              false, std::nullopt);
+    }
+  }
+
+  auto decision =
+      prepare_host_tool_call(*database_, params, host_tool_replay_mutex_, host_tool_replays_);
+  if (decision.respond) return decision.response;
+  const auto token = decision.token;
+
+  // Effectful tools additionally need the one-shot host approval ticket.
+  if (host_tool_is_effectful(tool_name)) {
+    HostApprovalLedger::ExecutionBinding binding;
+    binding.approval_id = json_text_field(params, "approvalId");
+    const auto run_id = json_text_field(params, "runId");
+    binding.run_id = run_id.empty() ? std::nullopt : std::optional<std::string>(run_id);
+    binding.trace_id = json_text_field(params, "traceId");
+    binding.call_id = json_text_field(params, "callId");
+    binding.tool_name = tool_name;
+    binding.input_fingerprint = content_revision_hex(input.dump());
+    binding.target_host = json_text_field(target, "host");
+    binding.server_id = std::optional<std::string>(server_id);
+    binding.workspace_id =
+        workspace_id.empty() ? std::nullopt : std::optional<std::string>(workspace_id);
+    binding.environment = json_text_field(target, "environment");
+    binding.task_id = task_id.empty() ? std::nullopt : std::optional<std::string>(task_id);
+    const auto plan_id = json_text_field(params, "planId");
+    const auto plan_step_id = json_text_field(params, "planStepId");
+    binding.plan_id = plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id);
+    binding.plan_step_id =
+        plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id);
+    if (params.contains("evidenceIds") && params.at("evidenceIds").is_array()) {
+      std::vector<std::string> ids;
+      for (const auto& item : params.at("evidenceIds")) {
+        if (item.is_string()) ids.push_back(item.get<std::string>());
+      }
+      binding.evidence_ids = std::move(ids);
+    }
+    const auto ticket =
+        binding.approval_id.empty()
+            ? std::optional<HostApprovalLedger::TicketError>(
+                  HostApprovalLedger::TicketError::Missing)
+            : approvals_.consume(binding, [] { return now_epoch_seconds(); });
+    if (ticket.has_value()) {
+      const auto response = host_action_approval_failure(*ticket);
+      finish_host_tool_call(*database_, params, token, response, host_tool_replay_mutex_,
+                            host_tool_replays_);
+      return response;
+    }
+  }
+
+  HostToolRunner runner;
+  {
+    std::lock_guard lock(host_tool_replay_mutex_);
+    runner = host_tool_runner_;
+  }
+  nlohmann::json response;
+  try {
+    const auto output = runner ? runner(tool_name, server_id, input, cancel)
+                               : default_host_tool_run(tool_name, server_id, input, cancel);
+    response = host_tool_success(output);
+  } catch (const UnsupportedHostToolError& error) {
+    response = host_tool_failed("unsupported_route", error.what(), false, std::nullopt);
+  } catch (const HostToolTransportError& error) {
+    if (cancel != nullptr && cancel->load()) {
+      response = host_tool_failed("cancelled", "Host operation cancelled", false, std::nullopt);
+    } else {
+      response = host_tool_failed("transport", error.what(), true, std::nullopt);
+    }
+  } catch (const std::exception& error) {
+    response = host_tool_failed("execution_failed", error.what(), false, std::nullopt);
+  }
+  finish_host_tool_call(*database_, params, token, response, host_tool_replay_mutex_,
+                        host_tool_replays_);
+  return response;
+}
+
 nlohmann::json IpcRouter::handle_host_request(
     const std::string& method, const nlohmann::json& params,
     const std::shared_ptr<std::atomic<bool>>& cancel) {
@@ -9692,7 +10203,7 @@ nlohmann::json IpcRouter::handle_host_request(
                             {"error", nlohmann::json{{"code", code}, {"message", message}}}};
     };
     if (tool_name.rfind("mcp.", 0) != 0) {
-      return failed("unsupported_tool", "this desktop host does not execute that tool");
+      return host_tool_execute_command(params, cancel);
     }
     if (mcp_ == nullptr) return failed("mcp_unavailable", "The MCP supervisor is unavailable");
     const auto input = params.contains("input") ? params.at("input") : nlohmann::json::object();
