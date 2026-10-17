@@ -1,13 +1,20 @@
-# C++ / Python rewrite: milestones 1–3 in progress
+# C++ / Python rewrite log
+
+> **2026-10-17 status:** the Rust/Tauri host has been deleted; the C++ WebView
+> host is the only desktop host and owns native UI IPC, the local trust store,
+> approvals, and every `host.*` RPC. The milestone notes below are kept as the
+> migration record of how that was reached. Where they still say "Rust still
+> hosts" or "Tauri development", read them as the state at that time.
 
 > **Current scope:** the standalone C++ SSH service and Python caller are in
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
 > desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
-> existing UI. Tauri development and new package builds now select the Python
-> sidecar; installer resources contain Python Agent and C++ SSH assets only.
+> existing UI. Tauri development was retired; new package builds select the Python
+> sidecar, and installer resources contain Python Agent and C++ SSH assets only.
 > The desktop resolver has no legacy Node resource or runtime fallback; old Node paths below refer only to historical migration evidence.
-> Rust still hosts native UI IPC, local trust-store updates, and final approvals.
+> At the time of milestones 1–3, Rust still hosted native UI IPC, local
+> trust-store updates, and final approvals; the C++ host has since taken them over.
 > SSH network operations use C++; configurations outside current C++ coverage fail
 > explicitly instead of falling back to the Rust SSH backend. C++ verifies
 > configured OpenSSH host CAs and optional KRLs for supported CA algorithms; remote

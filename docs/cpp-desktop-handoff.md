@@ -90,8 +90,8 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 
 ## 下一步施工顺序
 
-1. ✅ Provider 配置读写、模型目录、Agent 进程监管与运行转发（经 sidecar 桥），以及 `host.tool.execute` 的非 MCP 只读工具分发都已迁入 C++ 宿主；Agent↔host 的 RPC 块至此完成。
-2. 迁移 MCP 配置、风险注解信任、服务器生命周期、OAuth 与进程监督；区分“设置已保存”和“服务已运行”。
+1. ✅ Provider 配置读写、模型目录、Agent 进程监管与运行转发（经 sidecar 桥），以及 `host.tool.execute` 的非 MCP 只读工具分发与 `mcp.*` durable plan/task 门禁对齐都已迁入 C++ 宿主；Agent↔host 的 RPC 块至此完成。
+2. ✅ MCP 配置、风险注解信任、服务器生命周期、OAuth 与进程监督已迁入 C++ 宿主（`host.mcp.catalog` + `mcp_server_*`），并区分“设置已保存”和“服务已运行”。
 3. 将服务器连接、Host Key 确认、终端、文件浏览、传输和审批流程接入 C++ 桌面宿主；复用现有 C++ SSH/SFTP/PTY 服务，不保留 Rust SSH 回退。
 4. 迁移剩余任务、审计、计划、恢复与事件命令，并逐项对照 shared schema 和 UI 使用点。
 5. 在分发布局（`pnpm package`）之上补齐安装器与签名，完成 Windows、macOS、Linux 桌面构建和安装后验收。
@@ -100,10 +100,10 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 
 ## 完成标准
 
-命令级盘点、依赖顺序与删除清理清单见 [`rust-removal-plan.md`](./rust-removal-plan.md)；在它的完成标准全部勾上之前不要删除 Rust/Tauri。
+命令级盘点、依赖顺序与删除清理清单见 [`rust-removal-plan.md`](./rust-removal-plan.md)；Rust/Tauri 已按该计划删除，本文件剩下的是从零实现 C++ 宿主能力的收尾项。
 
 - React 的现有外观和交互由 C++ WebView 宿主承载；所有 UI 命令都由 C++ 实现或明确标记为尚未迁移，不再依赖 Tauri/Rust 执行。
 - 现有数据库能从新安装和旧版本安全迁移；凭据、失败恢复、审计和数据兼容有明确实现。
 - Python Agent 只负责开发任务书指定的 Agent 与工具编排，通过 C++ 宿主执行本地权限和持久化操作。
 - SSH、MCP、Provider、终端和文件操作在授权边界内工作；不支持的配置明确失败，不静默走旧 Rust 路径。
-- 三平台 C++ 宿主和安装器完成构建、升级、用户数据保留及实际 UI 冒烟验收后，才清理 Rust/Tauri 旧实现。
+- 三平台 C++ 宿主和安装器完成构建、升级、用户数据保留及实际 UI 冒烟验收；Rust/Tauri 旧实现已在 `45fef20` 删除，参考实现留在 git 历史里。

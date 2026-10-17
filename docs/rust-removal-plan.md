@@ -6,11 +6,11 @@
 
 ## 0. 已删除的内容（本文件原本的前置条件）
 
-- 桌面 UI 原有 **81 个 Tauri 命令**（`crates/core` + `apps/desktop/src-tauri`），其中 C++ 宿主**已实现约 20 个**，其余仍返回 `NOT_IMPLEMENTED`。
+- 桌面 UI 原有 **81 个 Tauri 命令**（`crates/core` + `apps/desktop/src-tauri`），其中 C++ 宿主已实现绝大部分（逐条清单见 第 8 节），其余仍返回 `NOT_IMPLEMENTED`。
 - `pnpm package` 曾走 `tauri build`；现在由 `scripts/package.mjs` 暂存 C++ 宿主的**分发布局 + `SHA256SUMS.txt` + `release-manifest.json`**，并用 `pnpm package -- --verify` 复核完整性；**安装器（NSIS/MSI/DMG/deb）尚未实现**。
 - `pnpm check` 曾跑 `cargo fmt/clippy/check/test`；现在已移除。
 - 原本由 Rust 承载的共享能力（36 段 SQLite 迁移权威副本、OS 凭据边界、出站代理、host-trust、MCP、Python Agent sidecar 启动与监管）需要按下面顺序在 C++/Python 中重新提供。
-- Python Agent 到 C++ 宿主 RPC 的桥接仍未接入。
+- Python Agent 到 C++ 宿主 RPC 的桥接现已接入（`host.*` 服务端在 `ipc_router.cpp`，`host.tool.execute` 两条路由与 investigation 转发均已完成）。
 
 ---
 

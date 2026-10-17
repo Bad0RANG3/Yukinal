@@ -42,10 +42,10 @@ native/                    C++：独立 SSH service + C++ 桌面宿主（WebView
   src/                     C++ SSH service（libssh2 + cpp-httplib）
   desktop_host/            C++ 桌面宿主（窗口、IPC、SQLite、凭据、迁移）
 agent/                     Python：Agent Runtime（LangGraph/MCP/工具/策略/provider）
-apps/agent/                旧 Node Agent（仅保留做协议/迁移对照）
+apps/agent/                旧 Node Agent（已删除）
 apps/desktop/src/          React UI
-apps/desktop/src-tauri/    Tauri/Rust 旧宿主（暂存，不承接新桌面功能）
-crates/                    Rust：core / database / net / credentials / host-trust 等
+apps/desktop/src-tauri/    Tauri/Rust 旧宿主（已删除）
+crates/                    Rust：core / database / net / credentials / host-trust 等（已删除）
 packages/shared/           UI 与宿主的 IPC/schema 契约
 docs/                      设计与状态文档
 ```
@@ -237,7 +237,7 @@ pnpm --filter @yukinal/agent test:live
 2. **`cargo` 不在 PATH**：`.cargo/bin` 缺失；用 `~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin`。
 3. **NMake 需要 MSVC 环境**：不先 `vcvars64.bat` 会报找不到 `nmake`/`cl`。
 4. **CMake 依赖下载**：首次 configure 会拉取 libssh2 / nlohmann_json / cpp-httplib / webview / sqlite / bundled OpenSSL，需要网络；Windows 上 bundled OpenSSL 还需要完整 Perl（Strawberry Perl）。
-5. **测试静默跳过**：缺 Python extra 或 Paramiko 时 CMake 会不注册测试。核对 `ctest -N` 必须是 10 个。
+5. **测试静默跳过**：缺 Python extra 或 Paramiko 时 CMake 会不注册测试。核对 `ctest -N` 数量与预期一致（当前 14 个）。
 6. **`ssh_agent_development_brief.md`** 保持未跟踪、不提交。
 7. **Git 身份**：提交 author/committer 必须是 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 
@@ -301,19 +301,19 @@ pnpm --filter @yukinal/agent test:live
 
 ## 10. 并行工作线：C++ 桌面宿主（不属本任务书）
 
-状态：C++ 宿主已能打开 React UI、提供本机 IPC、初始化并迁移 SQLite（1→36）、服务器 CRUD、OS 凭据、活动/聊天记录，以及本轮新增的**网络代理设置**（`network_proxy_get`/`network_proxy_save`，凭据只进 OS 库，PAC/内嵌凭据失败关闭）。`native/build-cpp-host` 的 `desktop_host_*` 三个测试通过。
+状态：C++ 宿主已能打开 React UI、提供本机 IPC、初始化并迁移 SQLite（1→36）、服务器 CRUD、OS 凭据、活动/聊天记录、网络代理设置（`network_proxy_get`/`network_proxy_save`，凭据只进 OS 库，PAC/内嵌凭据失败关闭），以及终端、文件传输与拖拽、MCP（含 OAuth 与进程监督）和 Agent↔host 的 `host.*` RPC（含 `host.tool.execute` 两条路由）。`ctest` 当前有 14 个目标。
 
-未迁入 C++ 的命令返回 `NOT_IMPLEMENTED`，不会回退 Tauri。剩余迁移顺序见 `docs/cpp-desktop-handoff.md`。
+未迁入 C++ 的命令返回 `NOT_IMPLEMENTED`，不会回退 Tauri（Tauri 宿主已删除）。剩余迁移顺序见 `docs/cpp-desktop-handoff.md`。
 
-桌面宿主开发启动：`pnpm desktop:dev:cpp`；Tauri + Python Agent：`pnpm desktop:dev:python`。
+桌面宿主开发启动：`pnpm desktop:dev:cpp`（Tauri + Python Agent 的 `desktop:dev:python` 已随 Rust/Tauri 删除而移除）。
 
 ---
 
 ## 11. 接手后的建议顺序
 
-1. 按 第 9 节 复现本机结果，确认 CTest=10/10、Python=132、Rust 除已知 launch 问题外全绿。
+1. 按 第 9 节 复现本机结果，确认 CTest 全部通过（当前 14 个目标）、Python Agent 测试全绿；Rust 目标已随宿主删除而移除。
 2. 跑 第 6.1 节 真实 OpenSSH，补齐真实协议兼容性证据。
 3. 跑 第 6.2 节 真实 Provider（明确区分 Node SDK 与 Python LangChain 两条路径）。
 4. 把结果写回 `docs/rewrite-cpp-python.md`（带日期、版本、通过/失败组合），再更新 `docs/changelog.md`。
-5. 决定是否处理 第 7.1 节 的 Tauri 测试 manifest 问题（修好后本机 `pnpm check` 才能整条绿）。
+5. 第 7.1 节的 `yukinal-desktop --lib` launch 问题已随 Rust 宿主删除而消失，无需处理。
 6. 若要推送：确认只提交已完成且可复核的文件，Git 身份用 `Bad0RANG3 <badorangeovo@Outlook.com>`，且**不要**提交 `ssh_agent_development_brief.md`。

@@ -1,6 +1,6 @@
 # 目标架构与施工交接
 
-> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文旧 Rust/Node 路径仅表示历史基线或明确标注的测试。当前运行链路由独立 C++ SSH/SFTP 服务和 Python caller/Agent Runtime 承担；React/Tauri 保留现有界面、原生 IPC、系统凭据库接入及桌面授权桥接。Tauri 开发与新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。SSH、SFTP、PTY 和主机指纹探测没有 Rust 传输回退；C++ 不支持的认证、信任或代理配置明确失败。Windows 最近一次本地 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器测试已加入 Ubuntu CI，本机缺少 Docker，尚未运行该测试。C++ 支持直连、HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书和受支持的 Host CA；代理 URL、HTTPS 验证、bypass 匹配、CONNECT/SOCKS5 隧道及 Host CA KRL 下载均由 C++ 处理。SOCKS5 在本机解析目标域名，SOCKS5H 由代理解析。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
+> 状态：本文保留完整产品目标、验收条件和 1.0 历史实现快照；下文旧 Rust/Node 路径仅表示历史基线或明确标注的测试。当前运行链路由独立 C++ SSH/SFTP 服务和 Python caller/Agent Runtime 承担；React UI 保留现有界面，原生 IPC、系统凭据库接入及桌面授权桥接由 C++ WebView 宿主提供。新安装包选择 Python sidecar，桌面 resolver 没有 Node 资源或运行时回退。SSH、SFTP、PTY 和主机指纹探测没有 Rust 传输回退；C++ 不支持的认证、信任或代理配置明确失败。Windows 最近一次本地 CTest 的 6 个目标全部通过；Docker/OpenSSH 容器测试已加入 Ubuntu CI，本机缺少 Docker，尚未运行该测试。C++ 支持直连、HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H 代理和受支持的 NO_PROXY 主机规则，包含 OpenSSH 用户证书和受支持的 Host CA；代理 URL、HTTPS 验证、bypass 匹配、CONNECT/SOCKS5 隧道及 Host CA KRL 下载均由 C++ 处理。SOCKS5 在本机解析目标域名，SOCKS5H 由代理解析。待审批 LangGraph 检查点现可在精确匹配的持久任务启动恢复，完整桌面任务/计划恢复仍未完成。当前边界与验证结果见[重写方案](./rewrite-cpp-python.md)；本页目标不代表新功能已交付。
 
 ## 目标与角色
 
@@ -33,7 +33,7 @@
 | 位置 | 已有能力 | 为目标尚需完成 |
 | --- | --- | --- |
 | `agent/src/yukinal_agent/` 与 `agent/src/yukinal_ssh/` | Python Agent、权限/审批工具链、MCP/Provider 适配及 C++ 服务 caller 已接入；C++ 支持的 SSH 操作经回环 HTTP 接口执行 | 核实目标驱动的工具选择、实际审批、验证、失败恢复及真实 Provider/MCP/OpenSSH 端到端路径 |
-| `apps/desktop/src-tauri/` | 现有桌面桥接提供 UI IPC、凭据读取、目标解析、审批和持久任务衔接；它不再建立 Rust SSH/SFTP 会话 | 继续收敛到 UI/原生桥接职责，并验证授权生命周期、跨目标拒绝、预算、撤销、未知结果处置和审计 |
+| `apps/desktop/src-tauri/` | **已删除**（Rust/Tauri 旧宿主）；UI IPC、凭据读取、目标解析、审批和持久任务衔接现由 C++ WebView 宿主提供，且不再建立 Rust SSH/SFTP 会话 | 在 C++ 宿主继续验证授权生命周期、跨目标拒绝、预算、撤销、未知结果处置和审计 |
 | `native/` 与 `agent/src/yukinal_ssh/` | C++ SSH/SFTP/PTY 服务和 Python caller；C++ 回环测试覆盖结构化命令、SFTP 和安全发布 | 核实真实 OpenSSH 对认证、命令、文件扩展、断连和 staging 的行为 |
 | `apps/desktop/src/features/overview/` | 服务器健康快照、资源与容器信息、来源/新鲜度状态、活动入口及近期动态；步骤记录在任务页展示 | 真实 GUI、断连恢复、多服务器切换和完整任务过程验收 |
 | `apps/desktop/src/features/files/RemoteFilesPane.tsx` 与文件 IPC | 目录浏览、限长文本/图片预览、经 C++ SFTP 服务的双向传输、本机队列、预览上传、列表内拖放、进度/取消和远端原生拖出准备 | 验收系统文件管理器和三平台安装版操作；真实服务器兼容、碰撞/崩溃恢复与大文件行为 |
