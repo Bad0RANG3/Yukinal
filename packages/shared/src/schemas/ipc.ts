@@ -408,6 +408,7 @@ export const IPC_SCHEMAS = {
         providerId: z.string().trim().min(1).max(256).optional(),
         model: z.string().trim().min(1).max(256).optional(),
         reasoningEffort: AgentReasoningEffortSchema.optional(),
+        toolAccess: z.literal("none").optional(),
         workspaceId: z.string().trim().min(1).max(256).optional(),
         focusServerId: IpcServerIdSchema.optional(),
         permissionMode: AgentPermissionModeSchema.optional(),

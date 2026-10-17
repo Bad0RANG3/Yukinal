@@ -406,6 +406,7 @@ export const AgentRunRequestSchema = z
     providerId: z.string().trim().min(1).max(256).optional(),
     model: z.string().trim().min(1).max(256).optional(),
     reasoningEffort: AgentReasoningEffortSchema.optional(),
+    toolAccess: z.literal("none").optional(),
   })
   .superRefine((request, context) => {
     if (!agentPromptCarriesContent(request)) {

@@ -22,7 +22,6 @@ import {
 } from "react";
 
 import {
-  AGENT_PROMPT_LIMITS,
   type AgentAudioPromptPart,
   type AgentDocumentPromptPart,
   type AgentImagePromptPart,
@@ -38,7 +37,6 @@ import { AGENT_TEAMS, type AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { composerKeyAction } from "./composer-keyboard.js";
-import { PermissionPicker } from "./PermissionPicker.js";
 import { ReasoningPicker } from "./ReasoningPicker.js";
 import {
   audioAttachmentUrl,
@@ -81,6 +79,7 @@ export function AgentComposer({
   stopping,
   canSend,
   canStop,
+  sendDisabledReason,
   permissionMode,
   onPermissionModeChange,
   runMode,
@@ -120,6 +119,7 @@ export function AgentComposer({
   stopping: boolean;
   /** 当前是否允许提交（取决于 shell、sidecar、provider 与归档状态）。 */
   canSend: boolean;
+  sendDisabledReason?: string;
   /** 运行中有 runId 且没有正在停止时才允许中断。 */
   canStop: boolean;
   permissionMode: AgentPermissionMode;
@@ -157,7 +157,6 @@ export function AgentComposer({
   const policyWarning = policyEnvironmentWarning(runPolicy, targetEnvironment);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const otherFileInputRef = useRef<HTMLInputElement>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [draggingAttachment, setDraggingAttachment] = useState(false);
   const [trigger, setTrigger] = useState<ActiveTrigger | null>(null);
@@ -385,12 +384,12 @@ export function AgentComposer({
       <div
         className={`agent-composer-shell${draggingAttachment ? " is-dragging-attachment" : ""}`}
         onDragEnter={(event) => {
-          if (!canEdit) return;
+          if (!canEdit || !event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
           setDraggingAttachment(true);
         }}
         onDragOver={(event) => {
-          if (!canEdit) return;
+          if (!canEdit || !event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }}
@@ -400,103 +399,108 @@ export function AgentComposer({
           }
         }}
         onDrop={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
           setDraggingAttachment(false);
           void addFiles([...event.dataTransfer.files]);
         }}
       >
-        {imageAttachments.length > 0 ? (
-          <ul className="agent-composer-attachments" aria-label="待发送图片">
-            {imageAttachments.map((image, index) => (
-              <li key={`${image.name ?? "image"}-${index}`} className="agent-composer-attachment">
-                <img
-                  src={imageAttachmentUrl(image)}
-                  alt={image.name ?? `图片 ${index + 1}`}
-                  loading="lazy"
-                  referrerPolicy="no-referrer"
-                />
-                <span title={image.name}>{image.name ?? `图片 ${index + 1}`}</span>
-                <button
-                  type="button"
-                  aria-label={`移除${image.name ?? `图片 ${index + 1}`}`}
-                  title="移除图片"
-                  disabled={running}
-                  onClick={() => removeAttachment(image)}
-                >
-                  <Icon name="close" size="xs" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {fileAttachments.length > 0 ? (
-          <ul className="agent-composer-file-attachments" aria-label="待发送文本文件">
-            {fileAttachments.map((attachment, index) => (
-                <li
-                  key={`${attachment.name}-${index}`}
-                  className="agent-composer-file-attachment"
-                >
-                  <Icon name="file" size="sm" />
-                  <span title={attachment.name}>{attachment.name}</span>
+        {draggingAttachment ? <div className="agent-composer-drop-target" aria-hidden="true"><Icon name="plus" size="md" /><span>添加到对话</span></div> : null}
+        {attachments.length ? <div className="agent-composer-attachment-rail">
+          {imageAttachments.length > 0 ? (
+            <ul className="agent-composer-attachments" aria-label="待发送图片">
+              {imageAttachments.map((image, index) => (
+                <li key={`${image.name ?? "image"}-${index}`} className="agent-composer-attachment agent-composer-image-attachment">
+                  <img
+                    src={imageAttachmentUrl(image)}
+                    alt={image.name ?? `图片 ${index + 1}`}
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                  />
+                  <span title={image.name}>{image.name ?? `图片 ${index + 1}`}</span>
                   <button
                     type="button"
-                    aria-label={`移除${attachment.name}`}
-                    title="移除文本文件"
+                    aria-label={`移除${image.name ?? `图片 ${index + 1}`}`}
+                    title="移除图片"
                     disabled={running}
-                    onClick={() => removeAttachment(attachment)}
+                    onClick={() => removeAttachment(image)}
                   >
                     <Icon name="close" size="xs" />
                   </button>
                 </li>
               ))}
-          </ul>
-        ) : null}
-        {documentAttachments.length > 0 ? (
-          <ul className="agent-composer-file-attachments" aria-label="待发送 PDF">
-            {documentAttachments.map((document, index) => (
-              <li
-                key={`${document.name}-${index}`}
-                className="agent-composer-file-attachment"
-              >
-                <Icon name="file" size="sm" />
-                <span title={document.name}>{document.name}</span>
-                <button
-                  type="button"
-                  aria-label={`移除${document.name}`}
-                  title="移除 PDF"
-                  disabled={running}
-                  onClick={() => removeAttachment(document)}
+            </ul>
+          ) : null}
+          {fileAttachments.length > 0 ? (
+            <ul className="agent-composer-file-attachments" aria-label="待发送文本文件">
+              {fileAttachments.map((attachment, index) => (
+                  <li
+                    key={`${attachment.name}-${index}`}
+                    className="agent-composer-file-attachment"
+                  >
+                    <Icon name="file" size="sm" />
+                    <span title={attachment.name}>{attachment.name}</span>
+                    <button
+                      type="button"
+                      aria-label={`移除${attachment.name}`}
+                      title="移除文本文件"
+                      disabled={running}
+                      onClick={() => removeAttachment(attachment)}
+                    >
+                      <Icon name="close" size="xs" />
+                    </button>
+                  </li>
+                ))}
+            </ul>
+          ) : null}
+          {documentAttachments.length > 0 ? (
+            <ul className="agent-composer-file-attachments" aria-label="待发送 PDF">
+              {documentAttachments.map((document, index) => (
+                <li
+                  key={`${document.name}-${index}`}
+                  className="agent-composer-file-attachment"
                 >
-                  <Icon name="close" size="xs" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {audioAttachments.length > 0 ? (
-          <ul className="agent-composer-attachments" aria-label="待发送音频">
-            {audioAttachments.map((audio, index) => (
-              <li
-                key={`${audio.name ?? "audio"}-${index}`}
-                className="agent-composer-attachment agent-composer-audio-attachment"
-              >
-                {/* 用浏览器自带的播放器预览：它是本地 data URL，不经过任何远端请求。 */}
-                <audio controls preload="metadata" src={audioAttachmentUrl(audio)} />
-                <span title={audio.name}>{audio.name ?? `音频 ${index + 1}`}</span>
-                <button
-                  type="button"
-                  aria-label={`移除${audio.name ?? `音频 ${index + 1}`}`}
-                  title="移除音频"
-                  disabled={running}
-                  onClick={() => removeAttachment(audio)}
+                  <Icon name="file" size="sm" />
+                  <span title={document.name}>{document.name}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除${document.name}`}
+                    title="移除 PDF"
+                    disabled={running}
+                    onClick={() => removeAttachment(document)}
+                  >
+                    <Icon name="close" size="xs" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {audioAttachments.length > 0 ? (
+            <ul className="agent-composer-attachments" aria-label="待发送音频">
+              {audioAttachments.map((audio, index) => (
+                <li
+                  key={`${audio.name ?? "audio"}-${index}`}
+                  className="agent-composer-attachment agent-composer-audio-attachment"
                 >
-                  <Icon name="close" size="xs" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+                  {/* 用浏览器自带的播放器预览：它是本地 data URL，不经过任何远端请求。 */}
+                  <audio controls preload="metadata" src={audioAttachmentUrl(audio)} />
+                  <span title={audio.name}>{audio.name ?? `音频 ${index + 1}`}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除${audio.name ?? `音频 ${index + 1}`}`}
+                    title="移除音频"
+                    disabled={running}
+                    onClick={() => removeAttachment(audio)}
+                  >
+                    <Icon name="close" size="xs" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div> : null}
         {attachmentError ? <p className="agent-composer-attachment-error" role="status">{attachmentError}</p> : null}
+        {notices ? <div className="agent-input-notices">{notices}</div> : null}
         <textarea
           ref={inputRef}
           rows={1}
@@ -526,26 +530,15 @@ export function AgentComposer({
           ref={fileInputRef}
           className="agent-composer-file-input"
           type="file"
-          accept={IMAGE_ATTACHMENT_ACCEPT}
+          accept={`${IMAGE_ATTACHMENT_ACCEPT},${FILE_ATTACHMENT_ACCEPT}`}
           multiple
           tabIndex={-1}
           onChange={(event) => {
-            void addFiles(Array.from(event.target.files ?? []));
+            void addFiles(Array.from(event.target.files ?? [])).then(() => inputRef.current?.focus());
             event.target.value = "";
           }}
         />
-        <input
-          ref={otherFileInputRef}
-          className="agent-composer-file-input"
-          type="file"
-          accept={FILE_ATTACHMENT_ACCEPT}
-          multiple
-          tabIndex={-1}
-          onChange={(event) => {
-            void addFiles(Array.from(event.target.files ?? []));
-            event.target.value = "";
-          }}
-        />
+
 
         {suggestionsPresence.mounted ? (
           <ul
@@ -588,10 +581,16 @@ export function AgentComposer({
             // （加了反而会让读屏把面板之外的内容整个忽略掉）。它是一个挂在输入区
             // 上的弹出设置面板，焦点在面板与触发按钮之间自由移动即可。
             role="dialog"
-            aria-label="运行设置"
+            aria-label="附件与对话设置"
             tabIndex={-1}
             onAnimationEnd={settingsPresence.onAnimationEnd}
           >
+            <section className="agent-settings-group">
+              <button type="button" className="agent-settings-upload" disabled={!canEdit} onClick={() => { fileInputRef.current?.click(); setMenuOpen(false); }}><Icon name="file" size="md" /><span>上传图片或文件</span></button>
+            </section>
+            <section className="agent-settings-group">
+              <label className="agent-settings-permission"><span>访问权限</span><select aria-label="访问权限" value={permissionMode} disabled={running} onChange={(event) => onPermissionModeChange(event.target.value as AgentPermissionMode)}><option value="ask">请求批准</option><option value="auto">帮我批准</option></select></label>
+            </section>
             {roles.length ? <section className="agent-settings-group">
               <p className="agent-settings-title">回复角色</p>
               <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
@@ -654,6 +653,7 @@ export function AgentComposer({
                 })}
               </ul>
             </section>
+            {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
           </div>
         ) : null}
 
@@ -661,43 +661,9 @@ export function AgentComposer({
           <div className="agent-composer-toolbar-left">
             <button
               type="button"
-              className="agent-composer-tool"
-              aria-label="添加图片"
-              title={
-                imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages
-                  ? `每条消息最多 ${AGENT_PROMPT_LIMITS.maxImages} 张图片`
-                  : "添加图片"
-              }
-              disabled={!canEdit || imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Icon name="image" size="md" />
-            </button>
-            <button
-              type="button"
-              className="agent-composer-tool"
-              aria-label="添加文本文件或 PDF"
-              title={
-                fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
-                documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments
-                  ? "文本文件与 PDF 数量都已达到上限"
-                  : "添加文本文件或 PDF"
-              }
-              disabled={
-                !canEdit ||
-                (fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
-                  documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments)
-              }
-              onClick={() => otherFileInputRef.current?.click()}
-            >
-              <Icon name="file" size="md" />
-            </button>
-            <PermissionPicker value={permissionMode} readOnly={modeSpec.readOnly} disabled={running} onChange={onPermissionModeChange} />
-            <button
-              type="button"
               ref={settingsTriggerRef}
               className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
-              aria-label={`运行设置：${modeSpec.readOnly ? "仅只读，" : ""}${approvalSpec.label}，${policySpec.label}`}
+              aria-label="添加附件与对话设置"
               aria-expanded={menuOpen}
               aria-haspopup="dialog"
               title={`${modeSpec.readOnly ? "只读 · " : ""}${approvalSpec.label} · ${policyWarning ?? policySpec.label}`}
@@ -706,9 +672,9 @@ export function AgentComposer({
                 setTrigger(null);
               }}
             >
-              <Icon name={policyWarning ? "warning" : "settings"} size="md" />
+              <Icon name="plus" size="md" />
             </button>
-            {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
+
           </div>
           <div className="agent-composer-toolbar-right">
             {models.length ? <ReasoningPicker
@@ -732,7 +698,7 @@ export function AgentComposer({
                 type="button"
                 className={`agent-send-button ${sendPresence.closing ? "is-closing" : ""}`}
                 aria-label="发送消息"
-                title="发送消息（Ctrl+Enter）"
+                title={canSend ? "发送消息（Ctrl+Enter）" : sendDisabledReason ?? "请连接模型后发送"}
                 aria-keyshortcuts="Control+Enter Meta+Enter"
                 disabled={!canSend}
                 onClick={submit}
@@ -755,7 +721,7 @@ export function AgentComposer({
             </button> : null}
           </div>
         </div>
-        {notices ? <div className="agent-input-notices">{notices}</div> : null}
+
       </div>
     </footer>
   );

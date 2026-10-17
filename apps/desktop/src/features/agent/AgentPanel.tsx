@@ -25,7 +25,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell, isNativeDesktopShell } from "../../lib/ipc.js";
 import { errorMessage } from "../../lib/format.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
@@ -97,7 +97,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
 
   const shell = isDesktopShell();
   const preview = isPreviewFixture();
-  const agentRunning = !preview && agentStatus.data?.running === true;
+  const livePreviewChat = preview && isNativeDesktopShell();
+  const agentRunning = (!preview || livePreviewChat) && agentStatus.data?.running === true;
   const servers = useServers();
   const focusServer = servers.data?.find((server) => server.id === selectedServerId);
 
@@ -273,14 +274,15 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       prompt: text,
       persona: rolePersona(role),
       participant: { id: role.id, label: rolePersona(role).label, kind: "agent" },
-      taskId: selectedTaskId,
+      taskId: preview ? null : selectedTaskId,
       parts,
       persistUserMessage: (messageId, promptParts) =>
-        sessions.recordUserMessage(text, messageId, focusServerId, promptParts),
+        sessions.recordUserMessage(text, messageId, preview ? null : focusServerId, promptParts),
       providerId: (!modelOverride ? binding.provider?.id : null) ?? models.selectedProviderId,
       model: (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model,
       reasoningEffort: requestReasoningEffort(!modelOverride && binding.choice ? binding.provider : models.selectedProvider, (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model, reasoningEffort),
-      focusServerId,
+      focusServerId: preview ? null : focusServerId,
+      toolAccess: preview ? "none" : undefined,
       permissionMode,
       mode: runMode,
       // 「按环境自动」在这里就是「不带这个字段」，由 requestPolicyId 保证。
@@ -470,7 +472,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
               <AgentComposer
                 notices={<>
                   {sessions.archived ? <p className="agent-history-archived" role="status">当前对话已归档，恢复后才可以继续发送。</p> : null}
-                  {!preview ? <AgentNotices
+                  {!preview || livePreviewChat ? <AgentNotices
                     shell={shell}
                     agentRunning={agentRunning}
                     providerReady={models.providerReady}
@@ -487,8 +489,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                   {roles.notice ? <div className="agent-history-error agent-history-error-inline" role="status">{roles.notice}</div> : null}
                 </>}
                 status={<>
+                  {livePreviewChat ? <span>模拟服务器 · 仅对话</span> : null}
                   <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectServer(null)}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
-                  <AgentRunStatus compact preview={preview} running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
+                  <AgentRunStatus compact preview={preview && !livePreviewChat} running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
                 </>}
                 prompt={prompt}
                 onPromptChange={setPrompt}
@@ -499,6 +502,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 running={run.running}
                 stopping={run.stopping}
                 canSend={canSend}
+                sendDisabledReason={preview && !livePreviewChat ? "请在桌面窗口发送" : !agentRunning ? "请先启动运行服务" : !models.providerReady ? "请先配置模型" : !run.listening ? "正在连接对话" : "当前对话不可发送"}
                 canStop={Boolean(run.runId) && !run.stopping}
                 permissionMode={permissionMode}
                 onPermissionModeChange={(mode) => setPreferences({ agentPermissionMode: mode })}

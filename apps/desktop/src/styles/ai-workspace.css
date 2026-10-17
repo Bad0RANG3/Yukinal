@@ -118,7 +118,7 @@
 .ai-first .agent-notice-error { flex-basis: 100%; margin: 0; }
 .ai-first .agent-history-error-inline { margin: 0; }
 .ai-first .agent-composer { width: 100%; padding: 0; border: 0; background: transparent; }
-.ai-first .agent-composer-shell { min-height: 108px; gap: 10px; padding: 14px 12px 10px; border-radius: var(--radius-panel); background: var(--composer-surface); box-shadow: none; transition: border-color var(--motion-fast) ease; }
+.ai-first .agent-composer-shell { min-height: 108px; gap: 10px; padding: 18px var(--composer-action-inset) var(--composer-action-inset) 18px; border-radius: var(--composer-radius); background: var(--composer-surface); box-shadow: none; transition: border-color var(--motion-fast) ease; }
 .ai-first .agent-composer-shell:focus-within { border-color: var(--edge-normal); box-shadow: none; }
 .ai-first .agent-composer-toolbar { min-height: 32px; margin: 0; padding: 0; border: 0; }
 .ai-first .agent-composer-toolbar-left { flex: 0 1 auto; gap: 4px; }
@@ -126,8 +126,8 @@
 .ai-first .agent-composer-tool { width: 28px; height: 28px; border-radius: var(--radius-control); background: transparent; }
 .ai-first .agent-composer-tool.agent-settings-trigger { width: 28px; }
 .ai-first .agent-composer-input { min-height: 40px; max-height: 180px; }
-.ai-first .agent-send-button { display: grid; place-items: center; width: 32px; min-width: 32px; height: 32px; padding: 0; border-radius: var(--radius-circle); }
-.ai-first .agent-conversation.is-empty .agent-settings-panel { max-height: min(440px, 38vh); }
+.ai-first .agent-send-button { display: grid; place-items: center; width: var(--composer-action-size); min-width: var(--composer-action-size); height: var(--composer-action-size); padding: 0; border-radius: var(--radius-circle); }
+.ai-first .agent-conversation.is-empty .agent-settings-panel { max-height: min(480px, 55vh); }
 .ai-first .agent-composer textarea { font-size: var(--text-small); line-height: 1.6; }
 .ai-first .agent-composer :is(.agent-composer-select, .agent-model-trigger, .agent-composer-tool, .agent-run-mode, .agent-policy-trigger) { font-size: var(--text-label); }
 

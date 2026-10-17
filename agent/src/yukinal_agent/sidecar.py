@@ -1548,7 +1548,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     fields = {
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
-        "providerId", "model", "reasoningEffort", "requireCheckpoint", "planBinding",
+        "providerId", "model", "reasoningEffort", "toolAccess", "requireCheckpoint", "planBinding",
         "persona", "participant",
     }
     parsed = _strict_object(value, fields)
@@ -1601,6 +1601,8 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if parsed.get("permissionMode", "ask") not in ("ask", "auto"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if "toolAccess" in parsed and parsed["toolAccess"] != "none":
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid tool access")
     if "reasoningEffort" in parsed and parsed["reasoningEffort"] not in ("none", "low", "high", "max"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid reasoning effort")
     if parsed.get("mode", "goal") not in ("goal", "plan", "readonly"):
@@ -1721,6 +1723,8 @@ def _allowed_tools_for_run(
     mode: str,
     request: dict[str, Any],
 ) -> frozenset[str]:
+    if request.get("toolAccess") == "none":
+        return frozenset()
     allowed = set(_allowed_tool_names(registry, mode))
     if not _host_action_has_plan_binding(request):
         allowed.difference_update(PLAN_BOUND_HOST_ACTION_TOOLS)
@@ -1806,6 +1810,7 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "providerId": request.get("providerId"),
             "model": request.get("model"),
             "reasoningEffort": request.get("reasoningEffort"),
+            **({"toolAccess": request["toolAccess"]} if "toolAccess" in request else {}),
             "permissionMode": request.get("permissionMode", "ask"),
             "mode": request.get("mode", "goal"),
             "policyId": request.get("policyId"),
@@ -1824,7 +1829,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
-        "persona", "participant", "reasoningEffort",
+        "persona", "participant", "reasoningEffort", "toolAccess",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")

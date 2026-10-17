@@ -13,7 +13,7 @@ from yukinal_agent import MemoryAuditSink, ToolRegistry, ToolSpec
 from yukinal_agent.checkpoints import open_checkpoint_store
 from yukinal_agent.conversation_store import ConversationStore, message_bytes
 from yukinal_agent.models import ModelConfig, ModelFactory
-from yukinal_agent.sidecar import PythonSidecar, RPC_INVALID_PARAMS, _parse_run_request, _run_fingerprint
+from yukinal_agent.sidecar import PythonSidecar, RPC_INVALID_PARAMS, _parse_run_request, _run_fingerprint, _run_checkpoint_binding, _RpcFault
 
 
 class ScriptedModel:
@@ -58,6 +58,27 @@ def request(run_id: str, *, session: str = "session-1", server: str | None = Non
 
 
 class ConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_conversation_only_request_cannot_execute_even_a_read_tool(self) -> None:
+        store = ConversationStore()
+        calls = []
+        registry = ToolRegistry(MemoryAuditSink())
+        async def read(arguments: Any, context: Any) -> str:
+            calls.append(arguments)
+            return "should never execute"
+        registry.register(ToolSpec(name="probe.read", description="Read evidence", risk_level="read", requires_approval=False,
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False}, handler=read, target_id_argument=None))
+        model = ScriptedModel([AIMessage(content="", tool_calls=[{"name": "probe__read", "args": {}, "id": "blocked", "type": "tool_call"}]), AIMessage(content="Conversation only.")])
+        sidecar = LocalSidecar(model, store, registry=registry)
+        payload = {**request("no-tools"), "toolAccess": "none"}
+        result = await sidecar.rpc("agent.run.start", payload)
+        self.assertNotIn("error", result)
+        self.assertEqual(calls, [])
+        self.assertNotEqual(_run_fingerprint(payload), _run_fingerprint({key: value for key, value in payload.items() if key != "toolAccess"}))
+        self.assertNotEqual(_run_checkpoint_binding(payload), _run_checkpoint_binding({key: value for key, value in payload.items() if key != "toolAccess"}))
+        with self.assertRaises(_RpcFault):
+            _parse_run_request({**payload, "toolAccess": "all"})
+        store.close()
+
     async def test_native_legacy_history_hydrates_once_with_scope_and_current_message_cutoff(self) -> None:
         class HistoryHost:
             def __init__(self, *, wrong_scope: bool = False, empty: bool = False) -> None:

@@ -336,6 +336,7 @@ export interface IpcCommandMap {
       providerId?: string;
       model?: string;
       reasoningEffort?: AgentReasoningEffort;
+      toolAccess?: "none";
       workspaceId?: string;
       focusServerId?: string;
       permissionMode?: AgentPermissionMode;

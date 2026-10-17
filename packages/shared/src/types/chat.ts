@@ -345,6 +345,7 @@ export interface AgentRunRequest {
   model?: string;
   /** Omitted uses the provider default; explicit values require adapter support. */
   reasoningEffort?: AgentReasoningEffort;
+  toolAccess?: "none";
 }
 
 /** `agent.run.stop` params: stop decouples from the run only by its id. */

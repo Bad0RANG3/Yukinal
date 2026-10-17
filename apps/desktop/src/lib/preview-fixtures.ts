@@ -2,8 +2,10 @@
  * Isolated in-memory data for desktop and browser visual evaluation.
  *
  * It is reachable only from Vite development with `?fixture=1`.  Responses
- * still traverse the regular Zod IPC schema, but no credentials, sockets, SSH
- * operations, or native business commands are involved. Reloading resets it.
+ * still traverse the regular Zod IPC schema. Infrastructure stays in memory;
+ * native preview chat is separately allow-listed in preview-chat.ts and has
+ * no tool access. Browser fixtures never invoke native commands. Reloading
+ * resets mock infrastructure, while native chat history remains durable.
  */
 
 import {

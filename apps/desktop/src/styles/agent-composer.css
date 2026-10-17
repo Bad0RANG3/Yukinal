@@ -55,10 +55,13 @@
   justify-content: space-between;
   gap: 14px;
   border: 1px solid var(--edge-subtle);
-  border-radius: var(--radius-panel);
+  --composer-action-size: 36px;
+  --composer-action-inset: 10px;
+  --composer-radius: calc(var(--composer-action-size) / 2 + var(--composer-action-inset) + 1px);
+  border-radius: var(--composer-radius);
   background: var(--composer-surface);
   box-shadow: none;
-  padding: 12px 9px 9px 14px;
+  padding: 18px var(--composer-action-inset) var(--composer-action-inset) 18px;
 }
 
 /* Focus changes the border only; the input surface stays flat and unlit. */
@@ -68,13 +71,30 @@
 }
 
 .agent-composer-shell.is-dragging-attachment {
-  border-color: var(--composer-accent);
+  border-color: var(--edge-normal);
   box-shadow: none;
+}
+
+.agent-composer-drop-target {
+  position: absolute;
+  z-index: 25;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+  border: 1px dashed var(--muted);
+  border-radius: inherit;
+  background: var(--composer-surface);
+  color: var(--text);
 }
 
 .agent-composer-file-input {
   display: none;
 }
+
+.agent-composer-attachment-rail { display: flex; min-width: 0; max-width: 100%; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
 
 .agent-composer-attachments {
   display: flex;
@@ -83,7 +103,7 @@
   max-width: 100%;
   margin: 0;
   padding: 0 0 2px;
-  overflow-x: auto;
+  flex-wrap: wrap;
   list-style: none;
 }
 
@@ -106,6 +126,28 @@
   border-radius: var(--radius-control);
   object-fit: cover;
   background: var(--surface-3);
+}
+
+.agent-composer-image-attachment {
+  position: relative;
+  display: flex;
+  width: 76px;
+  min-width: 76px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+.agent-composer-image-attachment img { width: 76px; height: 76px; border-radius: 12px; }
+.agent-composer-image-attachment > span { padding-inline: 2px; }
+.agent-composer-attachment.agent-composer-image-attachment button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--composer-surface);
+  color: var(--text);
 }
 
 /* 音频附件比图片宽：播放器需要横向空间，而它取代的是那个 40px 的缩略图。 */
@@ -420,7 +462,8 @@
   position: absolute;
   z-index: 21;
   left: 8px;
-  right: 8px;
+  right: auto;
+  width: min(340px, calc(100% - 16px));
   bottom: calc(100% + 6px);
   display: flex;
   max-height: 60vh;
@@ -433,6 +476,11 @@
   box-shadow: var(--shadow-floating);
   padding: 12px;
 }
+
+.agent-settings-upload { display: flex; align-items: center; gap: 10px; border: 0; border-radius: 8px; padding: 10px 8px; background: transparent; color: var(--text); text-align: left; }
+.agent-settings-upload:hover:not(:disabled) { background: var(--surface-4); }
+.agent-settings-permission { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: var(--text-caption); }
+.agent-settings-permission select { min-width: 0; max-width: 65%; }
 
 .agent-settings-group {
   display: flex;
@@ -644,10 +692,16 @@
    现在它是一枚有文字的按钮，出现即代表真的能发。 */
 .agent-send-button {
   flex: 0 0 auto;
-  border-radius: var(--radius-pill);
+  display: grid;
+  width: var(--composer-action-size);
+  min-width: var(--composer-action-size);
+  height: var(--composer-action-size);
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
   background: var(--composer-accent);
   color: var(--on-accent);
-  padding: 5px 14px;
+  padding: 0;
   font-size: var(--text-caption);
   font-weight: 600;
 }
@@ -716,7 +770,7 @@
 
   .agent-composer-shell {
     min-height: 92px;
-    border-radius: var(--radius-panel);
+    border-radius: var(--composer-radius);
     padding-left: 12px;
   }
 

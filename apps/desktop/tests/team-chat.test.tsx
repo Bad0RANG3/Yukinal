@@ -115,3 +115,13 @@ test("running composer preserves stop admission and locks draft and model contro
   assert.match(stopping, /<button[^>]+aria-label="停止运行"[^>]+disabled=""/u);
   assert.ok(stopping.includes("停止中"));
 });
+
+test("composer keeps one plus entry, one attachment chooser and a precise send blocker", () => {
+  const markup = renderToStaticMarkup(<AgentComposer {...composerProps} canSend={false} sendDisabledReason="请先启动运行服务" />);
+  assert.equal((markup.match(/class="agent-composer-file-input"/gu) ?? []).length, 1);
+  assert.equal((markup.match(/class="agent-composer-toolbar-left"/gu) ?? []).length, 1);
+  assert.ok(markup.includes('aria-label="添加附件与对话设置"'));
+  assert.equal(markup.includes('aria-label="添加图片"'), false);
+  assert.equal(markup.includes('aria-label="添加文本文件或 PDF"'), false);
+  assert.match(markup, /aria-label="发送消息"[^>]+title="请先启动运行服务"[^>]+disabled=""/u);
+});

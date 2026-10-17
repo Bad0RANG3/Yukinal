@@ -75,6 +75,7 @@ export type StartRunInput = {
   providerId?: string | null;
   model?: string | null;
   reasoningEffort?: AgentReasoningEffort;
+  toolAccess?: "none";
   focusServerId?: string | null;
   permissionMode?: AgentPermissionMode;
   /** 运行模式：只读 / 计划 / 目标。由 sidecar 的权限引擎强制。 */
@@ -346,7 +347,7 @@ export function useAgentRun(options: {
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
-    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
+    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
     const previous = pendingAdmission.current;
     const reusable =
       previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
@@ -391,6 +392,7 @@ export function useAgentRun(options: {
         providerId: input.providerId ?? undefined,
         model: input.model ?? undefined,
         reasoningEffort: input.reasoningEffort,
+        toolAccess: input.toolAccess,
         persona: input.persona,
         participant: input.participant,
         focusServerId: input.focusServerId ?? undefined,

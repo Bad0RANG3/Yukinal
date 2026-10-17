@@ -24,6 +24,7 @@ import {
 // 只用它的类型层（`z.output`），所以是 `import type`：这行不会进入运行时产物。
 import type { z } from "zod";
 
+import { nativePreviewChatParams, usesNativePreviewChat } from "./preview-chat.js";
 import { isPreviewFixture, previewResponse } from "./preview-fixtures.js";
 
 type UnlistenFn = () => void;
@@ -120,9 +121,10 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
 ): Promise<T> {
   if (!isDesktopShell()) throw new IpcUnavailableError(command);
   const validatedParams = IPC_SCHEMAS[command].params.parse(params);
-  const nativeArgs = { ...(validatedParams as Record<string, unknown>) };
+  const livePreviewChat = isPreviewFixture() && usesNativePreviewChat(command, isNativeDesktopShell());
+  const nativeArgs = livePreviewChat ? nativePreviewChatParams(command, validatedParams as Record<string, unknown>) : { ...(validatedParams as Record<string, unknown>) };
   try {
-    if (isPreviewFixture()) return parse(previewResponse(command, validatedParams));
+    if (isPreviewFixture() && !livePreviewChat) return parse(previewResponse(command, validatedParams));
     if (!window.__YUKINAL_HOST__) throw new IpcUnavailableError(command);
     const raw = await window.__YUKINAL_HOST__.invoke(command, nativeArgs);
     return parse(raw);
@@ -172,7 +174,7 @@ export async function listenDesktop<E extends DesktopEventName>(
   // Browser preview cannot install native event listeners. Returning a no-op
   // subscription keeps components that always mount a listener (such as the
   // SSH authentication modal) from producing an unhandled browser rejection.
-  if (isPreviewFixture() || !isNativeDesktopShell()) return () => {};
+  if (!isNativeDesktopShell() || (isPreviewFixture() && !name.startsWith("agent."))) return () => {};
   const schema = EVENT_SCHEMAS[name];
   const deliver = (payload: unknown) => {
     const parsed = schema.safeParse(payload);
