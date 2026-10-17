@@ -81,10 +81,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
         run: |
+          sudo apt-get install -y gdb
           cd native/build-check
-          for t in transfer_manager_tests transfer_tests desktop_host_database_tests; do
+          for t in transfer_manager_tests; do
             echo "===== gdb $t ====="
-            timeout 240 gdb -batch -ex "set pagination off" -ex run -ex "bt" -ex "thread apply all bt" ./$t 2>&1 | tail -n 160 || true
+            timeout 240 gdb -batch -ex "set pagination off" -ex run -ex "bt" -ex "thread apply all bt" ./$t 2>&1 | tail -n 200 || true
           done
 
       - name: Build C++ targets (Windows)
