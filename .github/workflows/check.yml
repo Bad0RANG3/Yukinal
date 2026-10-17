@@ -71,7 +71,7 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path -Parent $nmake)
 
       - name: Configure C++ SSH service, desktop host, and tests
-        run: cmake -S native -B native/build-check -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }}
+        run: cmake -S native -B native/build-check -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }}
 
       - name: Build C++ targets
         if: matrix.os != 'windows-latest'
@@ -83,10 +83,7 @@ jobs:
         run: |
           sudo apt-get install -y gdb
           cd native/build-check
-          for t in transfer_manager_tests; do
-            echo "===== gdb $t ====="
-            timeout 240 gdb -batch -ex "set pagination off" -ex run -ex "bt" -ex "thread apply all bt" ./$t 2>&1 | tail -n 200 || true
-          done
+          timeout 240 gdb -batch -ex "set pagination off" -ex run -ex "bt" -ex "thread apply all bt" ./yukinal_desktop_host_transfer_manager_tests 2>&1 | tail -n 250 || true
 
       - name: Build C++ targets (Windows)
         if: matrix.os == 'windows-latest'
