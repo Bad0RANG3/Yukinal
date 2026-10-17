@@ -93,9 +93,8 @@ verifies authenticated SOCKS5 and SOCKS5H tunnels, including local versus proxy
 DNS resolution and rejection of an incorrect credential.
 
 `pnpm build:ssh-service` builds only the C++ executable and stages it under
-`apps/desktop/src-tauri/resources/ssh-service/`; `pnpm package` and the direct
-Tauri build hook do this automatically. The executable is included in the app
-resources. The Python Agent can use an operator-managed config; the desktop
+`apps/desktop/resources/ssh-service/`. `pnpm package` copies it into the staged
+distributable (under `ssh-service/`) together with its OpenSSL licence text. The Python Agent can use an operator-managed config; the desktop
 Agent and service panel also create a one-target config from the selected
 server and keychain identity. Both start the C++ child with only the referenced
 credential environment values. A `--parent-pid` monitor also makes the C++

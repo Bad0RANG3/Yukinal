@@ -1,6 +1,7 @@
 #include "yukinal/desktop_host/sidecar.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -35,6 +36,10 @@ namespace {
 constexpr std::size_t kMaxFrameBytes = 24 * 1024 * 1024;
 constexpr std::size_t kLogCapacity = 200;
 constexpr std::size_t kLogLineBytes = 4'000;
+// Host RPCs run on a small pool rather than one thread so a blocking
+// `host.tool.execute` (an MCP call) does not also block the `host.tool.cancel`
+// that is meant to interrupt it.
+constexpr std::size_t kHostWorkerCount = 4;
 
 std::string iso8601_now() {
   const auto now = std::chrono::system_clock::now();
@@ -101,6 +106,9 @@ struct SidecarClient::Impl {
   std::mutex host_mutex;
   std::condition_variable host_cv;
   std::deque<HostRequest> host_queue;
+  // Cancellation tokens for in-flight host requests, keyed by JSON-RPC id.
+  std::mutex cancel_mutex;
+  std::map<long long, std::shared_ptr<std::atomic<bool>>> cancellations;
 
   std::deque<std::string> logs;
   std::string stderr_partial;
@@ -120,7 +128,7 @@ struct SidecarClient::Impl {
   std::thread monitor_thread;
   std::thread stdout_thread;
   std::thread stderr_thread;
-  std::thread host_thread;
+  std::vector<std::thread> host_workers;
 
   ~Impl() { reset(); }
 
@@ -406,6 +414,72 @@ struct SidecarClient::Impl {
     notify_pending_of_exit();
   }
 
+  // Handles one `host.tool.cancel`: cancel the matching in-flight request and
+  // answer with whether one was found. Best-effort, exactly like the retired Rust
+  // host: the request may have completed between the Agent's abort and this frame.
+  nlohmann::json cancel_host_request(const nlohmann::json& params) {
+    long long request_id = 0;
+    if (params.is_object() && params.contains("requestId") &&
+        params.at("requestId").is_number_integer()) {
+      request_id = params.at("requestId").get<long long>();
+    }
+    if (request_id <= 0) {
+      throw SidecarRpcError(-32602, "host.tool.cancel requires a positive requestId");
+    }
+    std::shared_ptr<std::atomic<bool>> token;
+    {
+      std::lock_guard lock(cancel_mutex);
+      const auto found = cancellations.find(request_id);
+      if (found != cancellations.end()) {
+        token = found->second;
+        cancellations.erase(found);
+      }
+    }
+    if (token != nullptr) token->store(true);
+    return {{"cancelled", token != nullptr}};
+  }
+
+  void handle_host_frame(const HostRequest& request) {
+    nlohmann::json response = {{"jsonrpc", "2.0"}, {"id", request.id}};
+    try {
+      if (request.method == "host.tool.cancel") {
+        response["result"] = cancel_host_request(request.params);
+      } else {
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        {
+          std::lock_guard lock(cancel_mutex);
+          cancellations[request.id] = cancel;
+        }
+        auto forget = [this, id = request.id]() mutable {
+          std::lock_guard lock(cancel_mutex);
+          cancellations.erase(id);
+        };
+        HostHandler handler;
+        {
+          std::lock_guard lock(mutex);
+          handler = host_handler;
+        }
+        if (!handler) {
+          forget();
+          throw SidecarRpcError(-32601, "The desktop host does not implement " + request.method);
+        }
+        try {
+          response["result"] = handler(request.method, request.params, cancel);
+        } catch (...) {
+          forget();
+          throw;
+        }
+        forget();
+      }
+    } catch (const SidecarRpcError& error) {
+      response["error"] = {{"code", error.code()}, {"message", error.what()}};
+    } catch (const std::exception& error) {
+      response["error"] = {{"code", -32603}, {"message", error.what()}};
+    }
+    std::string ignored;
+    (void)write_line(response, ignored);
+  }
+
   void host_worker() {
     for (;;) {
       HostRequest request;
@@ -416,24 +490,7 @@ struct SidecarClient::Impl {
         request = std::move(host_queue.front());
         host_queue.pop_front();
       }
-      nlohmann::json response = {{"jsonrpc", "2.0"}, {"id", request.id}};
-      try {
-        HostHandler handler;
-        {
-          std::lock_guard lock(mutex);
-          handler = host_handler;
-        }
-        if (!handler) {
-          throw SidecarRpcError(-32601, "The desktop host does not implement " + request.method);
-        }
-        response["result"] = handler(request.method, request.params);
-      } catch (const SidecarRpcError& error) {
-        response["error"] = {{"code", error.code()}, {"message", error.what()}};
-      } catch (const std::exception& error) {
-        response["error"] = {{"code", -32603}, {"message", error.what()}};
-      }
-      std::string ignored;
-      (void)write_line(response, ignored);
+      handle_host_frame(request);
     }
   }
 
@@ -454,7 +511,10 @@ struct SidecarClient::Impl {
     }
     host_cv.notify_all();
     if (monitor_thread.joinable()) monitor_thread.join();
-    if (host_thread.joinable()) host_thread.join();
+    for (auto& worker : host_workers) {
+      if (worker.joinable()) worker.join();
+    }
+    host_workers.clear();
     if (stdout_thread.joinable()) stdout_thread.join();
     if (stderr_thread.joinable()) stderr_thread.join();
     cleanup_handles();
@@ -560,7 +620,10 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
       chunk.clear();
     }
   });
-  impl_->host_thread = std::thread([this] { impl_->host_worker(); });
+  impl_->host_workers.reserve(kHostWorkerCount);
+  for (std::size_t index = 0; index < kHostWorkerCount; ++index) {
+    impl_->host_workers.emplace_back([this] { impl_->host_worker(); });
+  }
 
   try {
     const auto initialize = request(
@@ -629,7 +692,10 @@ void SidecarClient::stop(std::chrono::milliseconds timeout) {
   impl_->host_cv.notify_all();
 
   if (impl_->monitor_thread.joinable()) impl_->monitor_thread.join();
-  if (impl_->host_thread.joinable()) impl_->host_thread.join();
+  for (auto& worker : impl_->host_workers) {
+    if (worker.joinable()) worker.join();
+  }
+  impl_->host_workers.clear();
   if (impl_->stdout_thread.joinable()) impl_->stdout_thread.join();
   if (impl_->stderr_thread.joinable()) impl_->stderr_thread.join();
   impl_->cleanup_handles();

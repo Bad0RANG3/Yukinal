@@ -1,12 +1,18 @@
 # 交付与发布
 
-> **状态更新（2026-10-15）：Rust/Tauri 宿主与 legacy Node agent 已删除，安装包/打包尚未实现。** 本页下方关于 Tauri、cargo、NSIS/MSI/DMG/deb、release manifest 与随包 Node runtime 的记录都是**历史证据**，不再描述当前源码，也不能作为当前交付的证据。当前代码验证只剩 `pnpm check`（CTest + JS 契约/类型/单测/打包前端 + Python sidecar smoke）；下一步实现与打包指导见 [C++ 接管与 Rust 移除计划](./rust-removal-plan.md)。
+> **状态更新（2026-10-15）：Rust/Tauri 宿主与 legacy Node agent 已删除，安装包/打包尚未实现。** 本页下方关于 Tauri、cargo、NSIS/MSI/DMG/deb、release manifest 与随包 Node runtime 的记录都是**历史证据**，不再描述当前源码，也不能作为当前交付的证据。当前代码验证只剩 `pnpm check`（CTest + JS 契约/类型/单测/打包前端 + Python sidecar smoke）；下一步实现与打包指导见 [C++ 接管与 Rust 移除计划](./rust-removal-plan.md)。**2026-10-17 补充：C++ 宿主的分发布局与完整性清单已实现（`pnpm package` / `pnpm package -- --verify`），但安装器、签名与三平台真机验收仍未做，见下文“当前状态：C++ 宿主打包”。**
 
 本页的表格和“远端 CI 快照”记录已经取得的实现与安装包证据；后续 Windows 构建记录按日期保存旧产物与环境证据。新的产品目标与尚需完成的业务验收以[目标架构与施工交接](./architecture-and-build-plan.md)为准。历史段落中“待首次远端验收”或旧“三条路径”描述的是当时状态，不能作为新目标已完成的证明。
 
 当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的十个目标全部通过，包含 Python caller、C++ HTTP 服务集成、Paramiko SSH mock、Agent 到 C++ SSH 集成，以及 C++ 桌面宿主。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。
 
 2026-10-15 源码迁移移除了旧 Rust SSH crate、桌面测试专用 Rust SSH 连接器以及 Rust `server.exec` 测试回退。下方旧交付记录中的 `yukinal-ssh` 测试命令仅作历史证据，不再适用于当前源码；现在通过 CTest 验证 C++ SSH 与 Python caller。
+
+## 当前状态：C++ 宿主打包（2026-10-17）
+
+C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌面宿主、冻结 Python Agent（PyInstaller onedir）和 C++ SSH 服务暂存到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`（应用版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256 与字节数、启动所需的 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。`pnpm release:manifest` 重建清单，`pnpm package -- --verify` 逐字节复核，任何不一致都非零退出；缺少宿主/Agent/SSH 服务产物时 fail-closed，不会产出部分载荷。
+
+**仍未实现**：NSIS/MSI/DMG/deb 安装器、升级与用户数据保留、代码签名与公证、三平台真实 UI 冒烟，以及 `package.yml` workflow（仓库目前只有 `check.yml`）。因此本页下方的 Tauri/cargo/Node-runtime 记录依旧只是**历史证据**，新的 C++ 分发布局尚未做安装后验收。完整性校验只证明载荷未被改动，不证明发布者身份。
 
 ## 当前状态
 
@@ -80,22 +86,26 @@ Rust 依赖边界复核（2026-09-30）：`cargo tree -i glib@0.18.5 --target x8
 
 ## 开发和本地验证
 
-开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。Node.js 仅用于构建工具、前端及旧版本地兼容 sidecar；当前安装包由冻结 Python Agent 提供运行时。仓库根目录执行：
+开发和构建需要 Node.js ≥ 24、pnpm 11.8.0 及当前平台的 C++ 工具链（CMake + MSVC/NMake 或 MinGW）。桌面宿主需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。控制平面（`services/control-plane/`）使用独立 venv 与 `pip install -e "services/control-plane[test]"`，生产库为 PostgreSQL，写入前需先 `alembic upgrade head`。Node.js 只用于构建工具与前端；当前安装包由冻结 Python Agent 提供运行时。仓库根目录执行：
 
 ```bash
 pnpm install --frozen-lockfile
 python -m venv agent/.venv
 agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
+python -m venv services/control-plane/.venv
+services/control-plane/.venv/Scripts/python.exe -m pip install -e "services/control-plane[test]"
 pnpm check
-pnpm --filter @yukinal/desktop tauri dev
+pnpm desktop:dev:cpp
 ```
 
 macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
-`agent/.venv/bin/python`。
+`agent/.venv/bin/python`，控制平面同理换成 `services/control-plane/.venv/bin/python`。
 
-只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。构建当前平台安装包使用 `pnpm package`；它会先对六种受支持平台逐一核对 Node.js 官方 SHASUMS pin，再下载并校验迁移期回退归档，构建并 smoke 检查冻结 Python Agent，产物位于 `target/release/bundle/`。本地构建成功只证明该平台产物生成，不代替安装后的验收。
+只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。`pnpm package` 现在只暂存 C++ 宿主分发布局并写出完整性清单（先运行 `pnpm build:python-agent`、`pnpm build:ssh-service` 并构建 C++ 宿主），产物位于 `target/release/bundle/`；它不再下载 Node runtime，也不生成安装器。本地构建成功只证明该平台分发布局生成，不代替安装后的验收。
 
-成功运行 `pnpm package` 会在 `target/release/bundle/` 同步生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发安装文件的 SHA-256、字节数、应用版本和随包 Python Agent 版本、构建平台、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的可用第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建/替换产物后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm release:manifest -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。`--no-bundle` 编译检查不刷新旧安装包的清单。CI 的平台安装包作业会复核这两份文件再与安装包一起上传；测试也会检查 CI 上传规则覆盖清单支持的全部安装包后缀。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名。
+成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业尚未实现。
+
+`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，19 项，跑在 SQLite 上，覆盖 API、租户隔离、任务状态机、偏唯一索引并发控制、断连 `unknown`、凭据边界与 Alembic 迁移一致性）。该步骤只在 `services/control-plane/.venv` 存在时执行，缺失时会打印明确的 skip 原因而不是静默通过。控制平面自身的 PostgreSQL 部署、节点 HTTPS/WSS 通道与多 worker 并发仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
 
 ## 发布验收
 

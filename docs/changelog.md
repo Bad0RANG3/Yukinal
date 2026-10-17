@@ -4,6 +4,12 @@
 
 ## 未发布
 
+- **新增控制平面模块 `services/control-plane/`**（第四阶段，独立于桌面宿主）：FastAPI + SQLAlchemy 2.0(async) + Alembic 的多租户/节点/任务/模型配置/审批/审计服务；生产库为 PostgreSQL（`asyncpg`），测试与本地开发用 SQLite（`aiosqlite`）。缺 token 拒绝启动、启动时校验 schema 已迁移、`/v1` 全部要求 bearer token。实现租户隔离（跨租户 404 不泄露存在性）、任务状态机、每节点一个 active 任务的**偏唯一索引**（数据库级并发控制）、节点重启把 running 任务置为 `unknown`（不自动重放，`recoverable` 只读列表）、凭据只存引用（模型配置禁止未知字段，任务 payload 递归拒绝 secret 形状字段）与 `/v1/metrics` 汇总。19 项测试覆盖 API/schema/迁移一致性，并实际启动 uvicorn 验证 healthz/401/建租户/metrics；`pnpm check` 新增该步骤（`services/control-plane/.venv` 缺失时打印明确 skip 原因）。PostgreSQL 部署本身、节点 HTTPS/WSS 通道、多 worker 并发与 Prometheus 指标仍未做。
+
+- **C++ 宿主 `host.tool.execute` 完成 MCP 门禁对齐**：`mcp.*` 与非 MCP 只读工具共用 durable plan/task guardrail/目标匹配/幂等账本门禁，MCP 风险由宿主按 running+reviewed catalog 解析（无法解析即认为 effectful、fail-closed），不再存在 MCP 分支绕过 durable-plan 门禁的差异。`host.tool.execute` 的 `mcp.*` 分支同时改用与非 MCP 分支一致的 `{status, error:{code, message, retryable}}` 响应信封。
+
+- **C++ 宿主新增分发布局与完整性清单**：`pnpm package`（`scripts/package.mjs`）把 Release C++ 宿主、冻结 Python Agent 与 C++ SSH 服务暂存成 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，写出 `SHA256SUMS.txt` 与 `release-manifest.json`（含启动契约 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY`），`pnpm release:manifest` 重建清单、`pnpm package -- --verify` 逐字节复核并在不一致时非零退出。仍无安装器（NSIS/MSI/DMG/deb）、签名与三平台真机验收。
+
 - **删除整个 Rust/Tauri 桌面宿主（按用户要求）**：移除 `crates/`、`apps/desktop/src-tauri/`、`Cargo.toml`/`Cargo.lock`/`rust-toolchain.toml`/`.cargo/`，以及已退休的 legacy Node agent（`apps/agent/`）和只能由它运行的 smoke。React UI 现在只通过 `window.__YUKINAL_HOST__` 与 C++ 宿主通信，不再回退 Tauri；`pnpm check` 移除所有 cargo 步骤并全绿，`pnpm package`（tauri build）与安装器脚本一并移除。C++ 宿主尚未实现的命令继续返回 `NOT_IMPLEMENTED`；重写指导见 `docs/rust-removal-plan.md`。
 
 - C++ 桌面宿主接管本机 host-key 信任的只读与遗忘路径：`server_host_key_status`/`server_host_key_forget` 读写与连接路径同一个 `known_hosts` v1 文件，指纹变化报 `mismatch` 而不静默覆盖，遗忘未钉住的主机不伪报删除；探针与确认仍待迁移。桌面宿主测试覆盖 pin/status/forget 回环。

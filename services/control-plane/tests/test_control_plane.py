@@ -1,0 +1,418 @@
+"""Control-plane tests.
+
+They run against SQLite so no PostgreSQL server is needed, but they exercise the
+real FastAPI app, the real SQLAlchemy models and the real Alembic migration. The
+partial unique index that serialises tasks per node, the tenant scoping and the
+credential boundary are all asserted as behaviour, not just as schema.
+"""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import sqlalchemy
+from alembic import command
+from alembic.config import Config
+from fastapi.testclient import TestClient
+from sqlalchemy import inspect
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
+from yukinal_control_plane.app import create_app
+from yukinal_control_plane.config import Settings
+from yukinal_control_plane.db import Base
+
+SERVICE_ROOT = Path(__file__).resolve().parents[1]
+TOKEN = "control-plane-test-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+NODE_BODY = {"name": "build-01", "publicKey": "ssh-ed25519 AAAA test node identity"}
+
+
+class ControlPlaneTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._temporary.name) / "control.db"
+        self.url = f"sqlite+aiosqlite:///{self.db_path.as_posix()}"
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{self.db_path.as_posix()}")
+        Base.metadata.create_all(sync_engine)
+        sync_engine.dispose()
+        self.engine = create_async_engine(self.url, poolclass=NullPool)
+        self.app = create_app(
+            Settings(database_url=self.url, token=TOKEN), engine=self.engine
+        )
+        self.client = TestClient(self.app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self._temporary.cleanup()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def create_tenant(self, name: str = "Acme", tenant_id: str | None = None) -> str:
+        body: dict = {"name": name}
+        if tenant_id is not None:
+            body["id"] = tenant_id
+        response = self.client.post("/v1/tenants", json=body, headers=AUTH)
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["id"]
+
+    def create_node(self, tenant_id: str, name: str = "build-01") -> str:
+        body = dict(NODE_BODY)
+        body["name"] = name
+        response = self.client.post(
+            f"/v1/tenants/{tenant_id}/nodes", json=body, headers=AUTH
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["id"]
+
+    def create_task(
+        self, tenant_id: str, node_id: str, kind: str = "ssh.read", payload: dict | None = None
+    ) -> dict:
+        response = self.client.post(
+            f"/v1/tenants/{tenant_id}/tasks",
+            json={"nodeId": node_id, "kind": kind, "payload": payload or {"path": "/etc/hosts"}},
+            headers=AUTH,
+        )
+        return {"status": response.status_code, "body": response.json()}
+
+    def move(self, tenant_id: str, task_id: str, status: str, **extra) -> int:
+        response = self.client.post(
+            f"/v1/tenants/{tenant_id}/tasks/{task_id}/status",
+            json={"status": status, **extra},
+            headers=AUTH,
+        )
+        return response.status_code
+
+    # ── health and auth ──────────────────────────────────────────────────────
+
+    def test_health_is_open(self) -> None:
+        response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+    def test_mutations_require_the_token(self) -> None:
+        self.assertEqual(self.client.get("/v1/tenants").status_code, 401)
+        self.assertEqual(
+            self.client.get("/v1/tenants", headers={"Authorization": "Bearer wrong"}).status_code,
+            401,
+        )
+        self.assertEqual(self.client.get("/v1/tenants", headers=AUTH).status_code, 200)
+
+    def test_app_refuses_to_start_without_a_token(self) -> None:
+        with self.assertRaises(RuntimeError):
+            create_app(Settings(database_url=self.url), engine=self.engine)
+
+    def test_startup_verifies_the_schema(self) -> None:
+        with TestClient(self.app) as client:
+            self.assertEqual(client.get("/healthz").status_code, 200)
+
+    def test_startup_rejects_an_unmigrated_database(self) -> None:
+        fresh = Path(self._temporary.name) / "empty.db"
+        url = f"sqlite+aiosqlite:///{fresh.as_posix()}"
+        engine = create_async_engine(url, poolclass=NullPool)
+        app = create_app(Settings(database_url=url, token=TOKEN), engine=engine)
+        with self.assertRaises(RuntimeError) as raised:
+            with TestClient(app):
+                pass
+        self.assertIn("alembic upgrade head", str(raised.exception))
+
+    # ── tenants ──────────────────────────────────────────────────────────────
+
+    def test_tenant_lifecycle(self) -> None:
+        tenant_id = self.create_tenant("Acme", "ten_acme")
+        self.assertEqual(tenant_id, "ten_acme")
+        self.assertEqual(
+            self.client.get(f"/v1/tenants/{tenant_id}", headers=AUTH).json()["name"], "Acme"
+        )
+        listing = self.client.get("/v1/tenants", headers=AUTH).json()
+        self.assertEqual([tenant["id"] for tenant in listing], ["ten_acme"])
+        duplicate = self.client.post(
+            "/v1/tenants", json={"id": "ten_acme", "name": "Other"}, headers=AUTH
+        )
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(
+            self.client.get("/v1/tenants/ten_missing", headers=AUTH).status_code, 404
+        )
+
+    # ── nodes ────────────────────────────────────────────────────────────────
+
+    def test_nodes_are_tenant_scoped(self) -> None:
+        tenant_a = self.create_tenant("A")
+        tenant_b = self.create_tenant("B")
+        node_id = self.create_node(tenant_a)
+        self.assertEqual(
+            [node["id"] for node in self.client.get(f"/v1/tenants/{tenant_a}/nodes", headers=AUTH).json()],
+            [node_id],
+        )
+        self.assertEqual(self.client.get(f"/v1/tenants/{tenant_b}/nodes", headers=AUTH).json(), [])
+        # A node of another tenant is not found, not forbidden: the id is never
+        # confirmed to exist elsewhere.
+        self.assertEqual(
+            self.client.get(f"/v1/tenants/{tenant_b}/nodes/{node_id}", headers=AUTH).status_code,
+            404,
+        )
+
+    def test_duplicate_node_name_is_a_conflict(self) -> None:
+        tenant_id = self.create_tenant()
+        self.create_node(tenant_id, "build-01")
+        response = self.client.post(
+            f"/v1/tenants/{tenant_id}/nodes", json=dict(NODE_BODY), headers=AUTH
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_registering_a_node_in_an_unknown_tenant_is_not_found(self) -> None:
+        response = self.client.post(
+            "/v1/tenants/ten_missing/nodes", json=dict(NODE_BODY), headers=AUTH
+        )
+        self.assertEqual(response.status_code, 404)
+
+    # ── tasks ────────────────────────────────────────────────────────────────
+
+    def test_task_lifecycle_and_transitions(self) -> None:
+        tenant_id = self.create_tenant()
+        node_id = self.create_node(tenant_id)
+        created = self.create_task(tenant_id, node_id)
+        self.assertEqual(created["status"], 201, created["body"])
+        task_id = created["body"]["id"]
+        self.assertEqual(created["body"]["status"], "queued")
+        self.assertEqual(created["body"]["attempts"], 0)
+
+        # A queued task cannot jump straight to succeeded.
+        self.assertEqual(self.move(tenant_id, task_id, "succeeded"), 409)
+        self.assertEqual(self.move(tenant_id, task_id, "running"), 200)
+        task = self.client.get(
+            f"/v1/tenants/{tenant_id}/tasks/{task_id}", headers=AUTH
+        ).json()
+        self.assertEqual(task["status"], "running")
+        self.assertEqual(task["attempts"], 1)
+        self.assertEqual(
+            self.move(tenant_id, task_id, "succeeded", outcome="ok", result={"code": 0}), 200
+        )
+        # A completed task is terminal.
+        self.assertEqual(self.move(tenant_id, task_id, "running"), 409)
+        self.assertEqual(self.move(tenant_id, task_id, "nonsense"), 409)
+
+    def test_one_active_task_per_node(self) -> None:
+        tenant_id = self.create_tenant()
+        node_id = self.create_node(tenant_id)
+        first = self.create_task(tenant_id, node_id)
+        self.assertEqual(first["status"], 201)
+        second = self.create_task(tenant_id, node_id)
+        self.assertEqual(second["status"], 409, second["body"])
+
+        # Finishing the first frees the node.
+        self.assertEqual(self.move(tenant_id, first["body"]["id"], "running"), 200)
+        self.assertEqual(self.move(tenant_id, first["body"]["id"], "succeeded"), 200)
+        third = self.create_task(tenant_id, node_id)
+        self.assertEqual(third["status"], 201, third["body"])
+
+        # Historical tasks accumulate: the index is partial, so the terminal row
+        # coexists with the one active row instead of blocking a new task.
+        tasks = self.client.get(f"/v1/tenants/{tenant_id}/tasks", headers=AUTH).json()
+        self.assertEqual(
+            sorted(task["status"] for task in tasks), ["queued", "succeeded"]
+        )
+
+    def test_tasks_are_tenant_scoped(self) -> None:
+        tenant_a = self.create_tenant("A")
+        tenant_b = self.create_tenant("B")
+        node_id = self.create_node(tenant_a)
+        task_id = self.create_task(tenant_a, node_id)["body"]["id"]
+        self.assertEqual(
+            self.client.get(
+                f"/v1/tenants/{tenant_b}/tasks/{task_id}", headers=AUTH
+            ).status_code,
+            404,
+        )
+        cross_node = self.create_task(tenant_b, node_id)
+        self.assertEqual(cross_node["status"], 404)
+
+    def test_task_payload_rejects_secret_fields(self) -> None:
+        tenant_id = self.create_tenant()
+        node_id = self.create_node(tenant_id)
+        response = self.client.post(
+            f"/v1/tenants/{tenant_id}/tasks",
+            json={"nodeId": node_id, "kind": "ssh.read", "payload": {"password": "hunter2"}},
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["code"], "secret_rejected")
+        nested = self.client.post(
+            f"/v1/tenants/{tenant_id}/tasks",
+            json={
+                "nodeId": node_id,
+                "kind": "ssh.read",
+                "payload": {"auth": {"privateKey": "-----BEGIN"}},
+            },
+            headers=AUTH,
+        )
+        self.assertEqual(nested.status_code, 400, nested.text)
+
+    # ── disconnect recovery ──────────────────────────────────────────────────
+
+    def test_heartbeat_marks_running_tasks_unknown(self) -> None:
+        tenant_id = self.create_tenant()
+        node_id = self.create_node(tenant_id)
+        task_id = self.create_task(tenant_id, node_id)["body"]["id"]
+        self.assertEqual(self.move(tenant_id, task_id, "running"), 200)
+
+        heartbeat = self.client.post(
+            f"/v1/tenants/{tenant_id}/nodes/{node_id}/heartbeat",
+            json={"agentVersion": "0.1.0", "restarted": True},
+            headers=AUTH,
+        )
+        self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+        self.assertEqual(heartbeat.json()["marked_unknown"], [task_id])
+
+        task = self.client.get(
+            f"/v1/tenants/{tenant_id}/tasks/{task_id}", headers=AUTH
+        ).json()
+        self.assertEqual(task["status"], "unknown")
+        self.assertEqual(task["outcome"], "node_restarted")
+        self.assertIsNotNone(
+            self.client.get(f"/v1/tenants/{tenant_id}/nodes/{node_id}", headers=AUTH).json()[
+                "last_seen_at"
+            ]
+        )
+
+        # The unknown task is listed for a human decision and never replayed.
+        recoverable = self.client.get(
+            f"/v1/tenants/{tenant_id}/nodes/{node_id}/recoverable", headers=AUTH
+        ).json()
+        self.assertEqual([task["id"] for task in recoverable], [task_id])
+
+        # A heartbeating node with running work that did not restart keeps it.
+        next_task = self.create_task(tenant_id, node_id)["body"]["id"]
+        self.assertEqual(self.move(tenant_id, next_task, "running"), 200)
+        plain = self.client.post(
+            f"/v1/tenants/{tenant_id}/nodes/{node_id}/heartbeat",
+            json={"restarted": False},
+            headers=AUTH,
+        )
+        self.assertEqual(plain.json()["marked_unknown"], [])
+        self.assertEqual(
+            self.client.get(
+                f"/v1/tenants/{tenant_id}/tasks/{next_task}", headers=AUTH
+            ).json()["status"],
+            "running",
+        )
+
+    # ── model configs and approvals ──────────────────────────────────────────
+
+    def test_model_config_never_stores_a_raw_key(self) -> None:
+        tenant_id = self.create_tenant()
+        rejected = self.client.post(
+            f"/v1/tenants/{tenant_id}/model-configs",
+            json={"name": "fast", "provider": "openai", "model": "gpt", "apiKey": "sk-live"},
+            headers=AUTH,
+        )
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+
+        accepted = self.client.post(
+            f"/v1/tenants/{tenant_id}/model-configs",
+            json={
+                "name": "fast",
+                "provider": "openai",
+                "model": "gpt",
+                "apiKeyRef": "keychain://yukinal/openai",
+            },
+            headers=AUTH,
+        )
+        self.assertEqual(accepted.status_code, 201, accepted.text)
+        self.assertEqual(accepted.json()["api_key_ref"], "keychain://yukinal/openai")
+        self.assertNotIn("apiKey", accepted.json())
+
+    def test_approval_flow(self) -> None:
+        tenant_id = self.create_tenant()
+        created = self.client.post(
+            f"/v1/tenants/{tenant_id}/approvals",
+            json={"action": "server.exec", "fingerprint": "abc123", "requestedBy": "agent"},
+            headers=AUTH,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        approval_id = created.json()["id"]
+        self.assertEqual(created.json()["state"], "pending")
+
+        decided = self.client.post(
+            f"/v1/tenants/{tenant_id}/approvals/{approval_id}/decide",
+            json={"decision": "approved", "decidedBy": "ada"},
+            headers=AUTH,
+        )
+        self.assertEqual(decided.status_code, 200, decided.text)
+        self.assertEqual(decided.json()["state"], "approved")
+        self.assertEqual(decided.json()["decided_by"], "ada")
+
+        # A decision is one-shot.
+        self.assertEqual(
+            self.client.post(
+                f"/v1/tenants/{tenant_id}/approvals/{approval_id}/decide",
+                json={"decision": "rejected", "decidedBy": "ada"},
+                headers=AUTH,
+            ).status_code,
+            409,
+        )
+
+    # ── audit and metrics ────────────────────────────────────────────────────
+
+    def test_audit_is_recorded_and_tenant_scoped(self) -> None:
+        tenant_a = self.create_tenant("A")
+        tenant_b = self.create_tenant("B")
+        node_id = self.create_node(tenant_a)
+        self.create_task(tenant_a, node_id)
+
+        audit = self.client.get(f"/v1/tenants/{tenant_a}/audit", headers=AUTH).json()
+        actions = {event["action"] for event in audit}
+        self.assertIn("tenant.create", actions)
+        self.assertIn("node.register", actions)
+        self.assertIn("task.create", actions)
+
+        # Newest first.
+        self.assertEqual(audit[0]["action"], "task.create")
+        other = self.client.get(f"/v1/tenants/{tenant_b}/audit", headers=AUTH).json()
+        self.assertEqual({event["action"] for event in other}, {"tenant.create"})
+
+    def test_metrics(self) -> None:
+        tenant_id = self.create_tenant()
+        node_id = self.create_node(tenant_id)
+        task_id = self.create_task(tenant_id, node_id)["body"]["id"]
+        self.assertEqual(self.move(tenant_id, task_id, "running"), 200)
+        self.client.post(
+            f"/v1/tenants/{tenant_id}/approvals",
+            json={"action": "server.exec", "fingerprint": "f", "requestedBy": "agent"},
+            headers=AUTH,
+        )
+        metrics = self.client.get("/v1/metrics", headers=AUTH).json()
+        self.assertEqual(metrics["tenants"], 1)
+        self.assertEqual(metrics["nodes"], 1)
+        self.assertEqual(metrics["tasks_by_status"], {"running": 1})
+        self.assertEqual(metrics["pending_approvals"], 1)
+
+    # ── migration ────────────────────────────────────────────────────────────
+
+    def test_migration_matches_the_models(self) -> None:
+        migration_db = Path(self._temporary.name) / "migrated.db"
+        url = f"sqlite+aiosqlite:///{migration_db.as_posix()}"
+        config = Config(str(SERVICE_ROOT / "alembic.ini"))
+        config.set_main_option("sqlalchemy.url", url)
+
+        command.upgrade(config, "head")
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
+        try:
+            migrated = set(inspect(sync_engine).get_table_names())
+        finally:
+            sync_engine.dispose()
+        self.assertEqual(migrated, set(Base.metadata.tables) | {"alembic_version"})
+
+        command.downgrade(config, "base")
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
+        try:
+            remaining = set(inspect(sync_engine).get_table_names())
+        finally:
+            sync_engine.dispose()
+        self.assertEqual(remaining, {"alembic_version"})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -376,16 +376,41 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   set(YUKINAL_DESKTOP_VERSION "${CMAKE_MATCH_1}")
 
   add_library(yukinal_desktop_host_core
+    desktop_host/src/content_hash.cpp
     desktop_host/src/credential_store.cpp
     desktop_host/src/database.cpp
+    desktop_host/src/desktop_approval.cpp
+    desktop_host/src/desktop_mcp.cpp
+    desktop_host/src/desktop_oauth.cpp
+    desktop_host/src/desktop_ssh.cpp
     desktop_host/src/desktop_target.cpp
+    desktop_host/src/desktop_terminal.cpp
     desktop_host/src/host_trust.cpp
     desktop_host/src/ipc_router.cpp
     desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
+    desktop_host/src/remote_drag.cpp
+    desktop_host/src/sftp_transfer_backend.cpp
     desktop_host/src/sidecar.cpp
+    desktop_host/src/transfer_history.cpp
+    desktop_host/src/transfer_local.cpp
+    desktop_host/src/transfer_manager.cpp
+    desktop_host/src/transfer_types.cpp
   )
   target_include_directories(yukinal_desktop_host_core PUBLIC desktop_host/include)
+  # The Streamable HTTP MCP transport uses the same httplib as the in-process SSH
+  # core. CPPHTTPLIB_OPENSSL_SUPPORT changes the header-only library's layout, so
+  # both libraries in one binary must agree; gate it on the same option that
+  # enables (and finds OpenSSL for) the SSH core.
+  if(YUKINAL_FETCH_DEPS)
+    target_include_directories(yukinal_desktop_host_core PRIVATE ${cpp_httplib_SOURCE_DIR})
+  else()
+    target_include_directories(yukinal_desktop_host_core PRIVATE ${HTTPLIB_INCLUDE_DIR})
+  endif()
+  if(YUKINAL_BUILD_SSH_SERVICE)
+    target_compile_definitions(yukinal_desktop_host_core PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+  endif()
   if(MSVC)
     # The host surfaces user-facing reasons (network proxy, credentials) in UTF-8
     # Chinese; MSVC otherwise reads them in the active code page and derails.
@@ -407,7 +432,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   )
   if(WIN32)
     target_compile_definitions(yukinal_desktop_host_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32 comdlg32 ole32)
+    target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32 comdlg32 ole32 ws2_32)
     target_sources(yukinal_desktop_host_core PRIVATE desktop_host/src/window_context.cpp)
     add_executable(yukinal-desktop-host WIN32 desktop_host/src/main.cpp desktop_host/src/windows_window_frame.cpp)
     if(MINGW)
@@ -451,10 +476,36 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     target_link_libraries(yukinal_desktop_host_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME desktop_host_tests COMMAND yukinal_desktop_host_tests)
 
+    add_executable(yukinal_desktop_host_transfer_tests
+      desktop_host/tests/test_transfer.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_transfer_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME transfer_tests COMMAND yukinal_desktop_host_transfer_tests)
+
+    add_executable(yukinal_desktop_host_transfer_manager_tests
+      desktop_host/tests/test_transfer_manager.cpp
+    )
+    target_link_libraries(yukinal_desktop_host_transfer_manager_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME transfer_manager_tests COMMAND yukinal_desktop_host_transfer_manager_tests)
+
     add_executable(yukinal_desktop_host_database_tests
       desktop_host/tests/test_database.cpp
     )
     target_include_directories(yukinal_desktop_host_database_tests PRIVATE desktop_host/src)
+    # The MCP HTTP transport test runs an httplib loopback server in-process, so
+    # this target needs the same httplib include and macro as the host core.
+    if(YUKINAL_FETCH_DEPS)
+      target_include_directories(yukinal_desktop_host_database_tests PRIVATE ${cpp_httplib_SOURCE_DIR})
+    else()
+      target_include_directories(yukinal_desktop_host_database_tests PRIVATE ${HTTPLIB_INCLUDE_DIR})
+    endif()
+    if(YUKINAL_BUILD_SSH_SERVICE)
+      target_compile_definitions(yukinal_desktop_host_database_tests PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+      target_link_libraries(yukinal_desktop_host_database_tests PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+    if(WIN32)
+      target_link_libraries(yukinal_desktop_host_database_tests PRIVATE ws2_32)
+    endif()
     target_link_libraries(yukinal_desktop_host_database_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME desktop_host_database_tests COMMAND yukinal_desktop_host_database_tests)
     add_test(NAME desktop_host_self_check COMMAND yukinal-desktop-host --self-check)

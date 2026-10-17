@@ -1,13 +1,20 @@
-# C++ / Python rewrite: milestones 1–3 in progress
+# C++ / Python rewrite log
+
+> **2026-10-17 status:** the Rust/Tauri host has been deleted; the C++ WebView
+> host is the only desktop host and owns native UI IPC, the local trust store,
+> approvals, and every `host.*` RPC. The milestone notes below are kept as the
+> migration record of how that was reached. Where they still say "Rust still
+> hosts" or "Tauri development", read them as the state at that time.
 
 > **Current scope:** the standalone C++ SSH service and Python caller are in
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
 > desktop-host bridge for approval, target resolution, and remaining tools, plus tool lifecycle events consumed by the
-> existing UI. Tauri development and new package builds now select the Python
-> sidecar; installer resources contain Python Agent and C++ SSH assets only.
+> existing UI. Tauri development was retired; new package builds select the Python
+> sidecar, and installer resources contain Python Agent and C++ SSH assets only.
 > The desktop resolver has no legacy Node resource or runtime fallback; old Node paths below refer only to historical migration evidence.
-> Rust still hosts native UI IPC, local trust-store updates, and final approvals.
+> At the time of milestones 1–3, Rust still hosted native UI IPC, local
+> trust-store updates, and final approvals; the C++ host has since taken them over.
 > SSH network operations use C++; configurations outside current C++ coverage fail
 > explicitly instead of falling back to the Rust SSH backend. C++ verifies
 > configured OpenSSH host CAs and optional KRLs for supported CA algorithms; remote
@@ -945,3 +952,722 @@ round trip. The canonical `native/build-nmake` Release build passed all twelve
 CTest targets. The in-process SSH commands (`server_logs`/`snapshot`/`services`),
 MCP supervision and catalog, `host.tool.execute`, investigation, and installer
 work remain; real SSH validation is blocked because the test host is filtered.
+
+On 2026-10-16, the C++ host gained its first SSH-backed UI commands.
+`native/desktop_host/src/desktop_ssh.cpp` reuses the router's target resolver to
+build a `TargetConfig`, sets the resolved credentials in the process environment
+for the duration of one call, and runs the in-process `server_logs` and
+`host_key_probe` core operations (a build without the SSH core returns an
+explicit error). `server_logs` then applies the Python `server.logs.normalize`
+RPC and returns its normalized output. `server_host_key_probe` issues a
+single-use, five-minute probe ticket bound to the server id, host, port and
+fingerprint and reports the presented fingerprint plus the pin comparison;
+`server_host_key_trust` claims that ticket, refuses a different existing pin, and
+otherwise writes the pin. `desktop_host_tests` covers the new parameter
+validation. A second MSVC dependency-tracking gap left objects compiled against
+the previous `IpcRouter` layout; forcing those targets to rebuild removed the
+startup access violations. The canonical `native/build-nmake` Release build
+passed all twelve CTest targets. `server_snapshot`/`server_services`, MCP
+supervision and catalog, `host.tool.execute`, investigation, the remaining file
+and terminal commands, and installer work remain.
+
+Later on 2026-10-16, the C++ host completed the three read-only overview panes.
+`server_services` runs `service_inventory` through the in-process SSH core and
+applies the Python `server.services.normalize` RPC. `server_snapshot` runs the
+fixed 22-command collector batch with a fresh 16-byte nonce, parses the
+nonce-delimited markers into `{command_id: {exitCode, stdout}}` (rejecting
+missing, ambiguous, or out-of-range sections), applies the Python
+`server.snapshot.normalize` RPC, validates the health/capabilities/collectors,
+and inserts the snapshot row before returning it, so the audit and trend views
+the database carries stay authoritative. `desktop_host_database_tests` and
+`desktop_host_tests` cover the snapshot persistence and the new parameter
+validation. The canonical `native/build-nmake` Release build passed all twelve
+CTest targets. `server_connect`/`disconnect`, remote file and terminal commands,
+MCP supervision and catalog, `host.tool.execute`, investigation, installers, and
+real SSH validation remain.
+
+The same day, the C++ host added the remote file browser's read path.
+`remote_file_list`, `remote_file_read`, and `remote_file_preview` run the
+in-process SFTP core through the same resolver and scoped credential environment
+as the other SSH commands: the listing is bounded to 4096 entries whose names are
+normalized into absolute paths, the read is capped at 1 MiB with a lossy UTF-8
+decode, and the preview confirms a regular file with `sftp_stat` before reading
+and reusing the shared `make_file_preview` builder. The browser path policy is
+deliberately not the Agent credential blocklist. `desktop_host_tests` covers the
+new parameter validation. The canonical `native/build-nmake` Release build passed
+all twelve CTest targets. `server_connect`/`disconnect` and the terminal commands,
+MCP supervision and catalog, `host.tool.execute`, investigation, the file
+transfer actions, installers, and real SSH validation remain.
+
+Later on 2026-10-16, the C++ host added the connection lifecycle commands.
+`server_connect` runs the in-process `connection_check`; on success it stores the
+`connected` server status and a success activity, and on a transport failure it
+stores `error` plus a failure activity before returning the error. `server_disconnect`
+is idempotent, marks the server `disconnected` and records the activity. The
+keyboard-interactive `server_auth_respond`/`server_auth_cancel` validate their
+bounded shapes and answer `accepted: false` while no PTY has registered a
+challenge; the PTY worker will own that challenge store when the terminal
+commands land. `desktop_host_tests` and `desktop_host_database_tests` cover the
+new validation. The canonical `native/build-nmake` Release build passed all twelve
+CTest targets. The terminal commands, file transfer actions, MCP supervision and
+catalog, `host.tool.execute`, investigation, installers, and real SSH validation
+remain.
+
+Later on 2026-10-16, the C++ host added the interactive terminal. A new
+`native/desktop_host/src/desktop_terminal.cpp` owns one SSH service child per
+session: it resolves the target, writes a one-target temporary configuration,
+passes the credentials only through the child environment, and spawns
+`yukinal-ssh-service --config … --terminal --cols … --rows …`. A reader thread
+parses the child's NDJSON frames and re-publishes them as `terminal.opened`,
+`terminal.data` (base64 output decoded to UTF-8) and `terminal.closed`; the
+`terminal_write`/`terminal_resize`/`terminal_close` commands write the matching
+frames back. `desktop_host_tests` covers the new parameter validation. The
+canonical `native/build-nmake` Release build passed all twelve CTest targets. A
+real PTY session against an OpenSSH server remains unverified because the test
+host is filtered; the file transfer actions, MCP supervision and catalog,
+`host.tool.execute`, investigation, and installers remain.
+
+Later on 2026-10-16, the C++ host added `mcp_server_review`. It rewrites a
+server's `allowedTools`, `trustLevel` and optional `annotationTrust`, which is
+the deliberate decision that lets the catalog expose specific third-party tools
+to the model; a server with no reviewed tools exposes none. Duplicate tool names
+are rejected. `desktop_host_database_tests` covers the review round trip. The MCP
+process supervisor, `host.mcp.catalog`, `host.tool.execute` for `mcp.*` tools,
+OAuth, the investigation RPCs, the file transfer actions, installers, and real
+SSH validation remain; the supervisor is a full MCP client (handshake, paginated
+`tools/list`, timeouts, shutdown) and is the next large MCP milestone.
+
+Later on 2026-10-16, the C++ host added the MCP supervisor. A new
+`native/desktop_host/src/desktop_mcp.cpp` spawns one stdio MCP child per server on
+demand, performs the `initialize` handshake plus `notifications/initialized`, and
+caches the `tools/list` result; the process stays alive for tool calls. The host
+now answers `host.mcp.catalog` with one entry per enabled, reviewed server
+(filtered by `allowedTools`), computing the effective risk from the server's
+`annotationTrust` and tool annotations (`none` → critical, `trusted` +
+`readOnlyHint` → low, `trusted` + `destructiveHint:false` → medium, else high).
+`host.tool.execute` routes `mcp.*` names to `tools/call` and returns the shared
+`HostMcpToolCallOutput`. `mcp_server_start`/`mcp_server_stop` drive the same
+supervisor for the settings UI. Only stdio is supported; HTTP transport, OAuth,
+pagination and cancellation are the next MCP steps. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets. The
+investigation RPCs, the file transfer actions, installers, and real SSH/MCP
+validation remain.
+
+Later on 2026-10-16, the MCP supervisor gained an end-to-end CTest. The database
+test executable now re-enters a minimal stdio MCP server when spawned with
+`--mcp-mock`; `desktop_host_database_tests` saves such a server, calls
+`McpSupervisor::catalog()`, and checks that the reviewed read-only `echo` tool is
+exposed as `mcp.mcp_mock.echo` with `risk: low`, then calls the tool and checks
+the returned content, and rejects an unknown tool. This exercises the real child
+spawn, newline-delimited JSON-RPC handshake, `tools/list` and `tools/call`
+without a third-party MCP package. The canonical `native/build-nmake` Release
+build passed all twelve CTest targets.
+
+Later on 2026-10-16, the MCP `tools/list` walk now follows `nextCursor` for up
+to 100 pages (capped at 10,000 tools), and `McpSupervisor::call` refuses a tool
+that the server lists but the server row never reviewed, so a newly advertised
+tool cannot be invoked before an explicit review. The mock MCP server now
+paginates (`echo`, then `secret`) to exercise both: the catalog still exposes
+only the reviewed `echo`, and `mcp.mcp_mock.secret` is refused. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets.
+
+Later on 2026-10-16, the C++ host added `investigation_task_list`. It reads the
+host-owned `investigation_tasks` rows (status filter, bounded limit, newest
+first) and decodes each into the shared `InvestigationTask` contract, including
+the JSON success criteria, scope, guardrails and last failure plus the derived
+budget. `desktop_host_database_tests` inserts a task and checks the decoded
+fields, the status filter and the rejection of an unknown status. The remaining
+investigation commands (task detail/create/start/stop/recover, schedules,
+retention, briefs) and their evidence/plan/ledger infrastructure remain, as do
+the MCP HTTP transport and OAuth, the file transfer actions, installers, and
+real validation.
+
+Later on 2026-10-16, the C++ host added `investigation_task_get`. It returns the
+decoded task plus its `evidence`, `findings`, `artifacts`, `runs` and `steps`
+collections, the latest `decisionBrief` and the active (or latest) `plan`, with
+nested JSON columns (evidence content, plan steps/approval/observation window,
+artifact content, step target/failure, run checkpoint/failure) passed through
+unchanged so the shared schema stays the contract. `desktop_host_database_tests`
+inserts a task, a finding and an active plan and checks the decoded detail,
+the empty collections and the unknown-task case. Task create/start/stop/recover,
+schedules, retention and brief selection remain, as do the MCP HTTP transport
+and OAuth, the file transfer actions, installers, and real validation.
+
+Later on 2026-10-16, the C++ host added `investigation_task_status_update` and
+`investigation_task_stop`. A non-terminal status clears the completion time; a
+terminal one stamps it. Stop is idempotent, refuses a completed/failed/expired
+task, best-effort cancels the task's active Agent run through the sidecar, then
+persists the terminal state. `desktop_host_database_tests` covers the status
+write, the stop, its idempotence and the rejections. The remaining investigation
+commands (create/start/recover, schedules, retention, brief selection), the MCP
+HTTP transport and OAuth, the file transfer actions, installers, and real
+validation remain.
+
+Later on 2026-10-17, the C++ host finished the investigation write path and the
+host-side investigation/evidence/context RPCs the Agent needs: `investigation_task_create`,
+`investigation_task_start` (builds the autonomous prompt and starts the Agent run
+through the sidecar, binding it to a new `investigation_runs` row),
+`investigation_task_recover`, `investigation_brief_select`,
+`investigation_retention_preview`/`prune`, and the schedule
+`list`/`runs`/`create`/`update`/`tick` commands; plus
+`host.investigation.plan.record`/`check`/`step_result`,
+`evidence.record`/`fetch`/`search`/`correlate`/`compare`, `finding.record`,
+`brief.record`, `artifact.record`, `retention.preview`,
+`filesystem_backup.register`/`restored`/`deleted`,
+`host.filesystem.backup.list_query`/`retention_scan`, `host.context.fetch`, the
+SSH filesystem backup/restore/cleanup targets, and the `host_tool_calls` ledger
+(idempotent claim/finish, bounded in-memory replay cache, canonical-JSON
+fingerprints). Each landed as its own commit; the canonical `native/build-nmake`
+Release build passed all twelve CTest targets and `pnpm check` was green after
+each. The MCP `tools/list`/`host.tool.execute` non-MCP branch, OAuth, the file
+transfer actions, installers, and real SSH/MCP validation remain.
+
+Later on 2026-10-17, the C++ MCP supervisor gained the Streamable HTTP transport.
+`native/desktop_host/src/desktop_mcp.cpp` now starts an `http`-transport server
+without spawning a process: it POSTs each JSON-RPC frame with
+`Accept: application/json, text/event-stream`, captures and replays
+`Mcp-Session-Id`, sends `Mcp-Protocol-Version` after the handshake, accepts either
+a JSON or an SSE (`data:` lines) response for one request, terminates the session
+with `DELETE` on shutdown, and resolves the server's static `httpAuthHeaders`
+secrets from the OS credential store so no plaintext is stored in the database.
+`Yukinal`'s `yukinal_desktop_host_core` links the same `httplib` as the in-process
+SSH core and gates `CPPHTTPLIB_OPENSSL_SUPPORT` on `YUKINAL_BUILD_SSH_SERVICE` so
+both translation units agree on one httplib ABI. `desktop_host_database_tests`
+now runs a loopback `httplib::Server` that answers `initialize` over JSON,
+`tools/list` over SSE and `tools/call` over JSON, requires the static
+`Authorization` header and the issued session id on follow-up requests, and
+verifies the catalog (`mcp.mcp_http_mock.echo`, `risk: low`), a tool call, and the
+`DELETE` on stop. The canonical `native/build-nmake` Release build passed all
+twelve CTest targets and `pnpm check` was green. OAuth and DPoP, the optional
+long-lived GET event stream, MCP call cancellation, the `host.tool.execute`
+non-MCP branch, the file transfer actions, installers, and real SSH/MCP
+validation remain.
+
+Later on 2026-10-17, the C++ host made MCP tool calls cancellable. The sidecar now
+runs Agent→host requests on a small pool instead of one thread, so a blocking
+`host.tool.execute` no longer also blocks the `host.tool.cancel` meant to
+interrupt it; the sidecar owns a per-request cancellation token registry, answers
+`host.tool.cancel` itself (`{cancelled: bool}`, best-effort like the retired Rust
+host) and threads the token into the handler (`HostHandler` gained a
+`std::shared_ptr<std::atomic<bool>>` argument). `McpSupervisor::call` accepts the
+token: the stdio wait now polls it in 100 ms slices and abandons the request, and
+the HTTP path checks it before and after the request. `host.tool.execute` answers
+`{status: "failed", error: {code: "cancelled", ...}}` when the call observes a
+cancellation. `desktop_host_database_tests` gains a `--mcp-slow-mock` stdio server
+whose one reviewed tool blocks for ten seconds and checks that a set token aborts
+the call promptly; the pool path is exercised by the existing
+`desktop_host_sidecar_tests`. The canonical `native/build-nmake` Release build
+passed all twelve CTest targets and `pnpm check` was green. OAuth and DPoP, the
+optional long-lived GET event stream, the `host.tool.execute` non-MCP branch, the
+file transfer actions, installers, and real SSH/MCP validation remain.
+
+Later on 2026-10-17, `mcp_server_save` learned to persist OAuth configuration (the
+first half of the OAuth block). `resolve_oauth_config` in
+`native/desktop_host/src/ipc_router.cpp` mirrors the retired Rust
+`commands/mcp/configuration.rs`: it trims and validates the issuer with the same
+HTTPS-or-loopback URL rules as the MCP endpoint, defaults `flow` to
+`authorization_code` and `clientAuth` to `none`, rejects a static `Authorization`
+header alongside OAuth, de-duplicates the scopes, and stages a write-only client
+secret in the OS credential store. The flow, client auth, DPoP flag, issuer and
+client id are treated as the stored identity: keeping all of them preserves the
+token, secret and DPoP key references, while changing any of them drops them and
+reclaims the retired credential references. A stored row whose OAuth is configured
+but never connected is reported as `invalid_config` from `mcp_server_list`/`save`
+and from `mcp_server_start` instead of being launched into a certain 401. The
+`mcp_oauth_connect`/`mcp_oauth_cancel` commands, the discovery/registration/token
+exchange, DPoP and the supervisor's bearer token source remain; this commit is the
+configuration/persistence half only. `desktop_host_database_tests` now covers the
+accept path, the defaulted fields, the unconnected report, secret preservation,
+method-switch reclamation and the mutual-exclusion/stdio refusals. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets and
+`pnpm check` was green.
+
+The second half of the OAuth block completed the connect engine in
+`native/desktop_host/src/desktop_oauth.cpp` and wired `mcp_oauth_connect`/
+`mcp_oauth_cancel` into `native/desktop_host/src/ipc_router.cpp`. `oauth_connect`
+performs RFC 8414/OIDC discovery, RFC 7591 dynamic client registration when no
+client id is configured, a PKCE S256 authorization-code flow with a loopback
+callback server, and an RFC 8628 device-code flow; the device-code prompt is
+emitted as `mcp.oauth_device_code` through the host event sink. When `dpop` is set,
+a freshly generated Ed25519 key is stored in the OS credential store, the
+authorization and token requests carry a `DPoP` proof, and a `DPoP-Nonce` challenge
+is honoured on retry. The token bundle is written only to the credential store,
+never to JSON or logs. `OAuthTokenSource` gives `McpSupervisor` a bearer token
+(plus a per-request `DPoP` proof when enabled) and refreshes it before expiry;
+`http_send`/`delete_http_session` retry once on an auth challenge, and the
+3-attempt retry mirrors the retired Rust `AUTH_ATTEMPTS`. `mcp_oauth_cancel`
+answers `{accepted}` (a live flow is asked to stop; otherwise `false`). One
+limitation is documented rather than hidden: WebView `invoke` is handled
+synchronously on the UI thread, so in the real app `mcp_oauth_connect` blocks the
+router until the flow finishes and a concurrent `mcp_oauth_cancel` or the
+device-code prompt event cannot be delivered during that window; the engine,
+registry and commands are implemented and unit-tested directly, and the loopback
+callback still completes the flow. `desktop_host_database_tests` drives a mock that
+plays both OAuth issuer and MCP endpoint to cover authorization-code (discovery,
+dynamic registration, PKCE, token exchange), device-code (prompt capture, pending
+to granted), mid-poll cancellation and the supervisor's bearer-token integration,
+plus router validation and the idle-cancel answer. The canonical
+`native/build-nmake` Release build passed all twelve CTest targets and
+`pnpm check` was green. The optional long-lived GET event stream remains.
+
+The first piece of the effectful-action block also landed: the host now owns its
+own approval-ticket ledger. `native/desktop_host/src/desktop_approval.cpp`
+(`HostApprovalLedger`) mirrors the retired Rust `state/approval.rs`. When the
+sidecar emits an `agent.waiting_approval` notification for one of the four
+effectful SSH actions (`server.exec`, `docker.restart`, `systemd.restart`,
+`package.install`), `IpcRouter`'s sidecar notification sink records a ticket that
+binds the exact run, trace, call, tool, target, durable task/plan/step and a
+host-recomputed canonical-JSON fingerprint of the action's `hostInput` — the
+sidecar's own fingerprint is deliberately not trusted. The `hostInput` is then
+stripped from the event forwarded to the UI, matching the retired host, so command
+text never reaches the WebView. A ticket becomes executable only when
+`agent_approval_respond` learns the sidecar accepted an `approve_once` decision;
+rejections, session grants, mismatched run ids, expired events (past the 180 s TTL)
+and malformed events all fail closed. A restored sidecar re-emitting the same
+pending approval with a fresh deadline refreshes the ticket instead of duplicating
+it, and one ticket is consumed exactly once against the matching request.
+`desktop_host_database_tests` covers the record/approve/consume cycle, the
+structured-restart binding, the restored-deadline refresh and conflicting replay
+refusal, forged/unapproved/replayed requests, every binding field that burns a
+ticket, expired/session/rejected outcomes, and the mid-response wait for the
+host acknowledgement. Wiring the ledger into `host.ssh.effectful_action_target`
+and `..._finished` is the next commit.
+
+The second piece of the effectful-action block landed: `host.ssh.effectful_action_target`
+and `host.ssh.effectful_action_finished` are now served in C++
+(`native/desktop_host/src/ipc_router.cpp`), mirroring the retired Rust
+`resolve_ssh_effectful_action_target`/`finish_ssh_effectful_action`. The target call
+re-validates the exact action input — `systemd.restart`, `docker.restart`,
+`package.install` and the bounded `server.exec` command, env allowlist, workdir and
+byte/timeout limits — then requires `taskId`/`planId`/`planStepId`, a remote
+`srv_`-prefixed server, a valid run identity, a registered server whose environment,
+workspace and scope all match the durable task, no task-guardrail violation and no
+plan deviation before it resolves a C++-supported target. It then claims the
+`host_tool_calls` idempotency row, consumes the one-shot approval ticket bound to
+the exact input fingerprint (failing closed with `approval_ticket` when none
+matches) and returns the `targetData`; `server.exec` additionally verifies the
+resolved target id and sets `allow_server_exec`. The completion call validates the
+outcome against the tool (`succeeded`, `failed`, `unknown`), reconstructs the fixed
+output shape and finishes the same ledger row, so a success, a deterministic
+failure or a retryable unknown outcome all close the call. `desktop_host_database_tests`
+covers every gate in order, the malformed-envelope parameter errors, the missing
+ledger-row RPC error and the success/failure/unknown completion paths.
+
+The file-transfer work opened with its durable metadata store.
+`DesktopDatabase::{insert,update}_file_transfer`, `file_transfer_staging` and
+`recover_file_transfers` (`native/desktop_host/src/database.cpp`) persist the
+bounded `TransferSnapshot` next to the host-private staging inventory, mirroring
+the retired Rust `FileTransfersRepository`. An insert is strict — a duplicate id
+is rejected rather than upserted — and both writes prune terminal history to the
+newest 500 rows; `staging_json` never leaves the repository. `recover_file_transfers`
+atomically rewrites every non-terminal row to `interrupted`, clearing the live
+`currentItem`/`activeConflict` fields, and returns each snapshot with its staging
+inventory so a restart can clean up host-owned staging files; terminal rows that
+still carry staging residue keep being returned until the manager clears them.
+`desktop_host_database_tests` covers the insert/update/duplicate/missing paths, the
+private staging read, the recovery rewrite and its idempotence, the 500-row terminal
+prune, and the metadata validation failures.
+
+The transfer contract module landed next: `transfer_types`
+(`native/desktop_host/include/yukinal/desktop_host/transfer_types.hpp` plus
+`src/transfer_types.cpp`) ports the retired Rust `transfer::types` seam — the
+`TransferSnapshot` struct with its exact 19-field camelCase IPC serialization, the
+host-private tagged staging inventory, the conflict request/action shapes, the
+status/direction/policy/failure-kind enums, and the pure helpers (`safe_name`,
+remote-path validation, `remote_child`, the transfer-scoped staging basename check,
+snapshot construction and id generation). Optional failure fields are omitted rather
+than serialized as null so the strict shared Zod object accepts them. A new
+`transfer_tests` target covers the enum round trips, the snapshot shape, the staging
+round trip, conflict-action parsing, the name/path guards and the staging ownership
+marker.
+
+The local filesystem seam landed next. `transfer_local`
+(`native/desktop_host/include/yukinal/desktop_host/transfer_local.hpp` plus
+`src/transfer_local.cpp`) ports the retired Rust `transfer::local` helpers: the
+`LocalFingerprint`/`LocalSource` handles, `local_source_fingerprint` and the
+unchanged-source re-check that raises `SourceChanged`, `read_local_directory` for
+recursive upload walks, exclusive `create_local_staging_file` writing
+`.<name>.yukinal-<owner>-<item>-<attempt>.part` (the owner is the transfer id with
+`-` removed, matching the Rust naming exactly), no-replace publication via a hard
+link, fingerprinted replace publication that refuses a destination that changed
+while the transfer was staged, `path_fingerprint_if_regular` for the overwrite
+guard, and `remove_recovered_local_staging`, which deletes only a staging file
+whose basename is owned by the transfer. `TransferError` now derives from
+`std::runtime_error` and carries a `TransferErrorCode`, so the seam reports the
+same failure kinds the manager will translate to IPC. Because `std::filesystem`
+reports a missing path as `file_type::not_found` *without* setting the error code,
+a shared `status_missing` helper checks both. `transfer_tests` drives these
+helpers against real files in a temporary directory: fingerprints, the
+changed-source abort, directory listing, exclusive staging and attempt suffixes,
+no-replace/replace publication with the duplicate and stale-target refusals, the
+download-directory guard and the recovery cleanup. The canonical
+`native/build-nmake` Release build passed all thirteen CTest targets and
+`pnpm check` was green.
+
+The transfer manager itself landed next, completing the local half of the
+file-transfer block. `transfer_backend`
+(`native/desktop_host/include/yukinal/desktop_host/transfer_backend.hpp`) declares
+the two seams the manager drives: `TransferBackend`, a minimal streaming remote
+surface (`lstat` with no-follow semantics, `list_dir`, `open_read`,
+`create_exclusive`, `create_dir`, `remove_file`, `publish_no_replace`,
+`rename_replace` and a `remove_recovered_staging` that fails closed by default),
+and `TransferHistoryStore`, the durable snapshot/staging seam ported from the
+retired Rust `RemoteTransferBackend` and `TransferHistoryStore` traits.
+`transfer_manager.hpp`/`src/transfer_manager.cpp` port the retired Rust
+`TransferManager`: one detached worker per transfer, a cancellable counting
+semaphore that admits at most three at a time (polled every 20 ms so a queued
+transfer observes cancellation), and an `active_workers`/`workers_cv` pair that
+`shutdown` waits on. Copying streams one 64 KiB buffer at a time and accumulates
+an incremental SHA-256, so no file is ever buffered whole; the shared
+`ContentHasher` was extracted into `content_revision.hpp` with its implementation
+in a new `content_hash.cpp`, and `database.cpp` now hashes through it instead of
+its own private `Sha256`. An upload opens the local source, streams it into an
+exclusive remote staging file, re-checks the source fingerprint and staged size
+and type, compares the remote staging SHA-256 against the local digest, and only
+then publishes with a no-replace rename or a fingerprinted atomic replace,
+removing the staging link afterwards and recording residue if that fails. A
+download stages locally, re-walks the remote path chain before the open (SFTP v3
+has no no-follow flag), re-checks the source stat after the open, streams,
+verifies the local staging digest, reads the remote source a second time to
+detect a mid-transfer change, re-checks the final stat and publishes without
+replacement or with the recorded destination fingerprint. Both directions walk
+directory trees, refuse symlinks, special files and unsafe names, and accumulate
+per-item failures instead of aborting the batch. A conflict under the `ask`
+policy parks the worker on a per-job decision queue (20 ms polling with cancel
+wakeups) and accepts `skip`, `overwrite` or `rename`; `overwrite` is only offered
+and admitted when the backend advertises atomic replace, and otherwise fails
+closed with an `Unsupported` failure. The final status is `cancelled` when the
+job was cancelled, `partial` when any item failed or was skipped with at least one
+completion, `failed` otherwise, or `completed`. Snapshots publish immediately on a
+lifecycle change, at most ten times a second for intermediate progress, and force
+a durable write whenever the staging inventory changes. Durability is fail-closed:
+`persist_initial` and the staging writes surface a persistence failure, and a
+terminal history write that fails demotes the live view to `failed` with a
+`transfer history` failure instead of claiming success. `with_history` runs
+synchronous startup recovery: active rows become `interrupted`, validated local
+staging files are removed, remote staging records stay pending an authenticated
+session with a recorded note, and `reconcile_remote_staging` retries owned remote
+staging removal only through an already-connected backend and clears the resolved
+residue and note. A new `transfer_manager_tests` target drives all of this with an
+in-memory backend and history store: file and directory upload/download, both
+directions' conflict resolutions, the overwrite refusal without atomic replace,
+cancelling a transfer that is waiting on a conflict and one that is still queued,
+shutdown marking an unfinished transfer `interrupted`, the three-way parallel cap
+(measured by peak concurrent backend reads) and single-permit serialisation,
+startup recovery plus remote-staging reconciliation, the fail-closed terminal
+history write (observed through the snapshot subscription, because the durable row
+correctly stays non-terminal), and the list/get/limit error paths. The
+`native/build-nmake` Release build then passed all fourteen CTest targets,
+`pnpm check` was green and publication hygiene was green.
+
+The durable seam the manager actually runs on landed next.
+`DatabaseTransferHistoryStore` (`transfer_history.hpp` plus
+`native/desktop_host/src/transfer_history.cpp`) adapts the host `DesktopDatabase` to
+`TransferHistoryStore`: `insert`/`update` serialize the typed snapshot through the
+exact IPC contract JSON beside the host-private staging array, `get`/`list`/`recover`
+decode a stored row back into a `TransferSnapshot`, and `staging` returns the private
+inventory without ever exposing it to IPC. Every decode is strict. A new
+`transfer_snapshot_from_json` in `transfer_types` reconstructs the 19-field snapshot
+(including the active conflict, the per-item failures and the staging residue from
+their contract shapes) and throws `std::runtime_error` on any violation instead of
+silently dropping a transfer, so a persisted row the database accepts but the
+contract rejects fails closed. The local-path registry gained the transfer-facing
+take methods: `take_upload_sources` validates one to 256 unique handles, prunes
+expired entries, re-checks each path with no-follow semantics and consumes the used
+handles so a start request cannot be replayed, while `take_download_directory`
+resolves a reusable directory handle but re-checks on every call that it is still a
+real directory. `transfer_tests` now round-trips a stored snapshot and rejects
+malformed ones; `test_ipc_router` drives the take methods (consumption, repeats,
+empty/oversized selections, retyped and expired handles, and download destinations);
+and `desktop_host_database_tests` exercises the store against a real database,
+including conflict/staging round-tripping, recovery and the fail-closed decode. The
+`native/build-nmake` Release build passed all fourteen CTest targets, `pnpm check`
+was green and publication hygiene was green. The SFTP adapter and the
+`file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring are the
+next commit.
+
+The streaming SFTP adapter landed next. `sftp_transfer_backend.hpp` plus
+`native/desktop_host/src/sftp_transfer_backend.cpp` add `SftpTransferBackend`, the
+`TransferBackend` the manager drives over SFTP. It delegates through an injectable
+`SftpRemoteOps` seam (seven blocking operations plus `ensure_supported`), so the
+adapter's policy is unit-testable without a server: `supports_atomic_replace`
+always returns false because plain SFTP v3 has no explicit atomic replace,
+`rename_replace` fails closed with `Unsupported` rather than emulating one, and
+`remove_recovered_staging` removes a recovered path only after `lstat` proves it is
+a regular file (absent is a no-op, anything else is `InvalidInput`). Every
+operation first calls `ensure_supported`, mirroring the retired Rust
+`ensure_cpp_transfer_target`, so an unsupported target never reaches the wire. The
+production seam, `make_ssh_service_sftp_remote_ops`, resolves each target and its
+credentials from the host database and credential store, runs the non-streaming
+operations in-process through `yukinal::ssh_service::sftp_*` under a scoped
+environment that never lets a secret reach the config or a log, and maps
+`already_exists`/`replace_unsupported` onto their transfer error codes. Streaming
+downloads and uploads spawn the packaged `yukinal-ssh-service` worker with a
+one-target config file and drive its newline-delimited JSON protocol: a `ready`
+handshake, then `data` frames carrying at most 32 KiB of standard base64, ending in
+`closed` (exit code zero) or `error`. `make_sftp_stream_reader`/`writer` wrap any
+`SftpStreamChannel`, so an in-memory channel exercises the whole frame protocol
+without a process. `transfer_tests` now covers the adapter's delegation and
+fail-closed policy with a fake `SftpRemoteOps`, and the reader/writer framing
+(handshake, chunk decoding, bounded upload splitting, error, premature EOF and
+nonzero exit) with a fake channel. The `native/build-nmake` Release build passed
+all fourteen CTest targets, `pnpm check` was green and publication hygiene was
+green. The `file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring
+and remote drag are the next commit.
+
+The remote drag-out preparation landed next. A new `remote_drag` module ports the
+retired Rust `crate::commands::files::drag_out` staging: a `RemoteDragStore` owns
+the host-private root (`<data dir>/native-remote-drag`), creates one private stage
+directory per preparation, sweeps stale `yukinal-remote-drag-*` entries on startup
+and on expiry, and hands out a one-time `remote_drag_<64 hex>` ticket with a
+five-minute TTL. Registration is bounded (64 prepared drags, 8 GiB per file and
+16 GiB total) and a `StagedRemoteDrag` handle removes its directory on destruction
+unless the native drag consumed it or a `keep()` pins a hung stage for the next
+sweep. `file_prepare_remote_drag` mirrors the retired adapter: it validates the
+safe absolute path and server id, resolves the target through a read-only
+`RemoteDragProbe` `lstat` seam (`make_ssh_service_remote_drag_probe` over the same
+SFTP ops), rejects a missing path, a non-regular file or a file above 8 GiB before
+any download, stages the file into the store's private directory through the
+transfer manager (a 30-minute bound; on timeout it cancels and only leaves the
+directory for the startup sweep when the stop cannot be observed), then requires
+exactly one regular staged file whose size matches the remote stat and whose
+canonical path stays inside the stage before registering the ticket. Two narrow
+test seams (`set_remote_drag_probe`, `set_remote_drag_store`) plus the direct
+store/path helpers let `transfer_manager_tests` cover the pure path and name
+rules, the store open/insert/take/expiry/caps/sweep behaviour, the staged-drag
+cleanup, and the IPC command's validation, probe failures and end-to-end staging
+without a server. The `native/build-nmake` Release build passed all fourteen CTest
+targets, `pnpm check` was green and publication hygiene was green. The native drag
+start (`file_drag_out_start`) and the local-drop emit path are the next commit.
+
+The drag-start IPC and the local-drop emit path landed next. `file_drag_out_start`
+validates the `remote_drag_<64 hex>` ticket, consumes it from the store, and hands
+the single staged file to the platform through a `NativeFileDrag` seam together
+with the main window handle; the private directory is held by a shared handle that
+is released only when the seam reports the drag ended, and a start the platform
+refuses removes the directory immediately. The command fails closed with
+`UNSUPPORTED`/`UNAVAILABLE` when no seam or no window is wired, and never consumes
+the ticket before that check. `emit_local_drop` registers OS-dropped local paths
+into the existing `LocalPathHandles` table and publishes `file.local_dropped`
+(`{handles, rejectedCount}`) through the event sink, so a dropped file is
+immediately usable by `file_transfer_upload`. `transfer_manager_tests` now drives
+both through injected seams: the ticket-format and unknown-ticket errors, the
+window and seam requirements that do not consume a ticket, a successful hand-off
+whose stage survives until the drag ends, the immediate cleanup of a refused
+drag, and the drop event whose handle starts an upload. The `native/build-nmake`
+Release build passed all fourteen CTest targets, `pnpm check` was green and
+publication hygiene was green. The platform-native drag itself (Windows
+`IDropSource`/`DoDragDrop`, where `make_native_file_drag` still returns null) and
+the WebView child window's OS drop target (`IDropTarget`/`WM_DROPFILES`) are the
+remaining pieces before remote drag-out works end to end on a real desktop.
+
+The transfer IPC wiring landed next. `IpcRouter` now owns the transfer manager: it
+creates `TransferManager::with_history` lazily on the first transfer command, backed
+by a `SftpTransferBackend` over `make_ssh_service_sftp_remote_ops` and a
+`DatabaseTransferHistoryStore`, and only when the host has an initialized database
+and this build has the SSH core. Creation happens under a dedicated mutex and fails
+closed: a recovery failure during `with_history` surfaces as a `TransferError`, and
+when no backend can be built the start/cancel commands report `TRANSFER_UNAVAILABLE`
+rather than silently doing nothing. A new `transfer_command` routes the six
+`file_transfer_*` methods, mirroring the retired Rust adapter exactly: `upload` and
+`download` take their sources from the consumed local-path handles
+(`take_upload_sources` / `take_download_directory`), start with `ConflictPolicy::Ask`
+and return the queued snapshot; `list` reconciles remote staging and returns the
+manager's merged job-plus-history view; `get` returns the live snapshot before the
+durable row; `cancel` requests cancellation and returns the resulting snapshot; and
+`resolve_conflict` reads the current active conflict's item index and only then
+records the decision, rejecting a transfer that is not waiting on a conflict. Every
+snapshot crosses IPC through the exact 19-field `transfer_snapshot_json` contract,
+and each published snapshot forwards to the WebView bridge as a
+`file.transfer_updated` event through the existing event sink. `~IpcRouter`
+unsubscribes the event listener and calls `shutdown()` so worker threads stop and
+their staging cleanup runs before the router goes away. Two narrow test seams
+(`set_transfer_manager` to inject an in-memory manager and `local_paths()` to register
+files and directories) let `transfer_manager_tests` drive the whole IPC surface without
+a database, a server or the SSH core: parameter validation before the manager is
+touched, upload and download publication end to end, list/get through the merged view,
+`file.transfer_updated` forwarding, conflict resolution including the strict
+discriminated-union action shape, cancellation while a transfer waits on a conflict,
+and the unknown-id error paths. The `native/build-nmake` Release build passed all
+fourteen CTest targets (`transfer_manager_tests` now includes the IPC checks),
+`pnpm check` was green and publication hygiene was green. Remote drag
+(`file_prepare_remote_drag` / `file_drag_out_start`) and the local-drop `emit` path
+are the next commit.
+
+The `host.tool.execute` non-MCP branch landed next, the last item of the host-RPC
+block. `IpcRouter::host_tool_execute_command` in
+`native/desktop_host/src/ipc_router.cpp` mirrors the retired Rust
+`commands/host.rs` gate order: every effectful tool must carry a durable
+`taskId`/`planId`/`planStepId` (else `denied_by_policy` with
+`detail.code: durable_plan_required`); a bound task is re-checked against its
+guardrails and active plan revision/step/evidence binding (`not_found`,
+`denied_by_policy`, `plan_deviation`); the target must be a resolved remote
+`srv_`-prefixed registered server whose metadata environment and attached
+workspaces match the request (`invalid_input`, `denied_by_policy`, `not_found`);
+the `host_tool_calls` idempotency ledger is claimed (and replayed from the bounded
+cache) exactly as the effectful path does; and the nine effectful tools still need
+the one-shot host approval ticket. The `mcp.*` names kept their own dispatch
+branch in this commit; a later commit routed them through the same gates.
+
+The nine read-only Agent tools (`server.info`, `server.logs`, `server.services`,
+`docker.ps`, `docker.logs`, `docker.inspect`, `systemd.inspect`,
+`package.inspect`, `filesystem.read`) are dispatched through a new
+`HostToolRunner` seam (`set_host_tool_runner`); the default runner resolves the
+target and credentials, runs the bounded operation through the desktop-SSH core
+(`native/desktop_host/src/desktop_ssh.cpp` gained `run_docker_ps`/`run_docker_logs`/
+`run_docker_inspect`/`run_systemd_inspect`/`run_package_inspect`/
+`run_agent_filesystem_read`), and applies the matching Python `*.normalize` RPC in
+reverse so the Agent's own normalizers stay the single source of the output shape.
+`filesystem.read` returns `{path, content, truncated, revision}` with the SHA-256 of
+the kept raw bytes. Failures map to `unsupported_route` (a tool this host does not
+run), `transport` (retryable, uncertain), `cancelled` or `execution_failed`, and the
+ledger records `transport`/`timeout`/`cancelled`/`execution_failed` as `uncertain`
+so they are never replayed. The effectful tools
+(`server.exec`, `docker.restart`, `systemd.restart`, `package.install`,
+`filesystem.write`/`edit`/`backup`/`restore`/`cleanup`) deliberately fail closed
+with `unsupported_route` here: the Agent drives them through
+`host.ssh.effectful_action_target`, so there is one gated execution path rather
+than a second ungated one. `desktop_host_database_tests` covers the envelope
+validation, every gate in order, the `unsupported_route` refusal, an injected
+runner success with its ledger row and its replay, and the guardrail/ticket
+refusals. The `native/build-nmake` Release build passed all fourteen CTest targets,
+`pnpm check` was green and publication hygiene was green. One honest gap remains:
+the new SSH helpers cannot be exercised headless (the target `43.240.221.2:22` is
+filtered). At this point the `mcp.*` branch still ran before the durable-plan and
+task guardrail gates; a later commit aligned it (see the section at the end of
+this document).
+
+## C++ host packaging: staged distributable and integrity manifest
+
+The last item in the build order before the control plane is packaging. The retired
+Tauri pipeline left `scripts/package.mjs`, the installer smoke scripts and
+`.github/workflows/package.yml` behind when Rust/Tauri was deleted, so the repository
+had no C++-host packaging path at all. This commit adds the part that can be produced
+and verified on one machine, and records the part that cannot.
+
+`scripts/package.mjs` stages the three artifacts the repository already builds — the
+Release C++ desktop host, the frozen Python Agent (the PyInstaller onedir under
+`agent/runtime/yukinal-agent`) and the C++ SSH service — into
+`target/release/bundle/yukinal-<version>-<platform>-<arch>/`, copying `NOTICE`,
+`LICENSE`, the OpenSSL licence next to the SSH service and the Agent's
+`THIRD_PARTY_LICENSES.txt` into the Agent directory. It then writes `SHA256SUMS.txt`
+(GNU `sha256sum` format) and `release-manifest.json` at the bundle root. The manifest
+records the application version (read from `packages/shared/src/version.ts`), the
+Agent version (`agent/pyproject.toml`), platform and architecture, the source
+revision, whether the worktree was dirty (untracked-but-not-ignored files included),
+every payload file's size and SHA-256, and the launch contract the C++ host already
+expects: `YUKINAL_AGENT_ENTRY` for the frozen entrypoint and
+`YUKINAL_SSH_SERVICE_BINARY` for the SSH service. Missing host, Agent or SSH-service
+artifacts fail the run instead of producing a partial payload.
+
+The integrity contract lives in `scripts/lib/release-artifacts.mjs` and is covered by
+`scripts/lib/release-artifacts.test.mjs` (now a `pnpm check` step): hashing, the
+recursive payload listing, checksum rendering and parsing, manifest validation
+(duplicate paths, paths that escape the payload directory, invalid digests) and
+`verifyReleaseManifest`, which re-reads every payload and reports *all* mismatches —
+missing files, size or digest drift, checksum lines that disagree with the manifest,
+and entries present in one file but absent from the other. `pnpm release:manifest`
+refreshes the manifest for an already-staged payload; `pnpm package -- --verify` runs
+the verification and exits non-zero on any disagreement. Verified on Windows against
+the `native/build-nmake` Release host and SSH service plus the existing frozen Agent:
+662 files and 89,339,080 bytes staged and re-verified, and a tampered `NOTICE` was
+rejected with both a size and a digest mismatch. `pnpm check` was green and
+publication hygiene was green.
+
+Honest gaps, recorded in the manifest's `notes` and in `docs/release.md`: no installer
+is produced (NSIS/MSI/DMG/deb, upgrade and data retention are not implemented),
+artifacts are unsigned, `.github/workflows/package.yml` does not exist, and the
+three-platform install and UI acceptance still needs real machines. `target/` is now
+ignored so the payload is never committed; the checksums prove the payload was not
+modified, not who produced it.
+
+## MCP gate alignment in `host.tool.execute`
+
+The retired Rust host ran one gate sequence for every `host.tool.execute` call:
+first the durable plan requirement, then the task guardrail and active-plan
+check, and only then either the MCP dispatch or the remote target checks. The C++
+host had kept `mcp.*` on a branch inside `handle_host_request` that ran *before*
+the durable-plan and task gates, so an MCP tool name skipped gates the Rust host
+applied. The Agent's host catalog only exposes reviewed `low`-risk MCP tools, so
+only such names reached the Agent in practice, but the host is the trust boundary
+and must enforce the gates itself.
+
+`McpSupervisor::tool_effective_risk` now resolves the host-computed effective risk
+of an internal `mcp.<segment>.<tool>` name from the running, reviewed catalog, and
+returns `nullopt` when the host cannot resolve it: a malformed name, no running
+server for that segment, or an unknown or unreviewed tool.
+`host_tool_is_effectful` treats an unresolvable MCP name as effectful, so a name
+the host cannot vouch for still requires a durable task, plan and plan step, and
+still uses the call ledger and the host approval ticket. `host_tool_execute_command`
+now dispatches `mcp.*` after the durable-plan and task-binding gates and before
+the remote target checks, exactly where the Rust host dispatched it, and
+`handle_host_request` routes every `host.tool.execute` call through it. The MCP
+call reports the same `{status, error:{code, message, retryable}}` envelope as the
+remote branch (`mcp_unavailable` when the supervisor is absent, `mcp_call_failed`
+on a tool error, `cancelled` on a cancelled call).
+
+`desktop_host_database_tests` covers the new gates: an `mcp.*` name the host
+cannot resolve as low risk is refused with `denied_by_policy` /
+`detail.code: durable_plan_required`, an `mcp.*` name with an unknown durable task
+is refused with `not_found` (proving it no longer bypasses the task gate), and a
+reviewed low-risk tool started through the router dispatches end to end and
+returns its content. The `native/build-nmake` Release build passed all fourteen
+CTest targets, `pnpm check` was green and publication hygiene was green. Because
+only low-risk MCP tools can be registered by the Agent today, the visible behavior
+of a healthy run is unchanged; the change closes the hole for every other name.
+
+## Control plane scaffold (`services/control-plane/`)
+
+Phase 4 of the brief adds a control plane: a FastAPI service over PostgreSQL that
+holds the state a fleet needs shared — tenants, nodes, tasks, provider/model
+selections, approvals and an audit log. The repository had none of it, and it is
+deliberately a new module that does not touch the single-machine desktop path.
+
+The first slice is in `services/control-plane/`: FastAPI, SQLAlchemy 2.0 (async)
+and Alembic, with PostgreSQL (`asyncpg`) in production and SQLite (`aiosqlite`)
+for tests and local development. `create_app` fails closed: it refuses to start
+without `YUKINAL_CONTROL_TOKEN` (unless the explicit local-only
+`YUKINAL_CONTROL_ALLOW_ANONYMOUS` is set) and refuses to serve a database whose
+schema is not migrated rather than surfacing a missing table as a later 500.
+Every `/v1` route needs the bearer token; `/healthz` is open.
+
+The API enforces the same rules the desktop host enforces locally:
+
+- **Tenant isolation.** Every row is scoped to a tenant, and a cross-tenant
+  identifier is `404`, never `403`, so the API never confirms that a row exists
+  elsewhere.
+- **One active task per node, at the database.** A partial unique index on
+  `status IN ('queued','running')` makes the constraint real under concurrency;
+  terminal tasks accumulate freely. `desktop`'s one-call-per-step fence is the
+  local analogue.
+- **A task state machine.** `queued → running → succeeded/failed/cancelled`, with
+  `running → unknown` when a node restarts. An invalid transition is `409`.
+- **Outcome-unknown on disconnect.** A heartbeat with `restarted: true` moves
+  every still-`running` task on the node to `unknown` (reason `node_restarted`)
+  and `GET .../recoverable` lists them for a human decision; nothing is replayed
+  automatically, matching the host's rule that an interrupted call stays
+  outcome-unknown.
+- **A credential boundary.** Only credential references are stored.
+  `ModelConfigCreate` forbids unknown fields, so a raw `apiKey` is a `422`, and
+  task payloads are scanned recursively for secret-shaped keys
+  (`400 secret_rejected`).
+- **An audit trail.** One `audit_events` row per mutation, tenant-scoped and
+  returned newest first.
+
+`services/control-plane/tests/test_control_plane.py` runs against SQLite and
+covers the API, tenant scoping, the state machine, the partial index, disconnect
+recovery, the credential boundary, the startup checks and a drift test that runs
+the real Alembic migration and compares the migrated tables with the models (19
+tests). A real `python -m yukinal_control_plane` boot was also exercised:
+`/healthz` returned `ok`, an unauthenticated `/v1/tenants` returned `401`, and a
+tenant create plus `/v1/metrics` round-tripped. `pnpm check` now runs the suite
+as a step that is skipped with an explicit reason when the service virtualenv is
+absent.
+
+Honest gaps: no PostgreSQL server exists in this environment, so the migration
+and the queries have been exercised only on SQLite (`JSON` rather than `JSONB`,
+and PostgreSQL connection-pool/restart behaviour is untested); the node channel
+is the same HTTP API rather than the intended authenticated HTTPS/WSS channel
+(the `publicKey` recorded at registration is stored but does not authenticate a
+node yet); multi-worker concurrency, a Prometheus exporter and per-tenant roles
+are not implemented. `/v1/metrics` is a small JSON summary.

@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/database.hpp"
 
+#include "yukinal/desktop_host/content_revision.hpp"
 #include "schema_migrations.hpp"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <initializer_list>
@@ -33,6 +35,15 @@
 
 namespace yukinal::desktop_host {
 namespace {
+
+// The desktop host must compute the evidence content hash the same way every other
+// Yukinal component does. The dependency-free SHA-256 lives in `content_hash.cpp`
+// and is shared through `content_revision.hpp` so no caller re-implements it.
+std::string sha256_hex(const std::string& input) {
+  ContentHasher hasher;
+  hasher.update(input.data(), input.size());
+  return hasher.hexdigest();
+}
 
 std::string path_as_utf8(const std::filesystem::path& path) {
   const auto encoded = path.u8string();
@@ -136,6 +147,12 @@ void bind_optional_text(sqlite3* connection, sqlite3_stmt* statement, int index,
   bind_text(connection, statement, index, *value);
 }
 
+void bind_int64(sqlite3* connection, sqlite3_stmt* statement, int index, std::int64_t value) {
+  if (sqlite3_bind_int64(statement, index, value) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
 bool is_active_transfer_status(const std::string& status) {
   return is_one_of(status, {"queued", "running", "waitingConflict"});
 }
@@ -215,6 +232,292 @@ nlohmann::json mcp_json_array(sqlite3_stmt* row, int column, const char* label) 
   auto value = parse_json_text(column_text(row, column), label);
   if (!value.is_array()) throw std::runtime_error(std::string("Stored ") + label + " is invalid");
   return value;
+}
+
+// Decodes one `investigation_tasks` row into the shared `InvestigationTask` shape.
+nlohmann::json decode_investigation_task(sqlite3_stmt* row) {
+  nlohmann::json task = {
+      {"id", column_text(row, 0)},
+      {"objective", column_text(row, 3)},
+      {"successCriteria", parse_json_text(column_text(row, 4), "investigation success criteria")},
+      {"scope", parse_json_text(column_text(row, 5), "investigation scope")},
+      {"guardrails", parse_json_text(column_text(row, 20), "investigation guardrails")},
+      {"mode", column_text(row, 6)},
+      {"permissionMode", column_text(row, 7)},
+      {"automationLevel", column_text(row, 8)},
+      {"createdBy", column_text(row, 13)},
+      {"phase", column_text(row, 14)},
+      {"status", column_text(row, 9)},
+      {"budget",
+       {{"maxSteps", sqlite3_column_int64(row, 10)},
+        {"maxRunMs", sqlite3_column_int64(row, 11)},
+        {"maxAttempts", sqlite3_column_int64(row, 12)}}},
+      {"createdAt", column_text(row, 15)},
+      {"updatedAt", column_text(row, 16)},
+  };
+  add_optional_text(task, "workspaceId", row, 1);
+  add_optional_text(task, "serverId", row, 2);
+  add_optional_text(task, "completedAt", row, 17);
+  add_optional_text(task, "activeRunId", row, 18);
+  if (sqlite3_column_type(row, 19) != SQLITE_NULL) {
+    task["lastFailure"] = parse_json_text(column_text(row, 19), "investigation last failure");
+  }
+  return task;
+}
+
+nlohmann::json decode_investigation_evidence(sqlite3_stmt* row) {
+  nlohmann::json evidence = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"scope", parse_json_text(column_text(row, 2), "evidence scope")},
+      {"kind", column_text(row, 3)},
+      {"sourceTool", column_text(row, 4)},
+      {"collectedAt", column_text(row, 5)},
+      {"inputSummary", column_text(row, 6)},
+      {"contentType", column_text(row, 7)},
+      {"contentHash", column_text(row, 9)},
+      {"truncated", sqlite3_column_int(row, 10) != 0},
+      {"redactionStatus", column_text(row, 11)},
+  };
+  // Content is persisted as canonical JSON for both text and json payloads
+  // (matching the shared `Evidence` contract), so a text body round-trips as the
+  // underlying string rather than a quoted column value.
+  evidence["content"] = parse_json_text(column_text(row, 8), "evidence content");
+  add_optional_text(evidence, "runId", row, 12);
+  return evidence;
+}
+
+nlohmann::json decode_investigation_finding(sqlite3_stmt* row) {
+  nlohmann::json finding = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"title", column_text(row, 2)},
+      {"kind", column_text(row, 3)},
+      {"statement", column_text(row, 4)},
+      {"evidenceIds", parse_json_text(column_text(row, 5), "finding evidence ids")},
+      {"confidence", column_text(row, 6)},
+      {"createdAt", column_text(row, 8)},
+  };
+  add_optional_text(finding, "nextVerification", row, 7);
+  return finding;
+}
+
+nlohmann::json decode_investigation_brief(sqlite3_stmt* row) {
+  nlohmann::json brief = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"generatedAt", column_text(row, 2)},
+      {"status", column_text(row, 3)},
+      {"findingIds", parse_json_text(column_text(row, 4), "brief finding ids")},
+      {"options", parse_json_text(column_text(row, 5), "brief options")},
+  };
+  add_optional_text(brief, "selectedOptionId", row, 6);
+  add_optional_text(brief, "planId", row, 7);
+  return brief;
+}
+
+nlohmann::json decode_investigation_plan(sqlite3_stmt* row) {
+  nlohmann::json plan = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"revision", sqlite3_column_int64(row, 2)},
+      {"status", column_text(row, 3)},
+      {"createdAt", column_text(row, 4)},
+      {"updatedAt", column_text(row, 5)},
+      {"steps", parse_json_text(column_text(row, 7), "plan steps")},
+  };
+  add_optional_text(plan, "currentStepId", row, 6);
+  if (sqlite3_column_type(row, 8) != SQLITE_NULL) {
+    plan["approval"] = parse_json_text(column_text(row, 8), "plan approval");
+  }
+  if (sqlite3_column_type(row, 9) != SQLITE_NULL) {
+    plan["observationWindow"] =
+        parse_json_text(column_text(row, 9), "plan observation window");
+  }
+  return plan;
+}
+
+nlohmann::json decode_investigation_artifact(sqlite3_stmt* row) {
+  nlohmann::json artifact = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"phase", column_text(row, 3)},
+      {"kind", column_text(row, 4)},
+      {"status", column_text(row, 5)},
+      {"title", column_text(row, 6)},
+      {"summary", column_text(row, 7)},
+      {"content", parse_json_text(column_text(row, 8), "artifact content")},
+      {"evidenceIds", parse_json_text(column_text(row, 9), "artifact evidence ids")},
+      {"createdAt", column_text(row, 10)},
+      {"updatedAt", column_text(row, 11)},
+  };
+  add_optional_text(artifact, "runId", row, 2);
+  add_optional_text(artifact, "planId", row, 12);
+  add_optional_text(artifact, "planStepId", row, 13);
+  return artifact;
+}
+
+nlohmann::json decode_investigation_run(sqlite3_stmt* row) {
+  nlohmann::json run = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"attempt", sqlite3_column_int64(row, 5)},
+      {"phase", column_text(row, 6)},
+      {"status", column_text(row, 7)},
+      {"startedAt", column_text(row, 8)},
+      {"updatedAt", column_text(row, 9)},
+  };
+  add_optional_text(run, "sessionId", row, 2);
+  add_optional_text(run, "messageId", row, 3);
+  add_optional_text(run, "traceId", row, 4);
+  add_optional_text(run, "endedAt", row, 10);
+  if (sqlite3_column_type(row, 11) != SQLITE_NULL) {
+    run["checkpoint"] = parse_json_text(column_text(row, 11), "run checkpoint");
+  }
+  if (sqlite3_column_type(row, 12) != SQLITE_NULL) {
+    run["failure"] = parse_json_text(column_text(row, 12), "run failure");
+  }
+  return run;
+}
+
+nlohmann::json decode_investigation_step(sqlite3_stmt* row) {
+  nlohmann::json step = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"runId", column_text(row, 2)},
+      {"ordinal", sqlite3_column_int64(row, 3)},
+      {"kind", column_text(row, 4)},
+      {"title", column_text(row, 5)},
+      {"status", column_text(row, 6)},
+      {"attempt", sqlite3_column_int64(row, 7)},
+      {"evidenceIds", parse_json_text(column_text(row, 12), "step evidence ids")},
+  };
+  add_optional_text(step, "toolName", row, 8);
+  if (sqlite3_column_type(row, 9) != SQLITE_NULL) {
+    step["target"] = parse_json_text(column_text(row, 9), "step target");
+  }
+  add_optional_text(step, "inputSummary", row, 10);
+  add_optional_text(step, "outputSummary", row, 11);
+  add_optional_text(step, "startedAt", row, 13);
+  add_optional_text(step, "endedAt", row, 14);
+  if (sqlite3_column_type(row, 15) != SQLITE_NULL) {
+    step["failure"] = parse_json_text(column_text(row, 15), "step failure");
+  }
+  add_optional_text(step, "planId", row, 16);
+  add_optional_text(step, "planStepId", row, 17);
+  return step;
+}
+
+// Decodes one `investigation_schedules` row. The column order below matches every
+// schedule SELECT in this file: 0 id, 1 task_id, 2 status, 3 interval_seconds,
+// 4 cooldown_seconds, 5 dedupe_window_seconds, 6 max_concurrent_runs, 7 budget,
+// 8 notification_policy, 9 next_run_at, 10 last_run_at, 11 last_outcome,
+// 12 last_error, 13 created_at, 14 updated_at, 15 baseline_run_id.
+nlohmann::json decode_investigation_schedule(sqlite3_stmt* row) {
+  nlohmann::json schedule = {
+      {"id", column_text(row, 0)},
+      {"taskId", column_text(row, 1)},
+      {"status", column_text(row, 2)},
+      {"intervalSeconds", sqlite3_column_int64(row, 3)},
+      {"cooldownSeconds", sqlite3_column_int64(row, 4)},
+      {"dedupeWindowSeconds", sqlite3_column_int64(row, 5)},
+      {"maxConcurrentRuns", sqlite3_column_int64(row, 6)},
+      {"budget", parse_json_text(column_text(row, 7), "schedule budget")},
+      {"notificationPolicy", column_text(row, 8)},
+      {"nextRunAt", column_text(row, 9)},
+      {"createdAt", column_text(row, 13)},
+      {"updatedAt", column_text(row, 14)},
+  };
+  add_optional_text(schedule, "lastRunAt", row, 10);
+  add_optional_text(schedule, "lastOutcome", row, 11);
+  add_optional_text(schedule, "lastError", row, 12);
+  add_optional_text(schedule, "baselineRunId", row, 15);
+  return schedule;
+}
+
+// Decodes one `investigation_schedule_runs` row into the shared shape: 0 id,
+// 1 schedule_id, 2 task_id, 3 status, 4 scheduled_at, 5 claimed_at, 6 started_at,
+// 7 finished_at, 8 dedupe_key, 9 outcome, 10 error.
+nlohmann::json decode_investigation_schedule_run(sqlite3_stmt* row) {
+  nlohmann::json run = {
+      {"id", column_text(row, 0)},
+      {"scheduleId", column_text(row, 1)},
+      {"taskId", column_text(row, 2)},
+      {"status", column_text(row, 3)},
+      {"scheduledAt", column_text(row, 4)},
+      {"dedupeKey", column_text(row, 8)},
+  };
+  add_optional_text(run, "claimedAt", row, 5);
+  add_optional_text(run, "startedAt", row, 6);
+  add_optional_text(run, "finishedAt", row, 7);
+  add_optional_text(run, "outcome", row, 9);
+  add_optional_text(run, "error", row, 10);
+  return run;
+}
+
+std::optional<nlohmann::json> load_investigation_task_row(sqlite3* connection,
+                                                           const std::string& task_id) {
+  Statement rows(connection, R"SQL(
+      SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+             permission_mode, automation_level, status, max_steps, max_run_ms,
+             max_attempts, created_by, phase, created_at, updated_at, completed_at,
+             active_run_id, last_failure, guardrails
+        FROM investigation_tasks
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection, rows.get(), 1, task_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return decode_investigation_task(rows.get());
+}
+
+const char* kInvestigationRunColumns =
+    "id, task_id, session_id, message_id, trace_id, attempt, phase, status, "
+    "started_at, updated_at, ended_at, checkpoint, failure";
+
+std::optional<nlohmann::json> load_investigation_run_row(sqlite3* connection,
+                                                         const std::string& run_id) {
+  const std::string sql = std::string("SELECT ") + kInvestigationRunColumns +
+                          " FROM investigation_runs WHERE id = ?1";
+  Statement rows(connection, sql.c_str());
+  bind_text(connection, rows.get(), 1, run_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return decode_investigation_run(rows.get());
+}
+
+const char* kScheduleColumns =
+    "id, task_id, status, interval_seconds, cooldown_seconds, dedupe_window_seconds, "
+    "max_concurrent_runs, budget, notification_policy, next_run_at, last_run_at, "
+    "last_outcome, last_error, created_at, updated_at, baseline_run_id";
+std::optional<nlohmann::json> load_investigation_schedule_row(sqlite3* connection,
+                                                             const std::string& schedule_id) {
+  const std::string sql = std::string("SELECT ") + kScheduleColumns +
+                          " FROM investigation_schedules WHERE id = ?1";
+  Statement rows(connection, sql.c_str());
+  bind_text(connection, rows.get(), 1, schedule_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return decode_investigation_schedule(rows.get());
+}
+
+const char* kScheduleRunColumns =
+    "id, schedule_id, task_id, status, scheduled_at, claimed_at, started_at, "
+    "finished_at, dedupe_key, outcome, error";
+
+std::optional<nlohmann::json> load_investigation_schedule_run_row(
+    sqlite3* connection, const std::string& run_id) {
+  const std::string sql = std::string("SELECT ") + kScheduleRunColumns +
+                          " FROM investigation_schedule_runs WHERE id = ?1";
+  Statement rows(connection, sql.c_str());
+  bind_text(connection, rows.get(), 1, run_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return decode_investigation_schedule_run(rows.get());
 }
 
 // Decodes one `mcp_servers` row into the shared `McpServerConfig` shape.
@@ -857,7 +1160,207 @@ std::optional<nlohmann::json> read_identity(sqlite3* connection,
   return identity;
 }
 
+// ── Investigation retention helpers ─────────────────────────────────────────
+bool iso8601_utc_text(const std::string& value) {
+  if (value.size() < 19 || value.size() > 80) return false;
+  std::tm utc{};
+  std::istringstream stream(value);
+  stream >> std::get_time(&utc, "%Y-%m-%dT%H:%M:%S");
+  if (stream.fail()) return false;
+#ifdef _WIN32
+  return _mkgmtime(&utc) != static_cast<std::time_t>(-1);
+#else
+  return timegm(&utc) != static_cast<std::time_t>(-1);
+#endif
+}
+
+void collect_json_string_ids(const std::string& raw, std::set<std::string>& out) {
+  nlohmann::json parsed;
+  try {
+    parsed = nlohmann::json::parse(raw);
+  } catch (const nlohmann::json::exception&) {
+    return;
+  }
+  if (!parsed.is_array()) return;
+  for (const auto& entry : parsed) {
+    if (entry.is_string()) out.insert(entry.get<std::string>());
+  }
+}
+
+// Evidence ids referenced by any finding, step, artifact, brief option or plan
+// step are never retention candidates.
+std::set<std::string> collect_protected_evidence(sqlite3* connection,
+                                                 const std::string& task_id) {
+  std::set<std::string> protected_ids;
+  const auto collect_direct = [&](const char* sql) {
+    Statement statement(connection, sql);
+    bind_text(connection, statement.get(), 1, task_id);
+    for (;;) {
+      const auto result = sqlite3_step(statement.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+      collect_json_string_ids(column_text(statement.get(), 0), protected_ids);
+    }
+  };
+  collect_direct("SELECT evidence_ids FROM investigation_findings WHERE task_id = ?1");
+  collect_direct("SELECT evidence_ids FROM investigation_steps WHERE task_id = ?1");
+  collect_direct("SELECT evidence_ids FROM investigation_artifacts WHERE task_id = ?1");
+  const auto collect_nested = [&](const char* sql) {
+    Statement statement(connection, sql);
+    bind_text(connection, statement.get(), 1, task_id);
+    for (;;) {
+      const auto result = sqlite3_step(statement.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+      nlohmann::json parsed;
+      try {
+        parsed = nlohmann::json::parse(column_text(statement.get(), 0));
+      } catch (const nlohmann::json::exception&) {
+        continue;
+      }
+      if (!parsed.is_array()) continue;
+      for (const auto& entry : parsed) {
+        if (!entry.is_object()) continue;
+        const auto ids = entry.find("evidenceIds");
+        if (ids == entry.end() || !ids->is_array()) continue;
+        for (const auto& id : *ids) {
+          if (id.is_string()) protected_ids.insert(id.get<std::string>());
+        }
+      }
+    }
+  };
+  collect_nested("SELECT options FROM investigation_decision_briefs WHERE task_id = ?1");
+  collect_nested("SELECT steps FROM investigation_plans WHERE task_id = ?1");
+  return protected_ids;
+}
+
+std::optional<std::string> investigation_task_status(sqlite3* connection,
+                                                     const std::string& task_id) {
+  Statement statement(connection, "SELECT status FROM investigation_tasks WHERE id = ?1");
+  bind_text(connection, statement.get(), 1, task_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection));
+  return std::string(column_text(statement.get(), 0));
+}
+
+bool terminal_task_status(const std::string& status) {
+  return is_one_of(status, {"completed", "failed", "stopped", "expired"});
+}
+
+// ── Investigation schedule helpers ──────────────────────────────────────────
+std::int64_t saturating_add(std::int64_t left, std::int64_t right) {
+  if (right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right) {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  return left + right;
+}
+
+std::int64_t saturating_sub(std::int64_t left, std::int64_t right) {
+  if (right > 0 && left < std::numeric_limits<std::int64_t>::min() + right) {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  if (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  return left - right;
+}
+
+std::optional<std::int64_t> iso8601_utc_epoch(const std::string& value) {
+  if (!iso8601_utc_text(value)) return std::nullopt;
+  std::tm utc{};
+  std::istringstream stream(value);
+  stream >> std::get_time(&utc, "%Y-%m-%dT%H:%M:%S");
+  if (stream.fail()) return std::nullopt;
+#ifdef _WIN32
+  const auto seconds = _mkgmtime(&utc);
+#else
+  const auto seconds = timegm(&utc);
+#endif
+  if (seconds == static_cast<std::time_t>(-1)) return std::nullopt;
+  return static_cast<std::int64_t>(seconds);
+}
+
+std::string iso8601_utc_from_epoch(std::int64_t epoch_seconds) {
+  const auto time = static_cast<std::time_t>(epoch_seconds);
+  std::tm utc{};
+#ifdef _WIN32
+  gmtime_s(&utc, &time);
+#else
+  gmtime_r(&time, &utc);
+#endif
+  std::ostringstream rendered;
+  rendered << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+  return rendered.str();
+}
+
+// A schedule run id is derived from `(scheduleId, dedupeKey)` so a duplicate tick
+// or a second scheduler loop can never fabricate a second run for one bucket.
+std::string schedule_run_id(const std::string& schedule_id, const std::string& dedupe_key) {
+  std::string seed = schedule_id;
+  seed.push_back('\0');
+  seed += dedupe_key;
+  return "schedrun_" + sha256_hex(seed);
+}
+
+// Mirrors the Rust database `validate_schedule_shape`, the last line of defence
+// before a schedule row or run is written.
+void validate_schedule_shape(const nlohmann::json& schedule) {
+  const auto id = schedule.value("id", std::string());
+  const auto task_id = schedule.value("taskId", std::string());
+  if (id.empty() || task_id.empty()) {
+    throw std::invalid_argument("schedule id and task id are required");
+  }
+  const auto interval = schedule.value("intervalSeconds", std::int64_t{0});
+  const auto cooldown = schedule.value("cooldownSeconds", std::int64_t{0});
+  const auto dedupe = schedule.value("dedupeWindowSeconds", std::int64_t{0});
+  const auto concurrent = schedule.value("maxConcurrentRuns", std::int64_t{0});
+  if (interval == 0 || cooldown > 86400 || dedupe == 0 || dedupe > 86400 || concurrent == 0 ||
+      concurrent > 16) {
+    throw std::invalid_argument("schedule bounds are invalid");
+  }
+  if (interval > 86400) {
+    throw std::invalid_argument("schedule interval is too large");
+  }
+  if (!iso8601_utc_text(schedule.value("nextRunAt", std::string()))) {
+    throw std::invalid_argument("schedule nextRunAt must be a UTC timestamp");
+  }
+}
+
+void insert_investigation_schedule_run(sqlite3* connection, const nlohmann::json& run) {
+  Statement insert(connection, R"SQL(
+      INSERT INTO investigation_schedule_runs (
+        id, schedule_id, task_id, status, scheduled_at, claimed_at, started_at,
+        finished_at, dedupe_key, outcome, error
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+    )SQL");
+  bind_text(connection, insert.get(), 1, run.value("id", std::string()));
+  bind_text(connection, insert.get(), 2, run.value("scheduleId", std::string()));
+  bind_text(connection, insert.get(), 3, run.value("taskId", std::string()));
+  bind_text(connection, insert.get(), 4, run.value("status", std::string()));
+  bind_text(connection, insert.get(), 5, run.value("scheduledAt", std::string()));
+  const auto optional = [&run](const char* key) -> std::optional<std::string> {
+    const auto found = run.find(key);
+    if (found == run.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  bind_optional_text(connection, insert.get(), 6, optional("claimedAt"));
+  bind_optional_text(connection, insert.get(), 7, optional("startedAt"));
+  bind_optional_text(connection, insert.get(), 8, optional("finishedAt"));
+  bind_text(connection, insert.get(), 9, run.value("dedupeKey", std::string()));
+  bind_optional_text(connection, insert.get(), 10, optional("outcome"));
+  bind_optional_text(connection, insert.get(), 11, optional("error"));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection));
+  }
+}
+
 }  // namespace
+
+std::string content_revision_hex(const std::string& input) { return sha256_hex(input); }
 
 DesktopDatabase::DesktopDatabase(const std::filesystem::path& data_directory) {
   if (!data_directory.is_absolute()) {
@@ -982,6 +1485,51 @@ std::optional<nlohmann::json> DesktopDatabase::get_server_connection(
   add_optional_text(record, "hostRevocationListUrl", statement.get(), 7);
   add_optional_text(record, "hostRevocationListSigners", statement.get(), 8);
   return record;
+}
+
+void DesktopDatabase::set_server_status(const std::string& server_id,
+                                        const std::string& status,
+                                        const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!is_one_of(status, {"connecting", "connected", "disconnected", "error"})) {
+    throw std::runtime_error("The server status is invalid");
+  }
+  Statement statement(connection_,
+                      "UPDATE servers SET status = ?2, updated_at = ?3 WHERE id = ?1");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, status);
+  bind_text(connection_, statement.get(), 3, timestamp);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) throw std::runtime_error("Server was not found");
+}
+
+void DesktopDatabase::record_connection_activity(
+    const std::string& id, const std::string& server_id, const std::string& title,
+    const std::optional<std::string>& description, const std::string& outcome,
+    const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!is_one_of(outcome, {"success", "failure", "cancelled", "denied"})) {
+    throw std::runtime_error("The connection activity outcome is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      INSERT INTO activities (
+        id, server_id, workspace_id, type, title, description, source, actor,
+        reason, outcome, trace_id, created_at
+      ) VALUES (?1, ?2, NULL, 'connection', ?3, ?4, 'user', 'user', NULL, ?5, NULL, ?6)
+    )SQL");
+  bind_text(connection_, statement.get(), 1, id);
+  bind_text(connection_, statement.get(), 2, server_id);
+  bind_text(connection_, statement.get(), 3, title);
+  bind_optional_text(connection_, statement.get(), 4, description);
+  bind_text(connection_, statement.get(), 5, outcome);
+  bind_text(connection_, statement.get(), 6, timestamp);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
 }
 
 nlohmann::json DesktopDatabase::list_servers() const {
@@ -1604,6 +2152,239 @@ std::optional<nlohmann::json> DesktopDatabase::get_file_transfer(
   return snapshot;
 }
 
+namespace {
+
+// The snapshot is the public progress contract; the staging inventory is
+// host-private. Both must stay bounded and well-formed. This mirrors the retired
+// Rust `validate_record` (identifiers/direction/status and size caps) without
+// porting the full Zod snapshot schema.
+void validate_file_transfer_metadata(const nlohmann::json& snapshot,
+                                     const nlohmann::json& staging) {
+  if (!snapshot.is_object()) {
+    throw std::invalid_argument("The file transfer snapshot must be an object");
+  }
+  for (const char* key : {"transferId", "serverId"}) {
+    const auto value = json_string_field(snapshot, key);
+    if (value.find_first_not_of(" \t\r\n") == std::string::npos) {
+      throw std::invalid_argument("The file transfer snapshot is missing an identifier");
+    }
+  }
+  if (!is_one_of(json_string_field(snapshot, "direction"), {"upload", "download"})) {
+    throw std::invalid_argument("The file transfer direction is invalid");
+  }
+  if (!is_known_transfer_status(json_string_field(snapshot, "status"))) {
+    throw std::invalid_argument("The file transfer status is invalid");
+  }
+  if (!staging.is_array()) {
+    throw std::invalid_argument("The file transfer staging inventory must be an array");
+  }
+  if (snapshot.dump().size() > 524288 || staging.dump().size() > 65536) {
+    throw std::invalid_argument("The file transfer metadata exceeds its storage limit");
+  }
+}
+
+std::int64_t file_transfer_epoch_ms(const nlohmann::json& snapshot, const char* key) {
+  const auto found = snapshot.find(key);
+  if (found == snapshot.end() ||
+      !(found->is_number_integer() || found->is_number_unsigned())) {
+    throw std::invalid_argument("The file transfer snapshot timestamps are invalid");
+  }
+  const auto value = found->get<std::int64_t>();
+  if (value < 0) {
+    throw std::invalid_argument("The file transfer snapshot timestamps are invalid");
+  }
+  return value;
+}
+
+nlohmann::json parse_file_transfer_staging(const std::string& text) {
+  nlohmann::json staging;
+  try {
+    staging = nlohmann::json::parse(text);
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("Stored file transfer staging inventory is invalid JSON");
+  }
+  if (!staging.is_array()) {
+    throw std::runtime_error("Stored file transfer staging inventory is invalid");
+  }
+  return staging;
+}
+
+// Keeps only the newest 500 terminal transfers, matching the retired Rust
+// `prune_terminal_history`. Active rows are never pruned.
+void prune_terminal_file_transfers(sqlite3* connection) {
+  execute_sql(connection, R"SQL(
+      DELETE FROM file_transfers
+       WHERE status IN ('completed','partial','failed','cancelled','interrupted')
+         AND transfer_id NOT IN (
+             SELECT transfer_id FROM file_transfers
+              WHERE status IN ('completed','partial','failed','cancelled','interrupted')
+              ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+              LIMIT 500
+         )
+  )SQL");
+}
+
+}  // namespace
+
+void DesktopDatabase::insert_file_transfer(const nlohmann::json& snapshot,
+                                           const nlohmann::json& staging) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  validate_file_transfer_metadata(snapshot, staging);
+  const auto snapshot_text = snapshot.dump();
+  const auto staging_text = staging.dump();
+  Transaction transaction(connection_);
+  {
+    Statement statement(connection_, R"SQL(
+        INSERT INTO file_transfers (
+          transfer_id, server_id, direction, status, started_at_epoch_ms,
+          updated_at_epoch_ms, snapshot_json, staging_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+      )SQL");
+    bind_text(connection_, statement.get(), 1, json_string_field(snapshot, "transferId"));
+    bind_text(connection_, statement.get(), 2, json_string_field(snapshot, "serverId"));
+    bind_text(connection_, statement.get(), 3, json_string_field(snapshot, "direction"));
+    bind_text(connection_, statement.get(), 4, json_string_field(snapshot, "status"));
+    bind_int64(connection_, statement.get(), 5,
+               file_transfer_epoch_ms(snapshot, "startedAtEpochMs"));
+    bind_int64(connection_, statement.get(), 6,
+               file_transfer_epoch_ms(snapshot, "updatedAtEpochMs"));
+    bind_text(connection_, statement.get(), 7, snapshot_text);
+    bind_text(connection_, statement.get(), 8, staging_text);
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+      if (sqlite3_extended_errcode(connection_) == SQLITE_CONSTRAINT_PRIMARYKEY) {
+        throw std::invalid_argument("A file transfer with this id already exists");
+      }
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  prune_terminal_file_transfers(connection_);
+  transaction.commit();
+}
+
+void DesktopDatabase::update_file_transfer(const nlohmann::json& snapshot,
+                                           const nlohmann::json& staging) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  validate_file_transfer_metadata(snapshot, staging);
+  {
+    Statement statement(connection_, R"SQL(
+        UPDATE file_transfers SET
+          server_id = ?2, direction = ?3, status = ?4,
+          started_at_epoch_ms = ?5, updated_at_epoch_ms = ?6,
+          snapshot_json = ?7, staging_json = ?8
+         WHERE transfer_id = ?1
+      )SQL");
+    bind_text(connection_, statement.get(), 1, json_string_field(snapshot, "transferId"));
+    bind_text(connection_, statement.get(), 2, json_string_field(snapshot, "serverId"));
+    bind_text(connection_, statement.get(), 3, json_string_field(snapshot, "direction"));
+    bind_text(connection_, statement.get(), 4, json_string_field(snapshot, "status"));
+    bind_int64(connection_, statement.get(), 5,
+               file_transfer_epoch_ms(snapshot, "startedAtEpochMs"));
+    bind_int64(connection_, statement.get(), 6,
+               file_transfer_epoch_ms(snapshot, "updatedAtEpochMs"));
+    bind_text(connection_, statement.get(), 7, snapshot.dump());
+    bind_text(connection_, statement.get(), 8, staging.dump());
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  if (sqlite3_changes(connection_) == 0) {
+    throw std::invalid_argument("The file transfer to update does not exist");
+  }
+  prune_terminal_file_transfers(connection_);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::file_transfer_staging(
+    const std::string& transfer_id) const {
+  std::lock_guard lock(mutex_);
+  if (transfer_id.find_first_not_of(" \t\r\n") == std::string::npos) {
+    throw std::invalid_argument("A file transfer id is required");
+  }
+  if (connection_ == nullptr) return std::nullopt;
+  std::optional<std::string> staging_text;
+  {
+    Statement statement(connection_,
+                        "SELECT staging_json FROM file_transfers WHERE transfer_id = ?1");
+    bind_text(connection_, statement.get(), 1, transfer_id);
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    staging_text = column_text(statement.get(), 0);
+  }
+  return parse_file_transfer_staging(*staging_text);
+}
+
+nlohmann::json DesktopDatabase::recover_file_transfers(std::int64_t now_epoch_ms) const {
+  std::lock_guard lock(mutex_);
+  if (now_epoch_ms < 0) {
+    throw std::invalid_argument("The file transfer recovery timestamp is invalid");
+  }
+  nlohmann::json records = nlohmann::json::array();
+  if (connection_ == nullptr) return {{"records", std::move(records)}};
+
+  struct Recovered {
+    std::string transfer_id;
+    bool nonterminal = false;
+    nlohmann::json snapshot;
+    nlohmann::json staging;
+  };
+  std::vector<Recovered> recovered;
+  Transaction transaction(connection_);
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT transfer_id, server_id, direction, status, started_at_epoch_ms,
+               updated_at_epoch_ms, snapshot_json, staging_json
+          FROM file_transfers
+         WHERE status IN ('queued','running','waitingConflict')
+            OR staging_json != '[]'
+         ORDER BY updated_at_epoch_ms DESC, transfer_id DESC
+      )SQL");
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      auto snapshot = decode_file_transfer(rows.get());
+      const bool nonterminal = is_active_transfer_status(column_text(rows.get(), 3));
+      const auto staging_text = column_text(rows.get(), 7);
+      if (!nonterminal && staging_text == "[]") continue;
+      Recovered entry;
+      entry.transfer_id = json_string_field(snapshot, "transferId");
+      entry.nonterminal = nonterminal;
+      if (nonterminal) {
+        snapshot["status"] = "interrupted";
+        snapshot["updatedAtEpochMs"] = now_epoch_ms;
+        snapshot["activeConflict"] = nullptr;
+        snapshot["currentItem"] = nullptr;
+        snapshot["currentItemBytes"] = 0;
+        snapshot["currentItemTotalBytes"] = nullptr;
+      }
+      entry.snapshot = std::move(snapshot);
+      entry.staging = parse_file_transfer_staging(staging_text);
+      recovered.push_back(std::move(entry));
+    }
+  }
+  for (const auto& entry : recovered) {
+    if (entry.nonterminal) {
+      Statement update(connection_, R"SQL(
+          UPDATE file_transfers SET status = 'interrupted', updated_at_epoch_ms = ?2,
+                                    snapshot_json = ?3
+           WHERE transfer_id = ?1
+             AND status IN ('queued','running','waitingConflict')
+        )SQL");
+      bind_text(connection_, update.get(), 1, entry.transfer_id);
+      bind_int64(connection_, update.get(), 2, now_epoch_ms);
+      bind_text(connection_, update.get(), 3, entry.snapshot.dump());
+      if (sqlite3_step(update.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+    }
+    records.push_back({{"snapshot", entry.snapshot}, {"staging", entry.staging}});
+  }
+  transaction.commit();
+  return {{"records", std::move(records)}};
+}
+
 nlohmann::json DesktopDatabase::list_mcp_servers() const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return {{"servers", nlohmann::json::array()}};
@@ -1701,6 +2482,2150 @@ std::optional<nlohmann::json> DesktopDatabase::delete_mcp_server(
     throw std::runtime_error(sqlite3_errmsg(connection_));
   }
   return existing;
+}
+
+void DesktopDatabase::insert_snapshot(const nlohmann::json& snapshot) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) {
+    throw std::runtime_error("The local snapshot database is unavailable");
+  }
+  const auto health = snapshot.at("health").get<std::string>();
+  if (!is_one_of(health, {"healthy", "warning", "critical", "unknown"})) {
+    throw std::runtime_error("The snapshot health is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      INSERT INTO snapshots (id, server_id, collected_at, health, payload)
+      VALUES (?1, ?2, ?3, ?4, ?5)
+    )SQL");
+  bind_text(connection_, statement.get(), 1, snapshot.at("id").get<std::string>());
+  bind_text(connection_, statement.get(), 2, snapshot.at("serverId").get<std::string>());
+  bind_text(connection_, statement.get(), 3, snapshot.at("collectedAt").get<std::string>());
+  bind_text(connection_, statement.get(), 4, health);
+  bind_text(connection_, statement.get(), 5, snapshot.dump());
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::latest_snapshot(
+    const std::string& server_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT payload
+        FROM snapshots
+       WHERE server_id = ?1
+       ORDER BY collected_at DESC, id DESC
+       LIMIT 1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, server_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return parse_json_text(column_text(rows.get(), 0), "snapshot payload");
+}
+
+namespace {
+
+bool has_control_characters(const std::string& value) {
+  return std::any_of(value.begin(), value.end(), [](unsigned char byte) {
+    return byte < 0x20 || byte == 0x7f;
+  });
+}
+
+// One `filesystem_backups` row as the metadata-only record the Agent host RPC
+// exposes. It is deliberately narrower than the table: the durable call identity
+// (plan/step/trace/call) is stored for audit but never handed to the model.
+nlohmann::json decode_filesystem_backup(sqlite3_stmt* statement) {
+  nlohmann::json record = {
+      {"id", column_text(statement, 0)},
+      {"serverId", column_text(statement, 1)},
+      {"path", column_text(statement, 7)},
+      {"backupPath", column_text(statement, 8)},
+      {"revision", column_text(statement, 9)},
+      {"bytesBackedUp", sqlite3_column_int64(statement, 10)},
+      {"status", column_text(statement, 11)},
+      {"createdAt", column_text(statement, 12)},
+      {"updatedAt", column_text(statement, 13)},
+  };
+  add_optional_text(record, "taskId", statement, 2);
+  add_optional_text(record, "restoredAt", statement, 14);
+  add_optional_text(record, "deletedAt", statement, 15);
+  return record;
+}
+
+std::optional<std::string> optional_record_text(const nlohmann::json& record, const char* key) {
+  const auto found = record.find(key);
+  if (found == record.end() || found->is_null()) return std::nullopt;
+  if (!found->is_string()) {
+    throw std::invalid_argument("The filesystem backup record is invalid");
+  }
+  auto value = found->get<std::string>();
+  if (value.empty()) return std::nullopt;
+  return value;
+}
+
+}  // namespace
+
+void DesktopDatabase::insert_filesystem_backup(const nlohmann::json& record) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!record.is_object()) {
+    throw std::invalid_argument("The filesystem backup record is invalid");
+  }
+  const auto required = [&record](const char* key) {
+    const auto found = record.find(key);
+    if (found == record.end() || !found->is_string()) {
+      throw std::invalid_argument("The filesystem backup record is invalid");
+    }
+    return found->get<std::string>();
+  };
+  const auto id = required("id");
+  const auto server_id = required("serverId");
+  const auto path = required("path");
+  const auto backup_path = required("backupPath");
+  const auto revision = required("revision");
+  const auto status = required("status");
+  const auto created_at = required("createdAt");
+  const auto updated_at = required("updatedAt");
+  for (const auto* value : {&id, &server_id, &path, &backup_path, &revision, &created_at,
+                            &updated_at}) {
+    if (value->empty() || has_control_characters(*value)) {
+      throw std::invalid_argument("The filesystem backup record is invalid");
+    }
+  }
+  if (revision.size() != 64 ||
+      !std::all_of(revision.begin(), revision.end(), [](unsigned char byte) {
+        return std::isxdigit(byte) != 0;
+      })) {
+    throw std::invalid_argument("The filesystem backup revision is invalid");
+  }
+  if (!is_one_of(status, {"available", "restored", "deleted"})) {
+    throw std::invalid_argument("The filesystem backup status is invalid");
+  }
+  std::int64_t bytes = -1;
+  const auto bytes_field = record.find("bytesBackedUp");
+  if (bytes_field != record.end() && bytes_field->is_number_integer()) {
+    bytes = bytes_field->get<std::int64_t>();
+  }
+  if (bytes < 0) {
+    throw std::invalid_argument("The filesystem backup byte count is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      INSERT INTO filesystem_backups (
+        id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+        path, backup_path, revision, bytes_backed_up, status, created_at,
+        updated_at, restored_at, deleted_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    )SQL");
+  bind_text(connection_, statement.get(), 1, id);
+  bind_text(connection_, statement.get(), 2, server_id);
+  bind_optional_text(connection_, statement.get(), 3, optional_record_text(record, "taskId"));
+  bind_optional_text(connection_, statement.get(), 4, optional_record_text(record, "planId"));
+  bind_optional_text(connection_, statement.get(), 5, optional_record_text(record, "planStepId"));
+  bind_optional_text(connection_, statement.get(), 6, optional_record_text(record, "traceId"));
+  bind_optional_text(connection_, statement.get(), 7, optional_record_text(record, "callId"));
+  bind_text(connection_, statement.get(), 8, path);
+  bind_text(connection_, statement.get(), 9, backup_path);
+  bind_text(connection_, statement.get(), 10, revision);
+  bind_int64(connection_, statement.get(), 11, bytes);
+  bind_text(connection_, statement.get(), 12, status);
+  bind_text(connection_, statement.get(), 13, created_at);
+  bind_text(connection_, statement.get(), 14, updated_at);
+  bind_optional_text(connection_, statement.get(), 15, optional_record_text(record, "restoredAt"));
+  bind_optional_text(connection_, statement.get(), 16, optional_record_text(record, "deletedAt"));
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::find_available_filesystem_backup(
+    const std::string& server_id, const std::string& path,
+    const std::string& backup_path) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement statement(connection_, R"SQL(
+      SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+             path, backup_path, revision, bytes_backed_up, status, created_at,
+             updated_at, restored_at, deleted_at
+        FROM filesystem_backups
+       WHERE server_id = ?1 AND path = ?2 AND backup_path = ?3
+         AND status = 'available'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, path);
+  bind_text(connection_, statement.get(), 3, backup_path);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_filesystem_backup(statement.get());
+}
+
+nlohmann::json DesktopDatabase::list_filesystem_backups_for_task(
+    const std::string& server_id, const std::string& task_id,
+    const std::optional<std::string>& status, const std::optional<std::string>& path,
+    int limit) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (server_id.empty() || task_id.empty()) {
+    throw std::invalid_argument("Filesystem backup listing requires a server and task");
+  }
+  if (limit < 1 || limit > 128) {
+    throw std::invalid_argument("Filesystem backup listing limit must be between 1 and 128");
+  }
+  if (status.has_value() && !is_one_of(*status, {"available", "restored", "deleted"})) {
+    throw std::invalid_argument("Filesystem backup status is invalid");
+  }
+  if (path.has_value() && (path->empty() || has_control_characters(*path))) {
+    throw std::invalid_argument("Filesystem backup listing path is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+             path, backup_path, revision, bytes_backed_up, status, created_at,
+             updated_at, restored_at, deleted_at
+        FROM filesystem_backups
+       WHERE server_id = ?1 AND task_id = ?2
+         AND (?3 IS NULL OR status = ?3)
+         AND (?4 IS NULL OR path = ?4)
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?5
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, task_id);
+  bind_optional_text(connection_, statement.get(), 3, status);
+  bind_optional_text(connection_, statement.get(), 4, path);
+  bind_int64(connection_, statement.get(), 5, static_cast<std::int64_t>(limit) + 1);
+  nlohmann::json records = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    records.push_back(decode_filesystem_backup(statement.get()));
+  }
+  const bool truncated = static_cast<int>(records.size()) > limit;
+  while (static_cast<int>(records.size()) > limit) records.erase(records.end() - 1);
+  return {{"records", std::move(records)}, {"truncated", truncated}};
+}
+
+nlohmann::json DesktopDatabase::list_available_filesystem_backups_for_server(
+    const std::string& server_id, const std::optional<std::string>& path_prefix,
+    int limit) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (server_id.empty()) {
+    throw std::invalid_argument("Filesystem backup listing requires a server");
+  }
+  if (limit < 1 || limit > 512) {
+    throw std::invalid_argument(
+        "Filesystem backup retention scan limit must be between 1 and 512");
+  }
+  if (path_prefix.has_value() && (path_prefix->empty() || has_control_characters(*path_prefix))) {
+    throw std::invalid_argument("Filesystem backup retention path prefix is invalid");
+  }
+  std::optional<std::string> like_prefix;
+  if (path_prefix.has_value()) {
+    std::string escaped;
+    escaped.reserve(path_prefix->size() + 1);
+    for (const char character : *path_prefix) {
+      if (character == '\\' || character == '%' || character == '_') escaped.push_back('\\');
+      escaped.push_back(character);
+    }
+    escaped.push_back('%');
+    like_prefix = std::move(escaped);
+  }
+  Statement statement(connection_, R"SQL(
+      SELECT id, server_id, task_id, plan_id, plan_step_id, trace_id, call_id,
+             path, backup_path, revision, bytes_backed_up, status, created_at,
+             updated_at, restored_at, deleted_at
+        FROM filesystem_backups
+       WHERE server_id = ?1 AND status = 'available'
+         AND (?2 IS NULL OR path LIKE ?2 ESCAPE '\')
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?3
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_optional_text(connection_, statement.get(), 2, like_prefix);
+  bind_int64(connection_, statement.get(), 3, static_cast<std::int64_t>(limit) + 1);
+  nlohmann::json records = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    records.push_back(decode_filesystem_backup(statement.get()));
+  }
+  const bool truncated = static_cast<int>(records.size()) > limit;
+  while (static_cast<int>(records.size()) > limit) records.erase(records.end() - 1);
+  return {{"records", std::move(records)}, {"truncated", truncated}};
+}
+
+void DesktopDatabase::mark_filesystem_backup_restored(const std::string& server_id,
+                                                      const std::string& path,
+                                                      const std::string& backup_path,
+                                                      const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Statement statement(connection_, R"SQL(
+      UPDATE filesystem_backups
+         SET status = 'restored', restored_at = ?4, updated_at = ?4
+       WHERE server_id = ?1 AND path = ?2 AND backup_path = ?3
+         AND status = 'available'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, path);
+  bind_text(connection_, statement.get(), 3, backup_path);
+  bind_text(connection_, statement.get(), 4, now);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) != 1) {
+    throw std::runtime_error("Filesystem backup is no longer available");
+  }
+}
+
+void DesktopDatabase::mark_filesystem_backup_deleted(const std::string& server_id,
+                                                     const std::string& path,
+                                                     const std::string& backup_path,
+                                                     const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Statement statement(connection_, R"SQL(
+      UPDATE filesystem_backups
+         SET status = 'deleted', deleted_at = ?4, updated_at = ?4
+       WHERE server_id = ?1 AND path = ?2 AND backup_path = ?3
+         AND status = 'available'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, server_id);
+  bind_text(connection_, statement.get(), 2, path);
+  bind_text(connection_, statement.get(), 3, backup_path);
+  bind_text(connection_, statement.get(), 4, now);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) != 1) {
+    throw std::runtime_error("Filesystem backup is no longer available");
+  }
+}
+
+namespace {
+
+bool is_host_tool_call_status(const std::string& value) {
+  return is_one_of(value, {"running", "success", "failed", "cancelled", "uncertain"});
+}
+
+std::string decode_host_tool_call_status(const std::string& raw) {
+  if (!is_host_tool_call_status(raw)) {
+    throw std::runtime_error("Unknown host tool call status `" + raw + "`");
+  }
+  return raw;
+}
+
+bool is_valid_host_tool_call_text(const std::string& value, std::size_t max_length) {
+  return !value.empty() && value.size() <= max_length && !has_control_characters(value);
+}
+
+}  // namespace
+
+std::optional<std::string> DesktopDatabase::host_tool_call_status(
+    const std::string& trace_id, const std::string& call_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement statement(
+      connection_,
+      "SELECT status FROM host_tool_calls WHERE trace_id = ?1 AND call_id = ?2");
+  bind_text(connection_, statement.get(), 1, trace_id);
+  bind_text(connection_, statement.get(), 2, call_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_host_tool_call_status(column_text(statement.get(), 0));
+}
+
+nlohmann::json DesktopDatabase::claim_host_tool_call(const nlohmann::json& input) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!input.is_object()) throw std::invalid_argument("The host tool call is invalid");
+  const auto required = [&input](const char* key) {
+    const auto found = input.find(key);
+    if (found == input.end() || !found->is_string() ||
+        !is_valid_host_tool_call_text(found->get<std::string>(), 4096)) {
+      throw std::invalid_argument("The host tool call is invalid");
+    }
+    return found->get<std::string>();
+  };
+  const auto trace_id = required("traceId");
+  const auto call_id = required("callId");
+  const auto tool_name = required("toolName");
+  const auto request_fingerprint = required("requestFingerprint");
+  const auto started_at = required("startedAt");
+  const auto task_id = optional_record_text(input, "taskId");
+  const auto plan_id = optional_record_text(input, "planId");
+  const auto plan_step_id = optional_record_text(input, "planStepId");
+  const auto action_fingerprint = optional_record_text(input, "actionFingerprint");
+
+  // A resumed durable plan may produce a new provider call id for the same
+  // logical action. Keep failed rows retryable, but block an action that is
+  // still running, already succeeded, or whose remote effect is uncertain.
+  if (task_id.has_value() && plan_id.has_value() && plan_step_id.has_value() &&
+      action_fingerprint.has_value()) {
+    Statement existing(connection_, R"SQL(
+        SELECT request_fingerprint, status
+          FROM host_tool_calls
+         WHERE task_id = ?1 AND plan_id = ?2 AND plan_step_id = ?3
+           AND action_fingerprint = ?4
+           AND status IN ('running', 'success', 'uncertain')
+         ORDER BY started_at DESC LIMIT 1
+      )SQL");
+    bind_text(connection_, existing.get(), 1, *task_id);
+    bind_text(connection_, existing.get(), 2, *plan_id);
+    bind_text(connection_, existing.get(), 3, *plan_step_id);
+    bind_text(connection_, existing.get(), 4, *action_fingerprint);
+    const auto result = sqlite3_step(existing.get());
+    if (result == SQLITE_ROW) {
+      return {{"claimed", false},
+              {"requestFingerprint", column_text(existing.get(), 0)},
+              {"status", decode_host_tool_call_status(column_text(existing.get(), 1))}};
+    }
+    if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+
+  {
+    Statement insert(connection_, R"SQL(
+        INSERT OR IGNORE INTO host_tool_calls (
+          trace_id, call_id, task_id, plan_id, plan_step_id, tool_name,
+          request_fingerprint, action_fingerprint, status, started_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
+      )SQL");
+    bind_text(connection_, insert.get(), 1, trace_id);
+    bind_text(connection_, insert.get(), 2, call_id);
+    bind_optional_text(connection_, insert.get(), 3, task_id);
+    bind_optional_text(connection_, insert.get(), 4, plan_id);
+    bind_optional_text(connection_, insert.get(), 5, plan_step_id);
+    bind_text(connection_, insert.get(), 6, tool_name);
+    bind_text(connection_, insert.get(), 7, request_fingerprint);
+    bind_optional_text(connection_, insert.get(), 8, action_fingerprint);
+    bind_text(connection_, insert.get(), 9, started_at);
+    if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    if (sqlite3_changes(connection_) == 1) return {{"claimed", true}};
+  }
+
+  Statement existing(connection_,
+                     "SELECT request_fingerprint, status FROM host_tool_calls "
+                     "WHERE trace_id = ?1 AND call_id = ?2");
+  bind_text(connection_, existing.get(), 1, trace_id);
+  bind_text(connection_, existing.get(), 2, call_id);
+  if (sqlite3_step(existing.get()) != SQLITE_ROW) {
+    throw std::runtime_error("The host tool call could not be read back");
+  }
+  return {{"claimed", false},
+          {"requestFingerprint", column_text(existing.get(), 0)},
+          {"status", decode_host_tool_call_status(column_text(existing.get(), 1))}};
+}
+
+void DesktopDatabase::finish_host_tool_call(const std::string& trace_id,
+                                            const std::string& call_id,
+                                            const std::string& status,
+                                            const std::string& ended_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  if (!is_host_tool_call_status(status)) {
+    throw std::invalid_argument("The host tool call status is invalid");
+  }
+  Statement statement(connection_, R"SQL(
+      UPDATE host_tool_calls
+         SET status = ?3, ended_at = ?4
+       WHERE trace_id = ?1 AND call_id = ?2 AND status = 'running'
+    )SQL");
+  bind_text(connection_, statement.get(), 1, trace_id);
+  bind_text(connection_, statement.get(), 2, call_id);
+  bind_text(connection_, statement.get(), 3, status);
+  bind_text(connection_, statement.get(), 4, ended_at);
+  if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) != 1) {
+    throw std::invalid_argument("host tool call `" + trace_id + "/" + call_id +
+                                "` was not running");
+  }
+}
+
+nlohmann::json DesktopDatabase::list_investigation_tasks(
+    const std::optional<std::string>& status, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Investigation task limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"tasks", nlohmann::json::array()}};
+  const char* sql = status.has_value()
+      ? R"SQL(
+          SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+                 permission_mode, automation_level, status, max_steps, max_run_ms,
+                 max_attempts, created_by, phase, created_at, updated_at, completed_at,
+                 active_run_id, last_failure, guardrails
+            FROM investigation_tasks
+           WHERE status = ?1
+           ORDER BY updated_at DESC
+           LIMIT ?2
+        )SQL"
+      : R"SQL(
+          SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+                 permission_mode, automation_level, status, max_steps, max_run_ms,
+                 max_attempts, created_by, phase, created_at, updated_at, completed_at,
+                 active_run_id, last_failure, guardrails
+            FROM investigation_tasks
+           ORDER BY updated_at DESC
+           LIMIT ?1
+        )SQL";
+  Statement rows(connection_, sql);
+  int limit_parameter = 1;
+  if (status.has_value()) {
+    bind_text(connection_, rows.get(), 1, *status);
+    limit_parameter = 2;
+  }
+  if (sqlite3_bind_int(rows.get(), limit_parameter, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  nlohmann::json tasks = nlohmann::json::array();
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    tasks.push_back(decode_investigation_task(rows.get()));
+  }
+  return {{"tasks", std::move(tasks)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_task(
+    const std::string& task_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  nlohmann::json task;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+               permission_mode, automation_level, status, max_steps, max_run_ms,
+               max_attempts, created_by, phase, created_at, updated_at, completed_at,
+               active_run_id, last_failure, guardrails
+          FROM investigation_tasks
+         WHERE id = ?1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    task = decode_investigation_task(rows.get());
+  }
+  const auto collect = [&](const char* sql,
+                           nlohmann::json (*decode)(sqlite3_stmt*)) {
+    nlohmann::json items = nlohmann::json::array();
+    Statement rows(connection_, sql);
+    bind_text(connection_, rows.get(), 1, task_id);
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      items.push_back(decode(rows.get()));
+    }
+    return items;
+  };
+  auto evidence = collect(
+      R"SQL(
+        SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary,
+               content_type, content, content_hash, truncated, redaction_status, run_id
+          FROM investigation_evidence
+         WHERE task_id = ?1
+         ORDER BY collected_at DESC, id
+      )SQL",
+      decode_investigation_evidence);
+  auto findings = collect(
+      R"SQL(
+        SELECT id, task_id, title, kind, statement, evidence_ids, confidence,
+               next_verification, created_at
+          FROM investigation_findings
+         WHERE task_id = ?1
+         ORDER BY created_at DESC, id
+      )SQL",
+      decode_investigation_finding);
+  auto artifacts = collect(
+      R"SQL(
+        SELECT id, task_id, run_id, phase, kind, status, title, summary, content,
+               evidence_ids, created_at, updated_at, plan_id, plan_step_id
+          FROM investigation_artifacts
+         WHERE task_id = ?1
+         ORDER BY updated_at DESC, id DESC
+      )SQL",
+      decode_investigation_artifact);
+  auto runs = collect(
+      R"SQL(
+        SELECT id, task_id, session_id, message_id, trace_id, attempt, phase, status,
+               started_at, updated_at, ended_at, checkpoint, failure
+          FROM investigation_runs
+         WHERE task_id = ?1
+         ORDER BY updated_at DESC, id
+      )SQL",
+      decode_investigation_run);
+  auto steps = collect(
+      R"SQL(
+        SELECT id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name,
+               target, input_summary, output_summary, evidence_ids, started_at, ended_at,
+               failure, plan_id, plan_step_id
+          FROM investigation_steps
+         WHERE task_id = ?1
+         ORDER BY ordinal, id
+      )SQL",
+      decode_investigation_step);
+
+  std::optional<nlohmann::json> brief;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT id, task_id, generated_at, status, finding_ids, options, selected_option_id,
+               plan_id
+          FROM investigation_decision_briefs
+         WHERE task_id = ?1
+         ORDER BY generated_at DESC, id DESC
+         LIMIT 1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_ROW) brief = decode_investigation_brief(rows.get());
+    else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  std::optional<nlohmann::json> plan;
+  {
+    Statement rows(connection_, R"SQL(
+        SELECT id, task_id, revision, status, created_at, updated_at, current_step_id, steps,
+               approval, observation_window
+          FROM investigation_plans
+         WHERE task_id = ?1
+         ORDER BY (status IN ('draft','active')) DESC, revision DESC, id DESC
+         LIMIT 1
+      )SQL");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_ROW) plan = decode_investigation_plan(rows.get());
+    else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+
+  nlohmann::json detail = {{"task", std::move(task)},
+                           {"evidence", std::move(evidence)},
+                           {"findings", std::move(findings)},
+                           {"artifacts", std::move(artifacts)},
+                           {"runs", std::move(runs)},
+                           {"steps", std::move(steps)}};
+  if (brief.has_value()) detail["decisionBrief"] = std::move(*brief);
+  if (plan.has_value()) detail["plan"] = std::move(*plan);
+  return detail;
+}
+
+std::optional<nlohmann::json> DesktopDatabase::set_investigation_task_status(
+    const std::string& task_id, const std::string& status,
+    const std::optional<std::string>& completed_at, const std::string& updated_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_tasks
+         SET status = ?2, completed_at = ?3, updated_at = ?4
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, update.get(), 1, task_id);
+  bind_text(connection_, update.get(), 2, status);
+  bind_optional_text(connection_, update.get(), 3, completed_at);
+  bind_text(connection_, update.get(), 4, updated_at);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, workspace_id, server_id, objective, success_criteria, scope, mode,
+             permission_mode, automation_level, status, max_steps, max_run_ms,
+             max_attempts, created_by, phase, created_at, updated_at, completed_at,
+             active_run_id, last_failure, guardrails
+        FROM investigation_tasks
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, task_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_task(rows.get());
+}
+
+std::optional<std::string> DesktopDatabase::active_investigation_run_id(
+    const std::string& task_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, "SELECT active_run_id FROM investigation_tasks WHERE id = ?1");
+  bind_text(connection_, rows.get(), 1, task_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (sqlite3_column_type(rows.get(), 0) == SQLITE_NULL) return std::nullopt;
+  return std::string(column_text(rows.get(), 0));
+}
+
+std::string DesktopDatabase::content_hash(const nlohmann::json& content) {
+  return sha256_hex(content.dump());
+}
+
+std::optional<nlohmann::json> DesktopDatabase::create_investigation_task(
+    const nlohmann::json& task) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  const auto field = [&task](const char* key) {
+    return task.value(key, std::string());
+  };
+  if (field("id").empty()) throw std::invalid_argument("investigation task id is required");
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_tasks (
+        id, workspace_id, server_id, objective, success_criteria, scope, mode,
+        permission_mode, automation_level, status, max_steps, max_run_ms, completed_at,
+        max_attempts, created_by, phase, active_run_id, last_failure, guardrails,
+        created_at, updated_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+                ?20, ?21)
+    )SQL");
+  const auto text_or_null = [&task](const char* key) -> std::optional<std::string> {
+    const auto found = task.find(key);
+    if (found == task.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  bind_text(connection_, insert.get(), 1, field("id"));
+  bind_optional_text(connection_, insert.get(), 2, text_or_null("workspaceId"));
+  bind_optional_text(connection_, insert.get(), 3, text_or_null("serverId"));
+  bind_text(connection_, insert.get(), 4, task.value("objective", std::string()));
+  bind_text(connection_, insert.get(), 5,
+            task.contains("successCriteria") ? task.at("successCriteria").dump() : "[]");
+  bind_text(connection_, insert.get(), 6,
+            task.contains("scope") ? task.at("scope").dump() : "{}");
+  bind_text(connection_, insert.get(), 7, task.value("mode", std::string("goal")));
+  bind_text(connection_, insert.get(), 8, task.value("permissionMode", std::string("ask")));
+  bind_text(connection_, insert.get(), 9, task.value("automationLevel", std::string("propose")));
+  bind_text(connection_, insert.get(), 10, task.value("status", std::string("pending")));
+  const auto budget = task.contains("budget") && task.at("budget").is_object()
+                          ? task.at("budget")
+                          : nlohmann::json::object();
+  bind_text(connection_, insert.get(), 11,
+            std::to_string(budget.value("maxSteps", std::int64_t{50})));
+  bind_text(connection_, insert.get(), 12,
+            std::to_string(budget.value("maxRunMs", std::int64_t{600000})));
+  bind_optional_text(connection_, insert.get(), 13, text_or_null("completedAt"));
+  bind_text(connection_, insert.get(), 14,
+            std::to_string(budget.value("maxAttempts", std::int64_t{3})));
+  bind_text(connection_, insert.get(), 15, task.value("createdBy", std::string("user")));
+  bind_text(connection_, insert.get(), 16, task.value("phase", std::string("investigating")));
+  bind_optional_text(connection_, insert.get(), 17, text_or_null("activeRunId"));
+  const auto failure = task.find("lastFailure");
+  if (failure != task.end() && !failure->is_null()) {
+    bind_text(connection_, insert.get(), 18, failure->dump());
+  } else {
+    bind_optional_text(connection_, insert.get(), 18, std::nullopt);
+  }
+  bind_text(connection_, insert.get(), 19,
+            task.contains("guardrails") ? task.at("guardrails").dump() : "{}");
+  const auto created_at = text_or_null("createdAt");
+  const auto updated_at = text_or_null("updatedAt");
+  if (!created_at.has_value() || !updated_at.has_value()) {
+    throw std::invalid_argument("investigation task createdAt and updatedAt are required");
+  }
+  bind_text(connection_, insert.get(), 20, *created_at);
+  bind_text(connection_, insert.get(), 21, *updated_at);
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return load_investigation_task_row(connection_, field("id"));
+}
+
+std::optional<nlohmann::json> DesktopDatabase::update_investigation_task_progress(
+    const std::string& task_id, const std::string& status, const std::string& phase,
+    const std::optional<std::string>& active_run_id,
+    const std::optional<nlohmann::json>& last_failure, const std::string& updated_at,
+    const std::optional<std::string>& completed_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_tasks
+         SET status = ?2, phase = ?3, active_run_id = ?4, last_failure = ?5,
+             updated_at = ?6, completed_at = ?7
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, update.get(), 1, task_id);
+  bind_text(connection_, update.get(), 2, status);
+  bind_text(connection_, update.get(), 3, phase);
+  bind_optional_text(connection_, update.get(), 4, active_run_id);
+  if (last_failure.has_value()) {
+    bind_text(connection_, update.get(), 5, last_failure->dump());
+  } else {
+    bind_optional_text(connection_, update.get(), 5, std::nullopt);
+  }
+  bind_text(connection_, update.get(), 6, updated_at);
+  bind_optional_text(connection_, update.get(), 7, completed_at);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  return load_investigation_task_row(connection_, task_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_plan(
+    const std::string& plan_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, revision, status, created_at, updated_at, current_step_id, steps,
+             approval, observation_window
+        FROM investigation_plans
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, plan_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_plan(rows.get());
+}
+
+std::optional<nlohmann::json> DesktopDatabase::latest_investigation_plan(
+    const std::string& task_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, revision, status, created_at, updated_at, current_step_id, steps,
+             approval, observation_window
+        FROM investigation_plans
+       WHERE task_id = ?1 AND status IN ('draft','active','completed')
+       ORDER BY revision DESC, id DESC
+       LIMIT 1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, task_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_plan(rows.get());
+}
+
+void DesktopDatabase::save_investigation_plan(const nlohmann::json& plan) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  const auto plan_id = plan.value("id", std::string());
+  const auto task_id = plan.value("taskId", std::string());
+  if (plan_id.empty() || task_id.empty()) {
+    throw std::invalid_argument("investigation plan id and taskId are required");
+  }
+  const auto steps = plan.contains("steps") ? plan.at("steps").dump() : "[]";
+  const auto approval =
+      plan.contains("approval") && !plan.at("approval").is_null()
+          ? std::optional<std::string>(plan.at("approval").dump())
+          : std::nullopt;
+  const auto window =
+      plan.contains("observationWindow") && !plan.at("observationWindow").is_null()
+          ? std::optional<std::string>(plan.at("observationWindow").dump())
+          : std::nullopt;
+  Transaction transaction(connection_);
+  {
+    Statement existing(connection_, "SELECT task_id FROM investigation_plans WHERE id = ?1");
+    bind_text(connection_, existing.get(), 1, plan_id);
+    const auto result = sqlite3_step(existing.get());
+    if (result == SQLITE_ROW) {
+      if (std::string(column_text(existing.get(), 0)) != task_id) {
+        throw std::invalid_argument("investigation plan id belongs to another task");
+      }
+      Statement update(connection_, R"SQL(
+          UPDATE investigation_plans
+             SET revision = ?2, status = ?3, created_at = ?4, updated_at = ?5,
+                 current_step_id = ?6, steps = ?7, approval = ?8, observation_window = ?9
+           WHERE id = ?1
+        )SQL");
+      bind_text(connection_, update.get(), 1, plan_id);
+      if (sqlite3_bind_int64(update.get(), 2, plan.value("revision", std::int64_t{1})) != SQLITE_OK) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      bind_text(connection_, update.get(), 3, plan.value("status", std::string("active")));
+      bind_text(connection_, update.get(), 4, plan.value("createdAt", std::string()));
+      bind_text(connection_, update.get(), 5, plan.value("updatedAt", std::string()));
+      const auto current = plan.find("currentStepId");
+      if (current != plan.end() && current->is_string()) {
+        bind_text(connection_, update.get(), 6, current->get<std::string>());
+      } else {
+        bind_optional_text(connection_, update.get(), 6, std::nullopt);
+      }
+      bind_text(connection_, update.get(), 7, steps);
+      bind_optional_text(connection_, update.get(), 8, approval);
+      bind_optional_text(connection_, update.get(), 9, window);
+      if (sqlite3_step(update.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+    } else if (result == SQLITE_DONE) {
+      Statement supersede(connection_, R"SQL(
+          UPDATE investigation_plans SET status = 'superseded', updated_at = ?2
+           WHERE task_id = ?1 AND status IN ('draft','active')
+        )SQL");
+      bind_text(connection_, supersede.get(), 1, task_id);
+      bind_text(connection_, supersede.get(), 2, plan.value("updatedAt", std::string()));
+      if (sqlite3_step(supersede.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      Statement insert(connection_, R"SQL(
+          INSERT INTO investigation_plans
+            (id, task_id, revision, status, created_at, updated_at, current_step_id, steps,
+             approval, observation_window)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        )SQL");
+      bind_text(connection_, insert.get(), 1, plan_id);
+      bind_text(connection_, insert.get(), 2, task_id);
+      if (sqlite3_bind_int64(insert.get(), 3, plan.value("revision", std::int64_t{1})) != SQLITE_OK) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      bind_text(connection_, insert.get(), 4, plan.value("status", std::string("active")));
+      bind_text(connection_, insert.get(), 5, plan.value("createdAt", std::string()));
+      bind_text(connection_, insert.get(), 6, plan.value("updatedAt", std::string()));
+      const auto current = plan.find("currentStepId");
+      if (current != plan.end() && current->is_string()) {
+        bind_text(connection_, insert.get(), 7, current->get<std::string>());
+      } else {
+        bind_optional_text(connection_, insert.get(), 7, std::nullopt);
+      }
+      bind_text(connection_, insert.get(), 8, steps);
+      bind_optional_text(connection_, insert.get(), 9, approval);
+      bind_optional_text(connection_, insert.get(), 10, window);
+      if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+    } else {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  transaction.commit();
+}
+
+void DesktopDatabase::upsert_investigation_artifact(const nlohmann::json& artifact) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  const auto artifact_id = artifact.value("id", std::string());
+  const auto task_id = artifact.value("taskId", std::string());
+  if (artifact_id.empty() || task_id.empty()) {
+    throw std::invalid_argument("investigation artifact id and taskId are required");
+  }
+  const auto content = artifact.contains("content") ? artifact.at("content").dump() : "null";
+  if (content.size() > 1048576) {
+    throw std::invalid_argument("investigation artifact content exceeds the 1 MiB limit");
+  }
+  {
+    Statement existing(connection_,
+                       "SELECT task_id FROM investigation_artifacts WHERE id = ?1");
+    bind_text(connection_, existing.get(), 1, artifact_id);
+    const auto result = sqlite3_step(existing.get());
+    if (result == SQLITE_ROW &&
+        std::string(column_text(existing.get(), 0)) != task_id) {
+      throw std::invalid_argument("investigation artifact id belongs to another task");
+    }
+    if (result != SQLITE_ROW && result != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  const auto optional_text = [&artifact](const char* key) -> std::optional<std::string> {
+    const auto found = artifact.find(key);
+    if (found == artifact.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement upsert(connection_, R"SQL(
+      INSERT INTO investigation_artifacts (
+        id, task_id, run_id, plan_id, plan_step_id, phase, kind, status, title, summary,
+        content, evidence_ids, created_at, updated_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+      ON CONFLICT(id) DO UPDATE SET
+        run_id = excluded.run_id, plan_id = excluded.plan_id,
+        plan_step_id = excluded.plan_step_id, phase = excluded.phase, kind = excluded.kind,
+        status = excluded.status, title = excluded.title, summary = excluded.summary,
+        content = excluded.content, evidence_ids = excluded.evidence_ids,
+        updated_at = excluded.updated_at
+    )SQL");
+  bind_text(connection_, upsert.get(), 1, artifact_id);
+  bind_text(connection_, upsert.get(), 2, task_id);
+  bind_optional_text(connection_, upsert.get(), 3, optional_text("runId"));
+  bind_optional_text(connection_, upsert.get(), 4, optional_text("planId"));
+  bind_optional_text(connection_, upsert.get(), 5, optional_text("planStepId"));
+  bind_text(connection_, upsert.get(), 6, artifact.value("phase", std::string("investigating")));
+  bind_text(connection_, upsert.get(), 7, artifact.value("kind", std::string()));
+  bind_text(connection_, upsert.get(), 8, artifact.value("status", std::string("draft")));
+  bind_text(connection_, upsert.get(), 9, artifact.value("title", std::string()));
+  bind_text(connection_, upsert.get(), 10, artifact.value("summary", std::string()));
+  bind_text(connection_, upsert.get(), 11, content);
+  bind_text(connection_, upsert.get(), 12,
+            artifact.contains("evidenceIds") ? artifact.at("evidenceIds").dump() : "[]");
+  bind_text(connection_, upsert.get(), 13, artifact.value("createdAt", std::string()));
+  bind_text(connection_, upsert.get(), 14, artifact.value("updatedAt", std::string()));
+  if (sqlite3_step(upsert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+nlohmann::json DesktopDatabase::list_investigation_artifacts(const std::string& task_id,
+                                                            int limit) const {
+  std::lock_guard lock(mutex_);
+  nlohmann::json items = nlohmann::json::array();
+  if (connection_ == nullptr) return {{"artifacts", std::move(items)}};
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, run_id, phase, kind, status, title, summary, content, evidence_ids,
+             created_at, updated_at, plan_id, plan_step_id
+        FROM investigation_artifacts
+       WHERE task_id = ?1
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ?2
+    )SQL");
+  bind_text(connection_, rows.get(), 1, task_id);
+  if (sqlite3_bind_int(rows.get(), 2, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    items.push_back(decode_investigation_artifact(rows.get()));
+  }
+  return {{"artifacts", std::move(items)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::find_investigation_evidence_in_run(
+    const nlohmann::json& evidence) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  const auto run_id = evidence.find("runId");
+  if (run_id == evidence.end() || !run_id->is_string()) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary, content_type,
+             content, content_hash, truncated, redaction_status, run_id
+        FROM investigation_evidence
+       WHERE task_id = ?1 AND run_id = ?2 AND scope = ?3 AND kind = ?4 AND source_tool = ?5
+         AND input_summary = ?6 AND content_hash = ?7 AND truncated = ?8 AND content_type = ?9
+       ORDER BY collected_at DESC, id DESC
+       LIMIT 1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, evidence.value("taskId", std::string()));
+  bind_text(connection_, rows.get(), 2, run_id->get<std::string>());
+  bind_text(connection_, rows.get(), 3, evidence.at("scope").dump());
+  bind_text(connection_, rows.get(), 4, evidence.value("kind", std::string()));
+  bind_text(connection_, rows.get(), 5, evidence.value("sourceTool", std::string()));
+  bind_text(connection_, rows.get(), 6, evidence.value("inputSummary", std::string()));
+  bind_text(connection_, rows.get(), 7, evidence.value("contentHash", std::string()));
+  if (sqlite3_bind_int(rows.get(), 8, evidence.value("truncated", false) ? 1 : 0) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  bind_text(connection_, rows.get(), 9, evidence.value("contentType", std::string()));
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_evidence(rows.get());
+}
+
+void DesktopDatabase::record_investigation_evidence(const nlohmann::json& evidence) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  const auto content = evidence.contains("content") ? evidence.at("content").dump() : "null";
+  if (content.size() > 1048576) {
+    throw std::invalid_argument("evidence content exceeds 1048576 bytes");
+  }
+  if (evidence.value("redactionStatus", std::string("unknown")) == "unknown") {
+    throw std::invalid_argument("evidence must be redacted before persistence");
+  }
+  if (content_hash(evidence.at("content")) != evidence.value("contentHash", std::string())) {
+    throw std::invalid_argument("evidence contentHash does not match content");
+  }
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_evidence (
+        id, task_id, run_id, scope, kind, source_tool, collected_at, input_summary,
+        content_type, content, content_hash, truncated, redaction_status
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+    )SQL");
+  bind_text(connection_, insert.get(), 1, evidence.value("id", std::string()));
+  bind_text(connection_, insert.get(), 2, evidence.value("taskId", std::string()));
+  const auto run_id = evidence.find("runId");
+  if (run_id != evidence.end() && run_id->is_string()) {
+    bind_text(connection_, insert.get(), 3, run_id->get<std::string>());
+  } else {
+    bind_optional_text(connection_, insert.get(), 3, std::nullopt);
+  }
+  bind_text(connection_, insert.get(), 4, evidence.at("scope").dump());
+  bind_text(connection_, insert.get(), 5, evidence.value("kind", std::string()));
+  bind_text(connection_, insert.get(), 6, evidence.value("sourceTool", std::string()));
+  bind_text(connection_, insert.get(), 7, evidence.value("collectedAt", std::string()));
+  bind_text(connection_, insert.get(), 8, evidence.value("inputSummary", std::string()));
+  bind_text(connection_, insert.get(), 9, evidence.value("contentType", std::string()));
+  bind_text(connection_, insert.get(), 10, content);
+  bind_text(connection_, insert.get(), 11, evidence.value("contentHash", std::string()));
+  if (sqlite3_bind_int(insert.get(), 12, evidence.value("truncated", false) ? 1 : 0) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  bind_text(connection_, insert.get(), 13, evidence.value("redactionStatus", std::string()));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_evidence(
+    const std::string& evidence_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary, content_type,
+             content, content_hash, truncated, redaction_status, run_id
+        FROM investigation_evidence
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, evidence_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_evidence(rows.get());
+}
+
+nlohmann::json DesktopDatabase::search_investigation_evidence(
+    const std::string& task_id, const nlohmann::json& query) const {
+  std::lock_guard lock(mutex_);
+  nlohmann::json items = nlohmann::json::array();
+  if (connection_ == nullptr) return std::move(items);
+  const auto optional = [&query](const char* key) -> std::optional<std::string> {
+    const auto found = query.find(key);
+    if (found == query.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  const auto limit = query.value("limit", 32);
+  if (limit < 1 || limit > 64) {
+    throw std::invalid_argument("evidence search limit must be between 1 and 64");
+  }
+  const auto scope = query.find("scope");
+  const std::optional<std::string> scope_text =
+      scope != query.end() && scope->is_object() ? std::optional<std::string>(scope->dump())
+                                                 : std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary, content_type,
+             content, content_hash, truncated, redaction_status, run_id
+        FROM investigation_evidence
+       WHERE task_id = ?1
+         AND (?2 IS NULL OR source_tool = ?2)
+         AND (?3 IS NULL OR kind = ?3)
+         AND (?4 IS NULL OR collected_at >= ?4)
+         AND (?5 IS NULL OR collected_at <= ?5)
+         AND (?6 IS NULL OR scope = ?6)
+       ORDER BY collected_at DESC, id DESC
+       LIMIT ?7
+    )SQL");
+  bind_text(connection_, rows.get(), 1, task_id);
+  bind_optional_text(connection_, rows.get(), 2, optional("sourceTool"));
+  bind_optional_text(connection_, rows.get(), 3, optional("kind"));
+  bind_optional_text(connection_, rows.get(), 4, optional("from"));
+  bind_optional_text(connection_, rows.get(), 5, optional("to"));
+  bind_optional_text(connection_, rows.get(), 6, scope_text);
+  if (sqlite3_bind_int(rows.get(), 7, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    items.push_back(decode_investigation_evidence(rows.get()));
+  }
+  return items;
+}
+
+nlohmann::json DesktopDatabase::list_investigation_evidence_for_run(
+    const std::string& run_id, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 64) {
+    throw std::invalid_argument("evidence run listing limit must be between 1 and 64");
+  }
+  nlohmann::json items = nlohmann::json::array();
+  if (connection_ == nullptr) return items;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, scope, kind, source_tool, collected_at, input_summary, content_type,
+             content, content_hash, truncated, redaction_status, run_id
+        FROM investigation_evidence
+       WHERE run_id = ?1
+       ORDER BY collected_at DESC, id DESC
+       LIMIT ?2
+    )SQL");
+  bind_text(connection_, rows.get(), 1, run_id);
+  if (sqlite3_bind_int(rows.get(), 2, limit) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    items.push_back(decode_investigation_evidence(rows.get()));
+  }
+  return items;
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_finding(
+    const std::string& finding_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, title, kind, statement, evidence_ids, confidence, next_verification,
+             created_at
+        FROM investigation_findings
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, finding_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_finding(rows.get());
+}
+
+void DesktopDatabase::record_investigation_finding(const nlohmann::json& finding) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_findings (
+        id, task_id, title, kind, statement, evidence_ids, confidence, next_verification,
+        created_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+    )SQL");
+  bind_text(connection_, insert.get(), 1, finding.value("id", std::string()));
+  bind_text(connection_, insert.get(), 2, finding.value("taskId", std::string()));
+  bind_text(connection_, insert.get(), 3, finding.value("title", std::string()));
+  bind_text(connection_, insert.get(), 4, finding.value("kind", std::string("unknown")));
+  bind_text(connection_, insert.get(), 5, finding.value("statement", std::string()));
+  bind_text(connection_, insert.get(), 6,
+            finding.contains("evidenceIds") ? finding.at("evidenceIds").dump() : "[]");
+  bind_text(connection_, insert.get(), 7, finding.value("confidence", std::string("low")));
+  const auto next = finding.find("nextVerification");
+  if (next != finding.end() && next->is_string()) {
+    bind_text(connection_, insert.get(), 8, next->get<std::string>());
+  } else {
+    bind_optional_text(connection_, insert.get(), 8, std::nullopt);
+  }
+  bind_text(connection_, insert.get(), 9, finding.value("createdAt", std::string()));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_brief(
+    const std::string& brief_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement rows(connection_, R"SQL(
+      SELECT id, task_id, generated_at, status, finding_ids, options, selected_option_id, plan_id
+        FROM investigation_decision_briefs
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, rows.get(), 1, brief_id);
+  const auto result = sqlite3_step(rows.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_investigation_brief(rows.get());
+}
+
+void DesktopDatabase::record_investigation_brief(const nlohmann::json& brief) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_decision_briefs (
+        id, task_id, plan_id, generated_at, status, finding_ids, options, selected_option_id
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    )SQL");
+  bind_text(connection_, insert.get(), 1, brief.value("id", std::string()));
+  bind_text(connection_, insert.get(), 2, brief.value("taskId", std::string()));
+  const auto plan_id = brief.find("planId");
+  if (plan_id != brief.end() && plan_id->is_string()) {
+    bind_text(connection_, insert.get(), 3, plan_id->get<std::string>());
+  } else {
+    bind_optional_text(connection_, insert.get(), 3, std::nullopt);
+  }
+  bind_text(connection_, insert.get(), 4, brief.value("generatedAt", std::string()));
+  bind_text(connection_, insert.get(), 5, brief.value("status", std::string("draft")));
+  bind_text(connection_, insert.get(), 6,
+            brief.contains("findingIds") ? brief.at("findingIds").dump() : "[]");
+  bind_text(connection_, insert.get(), 7,
+            brief.contains("options") ? brief.at("options").dump() : "[]");
+  bind_optional_text(connection_, insert.get(), 8, std::nullopt);
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::select_investigation_brief_option(
+    const std::string& task_id, const std::string& brief_id,
+    const std::string& option_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement read(connection_, R"SQL(
+      SELECT id, task_id, generated_at, status, finding_ids, options, selected_option_id, plan_id
+        FROM investigation_decision_briefs
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, read.get(), 1, brief_id);
+  const auto result = sqlite3_step(read.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  auto brief = decode_investigation_brief(read.get());
+  if (brief.value("taskId", std::string()) != task_id) {
+    throw std::invalid_argument("decision brief does not belong to the current investigation task");
+  }
+  if (brief.value("status", std::string()) == "dismissed") {
+    throw std::invalid_argument("dismissed decision briefs cannot be selected");
+  }
+  auto options = brief.value("options", nlohmann::json::array());
+  if (!options.is_array()) throw std::runtime_error("stored decision brief options are invalid");
+  bool found = false;
+  for (auto& option : options) {
+    if (!option.is_object()) continue;
+    const bool selected = option.value("id", std::string()) == option_id;
+    if (selected) found = true;
+    option["status"] = selected ? "selected" : "rejected";
+  }
+  if (!found) {
+    throw std::invalid_argument("decision option was not found in the selected brief");
+  }
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_decision_briefs
+         SET status = ?3, selected_option_id = ?2, options = ?5
+       WHERE id = ?1 AND task_id = ?4
+    )SQL");
+  bind_text(connection_, update.get(), 1, brief_id);
+  bind_text(connection_, update.get(), 2, option_id);
+  bind_text(connection_, update.get(), 3, "selected");
+  bind_text(connection_, update.get(), 4, task_id);
+  bind_text(connection_, update.get(), 5, options.dump());
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return get_investigation_brief(brief_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::investigation_retention_preview(
+    const std::string& task_id, const std::string& cutoff_at, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  if (!iso8601_utc_text(cutoff_at)) {
+    throw std::invalid_argument("retention cutoff must be a UTC ISO-8601 timestamp");
+  }
+  if (limit < 1 || limit > 128) {
+    throw std::invalid_argument("retention preview limit must be between 1 and 128");
+  }
+  const auto status = investigation_task_status(connection_, task_id);
+  if (!status.has_value()) return std::nullopt;
+  if (!terminal_task_status(*status)) {
+    throw std::invalid_argument("retention is available only for terminal investigation tasks");
+  }
+  const auto protected_ids = collect_protected_evidence(connection_, task_id);
+  std::vector<nlohmann::json> candidates;
+  std::int64_t candidate_bytes = 0;
+  std::int64_t protected_count = 0;
+  const auto collect = [&](const char* sql, const char* kind, const char* reason,
+                           bool can_be_protected, bool count_protected) {
+    Statement statement(connection_, sql);
+    bind_text(connection_, statement.get(), 1, task_id);
+    bind_text(connection_, statement.get(), 2, cutoff_at);
+    for (;;) {
+      const auto result = sqlite3_step(statement.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      const auto id = std::string(column_text(statement.get(), 0));
+      if (can_be_protected && protected_ids.find(id) != protected_ids.end()) {
+        if (count_protected) ++protected_count;
+        continue;
+      }
+      const auto bytes = sqlite3_column_int64(statement.get(), 3);
+      candidate_bytes += bytes;
+      candidates.push_back({{"id", id},
+                            {"taskId", column_text(statement.get(), 1)},
+                            {"kind", kind},
+                            {"createdAt", column_text(statement.get(), 2)},
+                            {"bytes", bytes},
+                            {"reason", reason}});
+    }
+  };
+  collect(R"SQL(
+      SELECT id, task_id, collected_at, length(CAST(content AS BLOB))
+        FROM investigation_evidence
+       WHERE task_id = ?1 AND collected_at < ?2
+    )SQL",
+          "evidence", "unreferenced_evidence", true, true);
+  collect(R"SQL(
+      SELECT id, task_id, updated_at, length(CAST(content AS BLOB))
+        FROM investigation_artifacts
+       WHERE task_id = ?1 AND status = 'superseded' AND updated_at < ?2
+    )SQL",
+          "artifact", "superseded_artifact", false, false);
+  std::sort(candidates.begin(), candidates.end(),
+            [](const nlohmann::json& left, const nlohmann::json& right) {
+              const auto left_time = left.value("createdAt", std::string());
+              const auto right_time = right.value("createdAt", std::string());
+              if (left_time != right_time) return left_time < right_time;
+              const auto left_kind = left.value("kind", std::string());
+              const auto right_kind = right.value("kind", std::string());
+              if (left_kind != right_kind) return left_kind < right_kind;
+              return left.value("id", std::string()) < right.value("id", std::string());
+            });
+  const auto total_candidates = static_cast<std::int64_t>(candidates.size());
+  nlohmann::json bounded = nlohmann::json::array();
+  for (std::int64_t index = 0; index < total_candidates && index < limit; ++index) {
+    bounded.push_back(candidates[static_cast<size_t>(index)]);
+  }
+  return nlohmann::json{{"taskId", task_id},
+                        {"cutoffAt", cutoff_at},
+                        {"candidates", std::move(bounded)},
+                        {"protectedCount", protected_count},
+                        {"candidateBytes", candidate_bytes},
+                        {"truncated", total_candidates > limit}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::investigation_retention_prune(
+    const std::string& task_id, const std::string& cutoff_at, const nlohmann::json& items,
+    const std::string& audit_id, const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  if (!iso8601_utc_text(cutoff_at)) {
+    throw std::invalid_argument("retention cutoff must be a UTC ISO-8601 timestamp");
+  }
+  if (!items.is_array() || items.empty() || items.size() > 128) {
+    throw std::invalid_argument("retention prune requires between 1 and 128 items");
+  }
+  const auto status = investigation_task_status(connection_, task_id);
+  if (!status.has_value()) return std::nullopt;
+  if (!terminal_task_status(*status)) {
+    throw std::invalid_argument("retention is available only for terminal investigation tasks");
+  }
+  Transaction transaction(connection_);
+  const auto protected_ids = collect_protected_evidence(connection_, task_id);
+  nlohmann::json deleted = nlohmann::json::array();
+  nlohmann::json skipped = nlohmann::json::array();
+  std::set<std::string> seen;
+  for (const auto& item : items) {
+    if (!item.is_object()) {
+      throw std::invalid_argument("retention prune items must be objects");
+    }
+    const auto id = item.value("id", std::string());
+    const auto kind = item.value("kind", std::string());
+    if (kind != "evidence" && kind != "artifact") {
+      throw std::invalid_argument("retention item kind must be evidence or artifact");
+    }
+    if (id.empty()) throw std::invalid_argument("retention item id is required");
+    if (!seen.insert(kind + "\x1f" + id).second) {
+      throw std::invalid_argument("retention prune items must be unique");
+    }
+    if (kind == "evidence") {
+      Statement read(connection_, R"SQL(
+          SELECT id, task_id, collected_at, length(CAST(content AS BLOB))
+            FROM investigation_evidence
+           WHERE id = ?1 AND task_id = ?2
+        )SQL");
+      bind_text(connection_, read.get(), 1, id);
+      bind_text(connection_, read.get(), 2, task_id);
+      const auto result = sqlite3_step(read.get());
+      if (result == SQLITE_DONE) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "not_found"}});
+        continue;
+      }
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      const auto owner = std::string(column_text(read.get(), 1));
+      const auto created_at = std::string(column_text(read.get(), 2));
+      const auto bytes = sqlite3_column_int64(read.get(), 3);
+      if (created_at >= cutoff_at) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "newer_than_cutoff"}});
+        continue;
+      }
+      if (protected_ids.find(id) != protected_ids.end()) {
+        skipped.push_back(
+            {{"id", id}, {"kind", kind}, {"reason", "referenced_by_task_history"}});
+        continue;
+      }
+      Statement remove(connection_, R"SQL(
+          DELETE FROM investigation_evidence
+           WHERE id = ?1 AND task_id = ?2 AND collected_at < ?3
+        )SQL");
+      bind_text(connection_, remove.get(), 1, id);
+      bind_text(connection_, remove.get(), 2, task_id);
+      bind_text(connection_, remove.get(), 3, cutoff_at);
+      if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      if (sqlite3_changes(connection_) == 1) {
+        deleted.push_back({{"id", id},
+                           {"taskId", owner},
+                           {"kind", kind},
+                           {"createdAt", created_at},
+                           {"bytes", bytes},
+                           {"reason", "unreferenced_evidence"}});
+      } else {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "changed_during_prune"}});
+      }
+    } else {
+      Statement read(connection_, R"SQL(
+          SELECT id, task_id, updated_at, length(CAST(content AS BLOB)), status
+            FROM investigation_artifacts
+           WHERE id = ?1 AND task_id = ?2
+        )SQL");
+      bind_text(connection_, read.get(), 1, id);
+      bind_text(connection_, read.get(), 2, task_id);
+      const auto result = sqlite3_step(read.get());
+      if (result == SQLITE_DONE) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "not_found"}});
+        continue;
+      }
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      const auto owner = std::string(column_text(read.get(), 1));
+      const auto updated_at = std::string(column_text(read.get(), 2));
+      const auto bytes = sqlite3_column_int64(read.get(), 3);
+      const auto artifact_status = std::string(column_text(read.get(), 4));
+      if (artifact_status != "superseded") {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "artifact_not_superseded"}});
+        continue;
+      }
+      if (updated_at >= cutoff_at) {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "newer_than_cutoff"}});
+        continue;
+      }
+      Statement remove(connection_, R"SQL(
+          DELETE FROM investigation_artifacts
+           WHERE id = ?1 AND task_id = ?2 AND status = 'superseded' AND updated_at < ?3
+        )SQL");
+      bind_text(connection_, remove.get(), 1, id);
+      bind_text(connection_, remove.get(), 2, task_id);
+      bind_text(connection_, remove.get(), 3, cutoff_at);
+      if (sqlite3_step(remove.get()) != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      if (sqlite3_changes(connection_) == 1) {
+        deleted.push_back({{"id", id},
+                           {"taskId", owner},
+                           {"kind", kind},
+                           {"createdAt", updated_at},
+                           {"bytes", bytes},
+                           {"reason", "superseded_artifact"}});
+      } else {
+        skipped.push_back({{"id", id}, {"kind", kind}, {"reason", "changed_during_prune"}});
+      }
+    }
+  }
+  std::int64_t deleted_evidence = 0;
+  std::int64_t deleted_artifacts = 0;
+  for (const auto& entry : deleted) {
+    if (entry.value("kind", std::string()) == "evidence") {
+      ++deleted_evidence;
+    } else {
+      ++deleted_artifacts;
+    }
+  }
+  const std::string description =
+      "retention prune task=" + task_id + " cutoff=" + cutoff_at +
+      " deleted_evidence=" + std::to_string(deleted_evidence) +
+      " deleted_artifacts=" + std::to_string(deleted_artifacts) +
+      " skipped=" + std::to_string(skipped.size());
+  Statement activity(connection_, R"SQL(
+      INSERT INTO activities (
+        id, server_id, workspace_id, type, title, description, source, actor,
+        reason, outcome, trace_id, created_at
+      )
+      SELECT ?1, server_id, workspace_id, 'agent_action',
+             '清理排查任务历史数据', ?2, 'user', 'user',
+             'explicit_retention_prune', 'success', ?1, ?3
+      FROM investigation_tasks WHERE id = ?4
+    )SQL");
+  bind_text(connection_, activity.get(), 1, audit_id);
+  bind_text(connection_, activity.get(), 2, description);
+  bind_text(connection_, activity.get(), 3, now);
+  bind_text(connection_, activity.get(), 4, task_id);
+  if (sqlite3_step(activity.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  transaction.commit();
+  return nlohmann::json{{"taskId", task_id},
+                        {"cutoffAt", cutoff_at},
+                        {"deleted", std::move(deleted)},
+                        {"skipped", std::move(skipped)}};
+}
+
+nlohmann::json DesktopDatabase::list_investigation_schedules(int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Schedule limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"schedules", nlohmann::json::array()}};
+  nlohmann::json schedules = nlohmann::json::array();
+  const std::string sql = std::string("SELECT ") + kScheduleColumns +
+                          " FROM investigation_schedules ORDER BY next_run_at ASC, id ASC "
+                          "LIMIT ?1";
+  Statement rows(connection_, sql.c_str());
+  bind_int64(connection_, rows.get(), 1, limit);
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    schedules.push_back(decode_investigation_schedule(rows.get()));
+  }
+  return {{"schedules", std::move(schedules)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_schedule(
+    const std::string& schedule_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  return load_investigation_schedule_row(connection_, schedule_id);
+}
+
+nlohmann::json DesktopDatabase::list_investigation_schedule_runs(
+    const std::string& schedule_id, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("Schedule run limit must be between 1 and 100");
+  }
+  if (connection_ == nullptr) return {{"runs", nlohmann::json::array()}};
+  nlohmann::json runs = nlohmann::json::array();
+  const std::string sql = std::string("SELECT ") + kScheduleRunColumns +
+                          " FROM investigation_schedule_runs WHERE schedule_id = ?1 "
+                          "ORDER BY scheduled_at DESC, id DESC LIMIT ?2";
+  Statement rows(connection_, sql.c_str());
+  bind_text(connection_, rows.get(), 1, schedule_id);
+  bind_int64(connection_, rows.get(), 2, limit);
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    runs.push_back(decode_investigation_schedule_run(rows.get()));
+  }
+  return {{"runs", std::move(runs)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_schedule_run(
+    const std::string& run_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  return load_investigation_schedule_run_row(connection_, run_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::create_investigation_schedule(
+    const nlohmann::json& schedule) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  validate_schedule_shape(schedule);
+  const auto schedule_id = schedule.value("id", std::string());
+  const auto task_id = schedule.value("taskId", std::string());
+  {
+    Statement task(connection_,
+                   "SELECT mode, automation_level FROM investigation_tasks WHERE id = ?1");
+    bind_text(connection_, task.get(), 1, task_id);
+    const auto result = sqlite3_step(task.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    if (std::string(column_text(task.get(), 0)) != "readonly" ||
+        std::string(column_text(task.get(), 1)) != "readonly") {
+      throw std::invalid_argument(
+          "scheduler triggers may only target read-only investigation tasks");
+    }
+  }
+  const auto optional = [&schedule](const char* key) -> std::optional<std::string> {
+    const auto found = schedule.find(key);
+    if (found == schedule.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_schedules (
+        id, task_id, status, interval_seconds, cooldown_seconds, dedupe_window_seconds,
+        max_concurrent_runs, budget, notification_policy, next_run_at, last_run_at,
+        last_outcome, last_error, created_at, updated_at, baseline_run_id
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    )SQL");
+  bind_text(connection_, insert.get(), 1, schedule_id);
+  bind_text(connection_, insert.get(), 2, task_id);
+  bind_text(connection_, insert.get(), 3, schedule.value("status", std::string("active")));
+  bind_int64(connection_, insert.get(), 4, schedule.value("intervalSeconds", std::int64_t{0}));
+  bind_int64(connection_, insert.get(), 5, schedule.value("cooldownSeconds", std::int64_t{0}));
+  bind_int64(connection_, insert.get(), 6,
+             schedule.value("dedupeWindowSeconds", std::int64_t{0}));
+  bind_int64(connection_, insert.get(), 7, schedule.value("maxConcurrentRuns", std::int64_t{0}));
+  bind_text(connection_, insert.get(), 8,
+            schedule.contains("budget") ? schedule.at("budget").dump() : "{}");
+  bind_text(connection_, insert.get(), 9,
+            schedule.value("notificationPolicy", std::string("on_change")));
+  bind_text(connection_, insert.get(), 10, schedule.value("nextRunAt", std::string()));
+  bind_optional_text(connection_, insert.get(), 11, optional("lastRunAt"));
+  bind_optional_text(connection_, insert.get(), 12, optional("lastOutcome"));
+  bind_optional_text(connection_, insert.get(), 13, optional("lastError"));
+  bind_text(connection_, insert.get(), 14, schedule.value("createdAt", std::string()));
+  bind_text(connection_, insert.get(), 15, schedule.value("updatedAt", std::string()));
+  bind_optional_text(connection_, insert.get(), 16, optional("baselineRunId"));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return load_investigation_schedule_row(connection_, schedule_id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::update_investigation_schedule(
+    const nlohmann::json& schedule) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  validate_schedule_shape(schedule);
+  const auto schedule_id = schedule.value("id", std::string());
+  const auto optional = [&schedule](const char* key) -> std::optional<std::string> {
+    const auto found = schedule.find(key);
+    if (found == schedule.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_schedules SET status = ?2, interval_seconds = ?3,
+             cooldown_seconds = ?4, dedupe_window_seconds = ?5, max_concurrent_runs = ?6,
+             budget = ?7, notification_policy = ?8, next_run_at = ?9, last_run_at = ?10,
+             last_outcome = ?11, last_error = ?12, updated_at = ?13, baseline_run_id = ?14
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, update.get(), 1, schedule_id);
+  bind_text(connection_, update.get(), 2, schedule.value("status", std::string("active")));
+  bind_int64(connection_, update.get(), 3, schedule.value("intervalSeconds", std::int64_t{0}));
+  bind_int64(connection_, update.get(), 4, schedule.value("cooldownSeconds", std::int64_t{0}));
+  bind_int64(connection_, update.get(), 5,
+             schedule.value("dedupeWindowSeconds", std::int64_t{0}));
+  bind_int64(connection_, update.get(), 6, schedule.value("maxConcurrentRuns", std::int64_t{0}));
+  bind_text(connection_, update.get(), 7,
+            schedule.contains("budget") ? schedule.at("budget").dump() : "{}");
+  bind_text(connection_, update.get(), 8,
+            schedule.value("notificationPolicy", std::string("on_change")));
+  bind_text(connection_, update.get(), 9, schedule.value("nextRunAt", std::string()));
+  bind_optional_text(connection_, update.get(), 10, optional("lastRunAt"));
+  bind_optional_text(connection_, update.get(), 11, optional("lastOutcome"));
+  bind_optional_text(connection_, update.get(), 12, optional("lastError"));
+  bind_text(connection_, update.get(), 13, schedule.value("updatedAt", std::string()));
+  bind_optional_text(connection_, update.get(), 14, optional("baselineRunId"));
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  return load_investigation_schedule_row(connection_, schedule_id);
+}
+
+nlohmann::json DesktopDatabase::claim_due_investigation_schedule_runs(
+    const std::string& now, int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 100) {
+    throw std::invalid_argument("schedule tick limit must be between 1 and 100");
+  }
+  nlohmann::json claimed = nlohmann::json::array();
+  nlohmann::json skipped = nlohmann::json::array();
+  if (connection_ == nullptr) {
+    return {{"claimed", std::move(claimed)}, {"skipped", std::move(skipped)}};
+  }
+  const auto now_epoch = iso8601_utc_epoch(now);
+  if (!now_epoch.has_value()) {
+    throw std::invalid_argument("scheduler now must be a UTC timestamp");
+  }
+  Transaction transaction(connection_);
+  std::vector<nlohmann::json> due;
+  {
+    const std::string sql =
+        std::string("SELECT ") + kScheduleColumns +
+        " FROM investigation_schedules WHERE status = 'active' AND next_run_at <= ?1 "
+        "ORDER BY next_run_at ASC, id ASC LIMIT ?2";
+    Statement rows(connection_, sql.c_str());
+    bind_text(connection_, rows.get(), 1, now);
+    bind_int64(connection_, rows.get(), 2, limit);
+    for (;;) {
+      const auto result = sqlite3_step(rows.get());
+      if (result == SQLITE_DONE) break;
+      if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+      due.push_back(decode_investigation_schedule(rows.get()));
+    }
+  }
+  // A run that already occupies this dedupe bucket only advances the trigger.
+  const auto advance_schedule = [&](const std::string& schedule_id,
+                                    const std::string& next_run_at) {
+    Statement update(connection_, R"SQL(
+        UPDATE investigation_schedules SET next_run_at = ?2, updated_at = ?3 WHERE id = ?1
+      )SQL");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    bind_text(connection_, update.get(), 2, next_run_at);
+    bind_text(connection_, update.get(), 3, now);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  // A skipped trigger is itself a terminal schedule outcome.
+  const auto finish_skipped_schedule = [&](const std::string& schedule_id,
+                                           const std::string& next_run_at,
+                                           const std::optional<std::string>& last_run_at,
+                                           const std::string& outcome) {
+    Statement update(connection_, R"SQL(
+        UPDATE investigation_schedules SET next_run_at = ?2, last_run_at = ?3,
+               last_outcome = ?4, last_error = NULL, updated_at = ?5 WHERE id = ?1
+      )SQL");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    bind_text(connection_, update.get(), 2, next_run_at);
+    bind_optional_text(connection_, update.get(), 3, last_run_at);
+    bind_text(connection_, update.get(), 4, outcome);
+    bind_text(connection_, update.get(), 5, now);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  // A claimed run preserves the previous terminal outcome so the scheduler can
+  // give the sidecar a meaningful changed/no_change/baseline follow-up prompt.
+  const auto claim_schedule = [&](const std::string& schedule_id,
+                                  const std::string& next_run_at) {
+    Statement update(connection_, R"SQL(
+        UPDATE investigation_schedules SET next_run_at = ?2, last_run_at = ?3, updated_at = ?3
+         WHERE id = ?1
+      )SQL");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    bind_text(connection_, update.get(), 2, next_run_at);
+    bind_text(connection_, update.get(), 3, now);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  const auto revoke = [&](const std::string& schedule_id) {
+    Statement update(connection_, "UPDATE investigation_schedules SET status = 'revoked' WHERE id = ?1");
+    bind_text(connection_, update.get(), 1, schedule_id);
+    if (sqlite3_step(update.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  };
+  const auto previous_last_run = [](const nlohmann::json& schedule)
+      -> std::optional<std::string> {
+    if (schedule.contains("lastRunAt") && schedule.at("lastRunAt").is_string()) {
+      return schedule.at("lastRunAt").get<std::string>();
+    }
+    return std::nullopt;
+  };
+  for (const auto& schedule : due) {
+    const auto schedule_id = schedule.value("id", std::string());
+    const auto task_id = schedule.value("taskId", std::string());
+    std::optional<std::array<std::string, 3>> task;  // status, mode, automation
+    {
+      Statement row(connection_,
+                    "SELECT status, mode, automation_level FROM investigation_tasks WHERE id = ?1");
+      bind_text(connection_, row.get(), 1, task_id);
+      const auto result = sqlite3_step(row.get());
+      if (result == SQLITE_ROW) {
+        task = std::array<std::string, 3>{std::string(column_text(row.get(), 0)),
+                                          std::string(column_text(row.get(), 1)),
+                                          std::string(column_text(row.get(), 2))};
+      } else if (result != SQLITE_DONE) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+    }
+    const auto due_at = schedule.value("nextRunAt", std::string());
+    const auto due_epoch = iso8601_utc_epoch(due_at).value_or(*now_epoch);
+    const auto dedupe_window = schedule.value("dedupeWindowSeconds", std::int64_t{1});
+    const auto dedupe_bucket = due_epoch / std::max<std::int64_t>(dedupe_window, 1);
+    const auto dedupe_key = "bucket:" + std::to_string(dedupe_bucket);
+    const auto interval = schedule.value("intervalSeconds", std::int64_t{0});
+    const auto next_run_at = iso8601_utc_from_epoch(saturating_add(*now_epoch, interval));
+    std::optional<nlohmann::json> existing;
+    {
+      Statement row(connection_, R"SQL(
+          SELECT id, schedule_id, task_id, status, scheduled_at, claimed_at, started_at,
+                 finished_at, dedupe_key, outcome, error
+            FROM investigation_schedule_runs WHERE schedule_id = ?1 AND dedupe_key = ?2
+        )SQL");
+      bind_text(connection_, row.get(), 1, schedule_id);
+      bind_text(connection_, row.get(), 2, dedupe_key);
+      const auto result = sqlite3_step(row.get());
+      if (result == SQLITE_ROW) existing = decode_investigation_schedule_run(row.get());
+      else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    if (existing.has_value()) {
+      advance_schedule(schedule_id, next_run_at);
+      const bool task_terminal = task.has_value() && terminal_task_status((*task)[0]);
+      if (task_terminal || existing->value("outcome", std::string()) == "task_terminal") {
+        revoke(schedule_id);
+      }
+      const auto status = existing->value("status", std::string());
+      if (status == "claimed" || status == "running") {
+        claimed.push_back(*existing);
+      } else {
+        skipped.push_back(*existing);
+      }
+      continue;
+    }
+    std::optional<std::string> reason;
+    if (!task.has_value()) {
+      reason = "task_missing";
+    } else {
+      const auto& status = (*task)[0];
+      const auto& mode = (*task)[1];
+      const auto& automation = (*task)[2];
+      if (mode == "readonly" && automation == "readonly" &&
+          is_one_of(status, {"pending", "investigating", "waiting_user"})) {
+        reason = std::nullopt;
+      } else if (terminal_task_status(status)) {
+        reason = "task_terminal";
+      } else {
+        reason = "task_not_readonly_or_waiting_user";
+      }
+    }
+    int active_count = 0;
+    {
+      Statement count(connection_, R"SQL(
+          SELECT COUNT(*) FROM investigation_schedule_runs
+           WHERE schedule_id = ?1 AND status IN ('queued','claimed','running')
+        )SQL");
+      bind_text(connection_, count.get(), 1, schedule_id);
+      if (sqlite3_step(count.get()) != SQLITE_ROW) {
+        throw std::runtime_error(sqlite3_errmsg(connection_));
+      }
+      active_count = sqlite3_column_int(count.get(), 0);
+    }
+    const auto max_concurrent = schedule.value("maxConcurrentRuns", std::int64_t{1});
+    const auto cooldown = schedule.value("cooldownSeconds", std::int64_t{0});
+    bool cooldown_active = false;
+    if (schedule.contains("lastRunAt") && schedule.at("lastRunAt").is_string()) {
+      if (const auto last = iso8601_utc_epoch(schedule.at("lastRunAt").get<std::string>());
+          last.has_value()) {
+        cooldown_active = saturating_sub(*now_epoch, *last) < cooldown;
+      }
+    }
+    std::optional<std::string> concurrency_reason = reason;
+    if (!concurrency_reason.has_value()) {
+      if (cooldown_active) {
+        concurrency_reason = "cooldown";
+      } else if (active_count >= max_concurrent) {
+        concurrency_reason = "concurrency_limit";
+      }
+    }
+    nlohmann::json run = {
+        {"id", schedule_run_id(schedule_id, dedupe_key)},
+        {"scheduleId", schedule_id},
+        {"taskId", task_id},
+        {"scheduledAt", due_at},
+        {"dedupeKey", dedupe_key},
+    };
+    if (concurrency_reason.has_value()) {
+      run["status"] = "skipped";
+      run["finishedAt"] = now;
+      run["outcome"] = *concurrency_reason;
+    } else {
+      run["status"] = "claimed";
+      run["claimedAt"] = now;
+    }
+    insert_investigation_schedule_run(connection_, run);
+    if (concurrency_reason.has_value()) {
+      skipped.push_back(run);
+      finish_skipped_schedule(schedule_id, next_run_at, previous_last_run(schedule),
+                              *concurrency_reason);
+      if (*concurrency_reason == "task_terminal") revoke(schedule_id);
+    } else {
+      claimed.push_back(run);
+      claim_schedule(schedule_id, next_run_at);
+    }
+  }
+  transaction.commit();
+  return {{"claimed", std::move(claimed)}, {"skipped", std::move(skipped)}};
+}
+
+int DesktopDatabase::investigation_evidence_count_for_run(const std::string& run_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return 0;
+  Statement count(connection_, "SELECT COUNT(*) FROM investigation_evidence WHERE run_id = ?1");
+  bind_text(connection_, count.get(), 1, run_id);
+  if (sqlite3_step(count.get()) != SQLITE_ROW) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  return sqlite3_column_int(count.get(), 0);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_investigation_run(
+    const std::string& run_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  return load_investigation_run_row(connection_, run_id);
+}
+
+nlohmann::json DesktopDatabase::list_investigation_runs(const std::string& task_id,
+                                                        int limit) const {
+  std::lock_guard lock(mutex_);
+  if (limit < 1 || limit > 1000) {
+    throw std::invalid_argument("investigation run limit is out of range");
+  }
+  nlohmann::json runs = nlohmann::json::array();
+  if (connection_ == nullptr) return runs;
+  const std::string sql = std::string("SELECT ") + kInvestigationRunColumns +
+                          " FROM investigation_runs WHERE task_id = ?1"
+                          " ORDER BY updated_at DESC, id DESC LIMIT ?2";
+  Statement rows(connection_, sql.c_str());
+  bind_text(connection_, rows.get(), 1, task_id);
+  sqlite3_bind_int64(rows.get(), 2, static_cast<sqlite3_int64>(limit));
+  for (;;) {
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    runs.push_back(decode_investigation_run(rows.get()));
+  }
+  return runs;
+}
+
+void DesktopDatabase::create_investigation_run(const nlohmann::json& run) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("database is unavailable");
+  const auto text_or_null = [&run](const char* key) -> std::optional<std::string> {
+    const auto found = run.find(key);
+    if (found == run.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  const auto json_or_null = [&run](const char* key) -> std::optional<std::string> {
+    const auto found = run.find(key);
+    if (found == run.end() || found->is_null()) return std::nullopt;
+    return found->dump();
+  };
+  const auto id = run.value("id", std::string());
+  if (id.empty()) throw std::invalid_argument("investigation run id is required");
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_runs (
+        id, task_id, session_id, message_id, trace_id, attempt, phase, status,
+        started_at, updated_at, ended_at, checkpoint, failure
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+    )SQL");
+  bind_text(connection_, insert.get(), 1, id);
+  bind_text(connection_, insert.get(), 2, run.value("taskId", std::string()));
+  bind_optional_text(connection_, insert.get(), 3, text_or_null("sessionId"));
+  bind_optional_text(connection_, insert.get(), 4, text_or_null("messageId"));
+  bind_optional_text(connection_, insert.get(), 5, text_or_null("traceId"));
+  sqlite3_bind_int64(insert.get(), 6, run.value("attempt", std::int64_t{1}));
+  bind_text(connection_, insert.get(), 7, run.value("phase", std::string("investigating")));
+  bind_text(connection_, insert.get(), 8, run.value("status", std::string("admitted")));
+  bind_text(connection_, insert.get(), 9, run.value("startedAt", std::string()));
+  bind_text(connection_, insert.get(), 10, run.value("updatedAt", std::string()));
+  bind_optional_text(connection_, insert.get(), 11, text_or_null("endedAt"));
+  bind_optional_text(connection_, insert.get(), 12, json_or_null("checkpoint"));
+  bind_optional_text(connection_, insert.get(), 13, json_or_null("failure"));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+std::optional<nlohmann::json> DesktopDatabase::update_investigation_run(
+    const nlohmann::json& run) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  const auto text_or_null = [&run](const char* key) -> std::optional<std::string> {
+    const auto found = run.find(key);
+    if (found == run.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  const auto json_or_null = [&run](const char* key) -> std::optional<std::string> {
+    const auto found = run.find(key);
+    if (found == run.end() || found->is_null()) return std::nullopt;
+    return found->dump();
+  };
+  const auto id = run.value("id", std::string());
+  if (id.empty()) throw std::invalid_argument("investigation run id is required");
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_runs
+         SET session_id = ?2, message_id = ?3, trace_id = ?4, attempt = ?5,
+             phase = ?6, status = ?7, started_at = ?8, updated_at = ?9,
+             ended_at = ?10, checkpoint = ?11, failure = ?12
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, update.get(), 1, id);
+  bind_optional_text(connection_, update.get(), 2, text_or_null("sessionId"));
+  bind_optional_text(connection_, update.get(), 3, text_or_null("messageId"));
+  bind_optional_text(connection_, update.get(), 4, text_or_null("traceId"));
+  sqlite3_bind_int64(update.get(), 5, run.value("attempt", std::int64_t{1}));
+  bind_text(connection_, update.get(), 6, run.value("phase", std::string("investigating")));
+  bind_text(connection_, update.get(), 7, run.value("status", std::string("admitted")));
+  bind_text(connection_, update.get(), 8, run.value("startedAt", std::string()));
+  bind_text(connection_, update.get(), 9, run.value("updatedAt", std::string()));
+  bind_optional_text(connection_, update.get(), 10, text_or_null("endedAt"));
+  bind_optional_text(connection_, update.get(), 11, json_or_null("checkpoint"));
+  bind_optional_text(connection_, update.get(), 12, json_or_null("failure"));
+  if (sqlite3_step(update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  return load_investigation_run_row(connection_, id);
+}
+
+std::optional<nlohmann::json> DesktopDatabase::recover_investigation_task(
+    const std::string& task_id, const std::string& updated_at,
+    const nlohmann::json& failure) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Transaction transaction(connection_);
+  std::string guardrails_json;
+  {
+    Statement rows(connection_,
+                   "SELECT guardrails FROM investigation_tasks WHERE id = ?1");
+    bind_text(connection_, rows.get(), 1, task_id);
+    const auto result = sqlite3_step(rows.get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+    guardrails_json = column_text(rows.get(), 0);
+  }
+  nlohmann::json guardrails = nlohmann::json::object();
+  if (!guardrails_json.empty()) {
+    try {
+      guardrails = nlohmann::json::parse(guardrails_json);
+    } catch (...) {
+      guardrails = nlohmann::json::object();
+    }
+    if (!guardrails.is_object()) guardrails = nlohmann::json::object();
+  }
+  if (failure.value("code", std::string()) == "outcome_unknown") {
+    // A command may have taken effect before the connection was lost; retire
+    // the broad task grant so the next run needs fresh per-call approval.
+    guardrails.erase("commandGrant");
+  }
+  const auto failure_json = failure.dump();
+  const auto guardrails_dump = guardrails.dump();
+  {
+    Statement steps(connection_, R"SQL(
+        UPDATE investigation_steps
+           SET status = CASE status
+                          WHEN 'pending' THEN 'skipped'
+                          ELSE 'failed'
+                        END,
+               ended_at = ?2,
+               failure = CASE
+                           WHEN status = 'pending' THEN NULL
+                           ELSE ?3
+                         END
+         WHERE task_id = ?1
+           AND status IN ('pending','running','waiting_user')
+           AND run_id IN (
+               SELECT id FROM investigation_runs
+                WHERE task_id = ?1 AND status IN ('admitted','running','waiting_user')
+           )
+      )SQL");
+    bind_text(connection_, steps.get(), 1, task_id);
+    bind_text(connection_, steps.get(), 2, updated_at);
+    bind_text(connection_, steps.get(), 3, failure_json);
+    if (sqlite3_step(steps.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  {
+    Statement runs(connection_, R"SQL(
+        UPDATE investigation_runs
+           SET status = 'interrupted', updated_at = ?2, ended_at = ?2, failure = ?3
+         WHERE task_id = ?1 AND status IN ('admitted','running','waiting_user')
+      )SQL");
+    bind_text(connection_, runs.get(), 1, task_id);
+    bind_text(connection_, runs.get(), 2, updated_at);
+    bind_text(connection_, runs.get(), 3, failure_json);
+    if (sqlite3_step(runs.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  {
+    Statement task(connection_, R"SQL(
+        UPDATE investigation_tasks
+           SET status = 'investigating', phase = 'recovery', active_run_id = NULL,
+               last_failure = ?2, updated_at = ?3, completed_at = NULL,
+               guardrails = ?4
+         WHERE id = ?1 AND status NOT IN ('completed','expired')
+      )SQL");
+    bind_text(connection_, task.get(), 1, task_id);
+    bind_text(connection_, task.get(), 2, failure_json);
+    bind_text(connection_, task.get(), 3, updated_at);
+    bind_text(connection_, task.get(), 4, guardrails_dump);
+    if (sqlite3_step(task.get()) != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+    if (sqlite3_changes(connection_) == 0) return std::nullopt;
+  }
+  transaction.commit();
+  return load_investigation_task_row(connection_, task_id);
 }
 
 nlohmann::json DesktopDatabase::list_chat_sessions(

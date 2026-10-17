@@ -1,5 +1,6 @@
 #include "yukinal/desktop_host/desktop_target.hpp"
 
+#include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -136,6 +138,21 @@ ProxyRoute resolve_proxy_route(const DesktopNetworkProxyConfig& config,
                                          "proxy credential");
   }
   return route;
+}
+
+bool supports_host_ca_algorithm(const std::string& algorithm) {
+  return algorithm == "ssh-ed25519" || algorithm == "ssh-rsa" ||
+         algorithm == "ecdsa-sha2-nistp256" || algorithm == "ecdsa-sha2-nistp384" ||
+         algorithm == "ecdsa-sha2-nistp521";
+}
+
+// Whether the outbound proxy route can be represented by the C++ SSH service.
+// Only the route shape is inspected here; unlike `resolve_proxy_route` no proxy
+// secret is read, because this probe never starts a session.
+bool proxy_route_is_supported(const DesktopDatabase& database) {
+  if (database.network_proxy_config().mode != "system") return true;
+  const auto resolution = resolve_network_proxy(true);
+  return resolution.value("kind", std::string()) != "unusable";
 }
 
 nlohmann::json build_trust_source(const nlohmann::json& server, const std::string& host,
@@ -395,6 +412,43 @@ nlohmann::json resolve_ssh_service_probe_target(const DesktopDatabase& database,
   return {{"target", std::move(target)}, {"credentials", std::move(credentials_out)}};
 }
 
+bool supports_ssh_service_target(const DesktopDatabase& database,
+                                 const std::string& server_id) {
+  if (!valid_server_id(server_id)) return false;
+  const auto record = database.get_server_connection(server_id);
+  if (!record.has_value()) return false;
+  std::optional<std::string> host_ca_algorithm;
+  if (record->contains("hostCertificateAuthorityPublicKey") &&
+      record->at("hostCertificateAuthorityPublicKey").is_string()) {
+    const auto authority = record->at("hostCertificateAuthorityPublicKey").get<std::string>();
+    const auto separator = authority.find_first_of(" \t\r\n\f\v");
+    host_ca_algorithm = authority.substr(0, separator);
+  }
+  if (host_ca_algorithm.has_value() && !supports_host_ca_algorithm(*host_ca_algorithm)) {
+    return false;
+  }
+  const auto identity_id = optional_text(*record, "identityId");
+  if (!identity_id.has_value()) return false;
+  const auto identity = database.get_identity(*identity_id);
+  if (!identity.has_value()) return false;
+  const auto method = identity->value("method", std::string());
+  bool identity_supported =
+      method == "password" || method == "privateKey" || method == "agent";
+  if (!identity_supported && method == "certificate") {
+    identity_supported = optional_text(*identity, "certificatePath").has_value() ||
+                         optional_text(*identity, "privateKeyPath").has_value();
+  }
+  if (!identity_supported) return false;
+  if (!proxy_route_is_supported(database)) return false;
+  if (host_ca_algorithm.has_value()) return supports_host_ca_algorithm(*host_ca_algorithm);
+  const auto host = record->value("host", std::string());
+  const auto port = record->value("port", 0);
+  if (!valid_text(host, 253) || port < 1 || port > 65535) return false;
+  return HostTrustStore::load(std::filesystem::path(database.data_directory()) / "known_hosts")
+      .pinned_fingerprint(host, static_cast<std::uint16_t>(port))
+      .has_value();
+}
+
 nlohmann::json resolve_ssh_service_filesystem_read_target(const DesktopDatabase& database,
                                                           const CredentialStore& credentials,
                                                           const nlohmann::json& request) {
@@ -454,6 +508,125 @@ nlohmann::json resolve_ssh_service_filesystem_edit_target(const DesktopDatabase&
       resolve_ssh_service_target(database, credentials, required_param(request, "serverId"));
   payload["filesystemEdit"] = {{"path", path}, {"expectedRevision", expected_revision}};
   return payload;
+}
+
+bool is_safe_backup_token(const std::string& token) {
+  if (token.size() != kBackupTokenChars) return false;
+  return std::all_of(token.begin(), token.end(), [](unsigned char byte) {
+    return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+  });
+}
+
+std::string backup_path_for(const std::string& path, const std::string& token) {
+  if (!validate_remote_path(path)) {
+    throw std::runtime_error(
+        "remote path must be 1-4096 characters, absolute, and free of control characters");
+  }
+  if (!is_safe_backup_token(token)) {
+    throw std::runtime_error("backup token must be 32 lowercase hexadecimal characters");
+  }
+  const auto slash = path.rfind('/');
+  if (slash == std::string::npos) {
+    throw std::runtime_error("backup source must name a file below the remote root");
+  }
+  const auto name = path.substr(slash + 1);
+  if (name.empty()) {
+    throw std::runtime_error("backup source must name a file, not a directory");
+  }
+  const auto parent_raw = path.substr(0, slash);
+  const auto parent = parent_raw.empty() ? std::string("/") : parent_raw;
+  const auto fingerprint = content_revision_hex(path).substr(0, 16);
+  const auto backup_name = std::string(kBackupMarker) + fingerprint + "-" + token;
+  const auto backup_path = parent == "/" ? "/" + backup_name : parent + "/" + backup_name;
+  if (utf8_length(backup_path) > kMaxRemotePathChars) {
+    throw std::runtime_error("derived backup path must be at most 4096 characters");
+  }
+  return backup_path;
+}
+
+bool is_backup_path_for(const std::string& path, const std::string& backup_path) {
+  std::string expected;
+  try {
+    expected = backup_path_for(path, std::string(kBackupTokenChars, '0'));
+  } catch (const std::exception&) {
+    return false;
+  }
+  if (!validate_remote_path(backup_path)) return false;
+  const auto expected_slash = expected.rfind('/');
+  const auto actual_slash = backup_path.rfind('/');
+  if (expected_slash == std::string::npos || actual_slash == std::string::npos) return false;
+  const auto expected_parent = expected.substr(0, expected_slash);
+  const auto expected_name = expected.substr(expected_slash + 1);
+  const auto actual_parent = backup_path.substr(0, actual_slash);
+  const auto actual_name = backup_path.substr(actual_slash + 1);
+  const auto zeros = std::string(kBackupTokenChars, '0');
+  auto prefix = expected_name;
+  if (prefix.size() >= zeros.size() &&
+      prefix.compare(prefix.size() - zeros.size(), zeros.size(), zeros) == 0) {
+    prefix.resize(prefix.size() - zeros.size());
+  }
+  if (actual_parent != expected_parent) return false;
+  if (actual_name.size() != prefix.size() + kBackupTokenChars) return false;
+  if (actual_name.compare(0, prefix.size(), prefix) != 0) return false;
+  return is_safe_backup_token(actual_name.substr(prefix.size()));
+}
+
+std::string backup_token() {
+  std::random_device device;
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string token;
+  token.reserve(kBackupTokenChars);
+  for (std::size_t index = 0; index < kBackupTokenChars / 2; ++index) {
+    const auto byte = static_cast<unsigned>(device() & 0xFFu);
+    token.push_back(kHex[byte >> 4]);
+    token.push_back(kHex[byte & 0x0Fu]);
+  }
+  return token;
+}
+
+std::string backup_record_id(const std::string& server_id, const std::string& backup_path) {
+  return "backup_" + content_revision_hex(server_id + '\0' + backup_path);
+}
+
+void require_agent_backup_request(const std::string& path, const std::string& token) {
+  require_checked_remote_path(path);
+  if (!is_safe_backup_token(token)) {
+    throw std::runtime_error("backup token must be 32 lowercase hexadecimal characters");
+  }
+  (void)backup_path_for(path, token);
+}
+
+void require_agent_restore_request(const std::string& path, const std::string& backup_path,
+                                   const std::string& expected_revision) {
+  require_checked_remote_path(path);
+  if (!validate_remote_path(backup_path)) {
+    throw std::runtime_error("backupPath must be an absolute remote path");
+  }
+  if (!is_backup_path_for(path, backup_path)) {
+    throw std::runtime_error(
+        "backupPath must be a host-generated backup for the same target path");
+  }
+  if (!is_content_revision(expected_revision)) {
+    throw std::runtime_error(
+        "expectedRevision must be the 64-character hex revision returned by filesystem.read or "
+        "filesystem.edit");
+  }
+}
+
+void require_agent_cleanup_request(const std::string& path, const std::string& backup_path,
+                                   const std::string& expected_revision) {
+  require_checked_remote_path(path);
+  if (!validate_remote_path(backup_path)) {
+    throw std::runtime_error("backupPath must be an absolute remote path");
+  }
+  if (!is_backup_path_for(path, backup_path)) {
+    throw std::runtime_error(
+        "backupPath must be a host-generated backup for the same target path");
+  }
+  if (!is_content_revision(expected_revision)) {
+    throw std::runtime_error(
+        "expectedRevision must be the 64-character hex revision returned by filesystem.backup");
+  }
 }
 
 }  // namespace yukinal::desktop_host
