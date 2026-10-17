@@ -122,13 +122,13 @@ repository root and install the runtime dependencies:
 ```powershell
 python -m venv agent/.venv
 agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
-pnpm --filter @yukinal/desktop tauri dev
+pnpm desktop:dev:cpp
 ```
 
-`pnpm desktop:dev:python` is an equivalent shortcut.
+`pnpm desktop:dev` is the browser-only UI preview; the C++ host is the only desktop host.
 
 For a desktop package, also install the `package` extra and run `pnpm package`;
-this builds the frozen sidecar and includes available third-party license texts.
+this stages the frozen sidecar (with its available third-party licence texts) into the C++ host distributable.
 
 On macOS or Linux, use `agent/.venv/bin/python` for the install command. Set
 `YUKINAL_PYTHON` to another interpreter path when needed.
