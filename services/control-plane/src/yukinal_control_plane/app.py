@@ -335,7 +335,8 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
             session,
             tenant_id=tenant_id,
             action=body.action,
-            fingerprint=body.fingerprint,
+            node_id=body.node_id,
+            payload=body.payload,
             requested_by=body.requested_by,
             task_id=body.task_id,
         )

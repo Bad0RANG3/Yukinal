@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 
 from support import AUTH, SERVICE_ROOT, TOKEN, ControlPlaneTestCase, new_key
 
+from yukinal_control_plane import actions
 from yukinal_control_plane.app import create_app
 from yukinal_control_plane.config import Settings
 from yukinal_control_plane.db import Base
@@ -185,7 +186,11 @@ class ControlPlaneTests(ControlPlaneTestCase):
         node_id, _key = self.provision_node(tenant_id)
         response = self.client.post(
             f"/v1/tenants/{tenant_id}/tasks",
-            json={"nodeId": node_id, "kind": "ssh.read", "payload": {"password": "hunter2"}},
+            json={
+                "nodeId": node_id,
+                "kind": "filesystem.read",
+                "payload": {"password": "hunter2"},
+            },
             headers=AUTH,
         )
         self.assertEqual(response.status_code, 400, response.text)
@@ -194,7 +199,7 @@ class ControlPlaneTests(ControlPlaneTestCase):
             f"/v1/tenants/{tenant_id}/tasks",
             json={
                 "nodeId": node_id,
-                "kind": "ssh.read",
+                "kind": "filesystem.read",
                 "payload": {"auth": {"privateKey": "-----BEGIN"}},
             },
             headers=AUTH,
@@ -270,33 +275,34 @@ class ControlPlaneTests(ControlPlaneTestCase):
 
     def test_approval_flow(self) -> None:
         tenant_id = self.create_tenant()
-        created = self.client.post(
-            f"/v1/tenants/{tenant_id}/approvals",
-            json={"action": "server.exec", "fingerprint": "abc123", "requestedBy": "agent"},
-            headers=AUTH,
+        node_id, _key = self.provision_node(tenant_id)
+        created = self.create_approval(
+            tenant_id, node_id, "server.exec", {"command": "systemctl restart nginx"}
         )
         self.assertEqual(created.status_code, 201, created.text)
         approval_id = created.json()["id"]
         self.assertEqual(created.json()["state"], "pending")
-
-        decided = self.client.post(
-            f"/v1/tenants/{tenant_id}/approvals/{approval_id}/decide",
-            json={"decision": "approved", "decidedBy": "ada"},
-            headers=AUTH,
+        # The server owns the canonical form; the caller never supplies a
+        # fingerprint, so it cannot name one that does not match the input.
+        self.assertEqual(
+            created.json()["fingerprint"],
+            actions.action_fingerprint(
+                kind="server.exec",
+                node_id=node_id,
+                payload={"command": "systemctl restart nginx"},
+            ),
         )
+        self.assertEqual(created.json()["node_id"], node_id)
+        self.assertEqual(created.json()["payload"], {"command": "systemctl restart nginx"})
+
+        decided = self.decide(tenant_id, approval_id)
         self.assertEqual(decided.status_code, 200, decided.text)
         self.assertEqual(decided.json()["state"], "approved")
         self.assertEqual(decided.json()["decided_by"], "ada")
 
         # A decision is one-shot.
-        self.assertEqual(
-            self.client.post(
-                f"/v1/tenants/{tenant_id}/approvals/{approval_id}/decide",
-                json={"decision": "rejected", "decidedBy": "ada"},
-                headers=AUTH,
-            ).status_code,
-            409,
-        )
+        again = self.decide(tenant_id, approval_id, "rejected")
+        self.assertEqual(again.status_code, 409, again.text)
 
     # ── audit and metrics ────────────────────────────────────────────────────
 
@@ -322,11 +328,8 @@ class ControlPlaneTests(ControlPlaneTestCase):
         node_id, _key = self.provision_node(tenant_id)
         task_id = self.create_task(tenant_id, node_id)["body"]["id"]
         self.assertEqual(self.move(tenant_id, task_id, "running"), 200)
-        self.client.post(
-            f"/v1/tenants/{tenant_id}/approvals",
-            json={"action": "server.exec", "fingerprint": "f", "requestedBy": "agent"},
-            headers=AUTH,
-        )
+        # Left pending on purpose: the metric counts undecided requests.
+        self.create_approval(tenant_id, node_id, "server.exec", {"command": "ls"})
         metrics = self.client.get("/v1/metrics", headers=AUTH).json()
         self.assertEqual(metrics["tenants"], 1)
         self.assertEqual(metrics["nodes"], 1)
@@ -345,16 +348,23 @@ class ControlPlaneTests(ControlPlaneTestCase):
         sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
         try:
             migrated = set(inspect(sync_engine).get_table_names())
+            inspector = inspect(sync_engine)
             indexes = {
                 index["name"]
-                for table in ("tasks", "node_nonces")
-                for index in inspect(sync_engine).get_indexes(table)
+                for table in ("tasks", "node_nonces", "approvals")
+                for index in inspector.get_indexes(table)
+            }
+            approvals_fks = {
+                (fk["referred_table"], tuple(fk["constrained_columns"]))
+                for fk in inspector.get_foreign_keys("approvals")
             }
         finally:
             sync_engine.dispose()
         self.assertEqual(migrated, set(Base.metadata.tables) | {"alembic_version"})
         self.assertIn("uq_tasks_active_per_node", indexes)
         self.assertIn("ix_node_nonces_at", indexes)
+        self.assertIn("ix_approvals_node_id", indexes)
+        self.assertIn(("nodes", ("node_id",)), approvals_fks)
 
         command.downgrade(config, "base")
         sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")

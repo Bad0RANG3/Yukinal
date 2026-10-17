@@ -25,6 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .actions import action_fingerprint
 from .db import Base
 from .nodeauth import key_fingerprint
 
@@ -138,6 +139,18 @@ class Task(Base):
 
     node: Mapped[Node] = relationship(back_populates="tasks")
 
+    @property
+    def fingerprint(self) -> str:
+        """Fingerprint of the exact action this task performs.
+
+        Published on the API so an operator can approve precisely this action;
+        an approval stores the same value, and a mismatch between the two never
+        clears the task.
+        """
+        return action_fingerprint(
+            kind=self.kind, node_id=self.node_id, payload=self.payload or {}
+        )
+
 
 class Approval(Base):
     __tablename__ = "approvals"
@@ -149,6 +162,13 @@ class Approval(Base):
     task_id: Mapped[str | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL"), index=True
     )
+    # The node the action is bound to, and the input it was requested for.
+    # Stored because a decision is only meaningful if the approver can see what
+    # they are approving; the fingerprint alone would be opaque.
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     action: Mapped[str] = mapped_column(String(128), nullable=False)
     # Fingerprint of the exact action input. A decision only applies to the
     # matching fingerprint (the desktop host uses the same rule).

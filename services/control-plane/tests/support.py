@@ -103,7 +103,7 @@ class ControlPlaneTestCase(unittest.TestCase):
         return response.json()["id"], key
 
     def create_task(
-        self, tenant_id: str, node_id: str, kind: str = "ssh.read", payload: dict | None = None
+        self, tenant_id: str, node_id: str, kind: str = "filesystem.read", payload: dict | None = None
     ) -> dict:
         response = self.client.post(
             f"/v1/tenants/{tenant_id}/tasks",
@@ -130,6 +130,44 @@ class ControlPlaneTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    # ── approval helpers ─────────────────────────────────────────────────────
+
+    def create_approval(
+        self,
+        tenant_id: str,
+        node_id: str,
+        action: str,
+        payload: dict | None = None,
+        requested_by: str = "agent",
+    ):
+        return self.client.post(
+            f"/v1/tenants/{tenant_id}/approvals",
+            json={
+                "action": action,
+                "nodeId": node_id,
+                "payload": payload if payload is not None else {},
+                "requestedBy": requested_by,
+            },
+            headers=AUTH,
+        )
+
+    def decide(self, tenant_id: str, approval_id: str, decision: str = "approved", decided_by: str = "ada"):
+        return self.client.post(
+            f"/v1/tenants/{tenant_id}/approvals/{approval_id}/decide",
+            json={"decision": decision, "decidedBy": decided_by},
+            headers=AUTH,
+        )
+
+    def approve(
+        self, tenant_id: str, node_id: str, action: str, payload: dict | None = None
+    ) -> str:
+        """Request and approve one action, returning the approval id."""
+        created = self.create_approval(tenant_id, node_id, action, payload)
+        self.assertEqual(created.status_code, 201, created.text)
+        decided = self.decide(tenant_id, created.json()["id"])
+        self.assertEqual(decided.status_code, 200, decided.text)
+        return created.json()["id"]
 
     def wait_for_task_status(
         self, tenant_id: str, task_id: str, status: str, timeout: float = 5.0

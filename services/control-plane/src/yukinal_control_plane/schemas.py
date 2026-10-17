@@ -104,6 +104,9 @@ class TaskView(_View):
     node_id: str
     kind: str
     payload: dict
+    # Computed from (kind, nodeId, payload): the exact action an approval must
+    # match before the task may leave the queue.
+    fingerprint: str
     status: str
     outcome: str | None
     result: dict | None
@@ -132,8 +135,17 @@ class ModelConfigView(_View):
 
 
 class ApprovalCreate(_Request):
+    """A request to approve one exact action.
+
+    The caller sends the action, the node and the input; the server computes the
+    fingerprint from them. An operator therefore never has to reproduce the
+    canonical form by hand, and cannot pick a fingerprint that does not match the
+    input it claims to authorise.
+    """
+
     action: str = Field(min_length=1, max_length=128)
-    fingerprint: str = Field(min_length=1, max_length=128)
+    node_id: str = Field(alias="nodeId", min_length=1, max_length=64)
+    payload: dict = Field(default_factory=dict)
     task_id: str | None = Field(default=None, alias="taskId", max_length=64)
     requested_by: str = Field(alias="requestedBy", min_length=1, max_length=200)
 
@@ -151,6 +163,8 @@ class ApprovalView(_View):
     id: str
     tenant_id: str
     task_id: str | None
+    node_id: str
+    payload: dict
     action: str
     fingerprint: str
     state: str

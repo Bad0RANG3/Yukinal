@@ -1638,8 +1638,25 @@ The API enforces the same rules the desktop host enforces locally:
   elsewhere.
 - **One active task per node, at the database.** A partial unique index on
   `status IN ('queued','running')` makes the constraint real under concurrency;
-  terminal tasks accumulate freely. `desktop`'s one-call-per-step fence is the
-  local analogue.
+  terminal tasks accumulate freely. Assignment then claims the row with a
+  conditional update (`... WHERE id = ? AND status = 'queued'`), so two workers
+  that both selected the same queued task cannot both hand it to a node — the
+  loser's update matches no row. `desktop`'s one-call-per-step fence is the local
+  analogue.
+- **Approval before an effectful action.** A task kind needs an approval unless it
+  is one of the host's known plan-bound observations (`server.info`, `docker.ps`,
+  `filesystem.read`, `systemd.inspect`, …); an unrecognised kind, and every
+  `mcp.*` tool whose risk the control plane cannot resolve, is treated as
+  effectful, which is the closed default. The approval request carries the action,
+  the node and the payload, and the *server* computes the fingerprint (`sha256` of
+  the canonical `{kind, nodeId, payload}`: sorted keys, no whitespace) — a caller
+  cannot name a fingerprint that does not match what it asked for. A decision
+  applies only to the matching fingerprint, so approving a command on node A does
+  not authorise it on node B, nor a different command anywhere. The gate is
+  checked when the task is created (the queue means "ready to dispatch", so a task
+  that could never run would hold the node's single active slot) and again on the
+  `queued → running` edge, which catches an approval that lapsed in between; a
+  refusal is `409 approval_required` and names the fingerprint to approve.
 - **A task state machine.** `queued → running → succeeded/failed/cancelled`, with
   `running → unknown` when a node restarts. An invalid transition is `409`.
 - **Outcome-unknown on disconnect.** A heartbeat with `restarted: true` moves
@@ -1676,9 +1693,12 @@ rest of the service follows.
 `WS /v1/node/channel` is the node's outbound channel, authenticated with the
 same signature at the upgrade. On connect the control plane assigns every queued
 task for that node — the move to `running` is the moment work leaves the queue —
-and the node reports outcomes back. If the socket drops while a task is running,
-the task becomes `unknown` with reason `node_disconnected` (a graceful `close`
-gives `node_closed`); it is never marked failed and never replayed, and a
+and the node reports outcomes back. A task the node may not run yet is not handed
+over silently: `ready` and `synced` list it under `waiting` with a reason
+(`approval_required`) and the fingerprint to approve, so a stalled queue is
+reported instead of looking like an idle node. If the socket drops while a task is
+running, the task becomes `unknown` with reason `node_disconnected` (a graceful
+`close` gives `node_closed`); it is never marked failed and never replayed, and a
 reconnecting node may still report what actually happened. That is the same
 outcome-unknown rule the desktop host applies to an interrupted call, now
 enforced for a fleet. The disconnect marking runs in a cancellation-shielded
@@ -1688,23 +1708,35 @@ marking would be cancelled away exactly when the connection did not end cleanly.
 `services/control-plane/tests/` runs against SQLite and covers the API, tenant
 and per-node scoping, the state machine, the partial index, disconnect recovery,
 the credential boundary, key parsing and signature/replay refusals, the startup
-checks, and a drift test that runs the real Alembic migrations and compares the
-migrated tables and indexes with the models (45 tests). Beyond the test
-transport, a real `python -m yukinal_control_plane` process was exercised with a
-real WebSocket client: `/healthz` returned `ok`, an unauthenticated request
-returned `401`, a signed heartbeat was accepted, the channel handed over a task
-that was reported `succeeded` and acked, and a client that dropped its socket
-mid-task left the task `unknown`/`node_disconnected` and visible in
-`/v1/node/recoverable`. `pnpm check` runs the suite as a step that is skipped
-with an explicit reason when the service virtualenv is absent.
+checks, approval binding (canonical fingerprints, exact match on payload, node,
+tenant and action, pending and rejected decisions not clearing a task, unknown
+kinds requiring approval, and the dispatch re-check) and atomic assignment (a
+conditional update claims once, a stale object cannot steal a claimed task, and a
+repeat pass neither reassigns nor re-audits), and a drift test that runs the real
+Alembic migrations and compares the migrated tables, indexes and foreign keys with
+the models (68 tests). Beyond the test transport, a real `python -m
+yukinal_control_plane` process was exercised with a real WebSocket client and real
+Ed25519 signatures: `/healthz` returned `ok`, an unauthenticated request returned
+`401`, a signed heartbeat was accepted, the channel handed over a task that was
+reported `succeeded` and acked, and a client that dropped its socket mid-task left
+the task `unknown`/`node_disconnected` and visible in `/v1/node/recoverable`. The
+approval gate was driven the same way: an effectful task was refused with the
+fingerprint to approve, a pending approval still did not clear it, the matching
+approved action was dispatched and completed, a different payload was refused, and
+a task whose approval was withdrawn before dispatch was reported under `waiting`
+and left `queued`. `pnpm check` runs the suite as a step that is skipped with an
+explicit reason when the service virtualenv is absent.
 
 Honest gaps: no PostgreSQL server exists in this environment, so the migrations
 and the queries have been exercised only on SQLite (`JSON` rather than `JSONB`,
 and PostgreSQL connection-pool/restart behaviour is untested); node transport is
 request signatures over plain HTTP/WS rather than mutual TLS, so TLS termination
-and `wss://` are a deployment concern that has not been exercised; replay
-protection is database-backed and therefore holds across workers, but multi-worker
-task assignment has not been exercised; there are no per-tenant operator roles
-(one shared token), approvals are recorded but not enforced before dispatch, there
-is no server-initiated ping timer, and `/v1/metrics` is a small JSON summary
-rather than a Prometheus exporter.
+and `wss://` are a deployment concern that has not been exercised; assignment is a
+conditional update and replay protection is database-backed, so both are correct
+across processes by construction, but no second worker process has been run
+against one database; there are no per-tenant operator roles (one shared token,
+and the same caller can both request and decide an approval); an approval never
+expires on its own, cannot be revoked, and the *requirement* is a fixed table
+rather than a per-tenant or per-environment policy, so nothing ever writes the
+`expired` state; there is no server-initiated ping timer, and `/v1/metrics` is a
+small JSON summary rather than a Prometheus exporter.

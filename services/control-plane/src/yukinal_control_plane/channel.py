@@ -13,7 +13,14 @@ server -> node
     ``assigned``  one task to run (``task`` is a task view)
     ``synced``    response to ``sync``; ``assigned`` is the task count
     ``ack``       a reported status was applied
+    ``bye``       a graceful ``close`` was recorded; ``marked`` lists the tasks
+                  that became unknown
     ``error``     the message was rejected (``code``, ``message``)
+
+``ready`` and ``synced`` also carry ``waiting``: queued tasks this node may not
+run yet, each with a ``reason`` (currently ``approval_required``) and the action
+``fingerprint`` that needs approving. A stalled queue is therefore reported, not
+hidden.
 
 node -> server
     ``status``    ``{taskId, status, outcome?, result?}``
@@ -132,8 +139,15 @@ async def _open(session_factory: async_sessionmaker[AsyncSession], node_id: str)
         async with session.begin():
             node = await service.require_node_by_id(session, node_id)
             await service.touch_node(session, node)
-            assigned = await service.assign_queued_tasks(session, node, actor=node.id)
-            ready = {"type": MESSAGE_READY, "nodeId": node.id, "assigned": len(assigned)}
+            assigned, waiting = await service.assign_queued_tasks(session, node, actor=node.id)
+            ready = {
+                "type": MESSAGE_READY,
+                "nodeId": node.id,
+                "assigned": len(assigned),
+                # Queued work this node may not run yet, with the reason, so a
+                # stalled queue is visible instead of looking idle.
+                "waiting": waiting,
+            }
             messages = [_assigned_message(task) for task in assigned]
     return ready, messages
 
@@ -187,9 +201,11 @@ async def _sync(
         async with session.begin():
             node = await service.require_node_by_id(session, node_id)
             await service.touch_node(session, node)
-            assigned = await service.assign_queued_tasks(session, node, actor=node.id)
+            assigned, waiting = await service.assign_queued_tasks(session, node, actor=node.id)
             messages = [_assigned_message(task) for task in assigned]
-    await websocket.send_json({"type": MESSAGE_SYNCED, "assigned": len(messages)})
+    await websocket.send_json(
+        {"type": MESSAGE_SYNCED, "assigned": len(messages), "waiting": waiting}
+    )
     for message in messages:
         await websocket.send_json(message)
 

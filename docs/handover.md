@@ -291,7 +291,13 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
 - **运维面**（bearer token）`/v1/tenants/{tid}/...`：租户/节点/任务/模型配置/审批/审计的读写，
   租户隔离（跨租户一律 404 不泄露存在性）、任务状态机、每节点一个 active 任务的**偏唯一索引**
   （数据库级并发控制）、凭据边界（只存引用；`ModelConfigCreate` 禁止未知字段，任务 payload 递归
-  拒绝 secret 形状字段）与 `/v1/metrics` 汇总。
+  拒绝 secret 形状字段）与 `/v1/metrics` 汇总。**审批强制绑定执行**：审批请求携带
+  action/nodeId/payload，指纹由服务端计算（规范化 `{kind,nodeId,payload}` 的 sha256），调用方无法
+  自报指纹；决定只对**匹配指纹**生效，因此"批准 A 节点重启 nginx"不能派发"B 节点 rm -rf"。只读观测类
+  kind（对齐宿主 plan-bound observation 名单）免审批，**未知 kind 与所有 `mcp.*` 一律需要审批**
+  （fail closed）。门禁查两次：建任务时（队列即"可派发"，否则会占住节点唯一的 active 槽）与
+  `queued → running` 边（覆盖审批中途失效）。派发用**条件 UPDATE**（`WHERE status='queued'`）领取，
+  两个 worker 不会把同一任务派两次；未获批的任务在通道上以 `waiting`（含原因与指纹）上报而非静默滞留。
 - **节点面**（Ed25519 请求签名）`/v1/node/...`：节点注册时提供公钥（接受 base64/hex/`ssh-ed25519`
   行，统一存规范 base64），之后每个请求对
   `timestamp\nnonce\nMETHOD\npath[?query]\nsha256(body)` 签名；时间窗 300 秒，nonce 落库
@@ -301,15 +307,19 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属�
   置为 `unknown`（`node_disconnected`，优雅 `close` 为 `node_closed`），**不自动重放**，重连后可
   回报真实结果；断连标记在取消屏蔽（cancellation-shielded）作用域内执行，服务关闭时不会被静默跳过。
 
-45 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
-并**实际启动 uvicorn** 用真 WebSocket 客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签名
-heartbeat、握手→下发→`succeeded`→ack、中断→`unknown`/`node_disconnected`→`recoverable`。
+68 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
+以及审批绑定（指纹规范化、载荷/节点/租户/动作精确匹配、待批与驳回不放行、未知 kind 需审批、派发前复议）
+与原子领取（条件 UPDATE 只能领一次、陈旧对象无法抢占、重复派发不重复记账），并**实际启动 uvicorn** 用真
+WebSocket 客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签名 heartbeat、握手→下发→`succeeded`
+→ack、中断→`unknown`/`node_disconnected`→`recoverable`，以及 409 `approval_required`（报文含指纹）→
+批准→派发完成→换载荷被拒→审批撤销后以 `waiting` 上报且任务留在 `queued`。
 `pnpm check` 已纳入该步骤（`services/control-plane/.venv` 存在才跑，否则打印明确 skip 原因）。
 
 **仍待做**：PostgreSQL 本身（本机无 PG，迁移与查询只在 SQLite 验证；JSON 非 JSONB、连接池/重启行为
-未测）、TLS/`wss://` 终结与 mTLS（当前是请求签名 + 明文绑定）、多 worker 下的任务分配竞态
-（重放保护已落库，跨 worker 成立）、每租户角色授权（单一共享 token）、审批与任务派发的强制绑定、
-服务端 ping 定时器、Prometheus 指标。安装器与真机验收同 3.5。
+未测）、TLS/`wss://` 终结与 mTLS（当前是请求签名 + 明文绑定）、真正跑第二个 worker 进程验证任务分配
+（条件 UPDATE 与重放表均按跨进程正确性设计，未实测）、每租户角色授权（单一共享 token，且同一调用方
+可既申请又批准）、审批生命周期（不会自动过期、不可撤销，`expired` 状态无人写入；审批要求是固定表而
+非按租户/环境策略）、服务端 ping 定时器、Prometheus 指标。安装器与真机验收同 3.5。
 
 ### 3.7 真机验收
 
@@ -353,8 +363,8 @@ heartbeat、握手→下发→`succeeded`→ack、中断→`unknown`/`node_disco
 5. **host.tool.execute 收尾**（3.4 的最后一块）：非 MCP 只读分支与 `mcp.*` 门禁对齐均已完成。
 6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
 7. **控制平面**（3.6，独立阶段）：可复核切片已落地（`services/control-plane/`，运维面 + 节点
-   Ed25519 签名面 + `WS /v1/node/channel`，本地 SQLite 与真 uvicorn/真 WebSocket 验证，已纳入
-   `pnpm check`）；PostgreSQL 部署、TLS/mTLS 与多 worker 并发待相应环境。
+   Ed25519 签名面 + `WS /v1/node/channel` + 审批强制绑定执行与原子派发，本地 SQLite 与真
+   uvicorn/真 WebSocket 验证，已纳入 `pnpm check`）；PostgreSQL 部署、TLS/mTLS 与多 worker 并发待相应环境。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
 
 ---

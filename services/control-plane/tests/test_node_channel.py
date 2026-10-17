@@ -25,7 +25,12 @@ class NodeChannelTests(ControlPlaneTestCase):
         with self.node_socket(key, node_id) as socket:
             self.assertEqual(
                 socket.receive_json(),
-                {"type": channel.MESSAGE_READY, "nodeId": node_id, "assigned": 1},
+                {
+                    "type": channel.MESSAGE_READY,
+                    "nodeId": node_id,
+                    "assigned": 1,
+                    "waiting": [],
+                },
             )
             assigned = socket.receive_json()
             self.assertEqual(assigned["type"], channel.MESSAGE_ASSIGNED)
@@ -116,7 +121,8 @@ class NodeChannelTests(ControlPlaneTestCase):
             task_id = self.create_task(tenant_id, node_id)["body"]["id"]
             socket.send_json({"type": "sync"})
             self.assertEqual(
-                socket.receive_json(), {"type": channel.MESSAGE_SYNCED, "assigned": 1}
+                socket.receive_json(),
+                {"type": channel.MESSAGE_SYNCED, "assigned": 1, "waiting": []},
             )
             self.assertEqual(socket.receive_json()["task"]["id"], task_id)
             socket.send_json(

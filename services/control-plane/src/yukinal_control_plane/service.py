@@ -11,12 +11,18 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import models, nodeauth
-from .errors import Conflict, InvalidTransition, NotFound, Unauthorized
+from . import actions, models, nodeauth
+from .errors import (
+    ApprovalRequired,
+    Conflict,
+    InvalidTransition,
+    NotFound,
+    Unauthorized,
+)
 from .models import ACTIVE_TASK_STATUSES, APPROVAL_STATES, TASK_STATUSES
 
 # Allowed task transitions. A terminal state has no outgoing edges, so a
@@ -333,40 +339,139 @@ async def node_tasks(session: AsyncSession, node: models.Node) -> list[models.Ta
     )
 
 
+# ── action approval binding ──────────────────────────────────────────────────
+#
+# An effectful task is only created, and only leaves the queue, when an approved
+# decision matches its exact action: same tenant, same kind, same node, same
+# payload. The fingerprint is what makes "same" exact, so an approval for one
+# input can never dispatch another.
+
+
+def task_action_fingerprint(*, kind: str, node_id: str, payload: dict) -> str:
+    """Fingerprint of a prospective task, without creating one."""
+    return actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
+
+
+async def approved_action_id(
+    session: AsyncSession, *, tenant_id: str, kind: str, node_id: str, payload: dict
+) -> str | None:
+    """The id of an approved decision for exactly this action, if one exists."""
+    fingerprint = actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
+    return await session.scalar(
+        select(models.Approval.id)
+        .where(
+            models.Approval.tenant_id == tenant_id,
+            models.Approval.action == kind,
+            models.Approval.fingerprint == fingerprint,
+            models.Approval.state == "approved",
+        )
+        .order_by(models.Approval.decided_at.desc())
+        .limit(1)
+    )
+
+
+async def require_action_approval(
+    session: AsyncSession, *, tenant_id: str, kind: str, node_id: str, payload: dict
+) -> str:
+    """Return the action fingerprint, refusing an effectful action with no approval.
+
+    A read-only kind is always allowed; its fingerprint is still returned so the
+    caller can record it.
+    """
+    fingerprint = actions.action_fingerprint(kind=kind, node_id=node_id, payload=payload)
+    if not actions.requires_approval(kind):
+        return fingerprint
+    if (
+        await approved_action_id(
+            session, tenant_id=tenant_id, kind=kind, node_id=node_id, payload=payload
+        )
+        is None
+    ):
+        raise ApprovalRequired(
+            f"task kind `{kind}` changes its target and needs an approved action; "
+            f"request approval for fingerprint {fingerprint}"
+        )
+    return fingerprint
+
+
+async def claim_queued_task(session: AsyncSession, task_id: str) -> bool:
+    """Move one queued task to ``running`` if it is still queued.
+
+    Returns whether this caller won the claim. The condition lives in the
+    ``WHERE`` clause, so two workers that both selected the same queued task
+    cannot both assign it: the loser's update matches no row. Reading the status
+    into Python and writing it back would let both through, which is precisely
+    the multi-worker race.
+    """
+    claimed = await session.scalar(
+        update(models.Task)
+        .where(models.Task.id == task_id, models.Task.status == "queued")
+        .values(
+            status="running",
+            attempts=models.Task.attempts + 1,
+            updated_at=utc_now(),
+        )
+        .returning(models.Task.id)
+        .execution_options(synchronize_session=False)
+    )
+    return claimed is not None
+
+
 async def assign_queued_tasks(
     session: AsyncSession, node: models.Node, *, actor: str = "control-plane"
-) -> list[models.Task]:
-    """Move this node's queued tasks to ``running`` and return them.
+) -> tuple[list[models.Task], list[dict]]:
+    """Offer this node its queued work, returning ``(assigned, waiting)``.
 
-    Assignment is the moment work leaves the queue: the node announced itself on
-    the channel, and the partial unique index guarantees it has no other active
-    task.
+    Assignment is a conditional update, so a second worker that saw the same
+    queued row loses the race instead of handing one task to two connections. A
+    task whose kind needs an approval that is missing or was never decided is
+    reported in ``waiting`` rather than silently dropped, so the operator can see
+    why nothing was dispatched.
     """
-    queued = (
-        await session.scalars(
-            select(models.Task)
+    candidates = (
+        await session.execute(
+            select(
+                models.Task.id, models.Task.tenant_id, models.Task.kind, models.Task.payload
+            )
             .where(models.Task.node_id == node.id, models.Task.status == "queued")
             .order_by(models.Task.created_at)
         )
     ).all()
-    now = utc_now()
     assigned: list[models.Task] = []
-    for task in queued:
-        task.status = "running"
-        task.attempts += 1
-        task.updated_at = now
-        assigned.append(task)
+    waiting: list[dict] = []
+    for task_id, tenant_id, kind, payload in candidates:
+        payload = payload or {}
+        if actions.requires_approval(kind) and (
+            await approved_action_id(
+                session, tenant_id=tenant_id, kind=kind, node_id=node.id, payload=payload
+            )
+            is None
+        ):
+            waiting.append(
+                {
+                    "taskId": task_id,
+                    "reason": "approval_required",
+                    "fingerprint": actions.action_fingerprint(
+                        kind=kind, node_id=node.id, payload=payload
+                    ),
+                }
+            )
+            continue
+        if not await claim_queued_task(session, task_id):
+            # Another worker claimed it between our select and our update.
+            continue
+        assigned.append(await session.get(models.Task, task_id, populate_existing=True))
         await record_audit(
             session,
-            tenant_id=task.tenant_id,
+            tenant_id=tenant_id,
             actor=actor,
             action="task.transition",
             subject_type="task",
-            subject_id=task.id,
+            subject_id=task_id,
             detail={"from": "queued", "to": "running", "outcome": None},
         )
     await session.flush()
-    return assigned
+    return assigned, waiting
 
 
 # ── tasks ────────────────────────────────────────────────────────────────────
@@ -381,6 +486,12 @@ async def create_task(
     payload: dict,
 ) -> models.Task:
     await require_node(session, tenant_id, node_id)
+    # An effectful task may not even be queued without its approval. The queue
+    # means "ready to dispatch": a task that can never run would otherwise hold
+    # the node's single active slot and stall it.
+    fingerprint = await require_action_approval(
+        session, tenant_id=tenant_id, kind=kind, node_id=node_id, payload=payload
+    )
     task = models.Task(
         id=new_id("tsk"),
         tenant_id=tenant_id,
@@ -400,7 +511,7 @@ async def create_task(
         action="task.create",
         subject_type="task",
         subject_id=task.id,
-        detail={"kind": kind, "nodeId": node_id},
+        detail={"kind": kind, "nodeId": node_id, "fingerprint": fingerprint},
     )
     return task
 
@@ -446,6 +557,18 @@ async def _apply_transition(
             f"task `{task.id}` cannot move from `{task.status}` to `{status}`"
         )
     previous = task.status
+    if status == "running" and previous == "queued":
+        # Re-checked here as well as at creation: dispatch is the moment the node
+        # is told to act, so the gate belongs on this edge too. If the approval
+        # was never decided, or its fingerprint does not match this payload, the
+        # task does not move.
+        await require_action_approval(
+            session,
+            tenant_id=task.tenant_id,
+            kind=task.kind,
+            node_id=task.node_id,
+            payload=task.payload or {},
+        )
     task.status = status
     task.updated_at = utc_now()
     if status == "running":
@@ -563,17 +686,27 @@ async def create_approval(
     *,
     tenant_id: str,
     action: str,
-    fingerprint: str,
+    node_id: str,
+    payload: dict,
     requested_by: str,
     task_id: str | None = None,
 ) -> models.Approval:
-    await require_tenant(session, tenant_id)
+    """Record a request to approve exactly one action.
+
+    The fingerprint is computed here from the action, node and payload, so the
+    approval can only ever authorise the input it names; a caller cannot name a
+    fingerprint that does not match what they asked for.
+    """
+    await require_node(session, tenant_id, node_id)
     if task_id is not None:
         await require_task(session, tenant_id, task_id)
+    fingerprint = actions.action_fingerprint(kind=action, node_id=node_id, payload=payload)
     approval = models.Approval(
         id=new_id("apr"),
         tenant_id=tenant_id,
         task_id=task_id,
+        node_id=node_id,
+        payload=payload,
         action=action,
         fingerprint=fingerprint,
         requested_by=requested_by,
@@ -587,7 +720,12 @@ async def create_approval(
         action="approval.request",
         subject_type="approval",
         subject_id=approval.id,
-        detail={"action": action, "taskId": task_id},
+        detail={
+            "action": action,
+            "nodeId": node_id,
+            "taskId": task_id,
+            "fingerprint": fingerprint,
+        },
     )
     return approval
 
@@ -678,9 +816,11 @@ __all__ = [
     "ACTIVE_TASK_STATUSES",
     "APPROVAL_STATES",
     "TASK_STATUSES",
+    "approved_action_id",
     "assign_queued_tasks",
     "authenticate_node",
     "claim_nonce",
+    "claim_queued_task",
     "create_approval",
     "create_model_config",
     "create_task",
@@ -701,11 +841,13 @@ __all__ = [
     "recoverable_tasks",
     "recoverable_tasks_for_node",
     "register_node",
+    "require_action_approval",
     "require_node",
     "require_node_by_id",
     "require_node_task",
     "require_task",
     "require_tenant",
+    "task_action_fingerprint",
     "touch_node",
     "transition_node_task",
     "transition_task",

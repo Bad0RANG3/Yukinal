@@ -33,6 +33,12 @@ class InvalidTransition(Conflict):
     code = "invalid_transition"
 
 
+class ApprovalRequired(Conflict):
+    """An effectful action was attempted without a matching approved decision."""
+
+    code = "approval_required"
+
+
 class SecretRejected(ControlPlaneError):
     status_code = 400
     code = "secret_rejected"
