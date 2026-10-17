@@ -1,6 +1,6 @@
 # Dots 协调机制：实施与验收
 
-日期：2026-10-17。工作区：`C:/Users/sylun/.codex/worktrees/ui-layout-direction/3024-Yukinal`。
+日期：2026-10-17。工作分支：`codex/ui-layout-direction`。
 
 ## 现在可以怎样使用
 
