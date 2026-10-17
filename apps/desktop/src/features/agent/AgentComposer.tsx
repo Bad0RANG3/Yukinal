@@ -37,7 +37,7 @@ import { Icon } from "../../components/Icon.js";
 import { AGENT_TEAMS, type AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
-import { ModelPicker } from "./ModelPicker.js";
+import { composerKeyAction } from "./composer-keyboard.js";
 import { PermissionPicker } from "./PermissionPicker.js";
 import { ReasoningPicker } from "./ReasoningPicker.js";
 import {
@@ -363,37 +363,21 @@ export function AgentComposer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    // 候选列表打开时，方向键与 Enter 归列表所有。
-    if (open) {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setHighlight((current) => (current + 1) % suggestions.length);
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setHighlight((current) => (current - 1 + suggestions.length) % suggestions.length);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setDismissed(true);
-        return;
-      }
-      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-        const suggestion = suggestions[active];
-        if (suggestion && (suggestion.kind === "mention" || suggestion.reason === null)) {
-          event.preventDefault();
-          applySuggestion(suggestion);
-          return;
-        }
-        // 命令不可用时不吞掉 Enter，让用户照常提交并看到明确结果。
-      }
-    }
-    // 输入法组合中的 Enter 是选词确认，不是发送。
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    const suggestion = suggestions[active];
+    const action = composerKeyAction({
+      key: event.key, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey, altKey: event.altKey,
+      isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode,
+    }, { open, canComplete: Boolean(suggestion && (suggestion.kind === "mention" || suggestion.reason === null)) });
+    if (action === "native") return;
     event.preventDefault();
-    submit();
+    switch (action) {
+      case "next": setHighlight((current) => (current + 1) % suggestions.length); break;
+      case "previous": setHighlight((current) => (current - 1 + suggestions.length) % suggestions.length); break;
+      case "dismiss": event.stopPropagation(); setDismissed(true); break;
+      case "complete": if (suggestion) applySuggestion(suggestion); break;
+      case "submit": submit(); break;
+    }
   };
 
   return (
@@ -517,6 +501,7 @@ export function AgentComposer({
           ref={inputRef}
           rows={1}
           aria-label="消息输入"
+          title="Enter 换行，Ctrl+Enter 发送"
           value={prompt}
           disabled={!canEdit}
           onChange={(event) => {
@@ -726,16 +711,16 @@ export function AgentComposer({
             {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
           </div>
           <div className="agent-composer-toolbar-right">
-            {models.length ? (
-              <ModelPicker
-                choices={models}
-                selectedKey={selectedModelKey}
-                selectedTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
-                onSelect={onSelectModel}
-                disabled={running}
-              />
-            ) : <span className="agent-model-empty">未配置模型</span>}
-            <ReasoningPicker levels={reasoningLevels} value={reasoningEffort} modelLabel={models.find((item) => item.key === selectedModelKey)?.label ?? "当前模型"} disabled={running} onChange={(value) => onReasoningEffortChange?.(value)} />
+            {models.length ? <ReasoningPicker
+              choices={models}
+              selectedModelKey={selectedModelKey}
+              selectedModelTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
+              onSelectModel={onSelectModel}
+              levels={reasoningLevels}
+              value={reasoningEffort}
+              disabled={running}
+              onChange={(value) => onReasoningEffortChange?.(value)}
+            /> : <span className="agent-model-empty">未配置模型</span>}
             {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
                 点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。
                 语音若要做，应作为真实能力连同它的权限与降级路径一起加回来。 */}
@@ -747,7 +732,8 @@ export function AgentComposer({
                 type="button"
                 className={`agent-send-button ${sendPresence.closing ? "is-closing" : ""}`}
                 aria-label="发送消息"
-                title="发送消息（Enter）"
+                title="发送消息（Ctrl+Enter）"
+                aria-keyshortcuts="Control+Enter Meta+Enter"
                 disabled={!canSend}
                 onClick={submit}
                 onAnimationEnd={sendPresence.onAnimationEnd}
