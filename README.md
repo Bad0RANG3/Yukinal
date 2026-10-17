@@ -1,254 +1,277 @@
+<div align="center">
+
+<img src="./apps/desktop/src/assets/brand-mark.png" alt="Yukinal" width="96" height="96" />
+
 # Yukinal
 
-Yukinal is a desktop operations workspace for inspecting and managing SSH
-servers. The React interface remains the product UI; the 2.0 rewrite moves SSH
-operations toward a C++ service and Python Agent.
+**AI-native remote development & infrastructure workspace.**
 
-The current app/package interface version is `1.0.0`; the rewrite is still in progress.
+Inspect and manage SSH servers through an operator workspace that pairs a
+controlled AI Agent with a hardened, structured SSH service.
 
-## Rewrite status
+[**English**](README.md) · [中文](README.zh-CN.md)
 
-The brief's first SSH foundation stage is complete; the broader migration is
-still in progress. Current components include:
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Version](https://img.shields.io/badge/interface-1.0.0-informational.svg)](./packages/shared/src/version.ts)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
+[![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
+[![Dependencies](https://img.shields.io/badge/status-rewrite%20in%20progress-orange.svg)](./docs/rewrite-cpp-python.md)
 
-- a standalone C++ service bound to `127.0.0.1`;
-- a Python caller over local HTTP/JSON;
-- structured SSH operations: `connection_check`, `system_snapshot`, `docker_ps`,
-  `docker_logs`, `docker_inspect`, `systemd_inspect`, `package_inspect`,
-  `service_status`, fixed read-only `disk_usage`, `service_inventory`, and the existing host-approved
-  `docker_restart`, `systemd_restart`, and `package_install` actions, plus
-  bounded SFTP listing, metadata, read, write, exclusive backup creation, removal,
-  guarded atomic replacement, and link-count probes for supported desktop identities,
-  including OpenSSH user-certificate identities;
-- target allowlisting, strict SSH host-key verification, bounded timeouts and
-  output, and credentials referenced from environment variables or private-key
-  files;
-- a Python Tool Registry with JSON Schema validation, per-call tool/target
-  authorization, parameter-bound approval grants, and redacted audit events;
-- Streamable HTTP and stdio MCP clients, with remotely discovered tools
-  defaulting to approval-required;
-- a bounded LangGraph workflow with tool-call, total-time, and output-size
-  limits.
-- a configuration-driven OpenAI-compatible, Anthropic and Gemini model
-  factory using official LangChain adapters, including OpenAI Chat Completions
-  and Responses API selection;
-- a model-driven LangGraph tool loop with tenant/user/target/risk policy,
-  exact-argument approval requests, and bounded model output.
-- the Python Agent's bounded NDJSON/JSON-RPC transport and desktop initialization,
-  health, capability, and tool-catalog methods.
+</div>
 
-The Python JSON-RPC layer handles initialization, health, tool catalogs,
-provider checks and model catalogs, text runs, cancellation, and a bidirectional
-JSON-RPC bridge to the desktop host. The C++ host now owns the Agent process:
-`native/desktop_host/src/sidecar.cpp` launches and supervises it, and the router
-routes `agent_spawn`/`agent_status`/`agent_kill`/`agent_logs`, the six
-`provider_*` commands, and the `agent_run_start`/`agent_run_stop`/
-`agent_approval_respond` run commands through it, answering the Agent's
-`host.credentials.*` calls against the OS credential store. The C++ host forwards
-the run payload unchanged because the Python Agent Node owns durable admission,
-stop and approval state; a synchronous start keeps its long timeout while the
-sidecar's host worker keeps answering `host.*` calls. Remaining host RPC handlers
-and MCP/investigation forwarding are the next bridge milestones. Python runs can execute the existing
-read-only server tools through the host and can use MCP tools the host marks
-low-risk. On the desktop, `server.info` gathers its fixed SSH command batch
-through the C++ service, normalizes its snapshot in Python, and sends the
-validated result through the existing guarded host tool and snapshot database
-path. The Overview's direct snapshot refresh uses the same Python normalizer for
-C++ targets; unsupported configurations fail explicitly. The approved desktop
-actions remain behind host-side plan checks and one-time call grants. Python exposes approval-required host tools
-only while a durable remote-goal action step authorizes them; approval requests,
-rejection, expiry, and accepted calls round-trip through the desktop host.
-On C++-supported targets, `systemd.restart` and `docker.restart` now run as
-structured operations through the Python caller; the host checks the durable
-plan and consumes the exact one-time approval before returning target credentials.
-Durable task recovery and broader tool coverage remain in progress. The React UI
-is served by the C++ WebView host; the retired Rust/Tauri host and the legacy Node
-agent have been removed from the repository.
+---
 
-Desktop `filesystem.write`, `filesystem.edit`, `filesystem.backup`,
-`filesystem.restore`, and `filesystem.backup.cleanup` now use Python approval and
-the C++ SFTP service on supported target routes. The host validates durable
-action plans and owns backup metadata; backup creation is bounded to 1 MiB and
-uses exclusive sibling-file creation, restore verifies both revisions before
-guarded atomic replace, and cleanup verifies the backup digest before removing
-the remote copy and consuming its host ledger row. Backup listing and retention
-use Python for result formatting and per-path planning over bounded host-owned
-ledger queries.
+> **Status:** Yukinal 2.0 is an in-progress rewrite that moves SSH operations
+> behind a standalone C++ service and a Python Agent while the React interface
+> stays the product UI. The current app/package interface version is `1.0.0`.
+> The Rust/Tauri host and the legacy Node agent have been removed; the C++
+> WebView host is now the only desktop host. Packaging (installers, signing,
+> notarization) is **not implemented yet**. See
+> [rewrite status](./docs/rewrite-cpp-python.md) and
+> [release status](./docs/release.md).
 
-The Python Agent resolves the selected desktop server from SQLite and the OS
-credential store before starting a one-target C++ service. The desktop service
-panel uses the same short-lived service process for read-only service inventory.
-The Rust/Tauri host and the legacy Node agent are gone: the C++ WebView host is
-the only desktop host, and the Python Agent is the only agent runtime. Installing
-the desktop (installers, bundlers, NSIS/MSI/DMG/deb packaging) is **not
-implemented yet**; see [the Rust removal and C++ takeover plan](./docs/rust-removal-plan.md).
+## Contents
 
-To run the source Python Agent and its stdio sidecar protocol, create
-`agent/.venv` and install `agent[agent,models]`. `pnpm smoke:sidecar` exercises
-its stdio protocol. The C++ desktop host launches the Agent once its RPC bridge
-is implemented.
+- [What is Yukinal?](#what-is-yukinal)
+- [Architecture](#architecture)
+- [Repository layout](#repository-layout)
+- [Feature status](#feature-status)
+- [Build and run](#build-and-run)
+- [Configuration](#configuration)
+- [Common connection errors](#common-connection-errors)
+- [Security model](#security-model)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
-For the C++ and Python service test suite, install `agent[agent,models,test]`,
-configure and build the native service, then run `pnpm check`; the check gate
-detects the configured CMake build and runs its CTest suite. For example:
+## What is Yukinal?
 
-```powershell
-python -m pip install -e "agent[agent,models,test]"
-cmake -S native -B native/build-check -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON
-cmake --build native/build-check --config Release --parallel
-$env:YUKINAL_SSH_CMAKE_BUILD_DIR = "native/build-check"
-pnpm check
+Yukinal is a desktop operations workspace for teams that manage a handful of
+Linux servers. You describe a goal; the Agent decomposes it, calls the tools it
+is allowed to use, reads back the evidence, and reports what actually happened —
+while an engineer watches, approves, or takes over.
+
+The product is built around three user paths:
+
+| Path | From | Success looks like |
+| --- | --- | --- |
+| **Goal-driven AI operations** | Select a server, state a goal | The Agent gathers evidence, runs authorized, structured operations, verifies the remote state, and shows each step |
+| **Observability & takeover** | Open a server workspace | Freshness-labelled health, services, logs, files, and task progress; manual takeover when needed |
+| **Local ↔ remote files** | Drag from the OS file manager, or browse in the workspace | Streaming upload/download with progress, conflicts, and integrity checks |
+
+The model proposes plans and selects tools. **Authorization, approval, and
+execution boundaries are enforced by program code, never by the prompt.**
+
+## Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│  React desktop UI (TypeScript + Vite)                            │
+│  runs inside the C++ WebView host                                 │
+└───────────────▲──────────────────────────────────────────────────┘
+                │ host IPC (JSON)
+┌───────────────┴──────────────────────────────────────────────────┐
+│  C++ desktop host  (native/desktop_host)                          │
+│  window · IPC router · SQLite · OS credential store · approvals   │
+└───────┬───────────────────────────────────────────────┬──────────┘
+        │ NDJSON JSON-RPC 2.0 (stdio sidecar)           │ loopback HTTP
+┌───────▼──────────────────────────────┐        ┌────────▼──────────┐
+│  Python Agent  (agent/)               │        │  C++ SSH service  │
+│  LangGraph · Tool Registry · Policy   │───────▶│  (native/src)     │
+│  MCP clients · ModelFactory           │  HTTP  │  127.0.0.1 only   │
+│  Audit · Approvals · Checkpoints      │        │  structured ops   │
+└───────────────────────────────────────┘        └─────────┬─────────┘
+                                                           │ SSH / SFTP / PTY
+                                                    ┌──────▼──────┐
+                                                    │  target(s)  │
+                                                    └─────────────┘
 ```
 
-The new milestone boundary, API contract, build instructions, and remaining
-work are documented in [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md).
+An optional **control plane** (`services/control-plane`, FastAPI + PostgreSQL)
+adds a multi-tenant registry and task broker; nodes connect out to it over
+signed requests and a WebSocket channel. It does not change the single-machine
+desktop path.
 
-## Build the new SSH service
+## Repository layout
 
-Requirements: CMake 3.24+, a C++20 compiler, Python 3.11+, and (on macOS/Linux)
-OpenSSL development headers. On the first CMake configure, the build fetches
-pinned source versions of libssh2, nlohmann/json, and cpp-httplib.
+| Path | What it is |
+| --- | --- |
+| [`apps/desktop/`](./apps/desktop) | React desktop UI (the product interface) |
+| [`native/`](./native) | C++ SSH/SFTP/PTY service and the C++ desktop host |
+| [`agent/`](./agent) | Python Agent runtime and the `yukinal_ssh` caller |
+| [`services/control-plane/`](./services/control-plane) | Optional FastAPI + PostgreSQL control plane |
+| [`packages/shared/`](./packages/shared) | Cross-layer TypeScript contracts, schemas, and IPC fixtures |
+| [`packages/agent-sdk/`](./packages/agent-sdk), [`packages/provider-sdk/`](./packages/provider-sdk) | Client SDKs for the Agent transport and provider catalogues |
+| [`docs/`](./docs) | Product, security, rewrite, and release documentation |
+| [`scripts/`](./scripts) | Build, check, packaging, and smoke-test tooling |
+| [`configs/`](./configs) | Example service configuration |
 
-```powershell
-cmake -S native -B native/build
+## Feature status
+
+| Area | State |
+| --- | --- |
+| Standalone C++ SSH service on `127.0.0.1` with structured operations | ✅ Implemented |
+| Host-key verification (`known_hosts`, SHA-256 pin, or host CA + KRL) | ✅ Implemented |
+| Proxy routes (HTTP/HTTPS CONNECT, SOCKS5/SOCKS5H) and bypass rules | ✅ Implemented |
+| Bounded SFTP list/stat/read/write/backup, guarded atomic replace | ✅ Implemented |
+| C++ desktop host: window, IPC router, SQLite, credentials, approvals | ✅ Implemented |
+| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented |
+| MCP clients (stdio + Streamable HTTP) with approval-required defaults | ✅ Implemented |
+| Model factory: OpenAI-compatible, Anthropic, Gemini | ✅ Implemented |
+| Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented |
+| Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
+| Durable task/plan recovery | 🚧 Partial |
+| Installers, signing, notarization, cross-platform acceptance | ❌ Not implemented |
+
+Full detail and evidence live in the [rewrite log](./docs/rewrite-cpp-python.md)
+and [release status](./docs/release.md).
+
+## Build and run
+
+**Prerequisites**
+
+- **Node.js ≥ 24** and **pnpm 11.8.0** (`corepack enable` pins it via
+  `package.json`).
+- **Python 3.11+**.
+- **CMake 3.24+** and a **C++20** compiler (MSVC/NMake or MinGW on Windows;
+  a system compiler plus OpenSSL headers on macOS/Linux).
+- On Windows, a full **Perl** distribution with `IPC::Cmd` (Strawberry Perl
+  works) and a Visual Studio 2022 developer shell.
+
+**1. Install workspace dependencies**
+
+```bash
+pnpm install --frozen-lockfile
+```
+
+**2. Set up the Python Agent**
+
+```bash
+python -m venv agent/.venv
+# Windows
+agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
+# macOS / Linux
+agent/.venv/bin/python -m pip install -e "agent[agent,models]"
+```
+
+**3. Build the C++ SSH service**
+
+```bash
+cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
 cmake --build native/build --config Release
 ctest --test-dir native/build -C Release --output-on-failure
 ```
 
-Copy [`configs/ssh-service.example.json`](./configs/ssh-service.example.json),
-replace the target fields, create its OpenSSH `known_hosts` entry, and set
-`YUKINAL_SSH_API_TOKEN` to a random URL-safe value 32–256 characters long. The
-configuration keeps SSH credentials as a private-key path or a reference to an
-environment variable; it never stores a password value.
+**4. Run the full check gate**
 
-For host certificates, `host_certificate_authority` can replace the pinned key
-or `known_hosts` trust source. The C++ service verifies the host CA signature,
-certificate validity and principal patterns, and optional local or HTTPS OpenSSH
-KRL revocations before authenticating. HTTPS KRL downloads verify the server
-certificate; plain HTTP is restricted to loopback URLs.
-
-Desktop SSH targets also follow the app's selected proxy route. The C++ service
-accepts an optional target `proxy` with the configured HTTP or HTTPS proxy `url`,
-an optional `auth_env` reference, and `no_proxy` host patterns. The C++ service
-parses and validates the URL, verifies HTTPS proxy certificates, and establishes
-the CONNECT tunnel.
-Supported bypass patterns include exact hosts, domain suffixes (`.corp` or
-`*.corp`), IPv4 prefixes such as `10.*`, IPv4 CIDR ranges such as
-`10.0.0.0/8`, IPv6 CIDR ranges such as `2001:db8:abcd::/48`, and `*`. Hostname
-and wildcard patterns can be restricted to an SSH port, for example `localhost:22`,
-`*.corp:2200`, or `[::1]:2222`; `*:2222` bypasses the proxy for every host on
-that port. Proxy credentials belong in the environment variable, not in the JSON
-file. Unsupported proxy protocols use
-the compatibility route; invalid HTTP(S) proxy URLs or bypass patterns fail
-configuration validation in the C++ service.
-
-The Python client can be installed for development with:
-
-```powershell
-python -m pip install -e "agent[agent]"
+```bash
+pnpm check
 ```
 
-To use the C++ service from the existing UI through the Python sidecar,
-build the service and run it in one PowerShell session with the same token as
-the JSON config. Set the matching environment values in a second session before
-starting the Python desktop. Set the service target's `target_id` to the selected
-desktop server's opaque `serverId` (for example, `srv_stage1`). The model does
-not supply this ID; the Agent binds the request to the selected server.
+`pnpm check` runs repository hygiene and secret scanning, the docs-link gate,
+the CTest suite (C++ service/host + Python Agent), the control-plane tests when
+its venv exists, TypeScript build/typecheck/tests, the desktop bundle, and the
+Python sidecar smoke test.
+
+**5. Run the desktop**
+
+```bash
+pnpm desktop:dev:cpp   # C++ WebView host + Vite (the real desktop)
+pnpm desktop:dev       # browser-only UI preview (no SQLite/SSH/PTY)
+```
+
+Packaging stages a distributable layout but does **not** produce installers yet:
+
+```bash
+pnpm build:ssh-service
+pnpm build:python-agent
+pnpm package           # stages target/release/bundle/<name>/ + manifest
+pnpm package -- --verify
+```
+
+## Configuration
+
+Copy [`configs/ssh-service.example.json`](./configs/ssh-service.example.json),
+fill in an allow-listed target, add the host key to `known_hosts` (or pin its
+fingerprint / configure a host CA), and set `YUKINAL_SSH_API_TOKEN` to a random
+URL-safe value of 32–256 characters.
+
+Each target declares **exactly one** trust source (`known_hosts_file`,
+`host_key_fingerprint`, or `host_certificate_authority`) and **exactly one**
+authentication source (a private-key file, a private-key environment reference,
+a password environment reference, or `{"type":"agent"}`). No password value is
+ever stored in the JSON.
 
 ```powershell
 $env:YUKINAL_SSH_API_TOKEN = "<random URL-safe token>"
 native/build/Release/yukinal-ssh-service.exe --config path/to/ssh-service.json
 ```
 
-In the second PowerShell session:
+To drive the service from the UI, set the matching token/URL in a second shell
+and start the desktop:
 
 ```powershell
 $env:YUKINAL_SSH_API_TOKEN = "<same token>"
-$env:YUKINAL_SSH_API_URL = "http://127.0.0.1:8765"
+$env:YUKINAL_SSH_API_URL   = "http://127.0.0.1:8765"
 pnpm desktop:dev:cpp
 ```
 
-The C++ desktop host forwards the SSH token only to the Python Agent sidecar when
-the service is configured. The C++ SSH service still needs to be started separately.
-
-To include the Paramiko SSH mock in CTest, install the optional test extra
-before configuring CMake:
-
-```powershell
-python -m pip install -e "agent[agent,test]"
-```
-
-CMake registers `ssh_mock_integration` when Paramiko is available. This test
-covers SSH success, HTTP CONNECT success and proxy-auth rejection, bad SSH
-credentials, timeouts, output limits, and unknown or changed host keys without
-requiring Docker. When the Agent dependencies are also installed,
-`agent_ssh_mock_integration` exercises the Python Agent tool through the C++
-service and checks selected-server binding, the task target allowlist, and
-rejection of model-supplied target overrides.
-
-Its only enabled operation is:
-
-```python
-from yukinal_ssh import SshServiceClient
-
-client = SshServiceClient(token="same-token-as-YUKINAL_SSH_API_TOKEN")
-result = client.service_status("staging-web-01", "nginx.service")
-print(result.stdout.strip(), result.exit_code)
-```
+The desktop host forwards the SSH token only to the Python Agent sidecar, and
+only when the service is configured. The C++ SSH service is started separately.
 
 ## Common connection errors
 
-- `host_key_unverified`: the server's key does not match the saved pin or
-  `known_hosts` entry. Confirm the server identity through the desktop trust
-  flow before retrying.
-- `authentication_failed`: check the selected SSH identity, key file or
-  credential-store reference, and any private-key passphrase.
-- `proxy_auth_required`: the HTTP proxy rejected its Basic credential or the
-  configured `auth_env` is missing. Store `user:password` in that environment
-  variable; do not place it in the service JSON.
-- `proxy_connect_failed`: the proxy did not open a CONNECT tunnel. Check the
-  proxy host/port and whether it allows CONNECT to the SSH server port.
-- `timeout` or `resolver_busy`: retry after checking DNS, network reachability,
-  and the operation timeout. DNS lookups have a bounded worker pool.
+| Error | Meaning | Next step |
+| --- | --- | --- |
+| `host_key_unverified` | The server key doesn't match the saved pin or `known_hosts` entry | Confirm the server identity through the desktop trust flow |
+| `authentication_failed` | Bad identity, key file, or passphrase | Re-check the selected SSH identity and credential reference |
+| `proxy_auth_required` | The proxy rejected its Basic credential | Store `user:password` in the referenced env var, never in JSON |
+| `proxy_connect_failed` | The proxy refused the CONNECT tunnel | Check the proxy host/port and whether it allows CONNECT to the SSH port |
+| `timeout` / `resolver_busy` | Slow DNS or network | Retry after checking reachability; DNS uses a bounded worker pool |
 
-The Agent Runtime setup, MCP configuration and direct workflow example are in
-[`agent/README.md`](./agent/README.md). The combined extras above let CTest
-include its MCP/LangGraph tests and the Paramiko SSH mock.
+## Security model
 
-For real SSH protocol checks against the isolated OpenSSH container, configure
-with `-DYUKINAL_ENABLE_SSH_CONTAINER_TEST=ON` or run
-`python scripts/test_ssh_container.py --service-binary <path-to-executable>`.
-The test checks a successful read-only call, bad credentials, timeout/output
-limits, and unknown/changed host keys. It requires Docker, `ssh-keygen`, and
-`ssh-keyscan`; it generates temporary keys and removes its test container and
-image afterward.
+- **Default deny.** Unconfigured hosts, users, tools, and operations are
+  refused.
+- **Target allowlisting.** The model never supplies the host; targets resolve
+  through a controlled `target_id` allowlist.
+- **Host-key verification is mandatory.** Unknown or changed keys fail closed.
+- **Approval is bound to the exact action.** A fingerprint covers target, tool,
+  and full arguments; changed arguments require a new approval, and approvals
+  carry a window and a use budget.
+- **Bounded execution.** Timeouts, output sizes, concurrency, and tool-call
+  counts are capped; sensitive values are redacted from logs and audit.
+- **Untrusted input.** Agent and MCP output are treated as data, never as
+  instructions that can override policy.
 
-## Desktop UI
+The full boundary is documented in [security and data boundaries](./docs/security.md).
 
-The React UI runs inside the C++ WebView host. The C++ host owns the window, the
-IPC bridge, SQLite/credential access, and the migrated commands; commands it has
-not taken over yet return `NOT_IMPLEMENTED` and never fall back to a removed host.
+## Documentation
 
-Run the UI in the C++ desktop host with `pnpm desktop:dev:cpp`. The command builds
-the shared contracts and C++ host, then starts Vite and the native window. It
-accepts `YUKINAL_DESKTOP_HOST_BUILD_DIR` and `YUKINAL_DATA_DIR` for local build and
-data-directory overrides.
+| Doc | Read it for |
+| --- | --- |
+| [Documentation index](./docs/README.md) | The map of all project docs |
+| [Product definition](./docs/product.md) | Users, scenarios, and feature trade-offs |
+| [Security & data boundaries](./docs/security.md) | What the Agent may do and when it needs approval |
+| [Rewrite plan & current status](./docs/rewrite-cpp-python.md) | The C++/Python rewrite stage and interfaces |
+| [C++ takeover & Rust removal plan](./docs/rust-removal-plan.md) | From-scratch C++ host capability guidance |
+| [C++ desktop host migration](./docs/native-desktop-host.md) | Desktop host architecture |
+| [Architecture & acceptance criteria](./docs/architecture-and-build-plan.md) | Goals and release acceptance conditions |
+| [Release status](./docs/release.md) | Install, build, test, and packaging status |
+| [Changelog](./docs/changelog.md) | Version history |
+| [Agent README](./agent/README.md) | Agent runtime, MCP, and provider setup |
+| [SSH service README](./native/README.md) | Building and running the C++ service |
+| [Control plane README](./services/control-plane/README.md) | Multi-tenant registry and task broker |
 
-The browser preview is available with `pnpm desktop:dev`; it does not connect to
-the SSH service. Packaging/installers are not implemented yet; see
-[the Rust removal and C++ takeover plan](./docs/rust-removal-plan.md).
+## Contributing
 
-## Project docs
+Contributions are welcome. Start with the [contributing guide](./CONTRIBUTING.md)
+and the [documentation index](./docs/README.md), then open a focused PR that
+keeps code, tests, and docs in sync. Report security issues privately via the
+[security policy](./SECURITY.md).
 
-- [Product definition](./docs/product.md)
-- [Security and data boundaries](./docs/security.md)
-- [Rewrite plan and current status](./docs/rewrite-cpp-python.md)
-- [C++ takeover and Rust removal plan](./docs/rust-removal-plan.md)
-- [SSH + Agent acceptance handoff](./docs/acceptance-handoff.md)
-- [C++ desktop host migration](./docs/native-desktop-host.md)
-- [Architecture and acceptance criteria](./docs/architecture-and-build-plan.md)
-- [Release status](./docs/release.md)
-- [Documentation index](./docs/README.md)
+## License
 
-The project is MIT-licensed. Third-party dependencies and included assets are
-listed in [`NOTICE`](./NOTICE).
+Yukinal is released under the [MIT License](./LICENSE). Third-party
+dependencies and included assets are listed in [NOTICE](./NOTICE).
