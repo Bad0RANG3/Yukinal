@@ -1721,11 +1721,27 @@ std::string host_tool_action_fingerprint(const nlohmann::json& request) {
   return content_revision_hex(canonical.dump());
 }
 
-bool host_tool_is_effectful(const std::string& tool_name) {
-  return is_one_of(tool_name, {kToolDockerRestart, kToolServerExec, kToolSystemdRestart,
-                               kToolPackageInstall, kToolFilesystemWrite, kToolFilesystemEdit,
-                               kToolFilesystemBackup, kToolFilesystemBackupCleanup,
-                               kToolFilesystemRestore});
+/**
+ * Whether a tool call can change remote state and therefore needs the guarded
+ * call ledger (and, when it targets a remote server, an approval ticket).
+ * Built-in state-changing tools are effectful by name. An MCP tool is effectful
+ * unless the host can resolve its current effective risk as `low`: a name no
+ * running, reviewed catalog provides, or a missing supervisor, stays effectful
+ * so the default is closed (ADR 0014 / ADR 0074).
+ */
+bool host_tool_is_effectful(const std::string& tool_name, McpSupervisor* mcp) {
+  if (is_one_of(tool_name, {kToolDockerRestart, kToolServerExec, kToolSystemdRestart,
+                            kToolPackageInstall, kToolFilesystemWrite, kToolFilesystemEdit,
+                            kToolFilesystemBackup, kToolFilesystemBackupCleanup,
+                            kToolFilesystemRestore})) {
+    return true;
+  }
+  if (tool_name.rfind("mcp.", 0) == 0) {
+    if (mcp == nullptr) return true;
+    const auto risk = mcp->tool_effective_risk(tool_name);
+    return !risk.has_value() || *risk != "low";
+  }
+  return false;
 }
 
 bool host_tool_is_plan_bound_observation(const std::string& tool_name) {
@@ -1752,9 +1768,9 @@ bool plan_allows_repeated_observation(const nlohmann::json& plan,
 
 /** Whether this host tool needs the durable idempotency ledger. */
 bool host_tool_requires_idempotency(DesktopDatabase& database,
-                                    const nlohmann::json& request) {
+                                    const nlohmann::json& request, McpSupervisor* mcp) {
   const auto tool_name = json_text_field(request, "toolName");
-  if (host_tool_is_effectful(tool_name)) return true;
+  if (host_tool_is_effectful(tool_name, mcp)) return true;
   const bool planned = present_json_text(request, "taskId") &&
                        present_json_text(request, "planId") &&
                        present_json_text(request, "planStepId") &&
@@ -1795,9 +1811,10 @@ std::string host_tool_response_status(const nlohmann::json& response) {
 
 HostToolCallDecision prepare_host_tool_call(
     DesktopDatabase& database, const nlohmann::json& request, std::mutex& replay_mutex,
-    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays) {
+    std::map<std::pair<std::string, std::string>, nlohmann::json>& replays,
+    McpSupervisor* mcp) {
   HostToolCallDecision decision;
-  if (!host_tool_requires_idempotency(database, request)) {
+  if (!host_tool_requires_idempotency(database, request, mcp)) {
     decision.execute = true;
     return decision;
   }
@@ -4031,8 +4048,9 @@ nlohmann::json effectful_action_tool_call_object(const nlohmann::json& tool_call
  * Whether an effectful call omitted one of the three durable identifiers. Every
  * Agent-side effectful call must carry taskId, planId and planStepId.
  */
-bool effectful_action_requires_durable_plan(const nlohmann::json& tool_call) {
-  if (!host_tool_is_effectful(json_text_field(tool_call, "toolName"))) return false;
+bool effectful_action_requires_durable_plan(const nlohmann::json& tool_call,
+                                            McpSupervisor* mcp) {
+  if (!host_tool_is_effectful(json_text_field(tool_call, "toolName"), mcp)) return false;
   const auto present = [&tool_call](const char* key) {
     const auto found = tool_call.find(key);
     return found != tool_call.end() && found->is_string() &&
@@ -4093,7 +4111,7 @@ nlohmann::json handle_ssh_effectful_action_target(
                             "the SSH action requires a valid durable run identity", false,
                             std::nullopt);
   }
-  if (effectful_action_requires_durable_plan(tool_call)) {
+  if (effectful_action_requires_durable_plan(tool_call, nullptr)) {
     return host_tool_failed("durable_plan_required",
                             "this SSH action requires a durable task, ChangePlan and action step",
                             false, nlohmann::json{{"code", "durable_plan_required"}});
@@ -4175,7 +4193,7 @@ nlohmann::json handle_ssh_effectful_action_target(
                             false, std::nullopt);
   }
 
-  auto decision = prepare_host_tool_call(database, tool_call, replay_mutex, replays);
+  auto decision = prepare_host_tool_call(database, tool_call, replay_mutex, replays, nullptr);
   if (decision.respond) {
     if (json_text_field(decision.response, "status") == "success") {
       if (tool_name == kToolServerExec) {
@@ -4521,7 +4539,7 @@ HostToolCallDecision prepare_filesystem_backup_query_call(
                                          json_text_field(*deviation, "message"), false, *deviation);
     return decision;
   }
-  return prepare_host_tool_call(database, request, replay_mutex, replays);
+  return prepare_host_tool_call(database, request, replay_mutex, replays, nullptr);
 }
 
 nlohmann::json handle_filesystem_backup_list_query(
@@ -9899,16 +9917,13 @@ nlohmann::json IpcRouter::host_tool_execute_command(
     return host_tool_failed("invalid_input", "host.tool.execute requires a toolName", false,
                             std::nullopt);
   }
-  if (tool_name.rfind("mcp.", 0) == 0) {
-    // The MCP supervisor branch lives in `handle_host_request`; it is never
-    // reached here.
-    return host_tool_failed("invalid_input", "MCP tools are dispatched separately", false,
-                            std::nullopt);
-  }
+  const bool is_mcp_tool = tool_name.rfind("mcp.", 0) == 0;
 
   // Every effectful Agent tool must carry a durable task, plan, and plan step
-  // before the host will consider executing it.
-  if (effectful_action_requires_durable_plan(params)) {
+  // before the host will consider executing it. A non-low-risk MCP tool counts
+  // as effectful; the risk is resolved from the running, reviewed catalog (see
+  // `host_tool_is_effectful`).
+  if (effectful_action_requires_durable_plan(params, mcp_.get())) {
     return host_tool_failed(
         "denied_by_policy",
         "effectful host tools require a durable task, ChangePlan, and plan step before execution",
@@ -9961,6 +9976,35 @@ nlohmann::json IpcRouter::host_tool_execute_command(
     }
   }
 
+  // MCP tools run as host-owned child processes, so they have no resolved `srv_`
+  // remote target. Dispatch them here, after the durable-plan and task-binding
+  // gates but before the remote target checks, to match the retired Rust host's
+  // gate order.
+  if (is_mcp_tool) {
+    if (mcp_ == nullptr) {
+      return host_tool_failed("mcp_unavailable", "The MCP supervisor is unavailable", false,
+                              std::nullopt);
+    }
+    auto decision =
+        prepare_host_tool_call(*database_, params, host_tool_replay_mutex_, host_tool_replays_,
+                               mcp_.get());
+    if (decision.respond) return decision.response;
+    const auto token = decision.token;
+    nlohmann::json response;
+    try {
+      response = host_tool_success(mcp_->call(tool_name, input, cancel));
+    } catch (const std::exception& error) {
+      if (cancel != nullptr && cancel->load()) {
+        response = host_tool_failed("cancelled", "Host operation cancelled", false, std::nullopt);
+      } else {
+        response = host_tool_failed("mcp_call_failed", error.what(), false, std::nullopt);
+      }
+    }
+    finish_host_tool_call(*database_, params, token, response, host_tool_replay_mutex_,
+                          host_tool_replays_);
+    return response;
+  }
+
   const auto server_id = json_text_field(target, "serverId");
   if (server_id.empty()) {
     return host_tool_failed("invalid_input", "remote host tools require a concrete serverId",
@@ -10004,12 +10048,13 @@ nlohmann::json IpcRouter::host_tool_execute_command(
   }
 
   auto decision =
-      prepare_host_tool_call(*database_, params, host_tool_replay_mutex_, host_tool_replays_);
+      prepare_host_tool_call(*database_, params, host_tool_replay_mutex_, host_tool_replays_,
+                             mcp_.get());
   if (decision.respond) return decision.response;
   const auto token = decision.token;
 
   // Effectful tools additionally need the one-shot host approval ticket.
-  if (host_tool_is_effectful(tool_name)) {
+  if (host_tool_is_effectful(tool_name, mcp_.get())) {
     HostApprovalLedger::ExecutionBinding binding;
     binding.approval_id = json_text_field(params, "approvalId");
     const auto run_id = json_text_field(params, "runId");
@@ -10196,29 +10241,9 @@ nlohmann::json IpcRouter::handle_host_request(
     }
   }
   if (method == "host.tool.execute") {
-    const auto tool_name =
-        params.is_object() ? params.value("toolName", std::string()) : std::string();
-    const auto failed = [](const std::string& code, const std::string& message) {
-      return nlohmann::json{{"status", "failed"},
-                            {"error", nlohmann::json{{"code", code}, {"message", message}}}};
-    };
-    if (tool_name.rfind("mcp.", 0) != 0) {
-      return host_tool_execute_command(params, cancel);
-    }
-    if (mcp_ == nullptr) return failed("mcp_unavailable", "The MCP supervisor is unavailable");
-    const auto input = params.contains("input") ? params.at("input") : nlohmann::json::object();
-    if (!input.is_object()) {
-      return failed("invalid_arguments", "MCP tool arguments must be an object");
-    }
-    try {
-      return nlohmann::json{{"status", "success"},
-                            {"output", mcp_->call(tool_name, input, cancel)}};
-    } catch (const std::exception& error) {
-      if (cancel != nullptr && cancel->load()) {
-        return failed("cancelled", "Host operation cancelled");
-      }
-      return failed("mcp_call_failed", error.what());
-    }
+    // Both the remote and the MCP routes run the shared durable-plan/task gates
+    // and call ledger inside `host_tool_execute_command`.
+    return host_tool_execute_command(params, cancel);
   }
   if (method == "host.credentials.set") {
     if (!params.is_object() || !params.contains("service") || !params.contains("account") ||

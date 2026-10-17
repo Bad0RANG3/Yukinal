@@ -1236,6 +1236,40 @@ nlohmann::json McpSupervisor::catalog() {
   return {{"servers", std::move(servers)}, {"failures", std::move(failures)}};
 }
 
+std::optional<std::string> McpSupervisor::tool_effective_risk(const std::string& internal_name) {
+  std::string server_segment;
+  std::string tool_segment;
+  if (!split_internal_name(internal_name, server_segment, tool_segment)) return std::nullopt;
+  std::shared_ptr<Impl::Session> session;
+  {
+    std::lock_guard lock(impl_->mutex);
+    for (const auto& [id, candidate] : impl_->sessions) {
+      if (candidate->segment == server_segment && candidate->running) {
+        session = candidate;
+        break;
+      }
+    }
+  }
+  if (!session) return std::nullopt;
+  for (const auto& descriptor : session->tools) {
+    if (!descriptor.is_object() ||
+        sanitize_segment(descriptor.value("name", std::string())) != tool_segment) {
+      continue;
+    }
+    const auto remote = descriptor.value("name", std::string());
+    const bool reviewed = std::any_of(session->allowed_tools.begin(), session->allowed_tools.end(),
+                                      [&](const auto& item) {
+                                        return item.is_string() &&
+                                               item.get<std::string>() == remote;
+                                      });
+    if (!reviewed) return std::nullopt;
+    const auto annotations = descriptor.contains("annotations") ? descriptor.at("annotations")
+                                                                : nlohmann::json::object();
+    return effective_risk(session->annotation_trust, annotations);
+  }
+  return std::nullopt;
+}
+
 nlohmann::json McpSupervisor::call(const std::string& internal_name,
                                    const nlohmann::json& arguments,
                                    const std::shared_ptr<std::atomic<bool>>& cancel) {

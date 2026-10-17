@@ -4704,10 +4704,11 @@ int main(int argc, char** argv) {
       std::exit(8);
     }
 
-    // ── host.tool.execute non-MCP gating, dispatch and ledger ────────────────
-    // The non-MCP branch validates the envelope, durable plan, target and call
-    // ledger like the retired Rust host, runs read-only tools through the
-    // desktop-SSH runner (injected here) and fails every unrouted tool closed.
+    // ── host.tool.execute gating, dispatch and ledger ────────────────────────
+    // Both routes validate the envelope and durable plan like the retired Rust
+    // host. Remote tools additionally resolve a srv_ target and run through the
+    // desktop-SSH runner (injected here); `mcp.*` tools dispatch to the host MCP
+    // supervisor after the same gates. Unrouted tools fail closed.
     try {
       const nlohmann::json read_target = {
           {"host", "remote"}, {"serverId", "srv_target"}, {"environment", "staging"}};
@@ -4959,6 +4960,58 @@ int main(int argc, char** argv) {
         check(payload.value("status", std::string()) == "success" && runner_calls == 1,
               "a replayed host tool call must not run the tool twice");
       }
+      // ── MCP gate alignment ───────────────────────────────────────────────
+      // An `mcp.*` call runs the same durable-plan and task-binding gates as a
+      // remote tool. The host resolves the tool's risk from the running,
+      // reviewed catalog; a name it cannot resolve stays effectful.
+      {
+        const auto payload = run_tool(nlohmann::json{{"toolName", "mcp.ops.read_thing"},
+                                                     {"input", nlohmann::json::object()},
+                                                     {"target", nlohmann::json::object()}});
+        check(code_of(payload) == "denied_by_policy" &&
+                  detail_code(payload) == "durable_plan_required",
+              "an MCP tool the host cannot resolve as low risk must require a durable plan");
+      }
+      {
+        auto params = nlohmann::json{{"toolName", "mcp.ops.read_thing"},
+                                     {"input", nlohmann::json::object()},
+                                     {"target", nlohmann::json::object()},
+                                     {"taskId", "itask_mcp_missing"},
+                                     {"planId", "iplan_mcp"},
+                                     {"planStepId", "step_mcp"},
+                                     {"traceId", "trace_mcp_missing"},
+                                     {"callId", "call_mcp_missing"}};
+        check(code_of(run_tool(params)) == "not_found",
+              "an MCP tool must not bypass the durable task gate");
+      }
+      if (!test_executable.empty()) {
+        // A reviewed, low-risk tool is resolvable, so the gates pass and the
+        // call dispatches to the host's own MCP supervisor.
+        database.upsert_mcp_server({{"id", "mcp_mock"},
+                                    {"label", "Mock"},
+                                    {"transport", "stdio"},
+                                    {"command", test_executable.string()},
+                                    {"args", nlohmann::json::array({"--mcp-mock"})},
+                                    {"enabled", true},
+                                    {"allowedTools", nlohmann::json::array({"echo"})},
+                                    {"trustLevel", "reviewed"},
+                                    {"annotationTrust", "trusted"}});
+        check(tool_router.invoke("mcp_server_start", {{"serverId", "mcp_mock"}}).ok,
+              "the mock MCP server should start through the router");
+        const auto payload = run_tool(nlohmann::json{{"toolName", "mcp.mcp_mock.echo"},
+                                                     {"input", nlohmann::json::object()},
+                                                     {"target", nlohmann::json::object()}});
+        check(payload.value("status", std::string()) == "success" &&
+                  payload.value("output", nlohmann::json::object()).value("text", std::string()) ==
+                      "echo:echo",
+              "a resolved low-risk MCP tool should dispatch through host.tool.execute");
+        check(tool_router.invoke("mcp_server_stop", {{"serverId", "mcp_mock"}}).ok,
+              "the mock MCP server should stop through the router");
+        auto mock_row = database.get_mcp_server("mcp_mock").value();
+        mock_row["enabled"] = false;
+        database.upsert_mcp_server(mock_row);
+      }
+
       // Restore the default desktop-SSH runner for later tests.
       tool_router.set_host_tool_runner({});
     } catch (const std::exception& error) {

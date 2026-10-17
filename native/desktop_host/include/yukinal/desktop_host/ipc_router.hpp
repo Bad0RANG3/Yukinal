@@ -127,9 +127,10 @@ class IpcRouter {
   SidecarClient& ensure_sidecar();
   void configure_sidecar();
 
-  // Non-MCP `host.tool.execute`: validates the envelope, durable plan, target and
-  // call ledger, then runs the tool through `host_tool_runner_` (or the default
-  // desktop-SSH runner) and records its terminal outcome.
+  // `host.tool.execute`: validates the envelope, durable plan, target and call
+  // ledger, then runs the tool. Remote tools go through `host_tool_runner_` (or
+  // the default desktop-SSH runner); MCP tools dispatch to the host's MCP
+  // supervisor after the same gates. Records the terminal outcome either way.
   [[nodiscard]] nlohmann::json host_tool_execute_command(
       const nlohmann::json& params, const std::shared_ptr<std::atomic<bool>>& cancel);
   [[nodiscard]] nlohmann::json default_host_tool_run(

@@ -1499,8 +1499,8 @@ guardrails and active plan revision/step/evidence binding (`not_found`,
 workspaces match the request (`invalid_input`, `denied_by_policy`, `not_found`);
 the `host_tool_calls` idempotency ledger is claimed (and replayed from the bounded
 cache) exactly as the effectful path does; and the nine effectful tools still need
-the one-shot host approval ticket. The `mcp.*` names stay on their existing branch
-and are not touched.
+the one-shot host approval ticket. The `mcp.*` names kept their own dispatch
+branch in this commit; a later commit routed them through the same gates.
 
 The nine read-only Agent tools (`server.info`, `server.logs`, `server.services`,
 `docker.ps`, `docker.logs`, `docker.inspect`, `systemd.inspect`,
@@ -1524,12 +1524,11 @@ than a second ungated one. `desktop_host_database_tests` covers the envelope
 validation, every gate in order, the `unsupported_route` refusal, an injected
 runner success with its ledger row and its replay, and the guardrail/ticket
 refusals. The `native/build-nmake` Release build passed all fourteen CTest targets,
-`pnpm check` was green and publication hygiene was green. Two honest gaps remain:
+`pnpm check` was green and publication hygiene was green. One honest gap remains:
 the new SSH helpers cannot be exercised headless (the target `43.240.221.2:22` is
-filtered), and the `mcp.*` branch keeps its pre-existing behavior of running
-before the durable-plan and task guardrail gates, which differs from the retired
-Rust host (only low-risk MCP tools reach the Agent today); the non-MCP branch
-itself matches the retired host.
+filtered). At this point the `mcp.*` branch still ran before the durable-plan and
+task guardrail gates; a later commit aligned it (see the section at the end of
+this document).
 
 ## C++ host packaging: staged distributable and integrity manifest
 
@@ -1574,3 +1573,38 @@ artifacts are unsigned, `.github/workflows/package.yml` does not exist, and the
 three-platform install and UI acceptance still needs real machines. `target/` is now
 ignored so the payload is never committed; the checksums prove the payload was not
 modified, not who produced it.
+
+## MCP gate alignment in `host.tool.execute`
+
+The retired Rust host ran one gate sequence for every `host.tool.execute` call:
+first the durable plan requirement, then the task guardrail and active-plan
+check, and only then either the MCP dispatch or the remote target checks. The C++
+host had kept `mcp.*` on a branch inside `handle_host_request` that ran *before*
+the durable-plan and task gates, so an MCP tool name skipped gates the Rust host
+applied. The Agent's host catalog only exposes reviewed `low`-risk MCP tools, so
+only such names reached the Agent in practice, but the host is the trust boundary
+and must enforce the gates itself.
+
+`McpSupervisor::tool_effective_risk` now resolves the host-computed effective risk
+of an internal `mcp.<segment>.<tool>` name from the running, reviewed catalog, and
+returns `nullopt` when the host cannot resolve it: a malformed name, no running
+server for that segment, or an unknown or unreviewed tool.
+`host_tool_is_effectful` treats an unresolvable MCP name as effectful, so a name
+the host cannot vouch for still requires a durable task, plan and plan step, and
+still uses the call ledger and the host approval ticket. `host_tool_execute_command`
+now dispatches `mcp.*` after the durable-plan and task-binding gates and before
+the remote target checks, exactly where the Rust host dispatched it, and
+`handle_host_request` routes every `host.tool.execute` call through it. The MCP
+call reports the same `{status, error:{code, message, retryable}}` envelope as the
+remote branch (`mcp_unavailable` when the supervisor is absent, `mcp_call_failed`
+on a tool error, `cancelled` on a cancelled call).
+
+`desktop_host_database_tests` covers the new gates: an `mcp.*` name the host
+cannot resolve as low risk is refused with `denied_by_policy` /
+`detail.code: durable_plan_required`, an `mcp.*` name with an unknown durable task
+is refused with `not_found` (proving it no longer bypasses the task gate), and a
+reviewed low-risk tool started through the router dispatches end to end and
+returns its content. The `native/build-nmake` Release build passed all fourteen
+CTest targets, `pnpm check` was green and publication hygiene was green. Because
+only low-risk MCP tools can be registered by the Agent today, the visible behavior
+of a healthy run is unchanged; the change closes the hole for every other name.

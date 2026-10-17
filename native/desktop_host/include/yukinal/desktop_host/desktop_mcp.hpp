@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 
 namespace yukinal::desktop_host {
@@ -32,6 +33,13 @@ class McpSupervisor {
   [[nodiscard]] nlohmann::json call(const std::string& internal_name,
                                     const nlohmann::json& arguments,
                                     const std::shared_ptr<std::atomic<bool>>& cancel = nullptr);
+  // Resolves the host-computed effective risk (`low`, `medium`, `high` or
+  // `critical`) of a reviewed tool on a running server, or `nullopt` when the
+  // host cannot resolve it: the name is malformed, no running server owns that
+  // segment, the tool is unknown, or it has not been reviewed. Callers treat
+  // `nullopt` as effectful so the failure mode stays closed.
+  [[nodiscard]] std::optional<std::string> tool_effective_risk(
+      const std::string& internal_name);
 
  private:
   struct Impl;

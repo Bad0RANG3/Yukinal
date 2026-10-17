@@ -55,7 +55,7 @@ UI 命令 81 条中已实现 62 条，剩余 19 条（见 3.x）。已经打通�
 宿主 RPC（Python → C++，见 `packages/shared/src/types/host.ts`）已实现：
 
 - `host.credentials.set/get/reclaim`、`host.mcp.catalog`、`host.tool.cancel`、
-  `host.tool.execute`（**仅 `mcp.*` 分支**）。
+  `host.tool.execute`（`mcp.*` 与九类非 MCP 只读工具共用 durable plan/task 门禁）。
 - `host.ssh.service_target`、`host.ssh.filesystem_read_target`、
   `host.ssh.filesystem_write_target`、`host.ssh.filesystem_edit_target`。
 
@@ -251,10 +251,13 @@ Python Agent 会调用但 C++ 尚未实现的 `host.*` 方法（全部在 `handl
 （`investigation_plans`/`_steps`/`_evidence`/`_findings`/`_decision_briefs`/`_artifacts`/
 `_runs`），`database.cpp` 已能**读**它们（见 `investigation_task_get`），缺的是**写 + 校验**。
 
-**`host.tool.execute` 的非 MCP 分支**：目前只处理 `mcp.*`；其它工具名返回
-`{status:"failed", error}`。当桌面没有配置 managed SSH 服务时，`server.*`/`docker.*`/
-`systemd.*`/`package.*`/`filesystem.*` 会走 `host.tool.execute`，需要在 C++ 里分发到
-`desktop_ssh.cpp`/SFTP。参考 `host/tools.rs` 的 `host_tool_execute`。
+**`host.tool.execute`**：`IpcRouter::host_tool_execute_command`（`ipc_router.cpp`）已同时处理
+`mcp.*` 与九类非 MCP 只读工具（`server.info/logs/services`、`docker.ps/logs/inspect`、
+`systemd.inspect`、`package.inspect`、`filesystem.read`），两条路由共用同一套
+durable plan/task guardrail/目标匹配/idempotency 账本门禁。MCP 的风险由宿主按 running+reviewed
+catalog 解析（无法解析即视为 effectful，默认拒绝），门禁顺序与已退役 Rust 宿主的
+`host_tool_execute` 一致。effectful 工具在此 fail-closed 返回 `unsupported_route`，由 Agent 经
+`host.ssh.effectful_action_target` 驱动。参考 `host/tools.rs`。
 
 验收：每个 RPC 用 `desktop_host_database_tests`/`desktop_host_sidecar_tests` 覆盖；优先做
 plan.record/plan.check/evidence.record（它们是 investigation 写入的地基）。
@@ -318,7 +321,7 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。当�
    retention。
 3. **MCP HTTP + OAuth + 取消**（3.1），让远程 MCP 与审批取消可用。
 4. **文件传输动作 + 拖拽**（3.3）。
-5. **host.tool.execute 非 MCP 分支**（3.4 的最后一块）。
+5. **host.tool.execute 收尾**（3.4 的最后一块）：非 MCP 只读分支与 `mcp.*` 门禁对齐均已完成。
 6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
 7. **控制平面**（3.6，独立阶段）。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
