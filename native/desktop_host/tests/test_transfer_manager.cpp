@@ -6,6 +6,7 @@
 #include "yukinal/desktop_host/transfer_backend.hpp"
 #include "yukinal/desktop_host/transfer_manager.hpp"
 #include "yukinal/desktop_host/transfer_types.hpp"
+#include "yukinal/desktop_host/ipc_router.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -944,6 +945,186 @@ void run_query_checks() {
   manager.shutdown();
 }
 
+// Drives the transfer IPC commands through `IpcRouter` with an injected,
+// in-memory manager so the request validation, the manager wiring, the event
+// forwarding and the snapshot response shapes are all exercised without a
+// database, a server or the SSH core.
+void run_ipc_router_transfer_checks() {
+  using nlohmann::json;
+
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+
+  const auto source = temporary.path / "hello.txt";
+  write_file(source, "hello world");
+  const auto downloads = temporary.path / "downloads";
+  std::filesystem::create_directories(downloads);
+
+  auto history = std::make_shared<FakeHistoryStore>();
+  TransferManager manager = TransferManager::with_history(backend, history);
+
+  IpcRouter router;
+  router.set_transfer_manager(std::make_unique<TransferManager>(manager));
+
+  std::mutex events_mutex;
+  std::vector<std::pair<std::string, json>> events;
+  router.set_event_sink([&](const std::string& name, const json& payload) {
+    std::lock_guard<std::mutex> lock(events_mutex);
+    events.emplace_back(name, payload);
+  });
+
+  const auto upload_registration = router.local_paths().register_paths({source});
+  const auto download_registration = router.local_paths().register_paths({downloads});
+  check(upload_registration.handles.size() == 1 && download_registration.handles.size() == 1,
+        "the IPC test handles should register");
+  const auto& upload_handle = upload_registration.handles.front().handle_id;
+  const auto& download_handle = download_registration.handles.front().handle_id;
+
+  // Parameter validation happens before the manager is touched.
+  check(!router.invoke("file_transfer_upload", {{"serverId", "srv_1"}}).ok,
+        "file_transfer_upload should require its full parameter set");
+  check(!router.invoke("file_transfer_upload",
+                       {{"serverId", "not-a-server"},
+                        {"remoteDirectory", "/srv"},
+                        {"sourceHandleIds", {upload_handle}}})
+             .ok,
+        "file_transfer_upload should reject a malformed server id");
+  check(!router.invoke("file_transfer_upload",
+                       {{"serverId", "srv_1"},
+                        {"remoteDirectory", "relative"},
+                        {"sourceHandleIds", {upload_handle}}})
+             .ok,
+        "file_transfer_upload should reject a relative remote directory");
+  check(!router.invoke("file_transfer_upload",
+                       {{"serverId", "srv_1"},
+                        {"remoteDirectory", "/srv"},
+                        {"sourceHandleIds", {"short"}}})
+             .ok,
+        "file_transfer_upload should reject a malformed source handle id");
+  check(!router.invoke("file_transfer_upload",
+                       {{"serverId", "srv_1"},
+                        {"remoteDirectory", "/srv"},
+                        {"sourceHandleIds", {"local_path_missing0000000000000000000000000000000000000000"}}})
+             .ok,
+        "file_transfer_upload should reject an unknown source handle");
+
+  const auto upload = router.invoke("file_transfer_upload",
+      {{"serverId", "srv_1"}, {"remoteDirectory", "/srv"}, {"sourceHandleIds", {upload_handle}}});
+  check(upload.ok, "file_transfer_upload should start an upload");
+  const std::string upload_id = upload.value.at("transfer").at("transferId").get<std::string>();
+  check(!upload_id.empty() && upload.value.at("transfer").at("direction") == "upload" &&
+            upload.value.at("transfer").at("serverId") == "srv_1",
+        "file_transfer_upload should return the new upload snapshot");
+
+  const auto uploaded = wait_terminal(manager, upload_id);
+  check(uploaded.status == TransferStatus::Completed &&
+            backend->content("/srv/hello.txt") == "hello world",
+        "the IPC upload must publish the file through the manager");
+  const bool saw_update = wait_until([&] {
+    std::lock_guard<std::mutex> lock(events_mutex);
+    return std::any_of(events.begin(), events.end(), [&](const auto& entry) {
+      return entry.first == "file.transfer_updated" &&
+             entry.second.value("transfer", json::object()).value("transferId", std::string()) ==
+                 upload_id;
+    });
+  });
+  check(saw_update, "the router must forward file.transfer_updated events");
+
+  // The list and get commands route through the manager's merged view.
+  const auto list = router.invoke("file_transfer_list", {{"serverId", "srv_1"}});
+  check(list.ok && list.value.at("transfers").is_array() &&
+            !list.value.at("transfers").empty(),
+        "file_transfer_list should return the transfer history");
+  check(!router.invoke("file_transfer_list", {{"unexpected", true}}).ok,
+        "file_transfer_list should reject unknown parameters");
+  check(!router.invoke("file_transfer_list", {{"serverId", "not-a-server"}}).ok,
+        "file_transfer_list should reject a malformed server id");
+  const auto fetched = router.invoke("file_transfer_get", {{"transferId", upload_id}});
+  check(fetched.ok && fetched.value.at("transfer").at("transferId") == upload_id,
+        "file_transfer_get should return the transfer snapshot");
+  check(!router.invoke("file_transfer_get", {{"transferId", "tr_missing"}}).ok,
+        "file_transfer_get should report an unknown transfer");
+
+  // Download through a registered destination handle.
+  backend->add_file("/srv/report.txt", "report");
+  const auto download = router.invoke("file_transfer_download",
+      {{"serverId", "srv_1"},
+       {"remotePaths", {"/srv/report.txt"}},
+       {"destinationHandleId", download_handle}});
+  check(download.ok && download.value.at("transfer").at("direction") == "download",
+        "file_transfer_download should start a download");
+  const std::string download_id =
+      download.value.at("transfer").at("transferId").get<std::string>();
+  const auto downloaded = wait_terminal(manager, download_id);
+  check(downloaded.status == TransferStatus::Completed &&
+            read_file(downloads / "report.txt") == "report",
+        "the IPC download must publish the file through the manager");
+  check(!router.invoke("file_transfer_download",
+                       {{"serverId", "srv_1"},
+                        {"remotePaths", {"relative"}},
+                        {"destinationHandleId", download_handle}})
+             .ok,
+        "file_transfer_download should reject a relative remote path");
+
+  // Conflict resolution through the IPC command.
+  const auto conflict_source = temporary.path / "report.txt";
+  write_file(conflict_source, "local report");
+  const auto conflict_registration = router.local_paths().register_paths({conflict_source});
+  check(conflict_registration.handles.size() == 1, "the conflict handle should register");
+  const auto conflict = router.invoke("file_transfer_upload",
+      {{"serverId", "srv_1"},
+       {"remoteDirectory", "/srv"},
+       {"sourceHandleIds", {conflict_registration.handles.front().handle_id}}});
+  check(conflict.ok, "the conflicting upload should start");
+  const std::string conflict_id =
+      conflict.value.at("transfer").at("transferId").get<std::string>();
+  (void)wait_conflict(manager, conflict_id);
+
+  check(!router.invoke("file_transfer_resolve_conflict",
+                       {{"transferId", conflict_id}, {"action", {{"action", "rename"}}}})
+             .ok,
+        "a rename conflict action must carry exactly a name");
+  check(!router.invoke("file_transfer_resolve_conflict",
+                       {{"transferId", conflict_id},
+                        {"action", {{"action", "skip"}, {"name", "x"}}}})
+             .ok,
+        "a skip conflict action must not carry extra fields");
+  const auto resolved = router.invoke("file_transfer_resolve_conflict",
+      {{"transferId", conflict_id}, {"action", {{"action", "overwrite"}}}});
+  check(resolved.ok, "file_transfer_resolve_conflict should accept overwrite");
+  const auto conflict_done = wait_terminal(manager, conflict_id);
+  check(conflict_done.status == TransferStatus::Completed &&
+            backend->content("/srv/report.txt") == "local report",
+        "the IPC conflict resolution must overwrite the destination");
+  check(!router.invoke("file_transfer_resolve_conflict",
+                       {{"transferId", upload_id}, {"action", {{"action", "overwrite"}}}})
+             .ok,
+        "resolving a transfer with no active conflict must be rejected");
+
+  // Cancellation through the IPC command, while the transfer waits on a conflict.
+  const auto cancel_source = temporary.path / "cancel.txt";
+  write_file(cancel_source, "cancel me");
+  backend->add_file("/srv/cancel.txt", "existing");
+  const auto cancel_registration = router.local_paths().register_paths({cancel_source});
+  check(cancel_registration.handles.size() == 1, "the cancel handle should register");
+  const auto started = router.invoke("file_transfer_upload",
+      {{"serverId", "srv_1"},
+       {"remoteDirectory", "/srv"},
+       {"sourceHandleIds", {cancel_registration.handles.front().handle_id}}});
+  check(started.ok, "the cancellable upload should start");
+  const std::string cancel_id =
+      started.value.at("transfer").at("transferId").get<std::string>();
+  (void)wait_conflict(manager, cancel_id);
+  const auto cancelled = router.invoke("file_transfer_cancel", {{"transferId", cancel_id}});
+  check(cancelled.ok, "file_transfer_cancel should cancel a waiting transfer");
+  const auto cancel_done = wait_terminal(manager, cancel_id);
+  check(cancel_done.status == TransferStatus::Cancelled,
+        "a cancelled transfer must report cancelled");
+  check(!router.invoke("file_transfer_cancel", {{"transferId", "tr_missing"}}).ok,
+        "file_transfer_cancel should report an unknown transfer");
+}
+
 }  // namespace
 
 int main() {
@@ -954,6 +1135,7 @@ int main() {
   run_recovery_checks();
   run_fail_closed_history_check();
   run_query_checks();
+  run_ipc_router_transfer_checks();
 
   std::cout << "transfer manager tests: green\n";
   return 0;

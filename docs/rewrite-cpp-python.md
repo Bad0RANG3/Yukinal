@@ -1407,3 +1407,36 @@ nonzero exit) with a fake channel. The `native/build-nmake` Release build passed
 all fourteen CTest targets, `pnpm check` was green and publication hygiene was
 green. The `file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring
 and remote drag are the next commit.
+
+The transfer IPC wiring landed next. `IpcRouter` now owns the transfer manager: it
+creates `TransferManager::with_history` lazily on the first transfer command, backed
+by a `SftpTransferBackend` over `make_ssh_service_sftp_remote_ops` and a
+`DatabaseTransferHistoryStore`, and only when the host has an initialized database
+and this build has the SSH core. Creation happens under a dedicated mutex and fails
+closed: a recovery failure during `with_history` surfaces as a `TransferError`, and
+when no backend can be built the start/cancel commands report `TRANSFER_UNAVAILABLE`
+rather than silently doing nothing. A new `transfer_command` routes the six
+`file_transfer_*` methods, mirroring the retired Rust adapter exactly: `upload` and
+`download` take their sources from the consumed local-path handles
+(`take_upload_sources` / `take_download_directory`), start with `ConflictPolicy::Ask`
+and return the queued snapshot; `list` reconciles remote staging and returns the
+manager's merged job-plus-history view; `get` returns the live snapshot before the
+durable row; `cancel` requests cancellation and returns the resulting snapshot; and
+`resolve_conflict` reads the current active conflict's item index and only then
+records the decision, rejecting a transfer that is not waiting on a conflict. Every
+snapshot crosses IPC through the exact 19-field `transfer_snapshot_json` contract,
+and each published snapshot forwards to the WebView bridge as a
+`file.transfer_updated` event through the existing event sink. `~IpcRouter`
+unsubscribes the event listener and calls `shutdown()` so worker threads stop and
+their staging cleanup runs before the router goes away. Two narrow test seams
+(`set_transfer_manager` to inject an in-memory manager and `local_paths()` to register
+files and directories) let `transfer_manager_tests` drive the whole IPC surface without
+a database, a server or the SSH core: parameter validation before the manager is
+touched, upload and download publication end to end, list/get through the merged view,
+`file.transfer_updated` forwarding, conflict resolution including the strict
+discriminated-union action shape, cancellation while a transfer waits on a conflict,
+and the unknown-id error paths. The `native/build-nmake` Release build passed all
+fourteen CTest targets (`transfer_manager_tests` now includes the IPC checks),
+`pnpm check` was green and publication hygiene was green. Remote drag
+(`file_prepare_remote_drag` / `file_drag_out_start`) and the local-drop `emit` path
+are the next commit.

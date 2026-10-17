@@ -7,6 +7,7 @@
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/local_paths.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
+#include "yukinal/desktop_host/transfer_manager.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -34,6 +35,8 @@ class IpcRouter {
   explicit IpcRouter(DesktopDatabase* database = nullptr,
                      const CredentialStore* credentials = nullptr);
 
+  ~IpcRouter();
+
   IpcReply invoke(const std::string& method, nlohmann::json params);
   [[nodiscard]] std::set<std::string> subscribers(const std::string& event) const;
 
@@ -48,6 +51,16 @@ class IpcRouter {
   // WebView bridge. Set once at startup; safe to call from the sidecar thread.
   void set_event_sink(std::function<void(const std::string&, const nlohmann::json&)> sink);
 
+  // Test seam: replace the lazily created transfer manager (for example with one
+  // backed by an in-memory backend and history). Passing nullptr restores lazy
+  // creation. The previous manager's event subscription is released first.
+  void set_transfer_manager(std::unique_ptr<TransferManager> manager);
+
+  // Test seam: the local path handle table, so a test can register files and
+  // directories and then drive the transfer start commands without a native
+  // picker.
+  [[nodiscard]] LocalPathHandles& local_paths() { return local_paths_; }
+
  private:
   IpcReply subscribe(const nlohmann::json& params, bool add);
   IpcReply server_command(const std::string& method,
@@ -60,6 +73,7 @@ class IpcRouter {
                                const nlohmann::json& params);
   IpcReply connection_command(const std::string& method,
                               const nlohmann::json& params);
+  IpcReply transfer_command(const std::string& method, const nlohmann::json& params);
   IpcReply terminal_command(const std::string& method,
                             const nlohmann::json& params);
   [[nodiscard]] std::string issue_probe_ticket(const std::string& server_id,
@@ -75,6 +89,12 @@ class IpcRouter {
   SidecarClient& ensure_sidecar();
   void configure_sidecar();
 
+  // Lazily creates the SFTP-backed transfer manager. Returns nullptr when the
+  // host has no local database or this build has no SSH core (so no backend can
+  // be built); a recovery failure during creation propagates as `TransferError`.
+  [[nodiscard]] TransferManager* ensure_transfer_manager();
+  void subscribe_transfer_events_locked();
+
   mutable std::mutex mutex_;
   DesktopDatabase* database_;
   DesktopCredentialStore default_credentials_;
@@ -85,6 +105,14 @@ class IpcRouter {
   std::unique_ptr<TerminalManager> terminals_;
   std::unique_ptr<McpSupervisor> mcp_;
   LocalPathHandles local_paths_;
+  // The transfer manager streams uploaded/downloaded bytes on its own worker
+  // threads. It is created lazily on first use so a host with no SSH core or no
+  // initialized database never opens one, and it is shut down from the
+  // destructor. `transfer_mutex_` guards only the pointer and its subscription;
+  // the manager's own operations are independently synchronized.
+  std::mutex transfer_mutex_;
+  std::unique_ptr<TransferManager> transfers_;
+  std::size_t transfers_subscription_ = 0;
   struct ProbeTicket {
     std::string server_id;
     std::string host;

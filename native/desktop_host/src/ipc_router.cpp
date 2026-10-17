@@ -8,6 +8,9 @@
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/network_proxy.hpp"
+#include "yukinal/desktop_host/sftp_transfer_backend.hpp"
+#include "yukinal/desktop_host/transfer_history.hpp"
+#include "yukinal/desktop_host/transfer_types.hpp"
 
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
 #include "host_key.hpp"
@@ -5737,6 +5740,50 @@ void invalidate_plan_after_recovery(nlohmann::json& plan, nlohmann::json& artifa
   }
 }
 
+// The shared transfer handle-id contract: a trimmed 16..128 character opaque id.
+bool valid_transfer_handle_id(const std::string& value) {
+  const auto trimmed = trim_ascii(value);
+  return trimmed.size() >= 16 && trimmed.size() <= 128;
+}
+
+// The shared remote transfer path contract: an absolute, bounded POSIX path.
+bool valid_transfer_remote_path(const std::string& value) {
+  return !value.empty() && value.size() <= 4096 && value.front() == '/';
+}
+
+nlohmann::json transfer_snapshot_array(const std::vector<TransferSnapshot>& snapshots) {
+  nlohmann::json transfers = nlohmann::json::array();
+  for (const auto& snapshot : snapshots) {
+    transfers.push_back(transfer_snapshot_json(snapshot));
+  }
+  return transfers;
+}
+
+IpcReply transfer_snapshot_reply(TransferManager& manager, const std::string& transfer_id) {
+  const auto snapshot = manager.get(transfer_id);
+  if (!snapshot.has_value()) {
+    return failure("NOT_FOUND", "The file transfer was not found");
+  }
+  return {true, {{"transfer", transfer_snapshot_json(*snapshot)}}};
+}
+
+IpcReply transfer_error_reply(const TransferError& error) {
+  switch (error.code()) {
+    case TransferErrorCode::InvalidInput:
+      return failure("INVALID_PARAMS", error.what());
+    case TransferErrorCode::Local:
+      return failure("STORAGE_ERROR", error.what());
+    case TransferErrorCode::Remote:
+    case TransferErrorCode::AlreadyExists:
+    case TransferErrorCode::Unsupported:
+    case TransferErrorCode::SourceChanged:
+    case TransferErrorCode::Verification:
+    case TransferErrorCode::Cancelled:
+      return failure("TRANSFER_FAILED", error.what());
+  }
+  return failure("TRANSFER_FAILED", error.what());
+}
+
 }  // namespace
 
 IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentials)
@@ -5759,6 +5806,58 @@ IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentia
     if (sink) sink(event, payload);
   });
   mcp_ = std::make_unique<McpSupervisor>(database_, credentials_);
+}
+
+IpcRouter::~IpcRouter() {
+  std::unique_ptr<TransferManager> transfers;
+  std::size_t subscription = 0;
+  {
+    std::lock_guard lock(transfer_mutex_);
+    transfers = std::move(transfers_);
+    subscription = transfers_subscription_;
+    transfers_subscription_ = 0;
+  }
+  if (!transfers) return;
+  if (subscription != 0) transfers->unsubscribe(subscription);
+  // Blocks until every active transfer has stopped and its staging cleanup ran.
+  transfers->shutdown();
+}
+
+void IpcRouter::set_transfer_manager(std::unique_ptr<TransferManager> manager) {
+  std::lock_guard lock(transfer_mutex_);
+  if (transfers_ && transfers_subscription_ != 0) {
+    transfers_->unsubscribe(transfers_subscription_);
+  }
+  transfers_ = std::move(manager);
+  transfers_subscription_ = 0;
+  if (transfers_) subscribe_transfer_events_locked();
+}
+
+void IpcRouter::subscribe_transfer_events_locked() {
+  transfers_subscription_ = transfers_->subscribe([this](const TransferSnapshot& snapshot) {
+    std::function<void(const std::string&, const nlohmann::json&)> sink;
+    {
+      std::lock_guard lock(mutex_);
+      sink = event_sink_;
+    }
+    if (sink) sink("file.transfer_updated", {{"transfer", transfer_snapshot_json(snapshot)}});
+  });
+}
+
+TransferManager* IpcRouter::ensure_transfer_manager() {
+  std::lock_guard lock(transfer_mutex_);
+  if (transfers_) return transfers_.get();
+  if (database_ == nullptr) return nullptr;
+  auto ops = make_ssh_service_sftp_remote_ops(database_, credentials_);
+  if (!ops) return nullptr;
+  auto backend = std::make_shared<SftpTransferBackend>(std::move(ops));
+  // `with_history` performs synchronous, fail-closed startup recovery before the
+  // manager admits work; a failure propagates so the command reports it loudly.
+  auto manager = std::make_unique<TransferManager>(TransferManager::with_history(
+      std::move(backend), std::make_shared<DatabaseTransferHistoryStore>(database_)));
+  transfers_ = std::move(manager);
+  subscribe_transfer_events_locked();
+  return transfers_.get();
 }
 
 IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
@@ -7311,53 +7410,10 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return {true, {{"handles", std::move(handles)}}};
   }
 
-  if (method == "file_transfer_list") {
-    if (!only_fields(params, {"serverId"}, {})) {
-      return failure("INVALID_PARAMS", "file_transfer_list received an unexpected parameter");
-    }
-    std::optional<std::string> server_id;
-    if (params.contains("serverId")) {
-      if (!params.at("serverId").is_string()) {
-        return failure("INVALID_PARAMS", "file_transfer_list serverId must be a string");
-      }
-      const auto value = params.at("serverId").get<std::string>();
-      if (!valid_server_id(value)) {
-        return failure("INVALID_PARAMS", "file_transfer_list serverId is invalid");
-      }
-      server_id = value;
-    }
-    if (database_ == nullptr || !database_->is_available()) {
-      return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
-    }
-    try {
-      return {true, database_->list_file_transfers(server_id, 100)};
-    } catch (...) {
-      return failure("STORAGE_ERROR", "The local file transfer database could not read transfers");
-    }
-  }
-
-  if (method == "file_transfer_get") {
-    if (!exact_string_fields(params, {"transferId"})) {
-      return failure("INVALID_PARAMS", "file_transfer_get requires exactly transferId");
-    }
-    const auto transfer_id = params.at("transferId").get<std::string>();
-    if (transfer_id.empty() || transfer_id.size() > 128 ||
-        has_control_characters(transfer_id)) {
-      return failure("INVALID_PARAMS", "file_transfer_get transferId is invalid");
-    }
-    if (database_ == nullptr || !database_->is_available()) {
-      return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
-    }
-    try {
-      auto transfer = database_->get_file_transfer(transfer_id);
-      if (!transfer.has_value()) {
-        return failure("NOT_FOUND", "The file transfer was not found");
-      }
-      return {true, {{"transfer", std::move(*transfer)}}};
-    } catch (...) {
-      return failure("STORAGE_ERROR",
-                     "The local file transfer database could not read the transfer");
-    }
+  if (method == "file_transfer_upload" || method == "file_transfer_download" ||
+      method == "file_transfer_list" || method == "file_transfer_get" ||
+      method == "file_transfer_cancel" || method == "file_transfer_resolve_conflict") {
+    return transfer_command(method, params);
   }
 
   if (method == "__events.subscribe") return subscribe(params, true);
@@ -7375,6 +7431,277 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       return failure("OPEN_FAILED", "The system could not open the external URL");
     }
     return {true, {{"opened", true}}};
+  }
+
+  return failure("NOT_IMPLEMENTED",
+                 "This desktop command has not yet migrated to the C++ host: " + method);
+}
+
+IpcReply IpcRouter::transfer_command(const std::string& method,
+                                     const nlohmann::json& params) {
+  if (method == "file_transfer_list") {
+    if (!only_fields(params, {"serverId"}, {})) {
+      return failure("INVALID_PARAMS", "file_transfer_list received an unexpected parameter");
+    }
+    std::optional<std::string> server_id;
+    if (params.contains("serverId")) {
+      if (!params.at("serverId").is_string()) {
+        return failure("INVALID_PARAMS", "file_transfer_list serverId must be a string");
+      }
+      const auto value = params.at("serverId").get<std::string>();
+      if (!valid_server_id(value)) {
+        return failure("INVALID_PARAMS", "file_transfer_list serverId is invalid");
+      }
+      server_id = value;
+    }
+    TransferManager* manager = nullptr;
+    try {
+      manager = ensure_transfer_manager();
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+    if (manager == nullptr) {
+      // This build has no SFTP backend, so no live manager exists. Fall back to
+      // the durable history table so the UI can still show past transfers.
+      if (database_ == nullptr || !database_->is_available()) {
+        return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
+      }
+      try {
+        return {true, database_->list_file_transfers(server_id, 100)};
+      } catch (...) {
+        return failure("STORAGE_ERROR",
+                       "The local file transfer database could not read transfers");
+      }
+    }
+    try {
+      // Retry remote staging cleanup for servers that are now connected before
+      // reporting the merged job+history view.
+      manager->reconcile_remote_staging();
+      return {true, {{"transfers", transfer_snapshot_array(manager->list(server_id, 100))}}};
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    } catch (const std::exception& error) {
+      return failure("STORAGE_ERROR", error.what());
+    }
+  }
+
+  if (method == "file_transfer_get") {
+    if (!exact_string_fields(params, {"transferId"})) {
+      return failure("INVALID_PARAMS", "file_transfer_get requires exactly transferId");
+    }
+    const auto transfer_id = params.at("transferId").get<std::string>();
+    if (transfer_id.empty() || transfer_id.size() > 128 ||
+        has_control_characters(transfer_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_get transferId is invalid");
+    }
+    TransferManager* manager = nullptr;
+    try {
+      manager = ensure_transfer_manager();
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+    if (manager != nullptr) return transfer_snapshot_reply(*manager, transfer_id);
+    if (database_ == nullptr || !database_->is_available()) {
+      return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
+    }
+    try {
+      auto transfer = database_->get_file_transfer(transfer_id);
+      if (!transfer.has_value()) {
+        return failure("NOT_FOUND", "The file transfer was not found");
+      }
+      return {true, {{"transfer", std::move(*transfer)}}};
+    } catch (...) {
+      return failure("STORAGE_ERROR",
+                     "The local file transfer database could not read the transfer");
+    }
+  }
+
+  if (method == "file_transfer_upload") {
+    if (!only_fields(params, {"serverId", "remoteDirectory", "sourceHandleIds"},
+                     {"serverId", "remoteDirectory", "sourceHandleIds"})) {
+      return failure("INVALID_PARAMS", "file_transfer_upload received an unexpected parameter");
+    }
+    if (!params.at("serverId").is_string() || !params.at("remoteDirectory").is_string() ||
+        !params.at("sourceHandleIds").is_array()) {
+      return failure("INVALID_PARAMS", "file_transfer_upload parameters are invalid");
+    }
+    const auto server_id = params.at("serverId").get<std::string>();
+    const auto remote_directory = params.at("remoteDirectory").get<std::string>();
+    if (!valid_server_id(server_id) || !valid_transfer_remote_path(remote_directory)) {
+      return failure("INVALID_PARAMS", "file_transfer_upload parameters are invalid");
+    }
+    std::vector<std::string> handle_ids;
+    for (const auto& entry : params.at("sourceHandleIds")) {
+      if (!entry.is_string()) {
+        return failure("INVALID_PARAMS", "file_transfer_upload sourceHandleIds are invalid");
+      }
+      handle_ids.push_back(entry.get<std::string>());
+    }
+    if (handle_ids.empty() || handle_ids.size() > 256 ||
+        !std::all_of(handle_ids.begin(), handle_ids.end(), valid_transfer_handle_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_upload sourceHandleIds are invalid");
+    }
+    std::vector<std::filesystem::path> local_paths;
+    try {
+      local_paths = local_paths_.take_upload_sources(handle_ids);
+    } catch (const std::exception& error) {
+      return failure("LOCAL_PATH_UNAVAILABLE", error.what());
+    }
+    TransferManager* manager = nullptr;
+    try {
+      manager = ensure_transfer_manager();
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+    if (manager == nullptr) {
+      return failure("TRANSFER_UNAVAILABLE",
+                     "File transfer is unavailable because this build has no SSH core");
+    }
+    try {
+      const auto transfer_id = manager->start_upload(
+          server_id, remote_directory, std::move(local_paths), ConflictPolicy::Ask);
+      return transfer_snapshot_reply(*manager, transfer_id);
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+  }
+
+  if (method == "file_transfer_download") {
+    if (!only_fields(params, {"serverId", "remotePaths", "destinationHandleId"},
+                     {"serverId", "remotePaths", "destinationHandleId"})) {
+      return failure("INVALID_PARAMS", "file_transfer_download received an unexpected parameter");
+    }
+    if (!params.at("serverId").is_string() || !params.at("remotePaths").is_array() ||
+        !params.at("destinationHandleId").is_string()) {
+      return failure("INVALID_PARAMS", "file_transfer_download parameters are invalid");
+    }
+    const auto server_id = params.at("serverId").get<std::string>();
+    if (!valid_server_id(server_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_download serverId is invalid");
+    }
+    std::vector<std::string> remote_paths;
+    for (const auto& entry : params.at("remotePaths")) {
+      if (!entry.is_string()) {
+        return failure("INVALID_PARAMS", "file_transfer_download remotePaths are invalid");
+      }
+      const auto path = entry.get<std::string>();
+      if (!valid_transfer_remote_path(path)) {
+        return failure("INVALID_PARAMS", "file_transfer_download remotePaths are invalid");
+      }
+      remote_paths.push_back(path);
+    }
+    if (remote_paths.empty() || remote_paths.size() > 256) {
+      return failure("INVALID_PARAMS", "file_transfer_download remotePaths are invalid");
+    }
+    const auto destination_id = params.at("destinationHandleId").get<std::string>();
+    if (!valid_transfer_handle_id(destination_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_download destinationHandleId is invalid");
+    }
+    std::filesystem::path local_directory;
+    try {
+      local_directory = local_paths_.take_download_directory(destination_id);
+    } catch (const std::exception& error) {
+      return failure("LOCAL_PATH_UNAVAILABLE", error.what());
+    }
+    TransferManager* manager = nullptr;
+    try {
+      manager = ensure_transfer_manager();
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+    if (manager == nullptr) {
+      return failure("TRANSFER_UNAVAILABLE",
+                     "File transfer is unavailable because this build has no SSH core");
+    }
+    try {
+      const auto transfer_id = manager->start_download(
+          server_id, std::move(remote_paths), local_directory, ConflictPolicy::Ask);
+      return transfer_snapshot_reply(*manager, transfer_id);
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+  }
+
+  if (method == "file_transfer_cancel") {
+    if (!exact_string_fields(params, {"transferId"})) {
+      return failure("INVALID_PARAMS", "file_transfer_cancel requires exactly transferId");
+    }
+    const auto transfer_id = params.at("transferId").get<std::string>();
+    if (transfer_id.empty() || transfer_id.size() > 128 ||
+        has_control_characters(transfer_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_cancel transferId is invalid");
+    }
+    TransferManager* manager = nullptr;
+    try {
+      manager = ensure_transfer_manager();
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+    if (manager == nullptr) {
+      if (database_ == nullptr || !database_->is_available()) {
+        return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
+      }
+      return failure("NOT_FOUND", "The file transfer was not found");
+    }
+    try {
+      manager->cancel(transfer_id);
+      return transfer_snapshot_reply(*manager, transfer_id);
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+  }
+
+  if (method == "file_transfer_resolve_conflict") {
+    if (!only_fields(params, {"transferId", "action"}, {"transferId", "action"})) {
+      return failure("INVALID_PARAMS",
+                     "file_transfer_resolve_conflict received an unexpected parameter");
+    }
+    if (!params.at("transferId").is_string() || !params.at("action").is_object()) {
+      return failure("INVALID_PARAMS", "file_transfer_resolve_conflict parameters are invalid");
+    }
+    const auto transfer_id = params.at("transferId").get<std::string>();
+    if (transfer_id.empty() || transfer_id.size() > 128 ||
+        has_control_characters(transfer_id)) {
+      return failure("INVALID_PARAMS", "file_transfer_resolve_conflict transferId is invalid");
+    }
+    const auto& action_json = params.at("action");
+    // The shared schema is a strict discriminated union: `rename` carries exactly
+    // one extra `name` field and the other actions carry none.
+    const bool is_rename = action_json.value("action", std::string()) == "rename";
+    if (action_json.size() != (is_rename ? 2u : 1u)) {
+      return failure("INVALID_PARAMS", "file_transfer_resolve_conflict action is invalid");
+    }
+    ConflictAction action;
+    try {
+      action = conflict_action_from_json(action_json);
+    } catch (const std::invalid_argument& error) {
+      return failure("INVALID_PARAMS", error.what());
+    }
+    TransferManager* manager = nullptr;
+    try {
+      manager = ensure_transfer_manager();
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
+    if (manager == nullptr) {
+      if (database_ == nullptr || !database_->is_available()) {
+        return failure("STORAGE_UNAVAILABLE", "The local file transfer database is unavailable");
+      }
+      return failure("NOT_FOUND", "The file transfer was not found");
+    }
+    try {
+      const auto current = manager->get(transfer_id);
+      if (!current.has_value()) {
+        return failure("NOT_FOUND", "The file transfer was not found");
+      }
+      if (!current->active_conflict.has_value()) {
+        return failure("INVALID_STATE", "The transfer is not waiting for a conflict decision");
+      }
+      manager->resolve_conflict(transfer_id, current->active_conflict->item_index, action);
+      return transfer_snapshot_reply(*manager, transfer_id);
+    } catch (const TransferError& error) {
+      return transfer_error_reply(error);
+    }
   }
 
   return failure("NOT_IMPLEMENTED",
