@@ -5,6 +5,11 @@ import { errorMessage } from "../../lib/format.js";
 import { useProviders } from "../../lib/providers.js";
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { TeamWatchPane } from "./TeamWatchPane.js";
+import { TeamFeedbackPreview } from "./TeamActivity.js";
+import { TEAM_WORK } from "./team-operations.js";
+import { useTeamRuntimeStore, TEAM_STAGE_LABEL, teamRunActive } from "./team-runtime-store.js";
+import { useServers } from "../../lib/servers.js";
 import { MemoryLibrary } from "../agent/MemoryLibrary.js";
 import {
   AGENT_NIST_STORAGE_KEY,
@@ -30,6 +35,11 @@ function readLocalRoles(key: string) {
 
 export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
   const providers = useProviders();
+  const servers = useServers({ enabled: false });
+  const runs = useTeamRuntimeStore((state) => state.runs);
+  const view = useTeamRuntimeStore((state) => state.panelView);
+  const setView = useTeamRuntimeStore((state) => state.setPanelView);
+  const selectedRoleId = useWorkspaceStore((state) => state.agentRoleId);
   const agentDraft = useWorkspaceStore((state) => state.agentDraft);
   const agentAttachments = useWorkspaceStore((state) => state.agentAttachments);
   const agentBusy = useWorkspaceStore((state) => state.agentBusy);
@@ -50,6 +60,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
   const availableProviders = providers.data ?? [];
   const protection = draftProtection({ agentDraft, agentAttachments, agentBusy, agentSessionArchived });
   const queryBlock = providers.isLoading ? "正在读取 AI 连接。" : providers.isError ? "请先重试读取 AI 连接。" : null;
+  const activeRuns = [...runs].reverse().filter((run) => teamRunActive(run) && (!selectedServerId || run.serverId === selectedServerId));
 
   function toggleEditor(role: AgentRole) {
     setDrafts((current) => ({ ...current, [role.id]: current[role.id] ?? { ...role } }));
@@ -68,6 +79,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
       delete next[roleId];
       return next;
     });
+    requestAnimationFrame(() => document.getElementById(`${instanceId}-${roleId}-edit-trigger`)?.focus());
   }
 
   function saveRole(role: AgentRole) {
@@ -101,20 +113,30 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
 
   return <section className="agent-nist-page" aria-labelledby={`${instanceId}-title`}>
     <header className="agent-nist-heading">
-      <div><h2 id={`${instanceId}-title`}>Agent NIST</h2></div>
+      <div><h2 id={`${instanceId}-title`}>团队</h2></div>
       <button type="button" className="agent-nist-text-action" onClick={() => setMemoryOpen(true)}><Icon name="archive" size="sm" />记忆库</button>
     </header>
 
-    <div className="agent-nist-teams" role="group" aria-label="运维 Agent 队伍">
-      {AGENT_TEAMS.map((candidate) => <button key={candidate.id} type="button" aria-pressed={candidate.id === teamId} className={candidate.id === teamId ? "is-selected" : ""} onClick={() => setTeamId(candidate.id)}>{candidate.label}</button>)}
-    </div>
-    <div className="agent-nist-team-purpose"><strong>{team.englishName} · {team.description}</strong><p>{team.purpose}</p></div>
-
+    <div className="team-workbench-tabs" role="group" aria-label="团队工作台视图">{([{ id: "teams", label: "团队" }, { id: "watch", label: "值守" }, { id: "config", label: "配置" }] as const).map((tab) => <button type="button" key={tab.id} aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{tab.label}</button>)}</div>
+    <div className="team-current-scope"><Icon name={selectedServerId ? "servers" : "projects"} size="xs" /><span title={selectedServerId ? servers.data?.find((server) => server.id === selectedServerId)?.name : undefined}>{selectedServerId ? servers.data?.find((server) => server.id === selectedServerId)?.name ?? selectedServerId : "全局工作区"}</span></div>
     {config.notice ? <p className="agent-nist-notice" role="status">{config.notice}</p> : null}
     {providers.isLoading ? <p className="agent-nist-notice" id={queryStateId} role="status">正在读取 AI 连接…</p> : null}
     {providers.isError ? <div className="agent-nist-notice is-error" id={queryStateId} role="alert"><p>无法读取 AI 连接：{errorMessage(providers.error)}</p><button type="button" className="agent-nist-text-action" disabled={providers.isFetching} onClick={() => void providers.refetch()}>重新读取</button></div> : null}
     {protection ? <p className="agent-nist-notice" id={protectionId} role="status">{protection}</p> : null}
     {notice ? <p className={`agent-nist-notice${notice.error ? " is-error" : ""}`} role={notice.error ? "alert" : "status"}>{notice.text}</p> : null}
+
+    {view === "teams" ? <>
+      <div className="team-current-mission"><span>当前协作</span>{activeRuns.length ? activeRuns.map((run) => <div key={run.id}><strong>{AGENT_TEAMS.find((item) => item.id === run.team)?.label} · {TEAM_STAGE_LABEL[run.stage]}</strong><p>{run.goal}</p></div>) : <><strong>从对话交给团队</strong><p>说明目标自动匹配，也可用 @ 指定队伍。</p></>}</div>
+      <ul className="team-roster">{[...AGENT_TEAMS].sort((a, b) => ["yellow", "blue", "purple", "white", "green", "orange", "red"].indexOf(a.id) - ["yellow", "blue", "purple", "white", "green", "orange", "red"].indexOf(b.id)).map((candidate) => <li key={candidate.id}><button type="button" className={`team-roster-row team-color-${candidate.id}`} aria-expanded={teamId === candidate.id} onClick={() => setTeamId(candidate.id)}><span className="team-roster-mark" aria-hidden="true" /><span><strong>{candidate.label}</strong><small>{TEAM_WORK[candidate.id].job}</small></span><Icon name={teamId === candidate.id ? "chevronDown" : "chevronRight"} size="xs" /></button>{teamId === candidate.id ? <div className="team-roster-detail"><p>{TEAM_WORK[candidate.id].output}</p><div><button type="button" className="agent-nist-text-action" disabled={Boolean(protection || queryBlock)} onClick={() => { const role = config.roles.find((item) => item.team === candidate.id); if (role) useRole(role); }}>在对话中使用<Icon name="chevronRight" size="xs" /></button><button type="button" className="agent-nist-text-action" onClick={() => setView("config")}>配置</button></div></div> : null}</li>)}</ul>
+      {selectedRoleId ? <button type="button" className="agent-nist-text-action" disabled={agentBusy} onClick={() => { useWorkspaceStore.getState().setAgentRoleId(null); setNotice({ text: "已恢复按对话目标自动匹配团队。", error: false }); }}>恢复自动匹配</button> : null}
+      {isPreviewFixture() ? <TeamFeedbackPreview serverId={selectedServerId} /> : null}
+    </> : null}
+    {view === "watch" ? <TeamWatchPane /> : null}
+    {view === "config" ? <>
+    <div className="agent-nist-teams" role="group" aria-label="运维 Agent 队伍">
+      {AGENT_TEAMS.map((candidate) => <button key={candidate.id} type="button" aria-pressed={candidate.id === teamId} className={candidate.id === teamId ? "is-selected" : ""} onClick={() => setTeamId(candidate.id)}>{candidate.label}</button>)}
+    </div>
+    <div className="agent-nist-team-purpose"><strong>{team.englishName} · {team.description}</strong><p>{team.purpose}</p></div>
 
     <div className="agent-nist-roles">
       {config.roles.filter((role) => role.team === teamId).map((role) => {
@@ -131,7 +153,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
         const choices = roleModelChoices(draftProvider);
         const validDraftModel = choices.some((choice) => choice.model === draft.model);
         return <article className="agent-nist-role" key={role.id}>
-          <div className="agent-nist-role-heading"><h3>{role.name}</h3><button type="button" className="agent-nist-text-action" aria-expanded={editing} aria-controls={editorId} onClick={() => toggleEditor(role)}><Icon name={editing ? "chevronUp" : "edit"} size="xs" />{editing ? "收起" : "编辑"}</button></div>
+          <div className="agent-nist-role-heading"><h3>{role.name}</h3><button id={`${instanceId}-${role.id}-edit-trigger`} type="button" className="agent-nist-text-action" aria-expanded={editing} aria-controls={editorId} onClick={() => toggleEditor(role)}><Icon name={editing ? "chevronUp" : "edit"} size="xs" />{editing ? "收起" : "编辑"}</button></div>
           <p className="agent-nist-responsibility">{role.responsibility}</p>
           <dl className="agent-nist-binding">
             <div><dt>连接</dt><dd>{binding.provider?.label ?? (role.providerId ? "原连接不可用" : "未绑定")}</dd></div>
@@ -144,7 +166,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
           </div>
 
           {editing ? <form id={editorId} className="agent-nist-editor" onSubmit={(event) => { event.preventDefault(); saveRole(draft); }}>
-            <label className="form-field"><span>角色名称</span><input className="form-input" aria-label="角色名称" required maxLength={60} value={draft.name} onChange={(event) => setDrafts((current) => ({ ...current, [role.id]: { ...draft, name: event.target.value } }))} /></label>
+            <label className="form-field"><span>角色名称</span><input autoFocus className="form-input" aria-label="角色名称" required maxLength={60} value={draft.name} onChange={(event) => setDrafts((current) => ({ ...current, [role.id]: { ...draft, name: event.target.value } }))} /></label>
             <label className="form-field"><span>角色职责</span><textarea className="form-input" aria-label="角色职责" required maxLength={4000} rows={5} value={draft.responsibility} onChange={(event) => setDrafts((current) => ({ ...current, [role.id]: { ...draft, responsibility: event.target.value } }))} /></label>
             <label className="form-field"><span>AI 连接</span><select className="form-select" aria-label="AI 连接" value={draft.providerId ?? ""} disabled={Boolean(queryBlock)} onChange={(event) => {
               const provider = availableProviders.find((candidate) => candidate.id === event.target.value);
@@ -168,6 +190,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
         </article>;
       })}
     </div>
+    </> : null}
     {memoryOpen ? <MemoryLibrary key={selectedServerId ?? "global"} onClose={() => setMemoryOpen(false)} /> : null}
   </section>;
 }

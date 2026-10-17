@@ -780,6 +780,14 @@ test("the device dialog's terminal states say what happened without inventing a 
   assert.match(cancelled, /已取消/);
 });
 
+test("a failed browser launch stays visible while device authorization is waiting", () => {
+  const html = renderDevice("waiting", { message: "无法打开链接：系统浏览器暂不可用" });
+  assert.match(html, /role="alert"/);
+  assert.match(html, /无法打开链接：系统浏览器暂不可用/);
+  assert.ok(buttonNamed(html, "取消授权"));
+  assert.match(html, /WDJB-MJHT/);
+});
+
 test("the verification link prefers the complete URI and falls back to the plain one", () => {
   assert.equal(
     deviceCodeLink(devicePrompt()),

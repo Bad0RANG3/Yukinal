@@ -100,6 +100,8 @@ export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, ag
   preview?: boolean;
 }) {
   const label = runStateLabel(runState);
+  const usageLabel = tokenUsage ? tokenUsage.reportedRequests === 0 ? "用量未上报" : `${tokenUsage.unreportedRequests ? "≥ " : ""}${(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens` : "";
+  const usageMissing = tokenUsage?.unreportedRequests ? `；${tokenUsage.unreportedRequests} 次模型请求未上报用量` : "";
   const statusLabel = preview ? "模拟数据 · 发送已停用" : label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动");
   return <>
     {compact ? <span className="agent-status is-icon" role="status" aria-label={statusLabel} title={statusLabel}><Icon name={preview ? "agent" : running ? "refresh" : agentReady ? "connect" : "disconnect"} size="sm" /></span> : running && label ? (
@@ -109,11 +111,11 @@ export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, ag
         {label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动")}
       </span>
     )}
-    {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
+    {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens${usageMissing}` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
       {compact ? <Icon name="archive" size="xs" /> : <span className="agent-context-caption">上下文 </span>}<span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{!compact && contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
     </span> : null}
-    {tokenUsage && !contextUsage ? <span className="agent-token-usage" title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens`}>
-      {(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens
+    {tokenUsage && !contextUsage ? <span className="agent-token-usage" title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens${usageMissing}`}>
+      {usageLabel}
     </span> : null}
   </>;
 }

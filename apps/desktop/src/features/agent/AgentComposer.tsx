@@ -13,6 +13,7 @@
 
 import {
   useCallback,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -182,7 +183,7 @@ export function AgentComposer({
   const settingsPanelRef = useRef<HTMLDivElement>(null);
   const hasContent = Boolean(prompt.trim() || attachments.length);
   // Preparing a local draft does not require a connected model or runtime.
-  const canEdit = !running && !commandContext.archived;
+  const canEdit = !commandContext.archived;
 
   /**
    * 输入框随内容长高，封顶由 CSS 的 max-height 决定。
@@ -274,6 +275,7 @@ export function AgentComposer({
      被拍扁了，而不是「收回去」。所以这里缓存最后一次非空的列表与高亮位置。
      这是一份渲染缓存，不是状态：它不参与任何判断，只在 closing 时被读取。 */
   const lastSuggestions = useRef<{ items: Suggestion[]; active: number }>({ items: [], active: 0 });
+  const suggestionsId = useId();
   if (open) lastSuggestions.current = { items: suggestions, active };
   const visibleSuggestions = suggestionsPresence.closing ? lastSuggestions.current.items : suggestions;
   const visibleActive = suggestionsPresence.closing ? lastSuggestions.current.active : active;
@@ -505,6 +507,9 @@ export function AgentComposer({
           ref={inputRef}
           rows={1}
           aria-label="消息输入"
+          aria-autocomplete="list"
+          aria-controls={open ? suggestionsId : undefined}
+          aria-activedescendant={open && suggestions[active] ? `${suggestionsId}-${active}` : undefined}
           title="Enter 换行，Ctrl+Enter 发送"
           value={prompt}
           disabled={!canEdit}
@@ -544,6 +549,8 @@ export function AgentComposer({
           <ul
             className={`composer-suggestions ${suggestionsPresence.closing ? "is-closing" : ""}`}
             role="listbox"
+            id={suggestionsId}
+            inert={suggestionsPresence.closing}
             aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的队伍与服务器"}
             onAnimationEnd={suggestionsPresence.onAnimationEnd}
           >
@@ -554,6 +561,7 @@ export function AgentComposer({
                   <button
                     type="button"
                     role="option"
+                    id={`${suggestionsId}-${index}`}
                     aria-selected={index === visibleActive}
                     className={`composer-suggestion ${index === visibleActive ? "is-active" : ""}`}
                     disabled={disabled}
@@ -592,11 +600,11 @@ export function AgentComposer({
               <label className="agent-settings-permission"><span>访问权限</span><select aria-label="访问权限" value={permissionMode} disabled={running} onChange={(event) => onPermissionModeChange(event.target.value as AgentPermissionMode)}><option value="ask">请求批准</option><option value="auto">帮我批准</option></select></label>
             </section>
             {roles.length ? <section className="agent-settings-group">
-              <p className="agent-settings-title">回复角色</p>
-              <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
-                <span className="sr-only">回复角色</span>
-                <select aria-label="回复角色" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
-                  <option value="">自动匹配</option>
+              <p className="agent-settings-title">优先团队</p>
+              <label className="agent-role-picker" title="由协调助手安排工作，或使用 @队伍指定优先处理角色">
+                <span className="sr-only">优先团队</span>
+                <select aria-label="优先团队" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
+                  <option value="">协调助手自动安排</option>
                   {AGENT_TEAMS.map((team) => <optgroup key={team.id} label={team.label}>
                     {roles.filter((role) => role.team === team.id).map((role) => <option key={role.id} value={role.id}>{team.label} · {role.name}</option>)}
                   </optgroup>)}

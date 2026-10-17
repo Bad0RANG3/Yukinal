@@ -29,6 +29,7 @@ std::optional<std::wstring> window_context_label(const nlohmann::json& params) {
   std::wstring label;
   if (section == "servers") label = L"\u670d\u52a1\u5668";
   else if (section == "agents") label = L"Agent NIST";
+  else if (section == "board") label = L"\u770b\u677f";
   else if (section == "projects") label = L"\u9879\u76ee";
   else if (section == "tasks") label = L"\u6392\u67e5\u4efb\u52a1";
   else if (section == "activity") label = L"\u52a8\u6001";

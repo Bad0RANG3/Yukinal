@@ -548,6 +548,8 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
       return { providers: PROVIDERS };
     case IPC_COMMANDS.providerModels:
       return { models: PROVIDERS.find((provider) => provider.id === paramString(params, "providerId", PROVIDERS[0]!.id))?.models ?? MODELS };
+    case IPC_COMMANDS.agentTeamTasks:
+      return { tasks: [] };
     case IPC_COMMANDS.agentStatus:
       return { running: true, pid: 1, protocolVersion: "1.0", agentVersion: "1.0.0-preview", toolCount: 12, entry: "browser-fixture", startedAt: AT, lastExit: null };
     case IPC_COMMANDS.agentLogs:

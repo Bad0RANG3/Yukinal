@@ -9,6 +9,8 @@
 import type {
   ApprovalResponse,
   AgentPromptPart,
+  AgentCoordinationConfig,
+  AgentTeamTask,
   AgentParticipant,
   AgentPersona,
   AgentReasoningEffort,
@@ -155,6 +157,7 @@ export const IPC_COMMANDS = {
   agentLogs: "agent_logs",
   /** Agent runs: Rust resolves the provider + credential and hands the call to the sidecar. */
   agentRunStart: "agent_run_start",
+  agentTeamTasks: "agent_team_tasks",
   agentRunStop: "agent_run_stop",
   agentContextReset: "agent_context_reset",
   agentContextResetAll: "agent_context_reset_all",
@@ -337,6 +340,7 @@ export interface IpcCommandMap {
       model?: string;
       reasoningEffort?: AgentReasoningEffort;
       toolAccess?: "none";
+      coordination?: AgentCoordinationConfig;
       workspaceId?: string;
       focusServerId?: string;
       permissionMode?: AgentPermissionMode;
@@ -370,6 +374,7 @@ export interface IpcCommandMap {
       result?: AgentRunResult;
     };
   };
+  agent_team_tasks: { params: { sessionId?: string; focusServerId?: string }; response: { tasks: AgentTeamTask[] } };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
   agent_context_reset: { params: { sessionId: string; focusServerId?: string }; response: { reset: boolean } };
   agent_context_reset_all: { params: Record<string, never>; response: { reset: boolean; count: number } };

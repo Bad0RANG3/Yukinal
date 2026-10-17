@@ -44,7 +44,7 @@ export type ChatSessions = {
     parts?: AgentPromptPart[],
   ): Promise<string>;
   /** 追加一条 Agent 回复；会话不存在时静默跳过。 */
-  recordAssistantMessage(content: string, identity?: ReplyIdentity): Promise<void>;
+  recordAssistantMessage(content: string, identity: ReplyIdentity, sessionId: string): Promise<void>;
   /** 归档状态变化只会影响当前会话。 */
   noteSessionUpdated(session: ChatSession): void;
   /** 返回 true 表示被删除的正是当前会话，调用方需要开一段新对话。 */
@@ -145,7 +145,7 @@ export function useChatSessions(): ChatSessions {
   );
 
   const recordAssistantMessage = useCallback(
-    async (content: string, identity?: ReplyIdentity): Promise<void> => { await recordMessage(activeSessionIdRef.current, "assistant", content, undefined, undefined, identity); },
+    async (content: string, identity: ReplyIdentity, sessionId: string): Promise<void> => { await recordMessage(sessionId, "assistant", content, undefined, undefined, identity); },
     [recordMessage],
   );
 

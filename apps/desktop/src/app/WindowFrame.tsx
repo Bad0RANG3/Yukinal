@@ -11,6 +11,7 @@ export function WindowFrame({ children }: { children: ReactNode }) {
   const captionSurface = native && supportsNativeCaptionSurface();
   const rootRef = useRef<HTMLDivElement>(null);
   const [captionJoined, setCaptionJoined] = useState(false);
+  const [maximized, setMaximized] = useState(false);
   const titlebarControls = supportsNativeTitlebarControls() && captionJoined;
   const section = useWorkspaceStore((state) => state.primary);
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
@@ -24,7 +25,11 @@ export function WindowFrame({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!native) return;
-    void updateNativeWindowContext({ section, serverName, serverStatus, agentBusy })
+    void updateNativeWindowContext({ section, serverName, serverStatus, agentBusy }).catch((error: unknown) => {
+      // Older running hosts fall back to Activity until a host restart adds Board.
+      if (section !== "board") throw error;
+      return updateNativeWindowContext({ section: "activity", serverName: null, serverStatus: null, agentBusy });
+    })
       .catch((error: unknown) => console.warn("Could not update native window context", error));
   }, [native, section, serverName, serverStatus, agentBusy]);
 
@@ -39,14 +44,18 @@ export function WindowFrame({ children }: { children: ReactNode }) {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const surface = readCaptionSurface(root);
-        const serialized = JSON.stringify(surface);
+        // Height matters for maximize/restore, but repeated native layout
+        // notifications with identical bounds must not restart the handshake.
+        const serialized = JSON.stringify([surface, window.innerWidth, window.innerHeight]);
         if (serialized === previous) return;
         previous = serialized;
         const request = ++revision;
         // Only remove the HTML corners after native chrome confirms its cap.
         // A rejected bridge update must leave a complete, rounded panel visible.
-        void updateNativeCaptionSurface(surface).then(() => {
-          if (!disposed && request === revision) setCaptionJoined(surface !== null);
+        void updateNativeCaptionSurface(surface).then((presentation) => {
+          if (disposed || request !== revision) return;
+          setCaptionJoined(surface !== null);
+          if (presentation) setMaximized(presentation.maximized);
         }).catch((error: unknown) => {
           if (disposed || request !== revision) return;
           previous = "";
@@ -78,7 +87,7 @@ export function WindowFrame({ children }: { children: ReactNode }) {
   }, [captionSurface]);
 
   if (!native) return children;
-  return <div ref={rootRef}
-    className={`native-workspace${captionJoined ? " native-caption-integrated" : ""}${titlebarControls ? " native-caption-controls" : ""}`}
+  return <div ref={rootRef} role="group" aria-label={maximized ? "最大化工作区" : "工作区"}
+    className={`native-workspace${captionJoined ? " native-caption-integrated" : ""}${titlebarControls ? " native-caption-controls" : ""}${maximized ? " native-window-maximized" : ""}`}
   >{children}</div>;
 }

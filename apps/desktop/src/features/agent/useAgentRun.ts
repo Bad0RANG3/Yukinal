@@ -15,6 +15,7 @@
 import {
   IPC_COMMANDS,
   type AgentPromptPart,
+  type AgentCoordinationConfig,
   type AgentPermissionMode,
   type AgentRunMode,
   type AgentTokenUsage,
@@ -29,6 +30,8 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
+import type { AgentTeam } from "../agent-nist/agent-nist.js";
+import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { RunLifecycle } from "./run-lifecycle.js";
 import {
   appendAssistantDelta,
@@ -62,6 +65,10 @@ export type StartOutcome =
 export type StartRunInput = {
   prompt: string;
   persona?: AgentPersona;
+  coordination?: AgentCoordinationConfig;
+  team?: AgentTeam;
+  /** Snapshot captured on first admission, retained unchanged across retries. */
+  uiContext?: string;
   participant?: AgentParticipant;
   /** Optional durable investigation objective receiving read-only evidence. */
   taskId?: string | null;
@@ -120,7 +127,7 @@ export function useAgentRun(options: {
    * 运行以终态回复结束时的回调 —— 落库的唯一入口。
    * 通过 ref 读取，因此订阅只建立一次也不会拿到过期的闭包。
    */
-  onAssistantMessage?: (text: string, identity: ReplyIdentity) => void;
+  onAssistantMessage?: (text: string, identity: ReplyIdentity, sessionId: string) => void;
   /** 运行开始等待审批；面板据此把 Agent 面板带到前景。 */
   onApprovalRequested?: () => void;
   /** sidecar 存活信号；false 表示进程已经不在了。 */
@@ -145,6 +152,7 @@ export function useAgentRun(options: {
   const lifecycle = useRef(new RunLifecycle());
   const approvalLocks = useRef(new Set<string>());
   const replyIdentity = useRef<ReplyIdentity>({});
+  const admittedSessionId = useRef<string | null>(null);
   /**
    * A message admitted with `resume: false` but not yet executed.
    *
@@ -159,6 +167,7 @@ export function useAgentRun(options: {
     parts: AgentPromptPart[];
     taskId?: string | null;
     routingKey: string;
+    uiContext?: string;
   } | null>(null);
 
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -201,6 +210,7 @@ export function useAgentRun(options: {
       setRunId(event.runId);
       setRunning(true);
       setRunState("thinking");
+      useTeamRuntimeStore.getState().stage(event.runId, "thinking");
     });
     on("agent.thinking", (event) => {
       if (!isActive(event)) return;
@@ -212,12 +222,15 @@ export function useAgentRun(options: {
       setEntries((current) => appendAssistantDelta(current, event.textDelta, replyIdentity.current));
     });
     on("agent.usage", (event) => {
+      useTeamRuntimeStore.getState().usage(event.runId, event.usage);
       if (!isActive(event)) return;
       setTokenUsage(event.usage);
     });
     on("agent.tool_call", (event) => {
       if (!isActive(event)) return;
       setRunState("running_tool");
+      useTeamRuntimeStore.getState().stage(event.runId, "running_tool");
+      useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, false, event.callId);
       setEntries((current) =>
         appendToolCall(current, {
           callId: event.callId,
@@ -231,6 +244,8 @@ export function useAgentRun(options: {
     });
     on("agent.tool_result", (event) => {
       if (!isActive(event)) return;
+      useTeamRuntimeStore.getState().stage(event.runId, "thinking");
+      useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, true, event.callId);
       setRunState("thinking");
       setEntries((current) =>
         settleToolResult(
@@ -254,6 +269,7 @@ export function useAgentRun(options: {
     on("agent.waiting_approval", (event) => {
       if (!isActive(event)) return;
       setRunState("waiting_approval");
+      useTeamRuntimeStore.getState().stage(event.runId, "waiting_approval");
       onApprovalRequested.current?.();
       setEntries((current) => appendEntries(current, [{ kind: "approval", approval: event.approval }]));
     });
@@ -266,13 +282,15 @@ export function useAgentRun(options: {
       if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState(event.result.state);
+      useTeamRuntimeStore.getState().stage(event.runId, event.result.state === "completed" ? "completed" : event.result.state === "cancelled" ? "cancelled" : "failed");
       setContextUsage(event.result.context ?? null);
       if (!event.result.text) return;
-      onAssistantMessage.current?.(event.result.text, replyIdentity.current);
+      if (admittedSessionId.current) onAssistantMessage.current?.(event.result.text, replyIdentity.current, admittedSessionId.current);
       setEntries((current) => settleAssistantText(current, event.result.text, replyIdentity.current));
     });
     on("agent.failed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
+      useTeamRuntimeStore.getState().stage(event.runId, "failed");
       if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState("failed");
@@ -296,6 +314,7 @@ export function useAgentRun(options: {
   // 轮询到的存活信号是权威的：进程没了，在途运行不可能继续。
   useEffect(() => {
     if (!running || sidecarRunning !== false) return;
+    useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
     lifecycle.current.fail();
     setRunning(false);
     setRunId(null);
@@ -321,6 +340,7 @@ export function useAgentRun(options: {
     if (next === null || next === seenRestart.current) return;
     seenRestart.current = next;
     if (!running) return;
+    useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
     lifecycle.current.fail();
     setRunning(false);
     setRunId(null);
@@ -347,7 +367,7 @@ export function useAgentRun(options: {
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
-    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
+    const routingKey = JSON.stringify({ persona: input.persona, coordination: input.coordination, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
     const previous = pendingAdmission.current;
     const reusable =
       previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
@@ -355,12 +375,14 @@ export function useAgentRun(options: {
         : null;
     const expectedRunId = reusable?.runId ?? newId("run");
     if (!lifecycle.current.begin(expectedRunId)) return "busy";
+    if (input.team) useTeamRuntimeStore.getState().begin({ id: expectedRunId, team: input.team, source: input.coordination ? "coordinator" : undefined, serverId: input.focusServerId ?? null, taskId: input.taskId ?? undefined, goal: prompt });
     setRunning(true);
     setRunState("starting");
     setRunId(null);
     setApprovalStatuses({});
     setPendingApprovalIds([]);
     setTokenUsage(null);
+    admittedSessionId.current = null;
     replyIdentity.current = { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) };
     approvalLocks.current.clear();
 
@@ -378,10 +400,12 @@ export function useAgentRun(options: {
       if (!reusable) {
         const messageId = newId("msg");
         const sessionId = await input.persistUserMessage(messageId, parts);
-        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey };
+        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey, uiContext: input.uiContext };
       }
       const admitted = pendingAdmission.current;
       if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
+      admittedSessionId.current = admitted.sessionId;
+      useTeamRuntimeStore.getState().bind(expectedRunId, admitted.sessionId, input.taskId);
       const request: IpcCommandMap[typeof IPC_COMMANDS.agentRunStart]["params"] = {
         runId: admitted.runId,
         sessionId: admitted.sessionId,
@@ -393,7 +417,8 @@ export function useAgentRun(options: {
         model: input.model ?? undefined,
         reasoningEffort: input.reasoningEffort,
         toolAccess: input.toolAccess,
-        persona: input.persona,
+        coordination: input.coordination,
+        persona: input.persona && admitted.uiContext ? { ...input.persona, systemPrompt: `${input.persona.systemPrompt}\n\n${admitted.uiContext}` } : input.persona,
         participant: input.participant,
         focusServerId: input.focusServerId ?? undefined,
         permissionMode: input.permissionMode,
@@ -421,6 +446,7 @@ export function useAgentRun(options: {
       }
       return "started";
     } catch (error) {
+      useTeamRuntimeStore.getState().stage(expectedRunId, "failed");
       lifecycle.current.fail();
       setRunning(false);
       setRunState("failed");
@@ -437,6 +463,7 @@ export function useAgentRun(options: {
       if (stopped && lifecycle.current.finish(runId)) {
         setRunning(false);
         setRunState("cancelled");
+        useTeamRuntimeStore.getState().stage(runId, "cancelled");
       } else if (!stopped && lifecycle.current.isActive(runId)) {
         throw new Error("停止请求未被接受，请重试。");
       }

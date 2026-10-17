@@ -129,7 +129,7 @@ test("unreadable role storage falls back without overwriting stored data or call
   assert.ok(loadAgentRoles({ getItem: () => { throw new Error("blocked"); } }).notice);
 });
 
-test("role handoff selects a system persona and model without inserting duties into the visible draft", () => {
+test("preferred team selection preserves the coordinator model and visible draft", () => {
   const providers = [provider(), provider("provider-b")];
   const originals = structuredClone(providers);
   const role = configuredRole("provider-b");
@@ -141,8 +141,8 @@ test("role handoff selects a system persona and model without inserting duties i
   assert.equal(result.ok, true);
   const state = useWorkspaceStore.getState();
   assert.equal(observations.length, 1);
-  assert.equal(state.selectedProviderId, "provider-b");
-  assert.equal(state.selectedModel, "reasoning:model-v2");
+  assert.equal(state.selectedProviderId, "provider-a");
+  assert.equal(state.selectedModel, "default-model");
   assert.equal(state.selectedServerId, "server-current");
   assert.equal(state.agentOpen, true);
   assert.equal(state.agentHistoryOpen, false);
@@ -251,4 +251,13 @@ test("inactive providers can be assigned from their catalog but stay inactive an
   assert.equal(handoffAgentRole(saved, [inactive]).ok, false);
   assert.strictEqual(useWorkspaceStore.getState(), workspace);
   assert.deepEqual(inactive, before);
+});
+
+test("deployment and persistent watching route to builders and defenders without treating an attack alert as a red-team request", () => {
+  const roles = defaultAgentRoles();
+  assert.equal(resolveAgentRole("帮我部署这台服务器的环境", roles).role.team, "yellow");
+  assert.equal(resolveAgentRole("帮我部署这台服务器的环境", roles).role.id, "yellow-engineering");
+  assert.equal(resolveAgentRole("帮我持续检查服务和日志，每5分钟盯着", roles).role.team, "blue");
+  assert.equal(resolveAgentRole("这台服务器似乎正在被攻击，帮我检查", roles).role.team, "blue");
+  assert.equal(resolveAgentRole("@紫队 持续检查修复后的防护效果", roles).role.team, "purple");
 });

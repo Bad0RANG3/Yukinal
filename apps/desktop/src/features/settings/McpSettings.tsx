@@ -19,7 +19,7 @@
  *    句话都只描述「这台进程现在在不在」。工具数量只有在真的拿到描述符时才显示。
  */
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import type { McpOAuthDeviceCodeEvent, McpServerView } from "@yukinal/shared";
@@ -304,6 +304,14 @@ export function McpSettingsPanel({
   const isEditing = editingId !== null;
   const creating = editingId === "";
   const field = (name: DraftField) => `${titleId}-${name}`;
+  const editorTrigger = useRef<HTMLButtonElement | null>(null);
+  const editorForm = useRef<HTMLFormElement>(null);
+  const previousEditing = useRef<string | null>(null);
+  useEffect(() => {
+    if (editingId !== null) editorForm.current?.querySelector<HTMLInputElement>("input:not([readonly])")?.focus();
+    else if (previousEditing.current !== null) editorTrigger.current?.focus();
+    previousEditing.current = editingId;
+  }, [editingId]);
 
   return (
     <section className="settings-card" aria-labelledby={titleId}>
@@ -312,7 +320,7 @@ export function McpSettingsPanel({
           <h2 id={titleId}>MCP 服务器</h2>
         </div>
         <div className="settings-card-header-actions">
-          <button type="button" className="button-secondary" onClick={onBeginNew} disabled={busy}>
+          <button type="button" className="button-secondary" onClick={(event) => { editorTrigger.current = event.currentTarget; onBeginNew(); }} disabled={busy}>
             <Icon name="plus" size="sm" /> 添加服务器
           </button>
         </div>
@@ -453,7 +461,7 @@ export function McpSettingsPanel({
                   <button
                     type="button"
                     className="button-secondary"
-                    onClick={() => onBeginEdit(view)}
+                    onClick={(event) => { editorTrigger.current = event.currentTarget; onBeginEdit(view); }}
                     disabled={busy}
                   >
                     <Icon name="edit" size="sm" /> 编辑
@@ -475,6 +483,7 @@ export function McpSettingsPanel({
 
       {isEditing ? (
         <form
+          ref={editorForm}
           className="settings-form-grid settings-form-grid-provider mcp-settings-form"
           onSubmit={(event) => {
             event.preventDefault();

@@ -262,6 +262,7 @@ export type _IpcParamsContracts = {
   agent_kill: Expect<Assignable<ParamsOf<"agent_kill">, IpcCommandMap["agent_kill"]["params"]>>;
   agent_status: Expect<Assignable<ParamsOf<"agent_status">, IpcCommandMap["agent_status"]["params"]>>;
   agent_logs: Expect<Assignable<ParamsOf<"agent_logs">, IpcCommandMap["agent_logs"]["params"]>>;
+  agent_team_tasks: Expect<Assignable<ParamsOf<"agent_team_tasks">, IpcCommandMap["agent_team_tasks"]["params"]>>;
   agent_run_start: Expect<Assignable<ParamsOf<"agent_run_start">, IpcCommandMap["agent_run_start"]["params"]>>;
   agent_context_reset: Expect<Assignable<ParamsOf<"agent_context_reset">, IpcCommandMap["agent_context_reset"]["params"]>>;
   agent_context_reset_all: Expect<Assignable<ParamsOf<"agent_context_reset_all">, IpcCommandMap["agent_context_reset_all"]["params"]>>;
@@ -359,6 +360,7 @@ export type _IpcResponseContracts = {
   agent_kill: Expect<Assignable<ResponseOf<"agent_kill">, IpcCommandMap["agent_kill"]["response"]>>;
   agent_status: Expect<Assignable<ResponseOf<"agent_status">, IpcCommandMap["agent_status"]["response"]>>;
   agent_logs: Expect<Assignable<ResponseOf<"agent_logs">, IpcCommandMap["agent_logs"]["response"]>>;
+  agent_team_tasks: Expect<Assignable<ResponseOf<"agent_team_tasks">, IpcCommandMap["agent_team_tasks"]["response"]>>;
   agent_run_start: Expect<Assignable<ResponseOf<"agent_run_start">, IpcCommandMap["agent_run_start"]["response"]>>;
   agent_context_reset: Expect<Assignable<ResponseOf<"agent_context_reset">, IpcCommandMap["agent_context_reset"]["response"]>>;
   agent_context_reset_all: Expect<Assignable<ResponseOf<"agent_context_reset_all">, IpcCommandMap["agent_context_reset_all"]["response"]>>;

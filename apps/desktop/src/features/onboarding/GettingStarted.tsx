@@ -110,7 +110,7 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
       {step === 1 ? <section className="settings-card">
         <h3>连接服务器</h3>
         <label className="settings-field"><span className="field-label">服务器</span><select className="form-input" value={server?.id ?? ""} disabled={!shell || busy || workspace.agentBusy} onChange={(event) => { workspace.selectServer(event.target.value || null); action.reset(); }}><option value="">请选择服务器</option>{servers.data?.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.connection.host}</option>)}</select></label>
-        <p className="form-hint">首次连接会信任并保存主机指纹。请先通过可信渠道核验目标主机；后续指纹变化会拒绝连接。</p>
+        <p className="form-hint">首次连接前，请先通过可信渠道核对并保存主机指纹。后续指纹变化会拒绝连接。</p>
         <div className="settings-actions">
           <button className="button-secondary" disabled={!shell || busy} onClick={() => setServerModal("add")}>添加服务器</button>
           {server ? <button className="button-secondary" disabled={busy} onClick={() => setServerModal("edit")}>编辑连接</button> : null}

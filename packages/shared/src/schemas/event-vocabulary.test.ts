@@ -27,6 +27,7 @@ import { EVENT_SCHEMAS } from "./ipc.js";
 
 /** Channels the UI can subscribe to: declared *and* gated. */
 const SUBSCRIBABLE = [
+  "agent.team_task",
   "agent.started",
   "agent.thinking",
   "agent.text",
@@ -92,6 +93,7 @@ test("the agent channels the loop emits are all subscribable", () => {
   // gains an emit and this list is not updated, the UI silently cannot listen —
   // which is the agent.text failure mode, so it is asserted rather than assumed.
   const emitted = [
+    "agent.team_task",
     "agent.started",
     "agent.thinking",
     "agent.text",

@@ -245,7 +245,6 @@ function OverviewContent({
   connectionError?: string;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(interval);
@@ -312,7 +311,6 @@ function OverviewContent({
           <ResourceRow label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} hint={memory ? `${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}` : "采集器未返回可用读数"} />
           <ResourceRow label="磁盘" usage={diskUsage} thresholds={HEALTH_THRESHOLDS.disk} hint={disks.length ? `${disks.length} 个挂载点 · 显示最高占用` : "采集器未返回可用读数"} />
         </div>
-        <button type="button" className="button-secondary overview-task-action" onClick={() => setPrimary("tasks")} aria-label={`在 ${server.name} 上创建任务`}><Icon name="agent" size="sm" /><span>创建排查任务</span><Icon name="chevronRight" size="sm" /></button>
       </section>
 
       <details className="overview-inspector-section">

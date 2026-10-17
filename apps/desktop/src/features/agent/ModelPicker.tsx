@@ -45,6 +45,7 @@ export function ModelPicker({
   selectedTitle,
   onSelect,
   disabled = false,
+  inline = false,
 }: {
   choices: readonly ModelPickerChoice[];
   selectedKey: string | null;
@@ -52,6 +53,8 @@ export function ModelPicker({
   selectedTitle: string | null;
   onSelect: (key: string) => void;
   disabled?: boolean;
+  /** 在同一设置弹层中直接列出模型，避免再套一层弹出菜单。 */
+  inline?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -74,13 +77,13 @@ export function ModelPicker({
 
   // 每次展开都把高亮落在当前选中项上，而不是永远从第一项开始。
   useEffect(() => {
-    if (open && selectedIndex >= 0) setActive(selectedIndex);
-  }, [open, selectedIndex]);
+    if ((open || inline) && selectedIndex >= 0) setActive(selectedIndex);
+  }, [open, inline, selectedIndex]);
 
   useEffect(() => {
-    if (!open || !presence.mounted) return;
+    if (!(inline || (open && presence.mounted))) return;
     listRef.current?.children[activeIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [open, presence.mounted, activeIndex]);
+  }, [open, inline, presence.mounted, activeIndex]);
 
   // 点到组件之外就收起。`pointerdown` 而非 `click` 的理由写在
   // `hooks/useDismissOnOutsidePointer.ts` —— 那一处同时服务两个弹层。
@@ -91,8 +94,9 @@ export function ModelPicker({
     setOpen(false);
   };
 
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>): void => {
-    if (!open) {
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (disabled) return;
+    if (!open && !inline) {
       // 关闭态下这几个键负责展开，与原生 select 的预期一致。
       if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -127,6 +131,7 @@ export function ModelPicker({
       return;
     }
     if (event.key === "Escape") {
+      if (inline) return; // 外层设置面板负责一次关闭与返回焦点。
       event.preventDefault();
       // 必须拦住冒泡：外层 .agent-composer-shell 挂了一条 window 级的 Escape
       // 用来收起整个 Agent 面板（useAgentPanelShell）。不拦的话，用户想关掉这个
@@ -141,9 +146,38 @@ export function ModelPicker({
 
   if (!selected) return null;
 
+  const list = <ul
+          ref={listRef}
+          className="agent-model-menu"
+          role="listbox"
+          id={listboxId}
+          aria-label="可用模型"
+          aria-activedescendant={inline ? `${listboxId}-${activeIndex}` : undefined}
+          tabIndex={inline ? 0 : undefined}
+          onKeyDown={inline ? onKeyDown : undefined}
+        >
+          {choices.map((choice, index) => (
+            <li
+              key={choice.key}
+              id={`${listboxId}-${index}`}
+              role="option"
+              aria-selected={choice.key === selected.key}
+              title={choice.providerLabel ? `${choice.providerLabel} · ${choice.label}` : choice.label}
+              className={`agent-model-option ${index === activeIndex ? "is-active" : ""}`}
+              onMouseEnter={() => setActive(index)}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => { if (!disabled) { if (inline) listRef.current?.focus(); choose(choice.key); } }}
+            >
+              <span className="agent-model-option-name">{shortModelLabel(choice.label)}</span>
+              {choice.key === selected.key ? <Icon name="check" size="sm" /> : null}
+              {choice.providerLabel && choices.some((other) => other.key !== choice.key && shortModelLabel(other.label) === shortModelLabel(choice.label)) ? <span className="agent-model-option-from">{choice.providerLabel}</span> : null}
+            </li>
+          ))}
+        </ul>;
+
   return (
-    <div className="agent-model-picker" ref={rootRef}>
-      <button
+    <div className={`agent-model-picker${inline ? " agent-model-picker-inline" : ""}`} ref={rootRef}>
+      {inline ? list : <button
         type="button"
         role="combobox"
         className={`agent-model-select ${open ? "is-open" : ""}`}
@@ -159,38 +193,12 @@ export function ModelPicker({
       >
         <span className="agent-model-value">{shortModelLabel(selected.label)}</span>
         <Icon name="chevronDown" size="xs" />
-      </button>
+      </button>}
 
-      {presence.mounted ? (
-        <div className={`agent-model-popover ${presence.closing ? "is-closing" : ""}`} onAnimationEnd={presence.onAnimationEnd}>
+      {!inline && presence.mounted ? (
+        <div className={`agent-model-popover ${presence.closing ? "is-closing" : ""}`} inert={presence.closing} onAnimationEnd={presence.onAnimationEnd}>
         <p className="agent-model-menu-title">选择模型</p>
-        <ul
-          ref={listRef}
-          className="agent-model-menu"
-          role="listbox"
-          id={listboxId}
-          aria-label="可用模型"
-        >
-          {choices.map((choice, index) => (
-            <li
-              key={choice.key}
-              id={`${listboxId}-${index}`}
-              role="option"
-              aria-selected={choice.key === selected.key}
-              title={choice.providerLabel ? `${choice.providerLabel} · ${choice.label}` : choice.label}
-              className={`agent-model-option ${index === activeIndex ? "is-active" : ""}`}
-              onMouseEnter={() => setActive(index)}
-              // 不阻止 mousedown 的话，浏览器会先把焦点从触发器挪走，
-              // 触发器的 keydown/activedescendant 状态就断了。
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(choice.key)}
-            >
-              <span className="agent-model-option-name">{shortModelLabel(choice.label)}</span>
-              {choice.key === selected.key ? <Icon name="check" size="sm" /> : null}
-              {choice.providerLabel && choices.some((other) => other.key !== choice.key && shortModelLabel(other.label) === shortModelLabel(choice.label)) ? <span className="agent-model-option-from">{choice.providerLabel}</span> : null}
-            </li>
-          ))}
-        </ul>
+        {list}
         </div>
       ) : null}
     </div>

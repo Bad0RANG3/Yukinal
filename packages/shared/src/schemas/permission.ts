@@ -3,6 +3,7 @@
  */
 
 import { z } from "zod";
+import { AgentCoordinationConfigSchema } from "./coordination.js";
 import { AgentParticipantSchema, AgentPersonaSchema } from "./agent-context.js";
 
 import {
@@ -407,6 +408,7 @@ export const AgentRunRequestSchema = z
     model: z.string().trim().min(1).max(256).optional(),
     reasoningEffort: AgentReasoningEffortSchema.optional(),
     toolAccess: z.literal("none").optional(),
+    coordination: AgentCoordinationConfigSchema.optional(),
   })
   .superRefine((request, context) => {
     if (!agentPromptCarriesContent(request)) {

@@ -1,19 +1,19 @@
 /**
  * Main navigation skeleton:
  *
- *   Servers | Agent NIST | Tasks | Activity | Settings <- primary nav
+ *   Activity | Board | Teams | Settings <- primary nav
  *   Overview | Terminal | Files | Logs | Services  <- server-scoped pages
- *   AI workspace (persistent center) | Dashboard / selected server (right)
+ *   AI workspace (persistent center) | Activity / selected server (right)
  *
- * The fleet dashboard is the default reference view; a selected server opens its overview.
+ * Server selection is contextual; it does not need its own navigation entry.
  */
 
 import { create } from "zustand";
 
 import type { AgentPromptPart } from "@yukinal/shared";
 
-export const PRIMARY_NAV = ["servers", "agents", "tasks", "activity", "settings"] as const;
-export type PrimaryNav = (typeof PRIMARY_NAV)[number];
+export const PRIMARY_NAV = ["activity", "board", "agents", "tasks", "settings"] as const;
+export type PrimaryNav = (typeof PRIMARY_NAV)[number] | "servers";
 
 export const SERVER_PAGES = ["overview", "terminal", "files", "logs", "services", "activity"] as const;
 export type ServerPage = (typeof SERVER_PAGES)[number];
@@ -57,7 +57,7 @@ export interface WorkspaceState {
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
-  primary: "servers",
+  primary: "activity",
   serverPage: "overview",
   serverDetailOpen: false,
   selectedServerId: null,
@@ -79,7 +79,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setAgentBusy: (agentBusy) => set({ agentBusy }),
   setAgentHistoryOpen: (agentHistoryOpen) => set({ agentHistoryOpen }),
   setAgentSessionArchived: (agentSessionArchived) => set({ agentSessionArchived }),
-  setPrimary: (primary) => set(primary === "servers" ? { primary, serverDetailOpen: false } : { primary }),
+  setPrimary: (primary) => set(primary === "servers" || primary === "activity" ? { primary: "activity", serverDetailOpen: false } : { primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers", serverDetailOpen: true }),
   selectServer: (selectedServerId) => set((state) => state.agentBusy && selectedServerId !== state.selectedServerId ? state : ({
     selectedServerId,

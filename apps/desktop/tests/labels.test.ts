@@ -163,6 +163,7 @@ test("every event the UI subscribes to has a gate", () => {
   // The channels the desktop actually registers handlers for. A channel listed
   // here without a schema would be a payload crossing the boundary unchecked.
   const subscribed = [
+    "agent.team_task",
     "agent.started",
     "agent.thinking",
     "agent.text",

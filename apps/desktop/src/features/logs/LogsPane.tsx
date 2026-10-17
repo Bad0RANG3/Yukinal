@@ -8,7 +8,7 @@ import {
 import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
+import { EmptyPanel, ErrorPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { PageToolbar } from "../../components/PageToolbar.js";
@@ -50,7 +50,7 @@ export function LogsPane({ serverId }: { serverId?: string | null } = {}) {
   }
 
   if (logsQuery.isLoading) {
-    return <LoadingPanel title="正在读取最近日志" />;
+    return <div className="loading-panel" role="status" aria-label="读取日志"><div className="loading-spinner" /></div>;
   }
 
   if (logsQuery.isError || !logsQuery.data) {
@@ -82,7 +82,7 @@ export function LogsPane({ serverId }: { serverId?: string | null } = {}) {
       {response.message ? <div className="log-notice">{response.message}</div> : null}
 
       {response.lines.length === 0 ? (
-        <EmptyPanel extraClass="log-empty" icon="logs" title="没有可展示的日志" body={response.message ?? "日志源没有返回内容。"} />
+        <p className="muted-copy">暂无日志</p>
       ) : (
         <ol className="log-list" aria-label="远端日志列表">
           {response.lines.map((line, index) => (

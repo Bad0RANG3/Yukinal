@@ -30,6 +30,21 @@ select {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Desktop targets can stay visually quiet while remaining easy to hit. */
+button:not(.md-link),
+summary {
+  min-inline-size: 24px;
+  min-block-size: 24px;
+}
+
+select { min-block-size: 24px; }
+.server-search input { min-block-size: 24px; }
+label:has(> input:is([type="checkbox"], [type="radio"])) {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 24px;
+}
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
@@ -38,6 +53,13 @@ select:focus-visible,
 [role="tab"]:focus-visible,
 [role="menuitem"]:focus-visible,
 [role="switch"]:focus-visible {
+  outline: var(--focus-width) solid var(--accent);
+  outline-offset: var(--focus-offset);
+}
+
+summary:focus-visible,
+[role="listbox"]:focus-visible,
+[role="scrollbar"]:focus-visible {
   outline: var(--focus-width) solid var(--accent);
   outline-offset: var(--focus-offset);
 }

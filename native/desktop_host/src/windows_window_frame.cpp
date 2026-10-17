@@ -90,8 +90,9 @@ void paint_caption_surface(HWND window, const RECT& client, int height, unsigned
   const double scale = client.right / surface.viewport_width;
   const double left = surface.left * scale;
   const double right = surface.right * scale;
-  const double radius = (std::min)(surface.radius * scale, (right - left) / 2);
-  const double top = 12 * scale;
+  const bool maximized = IsZoomed(window) != FALSE;
+  const double radius = maximized ? 0 : (std::min)(surface.radius * scale, (right - left) / 2);
+  const double top = maximized ? 0 : 12 * scale;
   const double edge = (std::max)(1.0, scale);
   const double shadow_width = (std::max)(1.0, 5 * scale);
   const int first = (std::max)(0, static_cast<int>(left - shadow_width * 3));
@@ -389,7 +390,7 @@ IpcReply update_caption_surface(webview_t view, const nlohmann::json& params) {
   GetClientRect(window, &caption);
   caption.bottom = frame_scale(window, kChromeHeight);
   InvalidateRect(window, &caption, FALSE);
-  return {true, nlohmann::json::object()};
+  return {true, {{"maximized", IsZoomed(window) != FALSE}}};
 }
 
 void uninstall_fused_frame(webview_t view) {

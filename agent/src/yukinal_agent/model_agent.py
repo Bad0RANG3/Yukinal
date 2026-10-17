@@ -104,6 +104,7 @@ class ModelAgentResult:
 
 
 class _AgentState(TypedDict, total=False):
+    token_usage: dict[str, int]
     messages: list[Any]
     turn_start_index: int
     task_id: str
@@ -147,13 +148,14 @@ class ModelDrivenAgent:
         event_sink: Any | None = None,
         checkpointer: Any | None = None,
         transcript_sink: Any | None = None,
+        tool_names: frozenset[str] | None = None,
     ) -> None:
         self._registry = registry
         self._budget = budget or AgentBudget()
         self._event_sink = event_sink
         self._transcript_sink = transcript_sink
         self._approval_checkpoints: set[str] = set()
-        tool_specs = registry.list()
+        tool_specs = tuple(spec for spec in registry.list() if tool_names is None or spec.name in tool_names)
         provider_to_internal: dict[str, str] = {}
         for spec in tool_specs:
             provider_name = _to_provider_tool_name(spec.name)
@@ -335,6 +337,21 @@ class ModelDrivenAgent:
 
     async def _call_model_recorded(self, state: _AgentState) -> dict[str, Any]:
         update = await self._call_model(state)
+        messages = update.get("messages", [])
+        if len(messages) > len(state["messages"]) and isinstance(messages[-1], AIMessage):
+            reported = messages[-1].usage_metadata
+            valid = (isinstance(reported, dict) and all(type(reported.get(key)) is int and 0 <= reported[key] <= 2**53 - 1
+                                                       for key in ("input_tokens", "output_tokens")))
+            previous = state.get("token_usage", {})
+            usage = {
+                "inputTokens": previous.get("inputTokens", 0) + (reported["input_tokens"] if valid else 0),
+                "outputTokens": previous.get("outputTokens", 0) + (reported["output_tokens"] if valid else 0),
+                "reportedRequests": previous.get("reportedRequests", 0) + int(valid),
+                "unreportedRequests": previous.get("unreportedRequests", 0) + int(not valid),
+            }
+            update["token_usage"] = usage
+            if self._event_sink is not None and state.get("run_id"):
+                self._event_sink({"type": "agent.usage", "runId": state["run_id"], "usage": usage, "at": datetime.now(UTC).isoformat()})
         self._record_transcript(state, update)
         return update
 

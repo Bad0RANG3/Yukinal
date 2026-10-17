@@ -305,6 +305,9 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.status, "succeeded")
+        usage_events = [event for event in events if event["type"] == "agent.usage"]
+        self.assertEqual(usage_events[-1]["usage"]["unreportedRequests"], 2)
+        events = [event for event in events if event["type"] != "agent.usage"]
         self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result"])
         call_event, result_event = events
         self.assertEqual(call_event["runId"], "run-events")

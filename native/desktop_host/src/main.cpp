@@ -402,7 +402,7 @@ int run(const std::vector<std::string>& arguments) {
     const std::string shell_bridge = std::string("window.__YUKINAL_HOST__.windowShell={titlebarOverlay:") +
         (titlebar_overlay ? "true" : "false") + ",updateContext:(context)=>"
         "window.__YUKINAL_HOST__.invoke('__shell.update_context',context).then(()=>undefined),"
-        "updateSurface:(surface)=>window.__YUKINAL_HOST__.invoke('__shell.update_surface',surface).then(()=>undefined),"
+        "updateSurface:(surface)=>window.__YUKINAL_HOST__.invoke('__shell.update_surface',surface),"
         "openWorkpage:(page)=>window.__YUKINAL_HOST__.invoke('__shell.open_workpage',page)};";
     context.open_workpage = [&](const nlohmann::json& page) -> yukinal::desktop_host::IpcReply {
       using yukinal::desktop_host::IpcReply;

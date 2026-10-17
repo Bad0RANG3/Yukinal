@@ -50,7 +50,14 @@ import {
 } from "./composer-triggers.js";
 import { promptPartsWithAttachments } from "./image-attachments.js";
 import { entriesFromMessages, lastUserEntry, type Entry } from "./transcript.js";
-import { AGENT_TEAMS, resolveAgentRole, roleBinding, rolePersona } from "../agent-nist/agent-nist.js";
+import { AGENT_TEAMS, resolveAgentRole } from "../agent-nist/agent-nist.js";
+import { CoordinatorStatus, CoordinatorTasks } from "./CoordinatorTasks.js";
+import { coordinatorConfig, coordinatorScope, coordinatorEntries } from "./coordinator-state.js";
+import { useCoordinatorTasks } from "./useCoordinatorTasks.js";
+import { ConversationWatchStatus } from "../agent-nist/TeamWatchPane.js";
+import { attentionReference } from "../agent-nist/team-operations.js";
+import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
+import { useWorkpagesStore } from "../workpages/workpages-store.js";
 import { useAgentRoles } from "../agent-nist/useAgentRoles.js";
 import { recalledDraft, rememberDraft, type SessionDraft } from "./session-drafts.js";
 import { requestPolicyId, type RunPolicyChoice } from "./run-policy.js";
@@ -60,6 +67,7 @@ import { useAgentPanelShell } from "./useAgentPanelShell.js";
 import { useAgentRun } from "./useAgentRun.js";
 import { useChatSessions } from "./useChatSessions.js";
 import { useFeedFollow } from "./useFeedFollow.js";
+import { WorkspaceConversation, WorkspaceLayers } from "../workpages/WorkspaceLayers.js";
 
 /**
  * 把一次自动恢复压成一个可比较的字符串。
@@ -72,13 +80,14 @@ function restartId(restart: RestartRecord | undefined): string | null {
   return restart ? `${restart.attempt}:${restart.at}` : null;
 }
 
-export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested }: {
+export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested, onOpenTeam }: {
   onCloseStart?: () => void;
   onCloseEnd?: () => void;
   workspace?: boolean;
   workspaceControls?: ReactNode;
   workspaceWorkpages?: ReactNode;
   onAttentionRequested?: () => void;
+  onOpenTeam?: () => void;
 }) {
   const agentStatus = useAgentStatus({ poll: true });
   const spawnAgent = useSpawnAgent();
@@ -115,10 +124,11 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     // 崩溃与自动重启之间的间隔可能短于一次轮询，所以「进程死过」这件事要由重启记录
     // 提供，而不能只靠 `running === false`。
     sidecarRestart: restartId(agentStatus.data?.restart),
-    onAssistantMessage: (text, identity) => void sessions.recordAssistantMessage(text, identity),
+    onAssistantMessage: (text, identity, sessionId) => void sessions.recordAssistantMessage(text, identity, sessionId),
     onApprovalRequested: () => { setAgentOpen(true); onAttentionRequested?.(); },
   });
 
+  const teamTasks = useCoordinatorTasks(agentStatus.data?.running, () => { setAgentOpen(true); onAttentionRequested?.(); });
   // 草稿和「正在跑」放在 workspace store 里，是因为首次使用引导要先替用户填好
   // 输入框、并避免覆盖正在进行的任务 —— 两者都是跨面板的事实，不只是本组件状态。
   const prompt = useWorkspaceStore((state) => state.agentDraft);
@@ -152,8 +162,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
    * 设定，策略覆盖是「这一次」，所以它只活在面板的这一次会话里。
    */
   const [runPolicy, setRunPolicy] = useState<RunPolicyChoice>(null);
-  const [modelOverride, setModelOverride] = useState(false);
-  useEffect(() => setModelOverride(false), [selectedRoleId]);
   const follow = useFeedFollow(agentOpen, run.entries);
   // 必须稳定：焦点陷阱那个 effect 以它为依赖，每次渲染都换新函数会让键盘监听反复重装。
   const closePanel = useCallback(() => setAgentOpen(false), [setAgentOpen]);
@@ -183,11 +191,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     ...AGENT_TEAMS.map((team) => ({ id: `team:${team.id}`, label: team.label, aliases: [team.id, `${team.id}-team`, team.englishName.replaceAll(" ", "")], detail: team.description })),
     ...mentionCandidates,
   ], [mentionCandidates]);
-  const currentRole = resolveAgentRole(prompt, roles.roles, selectedRoleId).role;
-  const currentBinding = roleBinding(currentRole, models.providers.data ?? []);
-  const boundModel = !modelOverride ? currentBinding.choice : undefined;
-  const reasoningProvider = boundModel ? currentBinding.provider : models.selectedProvider;
-  const modelReasoningLevels = reasoningLevels(reasoningProvider, boundModel?.model ?? models.selectedModel ?? models.selectedProvider?.model);
+  const modelReasoningLevels = reasoningLevels(models.selectedProvider, models.selectedModel ?? models.selectedProvider?.model);
 
   const rememberCurrentDraft = (): void => rememberDraft(drafts.current, scopeRef.current, liveView.current.sessionId, { prompt: liveView.current.prompt, attachments: liveView.current.attachments });
   const restoreDraft = (serverId: string | null, sessionId: string | null): void => {
@@ -240,11 +244,11 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     if (!parts.length || !canSend || run.running) return;
     // 提示词里的 @服务器 决定这次运行的目标；没提及时才回落到当前选中的服务器。
     const mentioned = resolveMentionedServer(text, mentionCandidates);
-    const focusServerId = mentioned?.id ?? selectedServerId;
-    const role = resolveAgentRole(text, roles.roles, selectedRoleId).role;
-    const binding = roleBinding(role, models.providers.data ?? []);
-    if (!modelOverride && role.providerId && binding.reason) {
-      setContextError(`${rolePersona(role).label}：${binding.reason}`);
+    const focusServerId = coordinatorScope(text, mentionCandidates, selectedServerId);
+    const requestedRole = resolveAgentRole(text, roles.roles, selectedRoleId);
+    const coordination = coordinatorConfig(roles.roles, models.providers.data ?? [], preview ? [] : servers.data ?? [], requestedRole.source === "auto" ? null : requestedRole.role.id);
+    if (!coordination.roles.length) {
+      setContextError("没有可用的团队模型，请检查团队中的 AI 连接绑定。");
       return;
     }
     const targetView = scopeViews.current.get(focusServerId);
@@ -271,17 +275,25 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       setPrompt("");
       setAttachments([]);
     }
+    const workspaceState = useWorkspaceStore.getState();
+    const pageState = useWorkpagesStore.getState();
+    const activePage = !pageState.collapsed ? pageState.pages.find((page) => page.id === pageState.activeId) : undefined;
+    const attention = useTeamRuntimeStore.getState().attention;
+    const uiContext = attentionReference({ section: workspaceState.primary, serverId: workspaceState.selectedServerId, serverView: workspaceState.primary === "servers" ? workspaceState.serverPage : undefined, workpage: activePage ? { kind: activePage.kind, serverId: activePage.serverId } : undefined, action: attention && Date.now() - attention.at < 120_000 && (!attention.serverId || attention.serverId === focusServerId) ? attention.action : undefined });
     const outcome = await run.start({
       prompt: text,
-      persona: rolePersona(role),
-      participant: { id: role.id, label: rolePersona(role).label, kind: "agent" },
+      persona: { id: "coordinator", label: "协调助手", systemPrompt: "用户始终与协调助手沟通；团队在后台完成独立任务。" },
+      coordination,
+      team: "white",
+      uiContext,
+      participant: { id: "coordinator", label: "协调助手", kind: "agent" },
       taskId: preview ? null : selectedTaskId,
       parts,
       persistUserMessage: (messageId, promptParts) =>
         sessions.recordUserMessage(text, messageId, preview ? null : focusServerId, promptParts),
-      providerId: (!modelOverride ? binding.provider?.id : null) ?? models.selectedProviderId,
-      model: (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model,
-      reasoningEffort: requestReasoningEffort(!modelOverride && binding.choice ? binding.provider : models.selectedProvider, (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model, reasoningEffort),
+      providerId: models.selectedProviderId,
+      model: models.selectedModel ?? models.selectedProvider?.model,
+      reasoningEffort: requestReasoningEffort(models.selectedProvider, models.selectedModel ?? models.selectedProvider?.model, reasoningEffort),
       focusServerId: preview ? null : focusServerId,
       toolAccess: preview ? "none" : undefined,
       permissionMode,
@@ -427,9 +439,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         closeButtonRef={panel.closeButtonRef}
         workspace={workspace}
         workspaceControls={workspaceControls}
+        context={<CoordinatorStatus tasks={teamTasks.tasks} sessionId={sessions.activeSessionId} preview={preview} />}
         showStatus={false}
       />
-      {workspaceWorkpages}
 
       {historyOpen ? <div ref={historyPopoverRef} className="agent-task-popover" role="dialog" aria-label="切换任务">
         <AgentHistoryPane
@@ -448,10 +460,11 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
           resetting={resettingContext}
         />
       </div> : null}
-        <>
-          <div className={`agent-conversation ${run.entries.length === 0 ? "is-empty" : "has-messages"}`}>
+        <WorkspaceLayers tools={workspaceWorkpages}>
+          <WorkspaceConversation enabled={Boolean(workspaceWorkpages)} empty={run.entries.length === 0}>
+            <ConversationWatchStatus onOpen={onOpenTeam} />
             <AgentFeed
-              entries={run.entries}
+              entries={coordinatorEntries(run.entries)}
               running={run.running}
               runState={run.runState}
               lastUserEntry={lastUserEntry(run.entries)}
@@ -462,7 +475,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
               approvalStatuses={run.approvalStatuses}
               feedRef={follow.feedRef}
               onScroll={follow.onScroll}
-            />
+            ><CoordinatorTasks runtime={teamTasks} sessionId={sessions.activeSessionId} /></AgentFeed>
 
             <div className="agent-input-region">
               <AgentComposer
@@ -510,9 +523,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 onRunPolicyChange={setRunPolicy}
                 targetEnvironment={targetEnvironment}
                 models={models.modelChoices}
-                selectedModelKey={boundModel?.key ?? models.selectedModelKey}
-                selectedModelLabel={boundModel && currentBinding.provider ? `${currentBinding.provider.label} · ${boundModel.label}` : models.selectedModelLabel}
-                onSelectModel={(key) => { setModelOverride(true); models.selectModelKey(key); }}
+                selectedModelKey={models.selectedModelKey}
+                selectedModelLabel={models.selectedModelLabel}
+                onSelectModel={models.selectModelKey}
                 reasoningLevels={modelReasoningLevels}
                 reasoningEffort={reasoningEffort}
                 onReasoningEffortChange={(value) => setPreferences({ agentReasoningEffort: value })}
@@ -531,8 +544,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 onRetry={() => void recent.refetch()}
               /> : null}
             </div>
-          </div>
-        </>
+          </WorkspaceConversation>
+        </WorkspaceLayers>
     </aside>
   );
 }

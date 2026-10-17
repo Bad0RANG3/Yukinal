@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { artifactFromContent, sandboxedArtifactDocument } from "../src/features/workpages/workpage-model.js";
 import { useWorkpagesStore } from "../src/features/workpages/workpages-store.js";
+import { centerConversationFrame, fitConversationFrame, moveConversationFrame, resizeConversationFrame } from "../src/features/workpages/conversation-frame.js";
 
 test("artifact output requires an explicit bounded visual envelope", () => {
   const rawHtml = artifactFromContent("a", "Reply", "<script>window.parent.postMessage('x','*')</script>");
@@ -46,4 +47,62 @@ test("workpages lock server targets and closing a terminal preserves its mounted
   store.close(terminal.id);
   assert.equal(useWorkpagesStore.getState().expandedId, null);
   assert.equal(useWorkpagesStore.getState().activeId, "tool:logs:server-b");
+});
+
+test("returning to conversation preserves tools and reopening reveals the same terminal", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, operationsOpen: false, collapsed: false });
+  const store = useWorkpagesStore.getState();
+  store.openTool("terminal", { serverId: "server-a" });
+  store.openTool("files", { serverId: "server-b" });
+  const pages = useWorkpagesStore.getState().pages;
+  const terminal = useWorkpagesStore.getState().retainedTerminals[0];
+  store.setCollapsed(true);
+  assert.equal(useWorkpagesStore.getState().pages, pages);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
+  assert.equal(useWorkpagesStore.getState().recent.length, 0);
+  store.openTool("terminal", { serverId: "server-a" });
+  assert.equal(useWorkpagesStore.getState().collapsed, false);
+  assert.equal(useWorkpagesStore.getState().pages.length, 2);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
+  assert.equal(useWorkpagesStore.getState().activeId, terminal?.id);
+  store.setCollapsed(true);
+  store.setOperationsOpen(true);
+  assert.equal(useWorkpagesStore.getState().collapsed, false);
+  assert.equal(useWorkpagesStore.getState().operationsOpen, true);
+});
+
+test("a team board is bound to its scope and opening it preserves existing terminal sessions", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
+  const store = useWorkpagesStore.getState();
+  store.openTool("terminal", { serverId: "srv_a" });
+  const terminal = useWorkpagesStore.getState().retainedTerminals[0];
+  store.openTeamBoard("srv_a");
+  store.openTeamBoard("srv_a");
+  assert.equal(useWorkpagesStore.getState().pages.length, 2);
+  assert.equal(useWorkpagesStore.getState().expandedId, "board:srv_a");
+  store.openTeamBoard(null);
+  assert.equal(useWorkpagesStore.getState().pages.at(-1)?.serverId, null);
+  store.close("board:all");
+  assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 1);
+});
+
+test("floating conversation starts centered and dragging stays inside the borrowed area", () => {
+  const bounds = { left: 800, top: 16, width: 300, height: 800 };
+  const frame = fitConversationFrame(bounds);
+  assert.deepEqual(frame, { width: 300, height: 512, top: 160 });
+  assert.equal(moveConversationFrame(bounds, frame, -2000).top, 16);
+  assert.equal(moveConversationFrame(bounds, frame, 2000).top + frame.height, 816);
+  assert.deepEqual(frame, { width: 300, height: 512, top: 160 });
+  assert.equal(bounds.width, 300);
+});
+
+test("resizing preserves the top edge, respects readable minimums and fits smaller windows", () => {
+  const bounds = { left: 800, top: 16, width: 300, height: 800 };
+  const frame = fitConversationFrame(bounds);
+  assert.deepEqual(resizeConversationFrame(bounds, frame, 2000, 2000), { width: 300, height: 656, top: 160 });
+  const reduced = resizeConversationFrame(bounds, frame, -2000, -2000);
+  assert.deepEqual(reduced, { width: 220, height: 260, top: 160 });
+  assert.deepEqual(centerConversationFrame(bounds, reduced), { width: 220, height: 260, top: 286 });
+  assert.deepEqual(fitConversationFrame({ left: 400, top: 16, width: 180, height: 210 }, frame), { width: 180, height: 210, top: 16 });
 });

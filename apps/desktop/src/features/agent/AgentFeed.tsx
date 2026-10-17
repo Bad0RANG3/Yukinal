@@ -6,11 +6,12 @@
  * 事实（sidecar、provider、是不是预览模式）。
  */
 
-import type { RefObject, ReactNode, UIEvent } from "react";
+import { useId, type RefObject, type ReactNode, type UIEvent } from "react";
 
 import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
 import { AgentEntryView } from "./AgentEntryView.js";
+import { ConversationScrollRail } from "./ConversationScrollRail.js";
 import type { Entry } from "./transcript.js";
 
 export function AgentFeed({
@@ -41,8 +42,10 @@ export function AgentFeed({
   /** 就绪提示等面板级说明，渲染在动态之后。 */
   children?: ReactNode;
 }) {
+  const feedId = useId();
   return (
-    <div ref={feedRef} className="agent-feed" onScroll={onScroll}>
+    <div className="agent-feed-frame">
+    <div id={feedId} ref={feedRef} className="agent-feed" onScroll={onScroll}>
       {entries.length === 0 ? (
         <div className="agent-empty">
           <div className="agent-empty-copy">
@@ -75,6 +78,8 @@ export function AgentFeed({
         </div>
       ) : null}
       {children}
+    </div>
+    <ConversationScrollRail viewportRef={feedRef} viewportId={feedId} />
     </div>
   );
 }

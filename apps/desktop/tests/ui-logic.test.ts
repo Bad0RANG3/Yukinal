@@ -59,8 +59,9 @@ test("opening the task workspace from a selected server keeps that server availa
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
 });
 
-test("Agent NIST follows the dashboard and navigation preserves the current target and draft", () => {
-  assert.deepEqual(PRIMARY_NAV.slice(0, 2), ["servers", "agents"]);
+test("Activity replaces the dashboard and navigation preserves the current target and draft", () => {
+  assert.deepEqual(PRIMARY_NAV, ["activity", "board", "agents", "tasks", "settings"]);
+  assert.equal(useWorkspaceStore.getInitialState().primary, "activity");
   const workspace = useWorkspaceStore.getState();
   workspace.selectServer("srv_role_target");
   workspace.setServerPage("logs");

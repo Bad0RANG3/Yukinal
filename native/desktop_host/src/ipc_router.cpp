@@ -7557,7 +7557,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "agent_context_reset" || method == "agent_context_reset_all" ||
       method == "agent_memory_list" || method == "agent_memory_save" || method == "agent_memory_delete" ||
-      method == "agent_run_start" || method == "agent_run_stop" ||
+      method == "agent_run_start" || method == "agent_run_stop" || method == "agent_team_tasks" ||
       method == "agent_approval_respond") {
     return agent_run_command(method, params);
   }
@@ -9063,6 +9063,7 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   static const std::map<std::string, std::string> kMethods = {
       {"agent_run_start", "agent.run.start"},
       {"agent_run_stop", "agent.run.stop"},
+      {"agent_team_tasks", "agent.teams.list"},
       {"agent_approval_respond", "agent.approval.respond"},
       {"agent_context_reset", "agent.context.reset"},
       {"agent_context_reset_all", "agent.context.resetAll"},
@@ -9077,7 +9078,7 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   if (!params.is_object()) {
     return failure("INVALID_PARAMS", method + " requires an object payload");
   }
-  if ((method == "agent_run_start" || method == "agent_context_reset") &&
+  if ((method == "agent_run_start" || method == "agent_context_reset" || method == "agent_team_tasks") &&
       params.contains("sessionId") && params["sessionId"].is_string() && database_) {
     try {
       const auto session = database_->get_chat_session(params["sessionId"].get<std::string>()).at("session");

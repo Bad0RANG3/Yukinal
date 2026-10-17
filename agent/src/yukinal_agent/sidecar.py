@@ -19,6 +19,7 @@ from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .conversation_store import ConversationStore, message_bytes
+from .coordination import CoordinationRuntime, COORDINATOR_TOOLS, parse_coordination
 from .host_rpc import HostRpcClient
 from .host_tools import (
     HOST_APPROVAL_TOOLS,
@@ -70,6 +71,7 @@ METHODS = {
     "system.describe": True,
     "agent.run.start": True,
     "agent.run.stop": True,
+    "agent.teams.list": True,
     "agent.approval.respond": True,
     "agent.context.reset": True,
     "agent.context.resetAll": True,
@@ -142,6 +144,7 @@ class PythonSidecar:
         self._run_sessions: dict[str, str] = {}
         self._resetting_sessions: set[str] = set()
         self._resetting_all = False
+        self._coordination = CoordinationRuntime(self._registry, self._conversations, self._emit, self._launch_team)
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -217,6 +220,19 @@ class PythonSidecar:
                     "toolNameCollisions": [],
                     "implemented": dict(METHODS),
                 }
+            elif method == "agent.teams.list":
+                parsed = _strict_object(params, {"sessionId", "focusServerId"})
+                session_id = parsed.get("sessionId")
+                if session_id is not None and (not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256):
+                    raise _RpcFault(RPC_INVALID_PARAMS, "A conversation is required")
+                if parsed.get("focusServerId") is not None and (not session_id or not _valid_server_id(parsed["focusServerId"])):
+                    raise _RpcFault(RPC_INVALID_PARAMS, "Invalid conversation scope")
+                try:
+                    if session_id is not None:
+                        self._conversations.bind_session(session_id, parsed.get("focusServerId"))
+                except ValueError as error:
+                    raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+                result = {"tasks": [self._coordination.public(job) for job in self._coordination.list(session_id)]}
             elif method == "agent.approval.respond":
                 result = self._approval_respond(params)
             elif method == "agent.memory.list":
@@ -641,6 +657,7 @@ class PythonSidecar:
             return await self._admit_run(request, run_id, admission, resumed)
         finally:
             if run_id not in self._active_runs:
+                self._coordination.parents.pop(run_id, None)
                 self._run_sessions.pop(run_id, None)
                 if request["sessionId"] not in self._run_sessions.values():
                     self._session_locks.pop(request["sessionId"], None)
@@ -664,11 +681,14 @@ class PythonSidecar:
                 model = with_reasoning_effort(model, request["reasoningEffort"])
             except ModelFactoryError as error:
                 raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        if request.get("coordination"):
+            self._coordination.activate(request)
         try:
             agent = ModelDrivenAgent(
                 self._registry,
                 model,
                 request["agentBudget"],
+                tool_names=_allowed_tools_for_run(self._registry, request.get("mode", "goal"), request),
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
                 transcript_sink=lambda messages: self._conversations.update_messages(run_id, messages),
@@ -704,6 +724,40 @@ class PythonSidecar:
         if resumed:
             response["resumed"] = True
         return response
+
+    async def _launch_team(self, job: dict[str, Any], parent: dict[str, Any], role: dict[str, Any]) -> dict[str, Any]:
+        # Child sessions contain only the bounded task brief. They never hydrate
+        # the native user conversation or wait for its foreground session lock.
+        payload: dict[str, Any] = {
+            "runId": job["runId"], "sessionId": job["workerSessionId"], "prompt": job["goal"],
+            "delivery": "sync", "mode": parent.get("mode", "goal") if job["access"] == "write" else "readonly",
+            "permissionMode": parent.get("permissionMode", "ask"),
+            "persona": {"id": role["id"], "label": role["label"], "systemPrompt": role["systemPrompt"] +
+                "\n你是后台团队成员。只完成当前任务，不能再分派团队。给协调助手返回简短结果、证据、失败和待确认事项。没有执行证据不能声称完成。"},
+            "participant": {"id": role["id"], "label": role["label"], "kind": "agent"},
+        }
+        for field in ("providerId", "model"):
+            value = role.get(field) or parent.get(field)
+            if value:
+                payload[field] = value
+        # Reasoning settings belong to the selected model, not a different
+        # team's independently bound provider/model.
+        if not role.get("providerId") and parent.get("reasoningEffort"):
+            payload["reasoningEffort"] = parent["reasoningEffort"]
+        for field in ("taskBudget", "toolAccess", "policyId"):
+            if field in parent:
+                payload[field] = parent[field]
+        if job.get("serverId"):
+            payload["focusServerId"] = job["serverId"]
+            server = next(item for item in parent["coordination"]["servers"] if item["id"] == job["serverId"])
+            payload["target"] = {"host": "remote", "serverId": job["serverId"], "environment": server["environment"]}
+        # An existing durable task binding can be inherited only on its exact
+        # original server. Other jobs do not acquire a host action plan by role.
+        if parent.get("taskId") and parent.get("targetId") == job.get("serverId"):
+            payload["taskId"] = parent["taskId"]
+        self._conversations.import_legacy(payload["sessionId"], job.get("serverId"), [])
+        response = await self._run_start(payload)
+        return response.get("result", {"state": "failed", "error": "team_run_not_started"})
 
     async def _hydrate_conversation(self, request: dict[str, Any]) -> None:
         # Concurrent first turns must share one native snapshot, even while its
@@ -765,6 +819,8 @@ class PythonSidecar:
         run_id = parsed.get("runId")
         if not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 256:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        if self._coordination.stop(run_id):
+            return {"stopped": True}
         task = self._active_runs.get(run_id)
         if task is None or task.done():
             return {"stopped": False}
@@ -808,7 +864,7 @@ class PythonSidecar:
         server_id = parsed.get("focusServerId")
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256 or server_id is not None and not _valid_server_id(server_id):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid context reset scope")
-        if session_id in self._run_sessions.values():
+        if session_id in self._run_sessions.values() or self._coordination.session_active(session_id):
             raise _RpcFault(RPC_INVALID_PARAMS, "Stop the active session run before resetting its context")
         try:
             self._conversations.bind_session(session_id, server_id)
@@ -834,7 +890,7 @@ class PythonSidecar:
 
     async def _context_reset_all(self, params: object) -> dict[str, Any]:
         _strict_object(params, set())
-        if self._run_sessions:
+        if self._run_sessions or self._coordination.active:
             raise _RpcFault(RPC_INVALID_PARAMS, "Stop all active runs before resetting model context")
         if self._resetting_all or self._resetting_sessions:
             raise _RpcFault(RPC_INVALID_PARAMS, "A context reset is already in progress")
@@ -890,8 +946,14 @@ class PythonSidecar:
         self, request: dict[str, Any], run_id: str, agent: ModelDrivenAgent,
     ) -> dict[str, Any]:
         task_id = request.get("taskId")
+        # Freeze a fresh status projection at each coordinator turn. Results
+        # completed after dispatch are visible without polluting worker history.
+        persona = request.get("persona")
+        if request.get("coordination"):
+            persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request) +
+                       "\n当前界面参考：\n" + (request.get("persona") or {}).get("systemPrompt", "")[:4000]}
         final_status = "failed"
-        available_bytes = agent.conversation_budget_bytes(request["promptText"], request.get("persona"))
+        available_bytes = agent.conversation_budget_bytes(request["promptText"], persona)
         memory_budget = min(16 * 1024, available_bytes // 8)
         context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
                                               max_bytes=available_bytes - memory_budget)
@@ -927,7 +989,7 @@ class PythonSidecar:
                 trace_id=_safe_context_id("trace", run_id),
                 checkpoint_binding=_run_checkpoint_binding(request),
                 require_checkpoint=request["requireCheckpoint"],
-                persona=request.get("persona"),
+                persona=persona,
                 conversation_messages=[*memories, *context.messages],
             )
             while result.status == "awaiting_approval":
@@ -987,6 +1049,7 @@ class PythonSidecar:
             return result
         finally:
             self._conversations.finish(run_id, final_status)
+            self._coordination.parents.pop(run_id, None)
             for approval_id, pending in list(self._pending_approvals.items()):
                 if pending.run_id == run_id:
                     self._pending_approvals.pop(approval_id, None)
@@ -1013,6 +1076,8 @@ class PythonSidecar:
                 return
 
     def _emit(self, event: dict[str, Any]) -> None:
+        if event.get("type") != "agent.team_task" and hasattr(self, "_coordination"):
+            self._coordination.observe(event)
         if isinstance(event.get("runId"), str):
             self._conversations.record_event(event["runId"], event)
         if self._notification_sink is not None:
@@ -1106,6 +1171,7 @@ class PythonSidecar:
         )
 
     async def shutdown(self) -> None:
+        await self._coordination.shutdown()
         active = list(self._active_runs.values())
         for task in active:
             task.cancel()
@@ -1551,9 +1617,14 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
         "providerId", "model", "reasoningEffort", "toolAccess", "requireCheckpoint", "planBinding",
-        "persona", "participant",
+        "persona", "participant", "coordination",
     }
     parsed = _strict_object(value, fields)
+    if "coordination" in parsed:
+        try:
+            parsed["coordination"] = parse_coordination(parsed["coordination"])
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
     if "persona" in parsed:
         persona = _strict_object(parsed["persona"], {"id", "label", "systemPrompt"})
         for field, limit in (("id", 256), ("label", 200), ("systemPrompt", 20_000)):
@@ -1727,7 +1798,9 @@ def _allowed_tools_for_run(
 ) -> frozenset[str]:
     if request.get("toolAccess") == "none":
         return frozenset()
-    allowed = set(_allowed_tool_names(registry, mode))
+    if request.get("coordination"):
+        return COORDINATOR_TOOLS
+    allowed = set(_allowed_tool_names(registry, mode)) - COORDINATOR_TOOLS
     if not _host_action_has_plan_binding(request):
         allowed.difference_update(PLAN_BOUND_HOST_ACTION_TOOLS)
     return frozenset(allowed)
@@ -1809,6 +1882,7 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "targetId": request.get("targetId"),
             "persona": request.get("persona"),
             "participant": request.get("participant"),
+            **({"coordination": request["coordination"]} if "coordination" in request else {}),
             "providerId": request.get("providerId"),
             "model": request.get("model"),
             "reasoningEffort": request.get("reasoningEffort"),
@@ -1831,7 +1905,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
-        "persona", "participant", "reasoningEffort", "toolAccess",
+        "persona", "participant", "reasoningEffort", "toolAccess", "coordination",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")

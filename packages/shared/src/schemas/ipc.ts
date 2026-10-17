@@ -27,7 +27,8 @@ import {
   ApprovalResponseSchema,
   EMPTY_PROMPT_MESSAGE,
 } from "./permission.js";
-import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema } from "./agent.js";
+import { AgentCoordinationConfigSchema } from "./coordination.js";
+import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema, AgentTeamTaskSchema } from "./agent.js";
 import { AgentParticipantSchema, AgentPersonaSchema, AgentMemorySchema, AgentMemoryListInputSchema, AgentMemorySaveInputSchema, AgentMemoryDeleteInputSchema } from "./agent-context.js";
 import {
   ChatMessageAppendResponseSchema,
@@ -409,6 +410,7 @@ export const IPC_SCHEMAS = {
         model: z.string().trim().min(1).max(256).optional(),
         reasoningEffort: AgentReasoningEffortSchema.optional(),
         toolAccess: z.literal("none").optional(),
+        coordination: AgentCoordinationConfigSchema.optional(),
         workspaceId: z.string().trim().min(1).max(256).optional(),
         focusServerId: IpcServerIdSchema.optional(),
         permissionMode: AgentPermissionModeSchema.optional(),
@@ -439,6 +441,10 @@ export const IPC_SCHEMAS = {
       resumed: z.boolean().optional(),
       result: AgentRunResultSchema.optional(),
     }),
+  },
+  agent_team_tasks: {
+    params: z.strictObject({ sessionId: z.string().trim().min(1).max(256).optional(), focusServerId: IpcServerIdSchema.optional() }),
+    response: z.strictObject({ tasks: z.array(AgentTeamTaskSchema).max(128) }),
   },
   agent_run_stop: {
     params: z.strictObject({ runId: z.string().trim().min(1).max(256) }),
@@ -665,6 +671,7 @@ export const IPC_SCHEMAS = {
  */
 export const EVENT_SCHEMAS = {
   "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
+  "agent.team_task": AGENT_EVENT_MEMBER_SCHEMAS["agent.team_task"],
   "agent.thinking": AGENT_EVENT_MEMBER_SCHEMAS["agent.thinking"],
   "agent.text": AGENT_EVENT_MEMBER_SCHEMAS["agent.text"],
   "agent.usage": AGENT_EVENT_MEMBER_SCHEMAS["agent.usage"],

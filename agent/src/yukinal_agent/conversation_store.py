@@ -92,6 +92,14 @@ class ConversationStore:
                 depth INTEGER NOT NULL,
                 PRIMARY KEY(session_id, epoch, participant_id)
             );
+            CREATE TABLE IF NOT EXISTS coordinator_team_tasks (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS coordinator_team_tasks_session
+                ON coordinator_team_tasks(session_id, updated_at);
             CREATE TABLE IF NOT EXISTS saved_memories (
                 id TEXT PRIMARY KEY,
                 scope TEXT NOT NULL CHECK (scope IN ('global', 'server')),
@@ -108,6 +116,19 @@ class ConversationStore:
         self._connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED, terms)")
         if database is not None and os.name != "nt":
             database.chmod(0o600)
+
+    def save_team_task(self, task: dict[str, Any]) -> None:
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO coordinator_team_tasks(id, session_id, payload_json, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+                (task["id"], task["sessionId"], _json(task), task["updatedAt"]),
+            )
+
+    def team_tasks(self) -> list[dict[str, Any]]:
+        return [json.loads(row["payload_json"]) for row in self._connection.execute(
+            "SELECT payload_json FROM coordinator_team_tasks ORDER BY updated_at, id"
+        )]
 
     def close(self) -> None:
         self._connection.close()

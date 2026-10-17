@@ -30,7 +30,8 @@
   padding: var(--workspace-side-inset);
 }
 .ai-first .workspace-brand { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 8px; margin-bottom: 8px; }
-.ai-first .workspace-brand > span { font-family: "Orbitron", var(--font-ui); font-size: 17px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
+.ai-first .workspace-brand > span { display: inline-block; font-family: "Orbitron", var(--font-ui); font-size: 17px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
+.ai-first .workspace-brand > span::first-letter { color: var(--brand-initial); }
 .ai-first .workspace-navigation { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; }
 .ai-first .workspace-nav-item { display: flex; align-items: center; width: 100%; gap: 8px; min-height: 32px; padding: 5px 8px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-label); text-align: left; line-height: 1.5; }
 .ai-first .workspace-nav-item > svg { flex: 0 0 20px; width: 20px; height: 16px; }
@@ -40,8 +41,9 @@
 .ai-first .server-sidebar-header { flex-shrink: 0; min-height: 36px; padding: 6px 8px 0; }
 .ai-first .server-sidebar-embedded .server-sidebar-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .ai-first .server-sidebar-count { color: var(--faint); font-size: var(--text-caption); font-variant-numeric: tabular-nums; }
-.ai-first .server-preview-control { display: flex; flex-shrink: 0; align-items: baseline; justify-content: space-between; gap: 8px; padding: 4px 8px 0; color: var(--faint); font-size: var(--text-caption); }
-.ai-first .server-preview-control .text-button { flex-shrink: 0; font-size: inherit; }
+.ai-first .server-preview-toggle { flex-shrink: 0; min-height: 20px; padding: 1px 4px; border: 1px solid transparent; border-radius: var(--radius-badge); background: transparent; color: var(--faint); font-size: 10px; line-height: 1.4; }
+.ai-first .server-preview-toggle[aria-pressed="true"] { border-color: var(--edge-normal); background: var(--material-rest); color: var(--muted); }
+.ai-first .server-preview-toggle:hover:not(:disabled) { color: var(--text); background: var(--material-hover); }
 .ai-first .server-sidebar h2 { font-size: var(--text-label); font-weight: 600; color: var(--muted); }
 .ai-first .server-sidebar-header-actions .icon-button { width: 28px; height: 28px; border: 0; background: transparent; }
 .ai-first .server-search { flex-shrink: 0; margin: 8px 0 6px; min-height: 32px; padding: 5px 10px; border: 1px solid var(--edge-subtle); border-radius: var(--radius-control); background: var(--material-inset); box-shadow: var(--shadow-inset); }
@@ -79,6 +81,8 @@
   .native-caption-controls .agent-panel.agent-workspace { border-top: 1px solid var(--edge-normal); border-top-left-radius: var(--ai-frame-radius); border-top-right-radius: var(--ai-frame-radius); }
   .native-caption-controls .agent-header { min-height: 40px; -webkit-app-region: drag; app-region: drag; }
   .native-caption-controls .agent-header :is(button, a, input, textarea, select, [role="combobox"]) { -webkit-app-region: no-drag; app-region: no-drag; }
+  .native-window-maximized.native-caption-controls .ai-workspace-column { padding-top: 0; }
+  .native-window-maximized.native-caption-controls .agent-panel.agent-workspace { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 }
 .ai-first .live-preview-control { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: 28px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-caption); white-space: nowrap; }
 .ai-first .live-preview-control:hover:not(:disabled) { color: var(--text); background: var(--material-rest); }
@@ -94,9 +98,17 @@
 .ai-first .agent-context { display: flex; flex: 1 1 auto; align-self: auto; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--text-label); }
 .ai-first .agent-context > svg { flex: 0 0 auto; }
 .ai-first .agent-context > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Both scrollbar gutters reserve the same width. Subtract that reservation
-   from the padding so the text and composer share the exact same column. */
-.ai-first .agent-feed { padding: 32px max(calc(var(--ai-content-inset) - var(--scrollbar-size)), calc((100% - var(--ai-reading-width)) / 2 - var(--scrollbar-size))); gap: 18px; scrollbar-gutter: stable both-edges; }
+.agent-feed-frame { position: relative; display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
+.agent-feed-frame > .agent-feed { width: 100%; min-width: 0; scrollbar-width: none; scrollbar-gutter: auto; }
+.agent-feed-frame > .agent-feed::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.conversation-scroll-rail { position: absolute; top: 16px; right: 6px; bottom: 16px; width: 18px; border: 0; border-left: 1px solid var(--line); background: transparent; cursor: ns-resize; touch-action: none; user-select: none; }
+.conversation-scroll-rail[data-overflow="false"] { visibility: hidden; pointer-events: none; }
+.conversation-scroll-ticks { position: absolute; inset: 0 auto 0 6px; width: 6px; color: var(--muted); opacity: .32; background: repeating-linear-gradient(to bottom, currentColor 0 2px, transparent 2px 14px); pointer-events: none; }
+.conversation-scroll-ticks.is-current { color: var(--text); opacity: .8; }
+.conversation-scroll-rail:is(:hover, :focus-visible) .conversation-scroll-ticks.is-current { opacity: 1; width: 8px; }
+.conversation-scroll-rail:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+/* The rail overlays the edge, so text and composer share one symmetric column. */
+.ai-first .agent-feed { padding: 32px max(var(--ai-content-inset), calc((100% - var(--ai-reading-width)) / 2)); gap: 18px; }
 .ai-first .agent-entry { position: relative; flex: 0 0 auto; min-width: 0; font-size: var(--ai-chat-text); line-height: 1.6; }
 .ai-first .agent-entry-user { align-self: flex-end; max-width: 85%; padding: 9px 12px; border-color: var(--edge-subtle); border-radius: var(--radius-card); background: var(--material-hover); }
 .ai-first .agent-entry-assistant { border: 0; background: transparent; padding: 0; }
@@ -107,6 +119,7 @@
 .ai-first .entry-label, .ai-first .agent-reasoning-summary { font-size: var(--text-caption); }
 .ai-first .agent-reasoning-text, .ai-first .agent-notice { font-size: var(--ai-chat-text); line-height: 1.6; }
 .ai-first .agent-conversation.is-empty { justify-content: center; padding-block: 32px clamp(64px, 10vh, 112px); }
+.ai-first .agent-conversation.is-empty .agent-feed-frame { flex: 0 0 auto; overflow: visible; }
 .ai-first .agent-conversation.is-empty .agent-feed { flex: 0 0 auto; overflow: visible; padding-block: 0 24px; }
 .ai-first .agent-empty { flex: 0 0 auto; justify-content: center; align-items: center; min-height: 0; margin: 0; padding: 0; text-align: center; }
 .ai-first .agent-empty-copy { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
@@ -179,7 +192,7 @@
   .ai-first .navigation-close { display: grid; margin-left: auto; }
   .ai-first .navigation-scrim { position: absolute; inset: 0; z-index: 21; border: 0; background: var(--material-scrim); }
   .ai-first .agent-header { padding-inline: 16px; }
-  .ai-first .agent-feed { padding-inline: calc(16px - var(--scrollbar-size)); }
+  .ai-first .agent-feed { padding-inline: 24px; }
   .ai-first .agent-input-region { width: calc(100% - 32px); padding-bottom: 16px; }
   .ai-first .workspace-guide-toggle, .ai-first .agent-token-usage { display: none; }
   .ai-first .live-preview-label { display: none; }
@@ -202,6 +215,8 @@
   .ai-first .workspace-nav-item.is-active, .ai-first .server-row-selected { border-color: var(--text); }
 }
 @media (forced-colors: active) {
+  .conversation-scroll-ticks { forced-color-adjust: none; color: CanvasText; }
+  .conversation-scroll-ticks.is-current { color: Highlight; opacity: 1; }
   .ai-first .workspace-nav-item.is-active { background: Highlight; color: HighlightText; }
   .ai-first .agent-composer-shell { border-color: CanvasText; }
 }
