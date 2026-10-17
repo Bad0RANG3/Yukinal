@@ -7,6 +7,11 @@ license = { text = "MIT" }
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.30,<1",
+  # Ed25519 node signatures: a node proves possession of its key per request, so
+  # no node secret is ever stored.
+  "cryptography>=42,<52",
+  # uvicorn needs a WebSocket implementation to serve the node channel.
+  "websockets>=12,<19",
   "sqlalchemy[asyncio]>=2.0,<3",
   "pydantic-settings>=2.4,<3",
   "alembic>=1.13,<2",

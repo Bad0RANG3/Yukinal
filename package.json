@@ -20,8 +20,6 @@
     "smoke:python-dev-agent": "node scripts/smoke-python-dev-agent.mjs",
     "test": "pnpm -r --if-present test",
     "smoke:sidecar": "node scripts/smoke-python-dev-agent.mjs",
-    "smoke:python-agent": "node scripts/smoke-python-agent.mjs",
-    "smoke:python-dev-agent": "node scripts/smoke-python-dev-agent.mjs",
     "desktop:dev": "pnpm --filter @yukinal/desktop dev",
     "desktop:dev:cpp": "node scripts/dev-cpp-host.mjs",
     "clean": "node scripts/clean.mjs"

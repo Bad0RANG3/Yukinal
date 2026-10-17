@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你愿意参与 Yukinal。仓库保留现有 Rust/Tauri/Node 桌面基线；新的 C++/Python 重写按 `ssh_agent_development_brief.md` 分阶段推进，目前只到 SSH 服务基础闭环。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
+感谢你愿意参与 Yukinal。桌面宿主已是 **C++ WebView 宿主**：Rust/Tauri 宿主与 legacy Node agent 已按 [`docs/rust-removal-plan.md`](./docs/rust-removal-plan.md) 从仓库删除，`pnpm check` 不再依赖 cargo。C++/Python 重写按 `ssh_agent_development_brief.md` 分阶段推进；尚未迁移的命令返回 `NOT_IMPLEMENTED`，不回退旧宿主。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
 
 ## 开始之前
 
@@ -29,7 +29,7 @@ pnpm check
 
 ## 修改规则
 
-- 现有 Rust 宿主拥有的进程、文件系统、SQLite、凭据与 SSH 能力不得下放到 WebView；新 C++ SSH 服务保持独立并只开放文档化的结构化操作。
+- C++ 桌面宿主拥有的进程、文件系统、SQLite、凭据与 SSH 能力不得下放到 WebView；C++ SSH 服务保持独立并只开放文档化的结构化操作。
 - 未来 Agent 只能提出工具调用；执行授权由程序化策略和宿主复核强制执行。不要通过提示词绕过权限规则。
 - MCP 远端描述和 schema 始终是不可信数据，只可展示或交给模型，不可当作指令执行。
 - 文档中的每项能力都必须能在实现或实际验收中找到依据；未验证的交付条件写入[交付与发布](./docs/release.md)，补完后更新状态。
@@ -43,7 +43,7 @@ pnpm check
 git diff --check
 ```
 
-`pnpm check` 已覆盖文档链接、密钥扫描、跨语言契约、类型检查、单元测试、sidecar 冒烟、打包契约、Rust 格式、Clippy 与 Rust 测试。修改打包或发布流程时还要按[交付与发布](./docs/release.md#发布验收)验证安装包。
+`pnpm check` 已覆盖文档链接、密钥扫描、发布卫生、跨语言契约、类型检查、单元测试、sidecar 冒烟、打包契约，以及 C++ SSH/桌面宿主与 Python Agent 的 CTest 套件；控制平面存在独立 venv 时还会跑其 SQLite 测试。修改打包或发布流程时还要按[交付与发布](./docs/release.md#发布验收)验证安装包。
 
 ## Pull Request
 
