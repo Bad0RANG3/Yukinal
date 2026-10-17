@@ -11,13 +11,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from . import schemas, service
+from . import channel, models, nodeauth, schemas, service
 from .config import Settings
 from .db import Base, create_engine, create_session_factory
 from .errors import ControlPlaneError
@@ -74,6 +74,36 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
                 raise HTTPException(status_code=401, detail="unauthorized")
         actor = (x_yukinal_actor or "operator").strip()
         return actor or "operator"
+
+    def canonical_path(request: Request) -> str:
+        """The path a node signs: the request path plus any query string."""
+        query = request.url.query
+        return request.url.path + (f"?{query}" if query else "")
+
+    async def current_node(
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        x_yukinal_node: str | None = Header(default=None, alias=nodeauth.HEADER_NODE),
+        x_yukinal_timestamp: str | None = Header(default=None, alias=nodeauth.HEADER_TIMESTAMP),
+        x_yukinal_nonce: str | None = Header(default=None, alias=nodeauth.HEADER_NONCE),
+        x_yukinal_signature: str | None = Header(default=None, alias=nodeauth.HEADER_SIGNATURE),
+    ) -> models.Node:
+        """Authenticate a request as a registered node.
+
+        The signature covers the body, so the tenant is read from the node row
+        rather than the URL: node-facing routes take no tenant id at all, and a
+        node can never act on another tenant's data.
+        """
+        return await service.authenticate_node(
+            session,
+            node_id=x_yukinal_node,
+            timestamp=x_yukinal_timestamp,
+            nonce=x_yukinal_nonce,
+            signature=x_yukinal_signature,
+            method=request.method,
+            path=canonical_path(request),
+            body=await request.body(),
+        )
 
     @app.exception_handler(ControlPlaneError)
     async def handle_domain_error(_request: Request, error: ControlPlaneError) -> JSONResponse:
@@ -339,6 +369,64 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
         _actor: str = Depends(current_actor),
     ) -> list:
         return await service.list_audit(session, tenant_id, limit=max(1, min(limit, 1000)))
+
+    # ── node-facing API ──────────────────────────────────────────────────────
+    # These routes authenticate with an Ed25519 signature, not the operator
+    # bearer token, and derive the tenant from the authenticated node row.
+
+    @app.post("/v1/node/heartbeat", response_model=schemas.HeartbeatResult)
+    async def node_heartbeat(
+        body: schemas.HeartbeatRequest,
+        node: models.Node = Depends(current_node),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict:
+        updated, marked = await service.heartbeat(
+            session,
+            tenant_id=node.tenant_id,
+            node_id=node.id,
+            agent_version=body.agent_version,
+            restarted=body.restarted,
+        )
+        return {
+            "node_id": updated.id,
+            "last_seen_at": updated.last_seen_at,
+            "marked_unknown": marked,
+        }
+
+    @app.get("/v1/node/tasks", response_model=list[schemas.TaskView])
+    async def node_list_tasks(
+        node: models.Node = Depends(current_node),
+        session: AsyncSession = Depends(get_session),
+    ) -> list:
+        return await service.node_tasks(session, node)
+
+    @app.get("/v1/node/recoverable", response_model=list[schemas.TaskView])
+    async def node_recoverable(
+        node: models.Node = Depends(current_node),
+        session: AsyncSession = Depends(get_session),
+    ) -> list:
+        return await service.recoverable_tasks_for_node(session, node)
+
+    @app.post("/v1/node/tasks/{task_id}/status", response_model=schemas.TaskView)
+    async def node_task_status(
+        task_id: str,
+        body: schemas.TaskStatusUpdate,
+        node: models.Node = Depends(current_node),
+        session: AsyncSession = Depends(get_session),
+    ) -> object:
+        return await service.transition_node_task(
+            session,
+            node=node,
+            task_id=task_id,
+            status=body.status,
+            outcome=body.outcome,
+            result=body.result,
+        )
+
+    @app.websocket("/v1/node/channel")
+    async def node_channel(websocket: WebSocket) -> None:
+        """The node's outbound channel: assignment, status and disconnect recovery."""
+        await channel.run_channel(websocket, session_factory)
 
     return app
 

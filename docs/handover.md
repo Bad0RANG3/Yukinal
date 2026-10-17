@@ -283,19 +283,33 @@ plan.record/plan.check/evidence.record（它们是 investigation 写入的地基
 brief 第 4 阶段：FastAPI 控制平面 + PostgreSQL（租户/节点/任务/模型配置/审批/审计）、节点主动
 HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属于新增模块，不影响现有单机路径。
 
-**已落地（`services/control-plane/`，可复核切片）**：FastAPI + SQLAlchemy 2.0(async) + Alembic。
-`create_app` 在没有 token 时拒绝启动（可用 `YUKINAL_CONTROL_ALLOW_ANONYMOUS=1` 显式对本地放开），
-启动时校验 schema 已迁移；`/v1` 全部要求 bearer token，`/healthz` 开放。已实现租户/节点/任务/
-模型配置/审批/审计的读写，租户隔离（跨租户一律 404，不泄露存在性）、任务状态机、
-每节点一个 active 任务的**偏唯一索引**（数据库级并发控制）、节点重启把 running 任务置为
-`unknown`（不自动重放，另有 `recoverable` 只读列表）、凭据边界（只存引用；`ModelConfigCreate`
-禁止未知字段，任务 payload 递归拒绝 secret 形状字段）与 `/v1/metrics` 汇总。19 个 unittest 覆盖
-API/schema/迁移一致性与边界，并实际启动 uvicorn 验证 healthz/401/建租户/metrics；`pnpm check`
-已纳入该步骤（`services/control-plane/.venv` 存在才跑，否则打印明确 skip 原因）。
+**已落地（`services/control-plane/`，可复核切片）**：FastAPI + SQLAlchemy 2.0(async) + Alembic，
+生产 PostgreSQL（`asyncpg`）/ 测试与本地 SQLite（`aiosqlite`）。`create_app` 在没有 token 时拒绝
+启动（可用 `YUKINAL_CONTROL_ALLOW_ANONYMOUS=1` 显式对本地放开），启动时校验 schema 已迁移；
+`/healthz` 开放，其余 `/v1` 分两套凭据：
 
-**仍待做**：PostgreSQL 本身（本机无 PG，迁移与查询只在 SQLite 上验证；JSON 非 JSONB、连接池/重启
-行为未测）、节点主动 HTTPS/WSS 通道与节点身份认证（`publicKey` 已存但未用于鉴权）、多 worker
-并发、Prometheus 指标、每租户角色授权、TLS 终结。安装器与真机验收同 3.5。
+- **运维面**（bearer token）`/v1/tenants/{tid}/...`：租户/节点/任务/模型配置/审批/审计的读写，
+  租户隔离（跨租户一律 404 不泄露存在性）、任务状态机、每节点一个 active 任务的**偏唯一索引**
+  （数据库级并发控制）、凭据边界（只存引用；`ModelConfigCreate` 禁止未知字段，任务 payload 递归
+  拒绝 secret 形状字段）与 `/v1/metrics` 汇总。
+- **节点面**（Ed25519 请求签名）`/v1/node/...`：节点注册时提供公钥（接受 base64/hex/`ssh-ed25519`
+  行，统一存规范 base64），之后每个请求对
+  `timestamp\nnonce\nMETHOD\npath[?query]\nsha256(body)` 签名；时间窗 300 秒，nonce 落库
+  `node_nonces` 保证一次性（重放 401）；未知节点/过期/签名错误/重放**统一 401**，不泄露节点是否
+  存在。节点路由不带 tenant id，租户从节点行推导。`WS /v1/node/channel` 是节点主动连出的通道：
+  连上即把该节点的 queued 任务置为 running 并下发，节点回报 `status`；socket 中断把 running 任务
+  置为 `unknown`（`node_disconnected`，优雅 `close` 为 `node_closed`），**不自动重放**，重连后可
+  回报真实结果；断连标记在取消屏蔽（cancellation-shielded）作用域内执行，服务关闭时不会被静默跳过。
+
+45 个 unittest 覆盖注册/签名/重放/租户与节点越权/状态机/偏唯一索引/断连恢复/迁移一致性与启动校验，
+并**实际启动 uvicorn** 用真 WebSocket 客户端 + 真 Ed25519 签名跑通：healthz、无 token 401、签名
+heartbeat、握手→下发→`succeeded`→ack、中断→`unknown`/`node_disconnected`→`recoverable`。
+`pnpm check` 已纳入该步骤（`services/control-plane/.venv` 存在才跑，否则打印明确 skip 原因）。
+
+**仍待做**：PostgreSQL 本身（本机无 PG，迁移与查询只在 SQLite 验证；JSON 非 JSONB、连接池/重启行为
+未测）、TLS/`wss://` 终结与 mTLS（当前是请求签名 + 明文绑定）、多 worker 下的任务分配竞态
+（重放保护已落库，跨 worker 成立）、每租户角色授权（单一共享 token）、审批与任务派发的强制绑定、
+服务端 ping 定时器、Prometheus 指标。安装器与真机验收同 3.5。
 
 ### 3.7 真机验收
 
@@ -338,8 +352,9 @@ API/schema/迁移一致性与边界，并实际启动 uvicorn 验证 healthz/401
 4. **文件传输动作 + 拖拽**（3.3）。
 5. **host.tool.execute 收尾**（3.4 的最后一块）：非 MCP 只读分支与 `mcp.*` 门禁对齐均已完成。
 6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
-7. **控制平面**（3.6，独立阶段）：可复核切片已落地（`services/control-plane/`，本地 SQLite 验证，
-已纳入 `pnpm check`）；PostgreSQL 部署、节点 HTTPS/WSS 通道与多 worker 并发待相应环境。
+7. **控制平面**（3.6，独立阶段）：可复核切片已落地（`services/control-plane/`，运维面 + 节点
+   Ed25519 签名面 + `WS /v1/node/channel`，本地 SQLite 与真 uvicorn/真 WebSocket 验证，已纳入
+   `pnpm check`）；PostgreSQL 部署、TLS/mTLS 与多 worker 并发待相应环境。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
 
 ---

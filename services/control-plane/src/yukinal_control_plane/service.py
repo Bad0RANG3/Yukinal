@@ -9,22 +9,24 @@ row exists elsewhere.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import models
-from .errors import Conflict, InvalidTransition, NotFound
+from . import models, nodeauth
+from .errors import Conflict, InvalidTransition, NotFound, Unauthorized
 from .models import ACTIVE_TASK_STATUSES, APPROVAL_STATES, TASK_STATUSES
 
 # Allowed task transitions. A terminal state has no outgoing edges, so a
-# completed task is never silently moved back to a live state.
+# completed task is never silently moved back to a live state. ``unknown`` can
+# move to any *reported* outcome: the control plane never replays it, but the node
+# that was running it may come back and state what actually happened.
 _TRANSITIONS: dict[str, set[str]] = {
     "queued": {"running", "cancelled"},
     "running": {"succeeded", "failed", "cancelled", "unknown"},
-    "unknown": {"running", "failed", "cancelled"},
+    "unknown": {"running", "succeeded", "failed", "cancelled"},
     "succeeded": set(),
     "failed": set(),
     "cancelled": set(),
@@ -151,6 +153,110 @@ async def list_nodes(session: AsyncSession, tenant_id: str) -> list[models.Node]
     )
 
 
+async def require_node_by_id(session: AsyncSession, node_id: str) -> models.Node:
+    """Resolve a node from its own id, for a node-authenticated request.
+
+    The tenant comes from the row, never from the request, so a node cannot claim
+    to belong to a tenant it does not.
+    """
+    node = await session.get(models.Node, node_id)
+    tenant = await session.get(models.Tenant, node.tenant_id) if node is not None else None
+    if node is None or tenant is None or tenant.disabled:
+        raise NotFound(f"node `{node_id}` was not found")
+    return node
+
+
+async def authenticate_node(
+    session: AsyncSession,
+    *,
+    node_id: str | None,
+    timestamp: str | None,
+    nonce: str | None,
+    signature: str | None,
+    method: str,
+    path: str,
+    body: bytes = b"",
+) -> models.Node:
+    """Verify a node's Ed25519 request signature and burn its nonce.
+
+    An unknown node, a stale timestamp, a bad signature and a replayed nonce all
+    raise the same ``Unauthorized``: the endpoint never confirms which node ids
+    exist, nor which half of the check failed.
+    """
+    if not (node_id and timestamp and nonce and signature):
+        raise Unauthorized("node authentication headers are missing")
+    node = await session.get(models.Node, node_id)
+    tenant = await session.get(models.Tenant, node.tenant_id) if node is not None else None
+    if node is None or tenant is None or tenant.disabled:
+        raise Unauthorized("node authentication failed")
+    if not nodeauth.timestamp_within_window(timestamp):
+        raise Unauthorized("the signed timestamp is outside the accepted window")
+    canonical = nodeauth.canonical_request(
+        timestamp=timestamp, nonce=nonce, method=method, path=path, body=body
+    )
+    if not nodeauth.verify_signature(node.public_key, signature, canonical):
+        raise Unauthorized("the request signature is not valid for this node")
+    await claim_nonce(session, node_id=node.id, nonce=nonce)
+    return node
+
+
+async def claim_nonce(
+    session: AsyncSession, *, node_id: str, nonce: str, now: datetime | None = None
+) -> None:
+    """Consume a request nonce, raising ``Unauthorized`` if it was already used."""
+    stamp = now or utc_now()
+    session.add(models.NodeNonce(node_id=node_id, nonce=nonce, at=stamp))
+    try:
+        await session.flush()
+    except IntegrityError as error:
+        raise Unauthorized("this request nonce has already been used") from error
+    # Keep the table proportional to the signature window instead of growing.
+    await session.execute(
+        delete(models.NodeNonce).where(
+            models.NodeNonce.at
+            < stamp - timedelta(seconds=nodeauth.SIGNATURE_WINDOW_SECONDS * 2)
+        )
+    )
+
+
+async def touch_node(
+    session: AsyncSession, node: models.Node, *, agent_version: str | None = None
+) -> None:
+    node.last_seen_at = utc_now()
+    if agent_version:
+        node.agent_version = agent_version
+    await session.flush()
+
+
+async def _mark_running_unknown(
+    session: AsyncSession, *, tenant_id: str, node_id: str, reason: str, now: datetime
+) -> list[str]:
+    """Move every ``running`` task on a node to outcome-unknown. Never a replay."""
+    running = (
+        await session.scalars(
+            select(models.Task).where(
+                models.Task.node_id == node_id, models.Task.status == "running"
+            )
+        )
+    ).all()
+    marked: list[str] = []
+    for task in running:
+        task.status = "unknown"
+        task.outcome = reason
+        task.updated_at = now
+        marked.append(task.id)
+        await record_audit(
+            session,
+            tenant_id=tenant_id,
+            actor="node",
+            action="task.unknown",
+            subject_type="task",
+            subject_id=task.id,
+            detail={"reason": reason},
+        )
+    return marked
+
+
 async def heartbeat(
     session: AsyncSession,
     *,
@@ -172,34 +278,37 @@ async def heartbeat(
         node.agent_version = agent_version
     marked: list[str] = []
     if restarted:
-        running = (
-            await session.scalars(
-                select(models.Task).where(
-                    models.Task.node_id == node_id, models.Task.status == "running"
-                )
-            )
-        ).all()
-        for task in running:
-            task.status = "unknown"
-            task.outcome = "node_restarted"
-            task.updated_at = now
-            marked.append(task.id)
-            await record_audit(
-                session,
-                tenant_id=tenant_id,
-                actor="node",
-                action="task.unknown",
-                subject_type="task",
-                subject_id=task.id,
-                detail={"reason": "node_restarted"},
-            )
+        marked = await _mark_running_unknown(
+            session, tenant_id=tenant_id, node_id=node_id, reason="node_restarted", now=now
+        )
     await session.flush()
     return node, marked
+
+
+async def mark_node_disconnected(
+    session: AsyncSession, node: models.Node, *, reason: str = "node_disconnected"
+) -> list[str]:
+    """Record that a node dropped its channel.
+
+    Running work is outcome-unknown: the remote effect may or may not have
+    happened, so nothing is replayed and the task is listed for a human decision.
+    """
+    now = utc_now()
+    node.last_seen_at = now
+    marked = await _mark_running_unknown(
+        session, tenant_id=node.tenant_id, node_id=node.id, reason=reason, now=now
+    )
+    await session.flush()
+    return marked
 
 
 async def recoverable_tasks(session: AsyncSession, *, tenant_id: str, node_id: str) -> list[models.Task]:
     """Tasks whose outcome is unknown after a disconnect. Read-only: no replay."""
     node = await require_node(session, tenant_id, node_id)
+    return await recoverable_tasks_for_node(session, node)
+
+
+async def recoverable_tasks_for_node(session: AsyncSession, node: models.Node) -> list[models.Task]:
     return list(
         (
             await session.scalars(
@@ -209,6 +318,55 @@ async def recoverable_tasks(session: AsyncSession, *, tenant_id: str, node_id: s
             )
         ).all()
     )
+
+
+async def node_tasks(session: AsyncSession, node: models.Node) -> list[models.Task]:
+    """Every task for one node, oldest first. Used by the node itself."""
+    return list(
+        (
+            await session.scalars(
+                select(models.Task)
+                .where(models.Task.node_id == node.id)
+                .order_by(models.Task.created_at)
+            )
+        ).all()
+    )
+
+
+async def assign_queued_tasks(
+    session: AsyncSession, node: models.Node, *, actor: str = "control-plane"
+) -> list[models.Task]:
+    """Move this node's queued tasks to ``running`` and return them.
+
+    Assignment is the moment work leaves the queue: the node announced itself on
+    the channel, and the partial unique index guarantees it has no other active
+    task.
+    """
+    queued = (
+        await session.scalars(
+            select(models.Task)
+            .where(models.Task.node_id == node.id, models.Task.status == "queued")
+            .order_by(models.Task.created_at)
+        )
+    ).all()
+    now = utc_now()
+    assigned: list[models.Task] = []
+    for task in queued:
+        task.status = "running"
+        task.attempts += 1
+        task.updated_at = now
+        assigned.append(task)
+        await record_audit(
+            session,
+            tenant_id=task.tenant_id,
+            actor=actor,
+            action="task.transition",
+            subject_type="task",
+            subject_id=task.id,
+            detail={"from": "queued", "to": "running", "outcome": None},
+        )
+    await session.flush()
+    return assigned
 
 
 # ── tasks ────────────────────────────────────────────────────────────────────
@@ -254,6 +412,14 @@ async def require_task(session: AsyncSession, tenant_id: str, task_id: str) -> m
     return task
 
 
+async def require_node_task(session: AsyncSession, node: models.Node, task_id: str) -> models.Task:
+    """A node may only act on its own tasks, even inside one tenant."""
+    task = await session.get(models.Task, task_id)
+    if task is None or task.node_id != node.id:
+        raise NotFound(f"task `{task_id}` was not found")
+    return task
+
+
 async def list_tasks(
     session: AsyncSession, tenant_id: str, *, node_id: str | None = None
 ) -> list[models.Task]:
@@ -264,21 +430,20 @@ async def list_tasks(
     return list((await session.scalars(query.order_by(models.Task.created_at))).all())
 
 
-async def transition_task(
+async def _apply_transition(
     session: AsyncSession,
+    task: models.Task,
     *,
-    tenant_id: str,
-    task_id: str,
     status: str,
-    outcome: str | None = None,
-    result: dict | None = None,
+    outcome: str | None,
+    result: dict | None,
+    actor: str,
 ) -> models.Task:
-    task = await require_task(session, tenant_id, task_id)
     if status not in TASK_STATUSES:
         raise Conflict(f"unknown task status `{status}`")
     if status not in _TRANSITIONS[task.status]:
         raise InvalidTransition(
-            f"task `{task_id}` cannot move from `{task.status}` to `{status}`"
+            f"task `{task.id}` cannot move from `{task.status}` to `{status}`"
         )
     previous = task.status
     task.status = status
@@ -292,14 +457,45 @@ async def transition_task(
     await session.flush()
     await record_audit(
         session,
-        tenant_id=tenant_id,
-        actor="control-plane",
+        tenant_id=task.tenant_id,
+        actor=actor,
         action="task.transition",
         subject_type="task",
         subject_id=task.id,
         detail={"from": previous, "to": status, "outcome": outcome},
     )
     return task
+
+
+async def transition_task(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    task_id: str,
+    status: str,
+    outcome: str | None = None,
+    result: dict | None = None,
+) -> models.Task:
+    task = await require_task(session, tenant_id, task_id)
+    return await _apply_transition(
+        session, task, status=status, outcome=outcome, result=result, actor="control-plane"
+    )
+
+
+async def transition_node_task(
+    session: AsyncSession,
+    *,
+    node: models.Node,
+    task_id: str,
+    status: str,
+    outcome: str | None = None,
+    result: dict | None = None,
+) -> models.Task:
+    """A node reports the outcome of one of its own tasks."""
+    task = await require_node_task(session, node, task_id)
+    return await _apply_transition(
+        session, task, status=status, outcome=outcome, result=result, actor=node.id
+    )
 
 
 # ── model configs ────────────────────────────────────────────────────────────
@@ -482,6 +678,9 @@ __all__ = [
     "ACTIVE_TASK_STATUSES",
     "APPROVAL_STATES",
     "TASK_STATUSES",
+    "assign_queued_tasks",
+    "authenticate_node",
+    "claim_nonce",
     "create_approval",
     "create_model_config",
     "create_task",
@@ -494,14 +693,21 @@ __all__ = [
     "list_nodes",
     "list_tasks",
     "list_tenants",
+    "mark_node_disconnected",
     "metrics",
     "new_id",
+    "node_tasks",
     "record_audit",
     "recoverable_tasks",
+    "recoverable_tasks_for_node",
     "register_node",
     "require_node",
+    "require_node_by_id",
+    "require_node_task",
     "require_task",
     "require_tenant",
+    "touch_node",
+    "transition_node_task",
     "transition_task",
     "utc_now",
 ]

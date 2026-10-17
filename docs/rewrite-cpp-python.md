@@ -1654,20 +1654,57 @@ The API enforces the same rules the desktop host enforces locally:
 - **An audit trail.** One `audit_events` row per mutation, tenant-scoped and
   returned newest first.
 
-`services/control-plane/tests/test_control_plane.py` runs against SQLite and
-covers the API, tenant scoping, the state machine, the partial index, disconnect
-recovery, the credential boundary, the startup checks and a drift test that runs
-the real Alembic migration and compares the migrated tables with the models (19
-tests). A real `python -m yukinal_control_plane` boot was also exercised:
-`/healthz` returned `ok`, an unauthenticated `/v1/tenants` returned `401`, and a
-tenant create plus `/v1/metrics` round-tripped. `pnpm check` now runs the suite
-as a step that is skipped with an explicit reason when the service virtualenv is
-absent.
+Nodes are a second audience with a second credential. An operator registers a
+node's Ed25519 public key (base64, hex or an `ssh-ed25519` line, stored in one
+canonical form); from then on the node proves possession of the private half on
+every request by signing
 
-Honest gaps: no PostgreSQL server exists in this environment, so the migration
+```
+<timestamp>\n<nonce>\n<METHOD>\n<path[?query]>\n<sha256-hex(body)>
+```
+
+The timestamp must be within 300 seconds, and the nonce is recorded in
+`node_nonces` so it can be used exactly once. An unknown node, a stale timestamp,
+a bad signature and a replayed nonce all return the same `401`, so the API never
+confirms which node ids exist. Node-facing routes under `/v1/node/...` take no
+tenant id: the tenant is derived from the authenticated node row, so a node
+cannot reach another tenant's data, and `require_node_task` keeps two nodes in
+one tenant from touching each other's tasks. The control plane therefore stores a
+public key and never a node secret, which is the same credential boundary the
+rest of the service follows.
+
+`WS /v1/node/channel` is the node's outbound channel, authenticated with the
+same signature at the upgrade. On connect the control plane assigns every queued
+task for that node — the move to `running` is the moment work leaves the queue —
+and the node reports outcomes back. If the socket drops while a task is running,
+the task becomes `unknown` with reason `node_disconnected` (a graceful `close`
+gives `node_closed`); it is never marked failed and never replayed, and a
+reconnecting node may still report what actually happened. That is the same
+outcome-unknown rule the desktop host applies to an interrupted call, now
+enforced for a fleet. The disconnect marking runs in a cancellation-shielded
+scope: a server shutdown cancels the channel task, and without the shield the
+marking would be cancelled away exactly when the connection did not end cleanly.
+
+`services/control-plane/tests/` runs against SQLite and covers the API, tenant
+and per-node scoping, the state machine, the partial index, disconnect recovery,
+the credential boundary, key parsing and signature/replay refusals, the startup
+checks, and a drift test that runs the real Alembic migrations and compares the
+migrated tables and indexes with the models (45 tests). Beyond the test
+transport, a real `python -m yukinal_control_plane` process was exercised with a
+real WebSocket client: `/healthz` returned `ok`, an unauthenticated request
+returned `401`, a signed heartbeat was accepted, the channel handed over a task
+that was reported `succeeded` and acked, and a client that dropped its socket
+mid-task left the task `unknown`/`node_disconnected` and visible in
+`/v1/node/recoverable`. `pnpm check` runs the suite as a step that is skipped
+with an explicit reason when the service virtualenv is absent.
+
+Honest gaps: no PostgreSQL server exists in this environment, so the migrations
 and the queries have been exercised only on SQLite (`JSON` rather than `JSONB`,
-and PostgreSQL connection-pool/restart behaviour is untested); the node channel
-is the same HTTP API rather than the intended authenticated HTTPS/WSS channel
-(the `publicKey` recorded at registration is stored but does not authenticate a
-node yet); multi-worker concurrency, a Prometheus exporter and per-tenant roles
-are not implemented. `/v1/metrics` is a small JSON summary.
+and PostgreSQL connection-pool/restart behaviour is untested); node transport is
+request signatures over plain HTTP/WS rather than mutual TLS, so TLS termination
+and `wss://` are a deployment concern that has not been exercised; replay
+protection is database-backed and therefore holds across workers, but multi-worker
+task assignment has not been exercised; there are no per-tenant operator roles
+(one shared token), approvals are recorded but not enforced before dispatch, there
+is no server-initiated ping timer, and `/v1/metrics` is a small JSON summary
+rather than a Prometheus exporter.

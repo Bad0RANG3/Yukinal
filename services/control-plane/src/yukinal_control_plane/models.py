@@ -8,6 +8,8 @@ tenant isolation is a plain ``WHERE`` clause rather than a trust decision.
 
 from __future__ import annotations
 
+import binascii
+from base64 import b64decode
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -24,6 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+from .nodeauth import key_fingerprint
 
 # Task statuses. ``unknown`` is the terminal-but-unresolved state used when a
 # node restarts while a task is running: the remote effect may have happened, so
@@ -64,6 +67,40 @@ class Node(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="node")
+
+    @property
+    def key_fingerprint(self) -> str:
+        """Short digest of the public key, so the API never has to echo it.
+
+        ``public_key`` is validated at registration, so a decode failure here
+        means a row was written outside the API; report that instead of raising
+        in the middle of serializing a response.
+        """
+        try:
+            return key_fingerprint(b64decode(self.public_key, validate=True))
+        except (binascii.Error, ValueError):
+            return "SHA256:unparseable"
+
+
+class NodeNonce(Base):
+    """Consumed request nonces, so a signed node request cannot be replayed.
+
+    The composite primary key makes a second use of the same nonce a constraint
+    violation rather than a silent accept. Rows older than the signature window
+    are pruned opportunistically on each claim, so the table stays small. This is
+    database-backed on purpose: a per-process cache would let a replay reach a
+    different worker.
+    """
+
+    __tablename__ = "node_nonces"
+
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    nonce: Mapped[str] = mapped_column(String(128), primary_key=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
 
 
 class Task(Base):

@@ -14,6 +14,11 @@ class ControlPlaneError(Exception):
             self.code = code
 
 
+class Unauthorized(ControlPlaneError):
+    status_code = 401
+    code = "unauthorized"
+
+
 class NotFound(ControlPlaneError):
     status_code = 404
     code = "not_found"

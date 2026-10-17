@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import nodeauth
 
 
 class _Request(BaseModel):
@@ -41,12 +43,27 @@ class NodeCreate(_Request):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    @field_validator("public_key")
+    @classmethod
+    def _canonical_ed25519_key(cls, value: str) -> str:
+        """Store one canonical form and reject a key that could never verify.
+
+        Registration is the only place a node identity enters the system, so a
+        key that is not a 32-byte Ed25519 public key is refused here rather than
+        accepted and failing every later signature check.
+        """
+        try:
+            return nodeauth.encode_public_key(nodeauth.parse_public_key(value))
+        except ValueError as error:
+            raise ValueError(str(error)) from error
+
 
 class NodeView(_View):
     id: str
     tenant_id: str
     name: str
     public_key: str
+    key_fingerprint: str
     agent_version: str | None
     last_seen_at: datetime | None
     created_at: datetime
