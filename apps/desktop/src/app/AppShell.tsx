@@ -44,6 +44,7 @@ export function AppShell() {
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   const setServerPage = useWorkspaceStore((state) => state.setServerPage);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [compact, setCompact] = useState(() => window.matchMedia("(max-width: 1180px)").matches);
   const [contextOpen, setContextOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(() => !isPreviewFixture() && !useOnboardingStore.getState().dismissed);
   const sidebarRef = useRef<HTMLElement>(null);
@@ -90,10 +91,11 @@ export function AppShell() {
     return () => { cancelAnimationFrame(frame); document.removeEventListener("keydown", onKey); sidebarToggleRef.current?.focus({ preventScroll: true }); };
   }, [sidebarOpen]);
   useEffect(() => {
-    const compact = window.matchMedia("(max-width: 1180px)"), navigation = window.matchMedia("(max-width: 720px)");
-    const reset = () => { setSidebarOpen(false); setContextOpen(false); };
-    compact.addEventListener("change", reset); navigation.addEventListener("change", reset);
-    return () => { compact.removeEventListener("change", reset); navigation.removeEventListener("change", reset); };
+    const layout = window.matchMedia("(max-width: 1180px)"), navigation = window.matchMedia("(max-width: 720px)");
+    const resize = () => { setSidebarOpen(false); setCompact(layout.matches); };
+    const closeNavigation = () => setSidebarOpen(false);
+    layout.addEventListener("change", resize); navigation.addEventListener("change", closeNavigation);
+    return () => { layout.removeEventListener("change", resize); navigation.removeEventListener("change", closeNavigation); };
   }, []);
   const openContext = () => { useWorkpagesStore.getState().setCollapsed(true); setContextOpen(true); requestAnimationFrame(() => inspectorRef.current?.focus({ preventScroll: true })); };
   const returnToAI = () => {
@@ -117,7 +119,7 @@ export function AppShell() {
     if (page) { setServerPage(page); document.getElementById(`server-tab-${page}`)?.focus(); }
   };
   return (
-    <div onClickCapture={recordTeamAttention} onFocusCapture={recordTeamAttention} className={`app-shell ai-first ${sidebarOpen ? "navigation-open" : ""} ${contextOpen ? "context-open" : ""} ${informationOpen && !contextOpen ? "information-open" : ""} ${informationExpanded ? "information-expanded" : ""}`} data-primary={primary}>
+    <div onClickCapture={recordTeamAttention} onFocusCapture={recordTeamAttention} className={`app-shell ai-first ${sidebarOpen ? "navigation-open" : ""} ${compact && contextOpen ? "context-open" : ""} ${informationOpen && !(compact && contextOpen) ? "information-open" : ""} ${informationExpanded ? "information-expanded" : ""}`} data-primary={primary}>
       <aside className="workspace-sidebar" id="workspace-sidebar" ref={sidebarRef} aria-label="工作区导航">
         <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
         <nav className="workspace-navigation" aria-label="主导航">{VISIBLE_PRIMARY_NAV.map((item) => <button type="button" key={item} data-attention={`nav:${item}`} className={`workspace-nav-item team-operation-target ${primaryActive(item) ? "is-active" : ""}`} aria-current={primaryActive(item) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span>{item === "board" ? <TeamBoardNavFeedback /> : null}</button>)}</nav>

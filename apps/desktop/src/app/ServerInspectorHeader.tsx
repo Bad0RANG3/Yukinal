@@ -28,7 +28,7 @@ export function ServerInspectorHeader({ onBack, onClose }: { onBack: () => void;
           </span>
           {server.metadata.region ? <span>{server.metadata.region}</span> : null}
         </div>
-        <p className="inspector-object-address"><code>{server.connection.username}@{server.connection.host}:{server.connection.port}</code></p>
+        <p className="inspector-object-address"><code title={`${server.connection.username}@${server.connection.host}:${server.connection.port}`}>{server.connection.username}@{server.connection.host}:{server.connection.port}</code></p>
       </div> : null}
     </header>
   );

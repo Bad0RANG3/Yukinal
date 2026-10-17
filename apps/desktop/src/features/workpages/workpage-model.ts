@@ -18,7 +18,7 @@ export type ArtifactContent = z.output<typeof ArtifactContentSchema>;
 export type WorkpageArtifact = { id: string; title: string; content: ArtifactContent; serverId?: string | null; createdAt?: string };
 export type WorkpageEvidence = { id: string; title: string; actor: string; target: string; execution: ToolExecutionRecord };
 
-type PageBase = { id: string; title: string; serverId: string | null; dock: WorkpageDock };
+type PageBase = { id: string; title: string; serverId: string | null; dock: WorkpageDock; pinned?: boolean };
 export type Workpage = PageBase & (
   | { kind: WorkpageTool }
   | { kind: "board" }

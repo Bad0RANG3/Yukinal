@@ -18,7 +18,7 @@
 .settings-organized .settings-card-header-actions { flex-wrap: wrap; }
 .settings-organized :is(.settings-card-header, .settings-actions, .settings-card-actions, .provider-picker-actions, .provider-row-actions) > button { min-width: 0; max-width: 100%; white-space: normal; }
 .settings-organized :is(.settings-storage-note, .settings-editing, .settings-notice, .settings-advanced > summary, .form-hint, .form-error, .form-success) { overflow-wrap: anywhere; }
-.settings-organized .settings-form-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-card); }
+.settings-organized .settings-form-grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
 .settings-organized .settings-form-grid .field-label { margin: 0 0 6px; font-size: var(--text-label); }
 .settings-organized .settings-form-fields > .settings-form-grid { margin-top: 12px; }
 .settings-organized .settings-check-grid { grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 12px; }
@@ -52,7 +52,7 @@
 .settings-organized .settings-error-row > button { flex-shrink: 0; white-space: nowrap; }
 .settings-organized .settings-preferences-reset { padding-top: var(--space-card); border-top: 1px solid var(--line); }
 .settings-organized .settings-preferences-reset .text-button { color: var(--muted); font-size: var(--text-label); }
-.settings-organized .settings-preferences .settings-form-grid { gap: 12px; }
+.settings-organized .settings-preferences .settings-form-grid { gap: 16px; }
 .settings-organized .settings-preferences .settings-field { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: 8px; }
 .settings-organized .settings-preferences .settings-field .field-label { margin: 0; }
 .settings-organized .settings-preferences .form-input { min-width: 0; margin: 0; }

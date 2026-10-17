@@ -32,7 +32,7 @@ test("interactive document applies a restrictive policy before untrusted content
 test("workpages lock server targets and closing a terminal preserves its mounted session", () => {
   useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
   const store = useWorkpagesStore.getState();
-  store.openTool("terminal", { serverId: "server-a", dock: "left" });
+  store.openTool("terminal", { serverId: "server-a", dock: "left", additional: true });
   store.openTool("logs", { serverId: "server-b", dock: "right" });
   const terminal = useWorkpagesStore.getState().pages.find((page) => page.kind === "terminal")!;
   assert.equal(terminal.serverId, "server-a");
@@ -69,6 +69,42 @@ test("returning to conversation preserves tools and reopening reveals the same t
   store.setOperationsOpen(true);
   assert.equal(useWorkpagesStore.getState().collapsed, false);
   assert.equal(useWorkpagesStore.getState().operationsOpen, true);
+});
+
+test("permanent tools cannot be closed or displaced by additional tabs", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, operationsOpen: false, collapsed: false });
+  const store = useWorkpagesStore.getState();
+  for (const kind of ["files", "terminal", "logs", "services"] as const) store.openTool(kind, { serverId: "server-a" });
+  const fixed = useWorkpagesStore.getState().pages;
+  for (const page of fixed) store.close(page.id);
+  assert.deepEqual(useWorkpagesStore.getState().pages, fixed);
+  for (let i = 0; i < 10; i++) store.openArtifact({ id: `result-${i}`, title: `Result ${i}`, content: { format: "markdown", text: "Done" } });
+  const state = useWorkpagesStore.getState();
+  assert.equal(state.pages.length, 8);
+  assert.deepEqual(state.pages.filter((page) => page.pinned), fixed);
+  assert.ok(state.recent.every((page) => !page.pinned));
+});
+
+test("new terminal tabs have separate sessions and switching a fixed target retains the old target", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, operationsOpen: false, collapsed: false });
+  const store = useWorkpagesStore.getState();
+  store.openTool("terminal", { serverId: "server-a" });
+  const original = useWorkpagesStore.getState().pages[0]!;
+  store.openTool("terminal", { serverId: "server-a", additional: true });
+  const additional = useWorkpagesStore.getState().pages[1]!;
+  assert.notEqual(additional.id, original.id);
+  assert.equal(additional.pinned, false);
+  store.close(additional.id);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 2);
+  store.openTool("terminal", { serverId: "server-b" });
+  const state = useWorkpagesStore.getState();
+  assert.equal(state.pages.find((page) => page.id === original.id)?.serverId, "server-a");
+  assert.equal(state.pages.find((page) => page.id === original.id)?.pinned, false);
+  assert.equal(state.pages.find((page) => page.pinned)?.serverId, "server-b");
+  store.openTool("terminal", { serverId: "server-a" });
+  assert.equal(useWorkpagesStore.getState().activeId, original.id);
+  assert.equal(useWorkpagesStore.getState().pages.filter((page) => page.pinned).length, 1);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 3);
 });
 
 test("a team board is bound to its scope and opening it preserves existing terminal sessions", () => {

@@ -1,5 +1,5 @@
 /* Local operations roles share the existing provider and conversation pipeline. */
-.agent-nist-page { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; font-size: var(--text-small); overflow-wrap: anywhere; }
+.agent-nist-page { display: flex; flex-direction: column; gap: 20px; width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; font-size: var(--text-small); overflow-wrap: anywhere; }
 .agent-nist-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .agent-nist-heading > div { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
 .agent-nist-heading h2 { margin: 0; color: var(--text); font-size: var(--text-subheading); font-weight: 600; }
@@ -41,9 +41,9 @@
 }
 
 /* One reference-column workbench; no changes to shell column widths. */
-.team-workbench-tabs { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--edge-normal); border-radius: var(--radius-control); }
-.team-workbench-tabs > button { flex: 1; min-width: 0; min-height: 30px; padding: 5px 8px; border: 0; border-radius: var(--radius-badge); color: var(--muted); background: transparent; font: inherit; font-size: var(--text-label); cursor: pointer; }
-.team-workbench-tabs > button[aria-pressed="true"] { color: var(--text); background: var(--material-active); }
+.team-workbench-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--edge-normal); }
+.team-workbench-tabs > button { flex: 1; min-width: 0; min-height: 36px; padding: 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); background: transparent; font: inherit; font-size: var(--text-label); cursor: pointer; }
+.team-workbench-tabs > button[aria-pressed="true"] { color: var(--text); border-bottom-color: currentColor; }
 .team-workbench-tabs > button:hover { color: var(--text); }
 .team-current-scope { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--faint); font-size: var(--text-caption); }
 .team-current-scope > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -53,9 +53,9 @@
 .team-current-mission strong { display: block; color: var(--text); font-size: var(--text-label); font-weight: 500; }
 .team-current-mission p { margin: 6px 0 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.65; }
 .team-current-mission > div + div { margin-top: 12px; }
-.team-roster { display: flex; flex-direction: column; min-width: 0; margin: -8px 0 0; padding: 0; list-style: none; }
+.team-roster { display: flex; flex-direction: column; min-width: 0; margin: 0; padding: 0; list-style: none; }
 .team-roster > li { min-width: 0; border-bottom: 1px solid var(--edge-subtle); }
-.team-roster-row { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; padding: 11px 0; border: 0; background: transparent; text-align: left; font: inherit; cursor: pointer; }
+.team-roster-row { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; min-height: 58px; padding: 14px 0; border: 0; background: transparent; text-align: left; font: inherit; cursor: pointer; }
 .team-roster-row > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 4px; }
 .team-roster-row strong { color: var(--text); font-size: var(--text-label); font-weight: 500; }
 .team-roster-row small { color: var(--faint); font-size: var(--text-caption); line-height: 1.4; }
@@ -63,9 +63,9 @@
 .team-roster-row:hover small, .team-roster-row[aria-expanded="true"] small { color: var(--muted); }
 .team-roster-mark { flex: 0 0 3px; height: 22px; border-radius: 2px; background: var(--team-color, var(--accent)); opacity: .55; }
 .team-roster-row[aria-expanded="true"] .team-roster-mark { opacity: 1; }
-.team-roster-detail { padding: 0 0 12px; }
-.team-roster-detail p { margin: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.65; }
-.team-roster-detail > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 7px; }
+.team-roster-detail { padding: 0 0 18px 13px; }
+.team-roster-detail p { margin: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.8; }
+.team-roster-detail > div { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; }
 .team-feedback-preview { align-self: flex-start; gap: 8px; }
 .team-feedback-preview > span { padding: 1px 5px; border: 1px solid var(--edge-normal); border-radius: var(--radius-badge); color: var(--faint); font-size: var(--text-caption); }
 .team-watch-pane { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
@@ -76,8 +76,8 @@
 .team-watch-intro { display: flex; flex-direction: column; gap: 6px; }
 .team-watch-intro > strong, .team-usage > strong { color: var(--text); font-size: var(--text-label); font-weight: 500; }
 .team-watch-intro > span, .team-empty { margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.6; }
-.team-watch-list { min-width: 0; margin: -4px 0 0; padding: 0; list-style: none; }
-.team-watch-list > li { padding: 14px 0; border-bottom: 1px solid var(--edge-normal); }
+.team-watch-list { min-width: 0; margin: 0; padding: 0; list-style: none; }
+.team-watch-list > li { padding: 18px 0; border-bottom: 1px solid var(--edge-normal); }
 .team-watch-list > li:first-child { border-top: 1px solid var(--edge-normal); }
 .team-watch-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .team-watch-heading > strong { color: var(--text); font-size: var(--text-label); font-weight: 500; }
@@ -90,7 +90,7 @@
 .team-watch-item[open] .team-watch-heading svg { transform: rotate(180deg); }
 .team-watch-item:not([open]) .team-watch-goal, .team-watch-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .team-watch-item[open] .team-watch-preview { display: none; }
-.team-watch-expanded { padding-top: 6px; }
+.team-watch-expanded { padding-block: 12px 6px; }
 .team-watch-policy { color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
 .team-watch-list p { margin: 9px 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .team-watch-list p.team-watch-outcome { color: var(--faint); }
