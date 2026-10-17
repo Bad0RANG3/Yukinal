@@ -23,6 +23,16 @@ const nativeBuildCandidates = process.env.YUKINAL_SSH_CMAKE_BUILD_DIR
 const nativeBuildDirectory = nativeBuildCandidates.find((directory) =>
   existsSync(join(directory, "CTestTestfile.cmake")));
 
+// The phase-4 control plane has its own virtualenv: it needs FastAPI/SQLAlchemy,
+// which the Agent does not. When the venv is absent the step is skipped with a
+// visible reason rather than reporting a false pass. Paths are absolute because
+// `spawnSync` resolves a relative `command` against the child's `cwd`.
+const controlPlaneRoot = resolve("services/control-plane");
+const controlPlanePython = [
+  join(controlPlaneRoot, ".venv", "Scripts", "python.exe"),
+  join(controlPlaneRoot, ".venv", "bin", "python"),
+].find((candidate) => existsSync(candidate));
+
 const steps = [
   { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
   { name: "secret scan", command: process.execPath, args: ["scripts/check-secrets.mjs"], required: true },
@@ -40,6 +50,15 @@ const steps = [
     required: true,
     skip: !nativeBuildDirectory,
     skipReason: "no configured CMake test build (see README.md)",
+  },
+  {
+    name: "control plane tests (SQLite)",
+    command: controlPlanePython ?? "python",
+    args: ["-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+    cwd: controlPlaneRoot,
+    required: true,
+    skip: !controlPlanePython,
+    skipReason: 'no services/control-plane/.venv (run `pip install -e ".[test]"` in it)',
   },
   {
     name: "build contract libs",
@@ -67,6 +86,7 @@ for (const step of steps) {
   console.log(`\n── ${step.name}`);
   const result = spawnCommandSync(step.command, step.args, {
     stdio: "inherit",
+    ...(step.cwd ? { cwd: step.cwd } : {}),
     env: step.env ? { ...process.env, ...step.env } : process.env,
   });
   if (result.status !== 0) {

@@ -69,6 +69,11 @@ native/build/
 native/build-*/
 build/
 agent/*.egg-info/
+# control plane: its virtualenv, scratch DBs and editable-install metadata
+services/control-plane/.venv/
+services/control-plane/.tmp/
+services/control-plane/*.egg-info/
+services/control-plane/*.db
 
 # local build/scratch logs
 build_out.txt

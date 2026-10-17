@@ -1615,3 +1615,59 @@ returns its content. The `native/build-nmake` Release build passed all fourteen
 CTest targets, `pnpm check` was green and publication hygiene was green. Because
 only low-risk MCP tools can be registered by the Agent today, the visible behavior
 of a healthy run is unchanged; the change closes the hole for every other name.
+
+## Control plane scaffold (`services/control-plane/`)
+
+Phase 4 of the brief adds a control plane: a FastAPI service over PostgreSQL that
+holds the state a fleet needs shared — tenants, nodes, tasks, provider/model
+selections, approvals and an audit log. The repository had none of it, and it is
+deliberately a new module that does not touch the single-machine desktop path.
+
+The first slice is in `services/control-plane/`: FastAPI, SQLAlchemy 2.0 (async)
+and Alembic, with PostgreSQL (`asyncpg`) in production and SQLite (`aiosqlite`)
+for tests and local development. `create_app` fails closed: it refuses to start
+without `YUKINAL_CONTROL_TOKEN` (unless the explicit local-only
+`YUKINAL_CONTROL_ALLOW_ANONYMOUS` is set) and refuses to serve a database whose
+schema is not migrated rather than surfacing a missing table as a later 500.
+Every `/v1` route needs the bearer token; `/healthz` is open.
+
+The API enforces the same rules the desktop host enforces locally:
+
+- **Tenant isolation.** Every row is scoped to a tenant, and a cross-tenant
+  identifier is `404`, never `403`, so the API never confirms that a row exists
+  elsewhere.
+- **One active task per node, at the database.** A partial unique index on
+  `status IN ('queued','running')` makes the constraint real under concurrency;
+  terminal tasks accumulate freely. `desktop`'s one-call-per-step fence is the
+  local analogue.
+- **A task state machine.** `queued → running → succeeded/failed/cancelled`, with
+  `running → unknown` when a node restarts. An invalid transition is `409`.
+- **Outcome-unknown on disconnect.** A heartbeat with `restarted: true` moves
+  every still-`running` task on the node to `unknown` (reason `node_restarted`)
+  and `GET .../recoverable` lists them for a human decision; nothing is replayed
+  automatically, matching the host's rule that an interrupted call stays
+  outcome-unknown.
+- **A credential boundary.** Only credential references are stored.
+  `ModelConfigCreate` forbids unknown fields, so a raw `apiKey` is a `422`, and
+  task payloads are scanned recursively for secret-shaped keys
+  (`400 secret_rejected`).
+- **An audit trail.** One `audit_events` row per mutation, tenant-scoped and
+  returned newest first.
+
+`services/control-plane/tests/test_control_plane.py` runs against SQLite and
+covers the API, tenant scoping, the state machine, the partial index, disconnect
+recovery, the credential boundary, the startup checks and a drift test that runs
+the real Alembic migration and compares the migrated tables with the models (19
+tests). A real `python -m yukinal_control_plane` boot was also exercised:
+`/healthz` returned `ok`, an unauthenticated `/v1/tenants` returned `401`, and a
+tenant create plus `/v1/metrics` round-tripped. `pnpm check` now runs the suite
+as a step that is skipped with an explicit reason when the service virtualenv is
+absent.
+
+Honest gaps: no PostgreSQL server exists in this environment, so the migration
+and the queries have been exercised only on SQLite (`JSON` rather than `JSONB`,
+and PostgreSQL connection-pool/restart behaviour is untested); the node channel
+is the same HTTP API rather than the intended authenticated HTTPS/WSS channel
+(the `publicKey` recorded at registration is stored but does not authenticate a
+node yet); multi-worker concurrency, a Prometheus exporter and per-tenant roles
+are not implemented. `/v1/metrics` is a small JSON summary.

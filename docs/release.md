@@ -86,22 +86,26 @@ Rust 依赖边界复核（2026-09-30）：`cargo tree -i glib@0.18.5 --target x8
 
 ## 开发和本地验证
 
-开发和构建需要 Node.js ≥ 24、pnpm 11.8.0、Rust 1.90+（含 rustfmt、Clippy）及当前平台所需的 Tauri 2 系统依赖。Tauri 开发需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。Node.js 仅用于构建工具、前端及旧版本地兼容 sidecar；当前安装包由冻结 Python Agent 提供运行时。仓库根目录执行：
+开发和构建需要 Node.js ≥ 24、pnpm 11.8.0 及当前平台的 C++ 工具链（CMake + MSVC/NMake 或 MinGW）。桌面宿主需要 Python 3.11+ 和 `agent[agent,models]` 环境；打包还需 `agent[agent,models,package]` 以生成 PyInstaller 冻结运行时。控制平面（`services/control-plane/`）使用独立 venv 与 `pip install -e "services/control-plane[test]"`，生产库为 PostgreSQL，写入前需先 `alembic upgrade head`。Node.js 只用于构建工具与前端；当前安装包由冻结 Python Agent 提供运行时。仓库根目录执行：
 
 ```bash
 pnpm install --frozen-lockfile
 python -m venv agent/.venv
 agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
+python -m venv services/control-plane/.venv
+services/control-plane/.venv/Scripts/python.exe -m pip install -e "services/control-plane[test]"
 pnpm check
-pnpm --filter @yukinal/desktop tauri dev
+pnpm desktop:dev:cpp
 ```
 
 macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
-`agent/.venv/bin/python`。
+`agent/.venv/bin/python`，控制平面同理换成 `services/control-plane/.venv/bin/python`。
 
 只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。`pnpm package` 现在只暂存 C++ 宿主分发布局并写出完整性清单（先运行 `pnpm build:python-agent`、`pnpm build:ssh-service` 并构建 C++ 宿主），产物位于 `target/release/bundle/`；它不再下载 Node runtime，也不生成安装器。本地构建成功只证明该平台分发布局生成，不代替安装后的验收。
 
 成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业尚未实现。
+
+`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，19 项，跑在 SQLite 上，覆盖 API、租户隔离、任务状态机、偏唯一索引并发控制、断连 `unknown`、凭据边界与 Alembic 迁移一致性）。该步骤只在 `services/control-plane/.venv` 存在时执行，缺失时会打印明确的 skip 原因而不是静默通过。控制平面自身的 PostgreSQL 部署、节点 HTTPS/WSS 通道与多 worker 并发仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
 
 ## 发布验收
 

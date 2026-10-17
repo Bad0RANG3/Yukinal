@@ -73,6 +73,8 @@ UI 命令 81 条中已实现 62 条，剩余 19 条（见 3.x）。已经打通�
 | `native/desktop_host/src/network_proxy.cpp` | 系统/环境代理解析 |
 | `native/desktop_host/src/sidecar.cpp` | Python Agent 监管 + NDJSON 分帧 + host RPC 分发 |
 
+另有一个**独立新模块**（不属于桌面宿主，也不影响单机路径）：控制平面 `services/control-plane/`（FastAPI + PostgreSQL 多租户/节点/任务/审批/审计），当前为可复核切片，见 3.6。
+
 ---
 
 ## 2. 环境、构建、测试
@@ -276,11 +278,24 @@ plan.record/plan.check/evidence.record（它们是 investigation 写入的地基
 - 参考 `docs/rust-removal-plan.md` 第 7 节删除清理清单与第 8 节完成标准，以及
   `docs/release.md`、`.github/workflows/package.yml`（该 workflow 目前仍不存在，仓库只有 `check.yml`）。
 
-### 3.6 控制平面 / PostgreSQL / 多租户（第四阶段，尚未开工）
+### 3.6 控制平面 / PostgreSQL / 多租户（第四阶段，已开工）
 
 brief 第 4 阶段：FastAPI 控制平面 + PostgreSQL（租户/节点/任务/模型配置/审批/审计）、节点主动
-HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。当前仓库完全没有该子系统，属于新增
-模块，不影响现有单机路径。
+HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。属于新增模块，不影响现有单机路径。
+
+**已落地（`services/control-plane/`，可复核切片）**：FastAPI + SQLAlchemy 2.0(async) + Alembic。
+`create_app` 在没有 token 时拒绝启动（可用 `YUKINAL_CONTROL_ALLOW_ANONYMOUS=1` 显式对本地放开），
+启动时校验 schema 已迁移；`/v1` 全部要求 bearer token，`/healthz` 开放。已实现租户/节点/任务/
+模型配置/审批/审计的读写，租户隔离（跨租户一律 404，不泄露存在性）、任务状态机、
+每节点一个 active 任务的**偏唯一索引**（数据库级并发控制）、节点重启把 running 任务置为
+`unknown`（不自动重放，另有 `recoverable` 只读列表）、凭据边界（只存引用；`ModelConfigCreate`
+禁止未知字段，任务 payload 递归拒绝 secret 形状字段）与 `/v1/metrics` 汇总。19 个 unittest 覆盖
+API/schema/迁移一致性与边界，并实际启动 uvicorn 验证 healthz/401/建租户/metrics；`pnpm check`
+已纳入该步骤（`services/control-plane/.venv` 存在才跑，否则打印明确 skip 原因）。
+
+**仍待做**：PostgreSQL 本身（本机无 PG，迁移与查询只在 SQLite 上验证；JSON 非 JSONB、连接池/重启
+行为未测）、节点主动 HTTPS/WSS 通道与节点身份认证（`publicKey` 已存但未用于鉴权）、多 worker
+并发、Prometheus 指标、每租户角色授权、TLS 终结。安装器与真机验收同 3.5。
 
 ### 3.7 真机验收
 
@@ -323,7 +338,8 @@ HTTPS/WSS 连接、任务持久化与断线恢复、并发控制、指标。当�
 4. **文件传输动作 + 拖拽**（3.3）。
 5. **host.tool.execute 收尾**（3.4 的最后一块）：非 MCP 只读分支与 `mcp.*` 门禁对齐均已完成。
 6. **安装包与三平台验收**（3.5）：分发布局 + 完整性清单已做；安装器与真机验收仍待做。
-7. **控制平面**（3.6，独立阶段）。
+7. **控制平面**（3.6，独立阶段）：可复核切片已落地（`services/control-plane/`，本地 SQLite 验证，
+已纳入 `pnpm check`）；PostgreSQL 部署、节点 HTTPS/WSS 通道与多 worker 并发待相应环境。
 8. 全程：每块一个已验证提交；同步文档；真机可用时补真机验收（3.7）。
 
 ---
