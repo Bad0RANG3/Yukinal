@@ -3,18 +3,23 @@
 // encoding and the path/name helpers the transfer manager relies on. They never
 // touch the database or the network.
 
+#include "yukinal/desktop_host/sftp_transfer_backend.hpp"
 #include "yukinal/desktop_host/transfer_local.hpp"
 #include "yukinal/desktop_host/transfer_types.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -209,6 +214,279 @@ void run_local_checks() {
   expect_transfer_error(
       [&] { remove_recovered_local_staging(directory / "other.txt", "tr_abc-def"); },
       TransferErrorCode::InvalidInput, "recovery must reject a non-owned path");
+}
+
+// ── Fake SFTP seams ──────────────────────────────────────────────────────────
+
+struct FakeRemoteReader : public TransferReader {
+  explicit FakeRemoteReader(std::string content) : content_(std::move(content)) {}
+  std::size_t read(char* data, std::size_t size) override {
+    const auto count = std::min(size, content_.size());
+    if (count > 0) std::memcpy(data, content_.data(), count);
+    content_.erase(0, count);
+    return count;
+  }
+  std::string content_;
+};
+
+struct FakeRemoteWriter : public TransferWriter {
+  void write(const char*, std::size_t) override {}
+  void finish() override { finished = true; }
+  bool finished = false;
+};
+
+// Records every call so the adapter's delegation and fail-closed policy can be
+// exercised without a server.
+class FakeRemoteOps : public SftpRemoteOps {
+ public:
+  void ensure_supported(const std::string& server_id) override {
+    ensure_calls.push_back(server_id);
+    if (fail_ensure) {
+      throw TransferError(TransferErrorCode::Unsupported, "target unsupported");
+    }
+  }
+
+  std::optional<RemoteStat> lstat(const std::string& server_id,
+                                  const std::string& path) override {
+    lstat_calls.emplace_back(server_id, path);
+    return next_lstat;
+  }
+
+  std::vector<RemoteTransferEntry> list_dir(const std::string& server_id,
+                                            const std::string& path) override {
+    list_calls.emplace_back(server_id, path);
+    return {};
+  }
+
+  std::unique_ptr<TransferReader> open_read(const std::string&, const std::string&) override {
+    ++open_read_calls;
+    return std::make_unique<FakeRemoteReader>("data");
+  }
+
+  std::unique_ptr<TransferWriter> create_exclusive(const std::string&,
+                                                   const std::string&) override {
+    ++create_calls;
+    return std::make_unique<FakeRemoteWriter>();
+  }
+
+  void create_dir(const std::string&, const std::string&) override { ++create_dir_calls; }
+
+  void remove_file(const std::string& server_id, const std::string& path) override {
+    remove_file_calls.emplace_back(server_id, path);
+  }
+
+  void publish_no_replace(const std::string&, const std::string&, const std::string&) override {
+    ++publish_calls;
+  }
+
+  std::vector<std::string> ensure_calls;
+  std::vector<std::pair<std::string, std::string>> lstat_calls;
+  std::vector<std::pair<std::string, std::string>> list_calls;
+  std::vector<std::pair<std::string, std::string>> remove_file_calls;
+  std::optional<RemoteStat> next_lstat;
+  bool fail_ensure = false;
+  int open_read_calls = 0;
+  int create_calls = 0;
+  int create_dir_calls = 0;
+  int publish_calls = 0;
+};
+
+// A fully in-memory stream channel: the test queues the worker's output frames and
+// inspects the frames the host writes, so the frame protocol is covered without a
+// server or a spawned process.
+class FakeStreamChannel : public SftpStreamChannel {
+ public:
+  void enqueue(std::string line) { output_.push_back(std::move(line)); }
+  void write_line(const std::string& line) override { written_.push_back(line); }
+  void close_write() override { write_closed = true; }
+  std::optional<std::string> read_line() override {
+    if (output_.empty()) return std::nullopt;
+    auto line = output_.front();
+    output_.erase(output_.begin());
+    return line;
+  }
+  int wait() override { return exit_code; }
+
+  std::vector<std::string> written_;
+  bool write_closed = false;
+  int exit_code = 0;
+
+ private:
+  std::vector<std::string> output_;
+};
+
+void run_sftp_backend_checks() {
+  const std::string server = "srv_01abc";
+  auto ops = std::make_shared<FakeRemoteOps>();
+  SftpTransferBackend backend(ops);
+
+  check(!backend.supports_atomic_replace(),
+        "the SFTP adapter must not advertise an atomic replace");
+
+  ops->next_lstat = RemoteStat{RemoteEntryKind::File, 12, std::uint32_t{5}};
+  const auto stat = backend.lstat(server, "/srv/app.log");
+  check(stat.has_value() && stat->size == 12 && stat->modified == 5 &&
+            !ops->ensure_calls.empty() && ops->ensure_calls.back() == server &&
+            ops->lstat_calls.size() == 1 && ops->lstat_calls[0].second == "/srv/app.log",
+        "the SFTP adapter must check support and forward lstat");
+
+  (void)backend.list_dir(server, "/srv");
+  check(ops->list_calls.size() == 1 && ops->list_calls[0].second == "/srv",
+        "the SFTP adapter must forward list_dir");
+  (void)backend.open_read(server, "/srv/a");
+  (void)backend.create_exclusive(server, "/srv/b");
+  check(ops->open_read_calls == 1 && ops->create_calls == 1,
+        "the SFTP adapter must forward streaming handles");
+  backend.create_dir(server, "/srv/new");
+  check(ops->create_dir_calls == 1, "the SFTP adapter must forward create_dir");
+  backend.remove_file(server, "/srv/a");
+  check(ops->remove_file_calls.size() == 1, "the SFTP adapter must forward remove_file");
+  backend.publish_no_replace(server, "/srv/a", "/srv/b");
+  check(ops->publish_calls == 1, "the SFTP adapter must forward publish_no_replace");
+
+  expect_transfer_error([&] { backend.rename_replace(server, "/srv/a", "/srv/b"); },
+                        TransferErrorCode::Unsupported,
+                        "the SFTP adapter must refuse rename_replace");
+
+  ops->next_lstat = std::nullopt;
+  const auto removals = ops->remove_file_calls.size();
+  backend.remove_recovered_staging(server, "/srv/.stage.part");
+  check(ops->remove_file_calls.size() == removals,
+        "an absent recovered staging file must not be removed");
+
+  ops->next_lstat = RemoteStat{RemoteEntryKind::File, 1, std::nullopt};
+  backend.remove_recovered_staging(server, "/srv/.stage.part");
+  check(ops->remove_file_calls.size() == removals + 1 &&
+            ops->remove_file_calls.back().second == "/srv/.stage.part",
+        "a regular recovered staging file must be removed");
+
+  ops->next_lstat = RemoteStat{RemoteEntryKind::Directory, 0, std::nullopt};
+  expect_transfer_error([&] { backend.remove_recovered_staging(server, "/srv/.stage.part"); },
+                        TransferErrorCode::InvalidInput,
+                        "a non-regular recovered staging entry must be rejected");
+
+  ops->fail_ensure = true;
+  const auto lists = ops->list_calls.size();
+  expect_transfer_error([&] { (void)backend.list_dir(server, "/srv"); },
+                        TransferErrorCode::Unsupported,
+                        "an unsupported target must fail closed");
+  check(ops->list_calls.size() == lists,
+        "an unsupported target must not reach the remote operation");
+}
+
+void run_sftp_stream_reader_checks() {
+  auto channel = std::make_shared<FakeStreamChannel>();
+  channel->enqueue("{\"type\":\"ready\"}");
+  channel->enqueue("{\"type\":\"data\",\"data\":\"aGVsbG8g\"}");
+  channel->enqueue("{\"type\":\"data\",\"data\":\"d29ybGQ=\"}");
+  channel->enqueue("{\"type\":\"closed\",\"exit_code\":0,\"bytes\":11}");
+  auto reader = make_sftp_stream_reader(channel);
+  std::string collected;
+  char buffer[4];
+  for (;;) {
+    const auto count = reader->read(buffer, sizeof(buffer));
+    if (count == 0) break;
+    collected.append(buffer, count);
+  }
+  check(collected == "hello world",
+        "the SFTP reader must decode data frames across caller-sized reads");
+
+  auto error_channel = std::make_shared<FakeStreamChannel>();
+  error_channel->enqueue("{\"type\":\"ready\"}");
+  error_channel->enqueue("{\"type\":\"error\",\"code\":\"sftp_error\",\"message\":\"boom\"}");
+  auto error_reader = make_sftp_stream_reader(error_channel);
+  expect_transfer_error([&] { char block[8]; (void)error_reader->read(block, sizeof(block)); },
+                        TransferErrorCode::Remote,
+                        "an SFTP download error frame must fail the read");
+
+  auto bad_channel = std::make_shared<FakeStreamChannel>();
+  bad_channel->enqueue("{\"type\":\"ready\"}");
+  bad_channel->enqueue("{\"type\":\"data\",\"data\":\"not base64!\"}");
+  auto bad_reader = make_sftp_stream_reader(bad_channel);
+  expect_transfer_error([&] { char block[8]; (void)bad_reader->read(block, sizeof(block)); },
+                        TransferErrorCode::Remote,
+                        "an invalid data chunk must be rejected");
+
+  auto unexpected_channel = std::make_shared<FakeStreamChannel>();
+  unexpected_channel->enqueue("{\"type\":\"ready\"}");
+  unexpected_channel->enqueue("{\"type\":\"data\",\"data\":\"aGVsbG8=\"}");
+  unexpected_channel->enqueue("{\"type\":\"nonsense\"}");
+  auto unexpected_reader = make_sftp_stream_reader(unexpected_channel);
+  char block[8];
+  check(unexpected_reader->read(block, sizeof(block)) == 5,
+        "the SFTP reader must return a valid small data chunk");
+  expect_transfer_error([&] { (void)unexpected_reader->read(block, sizeof(block)); },
+                        TransferErrorCode::Remote,
+                        "an unexpected download event must fail the read");
+
+  auto eof_channel = std::make_shared<FakeStreamChannel>();
+  eof_channel->enqueue("{\"type\":\"ready\"}");
+  auto eof_reader = make_sftp_stream_reader(eof_channel);
+  expect_transfer_error([&] { char block2[8]; (void)eof_reader->read(block2, sizeof(block2)); },
+                        TransferErrorCode::Remote,
+                        "a download without a final event must fail");
+
+  auto exit_channel = std::make_shared<FakeStreamChannel>();
+  exit_channel->enqueue("{\"type\":\"ready\"}");
+  exit_channel->enqueue("{\"type\":\"closed\",\"exit_code\":0}");
+  exit_channel->exit_code = 1;
+  auto exit_reader = make_sftp_stream_reader(exit_channel);
+  expect_transfer_error([&] { char block3[8]; (void)exit_reader->read(block3, sizeof(block3)); },
+                        TransferErrorCode::Remote,
+                        "a nonzero worker exit must fail the download");
+
+  auto no_ready = std::make_shared<FakeStreamChannel>();
+  no_ready->enqueue("{\"type\":\"error\",\"code\":\"sftp_error\",\"message\":\"no server\"}");
+  expect_transfer_error([&] { (void)make_sftp_stream_reader(no_ready); },
+                        TransferErrorCode::Remote,
+                        "a failed ready handshake must be reported");
+}
+
+void run_sftp_stream_writer_checks() {
+  constexpr std::size_t kChunkBytes = 32 * 1024;
+
+  auto channel = std::make_shared<FakeStreamChannel>();
+  channel->enqueue("{\"type\":\"ready\"}");
+  channel->enqueue("{\"type\":\"closed\",\"exit_code\":0,\"bytes\":5}");
+  auto writer = make_sftp_stream_writer(channel);
+  writer->write("hello", 5);
+  check(channel->written_.size() == 1 &&
+            channel->written_[0] == "{\"data\":\"aGVsbG8=\",\"type\":\"data\"}",
+        "a small upload write must be one exact data frame");
+  writer->finish();
+  check(channel->written_.size() == 2 &&
+            channel->written_.back() == "{\"type\":\"close\"}" && channel->write_closed,
+        "finish must send the close frame and close the worker input");
+
+  // A write larger than one chunk is split into bounded frames.
+  auto split_channel = std::make_shared<FakeStreamChannel>();
+  split_channel->enqueue("{\"type\":\"ready\"}");
+  split_channel->enqueue("{\"type\":\"closed\",\"exit_code\":0}");
+  auto split_writer = make_sftp_stream_writer(split_channel);
+  const std::string payload(kChunkBytes + 5, 'x');
+  split_writer->write(payload.data(), payload.size());
+  check(split_channel->written_.size() == 2,
+        "an oversized upload write must split into one frame per 32 KiB chunk");
+  const auto first = nlohmann::json::parse(split_channel->written_[0]);
+  const auto second = nlohmann::json::parse(split_channel->written_[1]);
+  check(first.at("type") == "data" && second.at("type") == "data" &&
+            first.at("data").get<std::string>().size() == ((kChunkBytes + 2) / 3) * 4 &&
+            second.at("data").get<std::string>().size() == ((5 + 2) / 3) * 4,
+        "each upload frame must encode at most one 32 KiB chunk");
+  split_writer->finish();
+
+  auto error_channel = std::make_shared<FakeStreamChannel>();
+  error_channel->enqueue("{\"type\":\"ready\"}");
+  error_channel->enqueue("{\"type\":\"error\",\"code\":\"sftp_error\",\"message\":\"no\"}");
+  auto error_writer = make_sftp_stream_writer(error_channel);
+  expect_transfer_error([&] { error_writer->finish(); }, TransferErrorCode::Remote,
+                        "an upload error frame must fail finish");
+
+  auto eof_channel = std::make_shared<FakeStreamChannel>();
+  eof_channel->enqueue("{\"type\":\"ready\"}");
+  auto eof_writer = make_sftp_stream_writer(eof_channel);
+  expect_transfer_error([&] { eof_writer->finish(); }, TransferErrorCode::Remote,
+                        "a missing upload completion frame must fail finish");
 }
 
 }  // namespace
@@ -494,6 +772,9 @@ int main() {
         "a generated transfer id must follow tr_<pid>_<nanos>_<seq>");
 
   run_local_checks();
+  run_sftp_backend_checks();
+  run_sftp_stream_reader_checks();
+  run_sftp_stream_writer_checks();
 
   std::cout << "transfer contract tests: green\n";
   return 0;

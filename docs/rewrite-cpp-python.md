@@ -1378,3 +1378,32 @@ including conflict/staging round-tripping, recovery and the fail-closed decode. 
 was green and publication hygiene was green. The SFTP adapter and the
 `file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring are the
 next commit.
+
+The streaming SFTP adapter landed next. `sftp_transfer_backend.hpp` plus
+`native/desktop_host/src/sftp_transfer_backend.cpp` add `SftpTransferBackend`, the
+`TransferBackend` the manager drives over SFTP. It delegates through an injectable
+`SftpRemoteOps` seam (seven blocking operations plus `ensure_supported`), so the
+adapter's policy is unit-testable without a server: `supports_atomic_replace`
+always returns false because plain SFTP v3 has no explicit atomic replace,
+`rename_replace` fails closed with `Unsupported` rather than emulating one, and
+`remove_recovered_staging` removes a recovered path only after `lstat` proves it is
+a regular file (absent is a no-op, anything else is `InvalidInput`). Every
+operation first calls `ensure_supported`, mirroring the retired Rust
+`ensure_cpp_transfer_target`, so an unsupported target never reaches the wire. The
+production seam, `make_ssh_service_sftp_remote_ops`, resolves each target and its
+credentials from the host database and credential store, runs the non-streaming
+operations in-process through `yukinal::ssh_service::sftp_*` under a scoped
+environment that never lets a secret reach the config or a log, and maps
+`already_exists`/`replace_unsupported` onto their transfer error codes. Streaming
+downloads and uploads spawn the packaged `yukinal-ssh-service` worker with a
+one-target config file and drive its newline-delimited JSON protocol: a `ready`
+handshake, then `data` frames carrying at most 32 KiB of standard base64, ending in
+`closed` (exit code zero) or `error`. `make_sftp_stream_reader`/`writer` wrap any
+`SftpStreamChannel`, so an in-memory channel exercises the whole frame protocol
+without a process. `transfer_tests` now covers the adapter's delegation and
+fail-closed policy with a fake `SftpRemoteOps`, and the reader/writer framing
+(handshake, chunk decoding, bounded upload splitting, error, premature EOF and
+nonzero exit) with a fake channel. The `native/build-nmake` Release build passed
+all fourteen CTest targets, `pnpm check` was green and publication hygiene was
+green. The `file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring
+and remote drag are the next commit.

@@ -387,6 +387,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/ipc_router.cpp
     desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
+    desktop_host/src/sftp_transfer_backend.cpp
     desktop_host/src/sidecar.cpp
     desktop_host/src/transfer_history.cpp
     desktop_host/src/transfer_local.cpp
