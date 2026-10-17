@@ -518,7 +518,7 @@
    两种都答不出「我现在用的是哪个模型」。自绘之后关闭态只显示模型短名，
    完整名称留在 title 与列表项里。 */
 .agent-model-picker {
-  position: static;
+  position: relative;
   min-width: 0;
 }
 
@@ -528,7 +528,7 @@
   max-width: 100%;
   align-items: center;
   gap: 2px;
-  border: 1px solid var(--composer-line);
+  border: 1px solid transparent;
   border-radius: var(--radius-pill);
   background: var(--composer-bg);
   color: var(--text);
@@ -571,35 +571,38 @@
   outline-offset: -2px;
 }
 
-/* 弹层向上开：输入区贴在面板底部，向下没有空间。 */
-.agent-model-menu {
+/* Model menus stay next to their trigger, with compact checked rows. */
+.agent-model-popover {
   position: absolute;
   z-index: 22;
-  left: 12px;
-  right: 12px;
+  right: 0;
   bottom: calc(100% + 6px);
-  min-width: 0;
-  max-width: 320px;
-  max-height: min(264px, 38vh);
+  width: min(260px, calc(100vw - 48px));
+  border: 1px solid var(--composer-line);
+  border-radius: var(--radius-panel);
+  background: var(--workspace-content-surface);
+  box-shadow: var(--shadow-floating);
+  padding: 6px;
+}
+
+.agent-model-menu-title { margin: 4px 8px 6px; font-size: var(--text-caption); color: var(--faint); }
+.agent-model-menu {
+  max-height: min(280px, 42vh);
   margin: 0;
-  padding: 4px;
+  padding: 0;
   overflow-y: auto;
   list-style: none;
-  border: 1px solid var(--composer-line);
-  border-radius: var(--radius-card);
-  background: var(--composer-surface);
-  box-shadow: var(--shadow-floating);
 }
 
 .agent-model-option {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
   min-width: 0;
-  flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   gap: 3px;
   border-radius: var(--radius-control);
-  color: var(--muted);
-  padding: 6px 8px;
+  color: var(--text);
+  padding: 7px 8px;
   font-size: var(--text-caption);
   white-space: normal;
   overflow-wrap: anywhere;
@@ -607,14 +610,12 @@
 }
 
 .agent-model-option.is-active {
-  background: var(--composer-bg);
+  background: var(--material-hover);
   color: var(--text);
 }
 
-/* 当前生效项用强调色标出，而不是靠一个需要额外图标的勾。 */
 .agent-model-option[aria-selected="true"] .agent-model-option-name {
-  color: var(--composer-accent);
-  font-weight: 600;
+  color: var(--text);
 }
 
 .agent-model-option-name {
@@ -622,6 +623,7 @@
 }
 
 .agent-model-option-from {
+  grid-column: 1 / -1;
   min-width: 0;
   color: var(--faint);
   font-size: var(--text-caption);
@@ -740,4 +742,30 @@
 
 @container agent-workspace (max-width: 580px) {
   .agent-role-picker select { font-size: var(--text-caption); }
+}
+
+.agent-permission-picker, .agent-reasoning-picker { position: relative; min-width: 0; }
+.agent-permission-trigger, .agent-effort-trigger { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 5px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); font: inherit; font-size: var(--text-caption); white-space: nowrap; }
+.agent-permission-trigger:hover:not(:disabled), .agent-effort-trigger:hover:not(:disabled) { background: var(--material-hover); color: var(--text); }
+.agent-permission-menu, .agent-effort-menu { position: absolute; z-index: 24; bottom: calc(100% + 10px); border: 1px solid var(--composer-line); border-radius: var(--radius-panel); background: var(--workspace-content-surface); box-shadow: var(--shadow-floating); }
+.agent-permission-menu { left: 0; width: min(300px, calc(100vw - 48px)); padding: 7px; }
+.agent-permission-menu > p { margin: 4px 8px 7px; color: var(--faint); font-size: var(--text-caption); }
+.agent-permission-menu button { display: grid; grid-template-columns: 18px minmax(0, 1fr) 16px; align-items: center; width: 100%; gap: 8px; border: 0; border-radius: var(--radius-control); padding: 8px; background: transparent; color: var(--text); text-align: left; }
+.agent-permission-menu button:hover:not(:disabled) { background: var(--material-hover); }
+.agent-permission-menu button > span { display: grid; gap: 3px; }
+.agent-permission-menu strong { font-size: var(--text-small); font-weight: 500; }
+.agent-permission-menu small { color: var(--faint); font-size: var(--text-caption); line-height: 1.4; }
+.agent-permission-menu button:disabled { opacity: var(--opacity-disabled); }
+.agent-effort-trigger { color: var(--reasoning-label); }
+.agent-effort-menu { right: 0; width: min(256px, calc(100vw - 48px)); padding: 10px 12px 9px; }
+.agent-effort-heading { display: grid; grid-template-columns: 24px 1fr 24px; align-items: center; text-align: center; color: var(--faint); }
+.agent-effort-heading strong { color: var(--reasoning-label); font-size: var(--text-small); font-weight: 500; }
+.agent-effort-model { display: block; margin: 0 18px 12px; overflow: hidden; color: var(--faint); font-size: var(--text-caption); text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+.agent-effort-menu input[type="range"] { display: block; width: 100%; height: 24px; margin: 0; border: 0; border-radius: var(--radius-pill); padding: 0; appearance: none; background: linear-gradient(to right, var(--reasoning-fill) 0 var(--effort-progress), var(--reasoning-track) var(--effort-progress) 100%); cursor: pointer; }
+.agent-effort-menu input[type="range"]::-webkit-slider-thumb { width: 24px; height: 24px; border: 0; border-radius: var(--radius-circle); appearance: none; background: var(--text); box-shadow: none; }
+.agent-effort-menu input[type="range"]::-moz-range-thumb { width: 24px; height: 24px; border: 0; border-radius: var(--radius-circle); background: var(--text); }
+.agent-effort-stops { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; font-size: var(--text-caption); color: var(--faint); }
+@container agent-composer (max-width: 420px) {
+  .agent-permission-trigger > span { display: none; }
+  .agent-permission-menu { left: -60px; }
 }

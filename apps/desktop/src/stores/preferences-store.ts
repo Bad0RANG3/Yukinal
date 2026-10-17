@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { AGENT_RUN_MODES } from "@yukinal/shared";
-import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
+import { AGENT_RUN_MODES, AGENT_REASONING_EFFORTS } from "@yukinal/shared";
+import type { AgentPermissionMode, AgentRunMode, AgentReasoningEffort } from "@yukinal/shared";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
 
 export const UI_PREFERENCES_STORAGE_KEY = "yukinal.ui-preferences.v1";
@@ -25,6 +25,7 @@ export interface UiPreferences {
   agentRunMode: AgentRunMode;
   /** Whether Send returns immediately or waits for the terminal run result. */
   agentDelivery: AgentDelivery;
+  agentReasoningEffort: AgentReasoningEffort | null;
 }
 
 export interface PreferencesState extends UiPreferences {
@@ -40,6 +41,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   agentPermissionMode: "ask",
   agentRunMode: "goal",
   agentDelivery: "async",
+  agentReasoningEffort: null,
 };
 
 function isTerminalFontSize(value: unknown): value is TerminalFontSize {
@@ -69,6 +71,7 @@ function sanitizePreferences(value: unknown): UiPreferences {
     agentPermissionMode: candidate.agentPermissionMode === "auto" || candidate.agentPermissionMode === "ask" ? candidate.agentPermissionMode : DEFAULT_UI_PREFERENCES.agentPermissionMode,
     agentRunMode: isAgentRunMode(candidate.agentRunMode) ? candidate.agentRunMode : DEFAULT_UI_PREFERENCES.agentRunMode,
     agentDelivery: candidate.agentDelivery === "sync" ? "sync" : "async",
+    agentReasoningEffort: typeof candidate.agentReasoningEffort === "string" && (AGENT_REASONING_EFFORTS as readonly string[]).includes(candidate.agentReasoningEffort) ? candidate.agentReasoningEffort : null,
   };
 }
 
@@ -90,6 +93,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         agentPermissionMode: state.agentPermissionMode,
         agentRunMode: state.agentRunMode,
         agentDelivery: state.agentDelivery,
+        agentReasoningEffort: state.agentReasoningEffort,
       }),
       merge: (persisted, current) => ({ ...current, ...sanitizePreferences(persisted) }),
     },

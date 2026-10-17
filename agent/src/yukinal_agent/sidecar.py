@@ -28,7 +28,7 @@ from .host_tools import (
     register_mcp_catalog,
 )
 from .model_agent import AgentBudget, ModelDrivenAgent
-from .models import ModelConfig, ModelFactory, ModelFactoryError
+from .models import ModelConfig, ModelFactory, ModelFactoryError, with_reasoning_effort
 from .provider_store import ProviderStore, ProviderStoreError, validate_provider_save
 from .ssh_tools import (
     _parse_docker_logs,
@@ -658,6 +658,11 @@ class PythonSidecar:
         model, _timeout_ms = await self._run_provider_model(
             request.get("providerId"), request.get("model")
         )
+        if "reasoningEffort" in request:
+            try:
+                model = with_reasoning_effort(model, request["reasoningEffort"])
+            except ModelFactoryError as error:
+                raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         try:
             agent = ModelDrivenAgent(
                 self._registry,
@@ -1543,7 +1548,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     fields = {
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
-        "providerId", "model", "requireCheckpoint", "planBinding",
+        "providerId", "model", "reasoningEffort", "requireCheckpoint", "planBinding",
         "persona", "participant",
     }
     parsed = _strict_object(value, fields)
@@ -1596,6 +1601,8 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if parsed.get("permissionMode", "ask") not in ("ask", "auto"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+    if "reasoningEffort" in parsed and parsed["reasoningEffort"] not in ("none", "low", "high", "max"):
+        raise _RpcFault(RPC_INVALID_PARAMS, "invalid reasoning effort")
     if parsed.get("mode", "goal") not in ("goal", "plan", "readonly"):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     if "policyId" in parsed:
@@ -1798,6 +1805,10 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "participant": request.get("participant"),
             "providerId": request.get("providerId"),
             "model": request.get("model"),
+            "reasoningEffort": request.get("reasoningEffort"),
+            "permissionMode": request.get("permissionMode", "ask"),
+            "mode": request.get("mode", "goal"),
+            "policyId": request.get("policyId"),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -1813,7 +1824,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
-        "persona", "participant",
+        "persona", "participant", "reasoningEffort",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")

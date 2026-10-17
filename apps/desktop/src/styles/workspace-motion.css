@@ -857,7 +857,7 @@
 
 .composer-suggestions,
 .agent-settings-panel,
-.agent-model-menu {
+.agent-model-popover {
   transform-origin: bottom center;
   animation: popover-enter var(--motion-fast) var(--motion-ease) both;
 }
@@ -866,13 +866,13 @@
   transform-origin: bottom left;
 }
 
-.agent-model-menu {
+.agent-model-popover {
   transform-origin: bottom right;
 }
 
 .composer-suggestions.is-closing,
 .agent-settings-panel.is-closing,
-.agent-model-menu.is-closing {
+.agent-model-popover.is-closing {
   pointer-events: none;
   animation: popover-exit var(--motion-fast) var(--motion-exit) both;
 }

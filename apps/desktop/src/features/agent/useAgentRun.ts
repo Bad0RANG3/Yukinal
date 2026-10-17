@@ -21,6 +21,7 @@ import {
   type AgentContextUsage,
   type AgentParticipant,
   type AgentPersona,
+  type AgentReasoningEffort,
   type ApprovalDecision,
   type ApprovalRequest,
   type IpcCommandMap,
@@ -73,6 +74,7 @@ export type StartRunInput = {
   persistUserMessage: (messageId: string, parts: AgentPromptPart[]) => Promise<string>;
   providerId?: string | null;
   model?: string | null;
+  reasoningEffort?: AgentReasoningEffort;
   focusServerId?: string | null;
   permissionMode?: AgentPermissionMode;
   /** 运行模式：只读 / 计划 / 目标。由 sidecar 的权限引擎强制。 */
@@ -344,7 +346,7 @@ export function useAgentRun(options: {
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
-    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId });
+    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
     const previous = pendingAdmission.current;
     const reusable =
       previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
@@ -388,6 +390,7 @@ export function useAgentRun(options: {
         parts,
         providerId: input.providerId ?? undefined,
         model: input.model ?? undefined,
+        reasoningEffort: input.reasoningEffort,
         persona: input.persona,
         participant: input.participant,
         focusServerId: input.focusServerId ?? undefined,

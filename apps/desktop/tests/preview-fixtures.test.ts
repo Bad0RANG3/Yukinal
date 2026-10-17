@@ -31,6 +31,7 @@ test("development fixture data satisfies the real IPC response contracts", () =>
     [IPC_COMMANDS.providerList, {}],
     [IPC_COMMANDS.providerModels, { providerId: "prv_preview" }],
     [IPC_COMMANDS.providerModels, { providerId: "prv_preview_local" }],
+    [IPC_COMMANDS.providerModels, { providerId: "prv_preview_deepseek" }],
     [IPC_COMMANDS.agentStatus, {}],
     [IPC_COMMANDS.agentLogs, {}],
     [IPC_COMMANDS.chatSessionList, {}],

@@ -214,6 +214,22 @@ def _resolve(value: str | None) -> str | None:
     return os.environ.get(reference.group(1), "") if reference is not None else value
 
 
+def with_reasoning_effort(model: Any, effort: str) -> Any:
+    """Apply a documented DeepSeek parameter before tools/output budgets are bound."""
+    from .deepseek_model import DeepSeekChatModel
+
+    if (
+        effort not in {"none", "low", "high", "max"}
+        or not isinstance(model, DeepSeekChatModel)
+        or urlsplit(model.openai_api_base or "").scheme != "https"
+        or urlsplit(model.openai_api_base or "").hostname != "api.deepseek.com"
+        or model.model_name not in {"deepseek-flash", "deepseek-v4-pro"}
+    ):
+        raise ModelFactoryError("reasoning_not_supported", "This model does not support the selected reasoning effort")
+    extra_body = {**(model.extra_body or {}), "thinking": {"type": "disabled" if effort == "none" else "enabled"}}
+    return model.model_copy(update={"reasoning_effort": None if effort == "none" else effort, "extra_body": extra_body})
+
+
 def _validate_base_url(value: str) -> None:
     if not isinstance(value, str):
         raise ValueError("base_url is invalid")

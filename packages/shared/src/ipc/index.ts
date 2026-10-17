@@ -11,6 +11,7 @@ import type {
   AgentPromptPart,
   AgentParticipant,
   AgentPersona,
+  AgentReasoningEffort,
   AgentMemory,
   AgentMemoryListInput,
   AgentMemorySaveInput,
@@ -334,6 +335,7 @@ export interface IpcCommandMap {
       resume?: boolean;
       providerId?: string;
       model?: string;
+      reasoningEffort?: AgentReasoningEffort;
       workspaceId?: string;
       focusServerId?: string;
       permissionMode?: AgentPermissionMode;

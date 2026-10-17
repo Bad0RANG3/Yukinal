@@ -288,7 +288,11 @@ export type AgentPromptPart =
   | AgentDocumentPromptPart
   | AgentAudioPromptPart;
 
-/** What UI sends to start a run.: targets are ids, not prose. */
+/** Explicit effort levels supported by verified model adapters. */
+export const AGENT_REASONING_EFFORTS = ["none", "low", "high", "max"] as const;
+export type AgentReasoningEffort = (typeof AGENT_REASONING_EFFORTS)[number];
+
+/** What UI sends to start a run: targets are ids, not prose. */
 export interface AgentRunRequest {
   runId: string;
   sessionId: string;
@@ -339,6 +343,8 @@ export interface AgentRunRequest {
   providerId?: string;
   /** Optional model override for the selected saved provider. */
   model?: string;
+  /** Omitted uses the provider default; explicit values require adapter support. */
+  reasoningEffort?: AgentReasoningEffort;
 }
 
 /** `agent.run.stop` params: stop decouples from the run only by its id. */

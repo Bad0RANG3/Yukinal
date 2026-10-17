@@ -23,6 +23,7 @@ import {
   AgentPermissionModeSchema,
   AgentPromptPartsSchema,
   AgentRunModeSchema,
+  AgentReasoningEffortSchema,
   ApprovalResponseSchema,
   EMPTY_PROMPT_MESSAGE,
 } from "./permission.js";
@@ -406,6 +407,7 @@ export const IPC_SCHEMAS = {
         resume: z.boolean().optional(),
         providerId: z.string().trim().min(1).max(256).optional(),
         model: z.string().trim().min(1).max(256).optional(),
+        reasoningEffort: AgentReasoningEffortSchema.optional(),
         workspaceId: z.string().trim().min(1).max(256).optional(),
         focusServerId: IpcServerIdSchema.optional(),
         permissionMode: AgentPermissionModeSchema.optional(),

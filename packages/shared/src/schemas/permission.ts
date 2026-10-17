@@ -10,6 +10,7 @@ import {
   AGENT_DOCUMENT_MEDIA_TYPES,
   AGENT_IMAGE_MEDIA_TYPES,
   AGENT_PROMPT_LIMITS,
+  AGENT_REASONING_EFFORTS,
   APPROVAL_DECISIONS,
   type AgentPromptPart,
 } from "../types/chat.js";
@@ -373,6 +374,8 @@ export function agentPromptCarriesContent(request: {
   );
 }
 
+export const AgentReasoningEffortSchema = z.enum(AGENT_REASONING_EFFORTS);
+
 export const AgentRunRequestSchema = z
   .strictObject({
     runId: z.string().trim().min(1).max(256),
@@ -402,6 +405,7 @@ export const AgentRunRequestSchema = z
     mode: AgentRunModeSchema.optional(),
     providerId: z.string().trim().min(1).max(256).optional(),
     model: z.string().trim().min(1).max(256).optional(),
+    reasoningEffort: AgentReasoningEffortSchema.optional(),
   })
   .superRefine((request, context) => {
     if (!agentPromptCarriesContent(request)) {

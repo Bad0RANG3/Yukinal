@@ -120,6 +120,21 @@ const PROVIDERS: AiProviderConfig[] = [
     updatedAt: AT,
   },
   {
+    id: "prv_preview_deepseek",
+    kind: "openai-compatible",
+    label: "DeepSeek · 模拟目录",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-flash",
+    enabled: true,
+    wireApi: "chat",
+    models: [
+      { id: "deepseek-flash", label: "DeepSeek Flash", supportsToolCalling: true, supportsStreaming: true },
+      { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", supportsToolCalling: true, supportsStreaming: true },
+    ],
+    createdAt: AT,
+    updatedAt: AT,
+  },
+  {
     id: "prv_preview_disabled",
     kind: "anthropic",
     label: "备用分析网关（已停用，仅供配置布局评估）",
@@ -523,7 +538,7 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
     case IPC_COMMANDS.agentStatus:
       return { running: true, pid: 1, protocolVersion: "1.0", agentVersion: "1.0.0-preview", toolCount: 12, entry: "browser-fixture", startedAt: AT, lastExit: null };
     case IPC_COMMANDS.agentLogs:
-      return { lines: ["[preview] Agent fixture is ready; no process or network connection was opened.", "[preview] Provider catalog: 2 enabled gateways, 1 disabled fallback.", "[preview] Long diagnostic entry: staging-checkout-api-with-background-migration.service / connection-pool-observation / readonly collection completed.", "[preview] MCP catalog and investigation history are in-memory examples only."], capacity: 256 };
+      return { lines: ["[preview] Agent fixture is ready; no process or network connection was opened.", "[preview] Provider catalog: 3 enabled gateways, 1 disabled fallback.", "[preview] Long diagnostic entry: staging-checkout-api-with-background-migration.service / connection-pool-observation / readonly collection completed.", "[preview] MCP catalog and investigation history are in-memory examples only."], capacity: 256 };
     case IPC_COMMANDS.chatSessionList: {
       const request = typeof params === "object" && params !== null ? params as Record<string, unknown> : {};
       const query = typeof request.query === "string" ? request.query.trim().toLocaleLowerCase() : "";

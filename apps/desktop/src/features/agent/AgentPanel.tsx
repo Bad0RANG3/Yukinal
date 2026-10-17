@@ -53,6 +53,7 @@ import { useAgentRoles } from "../agent-nist/useAgentRoles.js";
 import { recalledDraft, rememberDraft, type SessionDraft } from "./session-drafts.js";
 import { requestPolicyId, type RunPolicyChoice } from "./run-policy.js";
 import { useAgentModels } from "./useAgentModels.js";
+import { reasoningLevels, requestReasoningEffort } from "./reasoning.js";
 import { useAgentPanelShell } from "./useAgentPanelShell.js";
 import { useAgentRun } from "./useAgentRun.js";
 import { useChatSessions } from "./useChatSessions.js";
@@ -91,6 +92,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const permissionMode = usePreferencesStore((state) => state.agentPermissionMode);
   const runMode = usePreferencesStore((state) => state.agentRunMode);
   const delivery = usePreferencesStore((state) => state.agentDelivery);
+  const reasoningEffort = usePreferencesStore((state) => state.agentReasoningEffort);
   const setPreferences = usePreferencesStore((state) => state.setPreferences);
 
   const shell = isDesktopShell();
@@ -182,6 +184,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const currentRole = resolveAgentRole(prompt, roles.roles, selectedRoleId).role;
   const currentBinding = roleBinding(currentRole, models.providers.data ?? []);
   const boundModel = !modelOverride ? currentBinding.choice : undefined;
+  const reasoningProvider = boundModel ? currentBinding.provider : models.selectedProvider;
+  const modelReasoningLevels = reasoningLevels(reasoningProvider, boundModel?.model ?? models.selectedModel ?? models.selectedProvider?.model);
 
   const rememberCurrentDraft = (): void => rememberDraft(drafts.current, scopeRef.current, liveView.current.sessionId, { prompt: liveView.current.prompt, attachments: liveView.current.attachments });
   const restoreDraft = (serverId: string | null, sessionId: string | null): void => {
@@ -275,6 +279,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         sessions.recordUserMessage(text, messageId, focusServerId, promptParts),
       providerId: (!modelOverride ? binding.provider?.id : null) ?? models.selectedProviderId,
       model: (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model,
+      reasoningEffort: requestReasoningEffort(!modelOverride && binding.choice ? binding.provider : models.selectedProvider, (!modelOverride ? binding.choice?.model : null) ?? models.selectedModel ?? models.selectedProvider?.model, reasoningEffort),
       focusServerId,
       permissionMode,
       mode: runMode,
@@ -508,6 +513,9 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 selectedModelKey={boundModel?.key ?? models.selectedModelKey}
                 selectedModelLabel={boundModel && currentBinding.provider ? `${currentBinding.provider.label} · ${boundModel.label}` : models.selectedModelLabel}
                 onSelectModel={(key) => { setModelOverride(true); models.selectModelKey(key); }}
+                reasoningLevels={modelReasoningLevels}
+                reasoningEffort={reasoningEffort}
+                onReasoningEffortChange={(value) => setPreferences({ agentReasoningEffort: value })}
                 mentions={composerMentions}
                 roles={roles.roles}
                 selectedRoleId={selectedRoleId}

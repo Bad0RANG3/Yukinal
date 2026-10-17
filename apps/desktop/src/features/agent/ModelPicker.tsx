@@ -62,6 +62,8 @@ export function ModelPicker({
   // 好让 popover-exit 有机会播完。两者绝不能混用。
   const presence = usePresence(open, { exitAnimation: "popover-exit" });
 
+  useEffect(() => { if (disabled || !choices.length) setOpen(false); }, [disabled, choices.length]);
+
   const selectedIndex = choices.findIndex((choice) => choice.key === selectedKey);
   const selected = selectedIndex >= 0 ? choices[selectedIndex] : choices[0];
   const activeIndex = Math.min(active, Math.max(0, choices.length - 1));
@@ -160,13 +162,14 @@ export function ModelPicker({
       </button>
 
       {presence.mounted ? (
+        <div className={`agent-model-popover ${presence.closing ? "is-closing" : ""}`} onAnimationEnd={presence.onAnimationEnd}>
+        <p className="agent-model-menu-title">选择模型</p>
         <ul
           ref={listRef}
-          className={`agent-model-menu ${presence.closing ? "is-closing" : ""}`}
+          className="agent-model-menu"
           role="listbox"
           id={listboxId}
           aria-label="可用模型"
-          onAnimationEnd={presence.onAnimationEnd}
         >
           {choices.map((choice, index) => (
             <li
@@ -183,10 +186,12 @@ export function ModelPicker({
               onClick={() => choose(choice.key)}
             >
               <span className="agent-model-option-name">{shortModelLabel(choice.label)}</span>
-              {choice.providerLabel ? <span className="agent-model-option-from">{choice.providerLabel}</span> : null}
+              {choice.key === selected.key ? <Icon name="check" size="sm" /> : null}
+              {choice.providerLabel && choices.some((other) => other.key !== choice.key && shortModelLabel(other.label) === shortModelLabel(choice.label)) ? <span className="agent-model-option-from">{choice.providerLabel}</span> : null}
             </li>
           ))}
         </ul>
+        </div>
       ) : null}
     </div>
   );

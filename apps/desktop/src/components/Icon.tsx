@@ -79,6 +79,7 @@ export function Icon({ name, size = "md", strokeWidth }: IconProps) {
 }
 
 export type IconName =
+  | "check"
   | "activity"
   | "agent"
   | "archive"
@@ -111,6 +112,7 @@ export type IconName =
   | "warning";
 
 function iconBody(name: IconName): ReactNode {
+  if (name === "check") return <path d="m5 12 4 4L19 6" />;
   switch (name) {
     case "servers":
       return <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>;

@@ -29,6 +29,7 @@ import {
   type AgentPermissionMode,
   type AgentPromptPart,
   type AgentRunMode,
+  type AgentReasoningEffort,
   type Environment,
 } from "@yukinal/shared";
 
@@ -37,6 +38,8 @@ import { AGENT_TEAMS, type AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { ModelPicker } from "./ModelPicker.js";
+import { PermissionPicker } from "./PermissionPicker.js";
+import { ReasoningPicker } from "./ReasoningPicker.js";
 import {
   audioAttachmentUrl,
   FILE_ATTACHMENT_ACCEPT,
@@ -59,7 +62,7 @@ import {
   type MentionCandidate,
   type Submission,
 } from "./composer-triggers.js";
-import { APPROVAL_OPTIONS, APPROVAL_ORDER, approvalOptionSpec, runModeSpec } from "./run-mode.js";
+import { approvalOptionSpec, runModeSpec } from "./run-mode.js";
 import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
@@ -91,6 +94,9 @@ export function AgentComposer({
   selectedModelKey,
   selectedModelLabel,
   onSelectModel,
+  reasoningLevels = [],
+  reasoningEffort = null,
+  onReasoningEffortChange,
   mentions,
   commandContext,
   roles = [],
@@ -133,6 +139,9 @@ export function AgentComposer({
   /** 当前选中模型的完整名称。 */
   selectedModelLabel: string | null;
   onSelectModel: (key: string) => void;
+  reasoningLevels?: readonly AgentReasoningEffort[];
+  reasoningEffort?: AgentReasoningEffort | null;
+  onReasoningEffortChange?: (value: AgentReasoningEffort | null) => void;
   /** 可被 @ 提及的服务器。 */
   mentions: readonly MentionCandidate[];
   commandContext: CommandContext;
@@ -615,28 +624,6 @@ export function AgentComposer({
             </section>
 
             <section className="agent-settings-group">
-              <p className="agent-settings-title">批准方式</p>
-              <ul className="agent-settings-options">
-                {APPROVAL_ORDER.map((key) => {
-                  const option = APPROVAL_OPTIONS[key];
-                  return (
-                  <li key={option.value}>
-                    <button
-                      type="button"
-                      className={`agent-settings-option ${option.value === permissionMode ? "is-selected" : ""}`}
-                      aria-pressed={option.value === permissionMode}
-                      disabled={running}
-                      onClick={() => onPermissionModeChange(option.value)}
-                    >
-                      <span className="agent-settings-option-label">{option.label}</span>
-                    </button>
-                  </li>
-                  );
-                })}
-              </ul>
-            </section>
-
-            <section className="agent-settings-group">
               <p className="agent-settings-title">投递方式</p>
               <ul className="agent-settings-options">
                 {([
@@ -720,6 +707,7 @@ export function AgentComposer({
             >
               <Icon name="file" size="md" />
             </button>
+            <PermissionPicker value={permissionMode} readOnly={modeSpec.readOnly} disabled={running} onChange={onPermissionModeChange} />
             <button
               type="button"
               ref={settingsTriggerRef}
@@ -733,7 +721,7 @@ export function AgentComposer({
                 setTrigger(null);
               }}
             >
-              <Icon name={policyWarning ? "warning" : "shield"} size="md" />
+              <Icon name={policyWarning ? "warning" : "settings"} size="md" />
             </button>
             {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
           </div>
@@ -747,6 +735,7 @@ export function AgentComposer({
                 disabled={running}
               />
             ) : <span className="agent-model-empty">未配置模型</span>}
+            <ReasoningPicker levels={reasoningLevels} value={reasoningEffort} modelLabel={models.find((item) => item.key === selectedModelKey)?.label ?? "当前模型"} disabled={running} onChange={(value) => onReasoningEffortChange?.(value)} />
             {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
                 点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。
                 语音若要做，应作为真实能力连同它的权限与降级路径一起加回来。 */}

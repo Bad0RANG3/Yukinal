@@ -40,6 +40,9 @@
   --composer-line: var(--edge-emphasis);
   --composer-accent: var(--accent);
   --composer-accent-hover: var(--text);
+  --reasoning-label: #86aff4;
+  --reasoning-fill: #3978cf;
+  --reasoning-track: #424242;
   --workspace-content-surface: #282828;
   --workspace-raised-surface: var(--panel-raised);
   --workspace-raised-shadow: var(--shadow-card);
