@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1524,9 +1525,29 @@ void run_ipc_router_remote_drag_start_checks() {
         "the native drag should receive the staged file");
   check(store_handle->size() == 0, "starting the drag should consume the ticket");
   const auto staged_directory = drag->files().front().parent_path();
+  {
+    std::error_code diag_error;
+    std::fprintf(stderr, "[diag] staged_directory=%s exists=%d storeroot=%s\n",
+                 staged_directory.string().c_str(),
+                 std::filesystem::exists(staged_directory, diag_error) ? 1 : 0,
+                 store_handle->root().string().c_str());
+  }
   check(std::filesystem::exists(staged_directory),
         "the staged directory should survive until the drag ends");
   drag->finish();
+  {
+    std::error_code diag_error;
+    std::fprintf(stderr, "[diag] after finish exists=%d\n",
+                 std::filesystem::exists(staged_directory, diag_error) ? 1 : 0);
+    std::error_code list_error;
+    std::size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(staged_directory, list_error)) {
+      ++entries;
+      std::fprintf(stderr, "[diag] leftover entry=%s\n", entry.path().filename().string().c_str());
+    }
+    std::fprintf(stderr, "[diag] leftover entries=%zu list_error=%s\n", entries,
+                 list_error ? list_error.message().c_str() : "none");
+  }
   check(!std::filesystem::exists(staged_directory),
         "the staged directory should be removed when the drag ends");
 
@@ -1575,18 +1596,36 @@ void run_ipc_router_remote_drag_start_checks() {
 }  // namespace
 
 int main() {
+#define YUKINAL_DIAG_STEP(name)                                       \
+  do {                                                                \
+    std::fprintf(stderr, "[diag] begin %s\n", name);                  \
+    std::fflush(stderr);                                              \
+  } while (false)
+  YUKINAL_DIAG_STEP("run_upload_and_download_checks");
   run_upload_and_download_checks();
+  YUKINAL_DIAG_STEP("run_conflict_checks");
   run_conflict_checks();
+  YUKINAL_DIAG_STEP("run_cancellation_checks");
   run_cancellation_checks();
+  YUKINAL_DIAG_STEP("run_parallelism_checks");
   run_parallelism_checks();
+  YUKINAL_DIAG_STEP("run_recovery_checks");
   run_recovery_checks();
+  YUKINAL_DIAG_STEP("run_fail_closed_history_check");
   run_fail_closed_history_check();
+  YUKINAL_DIAG_STEP("run_query_checks");
   run_query_checks();
+  YUKINAL_DIAG_STEP("run_ipc_router_transfer_checks");
   run_ipc_router_transfer_checks();
+  YUKINAL_DIAG_STEP("run_remote_drag_path_checks");
   run_remote_drag_path_checks();
+  YUKINAL_DIAG_STEP("run_remote_drag_store_checks");
   run_remote_drag_store_checks();
+  YUKINAL_DIAG_STEP("run_ipc_router_remote_drag_checks");
   run_ipc_router_remote_drag_checks();
+  YUKINAL_DIAG_STEP("run_ipc_router_remote_drag_start_checks");
   run_ipc_router_remote_drag_start_checks();
+#undef YUKINAL_DIAG_STEP
 
   std::cout << "transfer manager tests: green\n";
   return 0;
