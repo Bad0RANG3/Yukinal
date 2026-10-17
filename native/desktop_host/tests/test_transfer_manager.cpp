@@ -1047,11 +1047,13 @@ void run_ipc_router_transfer_checks() {
   auto history = std::make_shared<FakeHistoryStore>();
   TransferManager manager = TransferManager::with_history(backend, history);
 
-  IpcRouter router;
-  router.set_transfer_manager(std::make_unique<TransferManager>(manager));
-
+  // The event sink must outlive the router: a transfer worker can still publish its
+  // terminal event while `~IpcRouter` shuts the manager down.
   std::mutex events_mutex;
   std::vector<std::pair<std::string, json>> events;
+
+  IpcRouter router;
+  router.set_transfer_manager(std::make_unique<TransferManager>(manager));
   router.set_event_sink([&](const std::string& name, const json& payload) {
     std::lock_guard<std::mutex> lock(events_mutex);
     events.emplace_back(name, payload);
@@ -1474,14 +1476,17 @@ void run_ipc_router_remote_drag_start_checks() {
   auto drag = std::make_shared<FakeNativeFileDrag>();
   int window_token = 0;  // A non-null dummy window handle.
 
+  // The event sink must outlive the router: the final `file_transfer_upload` below
+  // is not awaited, so its worker can still publish while `~IpcRouter` shuts the
+  // transfer manager down.
+  std::mutex events_mutex;
+  std::vector<std::pair<std::string, json>> events;
+
   IpcRouter router;
   router.set_transfer_manager(std::make_unique<TransferManager>(manager));
   router.set_remote_drag_probe(probe);
   router.set_remote_drag_store(std::move(store));
   router.set_native_window(&window_token);
-
-  std::mutex events_mutex;
-  std::vector<std::pair<std::string, json>> events;
   router.set_event_sink([&](const std::string& name, const json& payload) {
     std::lock_guard<std::mutex> lock(events_mutex);
     events.emplace_back(name, payload);
