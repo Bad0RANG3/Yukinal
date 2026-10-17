@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
 import { isDesktopShell } from "../../lib/ipc.js";
+import { SERVER_STATUS_LABEL } from "../../lib/labels.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
@@ -25,6 +26,9 @@ export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: 
   const { action, busy } = useServerAction();
   const serverRows = servers.data ?? [];
   const filteredServers = useMemo(() => { const needle = filter.trim().toLowerCase(); return needle ? serverRows.filter((server) => [server.name, server.connection.host, server.metadata.environment, server.metadata.region].filter((value): value is string => Boolean(value)).some((value) => value.toLowerCase().includes(needle))) : serverRows; }, [filter, serverRows]);
+  const connectionSummary = (["connected", "connecting", "error", "disconnected"] as const)
+    .map((status) => ({ status, count: filteredServers.filter((server) => server.status === status).length }))
+    .filter(({ count }) => count > 0);
   useEffect(() => {
     if (servers.data) syncServerSelection(servers.data.map((server) => server.id));
   }, [syncServerSelection, servers.data]);
@@ -55,6 +59,10 @@ export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: 
         <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索名称或主机" aria-label="搜索服务器" />
         {filter ? <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => setFilter("")}><Icon name="close" size="sm" /></button> : null}
       </div>
+
+      {servers.isSuccess && connectionSummary.length ? <div className="server-connection-summary" aria-label="当前列表连接状态">
+        {connectionSummary.map(({ status, count }) => <span key={status} className={`server-state-${status}`} title={`${count} 台${SERVER_STATUS_LABEL[status]}`}><strong>{count}</strong> {status === "connected" ? "在线" : status === "error" ? "异常" : SERVER_STATUS_LABEL[status]}</span>)}
+      </div> : null}
 
       {!embedded || filter.trim() ? <div className="server-list-meta">
         <span>{filter.trim() ? `${filteredServers.length} / ${serverRows.length}` : serverRows.length} 台服务器</span>

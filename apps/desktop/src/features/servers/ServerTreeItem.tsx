@@ -30,7 +30,10 @@ export function ServerTreeItem({ server, selected, disabled, onSelect, children 
     <div className={`server-row ${selected ? "server-row-selected" : ""}`}>
       {server.capabilities.docker ? <button type="button" className="server-tree-toggle" aria-label={`${expanded ? "收起" : "展开"} ${server.name} 的资源`} aria-expanded={expanded} aria-controls={groupId} onClick={() => setExpanded((value) => !value)}><Icon name={expanded ? "chevronDown" : "chevronRight"} size="xs" /></button> : <span className="server-tree-spacer" />}
       <button type="button" disabled={disabled} onClick={onSelect} className="server-row-main" aria-current={selected ? "true" : undefined} aria-label={`${server.name}，${server.connection.host}:${server.connection.port}，${ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}，${SERVER_STATUS_LABEL[server.status]}`} title={`${server.name} · ${SERVER_STATUS_LABEL[server.status]}`}>
-        <span className={`server-row-name server-state-${server.status}`}>{server.name}</span>
+        <span className="server-row-heading">
+          <span className={`server-row-name server-state-${server.status}`}>{server.name}</span>
+          <span className={`server-row-status server-state-${server.status}`}>{SERVER_STATUS_LABEL[server.status]}</span>
+        </span>
         <span className="server-row-detail"><span className="server-row-host" title={`${server.connection.host}:${server.connection.port}`}>{server.connection.host}</span><span className="server-row-port">:{server.connection.port}</span><span className="server-row-env">{ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}</span></span>
       </button>
       <div className="server-row-actions">{children}</div>
