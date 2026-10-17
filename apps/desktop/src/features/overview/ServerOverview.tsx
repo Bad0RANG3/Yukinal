@@ -23,6 +23,7 @@ import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
+import { ServerNetworkSection } from "./ServerNetworkSection.js";
 
 const SNAPSHOT_STALE_AFTER_MS = 45_000;
 
@@ -334,12 +335,10 @@ function OverviewContent({
             <strong>{disk.mountPoint}</strong><span>{disk.device}</span>
             <span>{formatBytes(disk.usedBytes)} / {formatBytes(disk.totalBytes)} · {Math.round(disk.usagePercent)}%</span>
           </li>)}</ul>}
-          <h3 className="overview-subsection-title">网络累计流量</h3>
-          {!network?.length ? <p className="muted-copy">尚无可用网络读数。</p> : <ul className="overview-property-list">{network.map((item, index) => <li key={`${item.name}-${index}`}>
-            <strong>{item.name}</strong><span>接收 {formatBytes(item.rxBytes)} · 发送 {formatBytes(item.txBytes)}</span>
-          </li>)}</ul>}
         </div>
       </details>
+
+      <ServerNetworkSection key={`network-${server.id}`} details={snapshot.networkDetails} traffic={network} onRefresh={onRefresh} refreshing={refreshing} connected={connected} />
 
       <details className="overview-inspector-section" key={`docker-${server.id}`}>
         <summary><Icon name="chevronRight" size="xs" /><span>Docker</span><small>{docker?.available ? `${docker.containers.length} 个容器${otherContainers > 0 ? ` · ${otherContainers} 非运行` : ""}` : "不可用"}</small></summary>

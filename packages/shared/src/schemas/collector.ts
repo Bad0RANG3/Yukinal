@@ -50,6 +50,39 @@ export const NetworkInterfaceSampleSchema = z.strictObject({
   txBytes: z.number().int().nonnegative(),
 });
 
+// resolv.conf may use a scoped IPv6 resolver such as fe80::53%eth0.
+const Ipv6AddressSchema = z.string().min(1).max(256).refine((value) => {
+  const parts = value.split("%");
+  return parts.length <= 2 && z.ipv6().safeParse(parts[0]).success &&
+    (parts.length === 1 || /^[A-Za-z0-9_.:-]{1,64}$/.test(parts[1] ?? ""));
+});
+const IpAddressSchema = z.union([z.ipv4(), Ipv6AddressSchema]);
+const NetworkCidrSchema = z.union([z.cidrv4(), z.cidrv6()]);
+const NetworkRouteSchema = z.strictObject({
+  destination: z.union([z.literal("default"), NetworkCidrSchema]),
+  gateway: IpAddressSchema.optional(),
+  interface: z.string().min(1).max(256).optional(),
+  metric: z.number().int().nonnegative().max(4_294_967_295).optional(),
+  type: z.string().min(1).max(256).optional(),
+});
+
+export const NetworkDetailsSchema = z.strictObject({
+  interfaces: z.array(z.strictObject({
+    name: z.string().min(1).max(256),
+    state: z.string().min(1).max(256),
+    addresses: z.array(NetworkCidrSchema).max(128),
+  })).max(256).optional(),
+  ipv4Routes: z.array(NetworkRouteSchema).max(512).optional(),
+  ipv6Routes: z.array(NetworkRouteSchema).max(512).optional(),
+  dnsServers: z.array(IpAddressSchema).max(32).optional(),
+  errors: z.strictObject({
+    interfaces: z.string().optional(),
+    ipv4Routes: z.string().optional(),
+    ipv6Routes: z.string().optional(),
+    dnsServers: z.string().optional(),
+  }).optional(),
+});
+
 export const ContainerInfoSchema = z.strictObject({
   name: z.string().min(1),
   image: z.string().min(1),
@@ -78,6 +111,7 @@ export const ServerSnapshotSchema = z.strictObject({
   disks: z.array(DiskUsageSchema).optional(),
   uptimeSeconds: z.number().int().nonnegative().optional(),
   network: z.array(NetworkInterfaceSampleSchema).optional(),
+  networkDetails: NetworkDetailsSchema.optional(),
   docker: z
     .strictObject({
       available: z.boolean(),

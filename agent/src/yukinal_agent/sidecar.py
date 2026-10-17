@@ -43,6 +43,7 @@ from .ssh_tools import (
 )
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .system_snapshot import SYSTEM_SNAPSHOT_COMMAND_IDS, normalize_system_snapshot
+from .network_snapshot import NETWORK_SNAPSHOT_COMMAND_IDS
 from .tools import ToolCallError, ToolRegistry
 
 RPC_VERSION = "1.0"
@@ -1150,12 +1151,13 @@ class PythonSidecar:
         outputs = parsed.get("outputs")
         if (
             not isinstance(outputs, dict)
-            or set(outputs) != set(SYSTEM_SNAPSHOT_COMMAND_IDS)
+            or not set(SYSTEM_SNAPSHOT_COMMAND_IDS) <= set(outputs)
+            or not set(outputs) <= set(SYSTEM_SNAPSHOT_COMMAND_IDS + NETWORK_SNAPSHOT_COMMAND_IDS)
         ):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command set")
         normalized_outputs: dict[str, tuple[int, str]] = {}
         total_bytes = 0
-        for command_id in SYSTEM_SNAPSHOT_COMMAND_IDS:
+        for command_id in outputs:
             result = outputs[command_id]
             if not isinstance(result, dict) or set(result) != {"exitCode", "stdout"}:
                 raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command result")

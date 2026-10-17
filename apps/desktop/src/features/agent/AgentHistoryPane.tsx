@@ -365,7 +365,7 @@ export function AgentHistoryPane({
     <section className={`agent-history-pane${compact ? " is-compact" : ""}`} aria-label="对话记录" onKeyDown={onPaneKeyDown}>
       <div className="agent-history-heading">
         <div>
-          <h3>{compact ? "切换任务" : "对话记录"}</h3>
+          <h3>{compact ? "最近对话" : "对话记录"}</h3>
           <p className="agent-history-summary">{summary}</p>
         </div>
         <div className="agent-history-heading-actions">

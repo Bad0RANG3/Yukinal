@@ -378,6 +378,17 @@ function snapshot(params: unknown): unknown {
       ],
       uptimeSeconds: 172800,
       network: [{ name: "eth0", rxBytes: 1099511627776, txBytes: 2199023255552 }],
+      networkDetails: {
+        interfaces: [{ name: "eth0", state: "UP", addresses: [warning ? "10.24.2.15/24" : inference ? "192.168.50.12/24" : "10.24.1.10/24", "fe80::1/64"] }],
+        ...(inference ? { errors: { ipv4Routes: "模拟：目标系统未提供 iproute2 路由信息", ipv6Routes: "模拟：IPv6 路由读取失败" } } : {
+          ipv4Routes: [
+            ...(!warning ? [{ destination: "default", gateway: "10.24.1.1", interface: "eth0", metric: 100 }] : []),
+            { destination: warning ? "10.24.2.0/24" : "10.24.1.0/24", interface: "eth0" },
+          ],
+          ipv6Routes: [],
+        }),
+        dnsServers: inference ? ["127.0.0.53"] : ["10.24.0.53", "10.24.0.54"],
+      },
       docker: {
         available: true,
         containers: [

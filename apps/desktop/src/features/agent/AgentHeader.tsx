@@ -58,7 +58,7 @@ export function AgentHeader({
           type="button"
           className={`agent-task-trigger ${historyOpen ? "is-active" : ""}`}
           aria-label={`切换任务：${taskTitle}`}
-          title="切换或搜索任务"
+          title="最近对话与搜索"
           disabled={running}
           aria-expanded={historyOpen}
           aria-haspopup="dialog"

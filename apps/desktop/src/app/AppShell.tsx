@@ -12,7 +12,6 @@ import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
 import { WorkpagesDock, WorkpagesLauncher } from "../features/workpages/WorkpagesDock.js";
 import { openNativeWorkpage } from "../lib/ipc.js";
-import { useRecentAgentSessions } from "../features/agent/useRecentAgentSessions.js";
 
 const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
 const GettingStarted = lazy(async () => ({ default: (await import("../features/onboarding/GettingStarted.js")).GettingStarted }));
@@ -44,9 +43,6 @@ export function AppShell() {
   const setServerPage = useWorkspaceStore((state) => state.setServerPage);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
-  const [requestedSessionId, setRequestedSessionId] = useState<string | null>(null);
-  const agentBusy = useWorkspaceStore((state) => state.agentBusy);
-  const recent = useRecentAgentSessions(selectedServerId, 3);
   const [guideOpen, setGuideOpen] = useState(() => !isPreviewFixture() && !useOnboardingStore.getState().dismissed);
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
@@ -110,11 +106,10 @@ export function AppShell() {
         <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
         <nav className="workspace-navigation" aria-label="主导航">{PRIMARY_NAV.map((item) => <button type="button" key={item} className={`workspace-nav-item ${primary === item && (item !== "servers" || !serverDetailOpen) ? "is-active" : ""}`} aria-current={primary === item && (item !== "servers" || !serverDetailOpen) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span></button>)}</nav>
         <ServerList embedded onClose={() => setSidebarOpen(false)} onSelect={() => { setSidebarOpen(false); closeGuide(); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); }} />
-        {recent.data?.sessions.length ? <section className="sidebar-recent" aria-label="最近任务"><span>最近任务</span>{recent.data.sessions.map((session) => <button type="button" key={session.id} disabled={agentBusy} title={session.title} onClick={() => { setRequestedSessionId(session.id); returnToAI(); }}>{session.title}</button>)}</section> : null}
       </aside>
       {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
-        <AgentPanel workspace requestedSessionId={requestedSessionId} onSessionOpened={() => setRequestedSessionId(null)} onAttentionRequested={returnToAI}
+        <AgentPanel workspace onAttentionRequested={returnToAI}
           workspaceWorkpages={<WorkpagesDock onPopOut={async (page) => {
             if (!page.serverId || page.kind === "evidence" || page.kind === "artifact") throw new Error("该内容可在工作页中展开");
             await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });

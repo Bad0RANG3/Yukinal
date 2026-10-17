@@ -24,6 +24,30 @@ export interface NetworkInterfaceSample {
   txBytes: number;
 }
 
+/** Configuration observed on the host, never a claim of Internet reachability. */
+export interface NetworkInterfaceInfo {
+  name: string;
+  state: string;
+  addresses: string[];
+}
+
+export interface NetworkRoute {
+  destination: string;
+  gateway?: string;
+  interface?: string;
+  metric?: number;
+  type?: string;
+}
+
+export interface NetworkDetails {
+  interfaces?: NetworkInterfaceInfo[];
+  ipv4Routes?: NetworkRoute[];
+  ipv6Routes?: NetworkRoute[];
+  dnsServers?: string[];
+  /** A missing section is unreported; an empty array is a successful empty result. */
+  errors?: Partial<Record<"interfaces" | "ipv4Routes" | "ipv6Routes" | "dnsServers", string>>;
+}
+
 export interface ContainerInfo {
   name: string;
   image: string;
@@ -52,6 +76,7 @@ export interface ServerSnapshot {
   disks?: DiskUsage[];
   uptimeSeconds?: number;
   network?: NetworkInterfaceSample[];
+  networkDetails?: NetworkDetails;
   docker?: { available: boolean; containers: ContainerInfo[] };
   capabilities: ServerCapabilities;
   /** Per-collector health so a failing collector degrades one card, not the page. */

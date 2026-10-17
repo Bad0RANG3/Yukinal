@@ -63,3 +63,21 @@
   .overview-properties { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; }
   .overview-property-list, .overview-container-list, .overview-collector-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; }
 }
+
+.network-check-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -3px 0 8px; color: var(--faint); font-size: var(--text-caption); }
+.network-check-heading .icon-button { width: 26px; height: 26px; padding: 5px; border: 0; background: transparent; }
+.overview-properties.network-checks { grid-template-columns: 1fr; gap: 6px; }
+.overview-network .network-warning, .network-checks .network-check-warning { color: var(--warning); }
+.network-checks .network-check-unknown { color: var(--faint); }
+.network-interface-list li > div { display: flex; justify-content: space-between; gap: 8px; }
+.network-interface-list small { color: var(--faint); font-size: inherit; }
+.network-read-error, .network-dns, .network-scope { margin: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.5; overflow-wrap: anywhere; }
+.network-read-error { color: var(--warning); }
+.network-scope { margin-top: 8px; color: var(--faint); }
+
+.network-full-config { min-width: 0; margin-top: 10px; }
+.network-full-config > summary { display: flex; align-items: center; gap: 5px; min-height: 26px; list-style: none; cursor: pointer; color: var(--muted); font-size: var(--text-caption); }
+.network-full-config > summary::-webkit-details-marker { display: none; }
+.network-full-config > summary small { margin-left: auto; color: var(--faint); font-size: inherit; }
+.network-full-config[open] > summary > .icon { transform: rotate(90deg); }
+.network-full-config > .overview-subsection-title:first-of-type { margin-top: 10px; }

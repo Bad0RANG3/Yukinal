@@ -37,6 +37,8 @@ import { AgentComposer } from "./AgentComposer.js";
 import { AgentFeed } from "./AgentFeed.js";
 import { AgentHeader, AgentRunStatus } from "./AgentHeader.js";
 import { AgentHistoryPane } from "./AgentHistoryPane.js";
+import { AgentRecentConversations } from "./AgentRecentConversations.js";
+import { useRecentAgentSessions } from "./useRecentAgentSessions.js";
 import { AgentNotices } from "./AgentNotices.js";
 import {
   commandHelpText,
@@ -70,15 +72,13 @@ function restartId(restart: RestartRecord | undefined): string | null {
   return restart ? `${restart.attempt}:${restart.at}` : null;
 }
 
-export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested, requestedSessionId, onSessionOpened }: {
+export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested }: {
   onCloseStart?: () => void;
   onCloseEnd?: () => void;
   workspace?: boolean;
   workspaceControls?: ReactNode;
   workspaceWorkpages?: ReactNode;
   onAttentionRequested?: () => void;
-  requestedSessionId?: string | null;
-  onSessionOpened?: (sessionId: string) => void;
 }) {
   const agentStatus = useAgentStatus({ poll: true });
   const spawnAgent = useSpawnAgent();
@@ -108,6 +108,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const contextEpoch = useWorkspaceStore((state) => state.agentContextEpoch);
   const setSelectedRoleId = useWorkspaceStore((state) => state.setAgentRoleId);
   const sessions = useChatSessions();
+  const recent = useRecentAgentSessions(selectedServerId, 3);
   // 「收到审批时把面板带到前景」是导航决策，所以由面板注入，而不是让运行模块去读 store。
   const run = useAgentRun({
     sidecarRunning: agentRunning,
@@ -353,7 +354,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const openStoredSession = (session: ChatSession, messages: ChatMessage[]): void => {
     if (liveView.current.running) return;
     const serverId = useWorkspaceStore.getState().selectedServerId;
-    if ((session.serverId ?? null) !== serverId) {
+    if ((session.serverId ?? null) !== (livePreviewChat ? null : serverId)) {
       setContextError("这段对话属于其他服务器，请先切换目标。");
       return;
     }
@@ -365,25 +366,20 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     setHistoryOpen(false);
   };
 
-  useEffect(() => {
-    if (!requestedSessionId || run.running) return;
-    if (requestedSessionId === sessions.activeSessionId) {
-      onSessionOpened?.(requestedSessionId);
-      return;
-    }
-    let disposed = false;
+  const openRecentSession = async (sessionId: string): Promise<void> => {
+    if (run.running || openingSession || resettingContext) return;
+    const scope = selectedServerId;
     setOpeningSession(true);
     setContextError(null);
-    void callDesktop(IPC_COMMANDS.chatSessionGet, { sessionId: requestedSessionId })
-      .then((detail) => {
-        if (!disposed && selectedServerId === useWorkspaceStore.getState().selectedServerId) openStoredSession(detail.session, detail.messages);
-      })
-      .catch((cause) => { if (!disposed) setContextError(`打开任务失败：${errorMessage(cause)}`); })
-      .finally(() => {
-        if (!disposed) { setOpeningSession(false); onSessionOpened?.(requestedSessionId); }
-      });
-    return () => { disposed = true; };
-  }, [requestedSessionId, selectedServerId, run.running]);
+    try {
+      const detail = await callDesktop(IPC_COMMANDS.chatSessionGet, { sessionId });
+      if (useWorkspaceStore.getState().selectedServerId === scope) openStoredSession(detail.session, detail.messages);
+    } catch (cause) {
+      if (useWorkspaceStore.getState().selectedServerId === scope) setContextError(`打开对话失败：${errorMessage(cause)}`);
+    } finally {
+      setOpeningSession(false);
+    }
+  };
 
   const resetContext = async (): Promise<void> => {
     if (run.running || resettingContext || !sessions.activeSessionId) return;
@@ -416,7 +412,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       onAnimationEnd={panel.onAnimationEnd}
     >
       <AgentHeader
-        running={run.running}
+        running={run.running || openingSession || resettingContext}
         runState={run.runState}
         tokenUsage={run.tokenUsage}
         contextUsage={run.contextUsage}
@@ -526,6 +522,14 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 onSelectRole={setSelectedRoleId}
                 commandContext={commandContext}
               />
+              {run.entries.length === 0 ? <AgentRecentConversations
+                sessions={recent.data?.sessions ?? []}
+                busy={run.running || openingSession || resettingContext}
+                error={recent.isError}
+                onOpen={(id) => void openRecentSession(id)}
+                onShowAll={() => setHistoryOpen(true)}
+                onRetry={() => void recent.refetch()}
+              /> : null}
             </div>
           </div>
         </>
