@@ -445,6 +445,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     target_link_libraries(yukinal_desktop_host_core PRIVATE
       ${SECURITY_FRAMEWORK} ${SYSTEM_CONFIGURATION_FRAMEWORK}
     )
+    add_executable(yukinal-desktop-host desktop_host/src/main.cpp)
   else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)

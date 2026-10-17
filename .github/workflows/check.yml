@@ -50,7 +50,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev build-essential curl wget file libssl-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libsecret-1-dev build-essential curl wget file libssl-dev
 
       - name: Install Python Agent and SSH test dependencies
         run: python -m pip install -e "agent[agent,models,test]"
