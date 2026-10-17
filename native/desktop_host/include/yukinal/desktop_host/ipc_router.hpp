@@ -177,6 +177,11 @@ class IpcRouter {
   std::unique_ptr<RemoteDragStore> drag_store_;
   std::shared_ptr<NativeFileDrag> native_drag_;
   void* native_window_ = nullptr;
+  // The staged directory of the drag that is currently in flight. The router holds
+  // the sole strong reference and the seam's completion callback only clears it, so
+  // the stage is released exactly when the OS reports the drag ended regardless of
+  // how the platform stores or copies the callback.
+  std::shared_ptr<StagedRemoteDrag> active_native_drag_;
   std::mutex prepare_mutex_;
   std::chrono::milliseconds remote_drag_timeout_{std::chrono::minutes(30)};
   std::chrono::milliseconds remote_drag_cancel_grace_{std::chrono::seconds(60)};

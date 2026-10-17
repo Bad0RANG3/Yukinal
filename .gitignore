@@ -75,6 +75,14 @@ services/control-plane/.tmp/
 services/control-plane/*.egg-info/
 services/control-plane/*.db
 
-# local build/scratch logs
+# local build/scratch logs: verification transcripts written to the repo root
+# (build/ctest/pnpm/commit/push captures) are throwaway output, never committed.
 build_out.txt
 *.buildlog.txt
+/build*.txt
+/ctest*.txt
+/pnpm*.txt
+/pub*.txt
+/push*.txt
+/commit*.txt
+/test_out.txt

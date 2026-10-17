@@ -106,17 +106,17 @@ does not yet restore the desktop task/plan lifecycle. Checkpoints can contain
 prompts and tool output; the SQLite file is not encrypted. POSIX builds restrict
 the state directory and database to the current user, while Windows relies on
 the per-user application-data ACL. Multimodal prompts and write-capable desktop
-tools are still being migrated. Tauri builds select the frozen Python sidecar;
-installed-app lifecycle and cross-platform acceptance remain in progress.
+tools are still being migrated. Desktop package builds select the frozen Python
+sidecar; installed-app lifecycle and cross-platform acceptance remain in progress.
 
 When `YUKINAL_SSH_API_TOKEN` is explicitly passed to the Python sidecar, it
 registers the read-only `ssh.service_status` and `ssh.disk_usage` tools backed by the C++ service. Disk usage reads the root filesystem with a fixed command and returns byte counts plus the use percentage. In
 the desktop autoconfiguration path, the Python sidecar resolves the selected
 `host_target.serverId` through Host RPC and starts a one-target C++ service for
 that call. `target_id` is not part of the model-visible input schema. The
-retained Node fallback does not receive the C++ service credentials.
+desktop host forwards the C++ service credentials only to the Python sidecar.
 
-Tauri development uses this runtime by default. Create the environment from the
+Desktop development uses this runtime by default. Create the environment from the
 repository root and install the runtime dependencies:
 
 ```powershell

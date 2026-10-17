@@ -8112,13 +8112,27 @@ IpcReply IpcRouter::remote_drag_start_command(const nlohmann::json& params) {
   }
   auto handle = std::make_shared<StagedRemoteDrag>(std::move(staged));
   const std::vector<std::filesystem::path> files = handle->files();
-  // The private directory must stay alive until the OS reports the drag ended; the
-  // seam releases this callback exactly then, dropping the last reference. If the
-  // drag cannot start, the local handle still owns the directory and removes it.
-  std::shared_ptr<StagedRemoteDrag> keep_alive = handle;
-  const bool started =
-      drag->start(window, files, [keep_alive]() mutable { keep_alive.reset(); });
+  // The private directory must stay alive until the OS reports the drag ended. The
+  // router keeps the sole strong reference and the completion callback only clears
+  // it, so the stage is dropped exactly then; capturing the handle in the callback
+  // would instead depend on how the platform stores and copies it. If the drag
+  // cannot start, the local `handle` is still the last reference, so the directory
+  // is removed as the command returns.
+  {
+    std::lock_guard lock(drag_mutex_);
+    active_native_drag_ = handle;
+  }
+  const bool started = drag->start(window, files, [this]() {
+    // Release outside the lock: the handle's destructor deletes the staged files.
+    std::shared_ptr<StagedRemoteDrag> released;
+    {
+      std::lock_guard lock(drag_mutex_);
+      released = std::move(active_native_drag_);
+    }
+  });
   if (!started) {
+    std::lock_guard lock(drag_mutex_);
+    active_native_drag_.reset();
     return failure("DRAG_FAILED", "the native drag could not be started");
   }
   return {true, nlohmann::json::object()};

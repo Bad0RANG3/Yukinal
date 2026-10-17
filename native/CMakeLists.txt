@@ -442,9 +442,14 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   elseif(APPLE)
     find_library(SECURITY_FRAMEWORK Security REQUIRED)
     find_library(SYSTEM_CONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
+    # Security and SystemConfiguration do not re-export CoreFoundation for the
+    # static host core on arm64, so link it explicitly for the CF* symbols used by
+    # the credential store and the platform proxy.
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     target_link_libraries(yukinal_desktop_host_core PRIVATE
-      ${SECURITY_FRAMEWORK} ${SYSTEM_CONFIGURATION_FRAMEWORK}
+      ${SECURITY_FRAMEWORK} ${SYSTEM_CONFIGURATION_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK}
     )
+    add_executable(yukinal-desktop-host desktop_host/src/main.cpp)
   else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)

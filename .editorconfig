@@ -8,8 +8,5 @@ indent_style = space
 indent_size = 2
 trim_trailing_whitespace = true
 
-[*.rs]
-indent_size = 4
-
 [*.{md,mdx}]
 trim_trailing_whitespace = false

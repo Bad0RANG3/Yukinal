@@ -38,7 +38,7 @@ Yukinal 可以持有 SSH 凭据、执行远程命令、读写远端文件并启�
 - 凭据从操作系统凭据库、sidecar 参数、日志、事件或 SQLite 中泄露；
 - Permission Engine 被绕过、票据跨工具/目标/环境重放，或危险操作被自动批准；
 - 服务器 id、工具名、路径、命令或主机指纹在校验后发生歧义；
-- Tauri IPC、sidecar JSON-RPC 或 MCP 帧的 schema、长度或生命周期绕过；
+- C++ 宿主 IPC、sidecar JSON-RPC 或 MCP 帧的 schema、长度或生命周期绕过；
 - Agent 或 MCP 输出被当作可信指令执行；
 - 退出、取消、超时或重启路径留下进程、句柄或未审计的执行。
 
