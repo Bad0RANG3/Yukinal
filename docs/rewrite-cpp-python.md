@@ -1351,6 +1351,30 @@ startup recovery plus remote-staging reconciliation, the fail-closed terminal
 history write (observed through the snapshot subscription, because the durable row
 correctly stays non-terminal), and the list/get/limit error paths. The
 `native/build-nmake` Release build then passed all fourteen CTest targets,
-`pnpm check` was green and publication hygiene was green. The SFTP adapter and the
+`pnpm check` was green and publication hygiene was green.
+
+The durable seam the manager actually runs on landed next.
+`DatabaseTransferHistoryStore` (`transfer_history.hpp` plus
+`native/desktop_host/src/transfer_history.cpp`) adapts the host `DesktopDatabase` to
+`TransferHistoryStore`: `insert`/`update` serialize the typed snapshot through the
+exact IPC contract JSON beside the host-private staging array, `get`/`list`/`recover`
+decode a stored row back into a `TransferSnapshot`, and `staging` returns the private
+inventory without ever exposing it to IPC. Every decode is strict. A new
+`transfer_snapshot_from_json` in `transfer_types` reconstructs the 19-field snapshot
+(including the active conflict, the per-item failures and the staging residue from
+their contract shapes) and throws `std::runtime_error` on any violation instead of
+silently dropping a transfer, so a persisted row the database accepts but the
+contract rejects fails closed. The local-path registry gained the transfer-facing
+take methods: `take_upload_sources` validates one to 256 unique handles, prunes
+expired entries, re-checks each path with no-follow semantics and consumes the used
+handles so a start request cannot be replayed, while `take_download_directory`
+resolves a reusable directory handle but re-checks on every call that it is still a
+real directory. `transfer_tests` now round-trips a stored snapshot and rejects
+malformed ones; `test_ipc_router` drives the take methods (consumption, repeats,
+empty/oversized selections, retyped and expired handles, and download destinations);
+and `desktop_host_database_tests` exercises the store against a real database,
+including conflict/staging round-tripping, recovery and the fail-closed decode. The
+`native/build-nmake` Release build passed all fourteen CTest targets, `pnpm check`
+was green and publication hygiene was green. The SFTP adapter and the
 `file_transfer_upload`/`download`/`cancel`/`resolve_conflict` IPC wiring are the
 next commit.

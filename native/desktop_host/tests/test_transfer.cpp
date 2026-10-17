@@ -39,6 +39,17 @@ void expect_invalid(F&& call, const char* message) {
 }
 
 template <typename F>
+void expect_runtime_error(F&& call, const char* message) {
+  try {
+    call();
+  } catch (const std::runtime_error&) {
+    return;
+  }
+  std::cerr << message << '\n';
+  std::exit(1);
+}
+
+template <typename F>
 void expect_transfer_error(F&& call, TransferErrorCode code, const char* message) {
   try {
     call();
@@ -327,6 +338,72 @@ int main() {
             sparse_json.at("totalFiles").is_null() &&
             sparse_json.at("currentItem").is_null(),
         "nullable progress fields must serialize as null");
+
+  // A persisted snapshot must reconstruct exactly, so durable history survives a
+  // restart without losing the conflict, the failures or the staging residue.
+  const auto stored = transfer_snapshot_from_json(encoded);
+  check(transfer_snapshot_json(stored) == encoded,
+        "a stored snapshot must round trip through the parser");
+  check(stored.transfer_id == snapshot.transfer_id &&
+            stored.server_id == snapshot.server_id &&
+            stored.direction == snapshot.direction && stored.status == snapshot.status &&
+            stored.started_at_epoch_ms == snapshot.started_at_epoch_ms &&
+            stored.total_files == snapshot.total_files &&
+            stored.current_item == snapshot.current_item,
+        "a parsed snapshot must carry the contract identifiers and progress");
+  check(stored.active_conflict.has_value() &&
+            stored.active_conflict->item_index == 1 &&
+            stored.active_conflict->existing_modified_epoch_seconds == 1700000000 &&
+            stored.active_conflict->allowed_actions.size() == 3 &&
+            stored.active_conflict->allowed_actions[2] == ConflictActionKind::Rename,
+        "a parsed snapshot must carry its active conflict");
+  check(stored.failures.size() == 1 && stored.failures[0].item == "old.log" &&
+            stored.failures[0].item_index.has_value() && *stored.failures[0].item_index == 0 &&
+            stored.failures[0].kind == TransferFailureKind::RemoteIo &&
+            stored.failures[0].staging_residue.has_value() && stored.staging_residue.size() == 1,
+        "a parsed snapshot must carry its failures and staging residue");
+  const auto sparse_stored = transfer_snapshot_from_json(sparse_json);
+  check(transfer_snapshot_json(sparse_stored) == sparse_json &&
+            !sparse_stored.active_conflict.has_value() &&
+            !sparse_stored.failures[0].item_index.has_value() &&
+            !sparse_stored.failures[0].staging_residue.has_value(),
+        "an omitted optional field must parse back as absent");
+
+  // A malformed persisted row must be reported loudly, never silently dropped.
+  expect_runtime_error([] { (void)transfer_snapshot_from_json(nlohmann::json::array()); },
+                       "a non-object snapshot must be rejected");
+  expect_runtime_error([] { (void)transfer_snapshot_from_json(nlohmann::json::object()); },
+                       "a snapshot missing every field must be rejected");
+  {
+    auto broken = encoded;
+    broken["status"] = "flying";
+    expect_runtime_error([&] { (void)transfer_snapshot_from_json(broken); },
+                         "a snapshot with an unknown status must be rejected");
+  }
+  {
+    auto broken = encoded;
+    broken["transferredBytes"] = -1;
+    expect_runtime_error([&] { (void)transfer_snapshot_from_json(broken); },
+                         "a snapshot with a negative counter must be rejected");
+  }
+  {
+    auto broken = encoded;
+    broken["failures"] = nlohmann::json::object();
+    expect_runtime_error([&] { (void)transfer_snapshot_from_json(broken); },
+                         "a snapshot whose failures are not an array must be rejected");
+  }
+  {
+    auto broken = encoded;
+    broken["activeConflict"]["allowedActions"] = nlohmann::json::array({"explode"});
+    expect_runtime_error([&] { (void)transfer_snapshot_from_json(broken); },
+                         "a snapshot with an unknown conflict action must be rejected");
+  }
+  {
+    auto broken = encoded;
+    broken["stagingResidue"] = nlohmann::json::array({1});
+    expect_runtime_error([&] { (void)transfer_snapshot_from_json(broken); },
+                         "a snapshot with a non-string residue entry must be rejected");
+  }
 
   // Host-private staging inventory round trips for both variants.
   TransferStagingFile local;

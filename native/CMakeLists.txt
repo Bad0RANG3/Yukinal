@@ -388,6 +388,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
     desktop_host/src/sidecar.cpp
+    desktop_host/src/transfer_history.cpp
     desktop_host/src/transfer_local.cpp
     desktop_host/src/transfer_manager.cpp
     desktop_host/src/transfer_types.cpp

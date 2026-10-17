@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,17 @@ void write_binary(const std::filesystem::path& path, const std::vector<std::uint
   std::ofstream stream(path, std::ios::binary | std::ios::trunc);
   stream.write(reinterpret_cast<const char*>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
+}
+
+template <typename F>
+void expect_runtime_error(F&& call, const char* message) {
+  try {
+    call();
+  } catch (const std::runtime_error&) {
+    return;
+  }
+  std::cerr << message << '\n';
+  std::exit(1);
 }
 
 }  // namespace
@@ -255,6 +267,71 @@ int main() {
     missing_rejected = true;
   }
   check(missing_rejected, "read_preview should reject an unknown handle");
+
+  // Upload handles are consumed exactly once and every path is revalidated with
+  // no-follow semantics before a transfer may start.
+  LocalPathHandles uploads;
+  const auto upload_file = uploads.register_paths({text_path});
+  const auto upload_dir = uploads.register_paths({directory.path});
+  check(upload_file.handles.size() == 1 && upload_dir.handles.size() == 1,
+        "upload sources should register one handle each");
+  const auto taken = uploads.take_upload_sources(
+      {upload_file.handles.front().handle_id, upload_dir.handles.front().handle_id});
+  check(taken.size() == 2 && taken[0] == text_path && taken[1] == directory.path,
+        "take_upload_sources should return the registered paths in order");
+  expect_runtime_error(
+      [&] { (void)uploads.take_upload_sources({upload_file.handles.front().handle_id}); },
+      "a consumed upload handle must not be reusable");
+
+  const auto repeated = uploads.register_paths({text_path});
+  expect_runtime_error(
+      [&] {
+        (void)uploads.take_upload_sources({repeated.handles.front().handle_id,
+                                           repeated.handles.front().handle_id});
+      },
+      "a repeated upload handle must be rejected");
+  const auto once = uploads.take_upload_sources({repeated.handles.front().handle_id});
+  check(once.size() == 1 && once[0] == text_path,
+        "a rejected upload request must not consume handles");
+  expect_runtime_error([&] { (void)uploads.take_upload_sources({}); },
+                       "an empty upload selection must be rejected");
+  expect_runtime_error(
+      [&] { (void)uploads.take_upload_sources(std::vector<std::string>(257, "local_path_x")); },
+      "more than 256 upload handles must be rejected");
+
+  const auto retyped_path = directory.path / "retyped";
+  write_binary(retyped_path, {'x'});
+  LocalPathHandles mutating;
+  const auto retyped = mutating.register_paths({retyped_path});
+  std::filesystem::remove(retyped_path);
+  std::filesystem::create_directory(retyped_path);
+  expect_runtime_error(
+      [&] { (void)mutating.take_upload_sources({retyped.handles.front().handle_id}); },
+      "an upload handle that changed type must be rejected");
+
+  bool upload_expired = false;
+  try {
+    (void)expiring.take_upload_sources({expiring_handle.handles.front().handle_id});
+  } catch (const std::exception&) {
+    upload_expired = true;
+  }
+  check(upload_expired, "an expired upload handle must be rejected");
+
+  // Download destinations stay reusable but must still be a real directory.
+  LocalPathHandles destinations;
+  const auto destination = destinations.register_paths({directory.path});
+  const auto file_destination = destinations.register_paths({text_path});
+  check(destinations.take_download_directory(destination.handles.front().handle_id) ==
+            directory.path,
+        "take_download_directory should resolve a registered directory");
+  check(destinations.take_download_directory(destination.handles.front().handle_id) ==
+            directory.path,
+        "a download destination should stay reusable");
+  expect_runtime_error(
+      [&] { (void)destinations.take_download_directory(file_destination.handles.front().handle_id); },
+      "a file handle must not be a download destination");
+  expect_runtime_error([&] { (void)destinations.take_download_directory("local_path_missing"); },
+                       "an unknown download destination must be rejected");
 
   return 0;
 }

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <system_error>
 
@@ -316,6 +317,66 @@ LocalPreviewData LocalPathHandles::read_preview(const std::string& handle_id,
   data.size = static_cast<std::uint64_t>(size);
   data.bytes = read_bounded_file(found->second.path, max_bytes);
   return data;
+}
+
+std::vector<std::filesystem::path> LocalPathHandles::take_upload_sources(
+    const std::vector<std::string>& handle_ids) {
+  if (handle_ids.empty() || handle_ids.size() > kMaxPickedPaths) {
+    throw std::runtime_error("select between 1 and 256 local files or folders");
+  }
+  const auto now = clock_();
+  std::lock_guard lock(mutex_);
+  prune_locked(now);
+
+  std::set<std::string> unique;
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(handle_ids.size());
+  for (const auto& handle_id : handle_ids) {
+    if (!unique.insert(handle_id).second) {
+      throw std::runtime_error("a local file handle was repeated");
+    }
+    const auto found = entries_.find(handle_id);
+    if (found == entries_.end()) {
+      throw std::runtime_error("local file handle expired or was not found");
+    }
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(found->second.path, error);
+    if (error) {
+      throw std::runtime_error("the selected local path could not be inspected");
+    }
+    const bool directory = found->second.directory;
+    if (std::filesystem::is_symlink(status) ||
+        (directory && !std::filesystem::is_directory(status)) ||
+        (!directory && !std::filesystem::is_regular_file(status))) {
+      throw std::runtime_error("selected local path changed type; select it again");
+    }
+    paths.push_back(found->second.path);
+  }
+  for (const auto& handle_id : handle_ids) entries_.erase(handle_id);
+  return paths;
+}
+
+std::filesystem::path LocalPathHandles::take_download_directory(
+    const std::string& handle_id) {
+  const auto now = clock_();
+  std::lock_guard lock(mutex_);
+  prune_locked(now);
+  const auto found = entries_.find(handle_id);
+  if (found == entries_.end()) {
+    throw std::runtime_error("local destination handle expired or was not found");
+  }
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(found->second.path, error);
+  if (error) {
+    throw std::runtime_error("the selected download destination could not be inspected");
+  }
+  if (!found->second.directory || std::filesystem::is_symlink(status) ||
+      !std::filesystem::is_directory(status)) {
+    throw std::runtime_error("selected download destination is no longer a real directory");
+  }
+  // The chosen destination remains reusable until its short TTL expires; every
+  // transfer still revalidates it and opens its own temporary child files safely.
+  return found->second.path;
 }
 
 nlohmann::json make_file_preview(const std::string& name, std::uint64_t size,

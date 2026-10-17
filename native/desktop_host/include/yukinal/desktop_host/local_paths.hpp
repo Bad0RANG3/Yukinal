@@ -60,6 +60,19 @@ class LocalPathHandles {
   [[nodiscard]] LocalPreviewData read_preview(const std::string& handle_id,
                                               std::size_t max_bytes);
 
+  // Consumes one to `kMaxPickedPaths` upload handles, returning the paths they
+  // name and forgetting them so a start request cannot be replayed. Every path is
+  // revalidated with no-follow semantics; a repeated, expired, missing, symlinked
+  // or retyped handle throws `std::runtime_error`.
+  [[nodiscard]] std::vector<std::filesystem::path> take_upload_sources(
+      const std::vector<std::string>& handle_ids);
+
+  // Resolves one download-directory handle. The destination stays selected and
+  // reusable until its short TTL expires, but every call re-checks that it is
+  // still a real directory. Throws `std::runtime_error` on any mismatch.
+  [[nodiscard]] std::filesystem::path take_download_directory(
+      const std::string& handle_id);
+
  private:
   void prune_locked(std::int64_t now);
 

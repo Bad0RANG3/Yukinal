@@ -133,6 +133,12 @@ nlohmann::json transfer_snapshot_json(const TransferSnapshot& snapshot);
 nlohmann::json conflict_request_json(const ConflictRequest& request);
 nlohmann::json transfer_item_failure_json(const TransferItemFailure& failure);
 
+// Reconstructs a `TransferSnapshot` from its stored IPC JSON. Every field is
+// validated against the 19-field contract, so a malformed persisted row is
+// reported loudly instead of silently dropping a transfer. Throws
+// `std::runtime_error` on any contract violation.
+TransferSnapshot transfer_snapshot_from_json(const nlohmann::json& value);
+
 // The host-private staging inventory, round-trippable.
 nlohmann::json transfer_staging_file_json(const TransferStagingFile& staging);
 std::optional<TransferStagingFile> transfer_staging_file_from_json(

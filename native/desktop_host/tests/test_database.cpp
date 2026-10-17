@@ -6,6 +6,8 @@
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
+#include "yukinal/desktop_host/transfer_history.hpp"
+#include "yukinal/desktop_host/transfer_types.hpp"
 #include "schema_migrations.hpp"
 
 #include <httplib.h>
@@ -570,6 +572,89 @@ int main(int argc, char** argv) {
       check(find_record(second, "trf_new").is_null() &&
                 find_record(second, "trf_active").at("snapshot").at("status") == "interrupted",
             "recovery should be idempotent and keep returning staging residue");
+    }
+
+    // The database-backed history store is the manager-facing durable seam: it
+    // stores the IPC snapshot next to the private staging inventory, reconstructs
+    // typed snapshots, recovers non-terminal rows and fails closed on a stored
+    // snapshot that no longer matches the contract.
+    {
+      using yukinal::desktop_host::ConflictActionKind;
+      using yukinal::desktop_host::ConflictRequest;
+      using yukinal::desktop_host::DatabaseTransferHistoryStore;
+      using yukinal::desktop_host::TransferSnapshot;
+      using yukinal::desktop_host::TransferStagingFile;
+      using yukinal::desktop_host::TransferStatus;
+
+      DatabaseTransferHistoryStore store(&database);
+      TransferSnapshot snapshot = yukinal::desktop_host::transfer_snapshot_from_json(
+          transfer_snapshot("trf_store", "srv_01abc", "upload", "running", 700, 700));
+      ConflictRequest conflict;
+      conflict.item_index = 2;
+      conflict.source_name = "app.log";
+      conflict.target_name = "app.log";
+      conflict.existing_size = 10;
+      conflict.incoming_size = 12;
+      conflict.allowed_actions = {ConflictActionKind::Skip, ConflictActionKind::Overwrite};
+      snapshot.active_conflict = conflict;
+      TransferStagingFile remote;
+      remote.remote = true;
+      remote.server_id = "srv_01abc";
+      remote.path = "/srv/tmp/.app.log.yukinal-trfstore-0-0.part";
+      remote.item_index = 0;
+      store.insert(snapshot, {remote});
+
+      const auto fetched = store.get("trf_store");
+      check(fetched.has_value() && fetched->transfer_id == "trf_store" &&
+                fetched->active_conflict.has_value() &&
+                fetched->active_conflict->item_index == 2 &&
+                fetched->active_conflict->allowed_actions.size() == 2,
+            "the history store should round trip the snapshot conflict");
+      const auto stored_staging = store.staging("trf_store");
+      check(stored_staging.size() == 1 && stored_staging[0].remote &&
+                stored_staging[0].path == remote.path && store.staging("trf_absent").empty(),
+            "the history store should keep the host-private staging inventory");
+      bool listed = false;
+      for (const auto& entry : store.list(std::string("srv_01abc"), 100)) {
+        if (entry.transfer_id == "trf_store") listed = true;
+      }
+      check(listed, "the history store should list durable snapshots");
+      bool bad_limit = false;
+      try {
+        (void)store.list(std::nullopt, 0);
+      } catch (const std::invalid_argument&) {
+        bad_limit = true;
+      }
+      check(bad_limit, "the history store should reject an out-of-range limit");
+
+      // Recovery runs before any read, so a still-active row becomes interrupted.
+      store.insert(yukinal::desktop_host::transfer_snapshot_from_json(
+                       transfer_snapshot("trf_recover", "srv_01abc", "download", "running", 600,
+                                         600)),
+                   {});
+      bool recovered = false;
+      for (const auto& record : store.recover(8000)) {
+        if (record.snapshot.transfer_id != "trf_recover") continue;
+        recovered = true;
+        check(record.snapshot.status == TransferStatus::Interrupted &&
+                  record.snapshot.updated_at_epoch_ms == 8000 && record.staging.empty(),
+              "the history store should recover a non-terminal transfer");
+      }
+      check(recovered, "the history store should return the recovered transfer");
+
+      // A stored snapshot the database accepts but the contract rejects must
+      // throw rather than silently vanish from history.
+      database.insert_file_transfer(
+          {{"transferId", "trf_broken"}, {"serverId", "srv_01abc"}, {"direction", "upload"},
+           {"status", "completed"}, {"startedAtEpochMs", 1}, {"updatedAtEpochMs", 1}},
+          nlohmann::json::array());
+      bool decode_rejected = false;
+      try {
+        (void)store.get("trf_broken");
+      } catch (const std::runtime_error&) {
+        decode_rejected = true;
+      }
+      check(decode_rejected, "the history store should reject a snapshot outside the contract");
     }
 
     // Terminal history is bounded: retaining 500 keeps the newest and drops the

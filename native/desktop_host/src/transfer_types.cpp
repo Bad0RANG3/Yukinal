@@ -336,6 +336,124 @@ ConflictAction conflict_action_from_json(const nlohmann::json& value) {
   return {ConflictActionKind::Rename, std::move(rename_to)};
 }
 
+namespace {
+
+[[noreturn]] void reject_snapshot() {
+  throw std::runtime_error("the stored transfer snapshot is invalid");
+}
+
+const nlohmann::json& required_field(const nlohmann::json& value, const char* key) {
+  const auto found = value.find(key);
+  if (found == value.end()) reject_snapshot();
+  return *found;
+}
+
+std::string required_string(const nlohmann::json& value, const char* key) {
+  const auto& field = required_field(value, key);
+  if (!field.is_string()) reject_snapshot();
+  return field.get<std::string>();
+}
+
+std::uint64_t required_count(const nlohmann::json& value, const char* key) {
+  const auto& field = required_field(value, key);
+  if (field.is_number_unsigned()) return field.get<std::uint64_t>();
+  if (field.is_number_integer()) {
+    const auto number = field.get<std::int64_t>();
+    if (number >= 0) return static_cast<std::uint64_t>(number);
+  }
+  reject_snapshot();
+}
+
+std::optional<std::uint64_t> nullable_count(const nlohmann::json& value, const char* key) {
+  const auto found = value.find(key);
+  if (found == value.end() || found->is_null()) return std::nullopt;
+  return required_count(value, key);
+}
+
+std::optional<std::string> nullable_text(const nlohmann::json& value, const char* key) {
+  const auto found = value.find(key);
+  if (found == value.end() || found->is_null()) return std::nullopt;
+  if (!found->is_string()) reject_snapshot();
+  return found->get<std::string>();
+}
+
+ConflictRequest conflict_request_from_json(const nlohmann::json& value) {
+  if (!value.is_object()) reject_snapshot();
+  ConflictRequest request;
+  request.item_index = required_count(value, "itemIndex");
+  request.source_name = required_string(value, "sourceName");
+  request.target_name = required_string(value, "targetName");
+  request.existing_size = required_count(value, "existingSize");
+  request.incoming_size = required_count(value, "incomingSize");
+  request.existing_modified_epoch_seconds =
+      nullable_count(value, "existingModifiedEpochSeconds");
+  const auto& actions = required_field(value, "allowedActions");
+  if (!actions.is_array()) reject_snapshot();
+  for (const auto& action : actions) {
+    if (!action.is_string()) reject_snapshot();
+    const auto kind = parse_conflict_action_kind(action.get<std::string>());
+    if (!kind.has_value()) reject_snapshot();
+    request.allowed_actions.push_back(*kind);
+  }
+  return request;
+}
+
+TransferItemFailure transfer_item_failure_from_json(const nlohmann::json& value) {
+  if (!value.is_object()) reject_snapshot();
+  TransferItemFailure failure;
+  failure.item_index = nullable_count(value, "itemIndex");
+  failure.item = required_string(value, "item");
+  const auto kind = parse_transfer_failure_kind(required_string(value, "kind"));
+  if (!kind.has_value()) reject_snapshot();
+  failure.kind = *kind;
+  failure.message = required_string(value, "message");
+  failure.staging_residue = nullable_text(value, "stagingResidue");
+  return failure;
+}
+
+}  // namespace
+
+TransferSnapshot transfer_snapshot_from_json(const nlohmann::json& value) {
+  if (!value.is_object()) reject_snapshot();
+  TransferSnapshot snapshot;
+  snapshot.transfer_id = required_string(value, "transferId");
+  snapshot.server_id = required_string(value, "serverId");
+  const auto direction = parse_transfer_direction(required_string(value, "direction"));
+  if (!direction.has_value()) reject_snapshot();
+  snapshot.direction = *direction;
+  const auto status = parse_transfer_status(required_string(value, "status"));
+  if (!status.has_value()) reject_snapshot();
+  snapshot.status = *status;
+  snapshot.started_at_epoch_ms = required_count(value, "startedAtEpochMs");
+  snapshot.updated_at_epoch_ms = required_count(value, "updatedAtEpochMs");
+  snapshot.total_files = nullable_count(value, "totalFiles");
+  snapshot.completed_files = required_count(value, "completedFiles");
+  snapshot.skipped_files = required_count(value, "skippedFiles");
+  snapshot.total_bytes = nullable_count(value, "totalBytes");
+  snapshot.transferred_bytes = required_count(value, "transferredBytes");
+  snapshot.current_item = nullable_text(value, "currentItem");
+  snapshot.current_item_bytes = required_count(value, "currentItemBytes");
+  snapshot.current_item_total_bytes = nullable_count(value, "currentItemTotalBytes");
+  const auto conflict = value.find("activeConflict");
+  if (conflict != value.end() && !conflict->is_null()) {
+    snapshot.active_conflict = conflict_request_from_json(*conflict);
+  }
+  snapshot.verified_files = required_count(value, "verifiedFiles");
+  snapshot.unverified_files = required_count(value, "unverifiedFiles");
+  const auto& failures = required_field(value, "failures");
+  if (!failures.is_array()) reject_snapshot();
+  for (const auto& failure : failures) {
+    snapshot.failures.push_back(transfer_item_failure_from_json(failure));
+  }
+  const auto& residue = required_field(value, "stagingResidue");
+  if (!residue.is_array()) reject_snapshot();
+  for (const auto& entry : residue) {
+    if (!entry.is_string()) reject_snapshot();
+    snapshot.staging_residue.push_back(entry.get<std::string>());
+  }
+  return snapshot;
+}
+
 TransferSnapshot new_transfer_snapshot(const std::string& transfer_id,
                                        const std::string& server_id,
                                        TransferDirection direction) {
