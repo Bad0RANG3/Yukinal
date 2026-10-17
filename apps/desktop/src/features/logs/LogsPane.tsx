@@ -8,9 +8,10 @@ import {
 import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
+import { EmptyPanel, ErrorPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
+import { PageToolbar } from "../../components/PageToolbar.js";
 
 const LEVEL_LABEL: Record<LogLevel, string> = {
   error: "错误",
@@ -25,8 +26,9 @@ const SOURCE_LABEL: Record<LogSource, string> = {
   unavailable: "未发现日志源",
 };
 
-export function LogsPane() {
-  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+export function LogsPane({ serverId }: { serverId?: string | null } = {}) {
+  const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const selectedServerId = serverId === undefined ? workspaceServerId : serverId;
   const shell = isDesktopShell();
   const logsQuery = useQuery({
     queryKey: ["serverLogs", selectedServerId],
@@ -41,14 +43,14 @@ export function LogsPane() {
     },
   });
 
-  if (!shell) return <PreviewEmpty icon="logs" body="原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端日志数据。" />;
+  if (!shell) return <PreviewEmpty icon="logs" body="桌面功能不可用" />;
 
   if (!selectedServerId) {
-    return <EmptyPanel icon="logs" title="选择一台服务器" body="从左侧列表选择目标环境，查看最近的远端日志。" />;
+    return <EmptyPanel icon="logs" title="选择一台服务器" />;
   }
 
   if (logsQuery.isLoading) {
-    return <LoadingPanel title="正在读取最近日志" hint="SSH · 最多 500 行 · 预计几秒完成" />;
+    return <div className="loading-panel" role="status" aria-label="读取日志"><div className="loading-spinner" /></div>;
   }
 
   if (logsQuery.isError || !logsQuery.data) {
@@ -68,26 +70,19 @@ export function LogsPane() {
 
   return (
     <div className="logs-page">
-      <section className="logs-page-header">
-        <div>
-          <p className="eyebrow">远端日志</p>
-          <h2>日志</h2>
-          <p>保留原始行，最多读取最近 500 行，便于快速定位问题。</p>
-        </div>
+      <PageToolbar actions={
         <button type="button" className="button-secondary" onClick={() => void logsQuery.refetch()} disabled={logsQuery.isFetching} title="刷新日志" aria-label="刷新日志">
           <Icon name="refresh" size="sm" /> {logsQuery.isFetching ? "读取中" : "刷新"}
         </button>
-      </section>
-
-      <div className="log-summary">
+      }>
         <span className={`log-source log-source-${response.source}`}>{SOURCE_LABEL[response.source]}</span>
         <span>{response.lines.length} 行{errors ? ` · ${errors} 个错误` : ""}{warnings ? ` · ${warnings} 个警告` : ""}</span>
-      </div>
+      </PageToolbar>
 
       {response.message ? <div className="log-notice">{response.message}</div> : null}
 
       {response.lines.length === 0 ? (
-        <EmptyPanel extraClass="log-empty" icon="logs" title="没有可展示的日志" body={response.message ?? "日志源没有返回内容。"} />
+        <p className="muted-copy">暂无日志</p>
       ) : (
         <ol className="log-list" aria-label="远端日志列表">
           {response.lines.map((line, index) => (

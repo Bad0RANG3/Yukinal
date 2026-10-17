@@ -9,6 +9,15 @@
 import type {
   ApprovalResponse,
   AgentPromptPart,
+  AgentCoordinationConfig,
+  AgentTeamTask,
+  AgentParticipant,
+  AgentPersona,
+  AgentReasoningEffort,
+  AgentMemory,
+  AgentMemoryListInput,
+  AgentMemorySaveInput,
+  AgentMemoryDeleteInput,
   AgentRunRequest,
   AgentRunResult,
   ChatMessage,
@@ -148,7 +157,13 @@ export const IPC_COMMANDS = {
   agentLogs: "agent_logs",
   /** Agent runs: Rust resolves the provider + credential and hands the call to the sidecar. */
   agentRunStart: "agent_run_start",
+  agentTeamTasks: "agent_team_tasks",
   agentRunStop: "agent_run_stop",
+  agentContextReset: "agent_context_reset",
+  agentContextResetAll: "agent_context_reset_all",
+  agentMemoryList: "agent_memory_list",
+  agentMemorySave: "agent_memory_save",
+  agentMemoryDelete: "agent_memory_delete",
   agentApprovalRespond: "agent_approval_respond",
   /** Persistent Agent conversation history. */
   chatSessionList: "chat_session_list",
@@ -315,12 +330,17 @@ export interface IpcCommandMap {
       taskId?: string;
       taskBudget?: TaskBudget;
       prompt: string;
+      persona?: AgentPersona;
+      participant?: AgentParticipant;
       messageId?: string;
       parts?: AgentPromptPart[];
       delivery?: "async" | "sync";
       resume?: boolean;
       providerId?: string;
       model?: string;
+      reasoningEffort?: AgentReasoningEffort;
+      toolAccess?: "none";
+      coordination?: AgentCoordinationConfig;
       workspaceId?: string;
       focusServerId?: string;
       permissionMode?: AgentPermissionMode;
@@ -354,7 +374,13 @@ export interface IpcCommandMap {
       result?: AgentRunResult;
     };
   };
+  agent_team_tasks: { params: { sessionId?: string; focusServerId?: string }; response: { tasks: AgentTeamTask[] } };
   agent_run_stop: { params: { runId: string }; response: { stopped: boolean } };
+  agent_context_reset: { params: { sessionId: string; focusServerId?: string }; response: { reset: boolean } };
+  agent_context_reset_all: { params: Record<string, never>; response: { reset: boolean; count: number } };
+  agent_memory_list: { params: AgentMemoryListInput; response: { memories: AgentMemory[] } };
+  agent_memory_save: { params: AgentMemorySaveInput; response: { memory: AgentMemory } };
+  agent_memory_delete: { params: AgentMemoryDeleteInput; response: { deleted: boolean } };
   agent_approval_respond: { params: ApprovalResponse; response: { accepted: boolean } };
   chat_session_list: { params: ChatSessionListInput; response: { sessions: ChatSession[]; counts: ChatSessionCounts } };
   chat_session_get: { params: { sessionId: string }; response: ChatSessionDetail };

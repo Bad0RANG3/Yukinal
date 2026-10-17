@@ -43,7 +43,7 @@ export function AgentNotices({
     return (
       <p className="agent-notice" role="status" aria-live="polite">
         <span>
-          {`Agent 崩溃后已自动重启 ${restart.attempt}/${restart.maxAttempts} 次仍未成功，不会再次自动尝试。`}
+          {`重启失败 ${restart.attempt}/${restart.maxAttempts}，自动恢复已停止。`}
         </span>
         <button type="button" className="text-button" disabled={spawning} onClick={onSpawn}>
           {spawning ? "启动中…" : "重新启动"}
@@ -59,7 +59,7 @@ export function AgentNotices({
     if (!restart) return null;
     return (
       <p className="agent-notice" role="status" aria-live="polite">
-        {`Agent 刚刚崩溃过，已自动重启（第 ${restart.attempt}/${restart.maxAttempts} 次）。上一次运行已中断。`}
+        {`上次运行已中断，服务已重启（${restart.attempt}/${restart.maxAttempts}）。`}
       </p>
     );
   }
@@ -67,10 +67,10 @@ export function AgentNotices({
   return (
     <p className="agent-notice" role="status" aria-live="polite">
       {!shell ? (
-        "启动 Yukinal 桌面应用后即可直接提问，无需先添加服务器。"
+        "桌面功能不可用"
       ) : !agentRunning ? (
         <>
-          <span>{agentExited ? "Agent 已退出，可以重新启动。" : statusUnreadable ? "无法读取 Agent 状态，可以尝试重新启动。" : "Agent 正在启动或尚未启动。"}</span>
+          <span>{agentExited ? "运行服务已退出" : statusUnreadable ? "无法读取运行状态" : "运行服务未启动"}</span>
           <button type="button" className="text-button" disabled={spawning} onClick={onSpawn}>
             {spawning ? "启动中…" : "启动 / 重试"}
           </button>
@@ -78,7 +78,7 @@ export function AgentNotices({
         </>
       ) : (
         <>
-          配置 AI Provider 后即可直接提问；不需要先添加服务器。
+          未配置模型连接
           <button type="button" className="text-button" onClick={onOpenSettings}>前往设置</button>
         </>
       )}

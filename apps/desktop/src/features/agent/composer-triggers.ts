@@ -79,7 +79,7 @@ export const AGENT_COMMANDS: readonly CommandSpec[] = [
   { name: "new", description: "开始一段新对话", requires: "idle" },
   { name: "clear", description: "清空当前动态", requires: "idle" },
   { name: "history", description: "打开对话记录", requires: "desktop" },
-  { name: "stop", description: "停止正在运行的 Agent", requires: "running" },
+  { name: "stop", description: "停止运行", requires: "running" },
   { name: "help", description: "查看可用命令", requires: "always" },
 ];
 
@@ -134,7 +134,7 @@ export function commandHelpText(context: CommandContext): string {
       return `/${spec.name} — ${spec.description}${reason ? `（${reason}）` : ""}`;
     }),
     "",
-    "输入 @ 可以提及服务器，把这次运行的目标指向它。",
+    "输入 @ 指定队伍或目标服务器；未指定队伍时按任务自动匹配。",
   ].join("\n");
 }
 
@@ -162,6 +162,7 @@ export type MentionCandidate = {
   label: string;
   /** 次要说明，例如环境或主机。 */
   detail?: string;
+  aliases?: readonly string[];
 };
 
 /** 前缀命中排在包含命中之前，这样输入 `prod` 时 `prod-1` 不被 `staging-prod` 挤掉。 */
@@ -173,10 +174,10 @@ export function matchMentions(
   const needle = query.trim().toLowerCase();
   const scored = candidates
     .map((candidate) => {
-      const label = candidate.label.toLowerCase();
+      const labels = [candidate.label, ...(candidate.aliases ?? [])].map((label) => label.toLowerCase());
       if (needle.length === 0) return { candidate, rank: 2 };
-      if (label.startsWith(needle)) return { candidate, rank: 0 };
-      if (label.includes(needle)) return { candidate, rank: 1 };
+      if (labels.some((label) => label.startsWith(needle))) return { candidate, rank: 0 };
+      if (labels.some((label) => label.includes(needle))) return { candidate, rank: 1 };
       return null;
     })
     .filter((entry): entry is { candidate: MentionCandidate; rank: number } => entry !== null)

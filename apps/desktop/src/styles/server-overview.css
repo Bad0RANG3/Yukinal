@@ -1,0 +1,83 @@
+/* A server overview is an inspector: current state first, detail on demand.
+   Keep it flat so the 280px rail does not become a stack of nested cards. */
+.overview-page.overview-inspector { gap: 0; }
+.overview-inspector > .overview-connection-notice {
+  margin: 0 0 var(--space-card); padding: 0 0 var(--space-card);
+  border: 0; border-bottom: 1px solid var(--edge-normal); border-radius: 0;
+  background: transparent;
+}
+.overview-status { padding-bottom: 6px; }
+.overview-status-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.overview-status .overview-refresh { width: 28px; height: 28px; flex: 0 0 auto; border: 0; background: transparent; }
+.overview-observed-at { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--faint); font-size: var(--text-caption); }
+.overview-observed-at .overview-freshness { padding: 0; border: 0; border-radius: 0; background: transparent; white-space: normal; }
+.overview-collection-warning, .overview-collection-progress { margin: 8px 0 0; color: var(--warning); font-size: var(--text-caption); line-height: 1.5; }
+.overview-collection-progress { color: var(--faint); }
+.overview-resources { padding: 8px 0 var(--space-card); }
+.overview-resource-list { display: grid; gap: 0; }
+.overview-resource-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 6px 8px; min-width: 0; padding: 12px 0; }
+.overview-resource-label { color: var(--muted); font-size: var(--text-label); }
+.overview-resource-row strong { color: var(--text); font-size: var(--text-body); font-weight: 600; font-variant-numeric: tabular-nums; }
+.overview-resource-track { grid-column: 1 / -1; height: 3px; overflow: hidden; background: var(--material-active); }
+.overview-resource-track .metric-fill { border-radius: 0; }
+.overview-resource-hint { grid-column: 1 / -1; min-width: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.4; }
+.overview-inspector .overview-task-action { display: flex; width: 100%; justify-content: flex-start; gap: 8px; margin-top: 8px; padding: 7px 9px; border-color: var(--edge-normal); border-radius: var(--radius-control); background: transparent; font-size: var(--text-label); }
+.overview-task-action > span { min-width: 0; flex: 1; text-align: left; white-space: normal; }
+.overview-inspector-section { min-width: 0; border-top: 1px solid var(--edge-normal); }
+.overview-inspector-section > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 7px; min-height: 42px; padding: 9px 0; color: var(--text); font-size: var(--text-label); list-style: none; cursor: pointer; }
+.overview-inspector-section > summary::-webkit-details-marker { display: none; }
+.overview-inspector-section > summary > .icon { flex: 0 0 auto; color: var(--faint); }
+.overview-inspector-section[open] > summary > .icon { transform: rotate(90deg); }
+.overview-inspector-section > summary > span { flex: 0 0 auto; }
+.overview-inspector-section > summary > small { min-width: 0; flex: 1 1 80px; color: var(--faint); text-align: right; font-size: var(--text-caption); overflow-wrap: anywhere; }
+.overview-section-content { min-width: 0; padding: 6px 0 20px; }
+.overview-section-content > .muted-copy { margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
+.overview-properties { display: grid; gap: 8px; min-width: 0; margin: 0; }
+.overview-properties > div { display: grid; grid-template-columns: 68px minmax(0, 1fr); align-items: baseline; gap: 8px; min-width: 0; }
+.overview-properties dt { color: var(--faint); font-size: var(--text-caption); }
+.overview-properties dd { min-width: 0; margin: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.5; overflow-wrap: anywhere; }
+.overview-subsection-title { margin: 16px 0 8px; color: var(--text); font-size: var(--text-caption); font-weight: 600; }
+.overview-property-list, .overview-container-list, .overview-collector-list { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.overview-property-list li, .overview-container-list li { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.45; overflow-wrap: anywhere; }
+.overview-property-list strong, .overview-container-list strong { color: var(--text); font-size: var(--text-caption); font-weight: 500; }
+.overview-property-list li > span, .overview-container-list li > span { color: var(--faint); }
+.overview-container-list { gap: 12px; }
+.overview-container-list li > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.overview-container-list .container-dot { align-self: center; box-shadow: none; }
+.overview-container-list strong { min-width: 0; flex: 1 1 90px; overflow-wrap: anywhere; }
+.overview-container-list small { color: var(--faint); font-size: var(--text-caption); }
+.overview-inspector .overview-activity-list { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.overview-inspector .overview-activity-list li { display: flex; flex-direction: column; gap: 4px; padding: 0; border: 0; min-width: 0; }
+.overview-inspector .overview-activity-list strong { color: var(--muted); font-size: var(--text-caption); line-height: 1.5; font-weight: 500; }
+.overview-inspector .overview-activity-list span, .overview-inspector .overview-activity-list time { color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
+.overview-all-activity { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; padding: 4px 0; border: 0; color: var(--muted); background: transparent; font: inherit; font-size: var(--text-caption); cursor: pointer; }
+.overview-all-activity:hover { color: var(--text); }
+.overview-diagnostics-description { margin: 0 0 12px; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
+.overview-collector-list { margin-top: 14px; gap: 10px; }
+.overview-collector-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 8px; min-width: 0; color: var(--muted); font-size: var(--text-caption); }
+.overview-collector-list time, .overview-collector-list small, .overview-collector-error { grid-column: 1 / -1; color: var(--faint); font-size: var(--text-caption); line-height: 1.45; }
+.overview-collector-error { margin: 0; color: var(--danger); overflow-wrap: anywhere; white-space: pre-wrap; }
+@container reference (min-width: 600px) {
+  .overview-resource-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+  .overview-inspector .overview-task-action { width: auto; min-width: 180px; }
+  .overview-properties { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; }
+  .overview-property-list, .overview-container-list, .overview-collector-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; }
+}
+
+.network-check-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -3px 0 8px; color: var(--faint); font-size: var(--text-caption); }
+.network-check-heading .icon-button { width: 26px; height: 26px; padding: 5px; border: 0; background: transparent; }
+.overview-properties.network-checks { grid-template-columns: 1fr; gap: 6px; }
+.overview-network .network-warning, .network-checks .network-check-warning { color: var(--warning); }
+.network-checks .network-check-unknown { color: var(--faint); }
+.network-interface-list li > div { display: flex; justify-content: space-between; gap: 8px; }
+.network-interface-list small { color: var(--faint); font-size: inherit; }
+.network-read-error, .network-dns, .network-scope { margin: 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.5; overflow-wrap: anywhere; }
+.network-read-error { color: var(--warning); }
+.network-scope { margin-top: 8px; color: var(--faint); }
+
+.network-full-config { min-width: 0; margin-top: 10px; }
+.network-full-config > summary { display: flex; align-items: center; gap: 5px; min-height: 26px; list-style: none; cursor: pointer; color: var(--muted); font-size: var(--text-caption); }
+.network-full-config > summary::-webkit-details-marker { display: none; }
+.network-full-config > summary small { margin-left: auto; color: var(--faint); font-size: inherit; }
+.network-full-config[open] > summary > .icon { transform: rotate(90deg); }
+.network-full-config > .overview-subsection-title:first-of-type { margin-top: 10px; }

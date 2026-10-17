@@ -2,11 +2,10 @@
 #include <httplib.h>
 #include <webview/webview.h>
 
-#ifdef _WIN32
-#include "yukinal/desktop_host/windows_window_frame.hpp"
-#endif
-
+#include <atomic>
 #include <filesystem>
+#include <functional>
+#include <mutex>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -23,6 +22,9 @@
 
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#ifdef _WIN32
+#include "yukinal/desktop_host/windows_window_frame.hpp"
+#endif
 
 namespace {
 
@@ -34,29 +36,106 @@ struct Options {
   bool help = false;
 };
 
+struct WindowEventLifetime {
+  std::mutex mutex;
+  std::atomic_bool alive{true};
+};
+
 struct BridgeContext {
   webview_t view = nullptr;
-  yukinal::desktop_host::IpcRouter router;
+  std::shared_ptr<WindowEventLifetime> lifetime;
+  std::shared_ptr<std::atomic_bool> window_alive = std::make_shared<std::atomic_bool>(true);
+  std::shared_ptr<yukinal::desktop_host::IpcRouter> shared_router;
+  yukinal::desktop_host::IpcRouter& router;
+  std::function<yukinal::desktop_host::IpcReply(const nlohmann::json&)> open_workpage;
+#ifdef _WIN32
+  WNDPROC previous_proc = nullptr;
+  bool auxiliary = false;
+  bool pinned = false;
+  std::string workpage_key;
+#endif
 
   explicit BridgeContext(yukinal::desktop_host::DesktopDatabase& database)
-      : router(&database) {}
+      : lifetime(std::make_shared<WindowEventLifetime>()),
+        shared_router(std::make_shared<yukinal::desktop_host::IpcRouter>(&database)), router(*shared_router) {}
+  BridgeContext(std::shared_ptr<yukinal::desktop_host::IpcRouter> shared,
+                std::shared_ptr<WindowEventLifetime> window_lifetime)
+      : lifetime(std::move(window_lifetime)), shared_router(std::move(shared)), router(*shared_router) {}
+
+  bool active() const { return lifetime->alive.load() && window_alive->load(); }
 
   void publish_event(const std::string& event, const nlohmann::json& payload) {
-    if (router.subscribers(event).empty()) return;
+    if (!active() || router.subscribers(event).empty()) return;
     const auto envelope = nlohmann::json{{"event", event}, {"payload", payload}}.dump();
-    const auto script = "window.__YUKINAL_HOST__?.dispatchEvent(JSON.parse(" +
-                        nlohmann::json(envelope).dump() + "));";
-    auto* pending = new std::string(script);
+    const auto script = "(()=>{const e=JSON.parse(" + nlohmann::json(envelope).dump() +
+                        ");window.__YUKINAL_HOST__?.dispatchEvent(e.event,e.payload)})();";
+    struct PendingEvent {
+      std::string script;
+      std::shared_ptr<WindowEventLifetime> lifetime;
+      std::shared_ptr<std::atomic_bool> window_alive;
+    };
+    auto* pending = new PendingEvent{script, lifetime, window_alive};
     const auto dispatched = webview_dispatch(
         view,
         [](webview_t current, void* value) {
-          std::unique_ptr<std::string> queued(static_cast<std::string*>(value));
-          webview_eval(current, queued->c_str());
+          std::unique_ptr<PendingEvent> queued(static_cast<PendingEvent*>(value));
+          // WebView destruction drains queued callbacks after releasing its browser.
+          // Keep the gate alive independently of the BridgeContext and skip eval.
+          if (!queued->lifetime->alive.load() || !queued->window_alive->load()) return;
+          webview_eval(current, queued->script.c_str());
         },
         pending);
     if (dispatched != WEBVIEW_ERROR_OK) delete pending;
   }
 };
+
+void destroy_bridge_window(BridgeContext& context) {
+  context.window_alive->store(false);
+  if (context.view) webview_destroy(context.view);
+  context.view = nullptr;
+}
+
+std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows(
+    BridgeContext& context, std::vector<std::unique_ptr<BridgeContext>>& auxiliary_windows) {
+  context.lifetime->alive.store(false);
+  context.router.set_event_sink({});
+  std::lock_guard lock(context.lifetime->mutex);
+  std::vector<std::unique_ptr<BridgeContext>> retired;
+  retired.swap(auxiliary_windows);
+  for (const auto& child : retired) child->window_alive->store(false);
+  return retired;
+}
+
+#ifdef _WIN32
+LRESULT CALLBACK workpage_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  auto* context = reinterpret_cast<BridgeContext*>(GetPropW(window, L"YukinalBridgeContext"));
+  if (!context || !context->previous_proc) return DefWindowProcW(window, message, wparam, lparam);
+  if (message == WM_CLOSE) {
+    if (context->auxiliary) {
+      // Closing a view preserves its terminal and running operations until app exit.
+      ShowWindow(window, SW_HIDE);
+      return 0;
+    }
+    context->lifetime->alive.store(false);
+    webview_terminate(context->view);
+  }
+  return CallWindowProcW(context->previous_proc, window, message, wparam, lparam);
+}
+void install_workpage_lifecycle(BridgeContext& context) {
+  const auto window = static_cast<HWND>(webview_get_window(context.view));
+  SetPropW(window, L"YukinalBridgeContext", &context);
+  context.previous_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(window, GWLP_WNDPROC,
+      reinterpret_cast<LONG_PTR>(workpage_window_proc)));
+}
+void uninstall_workpage_lifecycle(BridgeContext& context) {
+  const auto window = static_cast<HWND>(webview_get_window(context.view));
+  if (window && IsWindow(window)) {
+    if (context.previous_proc) SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(context.previous_proc));
+    RemovePropW(window, L"YukinalBridgeContext");
+  }
+  context.previous_proc = nullptr;
+}
+#endif
 
 class UiServer {
  public:
@@ -140,7 +219,7 @@ std::optional<Options> parse_options(const std::vector<std::string>& arguments) 
 }
 
 bool valid_dev_url(const std::string& value) {
-  static const std::regex pattern(R"(^http://127\.0\.0\.1:[1-9][0-9]{0,4}/?$)");
+  static const std::regex pattern(R"(^http://127\.0\.0\.1:[1-9][0-9]{0,4}/?(\?fixture=1)?$)");
   if (!std::regex_match(value, pattern)) return false;
   const auto colon = value.rfind(':');
   try {
@@ -166,9 +245,11 @@ std::optional<std::string> resolve_ui_url(const Options& options, UiServer& ui_s
   return ui_server.url();
 }
 
-
 void rpc_handler(const char* id, const char* request, void* context_pointer) {
   auto& context = *static_cast<BridgeContext*>(context_pointer);
+  // Queued native callbacks can run while webview_destroy drains its event queue.
+  // There is no browser left to receive a rejection, so do not touch the view.
+  if (!context.active()) return;
   nlohmann::json reply;
   bool ok = false;
   try {
@@ -181,11 +262,35 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
       } else {
         const auto method = arguments[0].get<std::string>();
 #ifdef _WIN32
-        const auto result = method == "__shell.update_context"
+        if (method == "__shell.pin" && context.auxiliary) {
+          const auto& params = arguments[1];
+          if (!params.is_object() || params.size() != 1 || !params.contains("pinned") || !params["pinned"].is_boolean()) {
+            webview_return(context.view, id, 1, R"({"code":"INVALID_PARAMS","message":"Pin requires a boolean"})");
+            return;
+          }
+          const bool pinned = params["pinned"].get<bool>();
+          const bool changed = SetWindowPos(static_cast<HWND>(webview_get_window(context.view)),
+              pinned ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) != FALSE;
+          if (!changed) {
+            webview_return(context.view, id, 1, R"({"code":"WINDOW_ERROR","message":"Could not change window pin state"})");
+            return;
+          }
+          context.pinned = pinned;
+          const auto value = nlohmann::json{{"pinned", pinned}}.dump();
+          webview_return(context.view, id, 0, value.c_str());
+          return;
+        }
+        const auto result = method == "__shell.open_workpage" && context.open_workpage
+            ? context.open_workpage(arguments[1])
+            : method == "__shell.hide" && context.auxiliary
+            ? (ShowWindow(static_cast<HWND>(webview_get_window(context.view)), SW_HIDE),
+                yukinal::desktop_host::IpcReply{true, {{"hidden", true}}})
+            : method == "__shell.update_context"
             ? yukinal::desktop_host::update_shell_context(context.view, arguments[1])
-            : method == "__shell.update_sidebar"
-                ? yukinal::desktop_host::update_shell_sidebar(context.view, arguments[1])
-                : context.router.invoke(method, std::move(arguments[1]));
+            : method == "__shell.update_surface"
+            ? yukinal::desktop_host::update_caption_surface(context.view, arguments[1])
+            : context.router.invoke(method, std::move(arguments[1]));
 #else
         const auto result = context.router.invoke(method, std::move(arguments[1]));
 #endif
@@ -198,12 +303,14 @@ void rpc_handler(const char* id, const char* request, void* context_pointer) {
   } catch (...) {
     reply = {{"code", "INTERNAL_ERROR"}, {"message", "Desktop IPC request failed"}};
   }
+  if (!context.active()) return;
   const auto serialized = reply.dump();
   webview_return(context.view, id, ok ? 0 : 1, serialized.c_str());
 }
 
 constexpr const char* kHostBridge = R"JS(
 (() => {
+  if (window.top !== window) return;
   const subscriptions = new Map();
   const nativeCall = (method, params) => window.yukinalNativeInvoke(method, params);
   const check = (result) => {
@@ -279,14 +386,84 @@ int run(const std::vector<std::string>& arguments) {
   try {
     const bool debug = options->dev_url.has_value();
     BridgeContext context(*database);
+    std::vector<std::unique_ptr<BridgeContext>> auxiliary_windows;
+    auto window_events = context.lifetime;
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
     context.router.set_event_sink(
-        [&context](const std::string& event, const nlohmann::json& payload) {
+        [&context, &auxiliary_windows, window_events](const std::string& event, const nlohmann::json& payload) {
+          std::lock_guard lock(window_events->mutex);
+          if (!window_events->alive.load()) return;
           context.publish_event(event, payload);
+          for (const auto& child : auxiliary_windows) child->publish_event(event, payload);
         });
 #ifdef _WIN32
-    const bool native_frame = yukinal::desktop_host::install_fused_frame(context.view);
+    const bool titlebar_overlay = yukinal::desktop_host::install_fused_frame(context.view);
+    const std::string shell_bridge = std::string("window.__YUKINAL_HOST__.windowShell={titlebarOverlay:") +
+        (titlebar_overlay ? "true" : "false") + ",updateContext:(context)=>"
+        "window.__YUKINAL_HOST__.invoke('__shell.update_context',context).then(()=>undefined),"
+        "updateSurface:(surface)=>window.__YUKINAL_HOST__.invoke('__shell.update_surface',surface),"
+        "openWorkpage:(page)=>window.__YUKINAL_HOST__.invoke('__shell.open_workpage',page)};";
+    context.open_workpage = [&](const nlohmann::json& page) -> yukinal::desktop_host::IpcReply {
+      using yukinal::desktop_host::IpcReply;
+      if (!context.active()) return {false, {{"code", "SHUTTING_DOWN"}, {"message", "The app is closing"}}};
+      if (!page.is_object() || page.size() != 2 || !page.contains("kind") || !page["kind"].is_string() ||
+          !page.contains("serverId") || !page["serverId"].is_string()) {
+        return {false, {{"code", "INVALID_PARAMS"}, {"message", "A workpage requires a kind and server"}}};
+      }
+      const auto kind = page["kind"].get<std::string>();
+      const auto server_id = page["serverId"].get<std::string>();
+      if ((kind != "files" && kind != "terminal" && kind != "logs" && kind != "services") ||
+          server_id.empty() || server_id.size() > 256 ||
+          !std::regex_match(server_id, std::regex("[A-Za-z0-9_-]+"))) {
+        return {false, {{"code", "INVALID_PARAMS"}, {"message", "This workpage cannot be detached"}}};
+      }
+      const auto servers = database->list_servers().at("servers");
+      bool found = false;
+      for (const auto& server : servers) if (server.at("id") == server_id) found = true;
+      if (!found) return {false, {{"code", "NOT_FOUND"}, {"message", "Server no longer exists"}}};
+      const auto key = kind + ":" + server_id;
+      {
+        std::lock_guard lock(window_events->mutex);
+        for (const auto& child : auxiliary_windows) if (child->workpage_key == key) {
+          const auto window = static_cast<HWND>(webview_get_window(child->view));
+          ShowWindow(window, SW_RESTORE); SetForegroundWindow(window);
+          return {true, {{"opened", true}}};
+        }
+        if (auxiliary_windows.size() >= 12) return {false, {{"code", "WINDOW_LIMIT"}, {"message", "Close the app to release inactive workpage windows"}}};
+      }
+      auto child = std::make_unique<BridgeContext>(context.shared_router, window_events);
+      child->auxiliary = true; child->workpage_key = key;
+      child->view = webview_create(debug ? 1 : 0, nullptr);
+      if (!child->view) return {false, {{"code", "WINDOW_ERROR"}, {"message", "Could not create a workpage window"}}};
+      if (!context.active()) {
+        destroy_bridge_window(*child);
+        return {false, {{"code", "SHUTTING_DOWN"}, {"message", "The app is closing"}}};
+      }
+      webview_set_title(child->view, ("Yukinal · " + kind).c_str());
+      webview_set_size(child->view, 480, 360, WEBVIEW_HINT_MIN);
+      webview_set_size(child->view, 940, 640, WEBVIEW_HINT_NONE);
+      if (webview_bind(child->view, "yukinalNativeInvoke", rpc_handler, child.get()) != WEBVIEW_ERROR_OK ||
+          webview_init(child->view, kHostBridge) != WEBVIEW_ERROR_OK ||
+          webview_init(child->view, "window.__YUKINAL_HOST__.workpageWindow={setPinned:(pinned)=>window.__YUKINAL_HOST__.invoke('__shell.pin',{pinned}),hide:()=>window.__YUKINAL_HOST__.invoke('__shell.hide',{})};") != WEBVIEW_ERROR_OK) {
+        destroy_bridge_window(*child);
+        return {false, {{"code", "WINDOW_ERROR"}, {"message", "Could not initialize the workpage bridge"}}};
+      }
+      if (!context.active()) {
+        destroy_bridge_window(*child);
+        return {false, {{"code", "SHUTTING_DOWN"}, {"message", "The app is closing"}}};
+      }
+      install_workpage_lifecycle(*child);
+      const auto child_url = *url + (url->find('?') == std::string::npos ? "?" : "&") +
+          "workpage=" + kind + "&server=" + server_id;
+      if (webview_navigate(child->view, child_url.c_str()) != WEBVIEW_ERROR_OK) {
+        uninstall_workpage_lifecycle(*child);
+        destroy_bridge_window(*child);
+        return {false, {{"code", "WINDOW_ERROR"}, {"message", "Could not load the workpage"}}};
+      }
+      { std::lock_guard lock(window_events->mutex); auxiliary_windows.push_back(std::move(child)); }
+      return {true, {{"opened", true}}};
+    };
 #endif
     if (webview_set_title(context.view, "Yukinal") != WEBVIEW_ERROR_OK ||
 #ifdef _WIN32
@@ -297,29 +474,40 @@ int run(const std::vector<std::string>& arguments) {
             WEBVIEW_ERROR_OK ||
         webview_init(context.view, kHostBridge) != WEBVIEW_ERROR_OK ||
 #ifdef _WIN32
-        webview_init(context.view,
-            native_frame ? R"JS((() => {
-              const listeners = new Set();
-              window.__YUKINAL_HOST__.windowShell = {
-                updateContext: (context) => window.__YUKINAL_HOST__.invoke('__shell.update_context', context).then(() => undefined),
-                updateSidebar: (sidebar) => window.__YUKINAL_HOST__.invoke('__shell.update_sidebar', sidebar).then(() => undefined),
-                onAction: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
-                dispatchAction: (action) => { for (const handler of listeners) handler(action); },
-              };
-            })();)JS" : "") != WEBVIEW_ERROR_OK ||
+        webview_init(context.view, shell_bridge.c_str()) != WEBVIEW_ERROR_OK ||
 #endif
         webview_navigate(context.view, url->c_str()) != WEBVIEW_ERROR_OK) {
 #ifdef _WIN32
       yukinal::desktop_host::uninstall_fused_frame(context.view);
 #endif
-      webview_destroy(context.view);
+      auto retired = retire_auxiliary_windows(context, auxiliary_windows);
+      for (auto& child : retired) {
+#ifdef _WIN32
+        uninstall_workpage_lifecycle(*child);
+#endif
+        destroy_bridge_window(*child);
+      }
+      destroy_bridge_window(context);
       return 3;
     }
+    #ifdef _WIN32
+    install_workpage_lifecycle(context);
+    #endif
     const auto result = webview_run(context.view);
+    auto retired = retire_auxiliary_windows(context, auxiliary_windows);
+    // Keep all contexts alive while destruction pumps callbacks from any window.
+    // Never hold the event mutex across that reentrant drain.
+    for (auto& child : retired) {
+        #ifdef _WIN32
+        uninstall_workpage_lifecycle(*child);
+        #endif
+      destroy_bridge_window(*child);
+    }
 #ifdef _WIN32
+    uninstall_workpage_lifecycle(context);
     yukinal::desktop_host::uninstall_fused_frame(context.view);
 #endif
-    webview_destroy(context.view);
+    destroy_bridge_window(context);
     return result == WEBVIEW_ERROR_OK ? 0 : 3;
   } catch (const webview::exception&) {
     return 3;

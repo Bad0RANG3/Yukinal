@@ -7,6 +7,8 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from .network_snapshot import NETWORK_SNAPSHOT_COMMAND_IDS, normalize_network_details
+
 
 SYSTEM_SNAPSHOT_COMMAND_IDS = (
     "os_detect",
@@ -50,13 +52,15 @@ class _CollectorParseError(ValueError):
 def normalize_system_snapshot(
     outputs: Mapping[str, tuple[int, str]],
 ) -> dict[str, Any]:
-    """Return UI-shaped snapshot data, leaving host identity and timestamps to Rust."""
-    if not isinstance(outputs, Mapping) or set(outputs) != set(SYSTEM_SNAPSHOT_COMMAND_IDS):
+    """Return UI-shaped snapshot data, leaving host identity and timestamps to the desktop host."""
+    if (not isinstance(outputs, Mapping)
+            or not set(SYSTEM_SNAPSHOT_COMMAND_IDS) <= set(outputs)
+            or not set(outputs) <= set(SYSTEM_SNAPSHOT_COMMAND_IDS + NETWORK_SNAPSHOT_COMMAND_IDS)):
         raise ValueError("the desktop SSH service returned an invalid snapshot command set")
 
     checked: dict[str, tuple[int, str]] = {}
     total_bytes = 0
-    for command_id in SYSTEM_SNAPSHOT_COMMAND_IDS:
+    for command_id in outputs:
         result = outputs[command_id]
         if (
             not isinstance(result, tuple)
@@ -116,6 +120,9 @@ def normalize_system_snapshot(
     for collector_id, field_name in field_names.items():
         if collector_id in parsed:
             snapshot[field_name] = parsed[collector_id]
+    network_details = normalize_network_details(checked)
+    if network_details is not None:
+        snapshot["networkDetails"] = network_details
     snapshot["health"] = _overall_health(
         _usage(parsed.get("cpu")),
         _usage(parsed.get("memory")),

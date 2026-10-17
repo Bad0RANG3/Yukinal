@@ -16,7 +16,7 @@
 
 .agent-history-toggle.is-active {
   border-color: var(--focus-line);
-  background: #15332f;
+  background: var(--ok-surface);
   color: var(--accent);
 }
 
@@ -32,6 +32,7 @@
 
 .agent-history-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
@@ -40,19 +41,20 @@
 .agent-history-heading h3 {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: var(--text-subheading);
 }
 
 /* 「共 12 段 · 已载入 50」这类计数：等宽数字，免得数字变化时整行宽度跳动。 */
 .agent-history-summary {
   margin: 3px 0 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
 }
 
 .agent-history-heading-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
@@ -60,7 +62,7 @@
 .agent-history-new {
   min-height: 28px;
   padding: 5px 8px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-search {
@@ -69,8 +71,8 @@
   align-items: center;
   gap: 7px;
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: #0a0f13;
+  border-radius: var(--radius-control);
+  background: var(--material-inset);
   color: var(--faint);
   padding: 0 9px;
 }
@@ -85,7 +87,7 @@
 
 .agent-history-search:focus-within {
   border-color: var(--focus-line);
-  box-shadow: 0 0 0 3px var(--focus-halo);
+  box-shadow: var(--shadow-focus);
 }
 
 .agent-history-search input {
@@ -95,7 +97,7 @@
   outline: 0;
   background: transparent;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-search input::placeholder {
@@ -126,11 +128,12 @@
    一个轮廓：一条浅色轨道，选中的那一段是浮起来的小片，切换时读起来是「这块片动了
    一下」，而不是「两条线交叉换位」。计数字号更小、跟着一起明暗。 */
 .agent-history-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
   gap: 2px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--surface-2);
   padding: 2px;
 }
@@ -138,16 +141,18 @@
 .agent-history-tabs button {
   display: flex;
   flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 5px;
   /* 边框一直占位、只在选中时换颜色：否则文字会在切换的瞬间左右跳一下。 */
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--faint);
   padding: 4px 6px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-tabs button:hover {
@@ -162,8 +167,9 @@
 
 /* 计数回答的是「有多少」，不是「我在哪」，所以它比标签暗一档。 */
 .agent-history-tab-count {
+  overflow-wrap: anywhere;
   color: inherit;
-  font-size: 9px;
+  font-size: var(--text-caption);
   font-variant-numeric: tabular-nums;
   opacity: 0.6;
 }
@@ -210,7 +216,7 @@
   background: var(--surface-1);
   color: var(--muted);
   padding: 1px 3px 5px;
-  font-size: 10px;
+  font-size: var(--text-caption);
   font-weight: 600;
   letter-spacing: 0.04em;
 }
@@ -226,7 +232,7 @@
   min-width: 0;
   flex-direction: column;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   background: var(--surface-2);
   transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease;
 }
@@ -239,7 +245,7 @@
    面板很窄，一行行看过去时「哪一段是打开的」要能一眼扫到。 */
 .agent-history-row.is-active {
   border-color: var(--focus-line);
-  background: #12221f;
+  background: var(--ok-surface);
 }
 
 .agent-history-row.is-active::before {
@@ -249,7 +255,7 @@
   bottom: 8px;
   left: -1px;
   width: 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-detail);
   background: var(--focus-line);
 }
 
@@ -265,7 +271,7 @@
   flex-direction: column;
   gap: 5px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: inherit;
   padding: 9px 10px 8px;
@@ -284,7 +290,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -294,7 +300,7 @@
 .agent-history-row-top time {
   flex: 0 0 auto;
   color: var(--faint);
-  font-size: 9px;
+  font-size: var(--text-caption);
   white-space: nowrap;
   transition: opacity var(--motion-fast) ease;
 }
@@ -316,7 +322,7 @@
   display: -webkit-box;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -325,18 +331,20 @@
 .agent-history-row-meta {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   color: var(--faint);
-  font-size: 9px;
+  font-size: var(--text-caption);
 }
 
 /* 目标是服务器**名字**，不是 srv_ 开头的 id：列表要回答「这是冲着哪台机器去的」。 */
 .agent-history-chip {
+  min-width: 0;
   max-width: 132px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   padding: 1px 6px;
   text-overflow: ellipsis;
@@ -345,15 +353,15 @@
 
 .agent-history-badge {
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   padding: 1px 6px;
 }
 
 /* 搜索命中：只染底色，不动字形 —— 一段标题里的命中不该改变它的粗细与行高。 */
 .agent-history-match {
-  border-radius: 2px;
-  background: #2c3f3a;
+  border-radius: var(--radius-detail);
+  background: var(--ok-surface);
   color: inherit;
   padding: 0 1px;
 }
@@ -367,7 +375,7 @@
   align-items: center;
   gap: 2px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--surface-3);
   padding: 1px;
   opacity: 0;
@@ -393,7 +401,7 @@
 
 .agent-history-rename-input {
   min-height: 30px;
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-rename-actions,
@@ -407,7 +415,7 @@
 .agent-history-rename-actions .text-button,
 .agent-history-confirm-actions .text-button {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-rename-actions .text-button:hover:not(:disabled),
@@ -419,7 +427,7 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--danger-surface);
   padding: 9px 10px;
 }
@@ -427,7 +435,7 @@
 .agent-history-confirm p {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -439,7 +447,7 @@
 
 .agent-history-confirm-delete:hover:not(:disabled) {
   border-color: var(--danger-line);
-  background: #2f1a1e;
+  background: var(--danger-surface);
 }
 
 /* 还有更多记录时刻意画成虚线：它是一条「继续往下」的边界，不是一个普通按钮。 */
@@ -449,11 +457,11 @@
   justify-content: center;
   gap: 6px;
   border: 1px dashed var(--line-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   padding: 8px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-history-more:hover:not(:disabled) {
@@ -483,8 +491,8 @@
 }
 
 .agent-history-delete:hover:not(:disabled) {
-  border-color: #704044;
-  background: #291a1d;
+  border-color: var(--danger-line);
+  background: var(--danger-surface);
   color: var(--danger);
 }
 
@@ -506,24 +514,24 @@
 
 .agent-history-empty strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--text-label);
 }
 
 .agent-history-empty p {
   max-width: 230px;
   margin: 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
 }
 
 .agent-history-error {
-  border: 1px solid #704044;
-  border-radius: 7px;
-  background: #291a1d;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-control);
+  background: var(--danger-surface);
   color: var(--danger);
   padding: 8px 9px;
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -559,3 +567,83 @@
     opacity: 1;
   }
 }
+
+.agent-task-heading { display: flex; min-width: 0; flex: 1; align-items: center; gap: 12px; }
+.agent-task-trigger { display: inline-flex; min-width: 0; max-width: 280px; align-items: center; gap: 6px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text); padding: 5px 6px; font: inherit; font-size: var(--text-label); text-align: left; }
+.agent-task-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-task-trigger > svg { flex-shrink: 0; color: var(--faint); }
+.agent-task-trigger:hover:not(:disabled), .agent-task-trigger.is-active { background: var(--material-hover); }
+.agent-task-heading > .agent-context { flex: 0 1 auto; font-size: var(--text-caption); }
+.agent-context-usage { color: var(--faint); font-size: var(--text-caption); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ai-first .agent-panel.agent-workspace:has(.agent-task-popover) { position: relative; }
+.agent-task-popover { position: absolute; top: 50px; left: 12px; z-index: 30; display: flex; width: min(440px, calc(100% - 24px)); max-height: min(620px, calc(100% - 72px)); border: 1px solid var(--line-strong); border-radius: var(--radius-panel); background: var(--surface-2); box-shadow: var(--shadow-popover, var(--shadow-frame)); overflow: hidden; }
+.agent-history-pane.is-compact { width: 100%; gap: 8px; padding: 10px; }
+.is-compact .agent-history-heading { align-items: center; }
+.is-compact .agent-history-heading h3 { font-size: var(--text-label); font-weight: 500; }
+.is-compact .agent-history-summary { display: none; }
+.is-compact .agent-history-heading-actions { gap: 8px; }
+.is-compact .agent-history-heading-actions .icon-button { width: 24px; height: 24px; }
+.agent-context-reset { font-size: var(--text-caption); }
+.is-compact .agent-history-panel { min-height: 140px; max-height: 440px; }
+.is-compact .agent-history-list { gap: 8px; }
+.is-compact .agent-history-group { gap: 2px; }
+.is-compact .agent-history-group-label { background: var(--surface-2); }
+.is-compact .agent-history-row { border-color: transparent; background: transparent; }
+.is-compact .agent-history-row:hover { background: var(--material-hover); }
+.is-compact .agent-history-row.is-active { background: var(--material-active); }
+.is-compact .agent-history-row-open { gap: 3px; padding: 7px 8px; }
+.is-compact .agent-history-row-preview { -webkit-line-clamp: 1; }
+.is-compact .agent-history-row-meta { display: none; }
+.is-compact .agent-history-empty { gap: 6px; padding: 24px 8px; }
+.is-compact .agent-history-empty > svg { display: none; }
+.is-compact .agent-history-empty > p:not(:has(button)) { max-width: 34ch; }
+@container agent-workspace (max-width: 680px) {
+  .agent-task-heading > .agent-context, .agent-token-usage { display: none; }
+  .agent-task-heading { gap: 4px; }
+  .agent-task-trigger { max-width: 210px; }
+  .agent-context-usage { font-size: 10px; }
+}
+
+/* The title keeps its place while secondary launcher labels fold to icons.
+   Text stays in the accessibility tree and every control remains in Tab order. */
+.ai-first .agent-header .agent-task-heading { flex: 1 1 0; }
+.ai-first .agent-header .agent-header-actions { flex: 0 1 auto; }
+.agent-workspace-controls { display: inline-flex; min-width: 0; flex: 0 1 auto; align-items: center; gap: 5px; }
+.agent-workspace-controls > .workpages-launcher { flex-shrink: 0; }
+.agent-workspace-controls .workspace-guide-toggle { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; min-height: 28px; padding: 4px 6px; white-space: nowrap; font-size: var(--text-caption); }
+.agent-workspace-controls > :is(button, .live-preview-control) { flex-shrink: 0; }
+@container agent-workspace (max-width: 1000px) {
+  .ai-first .agent-header .agent-task-heading > .agent-context { display: none; }
+  .ai-first .agent-header .agent-header-actions { gap: 6px; }
+  .ai-first .agent-header .agent-status[data-idle="true"] { display: none; }
+  .agent-workspace-controls { gap: 3px; }
+  .ai-first .agent-header .workpages-launcher-button { width: 28px; min-width: 28px; min-height: 28px; padding: 5px; }
+  .ai-first .agent-header .workpages-launcher-button > span,
+  .ai-first .agent-header .live-preview-label { position: absolute; display: block; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .ai-first .agent-header .live-preview-control { min-height: 28px; gap: 4px; padding: 4px 6px; }
+  .ai-first .agent-header .agent-token-usage { display: none; }
+}
+@container agent-workspace (max-width: 780px) {
+  .ai-first .agent-header .agent-workspace-controls .workspace-guide-toggle { display: inline-flex; justify-content: center; width: 28px; min-width: 28px; height: 28px; padding: 4px; }
+  .ai-first .agent-header .workspace-guide-toggle > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .agent-task-trigger { max-width: 220px; }
+}
+@container agent-workspace (max-width: 560px) {
+  .ai-first .agent-header { gap: 6px; padding-inline: 12px; }
+  .ai-first .agent-header .agent-header-actions { gap: 4px; }
+  .agent-task-trigger { max-width: 150px; padding-inline: 3px; }
+  .agent-context-caption, .agent-context-compacted { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .agent-workspace-controls { gap: 1px; }
+}
+
+/* Recents belong to the conversation, in the same reading column as the composer. */
+.agent-recent-conversations { display: grid; gap: 2px; min-width: 0; margin: 18px 4px 0; color: var(--faint); font-size: var(--text-caption); }
+.agent-recent-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+.agent-recent-conversations button { border: 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.agent-recent-conversations button:disabled { opacity: .5; cursor: default; }
+.agent-recent-heading button { display: inline-flex; align-items: center; gap: 3px; padding: 4px 0 4px 8px; }
+.agent-recent-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 29px; padding: 4px 6px; text-align: left; border-radius: var(--radius-control); }
+.agent-recent-row > .icon, .agent-recent-row time { flex: 0 0 auto; color: var(--faint); }
+.agent-recent-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-recent-row:not(:disabled):hover { color: var(--text); background: var(--material-hover); }
+.agent-recent-error { display: flex; align-items: center; gap: 8px; color: var(--warning); }

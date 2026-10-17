@@ -8,34 +8,37 @@
  * 模块内部，对外只暴露「有哪些服务器可提及」和一个「执行了这个命令」回调 ——
  * 这样面板不必知道弹窗的存在，而候选逻辑本身已在 composer-triggers 里被单独测试。
  *
- * 尚未接入的能力（语音）一律呈现为 disabled 并写明原因，
- * 不留「看起来能点、点了没反应」的假入口。
+ * 只呈现已经接入的输入能力。
  */
 
 import {
   useCallback,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
   type ClipboardEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 
 import {
-  AGENT_PROMPT_LIMITS,
   type AgentAudioPromptPart,
   type AgentDocumentPromptPart,
   type AgentImagePromptPart,
   type AgentPermissionMode,
   type AgentPromptPart,
   type AgentRunMode,
+  type AgentReasoningEffort,
   type Environment,
 } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
+import { AGENT_TEAMS, type AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
-import { ModelPicker } from "./ModelPicker.js";
+import { composerKeyAction } from "./composer-keyboard.js";
+import { ReasoningPicker } from "./ReasoningPicker.js";
 import {
   audioAttachmentUrl,
   FILE_ATTACHMENT_ACCEPT,
@@ -58,7 +61,7 @@ import {
   type MentionCandidate,
   type Submission,
 } from "./composer-triggers.js";
-import { APPROVAL_OPTIONS, APPROVAL_ORDER, RUN_MODE_ORDER, RUN_MODE_SPECS, approvalOptionSpec, runModeSpec } from "./run-mode.js";
+import { approvalOptionSpec, runModeSpec } from "./run-mode.js";
 import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
@@ -77,6 +80,7 @@ export function AgentComposer({
   stopping,
   canSend,
   canStop,
+  sendDisabledReason,
   permissionMode,
   onPermissionModeChange,
   runMode,
@@ -90,8 +94,16 @@ export function AgentComposer({
   selectedModelKey,
   selectedModelLabel,
   onSelectModel,
+  reasoningLevels = [],
+  reasoningEffort = null,
+  onReasoningEffortChange,
   mentions,
   commandContext,
+  roles = [],
+  selectedRoleId = null,
+  onSelectRole,
+  notices,
+  status,
 }: {
   prompt: string;
   onPromptChange: (value: string) => void;
@@ -108,6 +120,7 @@ export function AgentComposer({
   stopping: boolean;
   /** 当前是否允许提交（取决于 shell、sidecar、provider 与归档状态）。 */
   canSend: boolean;
+  sendDisabledReason?: string;
   /** 运行中有 runId 且没有正在停止时才允许中断。 */
   canStop: boolean;
   permissionMode: AgentPermissionMode;
@@ -124,12 +137,20 @@ export function AgentComposer({
   targetEnvironment: Environment;
   models: ReadonlyArray<{ key: string; label: string; providerLabel?: string }>;
   selectedModelKey: string | null;
-  /** 当前选中模型的完整名称，用于在输入框上方显示当前运行目标。 */
+  /** 当前选中模型的完整名称。 */
   selectedModelLabel: string | null;
   onSelectModel: (key: string) => void;
+  reasoningLevels?: readonly AgentReasoningEffort[];
+  reasoningEffort?: AgentReasoningEffort | null;
+  onReasoningEffortChange?: (value: AgentReasoningEffort | null) => void;
   /** 可被 @ 提及的服务器。 */
   mentions: readonly MentionCandidate[];
   commandContext: CommandContext;
+  roles?: readonly AgentRole[];
+  selectedRoleId?: string | null;
+  onSelectRole?: (roleId: string | null) => void;
+  notices?: ReactNode;
+  status?: ReactNode;
 }) {
   const modeSpec = runModeSpec(runMode);
   const approvalSpec = approvalOptionSpec(permissionMode);
@@ -137,14 +158,13 @@ export function AgentComposer({
   const policyWarning = policyEnvironmentWarning(runPolicy, targetEnvironment);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const otherFileInputRef = useRef<HTMLInputElement>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [draggingAttachment, setDraggingAttachment] = useState(false);
   const [trigger, setTrigger] = useState<ActiveTrigger | null>(null);
   const [highlight, setHighlight] = useState(0);
   /** Escape 之后本次触发词不再弹窗，直到内容变化。 */
   const [dismissed, setDismissed] = useState(false);
-  /** 「+」展开的设置面板：运行模式与批准方式都在这里。 */
+  /** 运行设置：运行模式与批准方式都在这里。 */
   const [menuOpen, setMenuOpen] = useState(false);
   const imageAttachments = attachments.filter(
     (attachment): attachment is AgentImagePromptPart => attachment.type === "image",
@@ -162,6 +182,8 @@ export function AgentComposer({
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
   const hasContent = Boolean(prompt.trim() || attachments.length);
+  // Preparing a local draft does not require a connected model or runtime.
+  const canEdit = !commandContext.archived;
 
   /**
    * 输入框随内容长高，封顶由 CSS 的 max-height 决定。
@@ -202,7 +224,7 @@ export function AgentComposer({
   const suggestionsPresence = usePresence(open, { exitAnimation: "popover-exit" });
   const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
   const sendPresence = usePresence(hasContent && !running, { exitAnimation: "pop-exit" });
-  const runningPresence = usePresence(running, { exitAnimation: "expand-exit" });
+  const runningPresence = usePresence(running, { exitAnimation: "pop-exit" });
 
   /* 面板打开时把焦点送进去。
      这不是锦上添花，是这一处原先真的走不通：面板在 DOM 里排在工具栏**之前**，
@@ -253,6 +275,7 @@ export function AgentComposer({
      被拍扁了，而不是「收回去」。所以这里缓存最后一次非空的列表与高亮位置。
      这是一份渲染缓存，不是状态：它不参与任何判断，只在 closing 时被读取。 */
   const lastSuggestions = useRef<{ items: Suggestion[]; active: number }>({ items: [], active: 0 });
+  const suggestionsId = useId();
   if (open) lastSuggestions.current = { items: suggestions, active };
   const visibleSuggestions = suggestionsPresence.closing ? lastSuggestions.current.items : suggestions;
   const visibleActive = suggestionsPresence.closing ? lastSuggestions.current.active : active;
@@ -283,7 +306,7 @@ export function AgentComposer({
   };
 
   const submit = (): void => {
-    if (!hasContent) return;
+    if (!hasContent || !canEdit) return;
     setTrigger(null);
     setDismissed(false);
     setAttachmentError(null);
@@ -291,7 +314,7 @@ export function AgentComposer({
   };
 
   const addFiles = async (files: readonly File[]): Promise<void> => {
-    if (!canSend || running || files.length === 0) return;
+    if (!canEdit || files.length === 0) return;
     let next: AgentPromptPart[] = [...attachments];
     let error: string | null = null;
     for (const file of files) {
@@ -341,37 +364,21 @@ export function AgentComposer({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    // 候选列表打开时，方向键与 Enter 归列表所有。
-    if (open) {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setHighlight((current) => (current + 1) % suggestions.length);
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setHighlight((current) => (current - 1 + suggestions.length) % suggestions.length);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setDismissed(true);
-        return;
-      }
-      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-        const suggestion = suggestions[active];
-        if (suggestion && (suggestion.kind === "mention" || suggestion.reason === null)) {
-          event.preventDefault();
-          applySuggestion(suggestion);
-          return;
-        }
-        // 命令不可用时不吞掉 Enter，让用户照常提交并看到明确结果。
-      }
-    }
-    // 输入法组合中的 Enter 是选词确认，不是发送。
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    const suggestion = suggestions[active];
+    const action = composerKeyAction({
+      key: event.key, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey, altKey: event.altKey,
+      isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode,
+    }, { open, canComplete: Boolean(suggestion && (suggestion.kind === "mention" || suggestion.reason === null)) });
+    if (action === "native") return;
     event.preventDefault();
-    submit();
+    switch (action) {
+      case "next": setHighlight((current) => (current + 1) % suggestions.length); break;
+      case "previous": setHighlight((current) => (current - 1 + suggestions.length) % suggestions.length); break;
+      case "dismiss": event.stopPropagation(); setDismissed(true); break;
+      case "complete": if (suggestion) applySuggestion(suggestion); break;
+      case "submit": submit(); break;
+    }
   };
 
   return (
@@ -379,12 +386,12 @@ export function AgentComposer({
       <div
         className={`agent-composer-shell${draggingAttachment ? " is-dragging-attachment" : ""}`}
         onDragEnter={(event) => {
-          if (running || !canSend) return;
+          if (!canEdit || !event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
           setDraggingAttachment(true);
         }}
         onDragOver={(event) => {
-          if (running || !canSend) return;
+          if (!canEdit || !event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }}
@@ -394,109 +401,118 @@ export function AgentComposer({
           }
         }}
         onDrop={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
           setDraggingAttachment(false);
           void addFiles([...event.dataTransfer.files]);
         }}
       >
-        {imageAttachments.length > 0 ? (
-          <ul className="agent-composer-attachments" aria-label="待发送图片">
-            {imageAttachments.map((image, index) => (
-              <li key={`${image.name ?? "image"}-${index}`} className="agent-composer-attachment">
-                <img
-                  src={imageAttachmentUrl(image)}
-                  alt={image.name ?? `图片 ${index + 1}`}
-                  loading="lazy"
-                  referrerPolicy="no-referrer"
-                />
-                <span title={image.name}>{image.name ?? `图片 ${index + 1}`}</span>
-                <button
-                  type="button"
-                  aria-label={`移除${image.name ?? `图片 ${index + 1}`}`}
-                  title="移除图片"
-                  disabled={running}
-                  onClick={() => removeAttachment(image)}
-                >
-                  <Icon name="close" size="xs" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {fileAttachments.length > 0 ? (
-          <ul className="agent-composer-file-attachments" aria-label="待发送文本文件">
-            {fileAttachments.map((attachment, index) => (
-                <li
-                  key={`${attachment.name}-${index}`}
-                  className="agent-composer-file-attachment"
-                >
-                  <Icon name="file" size="sm" />
-                  <span title={attachment.name}>{attachment.name}</span>
+        {draggingAttachment ? <div className="agent-composer-drop-target" aria-hidden="true"><Icon name="plus" size="md" /><span>添加到对话</span></div> : null}
+        {attachments.length ? <div className="agent-composer-attachment-rail">
+          {imageAttachments.length > 0 ? (
+            <ul className="agent-composer-attachments" aria-label="待发送图片">
+              {imageAttachments.map((image, index) => (
+                <li key={`${image.name ?? "image"}-${index}`} className="agent-composer-attachment agent-composer-image-attachment">
+                  <img
+                    src={imageAttachmentUrl(image)}
+                    alt={image.name ?? `图片 ${index + 1}`}
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                  />
+                  <span title={image.name}>{image.name ?? `图片 ${index + 1}`}</span>
                   <button
                     type="button"
-                    aria-label={`移除${attachment.name}`}
-                    title="移除文本文件"
+                    aria-label={`移除${image.name ?? `图片 ${index + 1}`}`}
+                    title="移除图片"
                     disabled={running}
-                    onClick={() => removeAttachment(attachment)}
+                    onClick={() => removeAttachment(image)}
                   >
                     <Icon name="close" size="xs" />
                   </button>
                 </li>
               ))}
-          </ul>
-        ) : null}
-        {documentAttachments.length > 0 ? (
-          <ul className="agent-composer-file-attachments" aria-label="待发送 PDF">
-            {documentAttachments.map((document, index) => (
-              <li
-                key={`${document.name}-${index}`}
-                className="agent-composer-file-attachment"
-              >
-                <Icon name="file" size="sm" />
-                <span title={document.name}>{document.name}</span>
-                <button
-                  type="button"
-                  aria-label={`移除${document.name}`}
-                  title="移除 PDF"
-                  disabled={running}
-                  onClick={() => removeAttachment(document)}
+            </ul>
+          ) : null}
+          {fileAttachments.length > 0 ? (
+            <ul className="agent-composer-file-attachments" aria-label="待发送文本文件">
+              {fileAttachments.map((attachment, index) => (
+                  <li
+                    key={`${attachment.name}-${index}`}
+                    className="agent-composer-file-attachment"
+                  >
+                    <Icon name="file" size="sm" />
+                    <span title={attachment.name}>{attachment.name}</span>
+                    <button
+                      type="button"
+                      aria-label={`移除${attachment.name}`}
+                      title="移除文本文件"
+                      disabled={running}
+                      onClick={() => removeAttachment(attachment)}
+                    >
+                      <Icon name="close" size="xs" />
+                    </button>
+                  </li>
+                ))}
+            </ul>
+          ) : null}
+          {documentAttachments.length > 0 ? (
+            <ul className="agent-composer-file-attachments" aria-label="待发送 PDF">
+              {documentAttachments.map((document, index) => (
+                <li
+                  key={`${document.name}-${index}`}
+                  className="agent-composer-file-attachment"
                 >
-                  <Icon name="close" size="xs" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {audioAttachments.length > 0 ? (
-          <ul className="agent-composer-attachments" aria-label="待发送音频">
-            {audioAttachments.map((audio, index) => (
-              <li
-                key={`${audio.name ?? "audio"}-${index}`}
-                className="agent-composer-attachment agent-composer-audio-attachment"
-              >
-                {/* 用浏览器自带的播放器预览：它是本地 data URL，不经过任何远端请求。 */}
-                <audio controls preload="metadata" src={audioAttachmentUrl(audio)} />
-                <span title={audio.name}>{audio.name ?? `音频 ${index + 1}`}</span>
-                <button
-                  type="button"
-                  aria-label={`移除${audio.name ?? `音频 ${index + 1}`}`}
-                  title="移除音频"
-                  disabled={running}
-                  onClick={() => removeAttachment(audio)}
+                  <Icon name="file" size="sm" />
+                  <span title={document.name}>{document.name}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除${document.name}`}
+                    title="移除 PDF"
+                    disabled={running}
+                    onClick={() => removeAttachment(document)}
+                  >
+                    <Icon name="close" size="xs" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {audioAttachments.length > 0 ? (
+            <ul className="agent-composer-attachments" aria-label="待发送音频">
+              {audioAttachments.map((audio, index) => (
+                <li
+                  key={`${audio.name ?? "audio"}-${index}`}
+                  className="agent-composer-attachment agent-composer-audio-attachment"
                 >
-                  <Icon name="close" size="xs" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+                  {/* 用浏览器自带的播放器预览：它是本地 data URL，不经过任何远端请求。 */}
+                  <audio controls preload="metadata" src={audioAttachmentUrl(audio)} />
+                  <span title={audio.name}>{audio.name ?? `音频 ${index + 1}`}</span>
+                  <button
+                    type="button"
+                    aria-label={`移除${audio.name ?? `音频 ${index + 1}`}`}
+                    title="移除音频"
+                    disabled={running}
+                    onClick={() => removeAttachment(audio)}
+                  >
+                    <Icon name="close" size="xs" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div> : null}
         {attachmentError ? <p className="agent-composer-attachment-error" role="status">{attachmentError}</p> : null}
+        {notices ? <div className="agent-input-notices">{notices}</div> : null}
         <textarea
           ref={inputRef}
           rows={1}
-          aria-label="Agent 输入"
+          aria-label="消息输入"
+          aria-autocomplete="list"
+          aria-controls={open ? suggestionsId : undefined}
+          aria-activedescendant={open && suggestions[active] ? `${suggestionsId}-${active}` : undefined}
+          title="Enter 换行，Ctrl+Enter 发送"
           value={prompt}
-          disabled={!canSend || running}
+          disabled={!canEdit}
           onChange={(event) => {
             const value = event.target.value;
             onPromptChange(value);
@@ -519,32 +535,23 @@ export function AgentComposer({
           ref={fileInputRef}
           className="agent-composer-file-input"
           type="file"
-          accept={IMAGE_ATTACHMENT_ACCEPT}
+          accept={`${IMAGE_ATTACHMENT_ACCEPT},${FILE_ATTACHMENT_ACCEPT}`}
           multiple
           tabIndex={-1}
           onChange={(event) => {
-            void addFiles(Array.from(event.target.files ?? []));
+            void addFiles(Array.from(event.target.files ?? [])).then(() => inputRef.current?.focus());
             event.target.value = "";
           }}
         />
-        <input
-          ref={otherFileInputRef}
-          className="agent-composer-file-input"
-          type="file"
-          accept={FILE_ATTACHMENT_ACCEPT}
-          multiple
-          tabIndex={-1}
-          onChange={(event) => {
-            void addFiles(Array.from(event.target.files ?? []));
-            event.target.value = "";
-          }}
-        />
+
 
         {suggestionsPresence.mounted ? (
           <ul
             className={`composer-suggestions ${suggestionsPresence.closing ? "is-closing" : ""}`}
             role="listbox"
-            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的服务器"}
+            id={suggestionsId}
+            inert={suggestionsPresence.closing}
+            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的队伍与服务器"}
             onAnimationEnd={suggestionsPresence.onAnimationEnd}
           >
             {visibleSuggestions.map((suggestion, index) => {
@@ -554,6 +561,7 @@ export function AgentComposer({
                   <button
                     type="button"
                     role="option"
+                    id={`${suggestionsId}-${index}`}
                     aria-selected={index === visibleActive}
                     className={`composer-suggestion ${index === visibleActive ? "is-active" : ""}`}
                     disabled={disabled}
@@ -581,71 +589,39 @@ export function AgentComposer({
             // （加了反而会让读屏把面板之外的内容整个忽略掉）。它是一个挂在输入区
             // 上的弹出设置面板，焦点在面板与触发按钮之间自由移动即可。
             role="dialog"
-            aria-label="运行设置"
+            aria-label="附件与对话设置"
             tabIndex={-1}
             onAnimationEnd={settingsPresence.onAnimationEnd}
           >
             <section className="agent-settings-group">
-              <p className="agent-settings-title">运行模式</p>
-              <p className="agent-settings-note">决定这次运行能做什么。只读类模式由权限引擎强制，模型无法绕过。</p>
-              <ul className="agent-settings-options">
-                {RUN_MODE_ORDER.map((key) => {
-                  const spec = RUN_MODE_SPECS[key];
-                  return (
-                  <li key={spec.mode}>
-                    <button
-                      type="button"
-                      className={`agent-settings-option ${spec.mode === runMode ? "is-selected" : ""}`}
-                      aria-pressed={spec.mode === runMode}
-                      // 运行中不允许切换：模式是随请求发出去的，中途改变会让
-                      // 「这次运行到底受哪个模式约束」变得说不清。
-                      disabled={running}
-                      onClick={() => onRunModeChange(spec.mode)}
-                    >
-                      <span className="agent-settings-option-label">
-                        {spec.label}
-                        {spec.readOnly ? <span className="agent-settings-badge">不改动</span> : null}
-                      </span>
-                      <span className="agent-settings-option-note">{spec.summary}</span>
-                    </button>
-                  </li>
-                  );
-                })}
-              </ul>
+              <button type="button" className="agent-settings-upload" disabled={!canEdit} onClick={() => { fileInputRef.current?.click(); setMenuOpen(false); }}><Icon name="file" size="md" /><span>上传图片或文件</span></button>
             </section>
-
             <section className="agent-settings-group">
-              <p className="agent-settings-title">批准方式</p>
-              <p className="agent-settings-note">决定允许的操作由谁点头。与运行模式互不冲突。</p>
-              <ul className="agent-settings-options">
-                {APPROVAL_ORDER.map((key) => {
-                  const option = APPROVAL_OPTIONS[key];
-                  return (
-                  <li key={option.value}>
-                    <button
-                      type="button"
-                      className={`agent-settings-option ${option.value === permissionMode ? "is-selected" : ""}`}
-                      aria-pressed={option.value === permissionMode}
-                      disabled={running}
-                      onClick={() => onPermissionModeChange(option.value)}
-                    >
-                      <span className="agent-settings-option-label">{option.label}</span>
-                      <span className="agent-settings-option-note">{option.summary}</span>
-                    </button>
-                  </li>
-                  );
-                })}
-              </ul>
+              <label className="agent-settings-permission"><span>访问权限</span><select aria-label="访问权限" value={permissionMode} disabled={running} onChange={(event) => onPermissionModeChange(event.target.value as AgentPermissionMode)}><option value="ask">请求批准</option><option value="auto">帮我批准</option></select></label>
+            </section>
+            {roles.length ? <section className="agent-settings-group">
+              <p className="agent-settings-title">优先团队</p>
+              <label className="agent-role-picker" title="由协调助手安排工作，或使用 @队伍指定优先处理角色">
+                <span className="sr-only">优先团队</span>
+                <select aria-label="优先团队" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
+                  <option value="">协调助手自动安排</option>
+                  {AGENT_TEAMS.map((team) => <optgroup key={team.id} label={team.label}>
+                    {roles.filter((role) => role.team === team.id).map((role) => <option key={role.id} value={role.id}>{team.label} · {role.name}</option>)}
+                  </optgroup>)}
+                </select>
+              </label>
+            </section> : null}
+            <section className="agent-settings-group">
+              <label className="agent-settings-readonly"><input type="checkbox" checked={modeSpec.readOnly} disabled={running} onChange={(event) => onRunModeChange(event.target.checked ? "readonly" : "goal")} />仅只读</label>
             </section>
 
             <section className="agent-settings-group">
               <p className="agent-settings-title">投递方式</p>
-              <p className="agent-settings-note">流式投递立即返回；等待完成会保留同一事件流，并等终态结果返回。</p>
               <ul className="agent-settings-options">
                 {([
-                  ["async", "流式投递", "发送后立即返回，回答继续通过事件流到达。"],
-                  ["sync", "等待完成", "发送调用等到运行结束后再返回，期间仍会显示流式事件。"],
-                ] as const).map(([value, label, note]) => (
+                  ["async", "流式投递"],
+                  ["sync", "等待完成"],
+                ] as const).map(([value, label]) => (
                   <li key={value}>
                     <button
                       type="button"
@@ -655,7 +631,6 @@ export function AgentComposer({
                       onClick={() => onDeliveryChange(value)}
                     >
                       <span className="agent-settings-option-label">{label}</span>
-                      <span className="agent-settings-option-note">{note}</span>
                     </button>
                   </li>
                 ))}
@@ -664,11 +639,6 @@ export function AgentComposer({
 
             <section className="agent-settings-group">
               <p className="agent-settings-title">目标策略</p>
-              {/* 这两句是这一组存在的理由，不能省：选定的策略**取代**按环境自动的那套，
-                  即使用户选的和目标环境对不上；而高危操作换不来自动批准。 */}
-              <p className="agent-settings-note">
-                决定这次运行按哪套策略判定。选定的策略会取代「按环境自动」，即使目标环境与它不一致；而 high / critical 操作无论选哪套都必须由你批准。
-              </p>
               {policyWarning ? <p className="agent-settings-warning" role="status">{policyWarning}</p> : null}
               <ul className="agent-settings-options">
                 {RUN_POLICY_ORDER.map((key) => {
@@ -685,98 +655,46 @@ export function AgentComposer({
                       onClick={() => onRunPolicyChange(spec.value)}
                     >
                       <span className="agent-settings-option-label">{spec.label}</span>
-                      <span className="agent-settings-option-note">{spec.summary}</span>
                     </button>
                   </li>
                   );
                 })}
               </ul>
             </section>
+            {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
           </div>
         ) : null}
 
         <div className="agent-composer-toolbar">
           <div className="agent-composer-toolbar-left">
-            {/* 最左侧的「+」展开设置：运行模式（做到什么程度）、批准方式（谁
-                点头）与目标策略（按哪套策略判定）。只读模式下「+」保持可点 ——
-                用户必须能改主意。 */}
             <button
               type="button"
               ref={settingsTriggerRef}
-              className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}`}
-              aria-label="运行设置"
+              className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
+              aria-label="添加附件与对话设置"
               aria-expanded={menuOpen}
               aria-haspopup="dialog"
-              title="运行模式与批准方式"
+              title={`${modeSpec.readOnly ? "只读 · " : ""}${approvalSpec.label} · ${policyWarning ?? policySpec.label}`}
               onClick={() => {
                 setMenuOpen((open) => !open);
                 setTrigger(null);
               }}
             >
-              {/* A plus rotated 45° is the close glyph, so the control animates
-                  between the two states instead of swapping one drawing for
-                  another. Keep rendering `plus`: the rotation is the state. */}
-              <Icon name="plus" size="lg" />
+              <Icon name="plus" size="md" />
             </button>
-            <button
-              type="button"
-              className="agent-composer-tool"
-              aria-label="添加图片"
-              title={
-                imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages
-                  ? `每条消息最多 ${AGENT_PROMPT_LIMITS.maxImages} 张图片`
-                  : "添加图片"
-              }
-              disabled={!canSend || running || imageAttachments.length >= AGENT_PROMPT_LIMITS.maxImages}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Icon name="image" size="lg" />
-            </button>
-            <button
-              type="button"
-              className="agent-composer-tool"
-              aria-label="添加文本文件或 PDF"
-              title={
-                fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
-                documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments
-                  ? "文本文件与 PDF 数量都已达到上限"
-                  : "添加文本文件或 PDF"
-              }
-              disabled={
-                !canSend ||
-                running ||
-                (fileAttachments.length >= AGENT_PROMPT_LIMITS.maxFiles &&
-                  documentAttachments.length >= AGENT_PROMPT_LIMITS.maxDocuments)
-              }
-              onClick={() => otherFileInputRef.current?.click()}
-            >
-              <Icon name="file" size="lg" />
-            </button>
-            {/* 当前状态的常驻摘要：不展开菜单也能看出这次运行会怎样。 */}
-            <span className={`agent-mode-summary ${modeSpec.readOnly ? "is-readonly" : ""}`}>
-              {modeSpec.label}
-            </span>
-            <span className="agent-approval-summary" title={approvalSpec.summary}>
-              {approvalSpec.label}
-            </span>
-            <span
-              className={`agent-policy-summary${policyWarning ? " has-warning" : ""}`}
-              title={policyWarning ?? policySpec.summary}
-            >
-              {policyWarning ? <Icon name="warning" size="sm" /> : null}
-              {policySpec.label}
-            </span>
+
           </div>
           <div className="agent-composer-toolbar-right">
-            {models.length ? (
-              <ModelPicker
-                choices={models}
-                selectedKey={selectedModelKey}
-                selectedTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
-                onSelect={onSelectModel}
-                disabled={running}
-              />
-            ) : <span className="agent-model-empty">未配置模型</span>}
+            {models.length ? <ReasoningPicker
+              choices={models}
+              selectedModelKey={selectedModelKey}
+              selectedModelTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
+              onSelectModel={onSelectModel}
+              levels={reasoningLevels}
+              value={reasoningEffort}
+              disabled={running}
+              onChange={(value) => onReasoningEffortChange?.(value)}
+            /> : <span className="agent-model-empty">未配置模型</span>}
             {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
                 点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。
                 语音若要做，应作为真实能力连同它的权限与降级路径一起加回来。 */}
@@ -788,39 +706,30 @@ export function AgentComposer({
                 type="button"
                 className={`agent-send-button ${sendPresence.closing ? "is-closing" : ""}`}
                 aria-label="发送消息"
-                title="发送消息（Enter）"
+                title={canSend ? "发送消息（Ctrl+Enter）" : sendDisabledReason ?? "请连接模型后发送"}
+                aria-keyshortcuts="Control+Enter Meta+Enter"
                 disabled={!canSend}
                 onClick={submit}
                 onAnimationEnd={sendPresence.onAnimationEnd}
               >
-                发送
+                <Icon name="arrowUp" size="md" />
               </button>
             ) : null}
+            {runningPresence.mounted ? <button
+              type="button"
+              className={`agent-stop-button${runningPresence.closing ? " is-closing" : ""}`}
+              aria-label="停止运行"
+              title={stopping ? "停止中" : "停止运行"}
+              disabled={!canStop}
+              onClick={onStop}
+              onAnimationEnd={runningPresence.onAnimationEnd}
+            >
+              <Icon name="stop" size="sm" />
+              <span>{stopping ? "停止中" : "停止"}</span>
+            </button> : null}
           </div>
         </div>
 
-        {runningPresence.mounted ? (
-          <div
-            className={`agent-running-bar ${runningPresence.closing ? "is-closing" : ""}`}
-            onAnimationEnd={runningPresence.onAnimationEnd}
-          >
-            <span className="agent-running-label">
-              <span className="agent-running-dot" aria-hidden="true" />
-              运行中
-            </span>
-            <button
-              type="button"
-              className="agent-stop-button"
-              aria-label="停止 Agent"
-              title={stopping ? "停止中" : "停止 Agent"}
-              disabled={!canStop}
-              onClick={onStop}
-            >
-              <Icon name="stop" size="sm" />
-              停止
-            </button>
-          </div>
-        ) : null}
       </div>
     </footer>
   );

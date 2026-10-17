@@ -19,7 +19,7 @@
  * 3. **不一致时并列显示两个指纹**，并说清可能是什么 —— 服务器换了密钥，或者有人在中间。
  *    这里**没有**「忽略」「继续连接」「仍然信任」按钮：那不是少写一个按钮，而是这个功能
  *    的全部意义（第 5 条）。
- * 4. **「遗忘」的后果写在按钮旁边**：下一次连接会回到 TOFU，也就是不核验就自动接受。
+ * 4. **「遗忘」的后果写在按钮旁边**：再次连接前必须重新探针、核对并信任，不会自动接受。
  *    它不是一个无害的「清理」动作（ADR 0012 的 Consequences）。
  * 5. **显式 CA 策略优先于叶子 pin。** CA 模式连接只接受有效 host certificate，不会再查
  *    `known_hosts`。这时面板必须说清叶子 pin 不参与校验，并禁用只会造成误解的信任/遗忘。
@@ -111,7 +111,7 @@ export function HostKeySection({
             setProbe(null);
             setNotice(
               result.forgotten
-                ? `已删除 ${result.host}:${result.port} 的钉子。下一次连接将回到首次连接的自动信任（TOFU），不再核验指纹。`
+                ? `已移除 ${result.host}:${result.port} 的已存指纹。再次连接前需重新探针、核对并信任。`
                 : `${result.host}:${result.port} 本来就没有钉子，无需遗忘。`,
             );
           },
@@ -210,7 +210,7 @@ export function HostKeyPanel({
             {caPolicyEnabled ? (
               <>
                 这条 known_hosts 记录只是历史叶子指纹，当前不会影响连接。关闭并保存此服务器的
-                CA 策略后，它才会重新成为 TOFU/匹配校验的钉子。
+                CA 策略后，它才会重新作为指纹匹配校验的依据。
               </>
             ) : (
               <>
@@ -327,8 +327,8 @@ export function HostKeyPanel({
 
       {!caPolicyEnabled && pinned ? (
         <p className="form-hint form-hint-warning">
-          「遗忘」会删除这条钉子。<strong>下一次连接这台主机将不再核验</strong>，直接按首次连接
-          信任并记录（TOFU）；已经建立的连接不受影响。要改钉子只能走这条路：遗忘 → 探针 → 信任。
+          「遗忘」会移除本机保存的指纹。<strong>再次连接前必须重新核验</strong>，不会自动信任；
+          已经建立的连接不受影响。更换指纹的步骤：遗忘 → 探针 → 通过可信渠道核对 → 信任。
         </p>
       ) : null}
     </section>

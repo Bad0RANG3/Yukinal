@@ -211,6 +211,26 @@ class ClientTests(unittest.TestCase):
                 _parse_system_snapshot_output(output, nonce)
             self.assertIn(expected_message, str(caught.exception))
 
+    def test_optional_network_snapshot_markers_are_validated_when_present(self) -> None:
+        nonce = "c" * 32
+        legacy = "".join(
+            f"__YK_SNAPSHOT_{nonce}_{command_id}_BEGIN__\nvalue\n"
+            f"__YK_SNAPSHOT_{nonce}_{command_id}_END_0__\n"
+            for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS
+        )
+        extra = (f"__YK_SNAPSHOT_{nonce}_network_routes4_BEGIN__\n[]\n"
+                 f"__YK_SNAPSHOT_{nonce}_network_routes4_END_0__\n")
+        self.assertNotIn("network_routes4", _parse_system_snapshot_output(legacy, nonce))
+        self.assertEqual(_parse_system_snapshot_output(legacy + extra, nonce)["network_routes4"], (0, "[]"))
+        malformed = (
+            extra.replace("BEGIN__", "MISSING__"),
+            extra.replace("_END_0__", "_END_999__"),
+            extra + extra,
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload), self.assertRaises(SshServiceError):
+                _parse_system_snapshot_output(legacy + payload, nonce)
+
     def test_read_only_operations_use_only_their_structured_parameters(self) -> None:
         calls = (
             ("connection_check", lambda: self.client.connection_check("staging-web-01", 7), {}),

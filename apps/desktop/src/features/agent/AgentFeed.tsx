@@ -6,12 +6,12 @@
  * 事实（sidecar、provider、是不是预览模式）。
  */
 
-import type { RefObject, ReactNode, UIEvent } from "react";
+import { useId, type RefObject, type ReactNode, type UIEvent } from "react";
 
 import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
-import { Icon } from "../../components/Icon.js";
 import { AgentEntryView } from "./AgentEntryView.js";
+import { ConversationScrollRail } from "./ConversationScrollRail.js";
 import type { Entry } from "./transcript.js";
 
 export function AgentFeed({
@@ -42,13 +42,15 @@ export function AgentFeed({
   /** 就绪提示等面板级说明，渲染在动态之后。 */
   children?: ReactNode;
 }) {
+  const feedId = useId();
   return (
-    <div ref={feedRef} className="agent-feed" onScroll={onScroll}>
+    <div className="agent-feed-frame">
+    <div id={feedId} ref={feedRef} className="agent-feed" onScroll={onScroll}>
       {entries.length === 0 ? (
         <div className="agent-empty">
-          <span className="agent-empty-mark"><Icon name="sparkle" size="xl" /></span>
-          <strong>随心输入</strong>
-          <p>描述你想完成的事情，Agent 会在当前上下文里协助你。</p>
+          <div className="agent-empty-copy">
+            <strong>新任务</strong>
+          </div>
         </div>
       ) : (
         entries.map((entry, index) => (
@@ -76,6 +78,8 @@ export function AgentFeed({
         </div>
       ) : null}
       {children}
+    </div>
+    <ConversationScrollRail viewportRef={feedRef} viewportId={feedId} />
     </div>
   );
 }

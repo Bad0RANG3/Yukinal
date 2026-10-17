@@ -279,7 +279,7 @@ struct TerminalManager::Impl {
     }
 #else
     if (session->stdin_write >= 0) {
-      close(session->stdin_write);
+      ::close(session->stdin_write);
       session->stdin_write = -1;
     }
 #endif
@@ -578,10 +578,10 @@ struct TerminalManager::Impl {
       dup2(child_stdin[0], STDIN_FILENO);
       dup2(child_stdout[1], STDOUT_FILENO);
       dup2(child_stdout[1], STDERR_FILENO);
-      close(child_stdin[0]);
-      close(child_stdin[1]);
-      close(child_stdout[0]);
-      close(child_stdout[1]);
+      ::close(child_stdin[0]);
+      ::close(child_stdin[1]);
+      ::close(child_stdout[0]);
+      ::close(child_stdout[1]);
       for (auto item = credentials.begin(); item != credentials.end(); ++item) {
         setenv(item.key().c_str(), item.value().get<std::string>().c_str(), 1);
       }
@@ -599,8 +599,8 @@ struct TerminalManager::Impl {
       execve(binary.c_str(), argv.data(), environ);
       _exit(127);
     }
-    close(child_stdin[0]);
-    close(child_stdout[1]);
+    ::close(child_stdin[0]);
+    ::close(child_stdout[1]);
     session->pid = child;
     session->stdin_write = child_stdin[1];
     session->stdout_read = child_stdout[0];

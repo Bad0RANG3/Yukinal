@@ -15,6 +15,66 @@ export type AgentRunState = (typeof AGENT_RUN_STATES)[number];
 /** Derived from the tuple so `schemas/agent.ts` and this type cannot disagree. */
 export type ToolResultStatus = (typeof TOOL_RESULT_STATUSES)[number];
 
+/** A speaker in a shared conversation; this metadata does not grant tool authority. */
+export interface AgentParticipant {
+  id: string;
+  label: string;
+  kind: "agent" | "subagent";
+  /** Required for subagents; the parent must belong to this shared session. */
+  parentId?: string;
+}
+
+/** The active role's instruction, carried separately from the user's message. */
+export interface AgentPersona {
+  id: string;
+  label: string;
+  systemPrompt: string;
+}
+
+/** Historical turns selected for the model; the complete transcript remains on disk. */
+export interface AgentContextUsage {
+  totalTurns: number;
+  includedTurns: number;
+  compactedTurns: number;
+  inputBytes: number;
+  maxInputBytes: number;
+  memorySources?: AgentMemorySource[];
+}
+
+export interface AgentMemorySource {
+  id: string;
+  scope: "global" | "server";
+  serverId?: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface AgentMemory extends AgentMemorySource {
+  content: string;
+  createdAt: string;
+}
+
+export interface AgentMemoryListInput {
+  scope?: "global" | "server";
+  serverId?: string;
+  query?: string;
+  limit?: number;
+}
+
+export interface AgentMemorySaveInput {
+  id?: string;
+  scope: "global" | "server";
+  serverId?: string;
+  title: string;
+  content: string;
+}
+
+export interface AgentMemoryDeleteInput {
+  id: string;
+  scope: "global" | "server";
+  serverId?: string;
+}
+
 export interface ChatSession {
   id: string;
   workspaceId?: string;
@@ -36,6 +96,8 @@ export interface ChatMessage {
   parts?: AgentPromptPart[];
   /** Set for role === "tool": links the bubble to its trace card. */
   traceId?: string;
+  participant?: AgentParticipant;
+  model?: string;
   createdAt: string;
 }
 
@@ -53,6 +115,8 @@ export interface ChatSessionCounts {
 
 export interface ChatSessionListInput {
   query?: string;
+  /** Omitted searches all scopes; null selects global conversations only. */
+  serverId?: string | null;
   /** Omitted returns both states; false returns active sessions, true archived sessions. */
   archived?: boolean;
   /**
@@ -90,6 +154,8 @@ export interface ChatMessageAppendInput {
   content: string;
   parts?: AgentPromptPart[];
   traceId?: string;
+  participant?: AgentParticipant;
+  model?: string;
   createdAt?: string;
 }
 
@@ -222,7 +288,40 @@ export type AgentPromptPart =
   | AgentDocumentPromptPart
   | AgentAudioPromptPart;
 
-/** What UI sends to start a run.: targets are ids, not prose. */
+/** Explicit effort levels supported by verified model adapters. */
+export const AGENT_REASONING_EFFORTS = ["none", "low", "high", "max"] as const;
+export type AgentReasoningEffort = (typeof AGENT_REASONING_EFFORTS)[number];
+
+/** A foreground turn owns this frozen roster; credentials stay in the host. */
+export interface AgentCoordinationConfig {
+  version: 1;
+  roles: Array<{ id: string; team: "blue" | "red" | "purple" | "white" | "yellow" | "orange" | "green"; label: string; systemPrompt: string; providerId?: string; model?: string }>;
+  servers: Array<{ id: string; name: string; environment: ToolTarget["environment"] }>;
+  preferredRoleId?: string;
+}
+
+export interface AgentTeamTask {
+  id: string;
+  runId: string;
+  sessionId: string;
+  parentRunId: string;
+  roleId: string;
+  team: AgentCoordinationConfig["roles"][number]["team"];
+  title: string;
+  serverId: string | null;
+  access: "read" | "write";
+  state: "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  lastTool?: string;
+  result?: string;
+  error?: string;
+  usage?: AgentTokenUsage;
+  approval?: ApprovalRequest;
+}
+
+/** What UI sends to start a run: targets are ids, not prose. */
 export interface AgentRunRequest {
   runId: string;
   sessionId: string;
@@ -231,6 +330,8 @@ export interface AgentRunRequest {
   /** Host-owned budget copied from the durable task; the sidecar cannot widen it. */
   taskBudget?: TaskBudget;
   prompt: string;
+  persona?: AgentPersona;
+  participant?: AgentParticipant;
   /** Stable message identity for admission/retry semantics. */
   messageId?: string;
   /** OpenCode-compatible message parts; `prompt` remains the compatibility fallback. */
@@ -271,6 +372,10 @@ export interface AgentRunRequest {
   providerId?: string;
   /** Optional model override for the selected saved provider. */
   model?: string;
+  /** Omitted uses the provider default; explicit values require adapter support. */
+  reasoningEffort?: AgentReasoningEffort;
+  toolAccess?: "none";
+  coordination?: AgentCoordinationConfig;
 }
 
 /** `agent.run.stop` params: stop decouples from the run only by its id. */
@@ -282,6 +387,8 @@ export interface AgentRunStopParams {
 export interface AgentTokenUsage {
   inputTokens: number;
   outputTokens: number;
+  reportedRequests?: number;
+  unreportedRequests?: number;
 }
 
 export interface AgentRunResult {
@@ -298,6 +405,7 @@ export interface AgentRunResult {
    * can be looked up without replaying the event stream.
    */
   traceId?: string;
+  context?: AgentContextUsage;
 }
 
 /** Approval round-trip between the desktop and the sidecar. */
@@ -358,6 +466,7 @@ export interface ApprovalResponse {
  * apart is not answering the question people actually ask of it (ADR 0014).
  */
 export type AgentStreamEvent =
+  | { type: "agent.team_task"; runId: string; task: AgentTeamTask; at: string }
   | { type: "agent.started"; runId: string; at: string }
   | { type: "agent.thinking"; runId: string; textDelta?: string; at: string }
   | { type: "agent.text"; runId: string; textDelta: string; at: string }

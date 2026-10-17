@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -231,6 +232,8 @@ int run_tests(int argc, char** argv) {
   // Agent run forwarding: the sidecar owns admission, stop and approval state,
   // so the router must relay the three commands instead of returning
   // NOT_IMPLEMENTED.
+  (void)database.create_chat_session("ses_router", std::nullopt, std::nullopt,
+      "Router admission", "2026-10-17T00:00:00Z");
   const auto admitted = router.invoke(
       "agent_run_start",
       {{"runId", "run_router_admission"}, {"sessionId", "ses_router"},
@@ -296,6 +299,93 @@ int run_tests(int argc, char** argv) {
   const auto killed = router.invoke("agent_kill", json::object());
   check(killed.ok && killed.value.value("killed", false),
         "agent_kill should stop the running sidecar");
+
+  // A tiny sidecar relay exercises the router's real private host RPC handler
+  // without a model, provider, or exposing a test-only production entry point.
+  const auto relay_source = directory.path / "context-relay";
+  std::filesystem::create_directories(relay_source / "yukinal_agent");
+  std::ofstream(relay_source / "yukinal_agent" / "__init__.py").close();
+  {
+    std::ofstream script(relay_source / "yukinal_agent" / "sidecar.py");
+    script << R"PY(import json
+import sys
+
+def send(frame):
+    print(json.dumps(frame, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method = frame.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "1.0", "agentVersion": "context-relay"}
+    elif method == "tools.list":
+        result = {"tools": []}
+    elif method == "provider.list":
+        send({"jsonrpc": "2.0", "id": 9000, "method": "host.chat.context", "params": frame["params"]})
+        response = json.loads(sys.stdin.readline())
+        if "error" in response:
+            send({"jsonrpc": "2.0", "id": frame["id"], "error": response["error"]})
+            continue
+        result = response["result"]
+    else:
+        send({"jsonrpc": "2.0", "id": frame["id"], "error": {"code": -32601, "message": "unknown relay method"}})
+        continue
+    send({"jsonrpc": "2.0", "id": frame["id"], "result": result})
+)PY";
+  }
+#ifdef _WIN32
+  SetEnvironmentVariableA("YUKINAL_AGENT_SOURCE", relay_source.string().c_str());
+#else
+  setenv("YUKINAL_AGENT_SOURCE", relay_source.string().c_str(), 1);
+#endif
+  (void)database.create_chat_session("ses_hydration", std::nullopt, std::nullopt,
+      "Hydration snapshot", "2026-10-17T01:00:00Z");
+  const auto stamp = "2026-10-17T01:00:01Z";
+  const json actor = {{"id", "reviewer"}, {"label", "Reviewer"}, {"kind", "agent"}};
+  (void)database.append_chat_message("z_prior", "ses_hydration", "user", "Earlier question",
+      std::nullopt, std::nullopt, stamp);
+  (void)database.append_chat_message("y_answer", "ses_hydration", "assistant", "Earlier answer",
+      std::nullopt, std::nullopt, stamp, actor, std::string("recorded-model"));
+  const json large_attachment = json::array({{{"type", "image"},
+      {"data", std::string(600 * 1024, 'A')}, {"mediaType", "image/png"}}});
+  (void)database.append_chat_message("x_attachment", "ses_hydration", "user", "Attachment question",
+      large_attachment, std::string("trace_attachment"), stamp);
+  (void)database.append_chat_message("a_current", "ses_hydration", "user", "Current question",
+      std::nullopt, std::nullopt, stamp);
+  (void)database.append_chat_message("0_future", "ses_hydration", "assistant", "Future answer",
+      std::nullopt, std::nullopt, stamp);
+  yukinal::desktop_host::IpcRouter context_router(&database, &credentials);
+  check(context_router.invoke("agent_spawn", json::object()).ok,
+        "the context relay sidecar should start");
+  const json context_params = {{"sessionId", "ses_hydration"}, {"excludeMessageId", "a_current"}, {"limit", 1000}};
+  const auto hydrated = context_router.invoke("provider_list", context_params);
+  check(hydrated.ok && hydrated.value.at("messages").size() == 3 &&
+        !hydrated.value.at("truncated").get<bool>(),
+        "attachment bytes must not discard text or earlier hydration messages");
+  const auto& history = hydrated.value.at("messages");
+  check(history.at(0).at("id") == "z_prior" && history.at(1).at("id") == "y_answer" &&
+        history.at(2).at("id") == "x_attachment",
+        "same-second cutoff must retain earlier turns and exclude current/future messages");
+  check(history.at(1).at("participant") == actor && history.at(1).at("model") == "recorded-model" &&
+        history.at(1).at("createdAt") == stamp,
+        "hydration must retain actor, model, and display time metadata");
+  check(!history.at(2).contains("parts") && !history.at(2).contains("traceId") &&
+        !history.at(2).contains("sessionId") && history.at(2).size() == 4,
+        "hydration must project text fields before enforcing its byte limit");
+  auto limited_params = context_params;
+  limited_params["limit"] = 2;
+  const auto limited_history = context_router.invoke("provider_list", limited_params);
+  check(limited_history.ok && limited_history.value.at("messages").size() == 2 &&
+        limited_history.value.at("messages").at(0).at("id") == "y_answer" &&
+        limited_history.value.at("truncated").get<bool>(),
+        "bounded hydration must select the newest earlier text messages in append order");
+  auto foreign_params = context_params;
+  foreign_params["serverId"] = "srv_other";
+  const auto foreign_history = context_router.invoke("provider_list", foreign_params);
+  check(!foreign_history.ok && foreign_history.value.value("code", std::string()) == "INVALID_PARAMS",
+        "the native hydration RPC must reject another server's history");
+  check(context_router.invoke("agent_kill", json::object()).ok,
+        "the context relay sidecar should stop cleanly");
 
   return 0;
 }

@@ -3,12 +3,15 @@
  */
 
 import { z } from "zod";
+import { AgentCoordinationConfigSchema } from "./coordination.js";
+import { AgentParticipantSchema, AgentPersonaSchema } from "./agent-context.js";
 
 import {
   AGENT_AUDIO_MEDIA_TYPES,
   AGENT_DOCUMENT_MEDIA_TYPES,
   AGENT_IMAGE_MEDIA_TYPES,
   AGENT_PROMPT_LIMITS,
+  AGENT_REASONING_EFFORTS,
   APPROVAL_DECISIONS,
   type AgentPromptPart,
 } from "../types/chat.js";
@@ -372,6 +375,8 @@ export function agentPromptCarriesContent(request: {
   );
 }
 
+export const AgentReasoningEffortSchema = z.enum(AGENT_REASONING_EFFORTS);
+
 export const AgentRunRequestSchema = z
   .strictObject({
     runId: z.string().trim().min(1).max(256),
@@ -379,6 +384,8 @@ export const AgentRunRequestSchema = z
     taskId: z.string().trim().min(1).max(256).optional(),
     taskBudget: TaskBudgetSchema.optional(),
     prompt: z.string().max(100_000),
+    persona: AgentPersonaSchema.optional(),
+    participant: AgentParticipantSchema.optional(),
     messageId: z.string().trim().min(1).max(256).optional(),
     parts: AgentPromptPartsSchema.optional(),
     delivery: z.enum(["async", "sync"]).optional(),
@@ -399,6 +406,9 @@ export const AgentRunRequestSchema = z
     mode: AgentRunModeSchema.optional(),
     providerId: z.string().trim().min(1).max(256).optional(),
     model: z.string().trim().min(1).max(256).optional(),
+    reasoningEffort: AgentReasoningEffortSchema.optional(),
+    toolAccess: z.literal("none").optional(),
+    coordination: AgentCoordinationConfigSchema.optional(),
   })
   .superRefine((request, context) => {
     if (!agentPromptCarriesContent(request)) {

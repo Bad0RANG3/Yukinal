@@ -22,6 +22,7 @@ export const EVENT_NAMES = [
   "server.auth_challenge",
   "mcp.oauth_device_code",
   "agent.started",
+  "agent.team_task",
   "agent.thinking",
   "agent.text",
   "agent.usage",
@@ -179,4 +180,4 @@ export type YukinalEvent =
   | { name: "investigation.schedule_notification"; payload: InvestigationScheduleNotificationEvent }
   | { name: "file.local_dropped"; payload: LocalFileDropEvent }
   | { name: "file.transfer_updated"; payload: FileTransferUpdatedEvent }
-  | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };
+  | { name: "agent.team_task" | "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

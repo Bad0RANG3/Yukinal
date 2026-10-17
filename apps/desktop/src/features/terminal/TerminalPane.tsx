@@ -45,8 +45,9 @@ const TERMINAL_THEME = {
   brightWhite: "#f1f1f1",
 };
 
-export function TerminalPane({ active }: { active: boolean }) {
-  const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+export function TerminalPane({ active, serverId }: { active: boolean; serverId?: string | null }) {
+  const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const selectedServerId = serverId === undefined ? workspaceServerId : serverId;
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -213,9 +214,7 @@ export function TerminalPane({ active }: { active: boolean }) {
           resize.dispose();
         });
       })
-      .catch((error) => {
-        if (!disposed) term.write(`\r\n\x1b[1;31m终端打开失败：\x1b[0m${String(error)}\r\n`);
-      });
+      .catch(reportIoError);
     if (activeRef.current) term.focus();
 
     return () => {
@@ -252,13 +251,13 @@ export function TerminalPane({ active }: { active: boolean }) {
   return (
     <section className="terminal-page">
       <div className="terminal-toolbar">
-        <div className="section-heading-inline"><Icon name="terminal" size="md" /><div><p className="eyebrow">SSH</p><h2>终端</h2></div></div>
+        <div className="section-heading-inline"><Icon name="terminal" size="md" /><span>SSH</span></div>
         <span className="terminal-toolbar-note">{TERMINAL_FONT_LABEL[preferences.terminalFont]} · {preferences.terminalFontSize}px</span>
       </div>
       {ioError !== null && (
         <div className="terminal-io-error" role="alert">
           <Icon name="warning" size="sm" />
-          <span>终端输入发送失败：{ioError}</span>
+          <span>终端连接或数据传输失败：{ioError}</span>
           <button
             type="button"
             className="button-secondary"

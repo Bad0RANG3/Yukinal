@@ -8,7 +8,7 @@
 
 namespace yukinal::desktop_host::detail {
 
-inline constexpr std::array<std::string_view, 36> kSchemaMigrations = {
+inline constexpr std::array<std::string_view, 37> kSchemaMigrations = {
     R"YKM001(
     CREATE TABLE servers (
         id          TEXT PRIMARY KEY,
@@ -576,6 +576,11 @@ inline constexpr std::array<std::string_view, 36> kSchemaMigrations = {
     CREATE INDEX idx_file_transfers_status_updated
         ON file_transfers (status, updated_at_epoch_ms DESC);
     )YKM036",
+    R"YKM037(
+    ALTER TABLE chat_messages ADD COLUMN participant_json TEXT;
+    ALTER TABLE chat_messages ADD COLUMN model TEXT;
+    CREATE INDEX idx_chat_sessions_server_updated ON chat_sessions (server_id, updated_at DESC);
+    )YKM037",
 };
 
 }  // namespace yukinal::desktop_host::detail

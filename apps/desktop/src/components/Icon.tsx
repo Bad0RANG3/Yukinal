@@ -79,7 +79,9 @@ export function Icon({ name, size = "md", strokeWidth }: IconProps) {
 }
 
 export type IconName =
+  | "check"
   | "activity"
+  | "board"
   | "agent"
   | "archive"
   | "arrowUp"
@@ -111,16 +113,20 @@ export type IconName =
   | "warning";
 
 function iconBody(name: IconName): ReactNode {
+  if (name === "check") return <path d="m5 12 4 4L19 6" />;
   switch (name) {
     case "servers":
       return <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>;
     case "projects":
       return <><path d="M5 6h5a3 3 0 0 1 3 3v6a3 3 0 0 0 3 3h3" /><path d="M7 4 5 6l2 2M17 16l2 2-2 2" /></>;
+    case "board":
+      return <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16M6 8h.01M12 8h.01M18 8h.01" /></>;
     case "activity":
       return <><circle cx="12" cy="12" r="8" /><path d="M12 8v4l3 2" /></>;
     case "settings":
       return <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.4 1.4-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2h-2v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L9 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H7.7v-2h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L9 9l1.4-1.4.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5v-.2h2v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L20 9l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2v2h-.2a1.7 1.7 0 0 0-1.7 1Z" /></>;
     case "agent":
+      return <><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9l-6 3V6a2 2 0 0 1 1-2Z" /><path d="M8 9h8M8 13h5" /></>;
     case "sparkle":
       return <path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Zm6.5 12.5.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3Z" />;
     case "plus":

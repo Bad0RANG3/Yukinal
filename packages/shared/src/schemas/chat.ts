@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { AgentPromptPartsSchema } from "./permission.js";
+import { AgentParticipantSchema } from "./agent-context.js";
 
 export const ChatMessageRoleSchema = z.enum(["user", "assistant", "tool", "system"]);
 
@@ -23,6 +24,8 @@ export const ChatMessageSchema = z.strictObject({
   content: z.string().max(100_000),
   parts: AgentPromptPartsSchema.optional(),
   traceId: z.string().trim().min(1).max(256).optional(),
+  participant: AgentParticipantSchema.optional(),
+  model: z.string().trim().min(1).max(256).optional(),
   createdAt: z.string().min(1).max(80),
 });
 

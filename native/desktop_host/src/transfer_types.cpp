@@ -497,7 +497,9 @@ void validate_safe_name(const std::string& name) {
     if (byte < 0x20 || byte == 0x7f || byte == '/' || byte == '\\' || byte == ':') reject();
   }
   if (name.back() == ' ' || name.back() == '.') reject();
-#ifdef _WIN32
+  // Reserved device names are rejected on every host: a transfer accepted on a
+  // POSIX host can still target a Windows volume, and the shared contract must
+  // not depend on which platform validated the name.
   const auto dot = name.find('.');
   auto stem = name.substr(0, dot == std::string::npos ? name.size() : dot);
   std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char byte) {
@@ -511,7 +513,6 @@ void validate_safe_name(const std::string& name) {
                   [&stem](const char* reserved) { return stem == reserved; })) {
     reject();
   }
-#endif
 }
 
 void validate_transfer_remote_path(const std::string& path) {

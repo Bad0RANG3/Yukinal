@@ -262,7 +262,13 @@ export type _IpcParamsContracts = {
   agent_kill: Expect<Assignable<ParamsOf<"agent_kill">, IpcCommandMap["agent_kill"]["params"]>>;
   agent_status: Expect<Assignable<ParamsOf<"agent_status">, IpcCommandMap["agent_status"]["params"]>>;
   agent_logs: Expect<Assignable<ParamsOf<"agent_logs">, IpcCommandMap["agent_logs"]["params"]>>;
+  agent_team_tasks: Expect<Assignable<ParamsOf<"agent_team_tasks">, IpcCommandMap["agent_team_tasks"]["params"]>>;
   agent_run_start: Expect<Assignable<ParamsOf<"agent_run_start">, IpcCommandMap["agent_run_start"]["params"]>>;
+  agent_context_reset: Expect<Assignable<ParamsOf<"agent_context_reset">, IpcCommandMap["agent_context_reset"]["params"]>>;
+  agent_context_reset_all: Expect<Assignable<ParamsOf<"agent_context_reset_all">, IpcCommandMap["agent_context_reset_all"]["params"]>>;
+  agent_memory_list: Expect<Assignable<ParamsOf<"agent_memory_list">, IpcCommandMap["agent_memory_list"]["params"]>>;
+  agent_memory_save: Expect<Assignable<ParamsOf<"agent_memory_save">, IpcCommandMap["agent_memory_save"]["params"]>>;
+  agent_memory_delete: Expect<Assignable<ParamsOf<"agent_memory_delete">, IpcCommandMap["agent_memory_delete"]["params"]>>;
   agent_run_stop: Expect<Assignable<ParamsOf<"agent_run_stop">, IpcCommandMap["agent_run_stop"]["params"]>>;
   agent_approval_respond: Expect<Assignable<ParamsOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["params"]>>;
   chat_session_list: Expect<Assignable<ParamsOf<"chat_session_list">, IpcCommandMap["chat_session_list"]["params"]>>;
@@ -354,7 +360,13 @@ export type _IpcResponseContracts = {
   agent_kill: Expect<Assignable<ResponseOf<"agent_kill">, IpcCommandMap["agent_kill"]["response"]>>;
   agent_status: Expect<Assignable<ResponseOf<"agent_status">, IpcCommandMap["agent_status"]["response"]>>;
   agent_logs: Expect<Assignable<ResponseOf<"agent_logs">, IpcCommandMap["agent_logs"]["response"]>>;
+  agent_team_tasks: Expect<Assignable<ResponseOf<"agent_team_tasks">, IpcCommandMap["agent_team_tasks"]["response"]>>;
   agent_run_start: Expect<Assignable<ResponseOf<"agent_run_start">, IpcCommandMap["agent_run_start"]["response"]>>;
+  agent_context_reset: Expect<Assignable<ResponseOf<"agent_context_reset">, IpcCommandMap["agent_context_reset"]["response"]>>;
+  agent_context_reset_all: Expect<Assignable<ResponseOf<"agent_context_reset_all">, IpcCommandMap["agent_context_reset_all"]["response"]>>;
+  agent_memory_list: Expect<Assignable<ResponseOf<"agent_memory_list">, IpcCommandMap["agent_memory_list"]["response"]>>;
+  agent_memory_save: Expect<Assignable<ResponseOf<"agent_memory_save">, IpcCommandMap["agent_memory_save"]["response"]>>;
+  agent_memory_delete: Expect<Assignable<ResponseOf<"agent_memory_delete">, IpcCommandMap["agent_memory_delete"]["response"]>>;
   agent_run_stop: Expect<Assignable<ResponseOf<"agent_run_stop">, IpcCommandMap["agent_run_stop"]["response"]>>;
   agent_approval_respond: Expect<Assignable<ResponseOf<"agent_approval_respond">, IpcCommandMap["agent_approval_respond"]["response"]>>;
   chat_session_list: Expect<Assignable<ResponseOf<"chat_session_list">, IpcCommandMap["chat_session_list"]["response"]>>;

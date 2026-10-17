@@ -1,252 +1,166 @@
-import { NativeSidebar } from "./NativeSidebar.js";
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { TeamHeartbeat, TeamBoardNavFeedback, recordTeamAttention } from "../features/agent-nist/TeamActivity.js";
 import { AgentPanel } from "../features/agent/AgentPanel.js";
-import { GettingStarted } from "../features/onboarding/GettingStarted.js";
 import { useOnboardingStore } from "../features/onboarding/onboarding-store.js";
-import { RuntimeSettings } from "../features/settings/RuntimeSettings.js";
 import { ServerList } from "../features/servers/ServerList.js";
 import { ServerAuthChallengeModal } from "../features/servers/ServerAuthChallengeModal.js";
 import { HostKeyGate } from "../features/servers/HostKeyGate.js";
-import { ServerOverview } from "../features/overview/ServerOverview.js";
 import { Icon, type IconName } from "../components/Icon.js";
-import brandMark from "../assets/brand-mark.png";
-import {
-  PRIMARY_NAV,
-  SERVER_PAGES,
-  useWorkspaceStore,
-  type PrimaryNav,
-  type ServerPage,
-} from "../stores/workspace-store.js";
-import { usePreferencesStore } from "../stores/preferences-store.js";
-import { useServers } from "../lib/servers.js";
-import { isDesktopShell, hasNativeWindowSidebar } from "../lib/ipc.js";
-import { SERVER_STATUS_LABEL } from "../lib/labels.js";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { PRIMARY_NAV, SERVER_PAGES, useWorkspaceStore, type PrimaryNav, type ServerPage } from "../stores/workspace-store.js";
+import { LivePreviewControl } from "./LivePreviewControl.js";
+import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
+import { isPreviewFixture } from "../lib/preview-fixtures.js";
+import { WorkpagesDock } from "../features/workpages/WorkpagesDock.js";
+import { useWorkpagesStore } from "../features/workpages/workpages-store.js";
+import { openNativeWorkpage } from "../lib/ipc.js";
 
-const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
-const RemoteFilesPane = lazy(async () => ({ default: (await import("../features/files/RemoteFilesPane.js")).RemoteFilesPane }));
+const GettingStarted = lazy(async () => ({ default: (await import("../features/onboarding/GettingStarted.js")).GettingStarted }));
+const RuntimeSettings = lazy(async () => ({ default: (await import("../features/settings/RuntimeSettings.js")).RuntimeSettings }));
+const ServerOverview = lazy(async () => ({ default: (await import("../features/overview/ServerOverview.js")).ServerOverview }));
 const ActivityFeed = lazy(async () => ({ default: (await import("../features/activity/ActivityFeed.js")).ActivityFeed }));
 const ServicesPane = lazy(async () => ({ default: (await import("../features/services/ServicesPane.js")).ServicesPane }));
 const LogsPane = lazy(async () => ({ default: (await import("../features/logs/LogsPane.js")).LogsPane }));
-const ProjectsPane = lazy(async () => ({ default: (await import("../features/projects/ProjectsPane.js")).ProjectsPane }));
-const InvestigationsPane = lazy(async () => ({ default: (await import("../features/investigations/InvestigationsPane.js")).InvestigationsPane }));
-
-const PRIMARY_NAV_META: Record<PrimaryNav, { label: string; icon: IconName }> = {
-  servers: { label: "服务器", icon: "servers" },
-  projects: { label: "项目", icon: "projects" },
-  tasks: { label: "排查任务", icon: "agent" },
-  activity: { label: "动态", icon: "activity" },
-  settings: { label: "设置", icon: "settings" },
+const AgentNistPane = lazy(async () => ({ default: (await import("../features/agent-nist/AgentNistPane.js")).AgentNistPane }));
+const VISIBLE_PRIMARY_NAV = PRIMARY_NAV.filter((item) => item !== "tasks");
+const PRIMARY_NAV_META: Record<(typeof VISIBLE_PRIMARY_NAV)[number], { label: string; icon: IconName }> = {
+  board: { label: "看板", icon: "board" },
+  agents: { label: "团队", icon: "agent" },
+  activity: { label: "动态", icon: "activity" }, settings: { label: "设置", icon: "settings" },
 };
-
-const SERVER_PAGE_META: Record<ServerPage, { label: string; icon: IconName }> = {
-  overview: { label: "概览", icon: "servers" },
-  terminal: { label: "终端", icon: "terminal" },
-  files: { label: "文件", icon: "folder" },
-  logs: { label: "日志", icon: "logs" },
-  services: { label: "服务", icon: "services" },
-  activity: { label: "活动", icon: "activity" },
+const SERVER_PAGE_LABEL: Record<ServerPage, string> = {
+  overview: "概览", terminal: "终端", files: "文件",
+  logs: "日志", services: "服务", activity: "活动",
 };
-
-function PageLoadingFallback() {
-  return <div className="compact-empty" role="status">正在加载页面…</div>;
-}
+function PageLoadingFallback() { return <div className="compact-empty" role="status">正在加载页面…</div>; }
+const INSPECTOR_PAGES = SERVER_PAGES.filter((page) => page !== "terminal" && page !== "files");
 
 export function AppShell() {
-  const nativeSidebar = hasNativeWindowSidebar();
   const primary = useWorkspaceStore((state) => state.primary);
   const serverPage = useWorkspaceStore((state) => state.serverPage);
+  const serverDetailOpen = useWorkspaceStore((state) => state.serverDetailOpen);
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
-  const agentOpen = useWorkspaceStore((state) => state.agentOpen);
-  const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
+  const informationOpen = useWorkpagesStore((state) => !state.collapsed && (state.pages.length > 0 || state.operationsOpen));
+  const informationExpanded = useWorkpagesStore((state) => Boolean(state.expandedId));
   const setPrimary = useWorkspaceStore((state) => state.setPrimary);
   const setServerPage = useWorkspaceStore((state) => state.setServerPage);
-  const preferences = usePreferencesStore();
-  const servers = useServers();
-  const selectedServer = servers.data?.find((server) => server.id === selectedServerId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(() => !useOnboardingStore.getState().dismissed);
-  const closeGuide = useCallback(() => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); }, []);
-  const [agentLayoutOpen, setAgentLayoutOpen] = useState(agentOpen);
-  const [agentToggleVisible, setAgentToggleVisible] = useState(!agentOpen);
-  const agentToggleRef = useRef<HTMLButtonElement>(null);
-  const workspaceContentRef = useRef<HTMLDivElement>(null);
-  const focusAgentToggleOnRender = useRef(false);
-  const responsiveAgentDefaultApplied = useRef(false);
-  const terminalActive = primary === "servers" && serverPage === "terminal";
-  const [terminalVisited, setTerminalVisited] = useState(terminalActive);
-  const layoutAgentOpen = agentOpen || agentLayoutOpen;
-  const onAgentCloseStart = useCallback(() => {
-    if (document.activeElement instanceof HTMLElement && document.activeElement.closest("#agent-panel")) {
-      workspaceContentRef.current?.focus({ preventScroll: true });
-    }
-    setAgentLayoutOpen(false);
-    setAgentToggleVisible(false);
+  const [compact, setCompact] = useState(() => window.matchMedia("(max-width: 1180px)").matches);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(() => !isPreviewFixture() && !useOnboardingStore.getState().dismissed);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const contextToggleRef = useRef<HTMLButtonElement>(null);
+  const inspectorRef = useRef<HTMLElement>(null);
+  const aiWorkspaceRef = useRef<HTMLDivElement>(null);
+  const previousPrimary = useRef(primary);
+  const closeGuide = () => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); };
+  const detail = primary === "servers" && serverDetailOpen;
+  const primaryActive = (item: (typeof VISIBLE_PRIMARY_NAV)[number]) => primary === item || (item === "activity" && primary === "servers" && !serverDetailOpen);
+  // Existing navigation requests also open tools on the information surface.
+  useEffect(() => {
+    if (!detail || guideOpen || (serverPage !== "terminal" && serverPage !== "files")) return;
+    useWorkpagesStore.getState().openTool(serverPage, { serverId: selectedServerId });
+    setServerPage("overview");
+    setContextOpen(false);
+  }, [detail, guideOpen, serverPage, selectedServerId, setServerPage]);
+  useEffect(() => {
+    // Retired task navigation can still arrive from an older in-memory view.
+    if (primary === "tasks") { setPrimary("activity"); return; }
+    if (primary === "board") { useWorkpagesStore.getState().openTeamBoard(null); setContextOpen(false); }
+    if (primary !== "board" && previousPrimary.current !== primary && window.matchMedia("(max-width: 1180px)").matches) setContextOpen(true);
+    previousPrimary.current = primary;
+  }, [primary, setPrimary]);
+
+  // Only the compact navigation is modal. The AI workspace never traps Tab or Escape.
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const sidebar = sidebarRef.current;
+    if (!sidebar) return;
+    const frame = requestAnimationFrame(() => sidebar.querySelector<HTMLElement>("button")?.focus());
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && event.target.closest("dialog[open]")) return;
+      if (event.key === "Escape") { event.preventDefault(); setSidebarOpen(false); return; }
+      if (event.key !== "Tab") return;
+      const items = Array.from(sidebar.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), [href]"))
+        .filter((item) => item.getClientRects().length > 0);
+      const first = items[0], last = items.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener("keydown", onKey); sidebarToggleRef.current?.focus({ preventScroll: true }); };
+  }, [sidebarOpen]);
+  useEffect(() => {
+    const layout = window.matchMedia("(max-width: 1180px)"), navigation = window.matchMedia("(max-width: 720px)");
+    const resize = () => { setSidebarOpen(false); setCompact(layout.matches); };
+    const closeNavigation = () => setSidebarOpen(false);
+    layout.addEventListener("change", resize); navigation.addEventListener("change", closeNavigation);
+    return () => { layout.removeEventListener("change", resize); navigation.removeEventListener("change", closeNavigation); };
   }, []);
-  const onAgentCloseEnd = useCallback(() => {
-    focusAgentToggleOnRender.current = true;
-    setAgentToggleVisible(true);
-  }, []);
-
-  useEffect(() => setSidebarOpen(false), [primary, selectedServerId]);
-  useEffect(() => {
-    if (terminalActive) setTerminalVisited(true);
-  }, [terminalActive]);
-  useEffect(() => {
-    if (agentOpen) {
-      setAgentLayoutOpen(true);
-      setAgentToggleVisible(false);
-    }
-  }, [agentOpen]);
-
-  // At tablet widths the Agent is deliberately an overlay (see styles.css), so
-  // showing it by default would hide the very dashboard a user just opened.
-  // Apply this only to the initial responsive state: once someone explicitly
-  // opens the panel, resizing the window must not make that choice disappear.
-  useEffect(() => {
-    if (responsiveAgentDefaultApplied.current) return;
-    responsiveAgentDefaultApplied.current = true;
-    if (window.matchMedia?.(nativeSidebar ? "(max-width: 960px)" : "(max-width: 1150px)").matches) setAgentOpen(false);
-  }, [setAgentOpen, nativeSidebar]);
-
-  useEffect(() => {
-    if (agentOpen || !agentToggleVisible || !focusAgentToggleOnRender.current) return;
-    focusAgentToggleOnRender.current = false;
-    const frame = requestAnimationFrame(() => agentToggleRef.current?.focus({ preventScroll: true }));
-    return () => cancelAnimationFrame(frame);
-  }, [agentOpen, agentToggleVisible]);
-
-  const navigateTab = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const next = event.key === "ArrowRight" ? (index + 1) % SERVER_PAGES.length
-      : event.key === "ArrowLeft" ? (index + SERVER_PAGES.length - 1) % SERVER_PAGES.length
-      : event.key === "Home" ? 0 : event.key === "End" ? SERVER_PAGES.length - 1 : null;
-    if (next === null) return;
-    event.preventDefault();
-    const page = SERVER_PAGES[next];
-    if (!page) return;
-    setServerPage(page);
-    document.getElementById(`server-tab-${page}`)?.focus();
+  const openContext = () => { useWorkpagesStore.getState().setCollapsed(true); setContextOpen(true); requestAnimationFrame(() => inspectorRef.current?.focus({ preventScroll: true })); };
+  const returnToAI = () => {
+    setContextOpen(false); setSidebarOpen(false);
+    useWorkpagesStore.getState().setCollapsed(true);
+    requestAnimationFrame(() => {
+      if (window.matchMedia("(max-width: 1180px)").matches) contextToggleRef.current?.focus({ preventScroll: true });
+      else aiWorkspaceRef.current?.focus({ preventScroll: true });
+    });
   };
-
-  const shellStyle = { "--ui-font-size": `${preferences.uiFontSize}px` } as CSSProperties;
-
+  const navigate = (item: PrimaryNav) => {
+    if (item === "board") { useWorkpagesStore.getState().openTeamBoard(null); setContextOpen(false); }
+    else useWorkpagesStore.getState().setCollapsed(true);
+    setPrimary(item); closeGuide(); setSidebarOpen(false);
+    if (item !== "board" && window.matchMedia("(max-width: 1180px)").matches) openContext();
+  };
+  const navigateTab = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const next = event.key === "ArrowRight" ? (index + 1) % INSPECTOR_PAGES.length : event.key === "ArrowLeft" ? (index + INSPECTOR_PAGES.length - 1) % INSPECTOR_PAGES.length : event.key === "Home" ? 0 : event.key === "End" ? INSPECTOR_PAGES.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault(); const page = INSPECTOR_PAGES[next];
+    if (page) { setServerPage(page); document.getElementById(`server-tab-${page}`)?.focus(); }
+  };
   return (
-    <div
-      className={`app-shell ${layoutAgentOpen ? "" : "agent-collapsed"} ${sidebarOpen ? "sidebar-open" : ""}`}
-      data-native-sidebar={nativeSidebar ? "true" : undefined}
-      data-primary={primary}
-      data-density={preferences.density}
-      data-reduce-motion={preferences.reduceMotion ? "true" : "false"}
-      style={shellStyle}
-    >
-      {!nativeSidebar ? <nav className="app-rail" aria-label="主导航">
-        <div className="brand-mark" aria-label="Yukinal">
-          <img src={brandMark} alt="" />
-        </div>
-        <div className="rail-nav">
-          {PRIMARY_NAV.map((item) => {
-            const meta = PRIMARY_NAV_META[item];
-            return (
-              <button
-                key={item}
-                type="button"
-                title={meta.label}
-                aria-label={meta.label}
-                aria-current={primary === item ? "page" : undefined}
-                onClick={() => { setPrimary(item); if (guideOpen) closeGuide(); }}
-                className={`rail-button ${primary === item ? "rail-button-active" : ""}`}
-              >
-                <span className="rail-icon" aria-hidden="true">
-                  <Icon name={meta.icon} size="lg" />
-                </span>
-                <span>{item === "tasks" ? "排查" : meta.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </nav> : null}
-
-      {!nativeSidebar && primary === "servers" ? <ServerList onClose={() => setSidebarOpen(false)} /> : null}
-      {sidebarOpen ? <button type="button" className="sidebar-scrim" aria-label="关闭服务器列表" onClick={() => setSidebarOpen(false)} /> : null}
-
-      <main className="workspace-main">
-        <header className="workspace-header">
-          <div className="workspace-heading">
-            {/* 这个斜杠是纯装饰：它把「产品名」和「工作区名」在视觉上分开，本身
-                不携带信息。标记成 aria-hidden 之后，读屏不会念出一个孤立的
-                「斜杠」，而它极低的对比度（--line-strong，约 2:1）也就名正言顺 ——
-                WCAG 对纯装饰性文字不作对比度要求。 */}
-            <p className="eyebrow">YUKINAL <span className="breadcrumb-divider" aria-hidden="true">/</span> {primary === "servers" ? "服务器工作区" : "工作区管理"}</p>
-            <h1 title={selectedServer?.name}>{primary === "servers" ? selectedServer?.name ?? "基础设施" : PRIMARY_NAV_META[primary].label}</h1>
-          </div>
+    <div onClickCapture={recordTeamAttention} onFocusCapture={recordTeamAttention} className={`app-shell ai-first ${sidebarOpen ? "navigation-open" : ""} ${compact && contextOpen ? "context-open" : ""} ${informationOpen && !(compact && contextOpen) ? "information-open" : ""} ${informationExpanded ? "information-expanded" : ""}`} data-primary={primary}>
+      <aside className="workspace-sidebar" id="workspace-sidebar" ref={sidebarRef} aria-label="工作区导航">
+        <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
+        <nav className="workspace-navigation" aria-label="主导航">{VISIBLE_PRIMARY_NAV.map((item) => <button type="button" key={item} data-attention={`nav:${item}`} className={`workspace-nav-item team-operation-target ${primaryActive(item) ? "is-active" : ""}`} aria-current={primaryActive(item) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span>{item === "board" ? <TeamBoardNavFeedback /> : null}</button>)}</nav>
+        <ServerList embedded onClose={() => setSidebarOpen(false)} onSelect={() => { useWorkpagesStore.getState().setCollapsed(true); setSidebarOpen(false); closeGuide(); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); }} />
+      </aside>
+      {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
+      <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
+        <AgentPanel workspace onAttentionRequested={returnToAI} onOpenTeam={() => navigate("agents")}
+          workspaceWorkpages={<WorkpagesDock onPopOut={async (page) => {
+            if (!page.serverId || page.kind === "evidence" || page.kind === "artifact" || page.kind === "board") throw new Error("该内容可在工作页中展开");
+            await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });
+          }} />} workspaceControls={<>
+          {import.meta.env.DEV ? <LivePreviewControl /> : null}
+          <button type="button" ref={sidebarToggleRef} className="icon-button navigation-toggle" aria-label="打开导航" aria-controls="workspace-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><Icon name="projects" /></button>
+          <button type="button" className="text-button workspace-guide-toggle" aria-label="连接设置" title="连接设置" onClick={() => { setGuideOpen((open) => !open); openContext(); }}><Icon name="settings" size="sm" /><span>连接设置</span></button>
+          <button type="button" ref={contextToggleRef} className="icon-button context-toggle" aria-label="打开参考面板" aria-controls="workspace-inspector" aria-expanded={contextOpen} onClick={openContext}><Icon name="activity" /></button>
+        </>} />
+      </div>
+      <main className="workspace-main workspace-inspector" id="workspace-inspector" ref={inspectorRef} tabIndex={-1} aria-label="动态与参考资料">
+        {detail && !guideOpen ? <ServerInspectorHeader onBack={() => setPrimary("activity")} onClose={returnToAI} /> : <header className="workspace-header is-titleless">
           <div className="workspace-header-meta">
-            <button type="button" className="button-secondary" aria-expanded={guideOpen} onClick={() => guideOpen ? closeGuide() : setGuideOpen(true)}>使用引导</button>
-            {!nativeSidebar && primary === "servers" ? <button type="button" className="icon-button sidebar-toggle" aria-label={sidebarOpen ? "关闭服务器列表" : "打开服务器列表"} aria-controls="server-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><Icon name="servers" size="md" /></button> : null}
-            {!isDesktopShell() ? <span className="preview-chip">预览模式</span> : selectedServer && primary === "servers" ? <span className={`context-chip server-status-${selectedServer.status}`}>{SERVER_STATUS_LABEL[selectedServer.status]}</span> : null}
-            {!agentOpen && agentToggleVisible ? (
-              <button
-                type="button"
-                className="agent-toggle-inline"
-                ref={agentToggleRef}
-                id="agent-toggle-inline"
-                aria-controls="agent-panel"
-                aria-expanded={false}
-                onClick={() => setAgentOpen(true)}
-              >
-                <Icon name="agent" size="sm" />
-                Agent
-              </button>
-            ) : null}
+            <button type="button" className="icon-button context-close" aria-label="回到对话" onClick={returnToAI}><Icon name="close" /></button>
           </div>
-        </header>
-
-        {primary === "servers" && !guideOpen ? (
-          <div className="server-tabs" role="tablist" aria-label="服务器视图">
-            {SERVER_PAGES.map((page, index) => (
-              <button
-                key={page}
-                type="button"
-                role="tab"
-                id={`server-tab-${page}`}
-                aria-controls="server-view"
-                aria-selected={serverPage === page}
-                tabIndex={serverPage === page ? 0 : -1}
-                onKeyDown={(event) => navigateTab(event, index)}
-                onClick={() => setServerPage(page)}
-                className={`server-tab ${serverPage === page ? "server-tab-active" : ""}`}
-              >
-                <Icon name={SERVER_PAGE_META[page].icon} size="sm" />
-                <span>{SERVER_PAGE_META[page].label}</span>
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        <div ref={workspaceContentRef} className="workspace-content" id={primary === "servers" ? "server-view" : undefined} role={primary === "servers" && !guideOpen ? "tabpanel" : undefined} aria-labelledby={primary === "servers" && !guideOpen ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
-          {guideOpen ? <GettingStarted onClose={closeGuide} /> : null}
+        </header>}
+        {detail && !guideOpen ? <div className="server-tabs" role="tablist" aria-label="服务器视图">{INSPECTOR_PAGES.map((page, index) => <button key={page} type="button" role="tab" data-attention={`view:${page}`} data-server-id={selectedServerId ?? undefined} id={`server-tab-${page}`} aria-controls="server-view" aria-selected={serverPage === page} tabIndex={serverPage === page ? 0 : -1} onKeyDown={(event) => navigateTab(event, index)} onClick={() => setServerPage(page)} className={`server-tab ${serverPage === page ? "server-tab-active" : ""}`}><span>{SERVER_PAGE_LABEL[page]}</span></button>)}</div> : null}
+        <div className="workspace-content" id={detail ? "server-view" : undefined} role={detail && !guideOpen ? "tabpanel" : undefined} aria-labelledby={detail && !guideOpen ? `server-tab-${serverPage}` : undefined} tabIndex={0}>
+          {guideOpen ? <Suspense fallback={<PageLoadingFallback />}><GettingStarted onClose={closeGuide} /></Suspense> : null}
           <div hidden={guideOpen} className="workspace-pages">
-          {primary === "settings" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><RuntimeSettings /></Suspense> : null}
-          {primary === "projects" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ProjectsPane /></Suspense> : null}
-          {primary === "tasks" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><InvestigationsPane /></Suspense> : null}
-          {primary === "activity" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed /></Suspense> : null}
-          {primary === "servers" && !guideOpen ? (
-            <>
-              {/* 任何会建立 SSH 连接的面板都先过主机指纹闸门：未钉住的服务器在认证之前
-                  就会被 `RequireMatch` 拒绝，这里把那次拒绝提前成可操作的核验流程。 */}
-              {serverPage === "overview" ? <HostKeyGate serverId={selectedServerId}><ServerOverview key={selectedServerId} /></HostKeyGate> : null}
-              {serverPage === "files" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><RemoteFilesPane key={selectedServerId} /></Suspense></HostKeyGate> : null}
+            {primary === "settings" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><RuntimeSettings /></Suspense> : null}
+            {primary === "agents" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><AgentNistPane onUseAgent={returnToAI} /></Suspense> : null}
+            {(primary === "activity" || (primary === "servers" && !detail)) && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed /></Suspense> : null}
+            {detail && !guideOpen ? <>
+              {serverPage === "overview" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServerOverview key={selectedServerId} /></Suspense></HostKeyGate> : null}
               {serverPage === "logs" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><LogsPane /></Suspense></HostKeyGate> : null}
               {serverPage === "services" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServicesPane /></Suspense></HostKeyGate> : null}
               {serverPage === "activity" ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed serverId={selectedServerId} /></Suspense> : null}
-            </>
-          ) : null}
-          {terminalVisited || terminalActive ? <div hidden={!terminalActive} className="terminal-container"><HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><TerminalPane key={selectedServerId} active={terminalActive} /></Suspense></HostKeyGate></div> : null}
+            </> : null}
           </div>
         </div>
       </main>
-
-      {agentOpen ? <button type="button" className="agent-scrim" aria-label="关闭 Agent 面板" onClick={() => setAgentOpen(false)} /> : null}
-      <AgentPanel onCloseStart={onAgentCloseStart} onCloseEnd={onAgentCloseEnd} />
-      {nativeSidebar ? <NativeSidebar onNavigate={closeGuide} /> : null}
+      <TeamHeartbeat />
       <ServerAuthChallengeModal />
     </div>
   );

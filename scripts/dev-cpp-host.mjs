@@ -49,7 +49,7 @@ function spawnLongRunning(command, args, options = {}) {
     cwd: options.cwd ?? root,
     env: options.env ?? process.env,
     stdio: "inherit",
-    windowsHide: true,
+    windowsHide: options.windowsHide ?? true,
   });
   runningChildren.add(child);
   const exit = new Promise((resolveResult) => {
@@ -164,7 +164,9 @@ async function main() {
     if (!hostEnvironment.YUKINAL_AGENT_SOURCE) {
       hostEnvironment.YUKINAL_AGENT_SOURCE = join(root, "agent", "src");
     }
-    host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { env: hostEnvironment });
+    // SW_HIDE in STARTUPINFO overrides the WebView's first ShowWindow call.
+    host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { env: hostEnvironment, windowsHide: false });
+    console.log("Desktop live preview is running; saved UI changes update this window automatically.");
     result = await Promise.race([
       vite.exit.then((value) => ({ role: "Vite", value })),
       host.exit.then((value) => ({ role: "C++ host", value })),

@@ -12,17 +12,22 @@ import {
   type ChatMessage,
   type ChatSession,
 } from "@yukinal/shared";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
-import { sessionTitleFromPrompt } from "./transcript.js";
+import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { sessionTitleFromPrompt, type ReplyIdentity } from "./transcript.js";
 
 /** 预览模式没有数据库，但输入框仍要能用；这个 id 永远不会被持久化。 */
 const EPHEMERAL_SESSION_ID = "ses_ui";
 
 export type ChatSessions = {
   activeSessionId: string | null;
+  activeSession: ChatSession | null;
+  title: string;
+  serverId: string | null;
   /** 当前会话已归档：可以读，不能继续发消息。 */
   archived: boolean;
   /** 任何一次记录写入失败的原因；面板负责呈现。 */
@@ -39,7 +44,7 @@ export type ChatSessions = {
     parts?: AgentPromptPart[],
   ): Promise<string>;
   /** 追加一条 Agent 回复；会话不存在时静默跳过。 */
-  recordAssistantMessage(content: string): Promise<void>;
+  recordAssistantMessage(content: string, identity: ReplyIdentity, sessionId: string): Promise<void>;
   /** 归档状态变化只会影响当前会话。 */
   noteSessionUpdated(session: ChatSession): void;
   /** 返回 true 表示被删除的正是当前会话，调用方需要开一段新对话。 */
@@ -48,18 +53,29 @@ export type ChatSessions = {
 
 export function useChatSessions(): ChatSessions {
   const shell = isDesktopShell();
+  const queryClient = useQueryClient();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [archived, setArchived] = useState(false);
+  const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
+  const [title, setTitle] = useState("新任务");
+  const [serverId, setServerId] = useState<string | null>(null);
+  const archived = useWorkspaceStore((state) => state.agentSessionArchived);
+  const setArchived = useWorkspaceStore((state) => state.setAgentSessionArchived);
   const [error, setError] = useState<string | null>(null);
   /**
    * 事件回调只注册一次，因此它必须读到「此刻」的会话 id，而不是注册时的闭包值。
    */
   const activeSessionIdRef = useRef<string | null>(null);
 
+  // Session identity is owned by this mounted panel. Dropping it must also drop
+  // the shared archived/history state rather than leaving a stale editor guard.
+  useEffect(() => () => {
+    useWorkspaceStore.setState({ agentSessionArchived: false, agentHistoryOpen: false });
+  }, []);
+
   const activate = useCallback((sessionId: string | null, nextArchived: boolean): void => {
     activeSessionIdRef.current = sessionId;
     setActiveSessionId(sessionId);
-    setArchived(nextArchived);
+    useWorkspaceStore.setState({ agentSessionArchived: nextArchived, agentHistoryOpen: false });
   }, []);
 
   const recordMessage = useCallback(
@@ -69,8 +85,9 @@ export function useChatSessions(): ChatSessions {
       content: string,
       messageId?: string,
       parts?: AgentPromptPart[],
-    ): Promise<void> => {
-      if (!shell || !sessionId || (!content.trim() && !parts?.length)) return;
+      identity?: ReplyIdentity,
+    ): Promise<boolean> => {
+      if (!shell || !sessionId || (!content.trim() && !parts?.length)) return false;
       try {
         await callDesktop(IPC_COMMANDS.chatMessageAppend, {
           sessionId,
@@ -78,12 +95,16 @@ export function useChatSessions(): ChatSessions {
           role,
           content,
           ...(parts?.length ? { parts } : {}),
+          ...identity,
         });
+        void queryClient.invalidateQueries({ queryKey: ["agent-chat-sessions"] });
+        return true;
       } catch (cause) {
         setError(`对话记录保存失败：${errorMessage(cause)}`);
+        return false;
       }
     },
-    [shell],
+    [shell, queryClient],
   );
 
   const recordUserMessage = useCallback(
@@ -108,47 +129,64 @@ export function useChatSessions(): ChatSessions {
             serverId: serverId ?? undefined,
           });
           sessionId = created.session.id;
+          setActiveSession(created.session);
+          setTitle(created.session.title);
+          setServerId(created.session.serverId ?? null);
           activate(sessionId, false);
         } catch (cause) {
           setError(`对话记录创建失败：${errorMessage(cause)}`);
-          return EPHEMERAL_SESSION_ID;
+          throw new Error(`对话记录创建失败：${errorMessage(cause)}`);
         }
       }
-      await recordMessage(sessionId, "user", prompt, messageId, parts);
+      if (!await recordMessage(sessionId, "user", prompt, messageId, parts)) throw new Error("用户消息未保存，请重试。");
       return sessionId;
     },
     [activate, recordMessage, shell],
   );
 
   const recordAssistantMessage = useCallback(
-    (content: string): Promise<void> => recordMessage(activeSessionIdRef.current, "assistant", content),
+    async (content: string, identity: ReplyIdentity, sessionId: string): Promise<void> => { await recordMessage(sessionId, "assistant", content, undefined, undefined, identity); },
     [recordMessage],
   );
 
   const startNewSession = useCallback((): void => {
     activate(null, false);
+    setActiveSession(null);
+    setTitle("新任务");
+    setServerId(null);
     setError(null);
   }, [activate]);
 
   const openStoredSession = useCallback((session: ChatSession): void => {
     activate(session.id, Boolean(session.archivedAt));
+    setActiveSession(session);
+    setTitle(session.title);
+    setServerId(session.serverId ?? null);
     setError(null);
   }, [activate]);
 
   const noteSessionUpdated = useCallback((session: ChatSession): void => {
     if (session.id !== activeSessionIdRef.current) return;
+    setTitle(session.title);
+    setActiveSession(session);
     setArchived(Boolean(session.archivedAt));
-  }, []);
+  }, [setArchived]);
 
   const noteSessionDeleted = useCallback((sessionId: string): boolean => {
     if (sessionId !== activeSessionIdRef.current) return false;
     activate(null, false);
+    setActiveSession(null);
+    setTitle("新任务");
+    setServerId(null);
     setError(null);
     return true;
   }, [activate]);
 
   return {
     activeSessionId,
+    activeSession,
+    title,
+    serverId,
     archived,
     error,
     startNewSession,

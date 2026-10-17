@@ -22,6 +22,23 @@
 
 /* Agent composer: intentionally mirrors the compact single-card input in the
    reference UI. Advanced task configuration stays out of the primary path. */
+.agent-conversation {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.agent-input-region {
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.agent-input-notices:not(:empty) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .agent-composer {
   border-top: 1px solid var(--line);
   background: var(--composer-bg);
@@ -29,35 +46,55 @@
 }
 
 .agent-composer-shell {
+  container: agent-composer / inline-size;
   position: relative;
   display: flex;
+  min-width: 0;
   min-height: 94px;
   flex-direction: column;
   justify-content: space-between;
   gap: 14px;
-  border: 1px solid var(--composer-line);
-  border-radius: 18px;
+  border: 1px solid var(--edge-subtle);
+  --composer-action-size: 36px;
+  --composer-action-inset: 10px;
+  --composer-radius: calc(var(--composer-action-size) / 2 + var(--composer-action-inset) + 1px);
+  border-radius: var(--composer-radius);
   background: var(--composer-surface);
-  box-shadow: 0 8px 22px rgb(0 0 0 / 18%);
-  padding: 12px 9px 9px 14px;
+  box-shadow: none;
+  padding: 18px var(--composer-action-inset) var(--composer-action-inset) 18px;
 }
 
-/* 焦点提示放在整张输入卡片上，而不是贴着文字画一圈方框。
-   与 .server-search / .agent-history-search 用的是同一套 :focus-within 写法，
-   所以「聚焦的输入区」在全站看起来是一致的一件事。 */
+/* Focus changes the border only; the input surface stays flat and unlit. */
 .agent-composer-shell:focus-within {
-  border-color: var(--focus-line);
-  box-shadow: 0 0 0 3px var(--focus-halo);
+  border-color: var(--edge-normal);
+  box-shadow: none;
 }
 
 .agent-composer-shell.is-dragging-attachment {
-  border-color: var(--composer-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--composer-accent) 22%, transparent);
+  border-color: var(--edge-normal);
+  box-shadow: none;
+}
+
+.agent-composer-drop-target {
+  position: absolute;
+  z-index: 25;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+  border: 1px dashed var(--muted);
+  border-radius: inherit;
+  background: var(--composer-surface);
+  color: var(--text);
 }
 
 .agent-composer-file-input {
   display: none;
 }
+
+.agent-composer-attachment-rail { display: flex; min-width: 0; max-width: 100%; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
 
 .agent-composer-attachments {
   display: flex;
@@ -66,7 +103,7 @@
   max-width: 100%;
   margin: 0;
   padding: 0 0 2px;
-  overflow-x: auto;
+  flex-wrap: wrap;
   list-style: none;
 }
 
@@ -78,7 +115,7 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--composer-line);
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   background: var(--composer-bg);
   padding: 5px;
 }
@@ -86,9 +123,31 @@
 .agent-composer-attachment img {
   width: 40px;
   height: 40px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   object-fit: cover;
   background: var(--surface-3);
+}
+
+.agent-composer-image-attachment {
+  position: relative;
+  display: flex;
+  width: 76px;
+  min-width: 76px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+.agent-composer-image-attachment img { width: 76px; height: 76px; border-radius: 12px; }
+.agent-composer-image-attachment > span { padding-inline: 2px; }
+.agent-composer-attachment.agent-composer-image-attachment button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--composer-surface);
+  color: var(--text);
 }
 
 /* 音频附件比图片宽：播放器需要横向空间，而它取代的是那个 40px 的缩略图。 */
@@ -118,11 +177,11 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--surface-3);
   padding: 6px 9px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .agent-user-file-attachment span {
@@ -136,7 +195,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -147,7 +206,7 @@
   height: 20px;
   place-items: center;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
   background: transparent;
   color: var(--faint);
 }
@@ -175,11 +234,11 @@
   align-items: center;
   gap: 6px;
   border: 1px solid var(--composer-line);
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   background: var(--composer-bg);
   padding: 5px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-composer-file-attachment > span {
@@ -195,7 +254,7 @@
   height: 20px;
   place-items: center;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
   background: transparent;
   color: var(--faint);
 }
@@ -207,8 +266,8 @@
 
 .agent-composer-attachment-error {
   margin: -5px 0 0;
-  color: var(--danger, #ff8f8f);
-  font-size: 10px;
+  color: var(--danger, var(--text));
+  font-size: var(--text-caption);
 }
 
 .agent-composer-input {
@@ -219,10 +278,10 @@
   resize: none;
   border: 0;
   outline: 0;
-  background: transparent;
-  color: #f2f2f2;
+  background: var(--composer-surface);
+  color: var(--text);
   padding: 0;
-  font-size: 13px;
+  font-size: var(--text-small);
   line-height: 1.45;
 }
 
@@ -254,9 +313,9 @@
   overflow-y: auto;
   list-style: none;
   border: 1px solid var(--composer-line);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   background: var(--composer-surface);
-  box-shadow: 0 14px 34px rgb(0 0 0 / 46%);
+  box-shadow: var(--shadow-floating);
 }
 
 .composer-suggestion {
@@ -266,12 +325,12 @@
   justify-content: space-between;
   gap: 10px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   padding: 6px 8px;
   text-align: left;
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .composer-suggestion.is-active:not(:disabled) {
@@ -281,7 +340,7 @@
 
 .composer-suggestion:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: var(--opacity-disabled);
 }
 
 .composer-suggestion-name {
@@ -298,7 +357,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -313,9 +372,6 @@
 .agent-composer-toolbar {
   justify-content: space-between;
   gap: 8px;
-  /* 这一行不允许靠压缩文字来腾地方。「目标模式」「请求批准」都是三四个字的
-     短标签，被挤掉几个像素就会截断成「目标模…」—— 而发送按钮一出现就必然
-     发生（实测左侧工具组被压掉 4px）。放不下时整组换行，而不是把标签剪短。 */
   flex-wrap: wrap;
 }
 
@@ -325,16 +381,32 @@
   min-width: 0;
 }
 
-/* 左侧是「这次运行会怎样」的唯一常驻说明，任何情况下都保持完整。 */
 .agent-composer-toolbar-left {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   flex-wrap: wrap;
 }
 
 .agent-composer-toolbar-right {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  max-width: 100%;
+  margin-left: auto;
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+
+.agent-composer-tool.agent-settings-trigger {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  padding-inline: 6px;
+  white-space: nowrap;
+}
+
+.agent-settings-trigger.is-readonly {
+  color: var(--text);
+  background: var(--warn-surface);
 }
 
 .agent-composer-tool {
@@ -344,90 +416,54 @@
   flex: 0 0 auto;
   place-items: center;
   border: 0;
-  border-radius: 50%;
-  color: #d6d7d8;
+  border-radius: var(--radius-circle);
+  color: var(--text);
 }
 
 .agent-composer-tool:hover:not(:disabled) {
-  background: #3a3b3d;
-  color: #fff;
+  background: var(--surface-4);
+  color: var(--text);
 }
 
 /* 这里原本是「帮我批准」勾选框。它把「请求批准」表达成「未勾选」，用户看到的
    是一个空框，读不出「不勾 = 每次都会问你」；而「帮我批准」的勾选态又和
    「已经批准了什么」混在一起。现在批准方式是设置面板里的两档选择。 */
 
-/* 当前运行状态的常驻摘要。不展开设置也能一眼看出这次运行会怎样 ——
-   模式是随请求发出的，用户必须能在按下发送前确认它。 */
-.agent-mode-summary,
-.agent-approval-summary,
-.agent-policy-summary {
-  overflow: hidden;
-  color: #a5a6a8;
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-mode-summary {
-  border: 1px solid var(--composer-line);
-  border-radius: 999px;
-  padding: 2px 7px;
-}
-
-.agent-policy-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.agent-policy-summary.has-warning {
-  border: 1px solid var(--warn-line);
-  border-radius: 999px;
-  background: var(--warn-surface);
-  color: #e6e6e6;
-  padding: 2px 7px;
-}
+.agent-composer-status { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--faint); font-size: var(--text-caption); }
+.agent-composer .agent-composer-status .agent-status { display: inline-flex; min-height: 28px; padding: 0 4px; border: 0; background: transparent; font-size: inherit; }
+.agent-composer .agent-composer-status .agent-status.is-icon::before { display: none; }
+.agent-composer-status .agent-context-usage { display: inline-flex; align-items: center; gap: 4px; font-size: inherit; }
+.agent-composer-status .agent-token-usage { display: inline; }
+.agent-settings-readonly { display: flex; align-items: center; gap: 8px; font-size: var(--text-caption); color: var(--muted); }
+.agent-settings-readonly input { accent-color: var(--accent); }
+.agent-input-notices:empty { display: none; }
+.agent-composer .agent-input-notices .agent-notice { padding: 0; font-size: var(--text-caption); line-height: 1.5; }
+.agent-composer .agent-input-notices .text-button { font-size: inherit; }
 
 .agent-settings-warning {
   margin: 0;
   border: 1px solid var(--warn-line);
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background: var(--warn-surface);
-  color: #e6e6e6;
+  color: var(--text);
   padding: 7px 9px;
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
 }
 
-/* 只读类模式给一个明确的视觉标记：它改变的是「能不能改东西」，
-   和模型、批准方式不是一个层级的信息。 */
-.agent-mode-summary.is-readonly {
-  border-color: var(--warn-line);
-  background: var(--warn-surface);
-  color: #e6e6e6;
-}
-
-/* 这里原来有一条 `.agent-approval-summary { color: #8d8f92 }`，把批准方式这一格
-   单独压暗。已删除，理由有二：
-     1. .agent-mode-summary 是它的成对项、用 #a5a6a8 —— 同一行里的两句话用两个
-        亮度，读起来像是有层级差别，但它们其实是并列的两个设置。
-     2. #8d8f92 落在 --composer-surface (#292a2c) 上只有 4.43:1，差 0.07 不到
-        WCAG AA 的 4.5:1。灰阶主题里「再暗一档表示次要」这个手法在更亮的底上
-        会直接失效，所以这类覆盖宁可删掉、统一到上面那条基础规则。 */
-
 .agent-settings-trigger.is-open {
-  background: #3a3b3d;
-  color: #fff;
+  background: var(--surface-4);
+  color: var(--text);
 }
 
-/* 「+」展开的设置面板：运行模式与批准方式。
+/* 运行设置面板：运行模式与批准方式。
    用 absolute 浮在输入框上方，与候选列表同一层，避免撑动整个卡片。 */
 .agent-settings-panel {
   position: absolute;
   z-index: 21;
   left: 8px;
-  right: 8px;
+  right: auto;
+  width: min(340px, calc(100% - 16px));
   bottom: calc(100% + 6px);
   display: flex;
   max-height: 60vh;
@@ -435,11 +471,16 @@
   gap: 14px;
   overflow-y: auto;
   border: 1px solid var(--composer-line);
-  border-radius: 14px;
+  border-radius: var(--radius-card);
   background: var(--composer-surface);
-  box-shadow: 0 16px 38px rgb(0 0 0 / 50%);
+  box-shadow: var(--shadow-floating);
   padding: 12px;
 }
+
+.agent-settings-upload { display: flex; align-items: center; gap: 10px; border: 0; border-radius: 8px; padding: 10px 8px; background: transparent; color: var(--text); text-align: left; }
+.agent-settings-upload:hover:not(:disabled) { background: var(--surface-4); }
+.agent-settings-permission { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: var(--text-caption); }
+.agent-settings-permission select { min-width: 0; max-width: 65%; }
 
 .agent-settings-group {
   display: flex;
@@ -450,20 +491,11 @@
 .agent-settings-title {
   margin: 0;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 600;
 }
 
-/* 说明文字用 --muted 而不是 --faint。--faint (#8d8d8d) 在暗色面板上够用
-   （#151515 上是 5.5:1），但这个弹层的底色是更亮的 --composer-surface (#292a2c)，
-   同一档灰在那里只有 4.33:1 —— 差一点点不到 WCAG AA 的 4.5:1。灰阶主题里
-   靠「再暗一档」来表示次要，在亮一档的底上就会失效，所以这一处必须换档。 */
-.agent-settings-note {
-  margin: 0;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.5;
-}
+/* Notes use the shared muted tone on the raised composer surface. */
 
 .agent-settings-options {
   display: flex;
@@ -480,7 +512,7 @@
   flex-direction: column;
   gap: 3px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: var(--composer-bg);
   padding: 7px 9px;
   text-align: left;
@@ -492,11 +524,11 @@
 
 .agent-settings-option.is-selected {
   border-color: var(--composer-accent);
-  background: #2b2c2e;
+  background: var(--surface-2);
 }
 
 .agent-settings-option:disabled {
-  opacity: 0.55;
+  opacity: var(--opacity-disabled);
 }
 
 .agent-settings-option-label {
@@ -504,34 +536,26 @@
   align-items: center;
   gap: 6px;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 600;
 }
 
 .agent-settings-option.is-selected .agent-settings-option-label {
-  color: #fff;
+  color: var(--text);
 }
 
 /* 「不改动」标记：只读类模式的选项上直接写清楚它意味着什么。 */
 .agent-settings-badge {
   border: 1px solid var(--warn-line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--warn-surface);
-  color: #dcdcdc;
+  color: var(--text);
   padding: 1px 6px;
-  font-size: 9px;
+  font-size: var(--text-caption);
   font-weight: 400;
 }
 
-.agent-settings-option-note {
-  color: var(--faint);
-  font-size: 10px;
-  line-height: 1.5;
-}
 
-.agent-settings-option.is-selected .agent-settings-option-note {
-  color: var(--muted);
-}
 
 /* 模型选择器从 10px 纯文本提权为明确的控件：它是「这次运行用哪个模型」
    的唯一指示，之前小到几乎看不见，用户无从确认自己选的是什么。
@@ -552,12 +576,12 @@
   max-width: 100%;
   align-items: center;
   gap: 2px;
-  border: 1px solid var(--composer-line);
-  border-radius: 999px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
   background: var(--composer-bg);
-  color: #efefef;
+  color: var(--text);
   padding: 4px 6px 4px 10px;
-  font-size: 11px;
+  font-size: var(--text-caption);
   line-height: 1.4;
   white-space: nowrap;
 }
@@ -595,66 +619,69 @@
   outline-offset: -2px;
 }
 
-/* 弹层向上开：输入区贴在面板底部，向下没有空间。 */
-.agent-model-menu {
+/* Model menus stay next to their trigger, with compact checked rows. */
+.agent-model-popover {
   position: absolute;
   z-index: 22;
   right: 0;
   bottom: calc(100% + 6px);
-  min-width: 100%;
-  max-width: min(300px, 84vw);
-  max-height: 264px;
+  width: min(260px, calc(100vw - 48px));
+  border: 1px solid var(--composer-line);
+  border-radius: var(--radius-panel);
+  background: var(--workspace-content-surface);
+  box-shadow: var(--shadow-floating);
+  padding: 6px;
+}
+
+.agent-model-menu-title { margin: 4px 8px 6px; font-size: var(--text-caption); color: var(--faint); }
+.agent-model-menu {
+  max-height: min(280px, 42vh);
   margin: 0;
-  padding: 4px;
+  padding: 0;
   overflow-y: auto;
   list-style: none;
-  border: 1px solid var(--composer-line);
-  border-radius: 12px;
-  background: var(--composer-surface);
-  box-shadow: 0 16px 38px rgb(0 0 0 / 50%);
 }
 
 .agent-model-option {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  border-radius: 8px;
-  color: var(--muted);
-  padding: 6px 8px;
-  font-size: 11px;
-  white-space: nowrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  border-radius: var(--radius-control);
+  color: var(--text);
+  padding: 7px 8px;
+  font-size: var(--text-caption);
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
 .agent-model-option.is-active {
-  background: var(--composer-bg);
+  background: var(--material-hover);
   color: var(--text);
 }
 
-/* 当前生效项用强调色标出，而不是靠一个需要额外图标的勾。 */
 .agent-model-option[aria-selected="true"] .agent-model-option-name {
-  color: var(--composer-accent);
-  font-weight: 600;
+  color: var(--text);
 }
 
 .agent-model-option-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .agent-model-option-from {
-  flex: 0 0 auto;
+  grid-column: 1 / -1;
+  min-width: 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-model-empty {
   max-width: 100px;
   overflow: hidden;
-  color: #96989a;
-  font-size: 10px;
+  color: var(--faint);
+  font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -665,11 +692,17 @@
    现在它是一枚有文字的按钮，出现即代表真的能发。 */
 .agent-send-button {
   flex: 0 0 auto;
-  border-radius: 999px;
+  display: grid;
+  width: var(--composer-action-size);
+  min-width: var(--composer-action-size);
+  height: var(--composer-action-size);
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
   background: var(--composer-accent);
-  color: #fff;
-  padding: 5px 14px;
-  font-size: 11px;
+  color: var(--on-accent);
+  padding: 0;
+  font-size: var(--text-caption);
   font-weight: 600;
 }
 
@@ -678,33 +711,23 @@
 }
 
 .agent-send-button:disabled {
-  opacity: 0.42;
+  opacity: var(--opacity-disabled);
 }
 
 /* 停止条：只在运行中出现，和发送按钮互斥，各自都有文字说明。
    中断是安全功能 —— 它不能藏在一个「看着像禁用」的图标后面。 */
-.agent-running-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border-top: 1px solid var(--composer-line);
-  margin-top: 8px;
-  padding-top: 8px;
-}
-
 .agent-running-label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-running-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
   background: var(--composer-accent);
   /* `soft-pulse` is the motion layer's one looping opacity animation. */
   animation: soft-pulse var(--motion-soft-cycle) ease-in-out infinite;
@@ -716,26 +739,28 @@
   align-items: center;
   gap: 5px;
   border: 1px solid var(--danger-line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--danger-surface);
-  color: #efefef;
+  color: var(--text);
   padding: 4px 11px;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .agent-stop-button:hover:not(:disabled) {
   border-color: var(--danger);
-  color: #fff;
+  color: var(--text);
 }
 
 .agent-stop-button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: var(--opacity-disabled);
 }
+
+.agent-stop-button.is-closing { animation: pop-exit var(--motion-fast) ease both; }
 
 .agent-composer-input:disabled {
   cursor: not-allowed;
-  opacity: 0.64;
+  opacity: var(--opacity-disabled);
 }
 
 @media (max-width: 480px) {
@@ -745,7 +770,7 @@
 
   .agent-composer-shell {
     min-height: 92px;
-    border-radius: 16px;
+    border-radius: var(--composer-radius);
     padding-left: 12px;
   }
 
@@ -753,4 +778,53 @@
   .agent-model-value {
     max-width: 86px;
   }
+}
+
+.agent-role-picker { display: flex; min-width: 0; width: 100%; }
+.agent-role-picker select { width: 100%; min-width: 0; min-height: 28px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); padding: 3px 20px 3px 6px; font: inherit; font-size: var(--text-caption); text-overflow: ellipsis; cursor: pointer; }
+.agent-role-picker select:hover { background: var(--material-hover); color: var(--text); }
+.agent-role-picker select option, .agent-role-picker select optgroup { background: var(--surface-2); color: var(--text); }
+.agent-reply-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; margin-bottom: 6px; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
+.agent-reply-meta strong { color: var(--muted); font-weight: 600; }
+.agent-reply-meta > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@container agent-composer (max-width: 360px) {
+  .agent-composer-toolbar-right { flex: 1 1 100%; }
+  .agent-composer-status { margin-left: 0; }
+  .agent-model-value { max-width: 120px; }
+}
+
+@container agent-workspace (max-width: 580px) {
+  .agent-role-picker select { font-size: var(--text-caption); }
+}
+
+.agent-permission-picker, .agent-reasoning-picker { position: relative; min-width: 0; }
+.agent-permission-trigger, .agent-effort-trigger { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 5px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); font: inherit; font-size: var(--text-caption); white-space: nowrap; }
+.agent-permission-trigger:hover:not(:disabled), .agent-effort-trigger:hover:not(:disabled) { background: var(--material-hover); color: var(--text); }
+.agent-permission-menu, .agent-effort-menu { position: absolute; z-index: 24; bottom: calc(100% + 10px); border: 1px solid var(--composer-line); border-radius: var(--radius-panel); background: var(--workspace-content-surface); box-shadow: var(--shadow-floating); }
+.agent-permission-menu { left: 0; width: min(300px, calc(100vw - 48px)); padding: 7px; }
+.agent-permission-menu > p { margin: 4px 8px 7px; color: var(--faint); font-size: var(--text-caption); }
+.agent-permission-menu button { display: grid; grid-template-columns: 18px minmax(0, 1fr) 16px; align-items: center; width: 100%; gap: 8px; border: 0; border-radius: var(--radius-control); padding: 8px; background: transparent; color: var(--text); text-align: left; }
+.agent-permission-menu button:hover:not(:disabled) { background: var(--material-hover); }
+.agent-permission-menu button > span { display: grid; gap: 3px; }
+.agent-permission-menu strong { font-size: var(--text-small); font-weight: 500; }
+.agent-permission-menu small { color: var(--faint); font-size: var(--text-caption); line-height: 1.4; }
+.agent-permission-menu button:disabled { opacity: var(--opacity-disabled); }
+.agent-effort-trigger { color: var(--muted); }
+.agent-effort-value { color: var(--reasoning-label); }
+.agent-effort-menu { right: 0; width: min(256px, calc(100vw - 48px)); padding: 10px 12px 9px; }
+.agent-effort-heading { position: relative; display: flex; justify-content: center; min-width: 0; min-height: 24px; margin: 10px 0; padding: 0 24px; text-align: center; color: var(--faint); }
+.agent-effort-heading > .icon-button { position: absolute; top: 0; right: 0; }
+.agent-effort-selection { display: flex; flex-direction: column; align-items: center; min-width: 0; gap: 2px; }
+.agent-effort-selection .agent-model-select { max-width: 100%; padding: 3px 5px; border: 0; background: transparent; }
+.agent-model-picker-inline { width: 100%; }
+.agent-model-picker-inline .agent-model-menu { max-height: min(240px, 30vh); }
+.agent-effort-heading strong { color: var(--reasoning-label); font-size: var(--text-small); font-weight: 500; }
+.agent-effort-menu input[type="range"] { display: block; width: 100%; height: 24px; margin: 0; border: 0; border-radius: var(--radius-pill); padding: 0; appearance: none; background: linear-gradient(to right, var(--reasoning-fill) 0 var(--effort-progress), var(--reasoning-track) var(--effort-progress) 100%); cursor: pointer; }
+.agent-effort-menu input[type="range"]::-webkit-slider-thumb { width: 24px; height: 24px; border: 0; border-radius: var(--radius-circle); appearance: none; background: var(--text); box-shadow: none; }
+.agent-effort-menu input[type="range"]::-moz-range-thumb { width: 24px; height: 24px; border: 0; border-radius: var(--radius-circle); background: var(--text); }
+.agent-effort-stops { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; font-size: var(--text-caption); color: var(--faint); }
+@container agent-composer (max-width: 420px) {
+  .agent-permission-trigger > span { display: none; }
+  .agent-permission-menu { left: -60px; }
 }

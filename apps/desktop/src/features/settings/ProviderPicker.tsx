@@ -58,7 +58,7 @@ export function ProviderPicker({
     <div className="provider-picker">
       <div className="provider-picker-row">
         <label className="settings-field provider-picker-field">
-          <span className="field-label">Provider</span>
+          <span className="field-label">模型连接</span>
           <select
             className="form-input"
             value={viewing ? viewing.id : NEW_PROVIDER_VALUE}
@@ -71,7 +71,7 @@ export function ProviderPicker({
                 {provider.enabled ? ` · ${CURRENT_BADGE}` : ""}
               </option>
             ))}
-            <option value={NEW_PROVIDER_VALUE}>新建 Provider…</option>
+            <option value={NEW_PROVIDER_VALUE}>新建连接…</option>
           </select>
         </label>
         {viewing && !confirming ? (
@@ -82,8 +82,8 @@ export function ProviderPicker({
               disabled={busy || viewing.enabled}
               title={
                 viewing.enabled
-                  ? "新建的 Agent 运行已经在用它。"
-                  : "把它设为新建 Agent 运行使用的 Provider；其余 Provider 会被停用（配置仍在）。"
+                  ? "已启用"
+                  : "启用此连接，其余连接停用"
               }
               onClick={() => onActivate(viewing.id)}
             >
@@ -139,10 +139,10 @@ export function ProviderPicker({
           />
           <span>
             {!viewing
-              ? "保存后会启用它，其余 Provider 自动停用。"
+              ? "保存并启用"
               : viewing.enabled
-                ? "新建 Agent 运行会使用它。"
-                : "未启用：配置保留，但新建 Agent 运行不会用到它。"}
+                ? "已启用"
+                : "未启用"}
           </span>
         </p>
       ) : null}

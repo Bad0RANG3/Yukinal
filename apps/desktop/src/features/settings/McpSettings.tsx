@@ -19,7 +19,7 @@
  *    句话都只描述「这台进程现在在不在」。工具数量只有在真的拿到描述符时才显示。
  */
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import type { McpOAuthDeviceCodeEvent, McpServerView } from "@yukinal/shared";
@@ -33,7 +33,6 @@ import {
   mcpRestartText,
   mcpUnavailableText,
   oauthClientAuthNeedsSecret,
-  previewToolNamespace,
   serverMessages,
   statusLabel,
   toSaveInput,
@@ -164,7 +163,7 @@ export function McpSettings() {
             onSuccess: (view) => {
               setNotice(
                 view.status.running
-                  ? `${view.config.label} 已启动（pid ${view.status.pid ?? "?"}）。工具会在 Agent 下次启动时注册。`
+                  ? `${view.config.label} 已启动（pid ${view.status.pid ?? "?"}），重启运行服务后生效。`
                   : `${view.config.label} 没有启动成功，原因见列表。`,
               );
             },
@@ -199,7 +198,7 @@ export function McpSettings() {
           actions.review.mutate(input, {
             onSuccess: () =>
               setNotice(
-                `${label} 的工具审核已保存；Agent 下次启动时只注册允许的工具。`,
+                `${label} 的工具审核已保存，重启运行服务后生效。`,
               ),
           })
         }
@@ -304,22 +303,24 @@ export function McpSettingsPanel({
   const titleId = useId();
   const isEditing = editingId !== null;
   const creating = editingId === "";
-  const namespace = previewToolNamespace(draft.id);
   const field = (name: DraftField) => `${titleId}-${name}`;
+  const editorTrigger = useRef<HTMLButtonElement | null>(null);
+  const editorForm = useRef<HTMLFormElement>(null);
+  const previousEditing = useRef<string | null>(null);
+  useEffect(() => {
+    if (editingId !== null) editorForm.current?.querySelector<HTMLInputElement>("input:not([readonly])")?.focus();
+    else if (previousEditing.current !== null) editorTrigger.current?.focus();
+    previousEditing.current = editingId;
+  }, [editingId]);
 
   return (
     <section className="settings-card" aria-labelledby={titleId}>
       <header className="settings-card-header">
         <div>
-          <p className="eyebrow">MCP</p>
           <h2 id={titleId}>MCP 服务器</h2>
-          <p>
-            模型可以调用 MCP 服务器提供的工具。进程由 Yukinal 自己派生与回收，每个服务器的工具
-            命名遵守 <code>mcp.&lt;服务器&gt;.&lt;工具&gt;</code>（ADR 0004）。
-          </p>
         </div>
         <div className="settings-card-header-actions">
-          <button type="button" className="button-secondary" onClick={onBeginNew} disabled={busy}>
+          <button type="button" className="button-secondary" onClick={(event) => { editorTrigger.current = event.currentTarget; onBeginNew(); }} disabled={busy}>
             <Icon name="plus" size="sm" /> 添加服务器
           </button>
         </div>
@@ -327,12 +328,7 @@ export function McpSettingsPanel({
 
       {loading ? <p className="form-hint">正在读取 MCP 服务器…</p> : null}
 
-      {!loading && servers.length === 0 ? (
-        <p className="form-hint">
-          还没有配置任何 MCP 服务器。添加一个 stdio 服务器（例如 <code>npx -y 某个包</code>）之后，
-          它的工具会在 Agent 下次启动时出现在模型可用的工具列表里。
-        </p>
-      ) : null}
+      {!loading && servers.length === 0 ? <p className="muted-copy">暂无 MCP 服务器</p> : null}
 
       {servers.length > 0 ? (
         <ul className="provider-list">
@@ -350,7 +346,7 @@ export function McpSettingsPanel({
                 <div className="provider-copy">
                   <div className="provider-name">
                     <span className={`provider-status-dot ${status.running ? "provider-status-on" : "provider-status-off"}`} />
-                    <span>{view.config.label}</span>
+                    <span className="provider-label">{view.config.label}</span>
                     <span className="settings-status">{status.text}</span>
                     {view.config.enabled ? null : <span className="settings-status">已禁用</span>}
                   </div>
@@ -389,11 +385,7 @@ export function McpSettingsPanel({
                   </p>
                   {view.status.running ? (
                     <p className="form-hint">
-                      {`服务器声明了 ${view.status.toolCount} 个工具`}
-                      {view.tools.length === 0
-                        ? "，正在读取描述符…"
-                        : `：${view.tools.map((tool) => tool.name).join("、")}（这是服务器的拼写；
-                           模型看到的名字是 mcp.… 形式，由宿主在注册时规范化）`}
+                      {`工具 ${view.status.toolCount}`}
                     </p>
                   ) : null}
                   {view.status.running && view.tools.length > 0 ? (
@@ -414,7 +406,7 @@ export function McpSettingsPanel({
                   ) : null}
                   {messages.length > 0 ? (
                     <details className="settings-storage-note">
-                      <summary>服务器输出（已脱敏、已截断）</summary>
+                      <summary>服务器输出</summary>
                       {messages.map((line, index) => (
                         <p key={`${view.config.id}-msg-${index}`} className="form-hint">
                           {line}
@@ -469,7 +461,7 @@ export function McpSettingsPanel({
                   <button
                     type="button"
                     className="button-secondary"
-                    onClick={() => onBeginEdit(view)}
+                    onClick={(event) => { editorTrigger.current = event.currentTarget; onBeginEdit(view); }}
                     disabled={busy}
                   >
                     <Icon name="edit" size="sm" /> 编辑
@@ -491,7 +483,8 @@ export function McpSettingsPanel({
 
       {isEditing ? (
         <form
-          className="settings-form-grid settings-form-grid-provider"
+          ref={editorForm}
+          className="settings-form-grid settings-form-grid-provider mcp-settings-form"
           onSubmit={(event) => {
             event.preventDefault();
             onSubmit();
@@ -508,10 +501,6 @@ export function McpSettingsPanel({
               readOnly={!creating}
               onChange={(event) => onDraftChange({ ...draft, id: event.target.value })}
             />
-            <p className="form-hint">
-              这是身份，也是工具名的来源（ADR 0004）。{namespace ? `工具会叫 ${namespace}。` : "必须能变成小写字母与短横线组成的一段。"}
-              {creating ? "" : " 已存在的 id 不能改：改了就是另一个服务器。"}
-            </p>
           </div>
 
           <div className="settings-field">
@@ -524,7 +513,6 @@ export function McpSettingsPanel({
               value={draft.label}
               onChange={(event) => onDraftChange({ ...draft, label: event.target.value })}
             />
-            <p className="form-hint">只用于在列表里分辨，不影响工具名。</p>
           </div>
 
           <div className="settings-field">
@@ -540,10 +528,6 @@ export function McpSettingsPanel({
               <option value="stdio">stdio（本机子进程）</option>
               <option value="http">Streamable HTTP</option>
             </select>
-            <p className="form-hint">
-              stdio 由 Yukinal 派生并回收进程；HTTP 直接连接一个明确配置的 endpoint。
-              远程 HTTP 必须使用 HTTPS，明文 HTTP 只允许回环地址。
-            </p>
           </div>
 
           {draft.transport === "stdio" ? (
@@ -559,9 +543,6 @@ export function McpSettingsPanel({
                   onChange={(event) => onDraftChange({ ...draft, command: event.target.value })}
                   placeholder="npx"
                 />
-                <p className="form-hint">
-                  Yukinal 派生这个进程，用标准输入输出与它说话；命令不会经过 shell 展开。
-                </p>
               </div>
 
               <div className="settings-field settings-fact-wide">
@@ -570,14 +551,11 @@ export function McpSettingsPanel({
                 </label>
                 <textarea
                   id={field("args")}
-                  className="form-textarea"
+                  className="form-input form-textarea"
                   rows={3}
                   value={draft.args}
                   onChange={(event) => onDraftChange({ ...draft, args: event.target.value })}
                 />
-                <p className="form-hint">
-                  一行一个参数，不做 shell 解析：这里的换行就是一个参数列表，不会被展开成命令拼接。
-                </p>
               </div>
             </>
           ) : draft.transport === "http" ? (
@@ -594,10 +572,6 @@ export function McpSettingsPanel({
                   placeholder="https://mcp.example.com/mcp"
                   spellCheck={false}
                 />
-                <p className="form-hint">
-                  必须有 host，且不能内嵌用户名、密码或查询参数；重定向不会被跟随。认证可使用
-                  下方面向 endpoint 的多个静态请求头，或 OAuth 授权码 + PKCE。
-                </p>
               </div>
 
               <div className="settings-field">
@@ -628,7 +602,7 @@ export function McpSettingsPanel({
                   </label>
                   <textarea
                     id={field("httpAuthHeaders")}
-                    className="form-textarea form-input-mono"
+                    className="form-input form-textarea form-input-mono"
                     rows={4}
                     value={draft.httpAuthHeaders}
                     onChange={(event) =>
@@ -637,11 +611,6 @@ export function McpSettingsPanel({
                     placeholder={"Authorization: Bearer …\nX-API-Key: …"}
                     spellCheck={false}
                   />
-                  <p className="form-hint">
-                    每行按第一个冒号分成 <code>Header-Name: secret</code>，顺序会原样发送。
-                    secret 只写入系统凭据库；编辑时留空冒号右侧会按名称保留现有 secret，删掉整行会回收它。
-                    协议保留头不可覆盖。
-                  </p>
                 </div>
               ) : null}
 
@@ -669,11 +638,6 @@ export function McpSettingsPanel({
                           <option value="client_secret_post">client_secret_post</option>
                           <option value="client_secret_basic">client_secret_basic</option>
                         </select>
-                        <p className="form-hint">
-                          {oauthClientAuthNeedsSecret(draft.oauthClientAuth)
-                            ? "密钥只写入系统凭据库，配置里只留一个引用；连接与刷新时都按这一种方式认证。"
-                            : "留空 client id 时注册的公共客户端始终是这一种：服务端即使在注册响应里返回 secret，连接也会拒绝，而不是悄悄改用它。"}
-                        </p>
                       </div>
                       {oauthClientAuthNeedsSecret(draft.oauthClientAuth) ? (
                         <div className="settings-field">
@@ -692,10 +656,6 @@ export function McpSettingsPanel({
                               onDraftChange({ ...draft, oauthClientSecret: event.target.value })
                             }
                           />
-                          <p className="form-hint">
-                            留空＝保留已存的 secret；重填＝轮换，旧值会被回收。换认证方式或删掉服务器
-                            同样会回收它，所以换方式后必须重新填一次。控制字符会被拒绝，不会静默改写。
-                          </p>
                         </div>
                       ) : null}
                       <div className="settings-field">
@@ -712,10 +672,6 @@ export function McpSettingsPanel({
                       placeholder="https://auth.example.com"
                       spellCheck={false}
                     />
-                    <p className="form-hint">
-                      留空时从 MCP endpoint 的 `WWW-Authenticate` 或 RFC 9728
-                      protected-resource metadata 自动发现授权服务器。
-                    </p>
                   </div>
                   <div className="settings-field">
                     <label className="field-label" htmlFor={field("oauthClientId")}>
@@ -731,10 +687,6 @@ export function McpSettingsPanel({
                       placeholder="留空则使用动态客户端注册"
                       spellCheck={false}
                     />
-                    <p className="form-hint">
-                      留空时，连接会读取 RFC 8414 元数据中的 registration endpoint，注册一个
-                      token_endpoint_auth_method 为 none 的公共客户端；client id 会保存到本地配置。
-                    </p>
                   </div>
                   <div className="settings-field settings-fact-wide">
                     <label className="field-label" htmlFor={field("oauthFlow")}>
@@ -756,11 +708,6 @@ export function McpSettingsPanel({
                       </option>
                       <option value="device_code">Device Code（设备码，RFC 8628）</option>
                     </select>
-                    <p className="form-hint">
-                      {draft.oauthFlow === "device_code"
-                        ? "设备码流程不需要本地回调，适合浏览器打不开、或者要授权给另一台机器的情况：连接时会显示一个 user_code、打开验证页面，并按服务器给的间隔轮询；取消会让它立刻停止。服务器必须在元数据里声明 device_authorization_endpoint。"
-                        : "授权码流程会打开系统浏览器，并在随机的 127.0.0.1 端口上等回调；issuer 的元数据必须声明 authorization code 与 S256。"}
-                    </p>
                   </div>
                   <div className="settings-field settings-fact-wide">
                     <label className="settings-check-row" htmlFor={field("oauthDpop")}>
@@ -774,11 +721,6 @@ export function McpSettingsPanel({
                       />
                       <span>
                         <strong>发送方约束令牌（DPoP）</strong>
-                        <small>
-                          私钥只进系统凭据库；每个请求都带一个绑定方法与 URL
-                          的签名 proof。服务器必须回 <code>token_type: DPoP</code>
-                          ，否则连接失败而不是退回 bearer。开关与 issuer 一样属于身份，改动会让已存令牌失效。
-                        </small>
                       </span>
                     </label>
                   </div>
@@ -788,7 +730,7 @@ export function McpSettingsPanel({
                     </label>
                     <textarea
                       id={field("oauthScopes")}
-                      className="form-textarea form-input-mono"
+                      className="form-input form-textarea form-input-mono"
                       rows={3}
                       value={draft.oauthScopes}
                       onChange={(event) =>
@@ -797,10 +739,6 @@ export function McpSettingsPanel({
                       placeholder={"mcp.read\nmcp.tools"}
                       spellCheck={false}
                     />
-                    <p className="form-hint">
-                      保存后在列表里点「连接 OAuth」。access token 与 refresh token 只进系统凭据库；
-                      改动 issuer、client id、scopes 或流程都会让已存的令牌失效并需要重新授权。
-                    </p>
                   </div>
                 </>
               ) : null}
@@ -817,12 +755,11 @@ export function McpSettingsPanel({
               />
               <span>
                 <strong>启用</strong>
-                <small>禁用时保存可以，启动与注册都不行。</small>
               </span>
             </label>
           </div>
 
-          <div className="settings-actions">
+          <div className="settings-actions field-wide">
             <button type="submit" className="button-primary" disabled={busy}>
               保存
             </button>
@@ -831,10 +768,7 @@ export function McpSettingsPanel({
             </button>
           </div>
 
-          <p className="form-hint">
-            保存<strong>不会启动</strong>服务器：那是「启动」按钮的事。每个 MCP 工具调用都需要用户逐项批准，
-            所以保存一个服务器不等于信任它。
-          </p>
+
         </form>
       ) : null}
 
@@ -890,7 +824,6 @@ function McpToolReview({
             />
             <span>
               <strong>{tool.name}</strong>
-              <small>{tool.description || "服务器未提供描述"}</small>
             </span>
           </label>
         ))}
@@ -898,7 +831,6 @@ function McpToolReview({
           <input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />
           <span>
             <strong>已完成审核</strong>
-            <small>只控制这些工具是否注册；默认每次调用仍按 critical 逐项批准。</small>
           </span>
         </label>
         <label className="settings-check-row">
@@ -909,10 +841,6 @@ function McpToolReview({
           />
           <span>
             <strong>信任此服务器声明的只读/破坏性注解</strong>
-            <small>
-              开启后，服务器自称只读的工具会像内置只读工具一样自动执行，自称非破坏性的工具按写入档位审批。
-              只对你信任的服务器开启——注解是服务器自己的说法，不是证据。
-            </small>
           </span>
         </label>
         <button

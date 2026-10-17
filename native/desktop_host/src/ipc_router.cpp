@@ -7272,7 +7272,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
   }
 
   if (method == "chat_session_list") {
-    if (!only_fields(params, {"query", "archived", "offset", "limit"}, {})) {
+    if (!only_fields(params, {"query", "archived", "offset", "limit", "serverId"}, {})) {
       return failure("INVALID_PARAMS", "chat_session_list received unexpected parameters");
     }
     std::optional<std::string> query;
@@ -7302,7 +7302,15 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       return failure("STORAGE_UNAVAILABLE", "The local chat database is unavailable");
     }
     try {
-      return {true, database_->list_chat_sessions(query, archived, limit, offset)};
+      std::optional<std::string> server_id;
+      if (params.contains("serverId") && !params.at("serverId").is_null()) {
+        std::string value;
+        if (!valid_request_text(params, "serverId", 256, true, value) || !valid_opaque_id(value)) {
+          return failure("INVALID_PARAMS", "chat_session_list serverId is invalid");
+        }
+        server_id = std::move(value);
+      }
+      return {true, database_->list_chat_sessions(query, archived, limit, offset, server_id, params.contains("serverId"))};
     } catch (...) {
       return failure("STORAGE_ERROR", "The local chat database could not list sessions");
     }
@@ -7376,7 +7384,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "chat_message_append") {
     if (!only_fields(params,
-                     {"sessionId", "messageId", "role", "content", "parts", "traceId", "createdAt"},
+                     {"sessionId", "messageId", "role", "content", "parts", "traceId", "createdAt", "participant", "model"},
                      {"sessionId", "role", "content"})) {
       return failure("INVALID_PARAMS", "chat_message_append received invalid parameters");
     }
@@ -7424,6 +7432,33 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       trace_id = std::move(value);
     }
     std::string timestamp = iso8601_now();
+    std::optional<nlohmann::json> participant;
+    if (params.contains("participant")) {
+      const auto& actor = params.at("participant");
+      std::string actor_id, label;
+      if (!only_fields(actor, {"id", "label", "kind", "parentId"}, {"id", "label", "kind"}) ||
+          !valid_request_text(actor, "id", 160, true, actor_id) ||
+          !valid_request_text(actor, "label", 120, true, label) ||
+          !actor.at("kind").is_string() ||
+          !is_one_of(actor.at("kind").get<std::string>(), {"agent", "subagent"})) {
+        return failure("INVALID_PARAMS", "chat_message_append participant is invalid");
+      }
+      if (actor.contains("parentId")) {
+        std::string parent;
+        if (!valid_request_text(actor, "parentId", 160, true, parent)) {
+          return failure("INVALID_PARAMS", "chat_message_append participant parent is invalid");
+        }
+      }
+      participant = actor;
+    }
+    std::optional<std::string> model;
+    if (params.contains("model")) {
+      std::string value;
+      if (!valid_request_text(params, "model", 512, true, value)) {
+        return failure("INVALID_PARAMS", "chat_message_append model is invalid");
+      }
+      model = std::move(value);
+    }
     if (params.contains("createdAt") &&
         !valid_request_text(params, "createdAt", 80, true, timestamp)) {
       return failure("INVALID_PARAMS", "chat_message_append createdAt is invalid");
@@ -7434,7 +7469,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     try {
       return {true, database_->append_chat_message(
                         message_id.value_or(next_id("msg")), session_id, role, content,
-                        parts, trace_id, timestamp)};
+                        parts, trace_id, timestamp, participant, model)};
     } catch (...) {
       return failure("STORAGE_ERROR", "The local chat database could not append the message");
     }
@@ -7496,6 +7531,13 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       return failure("STORAGE_UNAVAILABLE", "The local chat database is unavailable");
     }
     try {
+      const auto session = database_->get_chat_session(session_id).at("session");
+      const auto raw_store = database_->data_directory() / "agent-state" / "conversations.sqlite";
+      if (std::filesystem::exists(raw_store)) {
+        auto payload = nlohmann::json{{"sessionId", session_id}};
+        if (session.contains("serverId")) payload["focusServerId"] = session["serverId"];
+        ensure_sidecar().request("agent.context.delete", payload, std::chrono::seconds(30));
+      }
       return {true, database_->delete_chat_session(session_id)};
     } catch (...) {
       return failure("STORAGE_ERROR", "The local chat database could not delete the session");
@@ -7513,7 +7555,9 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
     return provider_command(method, params);
   }
 
-  if (method == "agent_run_start" || method == "agent_run_stop" ||
+  if (method == "agent_context_reset" || method == "agent_context_reset_all" ||
+      method == "agent_memory_list" || method == "agent_memory_save" || method == "agent_memory_delete" ||
+      method == "agent_run_start" || method == "agent_run_stop" || method == "agent_team_tasks" ||
       method == "agent_approval_respond") {
     return agent_run_command(method, params);
   }
@@ -8068,13 +8112,27 @@ IpcReply IpcRouter::remote_drag_start_command(const nlohmann::json& params) {
   }
   auto handle = std::make_shared<StagedRemoteDrag>(std::move(staged));
   const std::vector<std::filesystem::path> files = handle->files();
-  // The private directory must stay alive until the OS reports the drag ended; the
-  // seam releases this callback exactly then, dropping the last reference. If the
-  // drag cannot start, the local handle still owns the directory and removes it.
-  std::shared_ptr<StagedRemoteDrag> keep_alive = handle;
-  const bool started =
-      drag->start(window, files, [keep_alive]() mutable { keep_alive.reset(); });
+  // The private directory must stay alive until the OS reports the drag ended. The
+  // router keeps the sole strong reference and the completion callback only clears
+  // it, so the stage is dropped exactly then; capturing the handle in the callback
+  // would instead depend on how the platform stores and copies it. If the drag
+  // cannot start, the local `handle` is still the last reference, so the directory
+  // is removed as the command returns.
+  {
+    std::lock_guard lock(drag_mutex_);
+    active_native_drag_ = handle;
+  }
+  const bool started = drag->start(window, files, [this]() {
+    // Release outside the lock: the handle's destructor deletes the staged files.
+    std::shared_ptr<StagedRemoteDrag> released;
+    {
+      std::lock_guard lock(drag_mutex_);
+      released = std::move(active_native_drag_);
+    }
+  });
   if (!started) {
+    std::lock_guard lock(drag_mutex_);
+    active_native_drag_.reset();
     return failure("DRAG_FAILED", "the native drag could not be started");
   }
   return {true, nlohmann::json::object()};
@@ -9019,7 +9077,13 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   static const std::map<std::string, std::string> kMethods = {
       {"agent_run_start", "agent.run.start"},
       {"agent_run_stop", "agent.run.stop"},
+      {"agent_team_tasks", "agent.teams.list"},
       {"agent_approval_respond", "agent.approval.respond"},
+      {"agent_context_reset", "agent.context.reset"},
+      {"agent_context_reset_all", "agent.context.resetAll"},
+      {"agent_memory_list", "agent.memory.list"},
+      {"agent_memory_save", "agent.memory.save"},
+      {"agent_memory_delete", "agent.memory.delete"},
   };
   const auto found = kMethods.find(method);
   if (found == kMethods.end()) {
@@ -9027,6 +9091,24 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   }
   if (!params.is_object()) {
     return failure("INVALID_PARAMS", method + " requires an object payload");
+  }
+  if ((method == "agent_run_start" || method == "agent_context_reset" || method == "agent_team_tasks") &&
+      params.contains("sessionId") && params["sessionId"].is_string() && database_) {
+    try {
+      const auto session = database_->get_chat_session(params["sessionId"].get<std::string>()).at("session");
+      const auto expected = session.value("serverId", nlohmann::json(nullptr));
+      auto requested = params.value("focusServerId", nlohmann::json(nullptr));
+      if (params.contains("target") && params["target"].is_object() && params["target"].contains("serverId")) {
+        const auto target = params["target"]["serverId"];
+        if (!requested.is_null() && requested != target) {
+          return failure("INVALID_PARAMS", "Agent server target does not match its conversation");
+        }
+        requested = target;
+      }
+      if (expected != requested) return failure("CONTEXT_SCOPE_MISMATCH", "Conversation belongs to another server");
+    } catch (...) {
+      return failure("NOT_FOUND", "Agent conversation was not found");
+    }
   }
   // The Python Agent Node validates every run field and owns the durable
   // admission/approval state, so the host forwards the payload unchanged. A
@@ -10244,6 +10326,43 @@ nlohmann::json IpcRouter::handle_host_request(
     // Both the remote and the MCP routes run the shared durable-plan/task gates
     // and call ledger inside `host_tool_execute_command`.
     return host_tool_execute_command(params, cancel);
+  }
+  if (method == "host.chat.context") {
+    std::string session_id;
+    if (!database_ || !only_fields(params, {"sessionId", "serverId", "excludeMessageId", "limit"}, {"sessionId"}) ||
+        !valid_request_text(params, "sessionId", 256, true, session_id)) {
+      throw SidecarRpcError(-32602, "host.chat.context requires a conversation");
+    }
+    const auto detail = database_->get_chat_session(session_id);
+    const auto server_id = params.value("serverId", nlohmann::json(nullptr));
+    if (detail.at("session").value("serverId", nlohmann::json(nullptr)) != server_id) {
+      throw SidecarRpcError(-32602, "Conversation belongs to another server");
+    }
+    const auto excluded = params.value("excludeMessageId", std::string());
+    int limit = 1000;
+    if (params.contains("limit") && !valid_integer_range(params["limit"], 1, 1000, limit)) {
+      throw SidecarRpcError(-32602, "Conversation history limit is invalid");
+    }
+    auto eligible = nlohmann::json::array();
+    for (const auto& message : detail.at("messages")) {
+      if (!excluded.empty() && message.at("id") == excluded) break;
+      if (message.at("role") != "user" && message.at("role") != "assistant") continue;
+      // Hydration imports text only. Attachment bytes and trace metadata must
+      // neither cross this boundary nor consume the text context allowance.
+      auto projected = nlohmann::json::object();
+      for (const auto* key : {"id", "role", "content", "participant", "model", "createdAt"}) {
+        if (message.contains(key)) projected[key] = message.at(key);
+      }
+      eligible.push_back(std::move(projected));
+    }
+    auto messages = nlohmann::json::array();
+    size_t bytes = 2;  // JSON array brackets, plus a comma between messages.
+    for (auto it = eligible.rbegin(); it != eligible.rend() && messages.size() < static_cast<size_t>(limit); ++it) {
+      const auto size = it->dump().size() + (messages.empty() ? 0 : 1);
+      if (bytes + size > 512 * 1024) break;
+      messages.insert(messages.begin(), *it); bytes += size;
+    }
+    return {{"session", detail.at("session")}, {"messages", messages}, {"truncated", messages.size() < eligible.size()}};
   }
   if (method == "host.credentials.set") {
     if (!params.is_object() || !params.contains("service") || !params.contains("account") ||

@@ -105,7 +105,7 @@ export const DECISION_LABEL: Record<PermissionMode, string> = {
 export const APPROVAL_SOURCE_LABEL: Record<PermissionApprovalSource, string> = {
   user: "用户批准",
   policy: "策略批准",
-  agent: "Agent 自主批准",
+  agent: "运行服务批准",
 };
 
 /** 一次工具执行的完整状态。比「结果」多出「还没结束」的三种。 */

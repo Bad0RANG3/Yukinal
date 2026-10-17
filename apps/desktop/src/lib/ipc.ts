@@ -15,27 +15,28 @@ import {
   EVENT_SCHEMAS,
   IPC_SCHEMAS,
   WindowShellContextSchema,
-  WindowShellSidebarSchema,
-  WindowShellActionSchema,
-  type WindowShellSidebar,
-  type WindowShellAction,
+  WindowShellSurfaceSchema,
   type WindowShellContext,
+  type WindowShellSurface,
   type IpcCommandMap,
   type IpcCommandName,
 } from "@yukinal/shared";
 // 只用它的类型层（`z.output`），所以是 `import type`：这行不会进入运行时产物。
 import type { z } from "zod";
 
+import { nativePreviewChatParams, usesNativePreviewChat } from "./preview-chat.js";
 import { isPreviewFixture, previewResponse } from "./preview-fixtures.js";
 
 type UnlistenFn = () => void;
 
 type NativeDesktopHost = {
   windowShell?: {
+    titlebarOverlay?: boolean;
     updateContext: (context: WindowShellContext) => Promise<void>;
-    updateSidebar?: (sidebar: WindowShellSidebar) => Promise<void>;
-    onAction?: (handler: (action: unknown) => void) => UnlistenFn;
+    updateSurface?: (surface: WindowShellSurface) => Promise<{ maximized: boolean } | void>;
+    openWorkpage?: (page: { kind: "terminal" | "files" | "logs" | "services"; serverId: string }) => Promise<unknown>;
   };
+  workpageWindow?: { setPinned: (pinned: boolean) => Promise<{ pinned: boolean }>; hide: () => Promise<unknown> };
   invoke: (command: string, params: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, handler: (payload: unknown) => void) => Promise<UnlistenFn>;
   openUrl: (url: string) => Promise<unknown>;
@@ -54,28 +55,37 @@ export function isNativeDesktopShell(): boolean {
 
 /** A narrow native-shell presentation channel, separate from business tools. */
 export async function updateNativeWindowContext(context: WindowShellContext): Promise<void> {
-  if (!isNativeDesktopShell()) return;
   const shell = window.__YUKINAL_HOST__?.windowShell;
   if (shell) await shell.updateContext(WindowShellContextSchema.parse(context));
 }
 
-/** Capability detection keeps older hosts and browser previews on the React sidebar. */
-export function hasNativeWindowSidebar(): boolean {
-  return isNativeDesktopShell() && typeof window.__YUKINAL_HOST__?.windowShell?.updateSidebar === "function"
-    && typeof window.__YUKINAL_HOST__?.windowShell?.onAction === "function";
+export function supportsNativeCaptionSurface(): boolean {
+  return typeof window.__YUKINAL_HOST__?.windowShell?.updateSurface === "function";
 }
 
-export async function updateNativeWindowSidebar(sidebar: WindowShellSidebar): Promise<void> {
-  if (!hasNativeWindowSidebar()) return;
-  await window.__YUKINAL_HOST__!.windowShell!.updateSidebar!(WindowShellSidebarSchema.parse(sidebar));
+export function supportsNativeTitlebarControls(): boolean {
+  return window.__YUKINAL_HOST__?.windowShell?.titlebarOverlay === true;
 }
 
-export function onNativeWindowAction(handler: (action: WindowShellAction) => void): UnlistenFn {
-  if (!hasNativeWindowSidebar()) return () => {};
-  return window.__YUKINAL_HOST__!.windowShell!.onAction!((raw) => {
-    const parsed = WindowShellActionSchema.safeParse(raw);
-    if (parsed.success) handler(parsed.data);
-  });
+export async function openNativeWorkpage(page: { kind: "terminal" | "files" | "logs" | "services"; serverId: string }): Promise<void> {
+  const open = window.__YUKINAL_HOST__?.windowShell?.openWorkpage;
+  if (!open) throw new Error("独立窗口需要新版桌面应用");
+  await open(page);
+}
+
+export async function pinNativeWorkpage(pinned: boolean): Promise<boolean> {
+  const host = window.__YUKINAL_HOST__?.workpageWindow;
+  if (!host) throw new Error("当前窗口不支持桌面置顶");
+  return (await host.setPinned(pinned)).pinned;
+}
+
+export async function hideNativeWorkpage(): Promise<void> {
+  await window.__YUKINAL_HOST__?.workpageWindow?.hide();
+}
+
+export async function updateNativeCaptionSurface(surface: WindowShellSurface): Promise<{ maximized: boolean } | undefined> {
+  const presentation = await window.__YUKINAL_HOST__?.windowShell?.updateSurface?.(WindowShellSurfaceSchema.parse(surface));
+  return presentation && typeof presentation.maximized === "boolean" ? { maximized: presentation.maximized } : undefined;
 }
 
 /**
@@ -112,9 +122,10 @@ export async function callDesktopParsed<C extends IpcCommandName, T>(
 ): Promise<T> {
   if (!isDesktopShell()) throw new IpcUnavailableError(command);
   const validatedParams = IPC_SCHEMAS[command].params.parse(params);
-  const nativeArgs = { ...(validatedParams as Record<string, unknown>) };
+  const livePreviewChat = isPreviewFixture() && usesNativePreviewChat(command, isNativeDesktopShell());
+  const nativeArgs = livePreviewChat ? nativePreviewChatParams(command, validatedParams as Record<string, unknown>) : { ...(validatedParams as Record<string, unknown>) };
   try {
-    if (isPreviewFixture()) return parse(previewResponse(command, validatedParams));
+    if (isPreviewFixture() && !livePreviewChat) return parse(previewResponse(command, validatedParams));
     if (!window.__YUKINAL_HOST__) throw new IpcUnavailableError(command);
     const raw = await window.__YUKINAL_HOST__.invoke(command, nativeArgs);
     return parse(raw);
@@ -164,7 +175,7 @@ export async function listenDesktop<E extends DesktopEventName>(
   // Browser preview cannot install native event listeners. Returning a no-op
   // subscription keeps components that always mount a listener (such as the
   // SSH authentication modal) from producing an unhandled browser rejection.
-  if (!isNativeDesktopShell()) return () => {};
+  if (!isNativeDesktopShell() || (isPreviewFixture() && !name.startsWith("agent."))) return () => {};
   const schema = EVENT_SCHEMAS[name];
   const deliver = (payload: unknown) => {
     const parsed = schema.safeParse(payload);

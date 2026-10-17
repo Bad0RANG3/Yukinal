@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
+import { PageToolbar } from "../../components/PageToolbar.js";
 import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, subscribeDesktop, type DesktopEventPayload } from "../../lib/ipc.js";
 import { useServers } from "../../lib/servers.js";
@@ -89,6 +90,7 @@ export function InvestigationsPane() {
   const servers = useServers({ enabled: shell });
   const [targetSelection, setTargetSelection] = useState(selectedServerId ?? "");
   const [objective, setObjective] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
   const [criteria, setCriteria] = useState("");
   const [taskMode, setTaskMode] = useState<AgentRunMode>("goal");
   const [automationLevel, setAutomationLevel] = useState<TaskAutomationLevel>("execute");
@@ -155,6 +157,8 @@ export function InvestigationsPane() {
   const createTask = useMutation({
     mutationFn: (input: InvestigationTaskCreateInput) => callDesktop("investigation_task_create", { input }),
     onSuccess: (response) => {
+      // Keep the submit control visible until the user closes the form.
+      setCreateOpen(true);
       setObjective("");
       setCriteria("");
       setTaskMode("goal");
@@ -243,25 +247,22 @@ export function InvestigationsPane() {
     if (!taskDelegation.eligible) setBoundedDelegationRequested(false);
   }, [taskDelegation.eligible]);
 
-  if (!shell) return <PreviewEmpty icon="agent" body="排查任务和证据只在 Tauri 桌面壳中可用，浏览器预览不会伪造远端数据。" />;
-  if (tasks.isLoading) return <LoadingPanel title="正在读取排查任务" hint="从本地数据库加载任务与状态" />;
+  if (!shell) return <PreviewEmpty icon="agent" body="桌面功能不可用" />;
+  if (tasks.isLoading) return <LoadingPanel title="正在读取排查任务" />;
   if (tasks.isError || !tasks.data) {
     return <ErrorPanel showIcon title="无法读取排查任务" message={errorMessage(tasks.error)} onRetry={() => void tasks.refetch()} />;
   }
 
   const taskRows = tasks.data.tasks;
+  const showCreate = createOpen || taskRows.length === 0;
   return (
     <div className="investigations-page">
-      <section className="investigations-header">
-        <div>
-          <p className="eyebrow">证据驱动的自动化</p>
-          <h2>排查任务</h2>
-          <p>描述目标，AI 会生成计划、调用已配置工具并验证结果；只在缺少信息或需要授权时暂停。</p>
-        </div>
+      <PageToolbar actions={<>
         <button type="button" className="button-secondary" onClick={() => void tasks.refetch()} disabled={tasks.isFetching}>
           <Icon name="refresh" size="sm" /> {tasks.isFetching ? "读取中" : "刷新"}
         </button>
-      </section>
+        {taskRows.length > 0 ? <button type="button" className="button-secondary" aria-expanded={showCreate} aria-controls="investigation-create" onClick={() => setCreateOpen((open) => !open)}>{showCreate ? "收起新建" : "新建任务"}</button> : null}
+      </>}><span>{taskRows.length} 个任务</span></PageToolbar>
 
       {scheduleNotification ? (
         <section className="investigation-notification" role="status">
@@ -273,10 +274,9 @@ export function InvestigationsPane() {
         </section>
       ) : null}
 
-      <section className="investigation-create-card" aria-labelledby="investigation-create-title">
+      <section id="investigation-create" className="investigation-create-card" hidden={!showCreate} aria-labelledby="investigation-create-title">
         <div>
-          <p className="eyebrow">新目标</p>
-          <h3 id="investigation-create-title">告诉 AI 要完成什么</h3>
+          <h3 id="investigation-create-title">新建任务</h3>
         </div>
         <label className="field-label" htmlFor="investigation-server">目标服务器 / 运行范围</label>
         <select
@@ -321,9 +321,6 @@ export function InvestigationsPane() {
           placeholder="例如：检查 staging API 的 502 错误，修复配置并验证服务恢复"
           rows={2}
         />
-        <p className="investigation-goal-hint">
-          AI 会生成计划、调用已配置工具、验证并汇报；只有缺少必要信息或需要授权时才会暂停询问。
-        </p>
         <label className="investigation-task-delegation">
           <input
             type="checkbox"
@@ -332,16 +329,16 @@ export function InvestigationsPane() {
             onChange={(event) => setBoundedDelegationRequested(event.target.checked)}
           />
           <span>
-            <strong>授权 AI 在本次任务中受限自动推进</strong>
+            <strong>允许本次任务自动执行</strong>
             <small>
               {taskDelegation.eligible
-                ? "勾选后，AI 可按计划自动执行本任务范围内的普通结构化变更和命令，仅限所选开发/预发布服务器。远端命令最多 12 次、累计超时 15 分钟、总输出 1 MiB，授权最长 4 小时；关键危险操作仍逐项审批。不勾选时，需要授权的操作会逐项询问。"
-                : "仅适用于远程开发/预发布服务器的“目标执行 + 按计划推进”任务；当前范围或设置不符合条件。"}
+                ? "开发 / 预发布 · 最多 12 次命令 / 15 分钟 / 1 MiB · 授权 4 小时 · 高危操作逐项审批"
+                : "当前目标或运行模式不支持自动执行"}
             </small>
           </span>
         </label>
         <details className="investigation-advanced">
-          <summary>执行与验证选项 <span>默认逐项询问；可在上方显式开启受限委托</span></summary>
+          <summary>执行与验证选项</summary>
           <div className="investigation-advanced-content">
             <label className="field-label" htmlFor="investigation-criteria">自定义完成标准（可选，每行一条）</label>
             <textarea
@@ -349,7 +346,7 @@ export function InvestigationsPane() {
               className="text-input investigation-criteria"
               value={criteria}
               onChange={(event) => setCriteria(event.target.value)}
-              placeholder="留空时由 AI 根据目标生成并验证完成标准"
+              placeholder="完成标准（可选）"
               rows={2}
             />
             <div className="investigation-create-options">
@@ -436,7 +433,7 @@ export function InvestigationsPane() {
               ? `${selectedServer.name} · ${automationLevel === "execute" ? "按目标推进，变更受权限约束" : "先观察或生成方案"}`
               : scope?.host === "local"
                 ? "本机范围 · 不会连接远端服务器"
-                : "先选择目标服务器，再开始 AI 任务"}
+                : "请选择目标服务器"}
           </span>
           <button
             type="button"
@@ -462,19 +459,19 @@ export function InvestigationsPane() {
               });
             }}
           >
-            <Icon name="agent" size="sm" /> {createTask.isPending || startTask.isPending ? "启动中" : "开始 AI 任务"}
+            <Icon name="agent" size="sm" /> {createTask.isPending || startTask.isPending ? "启动中" : "开始任务"}
           </button>
         </div>
         {createTask.isError ? <p className="form-error" role="alert">{errorMessage(createTask.error)}</p> : null}
       </section>
 
       {taskRows.length === 0 ? (
-        <EmptyPanel extraClass="investigation-empty" icon="agent" title="还没有排查任务" body="创建一个只读目标后，Agent 会把每次采集结果绑定到同一条证据链。" />
+        <EmptyPanel extraClass="investigation-empty" icon="activity" title="暂无任务" />
       ) : (
         <div className="investigation-layout">
           <ul className="investigation-list" aria-label="排查任务列表">
             {taskRows.map((task) => (
-              <TaskRow key={task.id} task={task} selected={task.id === selectedTaskId} onSelect={() => selectTask(task.id)} />
+              <TaskRow key={task.id} task={task} serverName={serverRows.find((server) => server.id === task.scope.serverId)?.name} selected={task.id === selectedTaskId} onSelect={() => selectTask(task.id)} />
             ))}
           </ul>
           {selectedTaskId && detail.data ? (
@@ -521,22 +518,20 @@ export function InvestigationsPane() {
               selectingOptionId={selectBrief.isPending ? selectBrief.variables?.optionId : undefined}
               selectionError={selectBrief.isError ? errorMessage(selectBrief.error) : undefined}
             />
-          ) : (
-            <div className="investigation-detail-placeholder">选择一个任务查看证据、发现和决策摘要。</div>
-          )}
+          ) : null}
         </div>
       )}
     </div>
   );
 }
 
-function TaskRow({ task, selected, onSelect }: { task: InvestigationTask; selected: boolean; onSelect: () => void }) {
+function TaskRow({ task, serverName, selected, onSelect }: { task: InvestigationTask; serverName?: string; selected: boolean; onSelect: () => void }) {
   return (
     <li>
       <button type="button" className={`investigation-row ${selected ? "investigation-row-selected" : ""}`} onClick={onSelect} aria-pressed={selected}>
         <span className={`investigation-status investigation-status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
         <strong>{task.objective}</strong>
-        <small>{task.scope.host === "remote" ? task.scope.serverId ?? "远端服务器" : "本机"} · {task.successCriteria.length} 项完成标准</small>
+        <small>{task.scope.host === "remote" ? serverName ?? task.scope.serverId ?? "远端服务器" : "本机"} · {task.successCriteria.length} 项完成标准</small>
       </button>
     </li>
   );
@@ -637,7 +632,7 @@ function InvestigationDetail({
               <Icon name="stop" size="sm" /> {stopping ? "停止中" : "停止任务"}
             </button>
           ) : null}
-          <button type="button" className="button-primary" onClick={onContinue}><Icon name="agent" size="sm" /> 在 Agent 中继续</button>
+          <button type="button" className="button-primary" onClick={onContinue}><Icon name="agent" size="sm" /> 继续对话</button>
           {canRecover ? (
             <button type="button" className="button-secondary" onClick={() => onRecover()} disabled={recovering}>
               <Icon name="refresh" size="sm" /> {recovering ? "恢复中" : "恢复任务"}
@@ -678,22 +673,22 @@ function InvestigationDetail({
       ) : null}
       {recoveryError ? <p className="form-error" role="alert">恢复失败：{recoveryError}</p> : null}
       {runs.length > 0 ? (
-        <div className="investigation-runs">
-          <span className="project-card-label">运行记录</span>
+        <details className="investigation-runs investigation-section">
+          <summary>运行记录 · {runs.length}</summary>
           {runs.slice(0, 5).map((run) => (
             <div key={run.id} className="investigation-run-row">
               <span>第 {run.attempt} 次 · {run.status}</span>
               <small>{run.updatedAt}{run.failure ? ` · ${run.failure.code}` : ""}</small>
             </div>
           ))}
-        </div>
+        </details>
       ) : null}
       <div className="investigation-criteria">
         <span className="project-card-label">完成标准</span>
         <ul>{task.successCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>
       </div>
-      <div className="investigation-guardrails-view">
-        <span className="project-card-label">宿主硬边界</span>
+      <details className="investigation-guardrails-view investigation-section">
+        <summary>执行边界</summary>
         <small className="project-muted">
           时间窗：{task.guardrails.notBeforeAt ?? "立即"} → {task.guardrails.expiresAt ?? "未设置截止"}
         </small>
@@ -708,7 +703,7 @@ function InvestigationDetail({
             命令授权：{task.guardrails.commandGrant.callsUsed}/{task.guardrails.commandGrant.maxCalls} 次 · 剩余时长 {Math.max(0, task.guardrails.commandGrant.maxTotalDurationMs - task.guardrails.commandGrant.totalDurationMs)} ms · 剩余输出 {Math.max(0, task.guardrails.commandGrant.maxTotalOutputBytes - task.guardrails.commandGrant.totalOutputBytes)} 字节 · 截止 {task.guardrails.commandGrant.expiresAt}
           </small>
         ) : null}
-      </div>
+      </details>
       {plan ? (
         <div className="investigation-plan">
           <span className="project-card-label">当前计划 · 修订 {plan.revision}</span>
@@ -737,14 +732,14 @@ function InvestigationDetail({
           ))}
         </div>
       ) : (
-        <p className="project-muted">当前还没有活动计划；Agent 必须先声明计划才能继续使用任务工具。</p>
+        <p className="project-muted">暂无计划</p>
       )}
       {steps.length > 0 ? <InvestigationExecutionTimeline steps={steps} /> : null}
-      <div className="investigation-schedules">
-        <span className="project-card-label">持续巡检</span>
+      <details className="investigation-schedules investigation-section" open={Boolean(scheduleError) || schedules.length > 0}>
+        <summary>持续巡检 · {schedules.length}</summary>
         {scheduleError ? <p className="form-error" role="alert">持续巡检设置失败：{scheduleError}</p> : null}
         {schedules.length === 0 ? (
-          <p className="project-muted">没有后台触发器。只读任务可以按固定间隔收集证据，异常仍会停在等待用户状态。</p>
+          <p className="project-muted">暂无巡检</p>
         ) : schedules.map((schedule) => (
           <div key={schedule.id} className="investigation-schedule-row">
             <span>{scheduleStatusLabel(schedule.status)} · {scheduleIntervalLabel(schedule.intervalSeconds)} · 下次 {schedule.nextRunAt}</span>
@@ -832,11 +827,11 @@ function InvestigationDetail({
             ))}
           </div>
         ) : null}
-      </div>
-      <div className="investigation-findings">
-        <span className="project-card-label">结构化判断</span>
+      </details>
+      <details className="investigation-findings investigation-section" open={findings.length > 0}>
+        <summary>发现 · {findings.length}</summary>
         {findings.length === 0 ? (
-          <p className="project-muted">还没有带证据引用的事实或推断。</p>
+          <p className="project-muted">暂无发现</p>
         ) : (
           findings.map((finding) => (
             <article key={finding.id} className="investigation-finding">
@@ -852,19 +847,19 @@ function InvestigationDetail({
             </article>
           ))
         )}
-      </div>
-      <div className="investigation-evidence">
-        <span className="project-card-label">证据（已脱敏）</span>
+      </details>
+      <details className="investigation-evidence investigation-section" open={evidence.length > 0}>
+        <summary>证据 · {evidence.length}</summary>
         {evidence.length === 0 ? (
-          <p className="project-muted">Agent 还没有保存证据。</p>
+          <p className="project-muted">暂无证据</p>
         ) : (
           evidence.map((item) => <EvidenceCard key={item.id} evidence={item} />)
         )}
-      </div>
-      <div className="investigation-artifacts">
-        <span className="project-card-label">阶段工件</span>
+      </details>
+      <details className="investigation-artifacts investigation-section">
+        <summary>阶段记录 · {artifacts.length}</summary>
         {artifacts.length === 0 ? (
-          <p className="project-muted">还没有保存执行、验证或失败工件。</p>
+          <p className="project-muted">暂无阶段记录</p>
         ) : (
           artifacts.map((artifact) => (
             <details key={artifact.id} className="investigation-artifact-card">
@@ -878,7 +873,7 @@ function InvestigationDetail({
             </details>
           ))
         )}
-      </div>
+      </details>
       <RetentionPanel
         task={task}
         preview={retentionPreview}
@@ -917,7 +912,7 @@ function InvestigationDetail({
           {selectingOptionId ? <p className="project-muted">选择会记录决策并按上面的续接意图推进；不会绕过计划门控或逐项批准直接执行远端变更。</p> : null}
           {selectionError ? <p className="form-error" role="alert">记录选择失败：{selectionError}</p> : null}
         </div>
-      ) : <p className="project-muted">Agent 完成证据整理后，这里会出现可比较的处理选项。</p>}
+      ) : <p className="project-muted">暂无处理选项</p>}
     </section>
   );
 }

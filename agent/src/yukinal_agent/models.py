@@ -133,7 +133,12 @@ class ModelFactory:
                 raise ModelFactoryError("invalid_base_url", "Configured model endpoint is invalid") from None
         builder = self._builders.get(provider)
         if builder is None:
-            builder = self._load_builder(provider)
+            if provider == "openai" and base_url is not None and urlsplit(base_url).hostname == "api.deepseek.com" and config.wire_api != "responses":
+                from .deepseek_model import DeepSeekChatModel
+
+                builder = DeepSeekChatModel
+            else:
+                builder = self._load_builder(provider)
         if provider == "gemini":
             kwargs: dict[str, Any] = {
                 "model": model_name,
@@ -207,6 +212,22 @@ def _resolve(value: str | None) -> str | None:
         return None
     reference = _ENV_REFERENCE.fullmatch(value)
     return os.environ.get(reference.group(1), "") if reference is not None else value
+
+
+def with_reasoning_effort(model: Any, effort: str) -> Any:
+    """Apply a documented DeepSeek parameter before tools/output budgets are bound."""
+    from .deepseek_model import DeepSeekChatModel
+
+    if (
+        effort not in {"none", "low", "high", "max"}
+        or not isinstance(model, DeepSeekChatModel)
+        or urlsplit(model.openai_api_base or "").scheme != "https"
+        or urlsplit(model.openai_api_base or "").hostname != "api.deepseek.com"
+        or model.model_name not in {"deepseek-flash", "deepseek-v4-pro"}
+    ):
+        raise ModelFactoryError("reasoning_not_supported", "This model does not support the selected reasoning effort")
+    extra_body = {**(model.extra_body or {}), "thinking": {"type": "disabled" if effort == "none" else "enabled"}}
+    return model.model_copy(update={"reasoning_effort": None if effort == "none" else effort, "extra_body": extra_body})
 
 
 def _validate_base_url(value: str) -> None:

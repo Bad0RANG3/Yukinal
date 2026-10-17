@@ -170,6 +170,13 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(data["health"], "unknown")
         self.assertEqual(len(data["collectors"]), 7)
         self.assertNotIn("snapshotOutputs", data)
+        extended = sidecar.handle(_request(4, "server.snapshot.normalize", {
+            "outputs": {**outputs, "network_routes4": {"exitCode": 0, "stdout": "[]"},
+                        "network_dns": {"exitCode": 1, "stdout": ""}},
+        }))["result"]["snapshotData"]["networkDetails"]
+        self.assertEqual(extended["ipv4Routes"], [])
+        self.assertNotIn("dnsServers", extended)
+        self.assertIn("dnsServers", extended["errors"])
 
         invalid = sidecar.handle(_request(3, "server.snapshot.normalize", {
             "outputs": {**outputs, "extra": {"exitCode": 0, "stdout": ""}},

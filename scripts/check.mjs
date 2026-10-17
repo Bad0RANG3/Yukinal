@@ -5,7 +5,7 @@
  *
  * Order is deliberate:
  *   1. check repository hygiene and docs
- *   2. run the configured C++ SSH and Python Agent tests before unrelated JS gates
+ *   2. run the configured native CTest suite before unrelated JS gates
  *   3. build the contract libs (consumers import their dist/*.d.ts)
  *   4. typecheck and test JavaScript sources (including retained legacy Agent tests)
  *   5. smoke the Python Agent
@@ -13,15 +13,17 @@
  * Exits non-zero on the first failure.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnCommandSync } from "./lib/commands.mjs";
 
 const nativeBuildCandidates = process.env.YUKINAL_SSH_CMAKE_BUILD_DIR
   ? [resolve(process.env.YUKINAL_SSH_CMAKE_BUILD_DIR)]
-  : ["native/build-check", "native/build-desktop", "native/build", "native/build-nmake"];
+  : ["native/build-check", "native/build-desktop", "native/build", "native/build-nmake", "native/build-cpp-host"];
 const nativeBuildDirectory = nativeBuildCandidates.find((directory) =>
-  existsSync(join(directory, "CTestTestfile.cmake")));
+  existsSync(join(directory, "CTestTestfile.cmake")) &&
+  existsSync(join(directory, "CMakeCache.txt")) &&
+  /^YUKINAL_BUILD_TESTS:BOOL=ON\r?$/mu.test(readFileSync(join(directory, "CMakeCache.txt"), "utf8")));
 
 // The phase-4 control plane has its own virtualenv: it needs FastAPI/SQLAlchemy,
 // which the Agent does not. When the venv is absent the step is skipped with a
@@ -44,7 +46,7 @@ const steps = [
   // section that moves takes its anchors with it, and only the renderer notices.
   { name: "docs links", command: process.execPath, args: ["scripts/check-docs-links.mjs"], required: true },
   {
-    name: "C++ SSH service and Python Agent tests",
+    name: "configured native CTest suite",
     command: "ctest",
     args: ["--test-dir", nativeBuildDirectory ?? "native/build", "-C", "Release", "--output-on-failure"],
     required: true,

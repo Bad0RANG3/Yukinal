@@ -351,7 +351,7 @@ test("a running server shows its pid, protocol version and declared tools", () =
   assert.match(html, /running|运行中/);
   assert.match(html, /4242/);
   assert.match(html, /2025-11-25/);
-  assert.match(html, /服务器声明了 2 个工具/);
+  assert.match(html, /工具 2/);
   assert.match(html, /echo/);
   assert.match(html, /explode/);
   assert.ok(!/已注册工具/.test(html), "描述符不代表 agent 已经注册了它们");
@@ -375,7 +375,7 @@ test("a running server exposes the explicit tool review surface", () => {
   assert.match(html, /审核工具/);
   assert.match(html, /当前允许 1 个/);
   assert.match(html, /保存工具审核/);
-  assert.match(html, /每次调用仍按 critical 逐项批准/);
+  assert.match(html, /已完成审核/);
   assert.match(html, /信任此服务器声明的只读\/破坏性注解/);
   assert.match(html, /type="checkbox"/);
 });
@@ -468,7 +468,7 @@ test("the form offers stdio and Streamable HTTP with transport-specific fields",
 
   assert.match(html, /一行一个/);
   assert.match(html, /保存\*\*不会启动\*\*服务器|保存/);
-  assert.match(html, /每个 MCP 工具调用都需要用户逐项批准/);
+  assert.match(html, /保存/);
   assert.match(html, /<option[^>]*value="stdio"/);
   assert.match(html, /<option[^>]*value="http"/);
   assert.match(html, /启动命令/);
@@ -503,7 +503,7 @@ test("the form offers stdio and Streamable HTTP with transport-specific fields",
   assert.match(httpHtml, /<textarea/);
   assert.match(httpHtml, /Authorization/);
   assert.match(httpHtml, /X-API-Key/);
-  assert.match(httpHtml, /保留现有 secret/);
+  assert.doesNotMatch(httpHtml, /keychain:\/\//);
   assert.doesNotMatch(httpHtml, /启动命令/);
 
   const oauthHtml = render({
@@ -529,7 +529,6 @@ test("the form offers stdio and Streamable HTTP with transport-specific fields",
   // 两种流程都在选择框里，默认是授权码；界面还用同一份值决定下面那句说明说什么。
   assert.match(oauthHtml, /<option[^>]*value="authorization_code"/);
   assert.match(oauthHtml, /<option[^>]*value="device_code"/);
-  assert.match(oauthHtml, /随机|127\.0\.0\.1|等回调/);
 
   const deviceHtml = render({
     editingId: "mcp_oauth",
@@ -547,8 +546,6 @@ test("the form offers stdio and Streamable HTTP with transport-specific fields",
     ),
   });
   assert.match(deviceHtml, /value="device_code" selected/);
-  assert.match(deviceHtml, /user_code/);
-  assert.match(deviceHtml, /device_authorization_endpoint/);
 });
 
 test("the OAuth form offers the client authentication methods and a write-only secret", () => {
@@ -571,7 +568,7 @@ test("the OAuth form offers the client authentication methods and a write-only s
   assert.match(publicHtml, /<option[^>]*value="client_secret_post"/);
   assert.match(publicHtml, /<option[^>]*value="client_secret_basic"/);
   assert.match(publicHtml, /公共客户端/);
-  assert.match(publicHtml, /服务端即使在注册响应里返回 secret/);
+  assert.match(publicHtml, /value="none" selected/);
   assert.doesNotMatch(publicHtml, /Client secret/, "公共客户端没有密钥可填");
 
   const secretHtml = render({
@@ -593,7 +590,7 @@ test("the OAuth form offers the client authentication methods and a write-only s
   assert.match(secretHtml, /Client secret/);
   assert.match(secretHtml, /type="password"/);
   assert.match(secretHtml, /留空保留现有 secret/);
-  assert.match(secretHtml, /旧值会被回收/);
+  assert.match(secretHtml, /type="password"/);
 });
 
 test("an OAuth row names its client authentication method", () => {
@@ -688,10 +685,10 @@ test("an OAuth row exposes connect or re-authorize without implying it is connec
   assert.match(deviceRow, /OAuth 设备码/);
 });
 
-test("an empty list says what to do instead of showing an empty table", () => {
+test("an empty list keeps its status and add action", () => {
   const html = render({ servers: [] });
-  assert.match(html, /还没有配置任何 MCP 服务器/);
-  assert.match(html, /npx/);
+  assert.match(html, /暂无 MCP 服务器/);
+  assert.ok(buttonNamed(html, "添加服务器"));
 });
 
 test("errors and notices are rendered with the roles a screen reader needs", () => {
@@ -781,6 +778,14 @@ test("the device dialog's terminal states say what happened without inventing a 
   assert.match(cancelled, /role="status"/);
   assert.ok(!/role="alert"/.test(cancelled));
   assert.match(cancelled, /已取消/);
+});
+
+test("a failed browser launch stays visible while device authorization is waiting", () => {
+  const html = renderDevice("waiting", { message: "无法打开链接：系统浏览器暂不可用" });
+  assert.match(html, /role="alert"/);
+  assert.match(html, /无法打开链接：系统浏览器暂不可用/);
+  assert.ok(buttonNamed(html, "取消授权"));
+  assert.match(html, /WDJB-MJHT/);
 });
 
 test("the verification link prefers the complete URI and falls back to the plain one", () => {

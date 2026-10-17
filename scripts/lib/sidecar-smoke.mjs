@@ -76,6 +76,11 @@ export async function runSidecarSmoke(entry, options = {}) {
   const HOST_HANDLERS = {
     // "No MCP servers are configured" is the ordinary host: an empty catalog, not an error.
     "host.mcp.catalog": () => ({ servers: [], failures: [] }),
+    "host.chat.context": ({ sessionId, serverId }) => ({
+      session: { id: sessionId, ...(serverId ? { serverId } : {}) },
+      messages: [],
+      truncated: false,
+    }),
   };
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
@@ -202,6 +207,9 @@ export async function runSidecarSmoke(entry, options = {}) {
     hostMethodsSeen.has("host.mcp.catalog"),
     "the agent never asked the host for an MCP catalog (ADR 0014)",
   );
+  if (options.agentKind === "python") {
+    assert(hostMethodsSeen.has("host.chat.context"), "the agent never loaded its saved conversation context");
+  }
 
   console.log("sidecar smoke: green");
 }

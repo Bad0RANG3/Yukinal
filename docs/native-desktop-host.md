@@ -25,25 +25,56 @@ are not implemented yet; the command-level gap list and implementation order are
 
 ## Native WebView and IPC
 
-Product decisions and implementation boundaries are defined in the
-[Windows desktop window direction](./desktop-window-direction.md).
-
 ### Windows window geometry
 
-The Windows host owns the two rounded boundaries. DWM supplies the outer
-top-level window corners. The native title/status strip and its window controls
-share a 40-logical-pixel height. A fixed 240-DIP native sidebar joins that strip;
-the embedded WebView uses the remaining width, with 8-DIP right/bottom insets
-and a 14-DIP corner radius. The minimum window size is 1100 × 680. These product
-values scale with the window DPI; they are not HIG requirements.
+The Windows host owns the outer boundary. DWM supplies the top-level window
+corners and system caption buttons. The caption occupies the top 40 logical
+pixels, scaled by the window DPI. On a wide three-column workspace, a capable
+WebView2 runtime lets the WebView extend into that area so the existing AI
+toolbar sits inside the caption. The host excludes the native button strip and
+restored-window top resize edge from the WebView region. Compact windows and
+runtimes without this capability keep the WebView below the native caption.
 
-React fills that child window and owns only content layout. It does not draw an
-outer window, caption buttons, or a second title bar. Browser development mode
-previews content only. Maximizing lets Windows square the outer boundary while
-retaining the inset content surface. Window movement, resizing, system menus,
-caption actions, and Snap hit testing stay with Win32 and DWM. Native-painted
-caption controls use system window commands and `HTMAXBUTTON` hit testing;
-they are not HTML controls.
+React gives only the central AI workspace a 16-logical-pixel rounded inner frame,
+using the shared panel radius (twice the control radius), inset
+12 pixels from the content's bottom. In the three-column desktop layout, its
+surface starts 12 logical pixels below the window's top. In the caption overlay,
+React paints the complete inner frame. The older-runtime fallback joins React's
+straight top edges to a Win32-painted rounded cap at the WebView boundary.
+The fused outer and AI surfaces use neutral gray values on both sides of this
+boundary, since the WebView's monochrome filter does not affect native painting.
+The left navigation and right dashboard sit directly on the window background.
+Both use `clamp(280px, 100px + 11vw, 360px)`, recalculating equally on resize and
+growing gradually in a maximized window. The centered
+AI inner frame fills its column and adapts to the available width.
+Its native caption cap follows the measured frame edges. Compact navigation
+still switches at the existing breakpoints, and phone-width layouts use the
+available inner-frame width.
+These are product values, rather than HIG requirements. React does not draw an outer window,
+caption buttons, or a second title bar. Browser development mode previews content
+only, with a 12-pixel top inset. Compact layouts retain the complete native caption
+so it can share space with Windows controls. Maximizing lets Windows square the outer boundary while retaining the
+AI workspace's inner frame. Window movement, resizing, system menus,
+caption actions, and Snap hit testing stay with Win32 and DWM. The sidebar owns
+the single visible application brand; panel names are not repeated in the caption.
+The AI welcome and input form share a starting area slightly above center. Once a conversation
+has messages, the transcript scrolls above the bottom input area. Transcript and
+input widths share a maximum 760-pixel reading measure, bounded by the frame
+in narrower windows; readiness notices stay beside the input they explain.
+The dark shell uses separate window, content, and raised-control surfaces. The
+composer uses #1d1d1d within the AI surface's #282828 background and has no glow, gradient,
+or shadow in resting, focused, or attachment-drag states. Nested server resources
+use a recessed surface. The outer-to-AI boundary uses only a faint edge and
+soft contact shadow, including its native caption cap. The welcome title is centered above the input; the
+28/14 title-to-body ratio and 8/24 grouping rhythm are calibrated from the Apple
+Music Windows v1.1 reference, not claimed as Apple implementation values.
+Empty-workspace task starters populate an empty draft even before the Agent is
+ready; sending still requires a ready runtime and model. They do not submit, replace attachments, or change permissions. Empty
+dashboard guidance describes available information without fabricating metrics.
+Caption hit testing falls back to DWM's current button bounds when the default
+handler reports a client hit. The conversion uses the outer window's screen
+origin, including maximized invisible borders, and keeps native non-client
+button codes so Windows still owns button behavior and Snap Layouts.
 
 Native acceptance must check drag, edge/corner resize, caption-button hover,
 Snap Layouts, minimize/restore, maximize/restore, inactive appearance, and moving
@@ -57,22 +88,33 @@ workspace context rather than maintaining an independent selection or task
 model. `WindowFrame` observes the existing workspace store and server query;
 the optional Windows `windowShell.updateContext` capability sends the selected
 section, server name, connection state, and Agent busy state to the native host.
-The title/status strip and the OS window title reflect that same context.
+The OS window title reflects that same context; the caption does not repeat it.
 `WindowShellContextSchema` is the presentation contract; the host independently
 validates its bounded fields. Credentials, prompts, and approval grants do not
 belong in that context.
 
-The native sidebar projects the same server cache and dispatches validated UI
-intents for navigation, selection, add/refresh and server context-menu actions.
-React re-resolves IDs and calls existing dialogs and application services.
-Busy/modal state blocks those intents; deletion retains its confirmation.
-Navigation, selected server, task state,
+As functions move into the frame, native controls must dispatch explicit actions
+to the existing application services. Navigation, selected server, task state,
 and approvals keep one source of truth. The shell must not acquire a separate
 Agent loop or a parallel server-action path. Visual tokens, typography, spacing,
 focus, and active/inactive states should evolve with the content design as one
 system, while Win32 continues to own native geometry and window management.
-The capability is optional: older hosts and browser previews retain the React
-sidebar. Shared theme-token transport and native task controls remain future work.
+`windowShell.updateSurface` is a separate presentation channel. A ResizeObserver
+keeps the cap aligned with the actual AI panel; a hidden or compact workspace
+clears it. Its strict shared schema and independent native checks accept only
+bounded CSS geometry and opaque colors. Native buttons keep their existing
+surface. After a successful surface update, the optional
+`windowShell.titlebarOverlay` capability moves the WebView into the caption and
+`WindowFrame` applies the matching layout. The left brand moves into the caption beside the AI toolbar, and navigation
+moves upward with it; the right panel retains its content inset. The same AI toolbar and application handlers remain
+in use; there is no second set of native business controls.
+
+The Windows build pins WebView2 SDK 1.0.2903.40. At runtime the host queries
+`ICoreWebView2Settings9` and enables `IsNonClientRegionSupportEnabled` before
+navigation. CSS `app-region: drag` gives the AI header native dragging, system
+menus, and double-click maximize/restore; interactive descendants explicitly use
+`no-drag`. Unsupported runtimes retain the separate-caption fallback. Native
+window commands do not travel through renderer IPC.
 
 The C++ window uses the pinned `webview/webview` C++ library over the operating
 system WebView: WebView2 on Windows, WebKit on macOS, and WebKitGTK on Linux. The
@@ -139,6 +181,15 @@ as a mismatch rather than silently replaced. Unmigrated commands return
 The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.
+On Windows, double-click `启动Yukinal.bat` to restart this checkout's desktop
+preview with mock data. It closes matching desktop processes and their children,
+updates the existing native build, restarts this checkout's Vite service in the
+background, and opens a visible window with a separate profile under
+`target/desktop-preview-profile`. Ports occupied by other projects are skipped.
+Pass `-CheckOnly` to inspect the launch plan without stopping or starting anything.
+The development URL also accepts the exact `?fixture=1` query for local mock
+data. Auxiliary workpage windows retain this query. Other paths, queries and
+non-loopback hosts remain rejected.
 
 The local file browser's native path selection now runs in C++. `local_path_pick`
 opens the platform file or folder picker and stores the chosen paths in a

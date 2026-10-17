@@ -22,7 +22,7 @@
   gap: 7px;
   margin: 0;
   color: var(--faint);
-  font-size: calc(var(--ui-font-size, 13px) - 2px);
+  font-size: calc(var(--ui-font-size, 14px) - 2px);
 }
 
 /* 「删除」在有确认之前是克制的描边按钮，不抢「设为当前」的位置；确认块出现后它才用
@@ -43,7 +43,7 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--danger-surface);
   padding: 9px 10px;
 }
@@ -51,7 +51,7 @@
 .provider-picker-confirm p {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -65,7 +65,7 @@
 
 .provider-picker-confirm-actions .text-button {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .provider-picker-confirm-actions .text-button:hover:not(:disabled) {
@@ -79,7 +79,7 @@
 
 .provider-picker-confirm-delete:hover:not(:disabled) {
   border-color: var(--danger-line);
-  background: #2f1a1e;
+  background: var(--danger-surface);
 }
 
 /* 删除后的结果提示：密钥到底有没有被一起删掉，只有这一次响应知道。 */
@@ -96,11 +96,11 @@
   margin: 14px 0 0;
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 9px;
-  background: #070809;
+  border-radius: var(--radius-control);
+  background: var(--surface-1);
   color: var(--muted);
   padding: 12px;
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -124,16 +124,16 @@
   min-width: 0;
 }
 
-.field-label,
-.source-title {
+.field-label {
   display: block;
   margin-bottom: 6px;
   color: var(--muted);
-  font-size: 10px;
 }
 
 .form-input {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
   outline: 0;
@@ -148,7 +148,7 @@
 
 .form-input:focus {
   border-color: var(--focus-line);
-  box-shadow: 0 0 0 3px var(--focus-halo);
+  box-shadow: var(--shadow-focus);
 }
 
 /* 与 .agent-composer-input 同一个坑：上面那条 `outline: 0` 权重 (0,1,0)，
@@ -168,6 +168,75 @@ select.form-input {
   appearance: auto;
 }
 
+/* Keep native selection, keyboard and form semantics while theming the popup
+   too. Older WebViews retain a dark native picker rather than a broken clone. */
+select { color-scheme: dark; }
+select option { color: var(--text); background: var(--surface-2); }
+@supports (appearance: base-select) {
+  select:not([multiple]):not([size]),
+  select:not([multiple]):not([size])::picker(select) { appearance: base-select; }
+  select:not([multiple]):not([size]) {
+    position: relative;
+    display: block;
+    padding-inline-end: 30px;
+    overflow: hidden;
+    text-align: start;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    background: var(--surface-2);
+    cursor: pointer;
+  }
+  select:not([multiple]):not([size])::picker-icon {
+    position: absolute;
+    inset-inline-end: 1px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    box-sizing: border-box;
+    inline-size: 28px;
+    min-inline-size: 0;
+    padding-inline: 4px;
+    text-align: center;
+    background: var(--surface-2);
+    box-shadow: -5px 0 4px 2px var(--surface-2);
+    color: var(--faint);
+    font-size: 10px;
+  }
+  select:not([multiple]):not([size])::picker(select) {
+    inline-size: anchor-size(width);
+    max-inline-size: calc(100vw - 24px);
+    max-block-size: min(360px, 50vh);
+    margin-block: 4px;
+    padding: 4px;
+    border: 1px solid var(--edge-normal);
+    border-radius: var(--radius-control);
+    background: var(--surface-2);
+    color: var(--text);
+    box-shadow: var(--shadow-popover, var(--shadow-frame));
+    font: inherit;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  select:not([multiple]):not([size]) option {
+    align-items: center;
+    gap: 8px;
+    min-block-size: 32px;
+    padding: 6px 8px;
+    border-radius: 3px;
+    color: var(--text);
+    background: transparent;
+    font: inherit;
+    line-height: 1.5;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  select:not([multiple]):not([size]) option:checked { background: var(--material-active); }
+  select:not([multiple]):not([size]) option:is(:hover, :focus-visible) { background: var(--material-hover); outline: 1px solid var(--focus-line); outline-offset: -1px; }
+  select:not([multiple]):not([size]) option:disabled { color: var(--faint); opacity: .55; }
+  select:not([multiple]):not([size]) option::checkmark { color: var(--muted); }
+  select:not([multiple]):not([size]):disabled { cursor: default; }
+}
+
 .form-input-mono,
 .form-textarea {
   font-family: var(--font-ui);
@@ -183,7 +252,7 @@ select.form-input {
 .form-success {
   display: block;
   margin: 7px 0 0;
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 1.5;
 }
 
@@ -215,7 +284,7 @@ select.form-input {
   align-items: flex-start;
   gap: 9px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   background: var(--surface-3);
   color: var(--text);
   padding: 10px;
@@ -235,32 +304,29 @@ select.form-input {
 }
 
 .settings-check-row strong {
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 600;
 }
 
 .settings-check-row small {
   color: var(--faint);
-  font-size: 9px;
+  font-size: var(--text-caption);
   line-height: 1.4;
 }
 
-.provider-list,
-.source-list-stack,
-.source-items {
+.provider-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.provider-row,
-.source-item {
+.provider-row {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: var(--surface-3);
   padding: 11px 12px;
 }
@@ -268,9 +334,7 @@ select.form-input {
 /* `.provider-row-active` 随 Provider 列表一起删掉了：那个列表现在是一个选择框，
    选中状态由控件自己表达。`.provider-list` / `.provider-row` 仍在，MCP 面板还在用。 */
 
-.provider-copy,
-.source-item-copy {
-  min-width: 0;
+.provider-copy {
   flex: 1;
 }
 
@@ -292,12 +356,12 @@ select.form-input {
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
-  border-radius: 50%;
+  border-radius: var(--radius-circle);
 }
 
 .provider-status-on {
   background: var(--success);
-  box-shadow: 0 0 0 3px #86dba51a;
+  box-shadow: var(--shadow-status);
 }
 
 .provider-status-off {
@@ -315,57 +379,48 @@ select.form-input {
   white-space: nowrap;
 }
 
-.source-group {
-  min-width: 0;
-}
-
-.source-title {
-  margin: 0 0 6px;
-  color: var(--faint);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.source-item {
-  padding: 9px 10px;
-}
-
-.source-item-copy {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.source-item-copy small {
-  color: var(--faint);
-  font-size: 9px;
-}
-
-.modal-backdrop {
-  position: fixed;
-  z-index: 20;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: rgb(0 0 0 / 72%);
-  padding: 20px;
-}
-
 .server-modal {
   position: relative;
   width: min(100%, 620px);
   max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
   overflow: auto;
+  overscroll-behavior: contain;
   margin: auto;
   color: var(--text);
   font: inherit;
   border: 1px solid var(--line-strong);
   border-radius: var(--card-radius);
   background: var(--surface-2);
-  box-shadow: 0 22px 80px rgb(0 0 0 / 48%);
+  box-shadow: var(--shadow-floating);
   padding: 20px;
+}
+
+/* Connection forms can grow well beyond a short desktop window. Keep their
+   close control outside the scroller and their actions inside its sticky edge. */
+.server-modal[open]:has(> .modal-header) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.server-modal > .modal-header { flex: 0 0 auto; }
+.server-modal > .server-form {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 12px 84px;
+  scrollbar-gutter: stable;
+}
+.server-modal > .server-form > * { flex-shrink: 0; }
+.server-modal > .server-form > .modal-actions {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  padding-block: 12px 4px;
 }
 
 .modal-header {
@@ -378,8 +433,11 @@ select.form-input {
 
 .modal-header h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--text-heading);
+  overflow-wrap: anywhere;
 }
+
+.modal-header > div { min-width: 0; }
 
 .auth-challenge-modal {
   width: min(100%, 520px);
@@ -394,6 +452,7 @@ select.form-input {
    而且不换行、不被截断、字母间距不被「排版美化」动过 —— 中间多一个空格就是一个无效的代码。 */
 .mcp-device-code-value {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -405,12 +464,17 @@ select.form-input {
 }
 
 .mcp-device-code-value code {
-  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 180px;
   overflow-x: auto;
   font-family: var(--font-terminal);
-  font-size: 22px;
+  font-size: var(--text-title);
   white-space: nowrap;
 }
+
+.mcp-device-code-value > button { flex: 0 0 auto; max-width: 100%; }
+.mcp-device-code :is(.form-hint, .form-error, .form-success) { overflow-wrap: anywhere; }
 
 .auth-challenge-target {
   display: inline-flex;
@@ -419,7 +483,7 @@ select.form-input {
   gap: 5px;
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -456,7 +520,7 @@ select.form-input {
   min-width: 0;
   margin: 0;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   padding: 10px 12px 12px;
 }
 
@@ -475,7 +539,7 @@ select.form-input {
   align-items: center;
   gap: 7px;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .form-check-option {
@@ -483,7 +547,7 @@ select.form-input {
   align-items: flex-start;
   gap: 7px;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--text-caption);
   line-height: 1.5;
 }
 
@@ -498,6 +562,7 @@ select.form-input {
 
 .modal-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 2px;
@@ -505,6 +570,7 @@ select.form-input {
 
 .terminal-page {
   display: flex;
+  min-width: 0;
   height: 100%;
   flex-direction: column;
   gap: 12px;
@@ -518,18 +584,26 @@ select.form-input {
   gap: 12px;
 }
 
+.terminal-toolbar { min-width: 0; flex-wrap: wrap; }
+.terminal-toolbar > * { min-width: 0; }
+.terminal-page .terminal-io-error { min-width: 0; flex-wrap: wrap; align-items: flex-start; }
+.terminal-page .terminal-io-error > span { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
+.terminal-page .terminal-io-error > button { max-width: 100%; margin-left: auto; white-space: normal; }
+
 .section-heading-inline {
   justify-content: flex-start;
 }
 
 .section-heading-inline h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-subheading);
 }
 
 .terminal-toolbar-note {
+  min-width: 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: var(--text-caption);
+  overflow-wrap: anywhere;
 }
 
 .terminal-shell {
@@ -538,7 +612,7 @@ select.form-input {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--card-radius);
-  background: #08090a;
+  background: var(--bg);
   padding: 14px;
 }
 
@@ -547,7 +621,7 @@ select.form-input {
 }
 
 .terminal-shell .xterm-viewport {
-  scrollbar-color: #34383e #08090a;
+  scrollbar-color: var(--surface-4) var(--bg);
 }
 
 .terminal-empty {
@@ -570,116 +644,15 @@ select.form-input {
 
 .terminal-empty strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--text-small);
 }
 
 .terminal-empty span {
   color: var(--faint);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
-.remote-files-page {
-  gap: 14px;
-}
-
-.files-toolbar {
-  gap: 8px;
-}
-
-.files-path-input {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-ui);
-}
-
-.files-layout {
-  gap: 12px;
-  min-height: 420px;
-}
-
-.file-list-panel,
-.file-preview-panel {
-  min-height: 420px;
-  padding: 16px;
-}
-
-.remote-file-row {
-  border-radius: 7px;
-  border-bottom-color: var(--line);
-}
-
-.remote-file-row:hover,
-.remote-file-row-selected {
-  background: var(--surface-4);
-}
-
-.remote-file-icon {
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-}
-
-.file-preview-content {
-  border: 1px solid var(--line);
-  background: #070809;
-  color: var(--text);
-}
-
-.activity-page,
-.services-page,
-.logs-page,
-.projects-page {
-  gap: 16px;
-}
-
-.activity-list,
-.service-list,
-.log-list {
-  background: var(--surface-2);
-}
-
-.activity-row,
-.service-row,
-.log-row {
-  border-bottom-color: var(--line);
-}
-
-.activity-type-icon {
-  border-radius: 9px;
-}
-
-.activity-row-meta,
-.service-summary,
-.log-summary,
-.project-card-meta {
-  color: var(--muted);
-}
-
-.activity-trace-detail {
-  border-color: #31514d;
-  border-radius: 9px;
-  background: #080f0f;
-}
-
-.activity-trace-step-input,
-.activity-trace-step-output {
-  font-family: var(--font-ui);
-}
-
-.service-row,
-.log-row {
-  padding-right: 15px;
-  padding-left: 15px;
-}
-
-.service-row code {
-  font-size: 10px;
-}
-
-.project-card {
-  padding: 16px;
-}
-
-.project-card:hover {
-  border-color: var(--line-strong);
+@container reference (max-width: 399px) {
+  .terminal-shell { padding: 8px; }
+  .terminal-toolbar { gap: 6px 12px; }
 }

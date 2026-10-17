@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 
 import { AppShell } from "./app/AppShell.js";
 import { WindowFrame } from "./app/WindowFrame.js";
+import { readWorkpageWindow, WorkpageWindow } from "./app/WorkpageWindow.js";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -18,10 +19,11 @@ const queryClient = new QueryClient({
 const container = document.getElementById("root");
 if (!container) throw new Error("#root is missing from index.html");
 
+const workpage = readWorkpageWindow();
 createRoot(container).render(
   <QueryClientProvider client={queryClient}>
-    <WindowFrame>
+    {workpage ? <WorkpageWindow {...workpage} /> : <WindowFrame>
       <AppShell />
-    </WindowFrame>
+    </WindowFrame>}
   </QueryClientProvider>,
 );

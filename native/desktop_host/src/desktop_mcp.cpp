@@ -1214,7 +1214,7 @@ nlohmann::json McpSupervisor::catalog() {
       const auto remote = descriptor.value("name", std::string());
       if (remote.empty()) continue;
       const bool reviewed = std::any_of(allowed.begin(), allowed.end(), [&](const auto& item) {
-        return item.is_string() && item.get<std::string>() == remote;
+        return item.is_string() && item.template get<std::string>() == remote;
       });
       if (!reviewed) continue;
       const auto annotations =
@@ -1260,7 +1260,7 @@ std::optional<std::string> McpSupervisor::tool_effective_risk(const std::string&
     const bool reviewed = std::any_of(session->allowed_tools.begin(), session->allowed_tools.end(),
                                       [&](const auto& item) {
                                         return item.is_string() &&
-                                               item.get<std::string>() == remote;
+                                               item.template get<std::string>() == remote;
                                       });
     if (!reviewed) return std::nullopt;
     const auto annotations = descriptor.contains("annotations") ? descriptor.at("annotations")
@@ -1297,7 +1297,7 @@ nlohmann::json McpSupervisor::call(const std::string& internal_name,
       remote = descriptor.value("name", std::string());
       reviewed = std::any_of(session->allowed_tools.begin(), session->allowed_tools.end(),
                              [&](const auto& item) {
-                               return item.is_string() && item.get<std::string>() == remote;
+                               return item.is_string() && item.template get<std::string>() == remote;
                              });
       break;
     }

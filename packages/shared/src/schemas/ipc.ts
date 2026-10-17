@@ -23,10 +23,13 @@ import {
   AgentPermissionModeSchema,
   AgentPromptPartsSchema,
   AgentRunModeSchema,
+  AgentReasoningEffortSchema,
   ApprovalResponseSchema,
   EMPTY_PROMPT_MESSAGE,
 } from "./permission.js";
-import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema } from "./agent.js";
+import { AgentCoordinationConfigSchema } from "./coordination.js";
+import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema, AgentTeamTaskSchema } from "./agent.js";
+import { AgentParticipantSchema, AgentPersonaSchema, AgentMemorySchema, AgentMemoryListInputSchema, AgentMemorySaveInputSchema, AgentMemoryDeleteInputSchema } from "./agent-context.js";
 import {
   ChatMessageAppendResponseSchema,
   ChatMessageRoleSchema,
@@ -397,12 +400,17 @@ export const IPC_SCHEMAS = {
         taskId: z.string().trim().min(1).max(256).optional(),
         taskBudget: TaskBudgetSchema.optional(),
         prompt: z.string().max(100_000),
+        persona: AgentPersonaSchema.optional(),
+        participant: AgentParticipantSchema.optional(),
         messageId: z.string().trim().min(1).max(256).optional(),
         parts: AgentPromptPartsSchema.optional(),
         delivery: z.enum(["async", "sync"]).optional(),
         resume: z.boolean().optional(),
         providerId: z.string().trim().min(1).max(256).optional(),
         model: z.string().trim().min(1).max(256).optional(),
+        reasoningEffort: AgentReasoningEffortSchema.optional(),
+        toolAccess: z.literal("none").optional(),
+        coordination: AgentCoordinationConfigSchema.optional(),
         workspaceId: z.string().trim().min(1).max(256).optional(),
         focusServerId: IpcServerIdSchema.optional(),
         permissionMode: AgentPermissionModeSchema.optional(),
@@ -434,10 +442,25 @@ export const IPC_SCHEMAS = {
       result: AgentRunResultSchema.optional(),
     }),
   },
+  agent_team_tasks: {
+    params: z.strictObject({ sessionId: z.string().trim().min(1).max(256).optional(), focusServerId: IpcServerIdSchema.optional() }),
+    response: z.strictObject({ tasks: z.array(AgentTeamTaskSchema).max(128) }),
+  },
   agent_run_stop: {
     params: z.strictObject({ runId: z.string().trim().min(1).max(256) }),
     response: z.strictObject({ stopped: z.boolean() }),
   },
+  agent_context_reset: {
+    params: z.strictObject({ sessionId: z.string().trim().min(1).max(256), focusServerId: IpcServerIdSchema.optional() }),
+    response: z.strictObject({ reset: z.boolean() }),
+  },
+  agent_context_reset_all: {
+    params: EMPTY_PAYLOAD,
+    response: z.strictObject({ reset: z.boolean(), count: z.number().int().nonnegative() }),
+  },
+  agent_memory_list: { params: AgentMemoryListInputSchema, response: z.strictObject({ memories: z.array(AgentMemorySchema).max(100) }) },
+  agent_memory_save: { params: AgentMemorySaveInputSchema, response: z.strictObject({ memory: AgentMemorySchema }) },
+  agent_memory_delete: { params: AgentMemoryDeleteInputSchema, response: z.strictObject({ deleted: z.boolean() }) },
   agent_approval_respond: {
     params: ApprovalResponseSchema,
     response: z.strictObject({ accepted: z.boolean() }),
@@ -445,6 +468,7 @@ export const IPC_SCHEMAS = {
   chat_session_list: {
     params: z.strictObject({
       query: z.string().trim().max(200).optional(),
+      serverId: IpcServerIdSchema.nullable().optional(),
       archived: z.boolean().optional(),
       // Bounded like every other page: the host rejects an offset past this rather than
       // running an unbounded scan.
@@ -475,6 +499,8 @@ export const IPC_SCHEMAS = {
         content: z.string().max(100_000),
         parts: AgentPromptPartsSchema.optional(),
         traceId: z.string().trim().min(1).max(256).optional(),
+        participant: AgentParticipantSchema.optional(),
+        model: z.string().trim().min(1).max(256).optional(),
         createdAt: z.string().min(1).max(80).optional(),
       })
       .refine(
@@ -645,6 +671,7 @@ export const IPC_SCHEMAS = {
  */
 export const EVENT_SCHEMAS = {
   "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
+  "agent.team_task": AGENT_EVENT_MEMBER_SCHEMAS["agent.team_task"],
   "agent.thinking": AGENT_EVENT_MEMBER_SCHEMAS["agent.thinking"],
   "agent.text": AGENT_EVENT_MEMBER_SCHEMAS["agent.text"],
   "agent.usage": AGENT_EVENT_MEMBER_SCHEMAS["agent.usage"],

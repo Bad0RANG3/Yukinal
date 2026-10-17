@@ -354,6 +354,8 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     set(WEBVIEW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(WEBVIEW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(WEBVIEW_ENABLE_PACKAGING OFF CACHE BOOL "" FORCE)
+    # Settings9 provides native CSS app-region drag/no-drag support.
+    set(WEBVIEW_MSWEBVIEW2_VERSION "1.0.2903.40" CACHE STRING "MS WebView2 version" FORCE)
     FetchContent_Declare(
       webview
       GIT_REPOSITORY https://github.com/webview/webview.git
@@ -440,9 +442,14 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   elseif(APPLE)
     find_library(SECURITY_FRAMEWORK Security REQUIRED)
     find_library(SYSTEM_CONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
+    # Security and SystemConfiguration do not re-export CoreFoundation for the
+    # static host core on arm64, so link it explicitly for the CF* symbols used by
+    # the credential store and the platform proxy.
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     target_link_libraries(yukinal_desktop_host_core PRIVATE
-      ${SECURITY_FRAMEWORK} ${SYSTEM_CONFIGURATION_FRAMEWORK}
+      ${SECURITY_FRAMEWORK} ${SYSTEM_CONFIGURATION_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK}
     )
+    add_executable(yukinal-desktop-host desktop_host/src/main.cpp)
   else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
@@ -451,7 +458,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
   endif()
   target_link_libraries(yukinal-desktop-host PRIVATE yukinal_desktop_host_core webview::core)
   if(WIN32)
-    target_link_libraries(yukinal-desktop-host PRIVATE dwmapi comctl32 uxtheme)
+    target_link_libraries(yukinal-desktop-host PRIVATE dwmapi)
   endif()
   if(YUKINAL_FETCH_DEPS)
     target_link_libraries(yukinal-desktop-host PRIVATE httplib::httplib)
@@ -465,6 +472,9 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
       target_link_libraries(yukinal_window_context_tests PRIVATE yukinal_desktop_host_core)
       add_test(NAME window_context_tests COMMAND yukinal_window_context_tests)
     endif()
+    add_executable(yukinal_caption_hit_test_tests desktop_host/tests/test_caption_hit_test.cpp)
+    target_include_directories(yukinal_caption_hit_test_tests PRIVATE desktop_host/include)
+    add_test(NAME caption_hit_test_tests COMMAND yukinal_caption_hit_test_tests)
     add_executable(yukinal_desktop_host_tests
       desktop_host/tests/test_ipc_router.cpp
     )
