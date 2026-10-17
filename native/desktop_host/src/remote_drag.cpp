@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -130,25 +129,9 @@ StagedRemoteDrag& StagedRemoteDrag::operator=(StagedRemoteDrag&& other) noexcept
 }
 
 void StagedRemoteDrag::remove_now() {
-  if (!owns_directory_ || keep_ || directory_.empty()) {
-    std::fprintf(stderr,
-                 "[diag] remove_now skipped owns=%d keep=%d empty=%d dir=%s\n",
-                 owns_directory_ ? 1 : 0, keep_ ? 1 : 0, directory_.empty() ? 1 : 0,
-                 directory_.string().c_str());
-    return;
-  }
+  if (!owns_directory_ || keep_ || directory_.empty()) return;
   std::error_code error;
-  std::uintmax_t removed = 0;
-  try {
-    removed = std::filesystem::remove_all(directory_, error);
-  } catch (const std::exception& exception) {
-    std::fprintf(stderr, "[diag] remove_now threw dir=%s what=%s\n",
-                 directory_.string().c_str(), exception.what());
-    return;
-  }
-  std::fprintf(stderr, "[diag] remove_now dir=%s removed=%llu ec=%s\n",
-               directory_.string().c_str(), static_cast<unsigned long long>(removed),
-               error ? error.message().c_str() : "none");
+  std::filesystem::remove_all(directory_, error);
 }
 
 // ── RemoteDragStore ────────────────────────────────────────────────────────────

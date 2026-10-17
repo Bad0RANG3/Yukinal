@@ -77,31 +77,6 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: cmake --build native/build-check --config Release --parallel
 
-      - name: Debug native test crashes (temporary)
-        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
-        continue-on-error: true
-        run: |
-          cd native/build-check
-          for i in 1 2 3; do
-            echo "=== direct run $i ==="
-            ./yukinal_desktop_host_transfer_manager_tests || echo "exit=$?"
-          done
-
-      - name: Debug native test crashes under gdb (temporary)
-        if: matrix.os == 'ubuntu-latest'
-        continue-on-error: true
-        run: |
-          sudo apt-get install -y gdb
-          cd native/build-check
-          echo "=== gdb run (randomization off) ==="
-          timeout 300 gdb -batch -ex "set pagination off" -ex run -ex "bt" -ex "thread apply all bt" ./yukinal_desktop_host_transfer_manager_tests 2>&1 | tail -n 120 || true
-          echo "=== gdb run (randomization on) ==="
-          timeout 300 gdb -batch -ex "set pagination off" -ex "set disable-randomization off" -ex run -ex "bt" -ex "thread apply all bt" ./yukinal_desktop_host_transfer_manager_tests 2>&1 | tail -n 120 || true
-          echo "=== core dump attempt ==="
-          ulimit -c unlimited || true
-          (./yukinal_desktop_host_transfer_manager_tests; echo "exit=$?") || true
-          ls -la core* 2>/dev/null || true
-
       - name: Build C++ targets (Windows)
         if: matrix.os == 'windows-latest'
         shell: cmd
