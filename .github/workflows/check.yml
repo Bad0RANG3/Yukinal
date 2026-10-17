@@ -77,6 +77,16 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: cmake --build native/build-check --config Release --parallel
 
+      - name: Debug native test crashes (temporary)
+        if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        run: |
+          cd native/build-check
+          for t in transfer_manager_tests transfer_tests desktop_host_database_tests; do
+            echo "===== gdb $t ====="
+            timeout 240 gdb -batch -ex "set pagination off" -ex run -ex "bt" -ex "thread apply all bt" ./$t 2>&1 | tail -n 160 || true
+          done
+
       - name: Build C++ targets (Windows)
         if: matrix.os == 'windows-latest'
         shell: cmd
