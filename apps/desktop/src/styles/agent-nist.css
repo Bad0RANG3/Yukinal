@@ -41,6 +41,38 @@
 }
 
 /* One reference-column workbench; no changes to shell column widths. */
+.team-config-section { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 18px 0 4px; border-top: 1px solid var(--edge-normal); }
+.team-config-section > header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; min-width: 0; }
+.team-config-section h3 { margin: 0; color: var(--text); font-size: var(--text-label); font-weight: 600; }
+.team-config-section > header > span, .team-config-section > p, .team-config-hint { margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.65; }
+.team-config-section .form-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; margin: 0; color: var(--muted); font-size: var(--text-caption); }
+.team-config-section .form-select { width: 100%; min-width: 0; max-width: 100%; font-size: var(--text-caption); text-overflow: ellipsis; }
+.team-config-current, .team-config-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; min-width: 0; }
+.team-config-current > span { color: var(--muted); font-size: var(--text-caption); line-height: 1.6; }
+.team-model-summary { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.team-model-summary > span { color: var(--faint); font-size: var(--text-caption); }
+.team-model-summary > strong { color: var(--muted); font-size: var(--text-caption); font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
+.team-model-summary > small { color: var(--faint); font-size: var(--text-caption); }
+.team-model-form { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding-block: 4px; }
+.team-config-actions > .button-secondary { max-width: 100%; padding: 7px 10px; border: 1px solid var(--edge-normal); border-radius: var(--radius-control); background: transparent; font-size: var(--text-caption); white-space: normal; }
+.team-config-section .is-error { color: var(--danger); }
+.team-model-bindings { min-width: 0; margin-top: 2px; padding-top: 14px; border-top: 1px solid var(--edge-subtle); }
+.team-model-bindings > summary { color: var(--muted); font-size: var(--text-caption); cursor: pointer; }
+.team-model-bindings > ul { margin: 8px 0 0; padding: 0; list-style: none; }
+.team-model-bindings li { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--edge-subtle); }
+.team-model-bindings li > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.team-model-bindings li strong { color: var(--muted); font-size: var(--text-caption); font-weight: 500; }
+.team-model-bindings li :is(span, small) { color: var(--faint); font-size: var(--text-caption); line-height: 1.6; }
+.team-model-bindings li > button { flex-shrink: 0; }
+.team-capability-list { margin: 0; padding: 0; min-width: 0; list-style: none; }
+.team-capability-list > li { min-width: 0; border-bottom: 1px solid var(--edge-subtle); }
+.team-capability-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-width: 0; padding: 15px 0; border: 0; background: transparent; color: var(--faint); font: inherit; text-align: left; cursor: pointer; }
+.team-capability-toggle > span { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.team-capability-toggle strong { color: var(--text); font-size: var(--text-label); font-weight: 500; }
+.team-capability-toggle small, .team-capability-detail > p { margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.7; }
+.team-capability-toggle > svg { flex-shrink: 0; }
+.team-capability-detail { min-width: 0; padding-bottom: 15px; }
+.team-capability-detail > div { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; margin-top: 10px; }
 .team-workbench-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--edge-normal); }
 .team-workbench-tabs > button { flex: 1; min-width: 0; min-height: 36px; padding: 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); background: transparent; font: inherit; font-size: var(--text-label); cursor: pointer; }
 .team-workbench-tabs > button[aria-pressed="true"] { color: var(--text); border-bottom-color: currentColor; }

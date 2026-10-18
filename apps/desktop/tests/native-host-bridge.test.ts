@@ -113,7 +113,8 @@ test("native shutdown skips queued RPC/events while destruction drains without i
   const lifetime = nativeSource.match(/struct WindowEventLifetime \{[\s\S]*?\n\};/u)?.[0];
   const pendingEvent = nativeSource.match(/    struct PendingEvent \{([\s\S]*?)\n    \};/u)?.[0];
   const queuedEvent = nativeSource.match(/\[\]\(webview_t current, void\* value\) \{([\s\S]*?)\n        \},/u)?.[1];
-  const rpcGuard = nativeSource.match(/void rpc_handler\(const char\* id, const char\* request, void\* context_pointer\) \{([\s\S]*?)  nlohmann::json reply;/u)?.[1];
+  // Compile the real entry gate without depending on the dispatcher body or its local variables.
+  const rpcGuard = nativeSource.match(/void rpc_handler\(const char\* id, const char\* request, void\* context_pointer\) \{[\s\S]*?(auto& context = \*static_cast<BridgeContext\*>\(context_pointer\);\s*if \([^\n]+\) return;)/u)?.[1];
   const active = nativeSource.match(/  bool active\(\) const \{[^\n]+\}/u)?.[0];
   const destroy = nativeSource.match(/void destroy_bridge_window\(BridgeContext& context\) \{[\s\S]*?\n\}/u)?.[0];
   const retire = nativeSource.match(/std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows\([\s\S]*?\n\}/u)?.[0];
@@ -133,10 +134,14 @@ struct BridgeContext;
 struct Window { BridgeContext* owner; };
 using webview_t = Window*;
 struct Router { void set_event_sink(std::nullptr_t) {} };
+struct Replies { bool closed = false; void close() { closed = true; } };
+struct Dispatcher { bool closed = false; void close() { closed = true; } };
 struct BridgeContext {
   webview_t view = nullptr;
   std::shared_ptr<WindowEventLifetime> lifetime;
   std::shared_ptr<std::atomic_bool> window_alive = std::make_shared<std::atomic_bool>(true);
+  std::shared_ptr<Replies> replies = std::make_shared<Replies>();
+  std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
   Router router;
   ${active}
 };
@@ -156,6 +161,7 @@ void webview_destroy(webview_t current) {
   assert(current->owner->lifetime->mutex.try_lock());
   current->owner->lifetime->mutex.unlock();
   assert(!current->owner->window_alive->load());
+  assert(current->owner->replies->closed && current->owner->dispatcher->closed);
   while (!callbacks.empty()) {
     auto callback = std::move(callbacks.front()); callbacks.pop_front(); callback();
   }
@@ -172,13 +178,30 @@ int main() {
   BridgeContext main;
   main.lifetime = std::make_shared<WindowEventLifetime>();
   main.view = new Window{&main};
+  // Each real RPC prerequisite must reject before reaching the handler body.
+  auto replies = main.replies;
+  main.replies.reset();
+  rpc_handler("id", "request", &main);
+  main.replies = std::move(replies);
+  rpc_handler(nullptr, "request", &main);
+  // Exercise window and application gates independently for both callback kinds.
+  main.window_alive->store(false);
+  rpc_handler("id", "request", &main);
+  queue_event(main); callbacks.front()(); callbacks.pop_front();
+  main.window_alive->store(true);
+  main.lifetime->alive.store(false);
+  rpc_handler("id", "request", &main);
+  queue_event(main); callbacks.front()(); callbacks.pop_front();
+  main.lifetime->alive.store(true);
+  assert(invoked == 0 && evaluated == 0);
   // The same extracted guards must admit normal work before shutdown.
   rpc_handler("id", "request", &main);
   queue_event(main); callbacks.front()(); callbacks.pop_front();
   assert(invoked == 1 && evaluated == 1);
   std::vector<std::unique_ptr<BridgeContext>> children;
   auto child = std::make_unique<BridgeContext>();
-  child->lifetime = main.lifetime; child->view = new Window{child.get()};
+  child->lifetime = main.lifetime; child->dispatcher = main.dispatcher;
+  child->view = new Window{child.get()};
   auto* child_context = child.get();
   children.push_back(std::move(child));
   callbacks.push_back([&main] { rpc_handler("id", "request", &main); });

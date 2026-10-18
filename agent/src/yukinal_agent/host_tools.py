@@ -637,19 +637,20 @@ def register_host_tools(
             timeout_ms=20_000,
             cancellable=True,
         ))
-    registry.register(ToolSpec(
-        name="server.exec",
-        description="Run one bounded command on the selected remote server after exact per-call user approval and host plan checks.",
-        input_schema=_SERVER_EXEC_SCHEMA,
-        risk_level="destructive",
-        requires_approval=True,
-        handler=_host_tool_handler(host, "server.exec"),
-        target_id_argument=None,
-        target_required=True,
-        origin={"kind": "builtin"},
-        timeout_ms=30_000,
-        cancellable=True,
-    ))
+    if "server.exec" not in excluded_names:
+        registry.register(ToolSpec(
+            name="server.exec",
+            description="Run one bounded command on the selected remote server after exact per-call user approval and host plan checks.",
+            input_schema=_SERVER_EXEC_SCHEMA,
+            risk_level="destructive",
+            requires_approval=True,
+            handler=_host_tool_handler(host, "server.exec"),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=30_000,
+            cancellable=True,
+        ))
     registry.register_many([
         ToolSpec(
             name=name,
@@ -665,6 +666,7 @@ def register_host_tools(
             cancellable=True,
         )
         for name, description, schema in _STRUCTURED_ACTIONS
+        if name not in excluded_names
     ])
     filesystem_actions = (
         (

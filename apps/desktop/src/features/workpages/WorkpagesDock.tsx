@@ -187,7 +187,7 @@ export function WorkpageContent({ page, active = true }: { page: Workpage; activ
   if (page.kind === "evidence") return <WorkpageEvidenceView page={page} />;
   if (!page.serverId && (page.kind === "terminal" || page.kind === "logs")) return <div className="workpage-unbound" aria-label={WORKPAGE_LABEL[page.kind]} />;
   return <HostKeyGate serverId={page.serverId}><Suspense fallback={<div className="workpage-loading" role="status" aria-label="加载工作页" />}>
-    {page.kind === "terminal" ? <TerminalPane serverId={page.serverId} active={active} /> : page.kind === "files" ? <RemoteFilesPane serverId={page.serverId} /> : page.kind === "logs" ? <LogsPane serverId={page.serverId} /> : <ServicesPane serverId={page.serverId} />}
+    {page.kind === "terminal" ? <TerminalPane serverId={page.serverId} active={active} /> : page.kind === "files" ? <RemoteFilesPane serverId={page.serverId} /> : page.kind === "logs" ? <LogsPane serverId={page.serverId} active={active} /> : <ServicesPane serverId={page.serverId} active={active} />}
   </Suspense></HostKeyGate>;
 }
 

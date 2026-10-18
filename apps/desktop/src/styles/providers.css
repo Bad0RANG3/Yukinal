@@ -586,6 +586,10 @@ select option { color: var(--text); background: var(--surface-2); }
 
 .terminal-toolbar { min-width: 0; flex-wrap: wrap; }
 .terminal-toolbar > * { min-width: 0; }
+.terminal-paste-button { flex: 0 0 auto; margin-left: auto; }
+.terminal-paste-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border: 1px solid var(--edge-normal); border-radius: var(--radius-control); color: var(--warning); font-size: var(--text-caption); }
+.terminal-paste-error > span { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.terminal-paste-error > button { max-width: 100%; }
 .terminal-page .terminal-io-error { min-width: 0; flex-wrap: wrap; align-items: flex-start; }
 .terminal-page .terminal-io-error > span { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
 .terminal-page .terminal-io-error > button { max-width: 100%; margin-left: auto; white-space: normal; }

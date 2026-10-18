@@ -18,6 +18,7 @@ import {
   providerKindUsesWireApi,
   parseProviderHeaders,
   providerSavePayload,
+  providerModelsQueryOptions,
   useProviders,
 } from "../../lib/providers.js";
 import { useAgentLogs, useAgentStatus, useCorePing } from "../../lib/runtime.js";
@@ -35,33 +36,39 @@ const SETTINGS_SECTIONS = [
 
 export function RuntimeSettings() {
   const [section, setSection] = useState<(typeof SETTINGS_SECTIONS)[number]["id"]>("general");
+  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set(["general"]));
+  const selectSection = (next: (typeof SETTINGS_SECTIONS)[number]["id"]) => {
+    setVisited((current) => current.has(next) ? current : new Set([...current, next]));
+    setSection(next);
+  };
   const id = useId();
   return <section className="settings-page settings-organized">
     <div className="settings-section-tabs" role="tablist" aria-label="设置分区">
       {SETTINGS_SECTIONS.map((item, index) => <button type="button" role="tab" key={item.id}
         id={`${id}-tab-${item.id}`} aria-controls={`${id}-panel-${item.id}`}
         aria-selected={section === item.id} tabIndex={section === item.id ? 0 : -1}
-        onClick={() => setSection(item.id)} onKeyDown={(event) => {
+        onClick={() => selectSection(item.id)} onKeyDown={(event) => {
           const next = event.key === "ArrowRight" ? (index + 1) % SETTINGS_SECTIONS.length
             : event.key === "ArrowLeft" ? (index + SETTINGS_SECTIONS.length - 1) % SETTINGS_SECTIONS.length
             : event.key === "Home" ? 0 : event.key === "End" ? SETTINGS_SECTIONS.length - 1 : null;
           const target = next === null ? null : SETTINGS_SECTIONS[next];
-          if (target) { event.preventDefault(); setSection(target.id); document.getElementById(`${id}-tab-${target.id}`)?.focus(); }
+          if (target) { event.preventDefault(); selectSection(target.id); document.getElementById(`${id}-tab-${target.id}`)?.focus(); }
         }}>{item.label}</button>)}
     </div>
     {SETTINGS_SECTIONS.map((item) => <div key={item.id} id={`${id}-panel-${item.id}`}
       role="tabpanel" aria-labelledby={`${id}-tab-${item.id}`} hidden={section !== item.id} tabIndex={0}>
-      {item.id === "general" ? <PreferenceSettings /> : item.id === "models" ? <ProviderSettings />
-        : item.id === "tools" ? <McpSettings /> : item.id === "network" ? <NetworkSettings /> : <RuntimeStatus />}
+      {/* Keep visited editors mounted so switching tabs preserves unsaved drafts. */}
+      {visited.has(item.id) ? item.id === "general" ? <PreferenceSettings /> : item.id === "models" ? <ProviderSettings active={section === item.id} />
+        : item.id === "tools" ? <McpSettings active={section === item.id} /> : item.id === "network" ? <NetworkSettings active={section === item.id} /> : <RuntimeStatus active={section === item.id} /> : null}
     </div>)}
   </section>;
 }
 
-function RuntimeStatus() {
+function RuntimeStatus({ active }: { active: boolean }) {
   const [showLogs, setShowLogs] = useState(false);
-  const core = useCorePing();
-  const status = useAgentStatus();
-  const logs = useAgentLogs(showLogs);
+  const core = useCorePing({ enabled: active });
+  const status = useAgentStatus({ enabled: active });
+  const logs = useAgentLogs(active && showLogs);
   const shell = isDesktopShell();
   return (
     <section className="settings-card">
@@ -138,7 +145,7 @@ function RuntimeLogs({ open, logs }: { open: boolean; logs: ReturnType<typeof us
   );
 }
 
-function ProviderSettings() {
+function ProviderSettings({ active }: { active: boolean }) {
   const queryClient = useQueryClient();
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
@@ -147,7 +154,7 @@ function ProviderSettings() {
   // `undefined` follows the active provider, `null` starts a new configuration,
   // and an id keeps a specific saved provider open for editing.
   const [editorProviderId, setEditorProviderId] = useState<string | null | undefined>(undefined);
-  const providers = useProviders();
+  const providers = useProviders({ enabled: active });
   const selectedProvider = providers.data?.find((provider) => provider.id === selectedProviderId)
     ?? providers.data?.find((provider) => provider.enabled);
   const editorProvider = editorProviderId === undefined
@@ -233,13 +240,13 @@ function ProviderSettings() {
       </section>
 
       {/* Each provider owns its draft. Query refreshes never overwrite typing. */}
-      {!providers.isLoading && !providers.isError ? <ProviderEditor key={editorProvider?.id ?? "new"} provider={editorProvider} existingProviderIds={new Set(providers.data?.map((item) => item.id))} onSaved={onSaved} /> : null}
+      {!providers.isLoading && !providers.isError ? <ProviderEditor key={editorProvider?.id ?? "new"} active={active} provider={editorProvider} existingProviderIds={new Set(providers.data?.map((item) => item.id))} onSaved={onSaved} /> : null}
     </div>
   );
 }
 
 /** Shared with the first-use guide, which hosts its own draft and provider list. */
-export function ProviderEditor({ provider, existingProviderIds, onSaved }: { provider?: AiProviderConfig; existingProviderIds: Set<string>; onSaved: (response: { provider: AiProviderConfig }) => void }) {
+export function ProviderEditor({ provider, existingProviderIds, onSaved, active = true }: { provider?: AiProviderConfig; existingProviderIds: Set<string>; onSaved: (response: { provider: AiProviderConfig }) => void; active?: boolean }) {
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
   const [providerId, setProviderId] = useState(provider?.id ?? "");
@@ -268,10 +275,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
     setKind(next);
     if (untouched) setBaseUrl(PROVIDER_KIND_DEFAULT_BASE_URL[next] ?? "");
   };
-  const catalog = useQuery({
-    queryKey: ["providers", "models", provider?.id], enabled: shell && Boolean(provider),
-    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerModels, { providerId: provider!.id })).models, retry: 0,
-  });
+  const catalog = useQuery(providerModelsQueryOptions(provider?.id, { enabled: active }));
   const models = catalog.data ?? provider?.models ?? [];
   const save = useMutation({
     mutationKey: ["provider-write"],

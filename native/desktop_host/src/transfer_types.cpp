@@ -181,6 +181,8 @@ TransferFailureKind TransferError::failure_kind() const noexcept {
     case TransferErrorCode::InvalidInput:
       return TransferFailureKind::InvalidInput;
     case TransferErrorCode::Local:
+    case TransferErrorCode::Busy:
+    case TransferErrorCode::ShuttingDown:
     case TransferErrorCode::SourceChanged:
       return TransferFailureKind::LocalIo;
     case TransferErrorCode::Remote:

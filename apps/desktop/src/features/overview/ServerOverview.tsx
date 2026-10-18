@@ -7,11 +7,8 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  HEALTH_THRESHOLDS,
   IPC_COMMANDS,
-  healthClass,
   type Activity,
-  type HealthClass,
   type CollectorSample,
   type Server,
   type ServerSnapshot,
@@ -24,8 +21,11 @@ import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js"
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
 import { ServerNetworkSection } from "./ServerNetworkSection.js";
+import { ResourceTrends } from "./ResourceTrends.js";
+import { appendResourceSample, ResourceTrendStore } from "./resource-trends.js";
 
 const SNAPSHOT_STALE_AFTER_MS = 45_000;
+const resourceTrendStore = new ResourceTrendStore();
 
 const COLLECTORS = [
   { id: "os", label: "系统信息" },
@@ -109,46 +109,6 @@ function collectorSummary(snapshot: ServerSnapshot) {
   return { kind, label, description, sampleMap };
 }
 
-/**
- * 未取到读数时是 `unknown`，有读数时一律交给 `healthClass`。
- *
- * 这里曾经自己重写了一遍阈值比较。那正是 `types/health.ts:8-9` 明令禁止的事：
- * 「原始数字变成健康等级的换算全项目只有一处，就是这里，外加 Rust 镜像
- * （crates/core/src/health.rs）—— UI 和 Agent 不允许各算各的」。
- * 更糟的是本文件已经 `import { HEALTH_THRESHOLDS }` 了：阈值取自共享模块，
- * 比较逻辑却是本地副本，于是「共享的那份对了、这份没跟上」不会有任何编译或
- * 测试报错。现在只保留 `undefined` 这一层判断，那确实是 UI 关心的事
- * （`HealthClass` 里没有 `unknown`，它属于 `HealthState`，见 types/health.ts:18）。
- */
-function gaugeClass(usage: number | undefined, thresholds: { warning: number; critical: number }): HealthClass | "unknown" {
-  return usage === undefined ? "unknown" : healthClass(usage, thresholds);
-}
-
-function ResourceRow({
-  label,
-  usage,
-  thresholds,
-  hint,
-}: {
-  label: string;
-  usage: number | undefined;
-  thresholds: { warning: number; critical: number };
-  hint: string;
-}) {
-  const status = gaugeClass(usage, thresholds);
-  const width = usage === undefined ? 0 : Math.min(100, Math.max(0, Math.round(usage)));
-  return (
-    <div className="overview-resource-row" role="group" aria-label={`${label} ${usage === undefined ? "读数不可用" : `${Math.round(usage)}%`}`}>
-      <span className="overview-resource-label">{label}</span>
-      <strong>{usage === undefined ? "—" : `${Math.round(usage)}%`}</strong>
-      <div className="overview-resource-track" aria-hidden="true">
-        <div className={`metric-fill metric-fill-${status}`} style={{ width: `${width}%` }} />
-      </div>
-      <span className="overview-resource-hint">{hint}</span>
-    </div>
-  );
-}
-
 function formatUptime(seconds?: number): string {
   if (seconds === undefined) return "—";
   const days = Math.floor(seconds / 86_400);
@@ -158,7 +118,7 @@ function formatUptime(seconds?: number): string {
   return `${Math.max(1, Math.floor(seconds / 60))} 分钟`;
 }
 
-export function ServerOverview() {
+export function ServerOverview({ active = true }: { active?: boolean }) {
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const shell = isDesktopShell();
   const serversQuery = useServers();
@@ -167,12 +127,15 @@ export function ServerOverview() {
 
   const snapshotQuery = useQuery({
     queryKey: ["serverSnapshot", selectedServerId],
+    staleTime: 15_000,
     queryFn: async () => {
       if (!selectedServerId) return null;
       return (await callDesktop(IPC_COMMANDS.serverSnapshot, { serverId: selectedServerId })).snapshot;
     },
-    refetchInterval: 15_000,
-    enabled: Boolean(selectedServerId) && shell && server?.status === "connected" && !busy,
+    refetchInterval: active ? 15_000 : false,
+    refetchIntervalInBackground: false,
+    retry: false,
+    enabled: active && Boolean(selectedServerId) && shell && server?.status === "connected" && !busy,
   });
   const snapshot = snapshotQuery.data?.serverId === server?.id ? snapshotQuery.data : undefined;
   const snapshotServerMismatch = Boolean(snapshotQuery.data && !snapshot);
@@ -204,7 +167,7 @@ export function ServerOverview() {
         showIcon
         title="无法读取服务器状态"
         message={snapshotServerMismatch ? "收到的快照属于另一台服务器，已拒绝显示。请重试采集。" : errorMessage(snapshotQuery.error)}
-        onRetry={() => void snapshotQuery.refetch()}
+        onRetry={() => void snapshotQuery.refetch({ cancelRefetch: false })}
         retryLabel="重试采集"
       />
     );
@@ -213,11 +176,12 @@ export function ServerOverview() {
   return <>
     {snapshotQuery.isError ? <p className="settings-notice" role="alert">最近一次刷新失败，当前仍显示上次成功采集的快照。{errorMessage(snapshotQuery.error)}</p> : null}
     <OverviewContent
+      key={server.id}
       server={server}
       snapshot={snapshot}
       receivedAt={snapshotQuery.dataUpdatedAt}
       refreshing={snapshotQuery.isFetching}
-      onRefresh={() => void snapshotQuery.refetch()}
+      onRefresh={() => void snapshotQuery.refetch({ cancelRefetch: false })}
       onConnect={() => action.mutate({ type: "connect", serverId: server.id })}
       connecting={busy || server.status === "connecting"}
       connectionError={action.isError ? action.error.message : undefined}
@@ -245,6 +209,11 @@ function OverviewContent({
   connectionError?: string;
 }) {
   const [now, setNow] = useState(() => Date.now());
+  const [observedResources, setObservedResources] = useState(() => resourceTrendStore.read(server.id));
+  const resourceHistory = appendResourceSample(observedResources, snapshot);
+  useEffect(() => {
+    setObservedResources(resourceTrendStore.record(snapshot));
+  }, [snapshot]);
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 10_000);
     return () => window.clearInterval(interval);
@@ -260,7 +229,6 @@ function OverviewContent({
   const disks = diskSample?.ok === false ? [] : snapshot.disks ?? [];
   const uptime = sampleFor(snapshot, "uptime")?.ok === false ? undefined : snapshot.uptimeSeconds;
   const docker = sampleFor(snapshot, "docker")?.ok === false ? undefined : snapshot.docker;
-  const diskUsage = disks.length > 0 ? Math.max(...disks.map((disk) => disk.usagePercent)) : undefined;
   const collection = collectorSummary(snapshot);
   const age = snapshotAge(snapshot.collectedAt, now, receivedAt);
   const connected = server.status === "connected";
@@ -270,7 +238,7 @@ function OverviewContent({
     : "缓存快照";
   const network = sampleFor(snapshot, "network")?.ok === false ? undefined : snapshot.network;
   const failedSamples = (snapshot.collectors ?? []).filter((sample) => !sample.ok);
-  const diagnosticsExpanded = collection.kind !== "complete" || age.kind !== "fresh" || !connected || failedSamples.length > 0;
+  const diagnosticsWarning = collection.kind !== "complete" || failedSamples.length > 0;
   const runningContainers = docker?.containers.filter((container) => container.state === "running").length ?? 0;
   const otherContainers = (docker?.containers.length ?? 0) - runningContainers;
   const diagnosticsLabel = failedSamples.length > 0 ? `${failedSamples.length} 项失败` : collection.label;
@@ -301,17 +269,11 @@ function OverviewContent({
             <Icon name="refresh" size="sm" />
           </button>
         </div>
-        {diagnosticsExpanded ? <p className="overview-collection-warning" role="status">{diagnosticsLabel} · {collection.description}</p> : null}
-        {refreshing ? <p className="overview-collection-progress" role="status">正在采集，当前显示上次完成的结果。</p> : null}
+        {diagnosticsWarning ? <p className="overview-collection-warning" role="status">{diagnosticsLabel}</p> : null}
+        {refreshing ? <p className="overview-collection-progress" role="status">正在更新…</p> : null}
       </section>
 
-      <section className="overview-resources" aria-label="系统资源读数">
-        <div className="overview-resource-list">
-          <ResourceRow label="CPU" usage={cpu?.usagePercent} thresholds={HEALTH_THRESHOLDS.cpu} hint={cpu ? `${cpu.cores} 核处理器` : "采集器未返回可用读数"} />
-          <ResourceRow label="内存" usage={memory?.usagePercent} thresholds={HEALTH_THRESHOLDS.memory} hint={memory ? `${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}` : "采集器未返回可用读数"} />
-          <ResourceRow label="磁盘" usage={diskUsage} thresholds={HEALTH_THRESHOLDS.disk} hint={disks.length ? `${disks.length} 个挂载点 · 显示最高占用` : "采集器未返回可用读数"} />
-        </div>
-      </section>
+      <ResourceTrends snapshot={snapshot} samples={resourceHistory} />
 
       <details className="overview-inspector-section">
         <summary><Icon name="chevronRight" size="xs" /><span>系统属性</span><small>{os ? `${os.distribution} ${os.version}` : "信息不完整"}</small></summary>
@@ -352,7 +314,7 @@ function OverviewContent({
 
       <RecentServerActivity serverId={server.id} />
 
-      <details className="overview-inspector-section overview-diagnostics" key={`diagnostics-${server.id}-${diagnosticsExpanded}`} open={diagnosticsExpanded}>
+      <details className="overview-inspector-section overview-diagnostics" key={`diagnostics-${server.id}`}>
         <summary><Icon name="chevronRight" size="xs" /><span>采集诊断</span><small>{reportedCollectors}/{COLLECTORS.length} · {diagnosticsLabel}</small></summary>
         <div className="overview-section-content">
           <p className="overview-diagnostics-description">{collection.description}</p>

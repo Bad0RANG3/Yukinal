@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { IPC_COMMANDS } from "@yukinal/shared";
 import { Icon } from "../../components/Icon.js";
@@ -14,17 +14,20 @@ import { BOARD_COLUMNS, boardCardFeedback, boardPreviewCards, teamBoardCards, ty
 import { TeamFeedbackPreview } from "./TeamActivity.js";
 import { TaskPropertiesWindow } from "./TaskPropertiesWindow.js";
 
+const InvestigationsPane = lazy(async () => ({ default: (await import("../investigations/InvestigationsPane.js")).InvestigationsPane }));
+
 export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?: boolean }) {
   const runs = useTeamRuntimeStore((state) => state.runs);
   const cues = useTeamRuntimeStore((state) => state.cues);
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
+  const [goalsOpen, setGoalsOpen] = useState(false);
   const [scope, setScope] = useState(serverId ?? "all");
   const [team, setTeam] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const servers = useServers({ enabled: false });
   const names = new Map(servers.data?.map((server) => [server.id, server.name]));
-  const query = useQuery({ queryKey: ["team-board-tasks"], enabled: isDesktopShell(), staleTime: TEAM_HEARTBEAT_MS,
+  const query = useQuery({ queryKey: ["team-board-tasks"], enabled: isDesktopShell() && !goalsOpen, staleTime: TEAM_HEARTBEAT_MS,
     queryFn: async () => (await callDesktop(IPC_COMMANDS.investigationTaskList, { limit: 100 })).tasks,
   });
   const allCards = [...(isPreviewFixture() ? boardPreviewCards(cues) : []), ...teamBoardCards(query.data ?? [], runs)];
@@ -35,10 +38,15 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
   const waitingCount = cards.filter((card) => card.column === "waiting").length;
   const selectedCard = allCards.find((card) => card.id === selectedId);
   return <div className="team-board is-expanded">
-    <header className="team-board-heading"><div><h2>看板</h2><span>{cards.filter((card) => !card.preview).length} 项任务</span></div><div className="team-board-heading-actions">
-      {isPreviewFixture() ? <TeamFeedbackPreview serverId={scope !== "all" ? scope : selectedServerId ?? servers.data?.[0]?.id ?? null} /> : null}
-      <button type="button" className="icon-button" disabled={query.isFetching} aria-label="刷新任务看板" title="刷新" onClick={() => void query.refetch()}><Icon name="refresh" size="sm" /></button>
+    <header className="team-board-heading"><div><h2>{goalsOpen ? "目标任务" : "看板"}</h2>{!goalsOpen ? <span>{cards.filter((card) => !card.preview).length} 项任务</span> : null}</div><div className="team-board-heading-actions">
+      <button type="button" className="button-secondary" onClick={() => {
+        setGoalsOpen((open) => !open);
+        if (goalsOpen) void query.refetch();
+      }}>{goalsOpen ? "返回看板" : "目标任务"}</button>
+      {!goalsOpen && isPreviewFixture() ? <TeamFeedbackPreview serverId={scope !== "all" ? scope : selectedServerId ?? servers.data?.[0]?.id ?? null} /> : null}
+      {!goalsOpen ? <button type="button" className="icon-button" disabled={query.isFetching} aria-label="刷新任务看板" title="刷新" onClick={() => void query.refetch()}><Icon name="refresh" size="sm" /></button> : null}
     </div></header>
+    {goalsOpen ? <Suspense fallback={<p className="agent-nist-notice" role="status">加载目标任务…</p>}><InvestigationsPane /></Suspense> : <>
     <div className="team-board-controls"><label className="team-board-search"><Icon name="search" size="sm" /><input aria-label="搜索看板任务" placeholder="搜索任务或服务器" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
       <div className="team-board-filters"><select aria-label="看板服务器范围" value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">全部服务器</option>{servers.data?.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}{serverId && !names.has(serverId) ? <option value={serverId}>当前服务器</option> : null}</select>
         <select aria-label="看板团队筛选" value={team} onChange={(event) => setTeam(event.target.value)}><option value="all">全部团队</option>{AGENT_TEAMS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}<option value="unassigned">未记录团队</option></select></div>
@@ -55,6 +63,7 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
     })}</div></div>
     <p className="team-board-footnote">已存任务与本窗口运行同步呈现。{query.data?.length === 100 ? "当前显示最近 100 个已存任务。" : ""}</p>
     {selectedCard ? <TaskPropertiesWindow key={selectedCard.id} card={selectedCard} serverName={selectedCard.serverId ? names.get(selectedCard.serverId) ?? selectedCard.serverId : "全局工作区"} onClose={() => setSelectedId(null)} /> : null}
+    </>}
   </div>;
 }
 

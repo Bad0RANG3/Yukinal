@@ -788,7 +788,7 @@ summary:focus-visible,
 }
 
 .agent-markdown .md-heading {
-  margin: 12px 0 6px;
+  margin: 10px 0 5px;
   color: var(--text);
   font-weight: 650;
   line-height: 1.4;
@@ -798,9 +798,9 @@ summary:focus-visible,
   margin-top: 0;
 }
 
-.agent-markdown h1 { font-size: var(--text-subheading); }
-.agent-markdown h2 { font-size: var(--text-body); }
-.agent-markdown h3 { font-size: var(--text-small); }
+.agent-markdown h1 { font-size: calc(var(--ai-chat-text, var(--text-body)) + 2px); }
+.agent-markdown h2 { font-size: calc(var(--ai-chat-text, var(--text-body)) + 1px); }
+.agent-markdown h3 { font-size: var(--ai-chat-text, var(--text-small)); }
 .agent-markdown h4,
 .agent-markdown h5,
 .agent-markdown h6 {

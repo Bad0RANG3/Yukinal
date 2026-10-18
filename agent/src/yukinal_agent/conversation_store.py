@@ -348,7 +348,12 @@ class ConversationStore:
                 raise ValueError("runId belongs to an earlier context generation; start a new turn")
             return
         self.validate_participant(request["sessionId"], request.get("targetId"), request.get("participant"), register=True)
-        metadata = {key: request[key] for key in ("participant", "persona", "providerId", "model", "taskId") if request.get(key) is not None}
+        # This is ordinary history metadata, not the execution request. Keep the
+        # role identity, while system instructions remain on the live request and
+        # its checkpoint identity rather than being copied into history records.
+        metadata = {key: request[key] for key in ("participant", "providerId", "model", "taskId") if request.get(key) is not None}
+        if request.get("persona") is not None:
+            metadata["persona"] = {key: request["persona"][key] for key in ("id", "label")}
         messages = messages_to_dict([HumanMessage(content=request["promptText"])])
         with self._connection:
             self._connection.execute(

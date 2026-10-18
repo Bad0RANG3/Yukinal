@@ -40,11 +40,17 @@ export function RemoteFilesPane({ serverId: explicitServerId }: { serverId?: str
   const files = useQuery({
     queryKey: ["remote-files", serverId, path],
     enabled: shell && Boolean(serverId),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     queryFn: () => callDesktop(IPC_COMMANDS.remoteFileList, { serverId: serverId as string, path }),
   });
   const remotePreview = useQuery({
     queryKey: ["remote-file-preview", serverId, selectedRemote?.path],
     enabled: shell && Boolean(serverId && selectedRemote?.type === "file"),
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     queryFn: () => callDesktop(IPC_COMMANDS.remoteFilePreview, { serverId: serverId as string, path: selectedRemote?.path as string }),
   });
   const localPreview = useQuery({

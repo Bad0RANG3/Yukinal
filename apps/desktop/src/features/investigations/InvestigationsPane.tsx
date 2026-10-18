@@ -30,6 +30,8 @@ import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, subscribeDesktop, type DesktopEventPayload } from "../../lib/ipc.js";
 import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { NativeTaskApprovals } from "../agent/NativeTaskApprovals.js";
+import { nativeTaskRuns } from "../agent/native-task-runs.js";
 import { resolveTaskDelegation } from "./auto-delegation.js";
 import { describeInvestigationFailure } from "./error-display.js";
 import { shouldAutoStartRecoveredTask } from "./recovery.js";
@@ -141,14 +143,16 @@ export function InvestigationsPane() {
     queryFn: () => callDesktop("investigation_schedule_runs", { scheduleId: selectedScheduleId as string }),
   });
   const startTask = useMutation({
-    mutationFn: (taskId: string) => callDesktop("investigation_task_start", { taskId }),
-    onSuccess: () => {
+    mutationFn: (taskId: string) => nativeTaskRuns.start(taskId),
+    // A host run may start before its metadata read fails. Refresh the real
+    // task on either outcome so its independent Stop action remains visible.
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["investigationTasks"] });
       if (selectedTaskId) void queryClient.invalidateQueries({ queryKey: ["investigationTask", selectedTaskId] });
     },
   });
   const stopTask = useMutation({
-    mutationFn: (taskId: string) => callDesktop("investigation_task_stop", { taskId }),
+    mutationFn: (taskId: string) => nativeTaskRuns.stop(taskId),
     onSuccess: (response) => {
       void queryClient.invalidateQueries({ queryKey: ["investigationTasks"] });
       void queryClient.invalidateQueries({ queryKey: ["investigationTask", response.task.id] });
@@ -641,6 +645,7 @@ function InvestigationDetail({
         </div>
       </div>
       {startError ? <p className="form-error" role="alert">启动任务失败：{startError}</p> : null}
+      <NativeTaskApprovals taskId={task.id} />
       {stopError ? <p className="form-error" role="alert">停止任务失败：{stopError}</p> : null}
       <div className="investigation-metrics">
         <span><strong>{evidence.length}</strong> 条证据</span>

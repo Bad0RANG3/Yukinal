@@ -18,6 +18,7 @@ import {
   type AgentCoordinationConfig,
   type AgentPermissionMode,
   type AgentRunMode,
+  type AgentRunResult,
   type AgentTokenUsage,
   type AgentContextUsage,
   type AgentParticipant,
@@ -32,13 +33,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
 import type { AgentTeam } from "../agent-nist/agent-nist.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
-import { RunLifecycle } from "./run-lifecycle.js";
+import { AgentRunStream, appendStreamBatch, settleStreamText, type RunStreamScope } from "./run-stream.js";
 import {
-  appendAssistantDelta,
   appendEntries,
-  appendReasoningDelta,
   appendToolCall,
-  settleAssistantText,
   settleToolResult,
   targetLabel,
   toolResultSummary,
@@ -148,11 +146,9 @@ export function useAgentRun(options: {
   const onApprovalRequested = useRef(options.onApprovalRequested);
   onApprovalRequested.current = options.onApprovalRequested;
 
-  // 流式文本按 run 累积（事件乱序也没关系，同 run 追加）。
-  const lifecycle = useRef(new RunLifecycle());
   const approvalLocks = useRef(new Set<string>());
-  const replyIdentity = useRef<ReplyIdentity>({});
-  const admittedSessionId = useRef<string | null>(null);
+  const stoppingScope = useRef<RunStreamScope | null>(null);
+  const mounted = useRef(true);
   /**
    * A message admitted with `resume: false` but not yet executed.
    *
@@ -180,9 +176,44 @@ export function useAgentRun(options: {
   const [approvalStatuses, setApprovalStatuses] = useState<Record<string, string>>({});
   const [tokenUsage, setTokenUsage] = useState<AgentTokenUsage | null>(null);
   const [contextUsage, setContextUsage] = useState<AgentContextUsage | null>(null);
+  const streamRef = useRef<AgentRunStream | null>(null);
+  if (streamRef.current === null) {
+    streamRef.current = new AgentRunStream((deltas, identity) => {
+      // Capture the run's identity now; React may apply this updater after a new run begins.
+      setEntries((current) => appendStreamBatch(current, deltas, identity));
+    });
+  }
+  const stream = streamRef.current;
+
+  const completeRun = useCallback((eventRunId: string, result: AgentRunResult): void => {
+    if (result.runId !== eventRunId) return;
+    const finished = stream.finish(eventRunId);
+    if (!finished) return;
+    const { scope, streamedText } = finished;
+    if (pendingAdmission.current?.runId === eventRunId) pendingAdmission.current = null;
+    setRunning(false);
+    setStopping(false);
+    setPendingApprovalIds([]);
+    setRunState(result.state);
+    useTeamRuntimeStore.getState().stage(eventRunId, result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed");
+    setContextUsage(result.context ?? null);
+    if (result.text) {
+      if (scope.sessionId) onAssistantMessage.current?.(result.text, scope.identity, scope.sessionId);
+      setEntries((current) => settleStreamText(current, result.text, scope.identity, streamedText));
+    } else if (result.state === "failed" && result.error) {
+      const error = result.error;
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: error }]));
+    }
+  }, []);
 
   useEffect(() => {
-    if (!isDesktopShell()) return;
+    mounted.current = true;
+    const resetView = (): void => {
+      mounted.current = false;
+      stream.reset();
+      stoppingScope.current = null;
+    };
+    if (!isDesktopShell()) return resetView;
     const subscriptions: DesktopSubscription[] = [];
     let disposed = false;
     // 订阅/退订的竞态由 `subscribeDesktop` 负责；这里只关心两件事 —— 把 8 个通道
@@ -203,10 +234,10 @@ export function useAgentRun(options: {
       );
     };
 
-    const isActive = (payload: { runId: string }): boolean => lifecycle.current.isActive(payload.runId);
+    const isActive = (payload: { runId: string }): boolean => stream.isActive(payload.runId);
 
     on("agent.started", (event) => {
-      if (!lifecycle.current.started(event.runId)) return;
+      if (!stream.started(event.runId)) return;
       setRunId(event.runId);
       setRunning(true);
       setRunState("thinking");
@@ -215,11 +246,11 @@ export function useAgentRun(options: {
     on("agent.thinking", (event) => {
       if (!isActive(event)) return;
       const delta = event.textDelta ?? "";
-      setEntries((current) => appendReasoningDelta(current, delta));
+      stream.enqueue(event.runId, "reasoning", delta);
     });
     on("agent.text", (event) => {
       if (!isActive(event)) return;
-      setEntries((current) => appendAssistantDelta(current, event.textDelta, replyIdentity.current));
+      stream.enqueue(event.runId, "assistant", event.textDelta);
     });
     on("agent.usage", (event) => {
       useTeamRuntimeStore.getState().usage(event.runId, event.usage);
@@ -228,6 +259,7 @@ export function useAgentRun(options: {
     });
     on("agent.tool_call", (event) => {
       if (!isActive(event)) return;
+      stream.boundary();
       setRunState("running_tool");
       useTeamRuntimeStore.getState().stage(event.runId, "running_tool");
       useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, false, event.callId);
@@ -244,6 +276,7 @@ export function useAgentRun(options: {
     });
     on("agent.tool_result", (event) => {
       if (!isActive(event)) return;
+      stream.boundary();
       useTeamRuntimeStore.getState().stage(event.runId, "thinking");
       useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, true, event.callId);
       setRunState("thinking");
@@ -268,6 +301,7 @@ export function useAgentRun(options: {
     });
     on("agent.waiting_approval", (event) => {
       if (!isActive(event)) return;
+      stream.boundary();
       setRunState("waiting_approval");
       useTeamRuntimeStore.getState().stage(event.runId, "waiting_approval");
       onApprovalRequested.current?.();
@@ -275,25 +309,18 @@ export function useAgentRun(options: {
     });
     on("agent.approval_expired", (event) => {
       if (!isActive(event)) return;
+      stream.flush();
       setApprovalStatuses((current) => ({ ...current, [event.approvalId]: "审批已过期" }));
     });
-    on("agent.completed", (event) => {
-      if (!lifecycle.current.finish(event.runId)) return;
-      if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
-      setRunning(false);
-      setRunState(event.result.state);
-      useTeamRuntimeStore.getState().stage(event.runId, event.result.state === "completed" ? "completed" : event.result.state === "cancelled" ? "cancelled" : "failed");
-      setContextUsage(event.result.context ?? null);
-      if (!event.result.text) return;
-      if (admittedSessionId.current) onAssistantMessage.current?.(event.result.text, replyIdentity.current, admittedSessionId.current);
-      setEntries((current) => settleAssistantText(current, event.result.text, replyIdentity.current));
-    });
+    on("agent.completed", (event) => completeRun(event.runId, event.result));
     on("agent.failed", (event) => {
-      if (!lifecycle.current.finish(event.runId)) return;
+      if (!stream.finish(event.runId)) return;
       useTeamRuntimeStore.getState().stage(event.runId, "failed");
       if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState("failed");
+      setStopping(false);
+      setPendingApprovalIds([]);
       setEntries((current) => appendEntries(current, [{ kind: "error", text: event.error }]));
     });
 
@@ -308,14 +335,15 @@ export function useAgentRun(options: {
     return () => {
       disposed = true;
       subscriptions.forEach((subscription) => subscription.stop());
+      resetView();
     };
   }, []);
 
   // 轮询到的存活信号是权威的：进程没了，在途运行不可能继续。
   useEffect(() => {
     if (!running || sidecarRunning !== false) return;
+    if (!stream.fail()) return;
     useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
-    lifecycle.current.fail();
     setRunning(false);
     setRunId(null);
     setStopping(false);
@@ -340,8 +368,8 @@ export function useAgentRun(options: {
     if (next === null || next === seenRestart.current) return;
     seenRestart.current = next;
     if (!running) return;
+    if (!stream.fail()) return;
     useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
-    lifecycle.current.fail();
     setRunning(false);
     setRunId(null);
     setStopping(false);
@@ -355,6 +383,7 @@ export function useAgentRun(options: {
   }, [sidecarRestart, running]);
 
   const start = useCallback(async (input: StartRunInput): Promise<StartOutcome> => {
+    if (!mounted.current) return "failed";
     const prompt = input.prompt;
     const parts =
       input.parts?.length
@@ -374,7 +403,8 @@ export function useAgentRun(options: {
         ? previous
         : null;
     const expectedRunId = reusable?.runId ?? newId("run");
-    if (!lifecycle.current.begin(expectedRunId)) return "busy";
+    const scope = stream.begin(expectedRunId, { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) });
+    if (!scope) return "busy";
     if (input.team) useTeamRuntimeStore.getState().begin({ id: expectedRunId, team: input.team, source: input.coordination ? "coordinator" : undefined, serverId: input.focusServerId ?? null, taskId: input.taskId ?? undefined, goal: prompt });
     setRunning(true);
     setRunState("starting");
@@ -382,8 +412,8 @@ export function useAgentRun(options: {
     setApprovalStatuses({});
     setPendingApprovalIds([]);
     setTokenUsage(null);
-    admittedSessionId.current = null;
-    replyIdentity.current = { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) };
+    setStopping(false);
+    stoppingScope.current = null;
     approvalLocks.current.clear();
 
     const attachments = parts.filter((part) => part.type === "image" || part.type === "file" || part.type === "document");
@@ -400,11 +430,12 @@ export function useAgentRun(options: {
       if (!reusable) {
         const messageId = newId("msg");
         const sessionId = await input.persistUserMessage(messageId, parts);
+        if (!stream.isPending(scope)) return "started";
         pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey, uiContext: input.uiContext };
       }
       const admitted = pendingAdmission.current;
-      if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
-      admittedSessionId.current = admitted.sessionId;
+      if (!admitted || admitted.runId !== scope.runId) throw new Error("运行受理状态丢失，请重新发送。");
+      scope.sessionId = admitted.sessionId;
       useTeamRuntimeStore.getState().bind(expectedRunId, admitted.sessionId, input.taskId);
       const request: IpcCommandMap[typeof IPC_COMMANDS.agentRunStart]["params"] = {
         runId: admitted.runId,
@@ -429,54 +460,70 @@ export function useAgentRun(options: {
       const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
         ...request, delivery: "async", resume: false,
       });
+      if (!stream.isPending(scope)) return "started";
       if (admissionResponse.runId !== admitted.runId) {
         throw new Error("sidecar 为已受理消息返回了不同的 runId。");
       }
       const response = await callDesktop(IPC_COMMANDS.agentRunStart, {
         ...request, delivery: input.delivery ?? "async", resume: true,
       });
+      if (!stream.isPending(scope)) return "started";
+      if (response.runId !== scope.runId) throw new Error("sidecar 为运行返回了不同的 runId。");
       if (response.duplicate || !response.started || !response.resumed) {
         throw new Error("这条消息已经由另一个调用启动，当前界面不能重复接管它。");
       }
-      pendingAdmission.current = null;
+      if (pendingAdmission.current?.runId === scope.runId) pendingAdmission.current = null;
       const started = response.runId;
-      if (lifecycle.current.acknowledge(started)) {
+      if (stream.acknowledge(scope)) {
         setRunId(started);
         setRunState("thinking");
       }
+      // Sync delivery can carry the terminal snapshot even if its event was missed.
+      if (response.result && ["completed", "cancelled", "failed"].includes(response.result.state)) completeRun(started, response.result);
       return "started";
     } catch (error) {
+      // A terminal event or a view change wins over a late RPC response/error.
+      if (!stream.fail(scope)) return "started";
       useTeamRuntimeStore.getState().stage(expectedRunId, "failed");
-      lifecycle.current.fail();
       setRunning(false);
+      setStopping(false);
+      setPendingApprovalIds([]);
       setRunState("failed");
       setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
       return "failed";
     }
-  }, []);
+  }, [completeRun]);
 
   const stop = useCallback(async (): Promise<void> => {
-    if (!runId || stopping) return;
+    const scope = runId ? stream.scopeFor(runId) : null;
+    if (!scope || !stream.isPending(scope) || stoppingScope.current === scope) return;
+    stoppingScope.current = scope;
     setStopping(true);
     try {
-      const { stopped } = await callDesktop(IPC_COMMANDS.agentRunStop, { runId });
-      if (stopped && lifecycle.current.finish(runId)) {
+      const { stopped } = await callDesktop(IPC_COMMANDS.agentRunStop, { runId: scope.runId });
+      if (!stream.isPending(scope)) return;
+      if (stopped && stream.finish(scope.runId)) {
         setRunning(false);
+        setPendingApprovalIds([]);
         setRunState("cancelled");
-        useTeamRuntimeStore.getState().stage(runId, "cancelled");
-      } else if (!stopped && lifecycle.current.isActive(runId)) {
+        useTeamRuntimeStore.getState().stage(scope.runId, "cancelled");
+      } else if (!stopped) {
         throw new Error("停止请求未被接受，请重试。");
       }
     } catch (error) {
+      if (!stream.isPending(scope)) return;
+      stream.flush();
       setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
     } finally {
-      setStopping(false);
+      if (stoppingScope.current === scope) stoppingScope.current = null;
+      if (stream.isCurrent(scope)) setStopping(false);
     }
-  }, [runId, stopping]);
+  }, [runId]);
 
   const respondApproval = useCallback(
     async (approval: ApprovalRequest, decision: ApprovalDecision): Promise<void> => {
-      if (approvalLocks.current.has(approval.approvalId) || !lifecycle.current.isActive(approval.runId)) return;
+      const scope = stream.scopeFor(approval.runId);
+      if (!scope || approvalLocks.current.has(approval.approvalId) || !stream.isActive(approval.runId)) return;
       if (Date.parse(approval.expiresAt) <= Date.now()) {
         setApprovalStatuses((current) => ({ ...current, [approval.approvalId]: "审批已过期" }));
         return;
@@ -490,6 +537,7 @@ export function useAgentRun(options: {
           decision,
           respondedAt: new Date().toISOString(),
         });
+        if (!stream.isCurrent(scope)) return;
         setApprovalStatuses((current) => ({
           ...current,
           [approval.approvalId]: !accepted
@@ -501,18 +549,23 @@ export function useAgentRun(options: {
                 : "已批准本次运行",
         }));
       } catch (error) {
+        if (!stream.isPending(scope)) return;
         approvalLocks.current.delete(approval.approvalId);
+        stream.flush();
         setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
       } finally {
-        setPendingApprovalIds((current) => current.filter((id) => id !== approval.approvalId));
+        if (stream.isCurrent(scope)) setPendingApprovalIds((current) => current.filter((id) => id !== approval.approvalId));
       }
     },
     [],
   );
 
   const loadTranscript = useCallback((next: Entry[]): void => {
+    stream.reset();
+    stoppingScope.current = null;
     pendingAdmission.current = null;
     setEntries(next);
+    setRunning(false);
     setRunState(null);
     setRunId(null);
     setStopping(false);
@@ -529,6 +582,7 @@ export function useAgentRun(options: {
   }, [loadTranscript]);
 
   const appendSystemEntry = useCallback((text: string): void => {
+    stream.flush();
     setEntries((current) => appendEntries(current, [{ kind: "system", text }]));
   }, []);
 

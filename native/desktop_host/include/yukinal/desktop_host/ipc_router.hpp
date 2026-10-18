@@ -214,6 +214,13 @@ class IpcRouter {
   std::function<void(const std::string&, const nlohmann::json&)> event_sink_;
 };
 
+namespace detail {
+// Complete Python-normalized snapshot data with host-owned identity and one
+// timestamp shared by the batch and every collector. Throws on invalid data.
+[[nodiscard]] nlohmann::json make_snapshot_record(const std::string& server_id,
+                                                const nlohmann::json& snapshot_data);
+}  // namespace detail
+
 [[nodiscard]] bool is_external_url(const std::string& url);
 [[nodiscard]] bool open_external_url(const std::string& url);
 [[nodiscard]] std::string operating_system();

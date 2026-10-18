@@ -10,6 +10,7 @@
   },
   "scripts": {
     "check": "node scripts/check.mjs",
+    "check:ai": "node scripts/check-ai.mjs",
     "package": "node scripts/package.mjs",
     "release:manifest": "node scripts/package.mjs --manifest",
     "typecheck": "pnpm -r --if-present typecheck",

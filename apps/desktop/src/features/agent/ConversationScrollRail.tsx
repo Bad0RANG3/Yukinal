@@ -1,37 +1,51 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 import { conversationScrollGeometry, conversationScrollTarget } from "./conversation-scroll.js";
+import { listenForFeedLayout } from "./feed-follow.js";
 
-export function ConversationScrollRail({ viewportRef, viewportId }: { viewportRef: RefObject<HTMLDivElement | null>; viewportId: string }) {
+export function ConversationScrollRail({ viewportRef, viewportId, contentVersion }: { viewportRef: RefObject<HTMLDivElement | null>; viewportId: string; contentVersion?: unknown }) {
   const railRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ pointerId: number; grabOffset: number } | null>(null);
+  const scheduleRef = useRef<() => void>(() => {});
   const [geometry, setGeometry] = useState(() => conversationScrollGeometry(0, 0, 0, 0));
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     const rail = railRef.current;
     if (!viewport || !rail) return;
+    let disposed = false;
     let frame = 0;
     const measure = () => {
       frame = 0;
+      if (disposed || document.hidden) return;
       const next = conversationScrollGeometry(viewport.clientHeight, viewport.scrollHeight, viewport.scrollTop, rail.clientHeight);
       setGeometry((previous) => previous.enabled === next.enabled && previous.maxScroll === next.maxScroll && previous.progress === next.progress && previous.trackHeight === next.trackHeight && previous.thumbHeight === next.thumbHeight ? previous : next);
     };
-    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
-    const resize = new ResizeObserver(schedule);
+    const schedule = () => { if (!disposed && !document.hidden && !frame) frame = requestAnimationFrame(measure); };
+    scheduleRef.current = schedule;
+    const visibility = () => {
+      if (document.hidden) {
+        if (frame) cancelAnimationFrame(frame);
+        frame = 0;
+        drag.current = null;
+      } else schedule();
+    };
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
     const observed = new Set<Element>();
     // Entries remain direct children so alignment and message animations stay intact.
     // Watching their sizes also catches streaming text, images and open details.
     const observeEntries = () => {
       const children = new Set(Array.from(viewport.children));
-      for (const entry of observed) if (!children.has(entry)) { resize.unobserve(entry); observed.delete(entry); }
-      for (const entry of children) if (!observed.has(entry)) { resize.observe(entry); observed.add(entry); }
+      for (const entry of observed) if (!children.has(entry)) { resize?.unobserve(entry); observed.delete(entry); }
+      for (const entry of children) if (!observed.has(entry)) { resize?.observe(entry); observed.add(entry); }
       schedule();
     };
-    const mutation = new MutationObserver(observeEntries);
-    resize.observe(viewport);
-    resize.observe(rail);
+    const mutation = typeof MutationObserver === "undefined" ? null : new MutationObserver(observeEntries);
+    resize?.observe(viewport);
+    resize?.observe(rail);
     observeEntries();
-    mutation.observe(viewport, { childList: true });
+    mutation?.observe(viewport, { childList: true });
+    const stopLayoutEvents = listenForFeedLayout(viewport, window, schedule, document.fonts ?? null);
+    document.addEventListener("visibilitychange", visibility);
     viewport.addEventListener("scroll", schedule, { passive: true });
     const wheel = (event: WheelEvent) => {
       if (!event.deltaY || event.ctrlKey || viewport.scrollHeight <= viewport.clientHeight) return;
@@ -42,13 +56,21 @@ export function ConversationScrollRail({ viewportRef, viewportId }: { viewportRe
     };
     rail.addEventListener("wheel", wheel, { passive: false });
     return () => {
+      disposed = true;
+      drag.current = null;
+      scheduleRef.current = () => {};
       if (frame) cancelAnimationFrame(frame);
-      resize.disconnect();
-      mutation.disconnect();
+      resize?.disconnect();
+      mutation?.disconnect();
+      stopLayoutEvents();
+      document.removeEventListener("visibilitychange", visibility);
       viewport.removeEventListener("scroll", schedule);
       rail.removeEventListener("wheel", wheel);
     };
   }, [viewportRef]);
+
+  // React still tells us about streamed content when DOM observers are absent.
+  useLayoutEffect(() => { scheduleRef.current(); }, [contentVersion]);
 
   const pointerGeometry = () => {
     const viewport = viewportRef.current;

@@ -5,11 +5,12 @@
  * answer always comes from the desktop host.
  */
 
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { IPC_COMMANDS } from "@yukinal/shared";
-import type { AgentSpawnResponse } from "@yukinal/shared";
+import type { AgentSpawnResponse, AgentStatus } from "@yukinal/shared";
 
 import { callDesktop, isDesktopShell } from "./ipc.js";
+import { PROVIDERS_QUERY_KEY } from "./providers.js";
 
 export const RUNTIME_QUERY_KEYS = {
   ping: ["runtime", "core"] as const,
@@ -17,10 +18,12 @@ export const RUNTIME_QUERY_KEYS = {
   logs: ["runtime", "agent-logs"] as const,
 };
 
-export function useCorePing() {
+const lastAgentRunning = new WeakMap<QueryClient, boolean>();
+
+export function useCorePing({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: RUNTIME_QUERY_KEYS.ping,
-    enabled: isDesktopShell(),
+    enabled: enabled && isDesktopShell(),
     // Version + OS never change while the window is alive; refetching is noise.
     staleTime: Infinity,
     queryFn: () => callDesktop(IPC_COMMANDS.corePing, {}),
@@ -32,17 +35,27 @@ export function useCorePing() {
  * events for active runs, but a poll still catches a process that dies while nobody
  * is looking at the event stream.
  */
-export function agentStatusQueryOptions({ poll = false }: { poll?: boolean } = {}) {
-  return queryOptions({
+export function agentStatusQueryOptions({ poll = false, enabled = true }: { poll?: boolean; enabled?: boolean } = {}) {
+  return queryOptions<AgentStatus>({
     queryKey: RUNTIME_QUERY_KEYS.status,
-    enabled: isDesktopShell(),
+    enabled: enabled && isDesktopShell(),
     refetchInterval: poll ? (query) => (query.state.data?.running ? 1_500 : 5_000) : false,
-    queryFn: () => callDesktop(IPC_COMMANDS.agentStatus, {}),
+    queryFn: async ({ client }): Promise<AgentStatus> => {
+      const status = await callDesktop(IPC_COMMANDS.agentStatus, {});
+      const wasRunning = lastAgentRunning.get(client);
+      lastAgentRunning.set(client, status.running);
+      // One shared status fetch handles both explicit and automatic startup.
+      // Provider reads that failed before startup must be retried once it runs.
+      if (status.running && wasRunning !== true) {
+        void client.invalidateQueries({ queryKey: PROVIDERS_QUERY_KEY });
+      }
+      return status;
+    },
   });
 }
 
 /** AgentPanel owns polling; settings and onboarding observe the same cache. */
-export function useAgentStatus(options: { poll?: boolean } = {}) {
+export function useAgentStatus(options: { poll?: boolean; enabled?: boolean } = {}) {
   return useQuery(agentStatusQueryOptions(options));
 }
 

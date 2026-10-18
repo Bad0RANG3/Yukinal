@@ -933,8 +933,12 @@ class PythonSidecar:
         except asyncio.CancelledError:
             # A queued turn can be stopped before it acquires the session lock.
             result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
-            self._conversations.finish(run_id, "cancelled")
-            self._emit({"type": "agent.completed", "runId": run_id, "result": result, "at": _timestamp()})
+            self._finish_run(request, run_id, "cancelled")
+            self._emit_terminal({
+                "type": "agent.completed", "runId": run_id,
+                **({"taskId": request["taskId"]} if request.get("taskId") else {}),
+                "result": result, "at": _timestamp(),
+            })
             return result
         finally:
             self._run_sessions.pop(run_id, None)
@@ -946,30 +950,31 @@ class PythonSidecar:
         self, request: dict[str, Any], run_id: str, agent: ModelDrivenAgent,
     ) -> dict[str, Any]:
         task_id = request.get("taskId")
-        # Freeze a fresh status projection at each coordinator turn. Results
-        # completed after dispatch are visible without polluting worker history.
-        persona = request.get("persona")
-        if request.get("coordination"):
-            persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request) +
-                       "\n当前界面参考：\n" + (request.get("persona") or {}).get("systemPrompt", "")[:4000]}
         final_status = "failed"
-        available_bytes = agent.conversation_budget_bytes(request["promptText"], persona)
-        memory_budget = min(16 * 1024, available_bytes // 8)
-        context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
-                                              max_bytes=available_bytes - memory_budget)
-        memories, sources = self._conversations.memory_context(request.get("targetId"), request["promptText"], max_bytes=memory_budget)
-        context_usage = {**context.usage, "memorySources": sources}
-        context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
-        context_usage["maxInputBytes"] = max(1, available_bytes)
-        self._conversations.record_event(run_id, {"type": "context.loaded", "context": context_usage})
+        context_usage: dict[str, Any] | None = None
         now = _timestamp
-        self._emit({
-            "type": "agent.started",
-            "runId": run_id,
-            **({"taskId": task_id} if task_id else {}),
-            "at": now(),
-        })
         try:
+            # Freeze a fresh status projection at each coordinator turn. Results
+            # completed after dispatch are visible without polluting worker history.
+            persona = request.get("persona")
+            if request.get("coordination"):
+                persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request) +
+                           "\n当前界面参考：\n" + (request.get("persona") or {}).get("systemPrompt", "")[:4000]}
+            available_bytes = agent.conversation_budget_bytes(request["promptText"], persona)
+            memory_budget = min(16 * 1024, available_bytes // 8)
+            context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
+                                                  max_bytes=available_bytes - memory_budget)
+            memories, sources = self._conversations.memory_context(request.get("targetId"), request["promptText"], max_bytes=memory_budget)
+            context_usage = {**context.usage, "memorySources": sources}
+            context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
+            context_usage["maxInputBytes"] = max(1, available_bytes)
+            self._conversations.record_event(run_id, {"type": "context.loaded", "context": context_usage})
+            self._emit({
+                "type": "agent.started",
+                "runId": run_id,
+                **({"taskId": task_id} if task_id else {}),
+                "at": now(),
+            })
             target_id = request.get("targetId")
             mode = request.get("mode", "goal")
             allowed_tools = set(_allowed_tools_for_run(self._registry, mode, request))
@@ -1005,9 +1010,9 @@ class PythonSidecar:
             }
             final_status = result.status
             if result.status == "succeeded":
-                for offset in range(0, len(text), 20_000):
-                    self._emit({"type": "agent.text", "runId": run_id, "textDelta": text[offset:offset + 20_000], "at": now()})
-                self._emit({
+                # Model text already streamed. The full terminal answer is a
+                # reconciliation snapshot, not another append-only delta.
+                self._emit_terminal({
                     "type": "agent.completed",
                     "runId": run_id,
                     **({"taskId": task_id} if task_id else {}),
@@ -1017,7 +1022,7 @@ class PythonSidecar:
             else:
                 message = result.error_code or "agent_run_failed"
                 base_result["error"] = message
-                self._emit({
+                self._emit_terminal({
                     "type": "agent.failed",
                     "runId": run_id,
                     **({"taskId": task_id} if task_id else {}),
@@ -1027,8 +1032,9 @@ class PythonSidecar:
             return base_result
         except asyncio.CancelledError:
             final_status = "cancelled"
-            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0, "context": context_usage}
-            self._emit({
+            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0,
+                      **({"context": context_usage} if context_usage is not None else {})}
+            self._emit_terminal({
                 "type": "agent.completed",
                 "runId": run_id,
                 **({"taskId": task_id} if task_id else {}),
@@ -1037,9 +1043,11 @@ class PythonSidecar:
             })
             return result
         except Exception:
+            final_status = "failed"
             message = "agent_run_failed"
-            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message, "context": context_usage}
-            self._emit({
+            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message,
+                      **({"context": context_usage} if context_usage is not None else {})}
+            self._emit_terminal({
                 "type": "agent.failed",
                 "runId": run_id,
                 **({"taskId": task_id} if task_id else {}),
@@ -1048,23 +1056,48 @@ class PythonSidecar:
             })
             return result
         finally:
-            self._conversations.finish(run_id, final_status)
-            self._coordination.parents.pop(run_id, None)
-            for approval_id, pending in list(self._pending_approvals.items()):
-                if pending.run_id == run_id:
-                    self._pending_approvals.pop(approval_id, None)
-                    if not pending.future.done():
-                        pending.future.cancel()
-            self._active_runs.pop(run_id, None)
-            self._completed_runs[run_id] = _run_fingerprint(request)
-            self._completed_runs.move_to_end(run_id)
-            while len(self._completed_runs) > 256:
-                self._completed_runs.popitem(last=False)
-            message_id = request.get("messageId")
-            admission = self._admissions.get(message_id) if message_id else None
-            if admission and admission["runId"] == run_id:
-                admission["completed"] = True
-                self._prune_admissions()
+            self._finish_run(request, run_id, final_status)
+
+    def _finish_run(self, request: dict[str, Any], run_id: str, status: str) -> None:
+        # A failing transcript store must not retain active reservations or invite
+        # an automatic replay. Never print the underlying error or run payload.
+        try:
+            self._conversations.finish(run_id, status)
+        except Exception:
+            print("Agent run status could not be saved to conversation history", file=sys.stderr, flush=True)
+        self._coordination.parents.pop(run_id, None)
+        for approval_id, pending in list(self._pending_approvals.items()):
+            if pending.run_id == run_id:
+                self._pending_approvals.pop(approval_id, None)
+                if not pending.future.done():
+                    pending.future.cancel()
+        self._active_runs.pop(run_id, None)
+        self._completed_runs[run_id] = _run_fingerprint(request)
+        self._completed_runs.move_to_end(run_id)
+        while len(self._completed_runs) > 256:
+            self._completed_runs.popitem(last=False)
+        message_id = request.get("messageId")
+        admission = self._admissions.get(message_id) if message_id else None
+        if admission and admission["runId"] == run_id:
+            admission["completed"] = True
+            self._prune_admissions()
+
+    def _emit_terminal(self, event: dict[str, Any]) -> None:
+        # Exactly one terminal delivery attempt, even if history persistence or
+        # coordinator bookkeeping fails. Ordinary events still fail closed.
+        try:
+            self._coordination.observe(event)
+        except Exception:
+            print("Agent terminal coordinator status could not be saved", file=sys.stderr, flush=True)
+        try:
+            self._conversations.record_event(event["runId"], event)
+        except Exception:
+            print("Agent terminal event could not be saved to conversation history", file=sys.stderr, flush=True)
+        if self._notification_sink is not None:
+            try:
+                self._notification_sink("agent.stream", event)
+            except Exception:
+                print("Agent terminal notification could not be delivered", file=sys.stderr, flush=True)
 
     def _prune_admissions(self) -> None:
         while len(self._admissions) > 256:
@@ -1196,7 +1229,7 @@ class PythonSidecar:
             "protocolVersion": RPC_VERSION,
             "agentVersion": self._agent_version,
             "capabilities": {
-                "streaming": False,
+                "streaming": True,
                 "toolCalling": bool(self._registry.list()),
                 "cancellation": True,
                 "mcp": self._mcp_loaded,

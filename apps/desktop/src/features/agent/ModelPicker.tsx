@@ -14,7 +14,7 @@
  * 关闭弹层也不需要额外把焦点搬回来。
  */
 
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
 import { Icon } from "../../components/Icon.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
@@ -39,6 +39,38 @@ export function shortModelLabel(label: string): string {
   return tail || label;
 }
 
+export type ModelPickerHighlight = { choiceKey: string | null; selectedKey: string | null };
+
+/** Highlight follows a stable choice key; it never changes the actual selected model. */
+export function activeModelChoice(choices: readonly ModelPickerChoice[], selectedKey: string | null, highlight: ModelPickerHighlight): ModelPickerChoice | undefined {
+  const selected = choices.find((choice) => choice.key === selectedKey);
+  const active = highlight.selectedKey === selectedKey ? choices.find((choice) => choice.key === highlight.choiceKey) : selected;
+  return active ?? selected ?? choices[0];
+}
+
+export type ModelPickerIntent =
+  | { type: "none" }
+  | { type: "open" }
+  | { type: "highlight"; key: string }
+  | { type: "select"; key: string }
+  | { type: "close"; reason: "escape" | "tab" };
+
+/** Pure keyboard policy shared by the real combobox and embedded listbox. */
+export function modelPickerKeyIntent(choices: readonly ModelPickerChoice[], activeKey: string | null, key: string, state: { open: boolean; inline: boolean; disabled: boolean }): ModelPickerIntent {
+  if (state.disabled || choices.length === 0) return { type: "none" };
+  if (!state.open && !state.inline && ["ArrowDown", "ArrowUp", "Enter", " "].includes(key)) return { type: "open" };
+  const index = Math.max(0, choices.findIndex((choice) => choice.key === activeKey));
+  const nextIndex = key === "Home" ? 0 : key === "End" ? choices.length - 1
+    : key === "ArrowDown" ? (index + 1) % choices.length
+      : key === "ArrowUp" ? (index - 1 + choices.length) % choices.length : null;
+  if (nextIndex !== null) return { type: "highlight", key: choices[nextIndex]!.key };
+  if (!state.open && !state.inline) return { type: "none" };
+  if (key === "Enter" || key === " ") return { type: "select", key: choices[index]!.key };
+  if (!state.inline && key === "Escape") return { type: "close", reason: "escape" };
+  if (!state.inline && key === "Tab") return { type: "close", reason: "tab" };
+  return { type: "none" };
+}
+
 export function ModelPicker({
   choices,
   selectedKey,
@@ -57,94 +89,80 @@ export function ModelPicker({
   inline?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
+  const [highlight, setHighlight] = useState<ModelPickerHighlight>(() => ({ choiceKey: selectedKey, selectedKey }));
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const listboxId = useId();
   // 逻辑上的 open 驱动全部行为；presence 只决定「还在不在 DOM 里」，
   // 好让 popover-exit 有机会播完。两者绝不能混用。
-  const presence = usePresence(open, { exitAnimation: "popover-exit" });
+  const menuOpen = open && !disabled && choices.length > 0;
+  const interactive = !disabled && (inline || menuOpen);
+  const presence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
 
   useEffect(() => { if (disabled || !choices.length) setOpen(false); }, [disabled, choices.length]);
 
+  // An embedded list survives its dialog's exit animation. Reopening that same
+  // node or receiving a new model must start at the selected item before focus.
+  useLayoutEffect(() => {
+    setHighlight((current) => current.choiceKey === selectedKey && current.selectedKey === selectedKey
+      ? current : { choiceKey: selectedKey, selectedKey });
+  }, [selectedKey, disabled]);
+
   const selectedIndex = choices.findIndex((choice) => choice.key === selectedKey);
-  const selected = selectedIndex >= 0 ? choices[selectedIndex] : choices[0];
-  const activeIndex = Math.min(active, Math.max(0, choices.length - 1));
-  /* 下面 onKeyDown 里的 `% choices.length` 不需要防 0：choices 为空时
-     `selected` 是 undefined，组件会在渲染前就 return null，那个带 onKeyDown 的
-     按钮根本不存在，除零分支不可达。调用方也已经用 `models.length ? ... : ...`
-     兜过一层。与其加一个永远走不到的判断，不如把这段不变量写在这里。 */
+  const selected = selectedIndex >= 0 ? choices[selectedIndex] : undefined;
+  const selectedLabel = selected?.label ?? "选择模型";
+  const activeChoice = activeModelChoice(choices, selectedKey, highlight);
+  const activeIndex = activeChoice ? choices.indexOf(activeChoice) : -1;
+  const activeId = activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined;
 
-  // 每次展开都把高亮落在当前选中项上，而不是永远从第一项开始。
-  useEffect(() => {
-    if ((open || inline) && selectedIndex >= 0) setActive(selectedIndex);
-  }, [open, inline, selectedIndex]);
+  const highlightChoice = (key: string) => setHighlight({ choiceKey: key, selectedKey });
+  const openMenu = () => {
+    setHighlight({ choiceKey: selected?.key ?? choices[0]?.key ?? null, selectedKey });
+    setOpen(true);
+  };
 
   useEffect(() => {
-    if (!(inline || (open && presence.mounted))) return;
+    if (!(interactive && (inline || presence.mounted))) return;
     listRef.current?.children[activeIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [open, inline, presence.mounted, activeIndex]);
+  }, [interactive, inline, presence.mounted, activeIndex]);
 
-  // 点到组件之外就收起。`pointerdown` 而非 `click` 的理由写在
-  // `hooks/useDismissOnOutsidePointer.ts` —— 那一处同时服务两个弹层。
-  useDismissOnOutsidePointer(open, [rootRef], useCallback(() => setOpen(false), []));
+  useDismissOnOutsidePointer(menuOpen && !inline, [rootRef], useCallback(() => setOpen(false), []));
 
   const choose = (key: string): void => {
+    if (!interactive || !choices.some((choice) => choice.key === key)) return;
     onSelect(key);
     setOpen(false);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
-    if (disabled) return;
-    if (!open && !inline) {
-      // 关闭态下这几个键负责展开，与原生 select 的预期一致。
-      if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
+    const intent = modelPickerKeyIntent(choices, activeChoice?.key ?? null, event.key, { open: menuOpen, inline, disabled });
+    switch (intent.type) {
+      case "none": return;
+      case "open":
         event.preventDefault();
-        setOpen(true);
-      }
-      return;
+        openMenu();
+        return;
+      case "highlight":
+        event.preventDefault();
+        highlightChoice(intent.key);
+        if (!inline) setOpen(true);
+        return;
+      case "select":
+        event.preventDefault();
+        choose(intent.key);
+        return;
+      case "close":
+        if (intent.reason === "escape") {
+          // Close this menu before the outer Agent panel sees Escape.
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        // Tab retains native focus movement; embedded lists leave dismissal to their dialog.
+        setOpen(false);
     }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActive((current) => (current + 1) % choices.length);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActive((current) => (current - 1 + choices.length) % choices.length);
-      return;
-    }
-    if (event.key === "Home") {
-      event.preventDefault();
-      setActive(0);
-      return;
-    }
-    if (event.key === "End") {
-      event.preventDefault();
-      setActive(choices.length - 1);
-      return;
-    }
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      const choice = choices[activeIndex];
-      if (choice) choose(choice.key);
-      return;
-    }
-    if (event.key === "Escape") {
-      if (inline) return; // 外层设置面板负责一次关闭与返回焦点。
-      event.preventDefault();
-      // 必须拦住冒泡：外层 .agent-composer-shell 挂了一条 window 级的 Escape
-      // 用来收起整个 Agent 面板（useAgentPanelShell）。不拦的话，用户想关掉这个
-      // 模型菜单，结果是整块 Agent 面板被收起来 —— 菜单没了，上下文也没了。
-      event.stopPropagation();
-      setOpen(false);
-      return;
-    }
-    // Tab 交给浏览器：焦点正常移走，这里只把弹层收起。
-    if (event.key === "Tab") setOpen(false);
   };
 
-  if (!selected) return null;
+  if (!choices.length) return null;
 
   const list = <ul
           ref={listRef}
@@ -152,8 +170,10 @@ export function ModelPicker({
           role="listbox"
           id={listboxId}
           aria-label="可用模型"
-          aria-activedescendant={inline ? `${listboxId}-${activeIndex}` : undefined}
-          tabIndex={inline ? 0 : undefined}
+          aria-activedescendant={inline && interactive ? activeId : undefined}
+          aria-disabled={disabled || undefined}
+          inert={disabled}
+          tabIndex={inline ? (disabled ? -1 : 0) : undefined}
           onKeyDown={inline ? onKeyDown : undefined}
         >
           {choices.map((choice, index) => (
@@ -161,42 +181,44 @@ export function ModelPicker({
               key={choice.key}
               id={`${listboxId}-${index}`}
               role="option"
-              aria-selected={choice.key === selected.key}
+              aria-selected={choice.key === selected?.key}
               title={choice.providerLabel ? `${choice.providerLabel} · ${choice.label}` : choice.label}
               className={`agent-model-option ${index === activeIndex ? "is-active" : ""}`}
-              onMouseEnter={() => setActive(index)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => { if (!disabled) { if (inline) listRef.current?.focus(); choose(choice.key); } }}
+              onMouseEnter={() => { if (interactive) highlightChoice(choice.key); }}
+              onMouseDown={(event) => { if (interactive) event.preventDefault(); }}
+              onClick={() => { if (interactive) { if (inline) listRef.current?.focus({ preventScroll: true }); choose(choice.key); } }}
             >
               <span className="agent-model-option-name">{shortModelLabel(choice.label)}</span>
-              {choice.key === selected.key ? <Icon name="check" size="sm" /> : null}
+              {choice.key === selected?.key ? <Icon name="check" size="sm" /> : null}
               {choice.providerLabel && choices.some((other) => other.key !== choice.key && shortModelLabel(other.label) === shortModelLabel(choice.label)) ? <span className="agent-model-option-from">{choice.providerLabel}</span> : null}
             </li>
           ))}
         </ul>;
 
   return (
-    <div className={`agent-model-picker${inline ? " agent-model-picker-inline" : ""}`} ref={rootRef}>
+    <div className={`agent-model-picker${inline ? " agent-model-picker-inline" : ""}`} ref={rootRef} onBlur={(event) => {
+      if (!inline && !event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+    }}>
       {inline ? list : <button
         type="button"
         role="combobox"
-        className={`agent-model-select ${open ? "is-open" : ""}`}
+        className={`agent-model-select ${menuOpen ? "is-open" : ""}`}
         aria-label="选择模型"
         aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={listboxId}
-        aria-activedescendant={open ? `${listboxId}-${activeIndex}` : undefined}
-        title={selectedTitle ?? selected.label}
+        aria-expanded={menuOpen}
+        aria-controls={presence.mounted ? listboxId : undefined}
+        aria-activedescendant={menuOpen && presence.mounted ? activeId : undefined}
+        title={selectedTitle ?? selectedLabel}
         disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => { if (menuOpen) setOpen(false); else openMenu(); }}
         onKeyDown={onKeyDown}
       >
-        <span className="agent-model-value">{shortModelLabel(selected.label)}</span>
+        <span className="agent-model-value">{shortModelLabel(selectedLabel)}</span>
         <Icon name="chevronDown" size="xs" />
       </button>}
 
       {!inline && presence.mounted ? (
-        <div className={`agent-model-popover ${presence.closing ? "is-closing" : ""}`} inert={presence.closing} onAnimationEnd={presence.onAnimationEnd}>
+        <div className={`agent-model-popover ${!menuOpen ? "is-closing" : ""}`} aria-hidden={!menuOpen} inert={!menuOpen} onAnimationEnd={presence.onAnimationEnd}>
         <p className="agent-model-menu-title">选择模型</p>
         {list}
         </div>

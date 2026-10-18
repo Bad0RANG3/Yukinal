@@ -227,6 +227,129 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rejected_global["error"]["code"], RPC_INVALID_PARAMS)
             reopened.close()
 
+    async def test_persona_history_metadata_keeps_identity_without_execution_instructions(self) -> None:
+        store = ConversationStore()
+        try:
+            incoming = request("private-metadata", persona="fixture-role")
+            incoming["providerId"] = "fixture-provider"
+            incoming["taskId"] = "fixture-task"
+            sentinel = "metadata-policy-sentinel-3127"
+            incoming["persona"]["systemPrompt"] = sentinel
+            parsed = _parse_run_request(incoming)
+            fingerprint = _run_fingerprint(parsed)
+            store.begin(parsed, fingerprint)
+            stored = store._connection.execute(
+                "SELECT metadata_json, fingerprint FROM conversation_turns WHERE run_id = ?",
+                (parsed["runId"],),
+            ).fetchone()
+            metadata = json.loads(stored["metadata_json"])
+            self.assertEqual(metadata["persona"], {"id": "fixture-role", "label": "Fixture-Role"})
+            self.assertEqual(metadata["participant"], parsed["participant"])
+            self.assertEqual((metadata["providerId"], metadata["model"], metadata["taskId"]),
+                             ("fixture-provider", "scripted", "fixture-task"))
+            self.assertNotIn(sentinel, stored["metadata_json"])
+            self.assertNotIn("systemPrompt", stored["metadata_json"])
+            self.assertEqual(parsed["persona"]["systemPrompt"], sentinel)
+            self.assertEqual(stored["fingerprint"], fingerprint)
+            # Admission replay still compares the complete execution identity.
+            store.begin(parsed, fingerprint)
+            changed = _parse_run_request(incoming | {"persona": incoming["persona"] | {"systemPrompt": "changed-policy"}})
+            with self.assertRaises(ValueError):
+                store.begin(changed, _run_fingerprint(changed))
+            self.assertEqual(store._connection.execute("SELECT count(*) FROM conversation_turns").fetchone()[0], 1)
+        finally:
+            store.close()
+
+    async def test_coordinator_and_worker_policies_reach_models_but_not_ordinary_records(self) -> None:
+        lead_sentinel = "lead-policy-sentinel-5173"
+        worker_sentinel = "worker-policy-sentinel-6841"
+        goal = "Summarize this local fixture."
+
+        class BoundaryModel(ScriptedModel):
+            async def ainvoke(self, messages: list[Any]) -> AIMessage:
+                self.seen.append(list(messages))
+                current = next(message.content for message in reversed(messages) if isinstance(message, HumanMessage))
+                if current == goal:
+                    return AIMessage(content="Fixture summary complete.")
+                if isinstance(messages[-1], ToolMessage):
+                    return AIMessage(content="Fixture work dispatched.")
+                return AIMessage(content="", tool_calls=[{
+                    "name": "teams__dispatch", "args": {"tasks": [{
+                        "key": "fixture-job", "roleId": "fixture-reader", "title": "Fixture summary",
+                        "goal": goal, "access": "read",
+                    }]}, "id": "fixture-dispatch", "type": "tool_call",
+                }])
+
+        store = ConversationStore()
+        model = BoundaryModel([])
+        sidecar = LocalSidecar(model, store)
+        try:
+            incoming = request("boundary-lead", prompt="Coordinate this local fixture.")
+            incoming["persona"]["systemPrompt"] = lead_sentinel
+            incoming["coordination"] = {"version": 1, "roles": [{
+                "id": "fixture-reader", "team": "blue", "label": "Fixture reader",
+                "systemPrompt": worker_sentinel,
+            }], "servers": []}
+            response = await asyncio.wait_for(sidecar.rpc("agent.run.start", incoming), 3)
+            self.assertEqual(response["result"]["result"]["state"], "completed")
+            await asyncio.wait_for(asyncio.gather(*list(sidecar._coordination.active.values())), 3)
+            job = next(iter(sidecar._coordination.jobs.values()))
+            self.assertEqual(job["state"], "completed")
+            lead_inputs = [messages for messages in model.seen if messages[-1].content != goal
+                           and any(lead_sentinel in str(message.content) for message in messages if isinstance(message, SystemMessage))]
+            worker_inputs = [messages for messages in model.seen if messages[-1].content == goal]
+            self.assertTrue(lead_inputs)
+            self.assertEqual(len(worker_inputs), 1)
+            self.assertTrue(worker_sentinel in str(worker_inputs[0][0].content), "Worker execution policy was not supplied")
+            self.assertFalse(lead_sentinel in str(worker_inputs[0]), "Coordinator policy crossed into worker history")
+            rows = store._connection.execute(
+                "SELECT metadata_json, messages_json, summary_text FROM conversation_turns"
+            ).fetchall()
+            self.assertEqual(len(rows), 2)
+            listing = await sidecar.rpc("agent.teams.list", {"sessionId": incoming["sessionId"]})
+            public = json.dumps({"records": [tuple(row) for row in rows], "notifications": sidecar.events,
+                                 "teamListing": listing}, ensure_ascii=False)
+            for sentinel in (lead_sentinel, worker_sentinel):
+                self.assertFalse(sentinel in public, "Execution policy entered ordinary records or notifications")
+            self.assertFalse("systemPrompt" in public, "Execution-only field entered ordinary records")
+            self.assertNotIn("coordination", json.dumps([row["metadata_json"] for row in rows]))
+        finally:
+            await sidecar.shutdown()
+            store.close()
+
+    async def test_legacy_policy_metadata_is_not_replayed_or_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "legacy.sqlite"
+            store = ConversationStore(database)
+            incoming = _parse_run_request(request("legacy-policy", prompt="Public question. " + "x" * 5000))
+            store.begin(incoming, _run_fingerprint(incoming))
+            store.update_messages(incoming["runId"], [HumanMessage(content=incoming["promptText"]),
+                                                     AIMessage(content="Legacy public answer.")])
+            store.finish(incoming["runId"], "succeeded")
+            metadata = json.loads(store._connection.execute("SELECT metadata_json FROM conversation_turns").fetchone()[0])
+            sentinel = "legacy-policy-sentinel-7916"
+            metadata["persona"]["systemPrompt"] = sentinel
+            raw_legacy = json.dumps(metadata)
+            with store._connection:
+                store._connection.execute("UPDATE conversation_turns SET metadata_json = ?", (raw_legacy,))
+            store.close()
+            reopened = ConversationStore(database)
+            try:
+                recent = reopened.context("session-1", None)
+                compacted = reopened.context("session-1", None, max_bytes=4096)
+                self.assertEqual(recent.usage["includedTurns"], 1)
+                self.assertEqual(compacted.usage["compactedTurns"], 1)
+                self.assertIn("Legacy public answer.", str(recent.messages))
+                self.assertIn("archive excerpts", str(compacted.messages))
+                for context in (recent, compacted):
+                    self.assertNotIn(sentinel, str(context.messages))
+                    self.assertNotIn("systemPrompt", str(context.messages))
+                    self.assertFalse(any(isinstance(message, SystemMessage) for message in context.messages))
+                self.assertNotIn(sentinel, json.dumps(reopened.checkpoint_bindings()))
+                self.assertEqual(reopened._connection.execute("SELECT metadata_json FROM conversation_turns").fetchone()[0], raw_legacy)
+            finally:
+                reopened.close()
+
     async def test_reset_clears_projection_and_checkpoints_but_keeps_raw_history_and_memories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ConversationStore(Path(directory) / "conversation.sqlite")

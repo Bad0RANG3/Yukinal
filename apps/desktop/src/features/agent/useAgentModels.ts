@@ -28,7 +28,6 @@ export function resolveAgentModels(providers: readonly AiProviderConfig[], provi
   const modelChoices: ModelChoice[] = [];
   let selectedProvider: AiProviderConfig | undefined;
   let fallback: AiProviderConfig | undefined;
-  let selectedModelLabel: string | null = null;
   for (const provider of providers) {
     if (!provider.enabled) continue;
     fallback ??= provider;
@@ -37,10 +36,19 @@ export function resolveAgentModels(providers: readonly AiProviderConfig[], provi
     for (const model of models) {
       const label = model.label || model.id;
       modelChoices.push({ key: modelChoiceKey(provider.id, model.id), providerId: provider.id, providerLabel: provider.label, model: model.id, label });
-      if (provider.id === providerId && model.id === modelId) selectedModelLabel ??= `${provider.label} · ${label}`;
     }
   }
-  return { modelChoices, selectedProvider, fallback, selectedModelLabel };
+  // This is the same model AgentPanel sends. A catalog refresh must not turn a
+  // valid foreground override into a different displayed or selected model.
+  const effectiveModel = selectedProvider ? modelId ?? selectedProvider.model : null;
+  const selectedModelKey = selectedProvider && effectiveModel ? modelChoiceKey(selectedProvider.id, effectiveModel) : null;
+  let selectedChoice = modelChoices.find((choice) => choice.key === selectedModelKey);
+  if (selectedProvider && effectiveModel && !selectedChoice) {
+    selectedChoice = { key: selectedModelKey!, providerId: selectedProvider.id, providerLabel: selectedProvider.label, model: effectiveModel, label: effectiveModel };
+    modelChoices.push(selectedChoice);
+  }
+  const selectedModelLabel = selectedChoice ? `${selectedChoice.providerLabel} · ${selectedChoice.label}` : null;
+  return { modelChoices, selectedProvider, fallback, selectedModelKey, selectedModelLabel };
 }
 
 export function useAgentModels() {
@@ -52,7 +60,7 @@ export function useAgentModels() {
   const selectedModel = useWorkspaceStore((state) => state.selectedModel);
   const selectProvider = useWorkspaceStore((state) => state.selectProvider);
 
-  const { modelChoices, selectedProvider, fallback, selectedModelLabel } = useMemo(
+  const { modelChoices, selectedProvider, fallback, selectedModelKey, selectedModelLabel } = useMemo(
     () => resolveAgentModels(providers.data ?? [], selectedProviderId, selectedModel),
     [providers.data, selectedProviderId, selectedModel],
   );
@@ -61,8 +69,6 @@ export function useAgentModels() {
   useEffect(() => {
     if (!selectedProvider && fallback) selectProvider(fallback.id, fallback.model);
   }, [selectedProvider, fallback, selectProvider]);
-
-  const selectedModelKey = selectedProviderId && selectedModel ? modelChoiceKey(selectedProviderId, selectedModel) : null;
 
   return {
     providers,
