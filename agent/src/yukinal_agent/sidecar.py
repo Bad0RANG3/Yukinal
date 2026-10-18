@@ -973,7 +973,7 @@ class PythonSidecar:
             available_bytes = agent.conversation_budget_bytes(request["promptText"], persona)
             memory_budget = min(16 * 1024, available_bytes // 8)
             context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
-                                                  max_bytes=available_bytes - memory_budget)
+                                                  max_bytes=available_bytes - memory_budget, query_text=request["promptText"])
             memories, sources = self._conversations.memory_context(request.get("targetId"), request["promptText"], max_bytes=memory_budget)
             context_usage = {**context.usage, "memorySources": sources}
             context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0

@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IPC_COMMANDS,
   type Activity,
@@ -177,6 +177,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
     {snapshotQuery.isError ? <p className="settings-notice" role="alert">最近一次刷新失败，当前仍显示上次成功采集的快照。{errorMessage(snapshotQuery.error)}</p> : null}
     <OverviewContent
       key={server.id}
+      active={active}
       server={server}
       snapshot={snapshot}
       receivedAt={snapshotQuery.dataUpdatedAt}
@@ -190,6 +191,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
 }
 
 function OverviewContent({
+  active,
   server,
   snapshot,
   receivedAt,
@@ -199,6 +201,7 @@ function OverviewContent({
   connecting,
   connectionError,
 }: {
+  active: boolean;
   server: Server;
   snapshot: ServerSnapshot;
   receivedAt: number;
@@ -214,10 +217,7 @@ function OverviewContent({
   useEffect(() => {
     setObservedResources(resourceTrendStore.record(snapshot));
   }, [snapshot]);
-  useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 10_000);
-    return () => window.clearInterval(interval);
-  }, []);
+  useEffect(() => startSnapshotDisplayClock(active, setNow), [active]);
 
   const osSample = sampleFor(snapshot, "os");
   const os = osSample?.ok === false ? undefined : snapshot.os;
@@ -312,7 +312,7 @@ function OverviewContent({
         </div>
       </details>
 
-      <RecentServerActivity serverId={server.id} />
+      <RecentServerActivity serverId={server.id} active={active} />
 
       <details className="overview-inspector-section overview-diagnostics" key={`diagnostics-${server.id}`}>
         <summary><Icon name="chevronRight" size="xs" /><span>采集诊断</span><small>{reportedCollectors}/{COLLECTORS.length} · {diagnosticsLabel}</small></summary>
@@ -345,15 +345,30 @@ function CollectorRow({ label, sample }: { label: string; sample?: CollectorSamp
   </li>;
 }
 
-function RecentServerActivity({ serverId }: { serverId: string }) {
-  const queryClient = useQueryClient();
-  const setServerPage = useWorkspaceStore((state) => state.setServerPage);
-  const activities = useQuery({
+/** The freshness label needs no timer while its containing page is hidden. */
+export function startSnapshotDisplayClock(active: boolean, onTick: (now: number) => void): () => void {
+  if (!active) return () => {};
+  onTick(Date.now());
+  const interval = window.setInterval(() => onTick(Date.now()), 10_000);
+  return () => window.clearInterval(interval);
+}
+
+export function recentServerActivityQueryOptions(serverId: string, active = true) {
+  return queryOptions({
     queryKey: ["activities", serverId],
+    enabled: active && isDesktopShell(),
+    retry: false,
     queryFn: async () => (await callDesktop(IPC_COMMANDS.activityList, { serverId, limit: 50 })).activities,
   });
+}
+
+function RecentServerActivity({ serverId, active }: { serverId: string; active: boolean }) {
+  const queryClient = useQueryClient();
+  const setServerPage = useWorkspaceStore((state) => state.setServerPage);
+  const activities = useQuery(recentServerActivityQueryOptions(serverId, active));
 
   useEffect(() => {
+    if (!active) return;
     const subscription = subscribeDesktop("activity.created", (activity) => {
       if (activity.serverId !== serverId) return;
       queryClient.setQueryData<Activity[]>(["activities", serverId], (current) => {
@@ -362,7 +377,7 @@ function RecentServerActivity({ serverId }: { serverId: string }) {
       });
     });
     return subscription.stop;
-  }, [queryClient, serverId]);
+  }, [queryClient, serverId, active]);
 
   const rows = activities.data?.slice(0, 3) ?? [];
   return (

@@ -67,7 +67,7 @@ export function AgentFeed({
       ) : (
         entries.map((entry, index) => (
           <AgentEntryView
-            key={index}
+            key={entry.entryId ?? index}
             entry={entry}
             isNewEntry={index === motion.index}
             onApproval={onApproval}

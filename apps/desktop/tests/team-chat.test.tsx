@@ -23,7 +23,9 @@ test("actor and model survive streaming, terminal reconciliation and history res
   assert.deepEqual(row.participant, identity.participant);
   assert.equal(row.model, identity.model);
   const messages: ChatMessage[] = [{ id: "msg-1", sessionId: "ses-1", role: "assistant", content: row.text, createdAt: "", ...identity }];
-  assert.deepEqual(entriesFromMessages(messages), [row]);
+  assert.equal(row.entryId, streamed[1]?.entryId, "terminal calibration retains the live row id");
+  assert.deepEqual(entriesFromMessages(messages), [{ ...row, entryId: messages[0]!.id }]);
+  assert.deepEqual(entriesFromMessages(messages), entriesFromMessages(messages.map((message) => ({ ...message }))));
   const markup = renderToStaticMarkup(<AgentEntryView entry={row} onApproval={async () => {}} approvalBusy={false} />);
   assert.ok(markup.includes(identity.participant.label));
   assert.ok(markup.includes(identity.model));

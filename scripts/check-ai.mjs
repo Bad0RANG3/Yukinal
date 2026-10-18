@@ -14,6 +14,7 @@ const modules = [
   "test_agent_streaming", "test_agent_model_loop", "test_agent_conversation_context", "test_coordinator_runtime",
   "test_agent_run_finalization", "test_provider_store", "test_agent_sidecar",
   "test_reasoning_effort", "test_agent_moe_routing", "test_agent_reasoning_loop",
+  "test_agent_long_workflow", "test_agent_large_coordination",
 ];
 for (const module of modules) {
   if (!existsSync(join(tests, `${module}.py`))) {

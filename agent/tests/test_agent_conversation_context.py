@@ -213,7 +213,8 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Only this active role: reviewer", messages[0].content)
             self.assertNotIn("Only this active role: planner", str(messages))
             self.assertTrue(any("Use a staged migration." in str(item.content) for item in messages))
-            self.assertTrue(any("Earlier answer by Planner" in str(item.content) for item in messages))
+            self.assertTrue(any("Historical turn participant" in str(item.content) and "Planner" in str(item.content) for item in messages))
+            self.assertFalse(any(str(item.content).startswith("Earlier answer by") for item in messages))
             self.assertEqual(response["result"]["result"]["context"]["includedTurns"], 1)
 
             isolated_model = ScriptedModel([AIMessage(content="Fresh session.")])
@@ -555,6 +556,52 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("private thinking state", raw)
         self.assertNotIn("private thinking state", str(context.messages))
         store.close()
+
+
+class ArchiveProjectionTests(unittest.TestCase):
+    def test_assistant_json_and_private_fields_remain_unchanged_in_projection(self) -> None:
+        store = ConversationStore()
+        try:
+            incoming = _parse_run_request(request("json-projection", prompt="Return JSON only."))
+            store.begin(incoming, _run_fingerprint(incoming))
+            answer = '{"count":24,"critical":4}'
+            private = "internal-fixture-trace"
+            store.update_messages(incoming["runId"], [HumanMessage(content=incoming["promptText"]),
+                AIMessage(content=answer, additional_kwargs={"reasoning_content": private})])
+            store.finish(incoming["runId"], "succeeded")
+            raw = store._connection.execute("SELECT messages_json FROM conversation_turns").fetchone()[0]
+            projected = store.context("session-1", None)
+            assistant = next(message for message in projected.messages if isinstance(message, AIMessage))
+            self.assertEqual(assistant.content, answer)
+            self.assertEqual(assistant.additional_kwargs["reasoning_content"], private)
+            self.assertTrue(any("Historical turn participant" in str(message.content) for message in projected.messages))
+            self.assertEqual(store._connection.execute("SELECT messages_json FROM conversation_turns").fetchone()[0], raw)
+        finally:
+            store.close()
+
+    def test_existing_public_summaries_are_searchable_after_index_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "existing.sqlite"
+            store = ConversationStore(path)
+            for index in range(40):
+                prompt = ("migrationmilestone value=KEPT. " if index == 13 else f"Batch {index}. ") + "evidence " * 400
+                incoming = _parse_run_request(request(f"migration-{index}", prompt=prompt))
+                store.begin(incoming, _run_fingerprint(incoming))
+                store.update_messages(incoming["runId"], [HumanMessage(content=prompt), AIMessage(content="ACK")])
+                store.finish(incoming["runId"], "succeeded")
+            store._connection.execute("DROP TABLE conversation_search")
+            store._connection.commit()
+            store.close()
+            reopened = ConversationStore(path)
+            try:
+                context = reopened.context("session-1", None, max_bytes=24000, query_text="What is migrationmilestone?")
+                self.assertGreater(context.usage["compactedTurns"], 13)
+                self.assertIn("migrationmilestone value=KEPT", str(context.messages))
+                self.assertLessEqual(message_bytes(context.messages), 24000)
+                self.assertTrue(reopened.delete_session("session-1", None))
+                self.assertEqual(reopened._connection.execute("SELECT count(*) FROM conversation_search").fetchone()[0], 0)
+            finally:
+                reopened.close()
 
 
 class DeepSeekAdapterTests(unittest.TestCase):

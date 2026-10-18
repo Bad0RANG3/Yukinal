@@ -329,7 +329,7 @@ export function useAgentRun(options: {
         if (!disposed) setListening(true);
       })
       .catch((error) => {
-        if (!disposed) setEntries([{ kind: "error", text: `无法接收 Agent 事件：${String(error)}` }]);
+        if (!disposed) setEntries(appendEntries([], [{ kind: "error", text: `无法接收 Agent 事件：${String(error)}` }]));
       });
 
     return () => {
@@ -392,7 +392,7 @@ export function useAgentRun(options: {
           ? [{ type: "text" as const, text: prompt }]
           : [];
     if (!parts.length) {
-      setEntries([{ kind: "error", text: "消息必须包含文字或图片。" }]);
+      setEntries(appendEntries([], [{ kind: "error", text: "消息必须包含文字或图片。" }]));
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
@@ -417,8 +417,10 @@ export function useAgentRun(options: {
     approvalLocks.current.clear();
 
     const attachments = parts.filter((part) => part.type === "image" || part.type === "file" || part.type === "document");
+    const messageId = reusable?.messageId ?? newId("msg");
     const userEntry: Entry = {
       kind: "user",
+      entryId: messageId,
       text: prompt,
       ...(attachments.length ? { attachments } : {}),
     };
@@ -428,7 +430,6 @@ export function useAgentRun(options: {
       // the resume; keeping these separate is what makes retrying the second call
       // idempotent rather than producing a second user message or run.
       if (!reusable) {
-        const messageId = newId("msg");
         const sessionId = await input.persistUserMessage(messageId, parts);
         if (!stream.isPending(scope)) return "started";
         pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey, uiContext: input.uiContext };
@@ -564,7 +565,7 @@ export function useAgentRun(options: {
     stream.reset();
     stoppingScope.current = null;
     pendingAdmission.current = null;
-    setEntries(next);
+    setEntries(appendEntries([], next));
     setRunning(false);
     setRunState(null);
     setRunId(null);

@@ -125,14 +125,14 @@ function RuntimeStatus({ active }: { active: boolean }) {
  * 而 presence 要求把 `is-closing` 和 `onAnimationEnd` 交给**当前真正渲染出来的
  * 那个元素** —— 内联写在三元表达式里做不到这件事。
  */
-function RuntimeLogs({ open, logs }: { open: boolean; logs: ReturnType<typeof useAgentLogs> }) {
+export function RuntimeLogs({ open, logs }: { open: boolean; logs: ReturnType<typeof useAgentLogs> }) {
   const presence = usePresence(open, { exitAnimation: "expand-exit" });
   if (!presence.mounted) return null;
   const closing = presence.closing ? " is-closing" : "";
   if (logs.isLoading) return <pre id="runtime-logs" className={`agent-log-viewer${closing}`} onAnimationEnd={presence.onAnimationEnd}>正在读取日志…</pre>;
   if (logs.isError) {
     return (
-      <div className={`settings-error-row${closing}`} role="alert" onAnimationEnd={presence.onAnimationEnd}>
+      <div id="runtime-logs" className={`settings-error-row${closing}`} role="alert" onAnimationEnd={presence.onAnimationEnd}>
         <span>{logs.error.message}</span>
         <button type="button" className="text-button" onClick={() => void logs.refetch()}>重试</button>
       </div>

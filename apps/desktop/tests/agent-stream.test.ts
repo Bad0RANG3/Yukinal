@@ -13,6 +13,19 @@ import {
 } from "../src/features/agent/run-stream.js";
 import { appendEntries, appendToolCall, type Entry, type ReplyIdentity } from "../src/features/agent/transcript.js";
 
+
+function assertEntryContent(actual: unknown, expected: unknown): void {
+  const content = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(content);
+    if (value && typeof value === "object" && "kind" in value) {
+      const { entryId: _entryId, ...rest } = value as Record<string, unknown>;
+      return rest;
+    }
+    return value;
+  };
+  assert.deepEqual(content(actual), expected);
+}
+
 const identity: ReplyIdentity = { participant: { id: "coordinator", label: "协调助手", kind: "agent" }, model: "configured-model" };
 
 function view(context: TestContext) {
@@ -55,7 +68,7 @@ test("a burst of real deltas produces one bounded-delay update without normalizi
   assert.equal(current.batches.length, 0);
   context.mock.timers.tick(1);
   assert.equal(current.batches.length, 1, "one transcript updater instead of one per token");
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: deltas.join(""), ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: deltas.join(""), ...identity });
   context.mock.timers.tick(STREAM_FLUSH_INTERVAL_MS * 5);
   assert.equal(current.batches.length, 1, "an idle buffer does not schedule periodic rendering");
 });
@@ -69,7 +82,7 @@ test("text and thinking alternate in arrival order within one frame and retain t
   }
   context.mock.timers.tick(STREAM_FLUSH_INTERVAL_MS);
   assert.equal(current.batches.length, 1);
-  assert.deepEqual(current.entries.slice(1), [
+  assertEntryContent(current.entries.slice(1), [
     { kind: "reasoning", text: "想一想" },
     { kind: "assistant", text: "答", ...identity },
     { kind: "reasoning", text: "再想" },
@@ -108,7 +121,7 @@ test("completion flushes its last chunk immediately and duplicate terminal snaps
   current.stream.enqueue("run_a", "assistant", "late duplicate");
   context.mock.timers.tick(1000);
   assert.equal(current.batches.length, 1);
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: "最后一块\n", ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: "最后一块\n", ...identity });
 });
 
 test("a terminal snapshot recovers only its missing suffix across interleaved thinking", (context) => {
@@ -117,7 +130,7 @@ test("a terminal snapshot recovers only its missing suffix across interleaved th
   current.stream.enqueue("run_a", "assistant", "答");
   current.stream.enqueue("run_a", "reasoning", "公开状态");
   assert.equal(current.complete("run_a", "答案\n"), true);
-  assert.deepEqual(current.entries.slice(1), [
+  assertEntryContent(current.entries.slice(1), [
     { kind: "assistant", text: "答", ...identity },
     { kind: "reasoning", text: "公开状态" },
     { kind: "assistant", text: "案\n", ...identity },
@@ -146,7 +159,7 @@ test("the character high-water mark publishes early without dropping bytes or sc
   current.complete("run_a", chunk.repeat(3));
   assert.equal(current.batches.length, 3);
   for (const batch of current.batches) assert.ok(batch.reduce((length, delta) => length + delta.text.length, 0) <= MAX_PENDING_STREAM_CHARS);
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: chunk.repeat(3), ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: chunk.repeat(3), ...identity });
   context.mock.timers.tick(1000);
   assert.equal(current.batches.length, 3);
 });
@@ -167,7 +180,7 @@ test("an oversized caller delta bypasses the pending cache verbatim", (context) 
   const text = "🙂\r\n".repeat(MAX_PENDING_STREAM_CHARS);
   current.stream.enqueue("run_a", "assistant", text);
   assert.equal(current.batches.length, 1);
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text, ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text, ...identity });
 });
 
 test("foreign run chunks and starts cannot claim the admitted slot", (context) => {
@@ -182,7 +195,7 @@ test("foreign run chunks and starts cannot claim the admitted slot", (context) =
   assert.equal(current.stream.started("run_owned"), true);
   current.stream.enqueue("run_owned", "assistant", "owned");
   current.stream.flush();
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: "owned", ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: "owned", ...identity });
 });
 
 test("a terminal event before RPC acknowledgement releases the slot and the late acknowledgement cannot claim a new run", (context) => {
@@ -227,7 +240,7 @@ test("resetting or unmounting a view discards only its pending tail and rejects 
   assert.equal(current.batches.length, 0);
   current.stream.enqueue("run_b", "assistant", "new answer");
   current.stream.flush();
-  assert.deepEqual(current.entries, [{ kind: "user", text: "new session" }, { kind: "assistant", text: "new answer", ...identity }]);
+  assertEntryContent(current.entries, [{ kind: "user", text: "new session" }, { kind: "assistant", text: "new answer", ...identity }]);
 });
 
 test("late stop/approval promises cannot finish or write to the next conversation", async (context) => {
@@ -249,7 +262,7 @@ test("late stop/approval promises cannot finish or write to the next conversatio
   resolve();
   await Promise.all([lateStop, lateApproval]);
   assert.equal(current.stream.isPending(next), true);
-  assert.deepEqual(current.entries, [{ kind: "user", text: "hello" }]);
+  assertEntryContent(current.entries, [{ kind: "user", text: "hello" }]);
 });
 
 test("failure and cancellation publish the last partial text before becoming terminal", (context) => {
@@ -259,13 +272,13 @@ test("failure and cancellation publish the last partial text before becoming ter
   current.stream.enqueue("run_a", "assistant", "partial before failure");
   assert.equal(current.stream.fail(first), first);
   assert.equal(current.stream.isPending(first), false);
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: "partial before failure", ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: "partial before failure", ...identity });
   current.entries = appendEntries(current.entries, [{ kind: "user", text: "retry" }]);
   current.begin("run_b");
   current.stream.enqueue("run_b", "assistant", "partial before cancel");
   assert.ok(current.stream.finish("run_b"));
   context.mock.timers.tick(1000);
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: "partial before cancel", ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: "partial before cancel", ...identity });
   assert.equal(current.batches.length, 2);
 });
 
@@ -280,7 +293,7 @@ test("the synchronous terminal fallback settles exactly once even without a star
   current.entries = settleStreamText(current.entries, "sync result", finished.scope.identity, finished.streamedText);
   assert.equal(current.stream.finish("run_sync"), null);
   assert.equal(current.stream.isPending(scope), false);
-  assert.deepEqual(current.entries.at(-1), { kind: "assistant", text: "sync result", ...identity });
+  assertEntryContent(current.entries.at(-1), { kind: "assistant", text: "sync result", ...identity });
 });
 
 test("deferred transcript updaters use each run's immutable identity instead of a later mutable ref", (context) => {
@@ -300,7 +313,7 @@ test("deferred transcript updaters use each run's immutable identity instead of 
   stream.enqueue("run_two", "assistant", "two");
   stream.finish("run_two");
   const entries = updates.reduce((current, update) => update(current), [] as Entry[]);
-  assert.deepEqual(entries, [
+  assertEntryContent(entries, [
     { kind: "assistant", text: "one", participant: { id: "one", label: "One", kind: "agent" }, model: "model-one" },
     { kind: "assistant", text: "two", participant: { id: "two", label: "Two", kind: "agent" }, model: "model-two" },
   ]);
@@ -309,7 +322,7 @@ test("deferred transcript updaters use each run's immutable identity instead of 
 test("a divergent or shorter terminal snapshot never erases the streamed evidence", () => {
   const entries: Entry[] = [{ kind: "assistant", text: "already visible", ...identity }];
   assert.equal(settleStreamText(entries, "already", identity, "already visible"), entries);
-  assert.deepEqual(settleStreamText(entries, "different final", identity, "already visible"), [
+  assertEntryContent(settleStreamText(entries, "different final", identity, "already visible"), [
     ...entries, { kind: "assistant", text: "different final", ...identity },
   ]);
 });
