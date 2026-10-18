@@ -19,7 +19,7 @@ class SftpMetadataDeadline {
     // A repeated wait within a phase must not restart that phase's allowance.
     if (phase != phase_) {
       phase_ = phase;
-      phase_deadline_ = std::min(overall_, now + limit(phase));
+      phase_deadline_ = (std::min)(overall_, now + limit(phase));
     }
     return phase_deadline_;
   }

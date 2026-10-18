@@ -437,7 +437,7 @@ def start_ssh_mock(
             elif b"systemctl list-units --type=service" in command:
                 channel.sendall(b"nginx.service loaded active running Nginx Web Server\n\n__YUKINAL_SOURCE__=systemd\n")
                 channel.send_exit_status(0)
-            elif b"journalctl -n 500" in command:
+            elif b"journalctl -n 100" in command:
                 if b"--since '-3600 seconds'" not in command or b"--unit 'nginx.service'" not in command:
                     channel.sendall(b"unexpected journal filters\n")
                     channel.send_exit_status(2)

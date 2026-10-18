@@ -736,13 +736,23 @@ class PythonSidecar:
                 "\n你是后台团队成员。只完成当前任务，不能再分派团队。给协调助手返回简短结果、证据、失败和待确认事项。没有执行证据不能声称完成。"},
             "participant": {"id": role["id"], "label": role["label"], "kind": "agent"},
         }
-        for field in ("providerId", "model"):
-            value = role.get(field) or parent.get(field)
-            if value:
-                payload[field] = value
-        # Reasoning settings belong to the selected model, not a different
-        # team's independently bound provider/model.
-        if not role.get("providerId") and parent.get("reasoningEffort"):
+        role_provider = role.get("providerId")
+        provider_id = role_provider or parent.get("providerId")
+        if provider_id:
+            payload["providerId"] = provider_id
+        # A separately selected provider owns its default model. Never carry a
+        # model name from the parent's provider into a provider-only binding.
+        model = role.get("model")
+        if not role_provider:
+            model = model or parent.get("model")
+        if model:
+            payload["model"] = model
+        # Reasoning settings belong to the inherited model. A model-only
+        # override can be incompatible with the parent's reasoning settings.
+        inherits_model = not role_provider and (
+            not role.get("model") or role["model"] == parent.get("model")
+        )
+        if inherits_model and parent.get("reasoningEffort"):
             payload["reasoningEffort"] = parent["reasoningEffort"]
         for field in ("taskBudget", "toolAccess", "policyId"):
             if field in parent:

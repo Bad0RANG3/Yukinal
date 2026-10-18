@@ -864,7 +864,7 @@ void run_tests(const std::string& python) {
     while (std::getline(capture, line)) {
       check(!json::parse(line, nullptr, false).is_discarded(),
             "every fixture frame must remain valid strict JSON");
-      longest_frame = std::max(longest_frame, line.size());
+      longest_frame = (std::max)(longest_frame, line.size());
     }
   }
   check(longest_frame >= 4700, "the fixture must retain a response larger than 4.7 KiB");
