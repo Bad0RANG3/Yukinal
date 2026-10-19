@@ -12,7 +12,7 @@
 [English](README.md) · [**中文**](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0--rc.5-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--rc.6-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -23,7 +23,7 @@
 ---
 
 > **状态：** Yukinal 2.0 正在重写中：SSH 操作迁移到独立的 C++ 服务和
-> Python Agent，React 界面仍是产品 UI。当前 app/package 接口版本为 `2.0.0-rc.5`。
+> Python Agent，React 界面仍是产品 UI。当前 app/package 接口版本为 `2.0.0-rc.6`。
 > Rust/Tauri 宿主与 legacy Node agent
 > 已从仓库删除，C++ WebView 宿主是唯一桌面宿主。候选 CI 已构建 Windows NSIS、
 > macOS DMG 和 Debian Linux 安装包；代码签名、公证、真实 Provider/SSH 与文件传输验收仍待完成。

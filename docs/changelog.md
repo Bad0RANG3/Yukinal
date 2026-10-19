@@ -2,6 +2,10 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
+## 2.0.0-rc.6 — 2026-10-20
+
+修复 Windows 运行发布门禁时的 symlink 用例误报：Windows 文件权限模型不提供 POSIX 可执行位，测试现在只在 POSIX 系统验证该位；macOS 仍会验证 Python.framework 文件链接展开时保留可执行权限。等待 RC.6 三平台完整验证。
+
 ## 2.0.0-rc.5 — 2026-10-20
 
 修复 macOS Agent 冻结载荷暂存：RC.3 的 macOS job 发现 PyInstaller 会在 Python.framework 中产生内部 symlink，而发布 manifest 只接受普通文件。构建现在只展开目标仍在 Agent runtime 内的链接，并拒绝越界链接、目录循环和特殊文件；新增覆盖展开和越界拒绝的测试。修复 Windows NSIS 构建参数把路径双重引号传入 `OutFile` 导致的安装器编译失败。等待 RC.5 三平台完整验证。

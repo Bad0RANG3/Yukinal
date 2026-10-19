@@ -42,7 +42,7 @@ struct SidecarLaunch {
   // environment. Values are never logged.
   std::vector<std::pair<std::string, std::string>> environment;
   std::string data_directory;
-  std::string client_version = "2.0.0-rc.5";
+  std::string client_version = "2.0.0-rc.6";
 };
 
 struct SidecarExitInfo {

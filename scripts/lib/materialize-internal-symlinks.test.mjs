@@ -61,7 +61,9 @@ test("materializes an internal file symlink and preserves its mode", async (t) =
   assert.deepEqual(links, ["Python.framework/Python"]);
   const stats = await lstat(link);
   assert.equal(stats.isFile(), true);
-  assert.equal(stats.mode & 0o111, 0o111);
+  if (process.platform !== "win32") {
+    assert.equal(stats.mode & 0o111, 0o111);
+  }
   assert.equal(await readFile(link, "utf8"), "framework binary");
 });
 
