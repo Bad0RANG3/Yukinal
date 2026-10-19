@@ -2,6 +2,10 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
+## 2.0.0-rc.7 — 2026-10-20
+
+新增 Python Agent 的显式 opt-in live Provider 工具循环探针与本机 OpenAI-compatible stub 测试；远程自定义 endpoint 限定为 HTTPS，loopback stub 可免 API key。该候选用于复核真实 Provider adapter 的单工具调用，不代表真实 MCP/SSH 目标任务、A/O/F/R 全路径或安装版三平台 GUI 验收已经完成。RC.7 跨平台构建和安装 smoke 待本次 tag workflow 验证。
+
 ## 2.0.0-rc.6 — 2026-10-20
 
 修复 Windows 运行发布门禁时的 symlink 用例误报：Windows 文件权限模型不提供 POSIX 可执行位，测试现在只在 POSIX 系统验证该位；macOS 仍会验证 Python.framework 文件链接展开时保留可执行权限。GitHub Actions [Run 39309839659](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 的第 2 次 attempt 全绿：Windows NSIS、Ubuntu DEB、macOS DMG 均完成安装/启动/卸载 smoke，并验证独立用户数据保留。macOS 首次 job 在 hdiutil 创建 DMG 时失败，同一提交重跑通过；该结果确认 runner 的重试通过，不代表真实 Provider、OpenSSH、GUI 拖放和签名/公证已验收。

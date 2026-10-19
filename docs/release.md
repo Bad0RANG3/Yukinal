@@ -1,6 +1,6 @@
 # 交付与发布
 
-**候选版本（2026-10-20）：`2.0.0-rc.6`。** 版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 在 Windows、Ubuntu 24.04、macOS 15 Intel 上运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后上传校验清单和安装包。稳定 `vX.Y.Z` 标签仅在三平台作业全部成功后创建 GitHub Release；候选标签只保存 CI artifact。此前候选 [GitHub Run 39298269150](https://github.com/Bad0RANG3/Yukinal/actions/runs/39298269150) 暴露 Windows 路径模拟和 Windows Agent 虚拟环境两项问题，rc.2 修复路径模拟、rc.3 加入按平台创建 Agent 环境。RC.2 Ubuntu 曾因终端 worker 在远端 shell 关闭后未退出而失败；rc.4 让桌面宿主在收到 `closed` 帧后关闭 worker stdin 并加入回归。RC.3 Ubuntu 的门禁和 Debian smoke 通过，但 macOS 在载荷暂存时遇到 PyInstaller Python.framework 内部 symlink；rc.5 仅展开 runtime 内的安全链接并拒绝越界。RC.4 Windows 的 NSIS 编译因命令行宏值包含重复引号而失败；rc.5 移除宏值中的字面引号。RC.5 Windows 全量门禁发现文件 symlink 权限断言错误地要求 Windows 暴露 POSIX 执行位；rc.6 仅在 POSIX 验证该权限。[Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 的三平台构建与安装 smoke 全绿。当前产物未签名/公证，真实 Provider、MCP、OpenSSH 业务链路和安装版 GUI 文件传输验收仍未完成，见下方发布验收条件；这些工作完成前不把当前候选当作稳定版对外交付。
+**候选版本（2026-10-20）：`2.0.0-rc.7`。** 版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 在 Windows、Ubuntu 24.04、macOS 15 Intel 上运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后上传校验清单和安装包。RC.6 的 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 已在三平台构建与安装 smoke 全绿；Ubuntu job 的 `openssh_container_integration` 也通过，覆盖隔离 OpenSSH 的认证、只读查询、超时、输出限制、host key 拒绝及 SFTP no-replace 冲突。RC.7 增加 Python Agent live Provider 探针、HTTPS endpoint 约束与 loopback 离线工具循环测试；本次三平台完整验证尚待 RC.7 tag workflow。当前构建未签名/公证；真实 Provider/MCP 目标任务、用户指定 SSH 主机和安装版三平台 GUI 文件传输验收仍未完成。按 A/O/F/R 发布验收清单，这些工作完成前不将候选标为稳定版。
 
 > **历史记录（截至 2026-10-17）：** Rust/Tauri 宿主移除和 C++ 分发布局的早期状态。下方旧 Tauri/MSI/Node runtime 的 run、哈希与验收只适用于当时源码；本页当前状态以 2026-10-20 更新为准。
 
@@ -24,7 +24,7 @@ C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌
 
 2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
 
-当前候选版本为 `2.0.0-rc.6`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
+当前候选版本为 `2.0.0-rc.7`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
 
 | 项目 | 已有证据 | 发布前仍需完成 |
 | --- | --- | --- |
@@ -127,8 +127,8 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 每个平台至少保留一条从干净安装环境执行的记录，包含提交、版本、操作系统、产物名称与 SHA-256、安装方式、随包 Python Agent 版本、启动/退出/重开/卸载结果和脱敏失败日志位置。确认主机未安装 Python 时 sidecar 仍能启动，并检查应用退出后 sidecar、MCP 子进程和 PTY 是否正确收尾。读取安装器清单或本地构建成功不算完成安装验收。Windows 可用 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 对 NSIS 安装版做进程级复验，也可用 `-InstallDir <目录>` 检查 MSI 提取载荷；真实 MSI 生命周期应在一次性管理员测试机运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`。这些脚本仍需配合干净系统、重启/升级及手动 GUI 验收。
 
-已有 Agent fixture `pnpm --filter @yukinal/agent exec tsx --test src/runtime/investigation-acceptance.test.ts` 使用真实 AgentLoop、权限审批和 Host RPC client，但服务端和远端文件是状态化内存 fixture。native Host RPC + SQLite 测试 `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib evidence_record_host_rpc_survives_host_restart_and_remains_fetchable` 覆盖 evidence 跨 `AppState` 重启。回环 SSH/SFTP 测试验证协议操作；这些都不证明真实 Provider、OpenSSH、安装版 UI 或大文件传输。新接口需分别补契约、宿主、sidecar、真实远端及 GUI 层的可观察验收。
+当前 `pnpm check` 包含 Python Agent 全量 unittest、C++ CTest、桌面/共享包类型和测试、控制平面测试及 sidecar smoke。回环 Provider 与 SSH/SFTP 测试验证组件协议，不证明真实 Provider、用户指定 OpenSSH 主机、安装版 UI 或大文件传输。`docs/acceptance-handoff.md` 第 6 节跟踪尚缺的外部验收，新的能力需要分别补齐宿主、sidecar、真实远端及 GUI 层可观察证据。
 
-真实 Provider 的可选门禁为 `pnpm --filter @yukinal/agent test:live`，用 `YUKINAL_LIVE_PROVIDER_TESTS=1` 显式启用，并以 `YUKINAL_LIVE_PROVIDERS` 选定实际要测的 Provider。真实 Provider 和 MCP 测试需记录实现、版本、认证方式和通过的输入组合；没有跑到的组合继续标为未验证。
+真实 Provider 的可选探针为 `scripts/accept_live_python_provider.py`，用 `YUKINAL_LIVE_PROVIDER_TESTS=1` 显式启用，并以 `YUKINAL_LIVE_PROVIDER`、`YUKINAL_LIVE_MODEL`、`YUKINAL_LIVE_API_KEY` 和可选 endpoint 参数选择当前 Python Agent adapter。探针真实请求一次模型并验证实际工具调用，但只使用本地只读 token 工具，不覆盖安装版桌面、MCP、SSH 目标或完整 A/O/F/R 路径。真实 Provider、MCP 和 SSH 任务需单独记录实现、版本、认证方式、测试目标和通过的输入组合；没有跑到的组合继续标为未验证。
 
 发布记录不得包含真实凭据、私钥、完整远端正文或未脱敏的模型上下文。签名、公证和自动更新尚未配置；向外提供安装包时必须明确说明。

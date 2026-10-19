@@ -14,6 +14,24 @@
 > current suite; see `native/README.md` and `docs/acceptance-handoff.md` for the
 > current registration.
 
+> **RC.6 remote acceptance (2026-10-20):** [GitHub Actions Run 39309839659
+> attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659)
+> passed on Windows, Ubuntu 24.04, and macOS 15 Intel. The Ubuntu job registered
+> 9 CTest targets including `openssh_container_integration` (9/9 passed); the
+> container test exercised real OpenSSH authentication, read-only service/disk
+> operations, timeout/output limits, unknown and changed host keys, and SFTP
+> hardlink no-replace publication/collision behavior. All three installer jobs
+> then built and smoke-installed their NSIS/DEB/DMG packages. This does not cover
+> a user-supplied server, a live Provider/MCP task, GUI drag/drop, or signing and
+> notarization.
+
+> **RC.7 Provider harness (2026-10-20):** adds an explicit opt-in probe for the
+> current Python `ModelFactory`/`ModelDrivenAgent` path and a local
+> OpenAI-compatible stub test that verifies the full tool-call/return loop
+> without a credential or billable request. Remote custom endpoints require
+> HTTPS. This is not yet evidence for a live provider, MCP target, installed
+> desktop workflow, or A/O/F/R acceptance.
+
 > **Current scope:** the standalone C++ SSH service and Python caller are in
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
 > Streamable HTTP MCP support, OpenAI-compatible/Anthropic/Gemini adapters, a
